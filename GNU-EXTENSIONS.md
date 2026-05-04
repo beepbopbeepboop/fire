@@ -240,6 +240,26 @@ GIMPLE (Gimplified Intermediate Representation) is GCC's IR format with structur
 
 ### Operators
 
+#### Operator Tables (machine-readable)
+
+```python
+# Mojo operator → C infix operator.
+# Operators absent from this table have dedicated lowering routines:
+#   **      → _lower_pow()         (pow() / int-cast path)
+#   //      → _lower_floordiv()    (__mojo_floordiv / __builtin_floor)
+#   @       → _lower_matmul()      (StructName___matmul__ call)
+_BIN_OPS = {
+    '+': '+', '-': '-', '*': '*', '/': '/',
+    '%': '%', '&': '&', '|': '|', '^': '^',
+    '<<': '<<', '>>': '>>',
+    '==': '==', '!=': '!=', '<': '<', '<=': '<=', '>': '>', '>=': '>=',
+    'and': '&&', 'or': '||',
+    'is': '==',
+    'is not': '!=',
+}
+_CMP_OPS = {'==', '!=', '<', '<=', '>', '>=', 'and', 'or', 'is', 'is not'}
+```
+
 #### Binary Arithmetic: `+ - * / % ** //`
 
 **Lowering rules**:

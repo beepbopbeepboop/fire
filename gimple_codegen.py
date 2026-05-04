@@ -21,6 +21,11 @@ from mojo_compiler import (
     tokenize, Parser,
 )
 from module_loader import load_module, get_symbol_type
+from generated_dispatch import (
+    _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
+    _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
+    _STMT_DISPATCH, _EXPR_DISPATCH,
+)
 
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers
@@ -36,9 +41,9 @@ class TypeLattice:
       - If mixed signed/unsigned: if unsigned rank >= signed rank → unsigned; else signed.
     """
 
-    _SIGNED   = {'int8_t': 1, 'int16_t': 2, 'int32_t': 3, 'int': 3, 'int64_t': 4}
-    _UNSIGNED = {'uint8_t': 1, 'uint16_t': 2, 'uint32_t': 3, 'unsigned int': 3, 'uint64_t': 4}
-    _FLOAT    = {'__fp16': 1, 'float': 2, 'double': 3}
+    _SIGNED   = _GD_SIGNED
+    _UNSIGNED = _GD_UNSIGNED
+    _FLOAT    = _GD_FLOAT
 
     @classmethod
     def is_float(cls, t: str) -> bool:    return t in cls._FLOAT
@@ -419,21 +424,11 @@ def _printf_fmt(ctype: str) -> str:
     return TypeLattice.printf_fmt(ctype)
 
 # ---------------------------------------------------------------------------
-# Operator tables
+# Operator tables  (imported from generated_dispatch.py)
 # ---------------------------------------------------------------------------
 
-_BIN_OPS: dict[str, str] = {
-    '+': '+', '-': '-', '*': '*', '/': '/',
-    '%': '%', '&': '&', '|': '|', '^': '^',
-    '<<': '<<', '>>': '>>',
-    '==': '==', '!=': '!=', '<': '<', '<=': '<=', '>': '>', '>=': '>=',
-    'and': '&&', 'or': '||',
-    'is': '==',
-    'is not': '!=',
-    '@': '*',  # matrix multiply (handled by _lower_matmul)
-}
-
-_CMP_OPS = {'==', '!=', '<', '<=', '>', '>=', 'and', 'or', 'is', 'is not'}
+_BIN_OPS  = _GD_BIN_OPS   # Mojo op → C infix op; **, //, @ handled separately
+_CMP_OPS  = _GD_CMP_OPS   # operators whose result type is _Bool
 
 # ---------------------------------------------------------------------------
 # C keyword avoidance
@@ -744,106 +739,83 @@ class GimpleGen:
 
     def lower_expr(self, node) -> tuple[str, str]:
         """Return (ctype, simple_rvalue). May emit temp assignments."""
-
-        if isinstance(node, IntLiteral):
-            return 'int', str(node.value)
-
-        if isinstance(node, FloatLiteral):
-            s = repr(node.value)
-            if '.' not in s and 'e' not in s.lower():
-                s += '.0'
-            return 'double', s
-
-        if isinstance(node, BoolLiteral):
-            return 'int', ('1' if node.value else '0')
-
-        if isinstance(node, EllipsisLiteral):
-            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* ... */")
-            return 'int', t
-
-        if isinstance(node, StringLiteral):
-            escaped = node.value.replace('\\', '\\\\').replace('"', '\\"')
-            return 'char *', f'"{escaped}"'
-
-        if isinstance(node, IdentExpr):
-            name = node.name
-            if name in self._captures and self._env_param:
-                # Captured variable: load from closure env struct
-                ctype = self._captures[name]
-                t = self._new_temp(ctype)
-                self._emit(f"  {t} = {self._env_param}->{name};")
-                return ctype, t
-            return self._type_of(name), name
-
-        if isinstance(node, WalrusExpr):
-            vtype, vv = self.lower_expr(node.value)
-            if node.name not in self.var_types:
-                self._declare_var(node.name, vtype)
-            dst = self.var_types[node.name]
-            self._emit(f"  {node.name} = {self._coerce(vtype, dst, vv)};")
-            return dst, node.name
-
-        if isinstance(node, BinaryOp):
-            return self._lower_binary(node)
-
-        if isinstance(node, UnaryOp):
-            ot, ov = self.lower_expr(node.operand)
-            if node.op == 'not':
-                t = self._new_temp('_Bool')
-                self._emit(f"  {t} = {ov} == 0;")
-                return '_Bool', t
-            c_op = {'-': '-', '~': '~', '+': '+'}.get(node.op, node.op)
-            t = self._new_temp(ot)
-            self._emit(f"  {t} = {c_op}{ov};")
-            return ot, t
-
-        if isinstance(node, CallExpr):
-            return self._lower_call(node)
-
-        if isinstance(node, TernaryExpr):
-            ct, cv = self.lower_expr(node.condition)
-            tt, tv = self.lower_expr(node.then_val)
-            et, ev = self.lower_expr(node.else_val)
-            res_type = TypeLattice.join(tt, et)
-            t = self._new_temp(res_type)
-            self._emit(f"  {t} = {cv} ? {tv} : {ev};")
-            return res_type, t
-
-        if isinstance(node, MemberExpr):
-            ot, ov = self.lower_expr(node.obj)
-            op = '->' if '*' in ot else '.'
-            struct_name = ot.replace(' *', '').strip()
-            field_type = (self.struct_field_types.get(struct_name, {})
-                          .get(node.member, 'int'))
-            t = self._new_temp(field_type)
-            self._emit(f"  {t} = {ov}{op}{node.member};")
-            return field_type, t
-
-        if isinstance(node, SubscriptExpr):
-            return self._lower_subscript(node)
-
-        if isinstance(node, SliceExpr):
-            return self._lower_slice(node)
-
-        if isinstance(node, ListExpr):
-            return self._lower_list_literal(node)
-
-        if isinstance(node, DictExpr):
-            return self._lower_dict_literal(node)
-
-        if isinstance(node, SetExpr):
-            return self._lower_set_literal(node)
-
-        if isinstance(node, TupleExpr):
-            return self._lower_tuple_literal(node)
-
-        if isinstance(node, Comprehension):
-            return self._lower_comprehension(node)
-
+        handler_name = _EXPR_DISPATCH.get(type(node).__name__)
+        if handler_name:
+            return getattr(self, handler_name)(node)
         self._emit(f"  /* TODO: unknown expr {type(node).__name__} */")
         t = self._new_temp('int')
         self._emit(f"  {t} = 0;")
         return 'int', t
+
+    # ── Expression handlers (one per AST node type) ───────────────────────
+
+    def _lower_IntLiteral(self, node) -> tuple[str, str]:
+        return 'int', str(node.value)
+
+    def _lower_FloatLiteral(self, node) -> tuple[str, str]:
+        s = repr(node.value)
+        if '.' not in s and 'e' not in s.lower():
+            s += '.0'
+        return 'double', s
+
+    def _lower_BoolLiteral(self, node) -> tuple[str, str]:
+        return 'int', ('1' if node.value else '0')
+
+    def _lower_EllipsisLiteral(self, node) -> tuple[str, str]:
+        t = self._new_temp('int')
+        self._emit(f"  {t} = 0;  /* ... */")
+        return 'int', t
+
+    def _lower_StringLiteral(self, node) -> tuple[str, str]:
+        escaped = node.value.replace('\\', '\\\\').replace('"', '\\"')
+        return 'char *', f'"{escaped}"'
+
+    def _lower_IdentExpr(self, node) -> tuple[str, str]:
+        name = node.name
+        if name in self._captures and self._env_param:
+            ctype = self._captures[name]
+            t = self._new_temp(ctype)
+            self._emit(f"  {t} = {self._env_param}->{name};")
+            return ctype, t
+        return self._type_of(name), name
+
+    def _lower_WalrusExpr(self, node) -> tuple[str, str]:
+        vtype, vv = self.lower_expr(node.value)
+        if node.name not in self.var_types:
+            self._declare_var(node.name, vtype)
+        dst = self.var_types[node.name]
+        self._emit(f"  {node.name} = {self._coerce(vtype, dst, vv)};")
+        return dst, node.name
+
+    def _lower_UnaryOp(self, node) -> tuple[str, str]:
+        ot, ov = self.lower_expr(node.operand)
+        if node.op == 'not':
+            t = self._new_temp('_Bool')
+            self._emit(f"  {t} = {ov} == 0;")
+            return '_Bool', t
+        c_op = {'-': '-', '~': '~', '+': '+'}.get(node.op, node.op)
+        t = self._new_temp(ot)
+        self._emit(f"  {t} = {c_op}{ov};")
+        return ot, t
+
+    def _lower_TernaryExpr(self, node) -> tuple[str, str]:
+        ct, cv = self.lower_expr(node.condition)
+        tt, tv = self.lower_expr(node.then_val)
+        et, ev = self.lower_expr(node.else_val)
+        res_type = TypeLattice.join(tt, et)
+        t = self._new_temp(res_type)
+        self._emit(f"  {t} = {cv} ? {tv} : {ev};")
+        return res_type, t
+
+    def _lower_MemberExpr(self, node) -> tuple[str, str]:
+        ot, ov = self.lower_expr(node.obj)
+        op = '->' if '*' in ot else '.'
+        struct_name = ot.replace(' *', '').strip()
+        field_type = (self.struct_field_types.get(struct_name, {})
+                      .get(node.member, 'int'))
+        t = self._new_temp(field_type)
+        self._emit(f"  {t} = {ov}{op}{node.member};")
+        return field_type, t
 
     # ── Binary operator lowering ──────────────────────────────────────────
 
@@ -1697,280 +1669,345 @@ class GimpleGen:
     # ── Statement generation ───────────────────────────────────────────────
 
     def gen_stmt(self, node):
-        if isinstance(node, PassStmt):
-            return
+        handler_name = _STMT_DISPATCH.get(type(node).__name__)
+        if handler_name:
+            getattr(self, handler_name)(node)
+        else:
+            self._emit(f"  /* TODO: {type(node).__name__} */")
 
-        if isinstance(node, VarDecl):
-            ctype = self._resolve_type(node.type_ann)
-            # For struct locals, use layout solver decision
-            if node.type_ann in self.struct_field_types and node.value is not None:
-                layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
-                self._layout_hint = layout
-            self._declare_var(node.name, ctype)
-            if node.value is not None:
-                vtype, v = self.lower_expr(node.value)
-                # Propagate element/value type for containers
-                if ctype in ('MojoList *', 'MojoSet *') and v in self._elem_types:
-                    self._elem_types[node.name] = self._elem_types[v]
-                if ctype == 'MojoDict *':
-                    if v in self._elem_types:
-                        self._elem_types[node.name] = self._elem_types[v]
-                    if v in self._dict_val_types:
-                        self._dict_val_types[node.name] = self._dict_val_types[v]
-                self._emit(f"  {node.name} = {self._coerce(vtype, ctype, v)};")
-            self._layout_hint = LayoutSolver.HEAP  # reset
-            return
+    # ── Statement handlers (one per AST node type) ────────────────────────
 
-        if isinstance(node, AssignStmt):
+    def _gen_stmt_PassStmt(self, node):
+        return
+
+    def _gen_stmt_VarDecl(self, node):
+        ctype = self._resolve_type(node.type_ann)
+        if node.type_ann in self.struct_field_types and node.value is not None:
+            layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
+            self._layout_hint = layout
+        self._declare_var(node.name, ctype)
+        if node.value is not None:
             vtype, v = self.lower_expr(node.value)
-            if isinstance(node.target, IdentExpr):
-                tname = node.target.name
-                if tname not in self.var_types:
-                    self._declare_var(tname, vtype)
-                dst = self.var_types[tname]
-                # Propagate container element / dict value type on assignment
-                if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
-                    self._elem_types[tname] = self._elem_types[v]
-                if dst == 'MojoDict *':
-                    if v in self._elem_types:
-                        self._elem_types[tname] = self._elem_types[v]
-                    if v in self._dict_val_types:
-                        self._dict_val_types[tname] = self._dict_val_types[v]
-                self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
-            elif isinstance(node.target, MemberExpr):
-                ot, ov = self.lower_expr(node.target.obj)
-                op = '->' if '*' in ot else '.'
-                struct_name = ot.replace(' *', '').strip()
-                field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
-                self._emit(f"  {ov}{op}{node.target.member} = {self._coerce(vtype, field_type, v)};")
-            elif isinstance(node.target, SubscriptExpr):
-                ot, obj_v = self.lower_expr(node.target.obj)
-                _, idx_v  = self.lower_expr(node.target.index)
-                if ot == 'MojoList *':
-                    elem = self._elem_of(obj_v)
-                    suf  = TypeLattice.list_suffix(elem)
-                    idx64 = self._new_temp('int64_t')
-                    self._emit(f"  {idx64} = (int64_t) {idx_v};")
-                    ev_cast = self._cast_for_list(vtype, v, suf)
-                    self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
-                else:
-                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
-            else:
-                self._emit("  /* TODO: complex assignment target */")
-            return
+            if ctype in ('MojoList *', 'MojoSet *') and v in self._elem_types:
+                self._elem_types[node.name] = self._elem_types[v]
+            if ctype == 'MojoDict *':
+                if v in self._elem_types:
+                    self._elem_types[node.name] = self._elem_types[v]
+                if v in self._dict_val_types:
+                    self._dict_val_types[node.name] = self._dict_val_types[v]
+            self._emit(f"  {node.name} = {self._coerce(vtype, ctype, v)};")
+        self._layout_hint = LayoutSolver.HEAP
 
-        if isinstance(node, AugAssignStmt):
-            base_op = node.op[:-1]
-            if base_op in ('//', '**'):
-                fake  = BinaryOp(op=base_op, left=node.target, right=node.value)
-                vtype, v = self.lower_expr(fake)
+    def _gen_stmt_AssignStmt(self, node):
+        vtype, v = self.lower_expr(node.value)
+        if isinstance(node.target, IdentExpr):
+            tname = node.target.name
+            if tname not in self.var_types:
+                self._declare_var(tname, vtype)
+            dst = self.var_types[tname]
+            if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
+                self._elem_types[tname] = self._elem_types[v]
+            if dst == 'MojoDict *':
+                if v in self._elem_types:
+                    self._elem_types[tname] = self._elem_types[v]
+                if v in self._dict_val_types:
+                    self._dict_val_types[tname] = self._dict_val_types[v]
+            self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+        elif isinstance(node.target, MemberExpr):
+            ot, ov = self.lower_expr(node.target.obj)
+            op = '->' if '*' in ot else '.'
+            struct_name = ot.replace(' *', '').strip()
+            field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
+            self._emit(f"  {ov}{op}{node.target.member} = {self._coerce(vtype, field_type, v)};")
+        elif isinstance(node.target, SubscriptExpr):
+            ot, obj_v = self.lower_expr(node.target.obj)
+            _, idx_v  = self.lower_expr(node.target.index)
+            if ot == 'MojoList *':
+                elem = self._elem_of(obj_v)
+                suf  = TypeLattice.list_suffix(elem)
+                idx64 = self._new_temp('int64_t')
+                self._emit(f"  {idx64} = (int64_t) {idx_v};")
+                ev_cast = self._cast_for_list(vtype, v, suf)
+                self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             else:
-                c_op = _BIN_OPS.get(base_op, base_op)
-                rtype, rv = self.lower_expr(node.value)
-                if isinstance(node.target, IdentExpr):
-                    tname  = node.target.name
-                    ttype  = self._type_of(tname)
-                    arith  = TypeLattice.join(ttype, rtype)
-                    lv_a   = tname
-                    rv_a   = rv
-                    if ttype != arith:
-                        ct = self._new_temp(arith)
-                        self._emit(f"  {ct} = ({arith}){tname};")
-                        lv_a = ct
-                    if rtype != arith:
-                        ct = self._new_temp(arith)
-                        self._emit(f"  {ct} = ({arith}){rv};")
-                        rv_a = ct
-                    tmp = self._new_temp(arith)
-                    self._emit(f"  {tmp} = {lv_a} {c_op} {rv_a};")
-                    vtype, v = arith, tmp
-                else:
-                    self._emit("  /* TODO: complex aug-assign target */")
-                    return
+                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+        else:
+            self._emit("  /* TODO: complex assignment target */")
+
+    def _gen_stmt_AugAssignStmt(self, node):
+        base_op = node.op[:-1]
+        if base_op in ('//', '**'):
+            fake  = BinaryOp(op=base_op, left=node.target, right=node.value)
+            vtype, v = self.lower_expr(fake)
+        else:
+            c_op = _BIN_OPS.get(base_op, base_op)
+            rtype, rv = self.lower_expr(node.value)
             if isinstance(node.target, IdentExpr):
-                tname = node.target.name
-                dst   = self._type_of(tname)
-                self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
-            elif isinstance(node.target, MemberExpr):
-                ot, ov = self.lower_expr(node.target.obj)
-                op     = '->' if '*' in ot else '.'
-                self._emit(f"  {ov}{op}{node.target.member} = {v};")
-            elif isinstance(node.target, SubscriptExpr):
-                ot, obj_v = self.lower_expr(node.target.obj)
-                _, idx_v  = self.lower_expr(node.target.index)
-                if ot == 'MojoList *':
-                    elem = self._elem_of(obj_v)
-                    suf  = TypeLattice.list_suffix(elem)
-                    idx64 = self._new_temp('int64_t')
-                    self._emit(f"  {idx64} = (int64_t) {idx_v};")
-                    self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {v});")
-                else:
-                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
+                tname  = node.target.name
+                ttype  = self._type_of(tname)
+                arith  = TypeLattice.join(ttype, rtype)
+                lv_a   = tname
+                rv_a   = rv
+                if ttype != arith:
+                    ct = self._new_temp(arith)
+                    self._emit(f"  {ct} = ({arith}){tname};")
+                    lv_a = ct
+                if rtype != arith:
+                    ct = self._new_temp(arith)
+                    self._emit(f"  {ct} = ({arith}){rv};")
+                    rv_a = ct
+                tmp = self._new_temp(arith)
+                self._emit(f"  {tmp} = {lv_a} {c_op} {rv_a};")
+                vtype, v = arith, tmp
             else:
                 self._emit("  /* TODO: complex aug-assign target */")
-            return
-
-        if isinstance(node, ReturnStmt):
-            if node.value is None:
-                self._emit("  return;")
+                return
+        if isinstance(node.target, IdentExpr):
+            tname = node.target.name
+            dst   = self._type_of(tname)
+            self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+        elif isinstance(node.target, MemberExpr):
+            ot, ov = self.lower_expr(node.target.obj)
+            op     = '->' if '*' in ot else '.'
+            self._emit(f"  {ov}{op}{node.target.member} = {v};")
+        elif isinstance(node.target, SubscriptExpr):
+            ot, obj_v = self.lower_expr(node.target.obj)
+            _, idx_v  = self.lower_expr(node.target.index)
+            if ot == 'MojoList *':
+                elem = self._elem_of(obj_v)
+                suf  = TypeLattice.list_suffix(elem)
+                idx64 = self._new_temp('int64_t')
+                self._emit(f"  {idx64} = (int64_t) {idx_v};")
+                self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {v});")
             else:
-                vtype, v = self.lower_expr(node.value)
-                ret = self.func_ret_type
-                if ret and ret != 'void' and vtype != ret:
-                    tmp = self._new_temp(ret)
-                    self._emit(f"  {tmp} = ({ret}){v};")
-                    self._emit(f"  return {tmp};")
-                else:
-                    self._emit(f"  return {v};")
-            return
+                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+        else:
+            self._emit("  /* TODO: complex aug-assign target */")
 
-        if isinstance(node, IfStmt):
-            _, cond_v   = self.lower_expr(node.condition)
-            bb_true     = self._new_bb()
-            bb_merge    = self._new_bb()
-            has_else    = bool(node.elifs or node.else_body)
-            bb_false    = self._new_bb() if has_else else bb_merge
+    def _gen_stmt_ReturnStmt(self, node):
+        if node.value is None:
+            self._emit("  return;")
+        else:
+            vtype, v = self.lower_expr(node.value)
+            ret = self.func_ret_type
+            if ret and ret != 'void' and vtype != ret:
+                tmp = self._new_temp(ret)
+                self._emit(f"  {tmp} = ({ret}){v};")
+                self._emit(f"  return {tmp};")
+            else:
+                self._emit(f"  return {v};")
 
-            self._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
-            self._emit_label(bb_true)
-            for s in node.then_body:
+    def _gen_stmt_IfStmt(self, node):
+        _, cond_v   = self.lower_expr(node.condition)
+        bb_true     = self._new_bb()
+        bb_merge    = self._new_bb()
+        has_else    = bool(node.elifs or node.else_body)
+        bb_false    = self._new_bb() if has_else else bb_merge
+
+        self._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+        self._emit_label(bb_true)
+        for s in node.then_body:
+            self.gen_stmt(s)
+        self._emit(f"  goto {bb_merge};")
+
+        current_false = bb_false
+        elifs = list(node.elifs)
+        while elifs:
+            ec, eb = elifs.pop(0)
+            self._emit_label(current_false)
+            has_more   = bool(elifs or node.else_body)
+            next_false = self._new_bb() if has_more else bb_merge
+            next_true  = self._new_bb()
+            _, ev = self.lower_expr(ec)
+            self._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
+            self._emit_label(next_true)
+            for s in eb:
+                self.gen_stmt(s)
+            self._emit(f"  goto {bb_merge};")
+            current_false = next_false
+
+        if node.else_body:
+            self._emit_label(current_false)
+            for s in node.else_body:
                 self.gen_stmt(s)
             self._emit(f"  goto {bb_merge};")
 
-            current_false = bb_false
-            elifs = list(node.elifs)
-            while elifs:
-                ec, eb = elifs.pop(0)
-                self._emit_label(current_false)
-                has_more   = bool(elifs or node.else_body)
-                next_false = self._new_bb() if has_more else bb_merge
-                next_true  = self._new_bb()
-                _, ev = self.lower_expr(ec)
-                self._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
-                self._emit_label(next_true)
-                for s in eb:
-                    self.gen_stmt(s)
-                self._emit(f"  goto {bb_merge};")
-                current_false = next_false
+        self._emit_label(bb_merge)
 
-            if node.else_body:
-                self._emit_label(current_false)
-                for s in node.else_body:
-                    self.gen_stmt(s)
-                self._emit(f"  goto {bb_merge};")
+    def _gen_stmt_WhileStmt(self, node):
+        bb_cond  = self._new_bb()
+        bb_body  = self._new_bb()
+        bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        _, cond_v = self.lower_expr(node.condition)
+        self._emit(f"  if ({cond_v}) goto {bb_body}; else goto {bb_after};")
+        self._loop_depth += 1
+        self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
+        self.loop_stack.append((bb_cond, bb_after))
+        for s in node.body:
+            self.gen_stmt(s)
+        self.loop_stack.pop()
+        self._loop_depth -= 1
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
 
-            self._emit_label(bb_merge)
-            return
+    def _gen_stmt_MultiAssignStmt(self, node):
+        vtype, v = self.lower_expr(node.value)
+        for target in node.targets:
+            if isinstance(target, IdentExpr):
+                tname = target.name
+                if tname not in self.var_types:
+                    self._declare_var(tname, vtype)
+                dst = self.var_types[tname]
+                self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+            elif isinstance(target, MemberExpr):
+                ot, ov = self.lower_expr(target.obj)
+                op = '->' if '*' in ot else '.'
+                self._emit(f"  {ov}{op}{target.member} = {v};")
+            elif isinstance(target, SubscriptExpr):
+                ot, obj_v = self.lower_expr(target.obj)
+                _, idx_v  = self.lower_expr(target.index)
+                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+            else:
+                self._emit("  /* TODO: complex multi-assign target */")
 
-        if isinstance(node, WhileStmt):
-            bb_cond  = self._new_bb()
-            bb_body  = self._new_bb()
-            bb_after = self._new_bb()
-            self._emit(f"  goto {bb_cond};")
-            self._emit_label(bb_cond)
-            _, cond_v = self.lower_expr(node.condition)
-            self._emit(f"  if ({cond_v}) goto {bb_body}; else goto {bb_after};")
-            self._loop_depth += 1
-            self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-            self.loop_stack.append((bb_cond, bb_after))
-            for s in node.body:
+    def _gen_stmt_ForStmt(self, node):
+        if (isinstance(node.iterable, CallExpr) and
+                isinstance(node.iterable.func, IdentExpr) and
+                node.iterable.func.name == 'range'):
+            self._gen_for_range(node)
+        else:
+            self._gen_for_iter(node)
+
+    def _gen_stmt_BreakStmt(self, node):
+        if self.loop_stack:
+            self._emit(f"  goto {self.loop_stack[-1][1]};")
+        else:
+            self._emit("  /* TODO: break outside loop */")
+
+    def _gen_stmt_ContinueStmt(self, node):
+        if self.loop_stack:
+            self._emit(f"  goto {self.loop_stack[-1][0]};")
+        else:
+            self._emit("  /* TODO: continue outside loop */")
+
+    def _gen_stmt_ExprStmt(self, node):
+        if isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr):
+            raw_name = node.value.func.name
+            if raw_name == 'print':
+                self._gen_print(node.value.args)
+                return
+            fname    = _safe_name(raw_name)
+            arg_vals = [self.lower_expr(a)[1] for a in node.value.args]
+            self._emit(f"  {fname} ({', '.join(arg_vals)});")
+        else:
+            self.lower_expr(node.value)
+
+    def _gen_stmt_AssertStmt(self, node):
+        _, v = self.lower_expr(node.value)
+        bb_trap = self._new_bb()
+        bb_ok   = self._new_bb()
+        self._emit(f"  if ({v}) goto {bb_ok}; else goto {bb_trap};")
+        self._emit_label(bb_trap)
+        if node.msg is not None:
+            mt, mv = self.lower_expr(node.msg)
+            if mt == 'char *':
+                self._emit(f'  puts ({mv});')
+            else:
+                self._emit(f'  printf ("{TypeLattice.printf_fmt(mt)}\\n", {mv});')
+        self._emit("  __builtin_trap ();")
+        self._emit(f"  goto {bb_ok};")
+        self._emit_label(bb_ok)
+
+    def _gen_stmt_RaiseStmt(self, node):
+        if node.value is not None:
+            vt, vv = self.lower_expr(node.value)
+            if vt == 'char *':
+                self._emit(f"  mojo_exc_msg_set ({vv});")
+        self._emit("  mojo_raise ();")
+
+    def _gen_stmt_TryStmt(self, node):
+        sj_ret = self._new_temp('int')
+        cond_t = self._new_temp('_Bool')
+        bb_try   = self._new_bb()
+        bb_exc   = self._new_bb()
+        bb_else  = self._new_bb() if node.else_body else None
+        bb_after = self._new_bb()
+
+        self._emit(f"  {sj_ret} = mojo_try_push ();")
+        self._emit(f"  {cond_t} = {sj_ret} != 0;")
+        self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
+
+        self._emit_label(bb_try)
+        for s in node.body:
+            self.gen_stmt(s)
+        self._emit("  mojo_exc_pop ();")
+        self._emit(f"  goto {bb_else if bb_else else bb_after};")
+
+        self._emit_label(bb_exc)
+        self._emit("  mojo_exc_pop ();")
+        for handler in node.handlers:
+            if handler.name:
+                self._declare_var(handler.name, 'char *')
+                self._emit(f"  {handler.name} = (char *) mojo_exc_msg_get ();")
+            for s in handler.body:
                 self.gen_stmt(s)
-            self.loop_stack.pop()
-            self._loop_depth -= 1
-            self._emit(f"  goto {bb_cond};")
-            self._emit_label(bb_after)
-            return
+        if node.finally_body:
+            for s in node.finally_body:
+                self.gen_stmt(s)
+        self._emit(f"  goto {bb_after};")
 
-        if isinstance(node, MultiAssignStmt):
-            vtype, v = self.lower_expr(node.value)
-            for target in node.targets:
-                if isinstance(target, IdentExpr):
-                    tname = target.name
-                    if tname not in self.var_types:
-                        self._declare_var(tname, vtype)
-                    dst = self.var_types[tname]
-                    self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
-                elif isinstance(target, MemberExpr):
-                    ot, ov = self.lower_expr(target.obj)
-                    op = '->' if '*' in ot else '.'
-                    self._emit(f"  {ov}{op}{target.member} = {v};")
-                elif isinstance(target, SubscriptExpr):
-                    ot, obj_v = self.lower_expr(target.obj)
-                    _, idx_v  = self.lower_expr(target.index)
-                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
+        if bb_else:
+            self._emit_label(bb_else)
+            for s in node.else_body:
+                self.gen_stmt(s)
+            if node.finally_body:
+                for s in node.finally_body:
+                    self.gen_stmt(s)
+            self._emit(f"  goto {bb_after};")
+
+        self._emit_label(bb_after)
+
+    def _gen_stmt_WithStmt(self, node):
+        aliases = []
+        for item in node.items:
+            et, ev = self.lower_expr(item.expr)
+            alias  = None
+            if item.alias is not None:
+                alias = item.alias if isinstance(item.alias, str) else item.alias.name
+                if alias not in self.var_types:
+                    self._declare_var(alias, et)
+                self._emit(f"  {alias} = {ev};")
+            else:
+                tmp = self._new_temp(et)
+                self._emit(f"  {tmp} = {ev};")
+                alias = tmp
+            struct_name = et.replace(' *', '').strip()
+            enter_fn    = f"{struct_name}___enter__"
+            if enter_fn in self.func_return_types:
+                self._emit(f"  {enter_fn} ({alias});")
+            else:
+                self._emit(f"  /* with: __enter__ ({struct_name}) */")
+            aliases.append((alias, struct_name))
+
+        def _emit_exits():
+            for al, sn in aliases:
+                exit_fn = f"{sn}___exit__"
+                if exit_fn in self.func_return_types:
+                    self._emit(f"  {exit_fn} ({al});")
                 else:
-                    self._emit("  /* TODO: complex multi-assign target */")
-            return
+                    self._emit(f"  /* with: __exit__ ({sn}) */")
 
-        if isinstance(node, ForStmt):
-            if (isinstance(node.iterable, CallExpr) and
-                    isinstance(node.iterable.func, IdentExpr) and
-                    node.iterable.func.name == 'range'):
-                self._gen_for_range(node)
-            else:
-                self._gen_for_iter(node)
-            return
+        has_exit = any(f"{sn}___exit__" in self.func_return_types
+                       for _, sn in aliases)
 
-        if isinstance(node, BreakStmt):
-            if self.loop_stack:
-                self._emit(f"  goto {self.loop_stack[-1][1]};")
-            else:
-                self._emit("  /* TODO: break outside loop */")
-            return
-
-        if isinstance(node, ContinueStmt):
-            if self.loop_stack:
-                self._emit(f"  goto {self.loop_stack[-1][0]};")
-            else:
-                self._emit("  /* TODO: continue outside loop */")
-            return
-
-        if isinstance(node, ExprStmt):
-            if isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr):
-                raw_name = node.value.func.name
-                if raw_name == 'print':
-                    self._gen_print(node.value.args)
-                    return
-                fname    = _safe_name(raw_name)
-                arg_vals = [self.lower_expr(a)[1] for a in node.value.args]
-                self._emit(f"  {fname} ({', '.join(arg_vals)});")
-            else:
-                self.lower_expr(node.value)
-            return
-
-        if isinstance(node, AssertStmt):
-            _, v = self.lower_expr(node.value)
-            bb_trap = self._new_bb()
-            bb_ok   = self._new_bb()
-            self._emit(f"  if ({v}) goto {bb_ok}; else goto {bb_trap};")
-            self._emit_label(bb_trap)
-            if node.msg is not None:
-                mt, mv = self.lower_expr(node.msg)
-                if mt == 'char *':
-                    self._emit(f'  puts ({mv});')
-                else:
-                    self._emit(f'  printf ("{TypeLattice.printf_fmt(mt)}\\n", {mv});')
-            self._emit("  __builtin_trap ();")
-            self._emit(f"  goto {bb_ok};")
-            self._emit_label(bb_ok)
-            return
-
-        if isinstance(node, RaiseStmt):
-            if node.value is not None:
-                vt, vv = self.lower_expr(node.value)
-                if vt == 'char *':
-                    self._emit(f"  mojo_exc_msg_set ({vv});")
-            self._emit("  mojo_raise ();")
-            return
-
-        if isinstance(node, TryStmt):
+        if has_exit:
             sj_ret = self._new_temp('int')
             cond_t = self._new_temp('_Bool')
             bb_try   = self._new_bb()
             bb_exc   = self._new_bb()
-            bb_else  = self._new_bb() if node.else_body else None
             bb_after = self._new_bb()
-
             self._emit(f"  {sj_ret} = mojo_try_push ();")
             self._emit(f"  {cond_t} = {sj_ret} != 0;")
             self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
@@ -1979,188 +2016,99 @@ class GimpleGen:
             for s in node.body:
                 self.gen_stmt(s)
             self._emit("  mojo_exc_pop ();")
-            self._emit(f"  goto {bb_else if bb_else else bb_after};")
+            _emit_exits()
+            self._emit(f"  goto {bb_after};")
 
             self._emit_label(bb_exc)
             self._emit("  mojo_exc_pop ();")
-            for handler in node.handlers:
-                if handler.name:
-                    self._declare_var(handler.name, 'char *')
-                    self._emit(f"  {handler.name} = (char *) mojo_exc_msg_get ();")
-                for s in handler.body:
-                    self.gen_stmt(s)
-            if node.finally_body:
-                for s in node.finally_body:
-                    self.gen_stmt(s)
+            _emit_exits()
+            self._emit("  mojo_raise ();")
             self._emit(f"  goto {bb_after};")
 
-            if bb_else:
-                self._emit_label(bb_else)
+            self._emit_label(bb_after)
+        else:
+            for s in node.body:
+                self.gen_stmt(s)
+            _emit_exits()
+
+    def _gen_stmt_FunctionDef(self, node):
+        outer_closures = getattr(self, '_all_closures', {}).get(
+            self.current_func_name, {})
+        ci = outer_closures.get(node.name)
+        if ci is None:
+            self._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")
+            return
+        if ci.captures:
+            env_var  = f"_env_{node.name}"
+            alloc_fn = f"_alloc_{ci.env_struct}"
+            self._declare_var(env_var, f"{ci.env_struct} *")
+            self._emit(f"  {env_var} = {alloc_fn} ();")
+            for vname, _ in ci.captures:
+                self._emit(f"  {env_var}->{vname} = {vname};")
+            self._closure_envs[node.name] = env_var
+        else:
+            self._closure_envs[node.name] = ''
+
+    def _gen_stmt_ImportStmt(self, node):
+        self._emit("  /* TODO: import */")
+
+    def _gen_stmt_FromImportStmt(self, node):
+        self._emit("  /* TODO: from import */")
+
+    def _gen_stmt_ComptimeIfStmt(self, node):
+        val = self._eval_const_bool(node.condition)
+        if val is True:
+            for s in node.then_body:
+                self.gen_stmt(s)
+        elif val is False:
+            if node.else_body:
                 for s in node.else_body:
                     self.gen_stmt(s)
-                if node.finally_body:
-                    for s in node.finally_body:
-                        self.gen_stmt(s)
-                self._emit(f"  goto {bb_after};")
-
-            self._emit_label(bb_after)
-            return
-
-        if isinstance(node, WithStmt):
-            # Build a list of (alias, struct_name) for items that have __exit__
-            aliases = []
-            for item in node.items:
-                et, ev = self.lower_expr(item.expr)
-                alias  = None
-                if item.alias is not None:
-                    alias = item.alias if isinstance(item.alias, str) else item.alias.name
-                    if alias not in self.var_types:
-                        self._declare_var(alias, et)
-                    self._emit(f"  {alias} = {ev};")
-                else:
-                    # No alias — use a temp to hold the CM so __exit__ can be called
-                    tmp = self._new_temp(et)
-                    self._emit(f"  {tmp} = {ev};")
-                    alias = tmp
-                struct_name = et.replace(' *', '').strip()
-                enter_fn    = f"{struct_name}___enter__"
-                if enter_fn in self.func_return_types:
-                    self._emit(f"  {enter_fn} ({alias});")
-                else:
-                    self._emit(f"  /* with: __enter__ ({struct_name}) */")
-                aliases.append((alias, struct_name))
-
-            def _emit_exits():
-                for al, sn in aliases:
-                    exit_fn = f"{sn}___exit__"
-                    if exit_fn in self.func_return_types:
-                        self._emit(f"  {exit_fn} ({al});")
-                    else:
-                        self._emit(f"  /* with: __exit__ ({sn}) */")
-
-            has_exit = any(f"{sn}___exit__" in self.func_return_types
-                           for _, sn in aliases)
-
-            if has_exit:
-                # Exception-safe: try body, call __exit__ on both normal and exc paths
-                sj_ret = self._new_temp('int')
-                cond_t = self._new_temp('_Bool')
-                bb_try   = self._new_bb()
-                bb_exc   = self._new_bb()
-                bb_after = self._new_bb()
-                self._emit(f"  {sj_ret} = mojo_try_push ();")
-                self._emit(f"  {cond_t} = {sj_ret} != 0;")
-                self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
-
-                self._emit_label(bb_try)
-                for s in node.body:
-                    self.gen_stmt(s)
-                self._emit("  mojo_exc_pop ();")
-                _emit_exits()
-                self._emit(f"  goto {bb_after};")
-
-                self._emit_label(bb_exc)
-                self._emit("  mojo_exc_pop ();")
-                _emit_exits()
-                self._emit("  mojo_raise ();")
-                self._emit(f"  goto {bb_after};")
-
-                self._emit_label(bb_after)
-            else:
-                for s in node.body:
-                    self.gen_stmt(s)
-                _emit_exits()
-            return
-
-        if isinstance(node, FunctionDef):
-            # Nested function — build the closure env and register the inner name
-            outer_closures = getattr(self, '_all_closures', {}).get(
-                self.current_func_name, {})
-            ci = outer_closures.get(node.name)
-            if ci is None:
-                self._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")
-                return
-            if ci.captures:
-                env_var  = f"_env_{node.name}"
-                alloc_fn = f"_alloc_{ci.env_struct}"
-                self._declare_var(env_var, f"{ci.env_struct} *")
-                self._emit(f"  {env_var} = {alloc_fn} ();")
-                for vname, _ in ci.captures:
-                    self._emit(f"  {env_var}->{vname} = {vname};")
-                self._closure_envs[node.name] = env_var
-            else:
-                # No captures — still need a sentinel so call sites know it's local
-                self._closure_envs[node.name] = ''
-            return
-
-        for cls, label in [
-            (ImportStmt,     'import'),
-            (FromImportStmt, 'from import'),
-        ]:
-            if isinstance(node, cls):
-                self._emit(f"  /* TODO: {label} */")
-                return
-
-        if isinstance(node, ComptimeIfStmt):
-            val = self._eval_const_bool(node.condition)
-            if val is True:
-                for s in node.then_body:
-                    self.gen_stmt(s)
-            elif val is False:
-                if node.else_body:
-                    for s in node.else_body:
-                        self.gen_stmt(s)
-            else:
-                # condition not constant — lower as a regular if
-                _, cond_v = self.lower_expr(node.condition)
-                bb_true  = self._new_bb()
-                bb_merge = self._new_bb()
-                bb_false = self._new_bb() if node.else_body else bb_merge
-                self._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
-                self._emit_label(bb_true)
-                for s in node.then_body:
+        else:
+            _, cond_v = self.lower_expr(node.condition)
+            bb_true  = self._new_bb()
+            bb_merge = self._new_bb()
+            bb_false = self._new_bb() if node.else_body else bb_merge
+            self._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
+            self._emit_label(bb_true)
+            for s in node.then_body:
+                self.gen_stmt(s)
+            self._emit(f"  goto {bb_merge};")
+            if node.else_body:
+                self._emit_label(bb_false)
+                for s in node.else_body:
                     self.gen_stmt(s)
                 self._emit(f"  goto {bb_merge};")
-                if node.else_body:
-                    self._emit_label(bb_false)
-                    for s in node.else_body:
+            self._emit_label(bb_merge)
+
+    def _gen_stmt_ComptimeForStmt(self, node):
+        unrolled = False
+        if (isinstance(node.iterable, CallExpr) and
+                isinstance(node.iterable.func, IdentExpr) and
+                node.iterable.func.name == 'range'):
+            args = node.iterable.args
+            ivals = [self._eval_const_int(a) for a in args]
+            if len(ivals) == 1 and ivals[0] is not None:
+                start, stop, step = 0, ivals[0], 1
+                unrolled = True
+            elif len(ivals) == 2 and all(v is not None for v in ivals):
+                start, stop, step = ivals[0], ivals[1], 1
+                unrolled = True
+            elif len(ivals) == 3 and all(v is not None for v in ivals):
+                start, stop, step = ivals[0], ivals[1], ivals[2]
+                unrolled = True
+            if unrolled and step != 0:
+                if node.target not in self.var_types:
+                    self._declare_var(node.target, 'int')
+                i = start
+                while (step > 0 and i < stop) or (step < 0 and i > stop):
+                    self._emit(f"  {node.target} = {i};")
+                    for s in node.body:
                         self.gen_stmt(s)
-                    self._emit(f"  goto {bb_merge};")
-                self._emit_label(bb_merge)
-            return
-
-        if isinstance(node, ComptimeForStmt):
-            # Try to unroll if iterable is range(...) with literal arguments.
-            unrolled = False
-            if (isinstance(node.iterable, CallExpr) and
-                    isinstance(node.iterable.func, IdentExpr) and
-                    node.iterable.func.name == 'range'):
-                args = node.iterable.args
-                ivals = [self._eval_const_int(a) for a in args]
-                if len(ivals) == 1 and ivals[0] is not None:
-                    start, stop, step = 0, ivals[0], 1
-                    unrolled = True
-                elif len(ivals) == 2 and all(v is not None for v in ivals):
-                    start, stop, step = ivals[0], ivals[1], 1
-                    unrolled = True
-                elif len(ivals) == 3 and all(v is not None for v in ivals):
-                    start, stop, step = ivals[0], ivals[1], ivals[2]
-                    unrolled = True
-                if unrolled and step != 0:
-                    if node.target not in self.var_types:
-                        self._declare_var(node.target, 'int')
-                    i = start
-                    while (step > 0 and i < stop) or (step < 0 and i > stop):
-                        self._emit(f"  {node.target} = {i};")
-                        for s in node.body:
-                            self.gen_stmt(s)
-                        i += step
-                    return
-            if not unrolled:
-                self._emit("  /* comptime for: iterable not constant — skipped */")
-            return
-
-        self._emit(f"  /* TODO: {type(node).__name__} */")
+                    i += step
+                return
+        if not unrolled:
+            self._emit("  /* comptime for: iterable not constant — skipped */")
 
     # ── for-range lowering ────────────────────────────────────────────────
 

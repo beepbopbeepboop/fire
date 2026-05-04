@@ -2,6 +2,7 @@
 import os
 from fe_reader import FormalEnglishReader
 from compiler_gen import dump_spec, PythonCompilerGen
+from gimple_spec_gen import GimpleSpecGenerator
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -45,6 +46,15 @@ def main():
     with open(out, 'w') as fh:
         fh.write(code)
     print(f'\n(also written to {out})')
+
+    dispatch_out = os.path.join(HERE, 'generated_dispatch.py')
+    dispatch_code = GimpleSpecGenerator(
+        os.path.join(HERE, 'GNU-EXTENSIONS.md'),
+        os.path.join(HERE, 'gimple-type-system.md'),
+    ).generate_dispatch_module()
+    with open(dispatch_out, 'w') as fh:
+        fh.write(dispatch_code)
+    print(f'(also written to {dispatch_out})')
 
 if __name__ == '__main__':
     main()
