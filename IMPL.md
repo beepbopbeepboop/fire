@@ -3,7 +3,7 @@
 This document records features that are fully implemented and working.
 See `PLAN.md` for future and deferred work.
 
-**Current Status**: 182/277 Mojo stdlib files compile successfully (65.7% pass rate).
+**Current Status**: 194/277 Mojo stdlib files compile successfully (70.0% pass rate).
 Unit test suite: 142/142 tests passing with zero regressions.
 
 ---

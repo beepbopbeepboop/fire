@@ -75,13 +75,19 @@ Missing:
 - `def __bool__(self) where conforms_to(Self.T, Boolable)` → emit method unconditionally, add comment
 - `where` clause is informational only in Python output
 
-### Lifetime/Origin Tracking
+### ~~Lifetime/Origin Tracking~~ — COMPLETE
 
-Currently dropped. Target behavior:
+✅ All target behaviors implemented:
 - `ref x: T` parameter → emit as `x: T` (convention prefix stripped)
 - `ref` return type → drop `ref` keyword
 - `Pointer(to=value)`, `UnsafePointer(to=value)` → emit as stub `Pointer(value)`
 - Origin annotations → drop entirely
+
+Parser bugs fixed (4 bugs, +12 stdlib files):
+1. ✅ KW tokens (`mut`, `ref`, etc.) accepted as `.member` names
+2. ✅ KW tokens accepted as keyword arg names in subscripts (`Type[mut=False, ...]`)
+3. ✅ Function-call types support chained member access (`type_of(x).Foo`)
+4. ✅ Subscripted exception types in `raises` clauses (`raises ExcType[Param]`)
 
 ### `UnsafePointer` Full Memory Semantics
 

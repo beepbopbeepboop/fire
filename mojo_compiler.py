@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'True', 'if', 'comptime', 'def', 'return', 'var', 'is', 'from', 'except', 'raises', 'break', 'assert', 'with', 'else', 'try', 'while', 'fn', 'raise', 'False', 'import', 'elif', 'as', 'finally', 'pass', 'or', 'for', 'out', 'trait', 'not', 'continue', 'ref', 'deinit', 'read', 'class', 'and', 'mut', 'struct', 'in'}
+_KEYWORDS = {'continue', 'assert', 'import', 'except', 'pass', 'True', 'var', 'not', 'read', 'raises', 'or', 'for', 'if', 'return', 'as', 'comptime', 'and', 'out', 'in', 'with', 'deinit', 'finally', 'ref', 'def', 'is', 'mut', 'False', 'struct', 'class', 'fn', 'trait', 'try', 'else', 'raise', 'from', 'elif', 'while', 'break'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -806,7 +806,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'out', 'mut', 'var', 'ref', 'deinit', 'read'}
+    _CONV_KWS = {'mut', 'var', 'read', 'deinit', 'out', 'ref'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -880,6 +880,8 @@ class Parser:
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF", "ARROW"):
                 if self._peek().kind in ("NAME", "DOT", "STRING", "COMMA"):
                     self._advance()
+                elif self._peek().kind == "LBRACKET":
+                    self._skip_bracketed()  # Skip subscripted exception types like ExcType[Param]
                 else:
                     break
         # Skip function qualifiers (unified, register_passable, etc.)
@@ -1125,11 +1127,13 @@ class Parser:
             t = self._peek()
             if t.kind == "DOT":
                 self._advance()
-                # Member can be a NAME or a backtick-quoted type
+                # Member can be a NAME (including KW like mut, ref) or a backtick-quoted type
                 if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
                     member = self._advance().value
+                elif self._peek().kind in ("NAME", "KW"):
+                    member = self._advance().value
                 else:
-                    member = self._expect("NAME").value
+                    member = self._expect("NAME").value  # error for invalid syntax
                 expr = MemberExpr(obj=expr, member=member)
             elif t.kind == "LBRACKET":
                 self._advance()
@@ -1152,7 +1156,7 @@ class Parser:
                             if self._peek().kind == "OP" and self._peek().value == "*":
                                 self._advance()
                                 self._parse_expr(0)
-                            elif self._peek().kind == "NAME" and self._peek(1).kind == "ASSIGN":
+                            elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                                 self._advance()  # skip name
                                 self._advance()  # skip =
                                 self._parse_expr(0)
@@ -1162,10 +1166,10 @@ class Parser:
                         self._expect("RBRACKET")
                         expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
                     # Check if this is a keyword-style bracket (func=value, attr=value)
-                    elif self._peek().kind == "NAME" and self._peek(1).kind == "ASSIGN":
+                    elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                         # Keyword arguments only
                         while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                            if self._peek().kind == "NAME":
+                            if self._peek().kind in ("NAME", "KW"):
                                 self._advance()  # skip name
                                 if self._peek().kind == "ASSIGN": self._advance()  # skip =
                                 self._parse_expr(0)  # parse and discard value
@@ -1188,10 +1192,10 @@ class Parser:
                                     self._advance()
                                     indices.append(self._parse_expr(0))
                                 # Check if keyword argument
-                                elif self._peek().kind == "NAME" and self._peek(1).kind == "ASSIGN":
+                                elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                                     # Skip remaining keyword arguments
                                     while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                                        if self._peek().kind == "NAME":
+                                        if self._peek().kind in ("NAME", "KW"):
                                             self._advance()  # skip name
                                             if self._peek().kind == "ASSIGN": self._advance()  # skip =
                                             self._parse_expr(0)  # parse and discard value
@@ -1404,11 +1408,13 @@ class Parser:
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
-            # Next part can be a NAME or a backtick-quoted type
+            # Next part can be a NAME (including KW like mut, ref) or a backtick-quoted type
             if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
                 name += "." + self._advance().value
+            elif self._peek().kind in ("NAME", "KW"):
+                name += "." + self._advance().value
             else:
-                name += "." + self._expect("NAME").value
+                name += "." + self._expect("NAME").value  # error for invalid syntax
         # Handle function call types like type_of(x)
         if self._peek().kind == "LPAREN":
             self._advance()  # (
@@ -1423,7 +1429,15 @@ class Parser:
                 elif t.kind == "EOF": break
                 else: name += t.value
             name += ")"
-            return name
+            # Do NOT return here; check for dotted names and subscripts after the call
+            # Second dotted-name loop after function call
+            while self._peek().kind == "DOT":
+                self._advance()  # consume dot
+                # Next part can be a NAME or a backtick-quoted type
+                if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
+                    name += "." + self._advance().value
+                else:
+                    name += "." + self._expect("NAME").value
         if self._peek().kind != "LBRACKET": return name
         # Consume [TypeArgs] and any chained subscripts — build a string representation
         parts = [name]
