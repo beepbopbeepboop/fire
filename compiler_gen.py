@@ -112,6 +112,9 @@ class PythonCompilerGen:
                 self._kws.add('in')
         for fs in spec.functions:
             self._kws.add(fs.keyword)
+        # Add 'fn' as an alternative to 'def' for function declarations (Mojo keyword)
+        if 'def' in self._kws:
+            self._kws.add('fn')
         for ss in spec.simple_stmts:
             self._kws.add(ss.keyword)
         for ts in spec.try_stmts:
@@ -152,6 +155,9 @@ class PythonCompilerGen:
             self._kws.add('struct')
         if spec.traits:
             self._kws.add('trait')
+        # Add 'class' as an alternative to 'struct' for class definitions
+        if 'struct' in self._kws:
+            self._kws.add('class')
 
         # ── Collect augmented ops ─────────────────────────────────────
         self._aug_ops: list[str] = []
@@ -796,9 +802,9 @@ class PythonCompilerGen:
         for cf in self.spec.control_flow:
             L.append(f'            if t.value == {cf.primary_kw!r}: return self._parse_{cf.kind}()')
         if self.spec.functions:
-            L.append( '            if t.value == "def": self._advance(); return self._parse_funcdef([])')
+            L.append( '            if t.value in ("def", "fn"): self._advance(); return self._parse_funcdef([])')
         if self.spec.structs:
-            L.append( '            if t.value == "struct": return self._parse_struct()')
+            L.append( '            if t.value in ("struct", "class"): return self._parse_struct()')
         if self.spec.traits:
             L.append( '            if t.value == "trait": return self._parse_trait()')
         for ts in self.spec.try_stmts:
@@ -811,6 +817,19 @@ class PythonCompilerGen:
             L.append(f'            if t.value == {ss.keyword!r}: return self._parse_{ss.kind}()')
         # Handle __extension and __mlir_region declarations (special syntax forms)
         L += [
+            '        # Handle __mlir_op, __mlir_attr and other MLIR/special forms',
+            '        if t.kind == "NAME" and t.value.startswith("__mlir"):',
+            '            self._advance()  # skip __mlir_op/__mlir_attr/etc',
+            '            # Skip string literal if present',
+            '            if self._peek().kind == "LPAREN":',
+            '                self._advance()  # skip (',
+            '                if self._peek().kind == "STRING":',
+            '                    self._advance()  # skip string',
+            '                self._advance()  # skip )',
+            '            # Skip the rest of the line (result type annotation, etc)',
+            '            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):',
+            '                self._advance()',
+            '            return PassStmt()',
             '        # Handle __extension Type: methods and __mlir_region name(...): body',
             '        if t.kind == "NAME" and t.value in ("__extension", "__mlir_region"):',
             '            self._advance()  # skip __extension or __mlir_region',
@@ -856,7 +875,10 @@ class PythonCompilerGen:
                   '            if kw.kind == "KW" and kw.value == "struct":',
                   '                self._pending_decs = decs',
                   '                return self._parse_struct()',
-                  '            self._expect("KW", "def")',
+                  '            if kw.kind == "KW" and kw.value in ("def", "fn"):',
+                  '                self._advance()',
+                  '                return self._parse_funcdef(decs)',
+                  '            self._expect("KW", "def or fn")',
                   '            return self._parse_funcdef(decs)']
         L += [
             '        expr = self._parse_expr(0)',
@@ -1189,8 +1211,12 @@ class PythonCompilerGen:
             '                self._advance()',
             '                args = []',
             '                while self._peek().kind != "RPAREN":',
+            '                    # Handle dictionary unpacking (**expr)',
+            '                    if self._peek().kind == "OP" and self._peek().value == "**":',
+            '                        self._advance()  # skip **',
+            '                        args.append(self._parse_expr(0))  # parse unpacked kwargs',
             '                    # Handle unpacking (*expr)',
-            '                    if self._peek().kind == "OP" and self._peek().value == "*":',
+            '                    elif self._peek().kind == "OP" and self._peek().value == "*":',
             '                        self._advance()  # skip *',
             '                        args.append(self._parse_expr(0))  # parse unpacked value',
             '                    # Handle keyword arguments (name=value)',
@@ -1762,7 +1788,12 @@ class PythonCompilerGen:
     def _gen_parse_struct(self):
         return [
             '    def _parse_struct(self):',
-            '        self._expect("KW", "struct")',
+            '        # Accept both "struct" and "class" keywords',
+            '        kw = self._peek()',
+            '        if kw.kind == "KW" and kw.value in ("struct", "class"):',
+            '            self._advance()',
+            '        else:',
+            '            self._expect("KW", "struct")',
             '        name = self._expect("NAME").value',
             '        # Skip generic type-param block [T: Trait, ...]',
             '        if self._peek().kind == "LBRACKET": self._skip_bracketed()',

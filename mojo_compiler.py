@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'if', 'for', 'from', 'and', 'var', 'read', 'pass', 'return', 'raise', 'finally', 'deinit', 'comptime', 'False', 'in', 'while', 'def', 'trait', 'mut', 'struct', 'raises', 'elif', 'not', 'continue', 'try', 'True', 'ref', 'or', 'break', 'import', 'else', 'except', 'out', 'assert', 'with', 'as', 'is'}
+_KEYWORDS = {'is', 'ref', 'for', 'var', 'read', 'comptime', 'if', 'not', 'out', 'mut', 'True', 'assert', 'continue', 'from', 'elif', 'else', 'def', 'raises', 'deinit', 'break', 'or', 'return', 'pass', 'in', 'with', 'as', 'False', 'import', 'finally', 'struct', 'try', 'except', 'trait', 'class', 'while', 'raise', 'fn', 'and'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -554,8 +554,8 @@ class Parser:
             if t.value == 'if': return self._parse_if()
             if t.value == 'while': return self._parse_while()
             if t.value == 'for': return self._parse_for()
-            if t.value == "def": self._advance(); return self._parse_funcdef([])
-            if t.value == "struct": return self._parse_struct()
+            if t.value in ("def", "fn"): self._advance(); return self._parse_funcdef([])
+            if t.value in ("struct", "class"): return self._parse_struct()
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
@@ -566,6 +566,19 @@ class Parser:
             if t.value == 'break': return self._parse_break()
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
+        # Handle __mlir_op, __mlir_attr and other MLIR/special forms
+        if t.kind == "NAME" and t.value.startswith("__mlir"):
+            self._advance()  # skip __mlir_op/__mlir_attr/etc
+            # Skip string literal if present
+            if self._peek().kind == "LPAREN":
+                self._advance()  # skip (
+                if self._peek().kind == "STRING":
+                    self._advance()  # skip string
+                self._advance()  # skip )
+            # Skip the rest of the line (result type annotation, etc)
+            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                self._advance()
+            return PassStmt()
         # Handle __extension Type: methods and __mlir_region name(...): body
         if t.kind == "NAME" and t.value in ("__extension", "__mlir_region"):
             self._advance()  # skip __extension or __mlir_region
@@ -609,7 +622,10 @@ class Parser:
             if kw.kind == "KW" and kw.value == "struct":
                 self._pending_decs = decs
                 return self._parse_struct()
-            self._expect("KW", "def")
+            if kw.kind == "KW" and kw.value in ("def", "fn"):
+                self._advance()
+                return self._parse_funcdef(decs)
+            self._expect("KW", "def or fn")
             return self._parse_funcdef(decs)
         expr = self._parse_expr(0)
         # Check for tuple unpacking in assignment (a, b = ...)
@@ -790,7 +806,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'var', 'mut', 'out', 'read', 'deinit', 'ref'}
+    _CONV_KWS = {'read', 'var', 'mut', 'ref', 'out', 'deinit'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -903,7 +919,12 @@ class Parser:
                            param_convs=param_convs)
 
     def _parse_struct(self):
-        self._expect("KW", "struct")
+        # Accept both "struct" and "class" keywords
+        kw = self._peek()
+        if kw.kind == "KW" and kw.value in ("struct", "class"):
+            self._advance()
+        else:
+            self._expect("KW", "struct")
         name = self._expect("NAME").value
         # Skip generic type-param block [T: Trait, ...]
         if self._peek().kind == "LBRACKET": self._skip_bracketed()
@@ -1192,8 +1213,12 @@ class Parser:
                 self._advance()
                 args = []
                 while self._peek().kind != "RPAREN":
+                    # Handle dictionary unpacking (**expr)
+                    if self._peek().kind == "OP" and self._peek().value == "**":
+                        self._advance()  # skip **
+                        args.append(self._parse_expr(0))  # parse unpacked kwargs
                     # Handle unpacking (*expr)
-                    if self._peek().kind == "OP" and self._peek().value == "*":
+                    elif self._peek().kind == "OP" and self._peek().value == "*":
                         self._advance()  # skip *
                         args.append(self._parse_expr(0))  # parse unpacked value
                     # Handle keyword arguments (name=value)
