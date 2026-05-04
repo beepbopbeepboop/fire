@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'comptime', 'mut', 'not', 'trait', 'read', 'or', 'as', 'import', 'raise', 'ref', 'while', 'finally', 'for', 'break', 'elif', 'continue', 'False', 'in', 'out', 'try', 'True', 'assert', 'return', 'deinit', 'with', 'if', 'def', 'is', 'except', 'and', 'from', 'pass', 'var', 'raises', 'struct', 'else'}
+_KEYWORDS = {'read', 'except', 'in', 'out', 'var', 'with', 'trait', 'assert', 'deinit', 'finally', 'return', 'break', 'and', 'struct', 'try', 'if', 'pass', 'or', 'False', 'True', 'else', 'elif', 'raise', 'ref', 'from', 'for', 'not', 'raises', 'is', 'def', 'while', 'mut', 'import', 'comptime', 'as', 'continue'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -767,7 +767,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'deinit', 'mut', 'var', 'ref', 'read', 'out'}
+    _CONV_KWS = {'var', 'read', 'deinit', 'mut', 'ref', 'out'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -793,6 +793,8 @@ class Parser:
             # Handle * (keyword-only separator or variadic parameter)
             if self._peek().kind == "OP" and self._peek().value == "*":
                 self._advance()
+                # Skip lifetime parameters if present after *
+                if self._peek().kind == "LBRACKET": self._skip_bracketed()
                 # If followed by NAME, it's a variadic parameter (*args)
                 if self._peek().kind == "NAME":
                     pname = self._expect("NAME").value
@@ -811,6 +813,8 @@ class Parser:
                 elif self._peek().kind == "COMMA": self._advance()
                 if self._peek().kind == "RPAREN": break
             if self._peek().kind == "RPAREN": break
+            # Skip lifetime parameters in brackets: ref[origin] param_name
+            if self._peek().kind == "LBRACKET": self._skip_bracketed()
             pname = self._expect("NAME").value
             ptype = None
             if self._peek().kind == "COLON":
@@ -1251,6 +1255,21 @@ class Parser:
         if self._peek().kind == "RBRACE":
             self._advance(); return DictExpr(pairs=[])
         first = self._parse_expr(0)
+        # Check for struct initializer syntax: {field = value, ...}
+        if self._peek().kind == "ASSIGN":
+            # This is a struct initializer with named fields
+            self._advance()  # skip =
+            self._parse_expr(0)  # parse and discard field value
+            # Skip any remaining fields
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "RBRACE": break
+                self._parse_expr(0)  # skip field name
+                if self._peek().kind == "ASSIGN": self._advance()
+                self._parse_expr(0)  # skip field value
+            self._expect("RBRACE")
+            # Return as dict for now (struct init not semantically tracked)
+            return DictExpr(pairs=[])
         if self._peek().kind == "COLON":
             self._advance(); val = self._parse_expr(0)
             if self._is_kw("for"):
