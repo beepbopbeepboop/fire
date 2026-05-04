@@ -27,6 +27,24 @@ The Mojo reference implementation consists of:
 
 ---
 
+## CLI Frontend
+
+The Mojo CLI (`build/mojo`) provides upstream-compatible command interface:
+
+| Command | Description |
+|---------|-------------|
+| `mojo repl` | Interactive REPL with Python-compatible eval/exec |
+| `mojo run <file.mojo>` | Compile and execute a Mojo file |
+| `mojo <file.mojo>` | Shorthand for `mojo run` |
+| `mojo build <file.mojo> -o <output>` | Compile to ELF executable |
+| `mojo compile <file.mojo>` | Compile to object file (sets `-o` to basename) |
+| `mojo --help` / `-h` | Display usage information |
+| `mojo --version` / `-v` | Show version string |
+
+**Implementation**: `build_mojo_cli.py` generates the CLI script at build time. The script wraps `gimple_codegen.py` to compile Mojo source to C with `__GIMPLE` annotations, then uses system `gcc` (or `gcc-mp-15` on macOS) to link and execute.
+
+---
+
 ## Layout Rules
 
 The tokenizer implements all four layout rules:
