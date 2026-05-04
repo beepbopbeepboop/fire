@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'read', 'except', 'in', 'out', 'var', 'with', 'trait', 'assert', 'deinit', 'finally', 'return', 'break', 'and', 'struct', 'try', 'if', 'pass', 'or', 'False', 'True', 'else', 'elif', 'raise', 'ref', 'from', 'for', 'not', 'raises', 'is', 'def', 'while', 'mut', 'import', 'comptime', 'as', 'continue'}
+_KEYWORDS = {'if', 'for', 'from', 'and', 'var', 'read', 'pass', 'return', 'raise', 'finally', 'deinit', 'comptime', 'False', 'in', 'while', 'def', 'trait', 'mut', 'struct', 'raises', 'elif', 'not', 'continue', 'try', 'True', 'ref', 'or', 'break', 'import', 'else', 'except', 'out', 'assert', 'with', 'as', 'is'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -566,6 +566,29 @@ class Parser:
             if t.value == 'break': return self._parse_break()
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
+        # Handle __extension Type: methods and __mlir_region name(...): body
+        if t.kind == "NAME" and t.value in ("__extension", "__mlir_region"):
+            self._advance()  # skip __extension or __mlir_region
+            name = self._expect("NAME").value
+            # Skip any function call arguments if present
+            if self._peek().kind == "LPAREN":
+                self._advance()  # (
+                depth = 1
+                while depth > 0:
+                    t_inner = self._advance()
+                    if t_inner.kind == "LPAREN": depth += 1
+                    elif t_inner.kind == "RPAREN": depth -= 1
+            self._expect("COLON")
+            # Check if there is a body on this line or on following lines
+            if self._peek().kind == "NEWLINE":
+                # Indented block follows
+                body = self._parse_block()
+            else:
+                # Body on same line, skip until newline
+                while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                    self._advance()
+            # Treat as a pass statement
+            return PassStmt()
         if t.kind == "OP" and t.value == "@":
             decs = []
             while self._peek().kind == "OP" and self._peek().value == "@":
@@ -767,7 +790,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'var', 'read', 'deinit', 'mut', 'ref', 'out'}
+    _CONV_KWS = {'var', 'mut', 'out', 'read', 'deinit', 'ref'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -795,7 +818,10 @@ class Parser:
                 self._advance()
                 # Skip lifetime parameters if present after *
                 if self._peek().kind == "LBRACKET": self._skip_bracketed()
-                # If followed by NAME, it's a variadic parameter (*args)
+                # Handle convention keywords after * (e.g., *, var x: Int)
+                while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+                    conv = self._advance().value
+                # If followed by NAME, it's a variadic parameter (*args) or keyword-only param
                 if self._peek().kind == "NAME":
                     pname = self._expect("NAME").value
                     ptype = None
@@ -812,6 +838,8 @@ class Parser:
                 # Otherwise it's a separator: skip following comma and check for end
                 elif self._peek().kind == "COMMA": self._advance()
                 if self._peek().kind == "RPAREN": break
+                # Continue to next parameter (convention keywords might follow)
+                continue
             if self._peek().kind == "RPAREN": break
             # Skip lifetime parameters in brackets: ref[origin] param_name
             if self._peek().kind == "LBRACKET": self._skip_bracketed()
@@ -1332,6 +1360,21 @@ class Parser:
         # Handle backtick-quoted MLIR types (e.g., `!pop.scalar<bool>`)
         if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
             return prefix + self._advance().value  # return the backtick string as-is
+        # Handle parenthesized types like () for unit type
+        if self._peek().kind == "LPAREN":
+            name = prefix + "("
+            self._advance()
+            depth = 1
+            while depth > 0:
+                t = self._advance()
+                if t.kind == "LPAREN": depth += 1; name += "("
+                elif t.kind == "RPAREN":
+                    depth -= 1
+                    if depth > 0: name += ")"
+                elif t.kind == "EOF": break
+                else: name += t.value
+            name += ")"
+            return name
         name = prefix + self._expect("NAME").value
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
@@ -1357,19 +1400,21 @@ class Parser:
             name += ")"
             return name
         if self._peek().kind != "LBRACKET": return name
-        # Consume [TypeArgs] — build a string representation
-        self._advance()  # [
-        parts = [name, "["]
-        depth = 1
-        while depth > 0:
-            t = self._advance()
-            if t.kind == "LBRACKET": depth += 1; parts.append("[")
-            elif t.kind == "RBRACKET":
-                depth -= 1
-                if depth > 0: parts.append("]")
-            elif t.kind == "EOF": break
-            else: parts.append(t.value)
-        parts.append("]")
+        # Consume [TypeArgs] and any chained subscripts — build a string representation
+        parts = [name]
+        while self._peek().kind == "LBRACKET":
+            self._advance()  # [
+            parts.append("[")
+            depth = 1
+            while depth > 0:
+                t = self._advance()
+                if t.kind == "LBRACKET": depth += 1; parts.append("[")
+                elif t.kind == "RBRACKET":
+                    depth -= 1
+                    if depth > 0: parts.append("]")
+                elif t.kind == "EOF": break
+                else: parts.append(t.value)
+            parts.append("]")
         return "".join(parts)
 
 # ── Code generator ─────────────────────────────────────────────────
