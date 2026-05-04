@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'read', 'pass', 'comptime', 'struct', 'except', 'raises', 'in', 'or', 'as', 'break', 'deinit', 'elif', 'finally', 'else', 'try', 'continue', 'for', 'is', 'mut', 'and', 'True', 'not', 'ref', 'trait', 'while', 'False', 'import', 'var', 'assert', 'if', 'def', 'with', 'out', 'raise', 'return', 'from'}
+_KEYWORDS = {'comptime', 'mut', 'not', 'trait', 'read', 'or', 'as', 'import', 'raise', 'ref', 'while', 'finally', 'for', 'break', 'elif', 'continue', 'False', 'in', 'out', 'try', 'True', 'assert', 'return', 'deinit', 'with', 'if', 'def', 'is', 'except', 'and', 'from', 'pass', 'var', 'raises', 'struct', 'else'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -589,6 +589,21 @@ class Parser:
             self._expect("KW", "def")
             return self._parse_funcdef(decs)
         expr = self._parse_expr(0)
+        # Check for tuple unpacking in assignment (a, b = ...)
+        if self._peek().kind == "COMMA":
+            targets = [expr]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "ASSIGN": break
+                targets.append(self._parse_expr(0))
+            # Check if this is actually an assignment
+            if self._peek().kind == "ASSIGN":
+                self._advance()
+                val = self._parse_expr(0)
+                tuple_target = TupleExpr(elements=targets)
+                return AssignStmt(target=tuple_target, value=val)
+            # Not an assignment, treat as expression statement with comma operator
+            return ExprStmt(TupleExpr(elements=targets))
         # Assignment / augmented assignment
         if self._peek().kind == "ASSIGN":
             self._advance()
@@ -752,7 +767,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'out', 'read', 'ref', 'deinit', 'mut', 'var'}
+    _CONV_KWS = {'deinit', 'mut', 'var', 'ref', 'read', 'out'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
