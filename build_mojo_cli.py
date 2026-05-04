@@ -17,6 +17,7 @@ MOJO_CLI_SCRIPT = '''#!/usr/bin/env python3
 """
 Mojo CLI - compiler and REPL frontend.
 Supports: mojo repl, mojo run <file>, mojo build <file>, mojo <file> (run shorthand)
+Also: --dump-{tokens,ast,c,gimple,all} for bootstrap verification.
 """
 import sys
 import os
@@ -46,6 +47,13 @@ def main():
         print(f"mojo {VERSION} (APEX reference implementation)")
         return
 
+    if cmd in ('--dump-tokens', '--dump-ast', '--dump-c', '--dump-gimple', '--dump-all'):
+        if len(sys.argv) < 3:
+            print(f"mojo {cmd}: no input file specified")
+            sys.exit(1)
+        handle_dump(cmd, sys.argv[2])
+        return
+
     if cmd == 'repl':
         handle_repl(sys.argv[2:])
         return
@@ -63,7 +71,7 @@ def main():
         return
 
     # Shorthand: mojo <file.mojo> is equivalent to mojo run <file.mojo>
-    if cmd.endswith('.mojo') or cmd.endswith('.🔥'):
+    if cmd.endswith('.mojo') or cmd.endswith('.\\U0001f525'):
         handle_run([cmd] + sys.argv[2:])
         return
 
@@ -88,14 +96,76 @@ OPTIONS:
     -h, --help                    Show this help message
     -v, --version                 Show version information
     -o <file>                     Output file (used with build/compile)
+    --dump-tokens <file>          Print token stream and exit
+    --dump-ast <file>             Print AST and exit
+    --dump-c <file>               Print generated C source and exit
+    --dump-gimple <file>          Print GIMPLE-annotated C and exit
+    --dump-all <file>             Print all four dumps with section headers
 
 EXAMPLES:
     mojo repl                     Start the REPL
     mojo run hello.mojo           Run hello.mojo
     mojo hello.mojo               Same as above (shorthand)
     mojo build hello.mojo -o out  Build to executable 'out'
+    mojo --dump-all hello.mojo    Dump all intermediate representations
 """
     print(help_text)
+
+def handle_dump(flag, input_file):
+    """Dump intermediate representations for bootstrap verification."""
+    if not os.path.exists(input_file):
+        print(f"mojo {flag}: file not found: {input_file}")
+        sys.exit(1)
+
+    try:
+        from mojo_compiler import tokenize, Parser
+        from gimple_codegen import compile_to_gimple
+
+        with open(input_file) as f:
+            src = f.read()
+
+        want_all = (flag == '--dump-all')
+
+        if flag == '--dump-tokens' or want_all:
+            if want_all:
+                print("=== TOKENS ===")
+            tokens = tokenize(src)
+            for tok in tokens:
+                print(f"{tok.kind} {tok.value!r}")
+            if want_all:
+                print()
+
+        if flag == '--dump-ast' or want_all:
+            if want_all:
+                print("=== AST ===")
+            tokens = tokenize(src)
+            stmts = Parser(tokens).parse_module()
+            for stmt in stmts:
+                print(repr(stmt))
+            if want_all:
+                print()
+
+        if flag == '--dump-c' or want_all:
+            if want_all:
+                print("=== C ===")
+            from mojo_compiler import compile as mojo_compile
+            print(mojo_compile(src))
+            if want_all:
+                print()
+
+        if flag == '--dump-gimple' or want_all:
+            if want_all:
+                print("=== GIMPLE ===")
+            print(compile_to_gimple(src))
+
+    except ImportError as e:
+        print(f"mojo {flag}: compiler not initialized ({e})")
+        sys.exit(1)
+    except Exception as e:
+        print(f"mojo {flag}: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 def handle_repl(args):
     """Interactive REPL - execute Mojo code interactively"""

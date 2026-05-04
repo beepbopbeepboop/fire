@@ -1,4 +1,5 @@
-.PHONY: run demo check check-gimple clean stdlib
+.PHONY: run demo check check-gimple clean stdlib bootstrap \
+        preflight transpile stage1 stage2 verify
 
 # Paths
 RUNTIME_SRC     = runtime/mojo_runtime.c
@@ -10,6 +11,15 @@ STDLIB_WRAPPER  = runtime/stdlib_wrapper.mojo
 STDLIB_DYLIB    = build/libmojo_stdlib.dylib
 MOJO_CLI        = build/mojo
 BUILD_MOJO_CLI  = build_mojo_cli.py
+
+# Bootstrap paths
+STAGE1_BIN      = stage1/mojo
+STAGE2_BIN      = stage2/mojo
+MOJO_MAIN       = mojo/mojo_main.mojo
+
+# Core compiler .py files to transpile (dependency order)
+TRANSPILE_SRCS  = generated_dispatch.py module_loader.py mojo_compiler.py gimple_codegen.py
+TRANSPILE_MOJOS = $(patsubst %.py,mojo/%.mojo,$(TRANSPILE_SRCS))
 
 run:
 	python run.py
@@ -68,8 +78,95 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 	@mkdir -p build
 	python compile_stdlib.py 2>&1 | tee build/stdlib-check.log
 
+# ──────────────────────────────────────────────────────────────
+# Bootstrap targets
+# ──────────────────────────────────────────────────────────────
+
+# Full bootstrap: preflight → transpile → stage1 → stage2 → verify
+bootstrap: preflight transpile stage1 stage2 verify
+	@echo "Bootstrap complete."
+
+# Stage 0: preflight checks
+preflight: $(MOJO_CLI)
+	@test -f ../apex/.venv/bin/python3 || \
+	    { echo "FAIL preflight: ../apex/.venv not found — run 'make install' in ../apex"; exit 1; }
+	@test -f mojo_compiler.py || \
+	    { echo "FAIL preflight: mojo_compiler.py missing — run 'python run.py'"; exit 1; }
+	@$(MOJO_CLI) --version >/dev/null 2>&1 || \
+	    { echo "FAIL preflight: build/mojo not working"; exit 1; }
+
+# Stage 1: transpile Python compiler → Mojo
+transpile: $(TRANSPILE_MOJOS)
+
+mojo/%.mojo: %.py scripts/py2mojo.sh
+	@mkdir -p mojo
+	@scripts/py2mojo.sh $<
+
+COMPILER_MAIN    = runtime/compiler_main.c
+RUNTIME_C        = runtime/mojo_runtime.c
+CC_FLAGS         = -fgimple -I runtime
+GCC_MP15         = /opt/local/bin/gcc-mp-15
+BOOTSTRAP_CC     = $(shell test -x $(GCC_MP15) && echo $(GCC_MP15) || echo gcc)
+
+# Stage 2: compile Mojo compiler with Python build/mojo → stage1/mojo
+# Two steps: dump GIMPLE C from mojo_main.mojo, then link with compiler_main.c
+stage1: $(STAGE1_BIN)
+
+build/mojo_logic.c: $(MOJO_CLI) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
+	@echo "  stage1: dumping GIMPLE from mojo_main.mojo..."
+	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > $@ || \
+	    { echo "FAIL stage1: --dump-gimple mojo/mojo_main.mojo failed"; rm -f $@; exit 1; }
+
+$(STAGE1_BIN): build/mojo_logic.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
+	@mkdir -p stage1
+	@echo "  stage1: linking with compiler_main.c..."
+	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o $@ build/mojo_logic.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	    { echo "FAIL stage1: link failed"; exit 1; }
+	@chmod +x $@
+	@echo "  stage1/mojo built"
+
+# Stage 3: compile Mojo compiler with stage1/mojo → stage2/mojo
+stage2: $(STAGE2_BIN)
+
+build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
+	@echo "  stage2: dumping GIMPLE from stage1/mojo..."
+	@$(STAGE1_BIN) --dump-gimple $(MOJO_MAIN) > $@ || \
+	    { echo "FAIL stage2: stage1/mojo --dump-gimple failed"; rm -f $@; exit 1; }
+
+$(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
+	@mkdir -p stage2
+	@echo "  stage2: linking with compiler_main.c..."
+	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o $@ build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	    { echo "FAIL stage2: link failed"; exit 1; }
+	@chmod +x $@
+	@echo "  stage2/mojo built"
+
+# Stage 4: verify bootstrap by comparing intermediate artifacts
+VERIFY_CORPUS = $(MOJO_MAIN) mojo/mojo_compiler.mojo mojo/gimple_codegen.mojo
+verify: $(STAGE1_BIN) $(STAGE2_BIN)
+	@echo "  verify: comparing stage1 vs stage2 artifacts..."
+	@mkdir -p build/verify
+	@ok=1; \
+	for f in $(VERIFY_CORPUS); do \
+	    base=$$(basename $$f .mojo); \
+	    $(STAGE1_BIN) --dump-all $$f > build/verify/s1_$$base.dump 2>&1 || \
+	        { echo "FAIL verify: stage1/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    $(STAGE2_BIN) --dump-all $$f > build/verify/s2_$$base.dump 2>&1 || \
+	        { echo "FAIL verify: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump >/dev/null 2>&1 || \
+	        { echo "FAIL verify: $$f — stage1 and stage2 differ:"; \
+	          diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump | head -40; \
+	          ok=0; break; }; \
+	done; \
+	test $$ok -eq 1
+
 clean:
 	rm -f mojo_compiler.py
 	rm -f $(DYLIB)
 	rm -f $(STDLIB_DYLIB)
 	rm -f $(MOJO_CLI)
+
+clean-bootstrap:
+	rm -f $(TRANSPILE_MOJOS)
+	rm -f build/mojo_logic.c build/mojo_logic2.c
+	rm -rf stage1 stage2 build/verify
