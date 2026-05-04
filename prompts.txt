@@ -1,0 +1,108 @@
+We are going to create something called formal english. We are only
+  going to support a subset, and an example of this can be found in
+  *.md. These files define a language called mojo, and we are going to
+  transpile the english into an ast, the ast will be used to make a
+  formal mojo compiler based upon the definition of the language from
+  formal english. Your job isn't to write this mojo compiler, rather
+  the system that can transiple from formal english into ast, and the
+  code generator into python as the target language of the system. One
+  shot everything, don't test and don't look up any external
+  references. This input source, mojo, can be different from your
+  knowledge of mojo, if there is a difference, use the on disk source
+  as authoritative. You can use your knowledge of mojo to resolve the
+  random unimportant little details. Please write all your code in
+  python.  create the plan into PLAN.md. Ask any questions that you
+  need. You have to resolve all english language issues by yourself.
+
+Ok, plan mode. I want you to add support to the english to python
+  transplier for these new *.md files. See Makefile for the big
+  picture. Light to minimal testing, we will do comprehensive testing
+  later. We need support for everything, don't skip things. If
+  something is hard, make a plan todo item for it. See the existing
+  PLAN.md, and update it. I think everything that works should move
+  moved into IMPL.md from the plan, this keeps the size of PLAN.md
+  small, just what we want to build.
+
+ # is documented in https://docs.modular.com/mojo/manual/basics, you were supposed to have grabbed the manual, and put this content into the .md     
+  files. Can you audit the .md files against the docs? And \ is only for triple quoted strings. I think you imagined this. We don't imagine the       
+  manguage, we read the doc to discover what the language is. All changes must be driven by my and documented. Once we do this, then mojo-layoutmd    
+  goe away I think.
+
+Let's write a codegen plan for the mojo compiler for also being able
+  to generate gimple, presently we just can do python, see
+  ast_nodes.py for example. mojo_ocmpiler.py is generated, see
+  makefile, but see compiler_gen.py for a non generated bit. Let's do
+  all the easy stuff and defer the hard things to TODO items in
+  CODEGENPLAN.md. That file will have the full plan. Include testing
+  to ensure correct wiring. Read and save the gcc manual for gimple
+  refernece for things you don't now about are might be unclear
+  about. You likely already know how to generate gimple. See the GCC
+  internals manual 6.10 Support for testing GIMPLE passes. Use the
+  dump modifier -gimple (e.g. -fdump-tree-all-gimple) to make tree
+  dumps more closely follow the format accepted by the GIMPLE parser.
+  can help you imagine how it works. Start small and ensure you know
+  how to use use it. See
+
+   $ cat gimplefe-1.c                                                                                                                                 
+  /* { dg-do compile } */                                                                                                                             
+  /* { dg-options "-fgimple" } */                                                                                                                     
+                                                                                                                                                      
+  int i;                                                                                                                                              
+  void __GIMPLE foo()                                                                                                                                 
+  {                                                                                                                                                   
+    i = 1;                                                                                                                                            
+  }                                                                                                                                                   
+  ((.venv) ) up:gcc.dg mrs$ pwd                                                                                                                       
+  /Users/mrs/net/gcc/gcc/testsuite/gcc.dg                                                                                                             
+   for concrete ideas. gimple-*.c for even more ideas. gcc-mp-15 is the compiler to target.      
+
+The docs are in: $ grep __GIMPLE *
+grep: include: Is a directory
+invoke.texi:Enable parsing of function definitions marked with @code{__GIMPLE}.
+grep: libgdiagnostics: Is a directory
+sourcebuild.texi:As of gcc 7, C functions can be tagged with @code{__GIMPLE} to indicate
+sourcebuild.texi:void __GIMPLE (startwith ("dse2")) foo ()
+sourcebuild.texi:The @code{__GIMPLE} parser is integrated with the C tokenizer and
+((.venv) ) up:doc mrs$ pwd
+/Users/mrs/net/gcc/gcc/doc
+
+use them instead of the network.
+
+
+Ok, let's fully implement the rest of the easy todos. Runtime, mkdir
+   runtime, and into it put C/C++/mojo or python code you need for the
+   runtime in it. In build/libmojo.dylib you can then hae what ever
+   runtime you need. Add dict, set, list and string todos as well as I
+   think yoi said those were waiting on runtime support. Do tests and
+   update the .md files. See PLAN.md and IMPL.md for the non-codegen
+   docs.
+
+
+And now we can do all medium and hard todos from CODEGENPLAN.md, be
+  sure to update the python codegen. mojo_compiler.py is generated
+  file, see Makefile. Update PLAN.md, IMPL.md and the other two md
+  files. Be sure to expand the solver for type inferencing to the
+  absolute most perfect inferencer possible, same with the solver for
+  data layout versus dynamic allocation. Create todos for any part we
+  need to skip for now.
+
+
+Ok, now, for all the code you wrote in *.py, that is defined by *.md,
+   add support to the transpiler to instead write that code upon
+   seeing the *.md files, and generate it that way instead. Audit all
+   the missing bits in the *.md files that should be in the system
+   already, but aren't and add those items to the PLAN.md file as TODO
+   elements. We want to work on that later.
+
+
+Ok, one important bit you missed, all the language *.md files are from
+  upstream, we can't edit them. Move all your content to
+  GNU-EXTENTIONS.md, you control and can write anything you need in
+  that file, you define its content. The module system is describe
+  upstream. Check the official mojo documentation, for example, for
+  modules, module comilation, module building, structure and so on,
+  bring into our .md files that content and indeed any missing content
+  your audit finds. Our .md files have back pointers to the doc, you
+  can find its general location from them.
+
+
