@@ -96,13 +96,13 @@ bootstrap: preflight stage1 stage2 stage3 verify
 	@echo "╚════════════════════════════════════════════════════════════╝"
 	@exit 0
 
-# Stage 1: Python interpreter analyzes mojo_main.mojo (bootstrap only)
+# Stage 1: Python version analyzes mojo_main.py (bootstrap only)
 stage1: preflight
 	@mkdir -p build/verify
-	@echo "Stage 1: Python interpreter analyzing mojo_main.mojo..."
+	@echo "Stage 1: Python bootstrap analyzing mojo_main.py..."
 	@echo "         (temporary bootstrap — will be replaced by Mojo-based)"
-	@/usr/bin/time -p $(MOJO_CLI) --dump-tokens $(MOJO_MAIN) > build/verify/stage1.dump 2> build/verify/stage1.time || \
-	    { echo "FAIL stage1: Python interpreter failed"; exit 1; }
+	@/usr/bin/time -p python3 mojo_main.py mojo/mojo_main.mojo > build/verify/stage1.dump 2> build/verify/stage1.time || \
+	    { echo "FAIL stage1: Python bootstrap failed"; exit 1; }
 	@cat build/verify/stage1.time
 
 # Stage 2: Mojo interpreter analyzes mojo_main.mojo (first self-hosted)
