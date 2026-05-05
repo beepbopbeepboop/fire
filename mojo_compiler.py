@@ -799,12 +799,28 @@ class Parser:
         # Skip optional convention keyword (var, ref, mut, etc.)
         if self._is_kw(*self._CONV_KWS):
             self._advance()
-        # Handle tuple unpacking: for (a, b) in ... or for a, b in ...
+        # Handle tuple unpacking: for (a, b) in ... or for a, b in ... or nested (a, (b, c))
         if self._peek().kind == "LPAREN":
             self._advance()
             names = []
             while self._peek().kind != "RPAREN":
-                if self._peek().kind in ("NAME", "KW"):
+                if self._peek().kind == "LPAREN":
+                    # Nested tuple: recursively parse and add as a unit
+                    self._advance()
+                    nested = []
+                    while self._peek().kind != "RPAREN":
+                        if self._peek().kind in ("NAME", "KW"):
+                            nested.append(self._advance().value)
+                        elif self._peek().kind == "COMMA":
+                            self._advance()
+                        elif self._peek().kind == "LPAREN":
+                            # Further nesting: for simplicity, skip detailed parsing
+                            break
+                        else:
+                            break
+                    self._expect("RPAREN")
+                    names.append("(" + ", ".join(nested) + ")")
+                elif self._peek().kind in ("NAME", "KW"):
                     names.append(self._advance().value)
                 elif self._peek().kind == "COMMA":
                     self._advance()

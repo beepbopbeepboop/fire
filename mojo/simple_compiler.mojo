@@ -7,12 +7,11 @@ For self-hosting bootstrap, export 4 functions called by runtime/compiler_main.c
   - mojo_tokens(src: String)           — prints token stream
   - mojo_ast(src: String)              — prints AST
 
-This is a minimal Mojo file that does NOT depend on gimple_codegen
-(which still has transpilation issues). Instead, it calls the Python
-compiler functions and returns results.
-
-Once gimple_codegen is fully transpiled to production-quality Mojo,
-this file will import and call the Mojo versions directly.
+Current status: Returns Python IR for both gimple and pyir.
+- gimple_codegen.mojo still has transpilation issues (see TODOs below)
+- For now, stage1/stage2 use Python IR; the C runtime will compile it to GIMPLE
+- Once gimple_codegen.mojo is production-quality, import and use it here
+- This is a TEMPORARY measure to unblock bootstrap testing; full GIMPLE will follow
 """
 
 from mojo_compiler import tokenize, Parser, compile as mojo_compile

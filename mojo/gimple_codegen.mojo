@@ -370,7 +370,7 @@ def _used_idents_node(node) -> set:
     if isinstance(node, TernaryExpr):
         return ((_used_idents_node(node.condition) | _used_idents_node(node.then_val)) | _used_idents_node(node.else_val))
     if isinstance(node, WalrusExpr):
-        return ([node.name]  # Set → List | _used_idents_node(node.value))
+        return ([node.name] | _used_idents_node(node.value))  # Set → List
     if isinstance(node, (ListExpr, SetExpr, TupleExpr)):
         var r: set = set()
         for e in node.elements:
@@ -503,31 +503,31 @@ struct GimpleGen:
     var _ptr_helpers_needed: DynamicVector[String]
     var _struct_allocs_needed: DynamicVector[String]
     fn __init__(self):
-        self.func_return_types: dict[str, str] = {}
-        self.struct_field_types: dict[str, dict[str, str]] = {}
-        self.imported_symbols: dict[str, tuple] = {}
-        self._all_closures: dict = {}
-        self._ptr_helpers_needed: set[str] = set()
-        self._struct_allocs_needed: set[str] = set()
+        self.func_return_types = {}
+        self.struct_field_types = {}
+        self.imported_symbols = {}
+        self._all_closures = {}
+        self._ptr_helpers_needed = set()
+        self._struct_allocs_needed = set()
         self._reset_func()
     fn _reset_func(self):
         self.bb_counter = 2
         self.temp_counter = 0
-        self.decls: list[str] = []
-        self.body_lines: list[str] = []
-        self.var_types: dict[str, str] = {}
-        self.loop_stack: list[tuple[str, str]] = []
+        self.decls = []
+        self.body_lines = []
+        self.var_types = {}
+        self.loop_stack = []
         self.exc_depth = 0
-        self.func_ret_type: str = ''
-        self._elem_types: dict[str, str] = {}
-        self._dict_val_types: dict[str, str] = {}
-        self._struct_layout: dict[str, str] = {}
-        self._layout_hint: str = LayoutSolver.HEAP
-        self.current_func_name: str = ''
-        self._loop_depth: int = 0
-        self._captures: dict[str, str] = {}
-        self._env_param: str = ''
-        self._closure_envs: dict[str, str] = {}
+        self.func_ret_type = ''
+        self._elem_types = {}
+        self._dict_val_types = {}
+        self._struct_layout = {}
+        self._layout_hint = LayoutSolver.HEAP
+        self.current_func_name = ''
+        self._loop_depth = 0
+        self._captures = {}
+        self._env_param = ''
+        self._closure_envs = {}
     fn _new_bb(self) -> String:
         self.bb_counter += 1
         return 'bb_' + str(self.bb_counter)
@@ -967,7 +967,7 @@ struct GimpleGen:
         let t = self._new_temp('int64_t')
         self._emit('  ' + str(t) + ' = (int64_t)' + str(val) + ';')
         return t
-    let _RUNTIME_PTRS = frozenset(['MojoList *', 'MojoStr *', 'MojoDict *', 'MojoSet *', 'MojoDictIter *', 'MojoSetIter *']  # Set → List)
+    let _RUNTIME_PTRS = frozenset(['MojoList *', 'MojoStr *', 'MojoDict *', 'MojoSet *', 'MojoDictIter *', 'MojoSetIter *'])  # Set → List
     fn _lower_method_call(self, node: CallExpr) -> StaticTuple[String, 2]:
         """Lower obj.method(args) — handles raw C pointers (UnsafePointer) and structs."""
         let func = node.func
@@ -2509,7 +2509,7 @@ struct GimpleGen:
                     let inferred = 'int'  # inferred: String
                 self.func_return_types[s.name] = inferred
                 self.var_types.clear()
-        self._all_closures: dict = {}
+        self._all_closures = {}
         for s in stmts:
             if not isinstance(s, FunctionDef):
                 continue
