@@ -150,6 +150,8 @@ class PythonCompilerGen:
                 self._kws.update(ac.conventions)
         # Compile-time keyword (ensure it's present)
         self._kws.add('comptime')
+        # Mojo immutable let keyword (complement to var for immutable declarations)
+        self._kws.add('let')
         # Struct / trait keywords
         if spec.structs:
             self._kws.add('struct')

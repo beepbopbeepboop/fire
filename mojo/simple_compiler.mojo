@@ -23,7 +23,11 @@ from mojo_compiler import tokenize, Parser, compile as mojo_compile
 # 2. For stage1, we need these as C symbols provided by the runtime, not Mojo imports.
 # 3. Once gimple_codegen.mojo transpiles cleanly, import and call it here instead
 #    of returning Python IR.
-# 4. gimple_codegen.mojo currently has parse errors (complex exception handlers).
+# 4. gimple_codegen.mojo has parse errors from transpilation:
+#    - Indentation/scope issues (global stmts after methods lack DEDENT)
+#    - Dict[?, Type] uses ? which isn't tokenized (should be AnyType)
+#    - Comments with assignments eat the actual assignment  (fixed in mojo_compiler)
+# These require fixing the transpiler (apex py2mojo) to generate valid Mojo.
 
 
 fn mojo_gimple(src: String) -> String:

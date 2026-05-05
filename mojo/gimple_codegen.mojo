@@ -137,8 +137,8 @@ struct EscapeAnalyzer:
         self._struct_types = struct_types
     fn find_escaping(self, params: list, body: list) -> set:
         """Return the set of local variable names that escape `body`."""
-        let escaped: DynamicVector[String]  # Set → DynamicVector = set()
-        let in_scope: DynamicVector[String]  # Set → DynamicVector = _tmp1
+        let escaped: DynamicVector[String] = set()  # Set → DynamicVector
+        let in_scope: DynamicVector[String] = _tmp1  # Set → DynamicVector
         var _tmp1 = DynamicVector[AnyType]()
         for p in params:
             _tmp1.append(p[0])
@@ -230,7 +230,7 @@ struct LayoutSolver:
                 result[name] = self.STACK
         return result
     fn _struct_locals(self, stmts: list) -> set:
-        var result: DynamicVector[String]  # Set → DynamicVector = set()
+        var result: DynamicVector[String] = set()  # Set → DynamicVector
         for node in stmts:
             if isinstance(node, VarDecl) and node.type_ann in self._struct_types:
                 result.add(node.name)
@@ -267,7 +267,7 @@ struct LayoutSolver:
                 return True
         return False
 
-let _TYPE_MAP: Dict[?, String] = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'Bool': 'int', 'String': 'char *', 'List': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *', 'Str': 'MojoStr *', 'None': 'void', None: 'int'}
+let _TYPE_MAP: Dict[AnyType, String] = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'Bool': 'int', 'String': 'char *', 'List': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *', 'Str': 'MojoStr *', 'None': 'void', None: 'int'}
 
 let _RUNTIME_FUNCS: Dict[String, String] = {'mojo_try_push': 'int', 'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double'}
 
