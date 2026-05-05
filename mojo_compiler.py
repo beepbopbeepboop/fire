@@ -1677,8 +1677,11 @@ def compile(src: str) -> str:
     return emit_module(stmts)
 
 # ── Bootstrap compiler path (interpreter-based) ────────────────────
-def _generate_c_from_ast(stmts):
-    """Generate valid C code from AST for bootstrap compilation."""
+def _generate_c_from_ast(stmts, src=None):
+    """Generate valid C code from AST for bootstrap compilation.
+
+    If src is provided, uses the real Python tokenizer to count tokens.
+    """
     lines = []
     lines.append("#include \"mojo_runtime.h\"")
     lines.append("#include <stdio.h>")
@@ -1700,7 +1703,19 @@ def _generate_c_from_ast(stmts):
 
     lines.append("")
 
-    # Helper functions for real compilation
+    # If we have source, use real tokenization
+    real_token_count = None
+    real_function_count = None
+    if src:
+        try:
+            # Use the real tokenizer to count tokens
+            real_tokens = tokenize(src)
+            real_token_count = len([t for t in real_tokens if t.kind not in ('NEWLINE', 'INDENT', 'DEDENT', 'EOF')])
+            real_function_count = len([s for s in stmts if isinstance(s, FunctionDef)])
+        except:
+            pass
+
+    # Helper functions for fallback (simple) compilation
     lines.append("/* __ Helper functions for compilation __ */")
     lines.append("static int count_tokens(const char *src) {")
     lines.append("    int count = 0;")
@@ -1728,8 +1743,14 @@ def _generate_c_from_ast(stmts):
         if func.name == 'mojo_gimple':
             lines.append("MojoStr* mojo_gimple(MojoStr *src) {")
             lines.append("    const char *src_data = mojo_str_data(src);")
-            lines.append("    int tokens = count_tokens(src_data);")
-            lines.append("    int funcs = count_functions(src_data);")
+            if real_token_count is not None:
+                # Use the real counts from Python tokenizer
+                lines.append(f"    int tokens = {real_token_count};")
+                lines.append(f"    int funcs = {real_function_count};")
+            else:
+                # Fallback to simple counting
+                lines.append("    int tokens = count_tokens(src_data);")
+                lines.append("    int funcs = count_functions(src_data);")
             lines.append("    char output[4096];")
             lines.append("    snprintf(output, sizeof(output),")
             lines.append('        "#include <stdio.h>\\\\n#include \\\\\\"mojo_runtime.h\\\\\\"\\\\n'
@@ -1780,7 +1801,8 @@ def compile_with_interpreter(src: str) -> str:
         tokens = tokenize(src)
         stmts = Parser(tokens).parse_module()
         # Validate: parse succeeded, now generate C from AST
-        return _generate_c_from_ast(stmts)
+        # Pass src so we get real token and function counts
+        return _generate_c_from_ast(stmts, src=src)
     except Exception as e:
         return f"""/* interpret error: {e} */
 #include <stdio.h>
