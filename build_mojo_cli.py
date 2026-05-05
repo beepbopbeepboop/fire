@@ -135,7 +135,15 @@ def _collect_stmts(entry_path, visited=None):
         src = f.read()
 
     tokens = tokenize(src)
-    stmts  = Parser(tokens).parse_module()
+    try:
+        stmts  = Parser(tokens).parse_module()
+    except SyntaxError as e:
+        # TODO: Parser doesn't support all Mojo syntax yet (e.g., slices x[1:2]).
+        # During bootstrap, if transitive deps fail to parse, skip them and
+        # let the later compilation stage handle imports (gimple_codegen will resolve them).
+        import sys
+        print(f"# WARNING: skipping {path} due to parse error: {e}", file=sys.stderr)
+        return []
 
     base_dir = os.path.dirname(path)
 

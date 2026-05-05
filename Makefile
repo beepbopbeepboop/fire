@@ -15,7 +15,7 @@ BUILD_MOJO_CLI  = build_mojo_cli.py
 # Bootstrap paths
 STAGE1_BIN      = stage1/mojo
 STAGE2_BIN      = stage2/mojo
-MOJO_MAIN       = mojo/mojo_main.mojo
+MOJO_MAIN       = mojo/simple_compiler.mojo
 
 # Core compiler .py files to transpile (dependency order)
 TRANSPILE_SRCS  = generated_dispatch.py module_loader.py mojo_compiler.py gimple_codegen.py

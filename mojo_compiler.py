@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'True', 'read', 'import', 'while', 'trait', 'in', 'deinit', 'break', 'ref', 'is', 'return', 'and', 'class', 'continue', 'from', 'except', 'False', 'finally', 'or', 'as', 'pass', 'elif', 'raise', 'def', 'else', 'for', 'out', 'struct', 'mut', 'var', 'fn', 'comptime', 'with', 'assert', 'try', 'not', 'raises', 'if'}
+_KEYWORDS = {'comptime', 'else', 'while', 'not', 'try', 'True', 'or', 'assert', 'in', 'raises', 'elif', 'out', 'class', 'for', 'False', 'def', 'except', 'var', 'deinit', 'ref', 'return', 'struct', 'and', 'fn', 'mut', 'import', 'with', 'if', 'read', 'break', 'trait', 'raise', 'from', 'finally', 'pass', 'as', 'is', 'continue'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -835,7 +835,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'out', 'read', 'deinit', 'mut', 'var', 'ref'}
+    _CONV_KWS = {'deinit', 'mut', 'ref', 'read', 'var', 'out'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value

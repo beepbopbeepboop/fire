@@ -28,7 +28,12 @@
 #define VERSION "0.1.0"
 
 /* ── Mojo-compiled symbols ───────────────────────────────────────────────
- * Defined in the C generated from mojo/mojo_main.mojo.                   */
+ * During bootstrap (stage1), these are provided by calling Python functions.
+ * TODO: Once gimple_codegen.mojo transpiles cleanly, replace with C from Mojo.
+ * Currently, simple_compiler.mojo cannot import mojo_compiler.mojo due to
+ * parser limitations with slice syntax (x[1:2]). As a workaround, we declare
+ * weak symbols that default to calling Python mojo_compiler module directly.
+ */
 extern MojoStr *mojo_gimple(MojoStr *src);
 extern MojoStr *mojo_pyir(MojoStr *src);
 extern void     mojo_tokens(MojoStr *src);
@@ -192,8 +197,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Runtime dir: MOJO_HOME env, else relative to where binary lives.
-     * Haiku: refine with realpath(argv[0]) if needed. */
+    /* TODO: Runtime dir resolution needs refinement.
+     * Currently uses MOJO_HOME env var or hardcoded "runtime" path.
+     * Should use realpath(argv[0]) to find runtime relative to binary location
+     * once the binary is relocated outside the build directory. */
     const char *runtime_dir = getenv("MOJO_HOME");
     if (!runtime_dir) runtime_dir = "runtime";
 

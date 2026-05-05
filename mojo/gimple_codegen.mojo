@@ -24,19 +24,19 @@ struct TypeLattice:
     let _FLOAT = _GD_FLOAT
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_float(t: String) -> Bool:
-        return t in cls._FLOAT
+        return t in TypeLattice._FLOAT
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_signed(t: String) -> Bool:
-        return t in cls._SIGNED
+        return t in TypeLattice._SIGNED
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_unsigned(t: String) -> Bool:
-        return t in cls._UNSIGNED
+        return t in TypeLattice._UNSIGNED
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_int(t: String) -> Bool:
-        return t in cls._SIGNED or t in cls._UNSIGNED
+        return t in TypeLattice._SIGNED or t in TypeLattice._UNSIGNED
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_numeric(t: String) -> Bool:
-        return cls.is_float(t) or cls.is_int(t)
+        return TypeLattice.is_float(t) or TypeLattice.is_int(t)
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn is_pointer(t: String) -> Bool:
         return '*' in t
@@ -54,20 +54,20 @@ struct TypeLattice:
             let t2 = 'int'  # inferred: String
         if t1 == t2:
             return t1
-        if cls.is_pointer(t1) or cls.is_pointer(t2):
-            return t1 if cls.is_pointer(t1) else t2
-        if cls.is_float(t1) or cls.is_float(t2):
-            let r1 = cls._FLOAT.get(t1, 0)
-            let r2 = cls._FLOAT.get(t2, 0)
+        if TypeLattice.is_pointer(t1) or TypeLattice.is_pointer(t2):
+            return t1 if TypeLattice.is_pointer(t1) else t2
+        if TypeLattice.is_float(t1) or TypeLattice.is_float(t2):
+            let r1 = TypeLattice._FLOAT.get(t1, 0)
+            let r2 = TypeLattice._FLOAT.get(t2, 0)
             if r1 == 0:
                 return t2
             if r2 == 0:
                 return t1
             return t1 if r1 >= r2 else t2
-        let rs1 = cls._SIGNED.get(t1, 0)
-        let rs2 = cls._SIGNED.get(t2, 0)
-        let ru1 = cls._UNSIGNED.get(t1, 0)
-        let ru2 = cls._UNSIGNED.get(t2, 0)
+        let rs1 = TypeLattice._SIGNED.get(t1, 0)
+        let rs2 = TypeLattice._SIGNED.get(t2, 0)
+        let ru1 = TypeLattice._UNSIGNED.get(t1, 0)
+        let ru2 = TypeLattice._UNSIGNED.get(t2, 0)
         if rs1 and rs2:
             return t1 if rs1 >= rs2 else t2
         if ru1 and ru2:
@@ -87,14 +87,14 @@ struct TypeLattice:
             if result == 'void':
                 let result = t
             elif t != 'void':
-                let result = cls.join(result, t)
+                let result = TypeLattice.join(result, t)
         return result
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn coerce(src: String, dst: String, val: String) -> String:
         """Return `val` cast to `dst` if types differ."""
         if src == dst:
             return val
-        if src == '_Bool' and cls.is_int(dst):
+        if src == '_Bool' and TypeLattice.is_int(dst):
             return '(' + str(dst) + ')(int)' + str(val) if dst != 'int' else '(int)' + str(val)
         if src == '_Bool':
             return '(int)' + str(val) if dst == 'int' else '(' + str(dst) + ')(int)' + str(val)
@@ -102,7 +102,7 @@ struct TypeLattice:
     @staticmethod  # classmethod → @staticmethod in Mojo
     fn list_suffix(elem: String) -> String:
         """Select 'int'/'double'/'str' API suffix based on element C type."""
-        if elem in cls._FLOAT:
+        if elem in TypeLattice._FLOAT:
             return 'double'
         if elem == 'char *':
             return 'str'

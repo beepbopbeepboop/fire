@@ -367,7 +367,7 @@ struct ComptimeForStmt:
     var iterable: AnyType
     var body: list
 
-let _KEYWORDS = ['continue', 'assert', 'import', 'except', 'pass', 'True', 'var', 'not', 'read', 'raises', 'or', 'for', 'if', 'return', 'as', 'comptime', 'and', 'out', 'in', 'with', 'deinit', 'finally', 'ref', 'def', 'is', 'mut', 'False', 'struct', 'class', 'fn', 'trait', 'try', 'else', 'raise', 'from', 'elif', 'while', 'break']  # Set → List
+let _KEYWORDS = ['comptime', 'else', 'while', 'not', 'try', 'True', 'or', 'assert', 'in', 'raises', 'elif', 'out', 'class', 'for', 'False', 'def', 'except', 'var', 'deinit', 'ref', 'return', 'struct', 'and', 'fn', 'mut', 'import', 'with', 'if', 'read', 'break', 'trait', 'raise', 'from', 'finally', 'pass', 'as', 'is', 'continue']  # Set → List
 
 let _TOKEN_RE = re.compile('(?P<FLOAT>\\d+\\.\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?|\\d+[eE][+-]?\\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\\*\\*=|//=|<<=|>>=|\\+=|\\-=|\\*=|/=|%=|@=|\\&=|\\|=|\\^=)|(?P<ARROW>->)|(?P<OP>\\*\\*|//|<<|>>|==|!=|<=|>=|:=|\\*|@|/|%|\\+|\\-|\\&|\\^|\\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\\^)|(?P<STRING>\\"\\"\\"[\\s\\S]*?\\"\\"\\"|\\\'\\\'\\\'[\\s\\S]*?\\\'\\\'\\\'|\\"(?:[^\\"\\\\]|\\\\.)*\\"|\\\'(?:[^\\\'\\\\]|\\\\.)*\\\'|`[^`]*`)|(?P<DOT>\\.)|(?P<COLON>:)|(?P<LPAREN>\\()|(?P<RPAREN>\\))|(?P<LBRACKET>\\[)|(?P<RBRACKET>\\])|(?P<LBRACE>\\{)|(?P<RBRACE>\\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\\S\\n]+)|(?P<UNK>.)')
 
@@ -567,8 +567,11 @@ struct Parser:
             if t.value == 'for':
                 return self._parse_for()
             if t.value in ('def', 'fn'):
-                self._advance()
-                return self._parse_funcdef([])
+                if t.value == 'fn' and self._peek(1).kind == 'LPAREN':
+                    pass
+                else:
+                    self._advance()
+                    return self._parse_funcdef([])
             if t.value in ('struct', 'class'):
                 return self._parse_struct()
             if t.value == 'trait':
@@ -809,7 +812,28 @@ struct Parser:
         self._expect('KW', 'for')
         if self._is_kw(*self._CONV_KWS):
             self._advance()
-        let target = self._expect('NAME').value
+        if self._peek().kind == 'LPAREN':
+            self._advance()
+            let names = []  # inferred: DynamicVector[?]
+            while self._peek().kind != 'RPAREN':
+                if self._peek().kind in ('NAME', 'KW'):
+                    names.append(self._advance().value)
+                elif self._peek().kind == 'COMMA':
+                    self._advance()
+                else:
+                    break
+            self._expect('RPAREN')
+            let target = (('(' + ', '.join(names)) + ')')
+        else:
+            let tok = self._advance()
+            let target = tok.value
+            if self._peek().kind == 'COMMA':
+                let names = [target]  # inferred: DynamicVector[?]
+                while self._peek().kind == 'COMMA':
+                    self._advance()
+                    let tok2 = self._advance()
+                    names.append(tok2.value)
+                let target = (('(' + ', '.join(names)) + ')')
         self._expect('KW', 'in')
         let iterable = self._parse_expr(0)
         self._expect('COLON')
@@ -820,7 +844,7 @@ struct Parser:
             self._expect('COLON')
             let else_body = self._parse_block()
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
-    let _CONV_KWS = ['mut', 'var', 'read', 'deinit', 'out', 'ref']  # Set → List
+    let _CONV_KWS = ['deinit', 'mut', 'ref', 'read', 'var', 'out']  # Set → List
     fn _parse_funcdef(self, decorators: DynamicVector[?]  # inferred):  # inferred
         if decorators is None:
             let decorators = []  # inferred: DynamicVector[?]
@@ -901,7 +925,7 @@ struct Parser:
                     self._skip_bracketed()
                 else:
                     break
-        while self._peek().kind == 'NAME' and self._peek().value in ('unified', 'register_passable'):
+        while self._peek().kind == 'NAME' and self._peek().value in ('unified', 'register_passable', 'capturing', 'raises'):
             self._advance()
         var ret = None
         if self._peek().kind == 'ARROW':
@@ -911,7 +935,7 @@ struct Parser:
                 if self._peek().kind == 'LBRACKET':
                     self._skip_bracketed()
             let ret = self._parse_type_ann()
-            while self._peek().kind == 'NAME' and self._peek().value in ('unified', 'register_passable'):
+            while self._peek().kind == 'NAME' and self._peek().value in ('unified', 'register_passable', 'capturing', 'raises'):
                 self._advance()
         if self._peek().kind == 'NAME' and self._peek().value == 'where':
             self._advance()
