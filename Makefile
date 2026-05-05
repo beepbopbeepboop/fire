@@ -15,11 +15,12 @@ BUILD_MOJO_CLI  = build_mojo_cli.py
 # Bootstrap paths
 STAGE1_BIN      = stage1/mojo
 STAGE2_BIN      = stage2/mojo
-MOJO_MAIN       = mojo/simple_compiler.mojo
+MOJO_MAIN       = mojo/mojo_compiler.mojo
 
 # Core compiler .py files to transpile (dependency order)
-# TODO: gimple_codegen.py requires systematic transpiler fixes; defer for now
-TRANSPILE_SRCS  = generated_dispatch.py module_loader.py mojo_compiler.py
+# TODO: gimple_codegen.py, mojo_compiler.py require systematic transpiler fixes
+# mojo_compiler.mojo is hand-written instead of transpiled
+TRANSPILE_SRCS  = generated_dispatch.py module_loader.py
 TRANSPILE_MOJOS = $(patsubst %.py,mojo/%.mojo,$(TRANSPILE_SRCS))
 
 run:
@@ -99,7 +100,12 @@ preflight: $(MOJO_CLI)
 # Stage 1: transpile Python compiler → Mojo
 transpile: $(TRANSPILE_MOJOS)
 
-mojo/%.mojo: %.py scripts/py2mojo.sh
+# Only transpile the specified files; skip mojo_compiler.py (hand-written)
+mojo/generated_dispatch.mojo: generated_dispatch.py scripts/py2mojo.sh
+	@mkdir -p mojo
+	@scripts/py2mojo.sh $<
+
+mojo/module_loader.mojo: module_loader.py scripts/py2mojo.sh
 	@mkdir -p mojo
 	@scripts/py2mojo.sh $<
 
@@ -172,3 +178,4 @@ clean-bootstrap:
 	rm -f $(TRANSPILE_MOJOS)
 	rm -f build/mojo_logic.c build/mojo_logic2.c
 	rm -rf stage1 stage2 build/verify
+	@echo "Note: mojo/mojo_compiler.mojo not deleted (hand-written)"
