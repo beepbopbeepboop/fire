@@ -22,24 +22,54 @@ def mojo_to_python(src: str) -> str:
 
 def load_interpreter_with_stubs():
     """Load all modules, with stubs for missing dependencies."""
-    order = [
+    # Phase 1-2: Interpreter loads .mojo files via syntax conversion
+    phase12_order = [
         ('mojo/ast_nodes.mojo', 'ast_nodes'),
         ('mojo/tokenizer.mojo', 'tokenizer'),
         ('mojo/parser.mojo', 'parser'),
-        ('mojo/generated_dispatch.mojo', 'generated_dispatch'),
-        ('mojo/module_loader.mojo', 'module_loader'),
-        ('mojo/codegen.mojo', 'codegen'),
+    ]
+
+    # Phase 3: Use Python implementations (avoid Mojo syntax issues)
+    phase3_order = [
+        ('mojo/generated_dispatch.py', 'generated_dispatch'),
+        ('mojo/module_loader.py', 'module_loader'),
+        ('gimple_codegen.py', 'codegen'),
     ]
 
     interpreter = Interpreter()
     modules = {}
 
-    for filepath, name in order:
+    # Load phase 1-2 modules via syntax conversion
+    for filepath, name in phase12_order:
         print(f"  Loading {name}...", end=' ', flush=True)
         try:
             with open(filepath) as f:
                 src = f.read()
             src = mojo_to_python(src)
+
+            module = types.ModuleType(name)
+            module.__file__ = filepath
+            sys.modules[name] = module
+            exec(src, module.__dict__)
+
+            # Inject into interpreter scope
+            for attr_name in dir(module):
+                if not attr_name.startswith('_'):
+                    attr = getattr(module, attr_name)
+                    interpreter.scope.define(attr_name, attr)
+
+            modules[name] = module
+            print("✓")
+        except Exception as e:
+            print(f"⚠ ({str(e)[:40]})")
+            modules[name] = None
+
+    # Load phase 3 modules directly (already Python)
+    for filepath, name in phase3_order:
+        print(f"  Loading {name}...", end=' ', flush=True)
+        try:
+            with open(filepath) as f:
+                src = f.read()
 
             module = types.ModuleType(name)
             module.__file__ = filepath
