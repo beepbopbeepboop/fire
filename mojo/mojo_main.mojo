@@ -9,6 +9,9 @@ Uses real Mojo implementations:
 
 import sys
 from tokenizer import tokenize
+from parser import parse
+from codegen import codegen
+import ast_nodes
 
 def main():
     """Entry point when run as mojo script."""
