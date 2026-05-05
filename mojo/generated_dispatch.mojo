@@ -8,7 +8,7 @@ var _FLOAT: dict = {'__fp16': 1, 'float': 2, 'double': 3}
 
 var _BIN_OPS: dict = {'+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '&': '&', '|': '|', '^': '^', '<<': '<<', '>>': '>>', '==': '==', '!=': '!=', '<': '<', '<=': '<=', '>': '>', '>=': '>=', 'and': '&&', 'or': '||', 'is': '==', 'is not': '!='}
 
-var _CMP_OPS: set = ['!=', '<', '<=', '==', '>', '>=', 'and', 'is', 'is not', 'or']  # Set → List
+var _CMP_OPS: set = ['!=', '<', '<=', '==', '>', '>=', 'and', 'is', 'is not', 'or']
 
 var _STMT_DISPATCH: dict = {'PassStmt': '_gen_stmt_PassStmt', 'VarDecl': '_gen_stmt_VarDecl', 'AssignStmt': '_gen_stmt_AssignStmt', 'AugAssignStmt': '_gen_stmt_AugAssignStmt', 'MultiAssignStmt': '_gen_stmt_MultiAssignStmt', 'ReturnStmt': '_gen_stmt_ReturnStmt', 'IfStmt': '_gen_stmt_IfStmt', 'WhileStmt': '_gen_stmt_WhileStmt', 'ForStmt': '_gen_stmt_ForStmt', 'BreakStmt': '_gen_stmt_BreakStmt', 'ContinueStmt': '_gen_stmt_ContinueStmt', 'ExprStmt': '_gen_stmt_ExprStmt', 'AssertStmt': '_gen_stmt_AssertStmt', 'RaiseStmt': '_gen_stmt_RaiseStmt', 'TryStmt': '_gen_stmt_TryStmt', 'WithStmt': '_gen_stmt_WithStmt', 'FunctionDef': '_gen_stmt_FunctionDef', 'ImportStmt': '_gen_stmt_ImportStmt', 'FromImportStmt': '_gen_stmt_FromImportStmt', 'ComptimeIfStmt': '_gen_stmt_ComptimeIfStmt', 'ComptimeForStmt': '_gen_stmt_ComptimeForStmt'}
 

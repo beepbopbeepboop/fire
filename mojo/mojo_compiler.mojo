@@ -367,7 +367,7 @@ struct ComptimeForStmt:
     var iterable: AnyType
     var body: list
 
-let _KEYWORDS = ['True', 'break', 'from', 'deinit', 'else', 'trait', 'return', 'with', 'pass', 'is', 'continue', 'def', 'import', 'raises', 'mut', 'assert', 'let', 'var', 'not', 'out', 'in', 'except', 'if', 'or', 'for', 'while', 'comptime', 'ref', 'read', 'struct', 'as', 'finally', 'class', 'fn', 'elif', 'try', 'raise', 'False', 'and']  # Set → List
+let _KEYWORDS = ['True', 'break', 'from', 'deinit', 'else', 'trait', 'return', 'with', 'pass', 'is', 'continue', 'def', 'import', 'raises', 'mut', 'assert', 'let', 'var', 'not', 'out', 'in', 'except', 'if', 'or', 'for', 'while', 'comptime', 'ref', 'read', 'struct', 'as', 'finally', 'class', 'fn', 'elif', 'try', 'raise', 'False', 'and']
 
 let _TOKEN_RE = re.compile('(?P<FLOAT>\\d+\\.\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?|\\d+[eE][+-]?\\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\\*\\*=|//=|<<=|>>=|\\+=|\\-=|\\*=|/=|%=|@=|\\&=|\\|=|\\^=)|(?P<ARROW>->)|(?P<OP>\\*\\*|//|<<|>>|==|!=|<=|>=|:=|\\*|@|/|%|\\+|\\-|\\&|\\^|\\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\\^)|(?P<STRING>\\"\\"\\"[\\s\\S]*?\\"\\"\\"|\\\'\\\'\\\'[\\s\\S]*?\\\'\\\'\\\'|\\"(?:[^\\"\\\\]|\\\\.)*\\"|\\\'(?:[^\\\'\\\\]|\\\\.)*\\\'|`[^`]*`)|(?P<DOT>\\.)|(?P<COLON>:)|(?P<LPAREN>\\()|(?P<RPAREN>\\))|(?P<LBRACKET>\\[)|(?P<RBRACKET>\\])|(?P<LBRACE>\\{)|(?P<RBRACE>\\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\\S\\n]+)|(?P<UNK>.)')
 
@@ -816,7 +816,21 @@ struct Parser:
             self._advance()
             let names = []  # inferred: DynamicVector[AnyType]
             while self._peek().kind != 'RPAREN':
-                if self._peek().kind in ('NAME', 'KW'):
+                if self._peek().kind == 'LPAREN':
+                    self._advance()
+                    let nested = []  # inferred: DynamicVector[AnyType]
+                    while self._peek().kind != 'RPAREN':
+                        if self._peek().kind in ('NAME', 'KW'):
+                            nested.append(self._advance().value)
+                        elif self._peek().kind == 'COMMA':
+                            self._advance()
+                        elif self._peek().kind == 'LPAREN':
+                            break
+                        else:
+                            break
+                    self._expect('RPAREN')
+                    names.append((('(' + ', '.join(nested)) + ')'))
+                elif self._peek().kind in ('NAME', 'KW'):
                     names.append(self._advance().value)
                 elif self._peek().kind == 'COMMA':
                     self._advance()
@@ -844,7 +858,7 @@ struct Parser:
             self._expect('COLON')
             let else_body = self._parse_block()
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
-    let _CONV_KWS = ['var', 'out', 'deinit', 'read', 'mut', 'ref']  # Set → List
+    let _CONV_KWS = ['var', 'out', 'deinit', 'read', 'mut', 'ref']
     fn _parse_funcdef(self, decorators: DynamicVector[AnyType]  # inferred):  # inferred
         if decorators is None:
             let decorators = []  # inferred: DynamicVector[AnyType]
@@ -1229,6 +1243,11 @@ struct Parser:
                             break
                     self._expect('RBRACKET')
                     let expr = SubscriptExpr(obj=expr, index=IntLiteral(value='0'))
+                elif self._peek().kind == 'COLON':
+                    self._advance()
+                    let stop = None if self._peek().kind == 'RBRACKET' else self._parse_expr(0)
+                    let expr = SliceExpr(obj=expr, start=None, stop=stop)
+                    self._expect('RBRACKET')
                 else:
                     let idx = self._parse_expr(0)
                     if self._peek().kind == 'COMMA':
@@ -1763,7 +1782,7 @@ def emit(node, indent: Int) -> String:
         out += _tmp34
         return '\n'.join(out)
     if isinstance(node, StructDef):
-        let _OWN_DECS = ['Copyable', 'Movable', 'ImplicitlyCopyable', 'ExplicitlyCopyable', 'Writable', 'Sized', 'Boolable', 'Stringable', 'Hashable', 'AnyType']  # Set → List
+        let _OWN_DECS = ['Copyable', 'Movable', 'ImplicitlyCopyable', 'ExplicitlyCopyable', 'Writable', 'Sized', 'Boolable', 'Stringable', 'Hashable', 'AnyType']
         var _tmp35 = DynamicVector[AnyType]()
         for d in node.decorators:
             _tmp35.append(d == 'fieldwise_init')
