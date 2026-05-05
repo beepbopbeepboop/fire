@@ -86,6 +86,23 @@ $(STDLIB_DYLIB): $(STDLIB_WRAPPER) $(STDLIB_STD_PATH) $(MOJO_CLI)
 stdlib: $(STDLIB_DYLIB)
 	@echo "Stdlib build complete (or attempted)"
 
+# Build the Mojo system executable from GIMPLE-generated C code
+mojo.ci: $(MOJO_MAIN)
+	./mojo.py --dump $(MOJO_MAIN) 2> /dev/null
+
+build/system.o: mojo.ci
+	@mkdir -p build
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ mojo.ci
+
+build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
+	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
+
+build/mojo: build/system.o build/mojo_runtime.o
+	@mkdir -p build
+	gcc-mp-15 -o $@ build/system.o build/mojo_runtime.o
+	@chmod +x $@
+	@echo "build/mojo linked successfully"
+
 # Attempt to transpile the time module through gimple_codegen
 stdlib-time: $(MOJO_CLI) mojo_compiler.py gimple_codegen.py
 	@mkdir -p build
