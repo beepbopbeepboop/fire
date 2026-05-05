@@ -65,6 +65,23 @@ static int file_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+static void setup_sdkroot(void)
+{
+    FILE *f = popen("xcrun --show-sdk-path 2>/dev/null", "r");
+    if (f) {
+        char sdkroot[4096];
+        if (fgets(sdkroot, sizeof(sdkroot), f)) {
+            /* Remove trailing newline */
+            size_t len = strlen(sdkroot);
+            if (len > 0 && sdkroot[len-1] == '\n') {
+                sdkroot[len-1] = '\0';
+            }
+            setenv("SDKROOT", sdkroot, 1);
+        }
+        pclose(f);
+    }
+}
+
 static const char *find_cc(void)
 {
     if (file_exists("/opt/local/bin/gcc-mp-15")) return "/opt/local/bin/gcc-mp-15";
@@ -192,6 +209,9 @@ static void do_run(const char *path, const char *runtime_dir)
 
 int main(int argc, char **argv)
 {
+    /* Set SDKROOT for macOS compilation */
+    setup_sdkroot();
+
     if (argc < 2) {
         fprintf(stderr, "mojo: missing command\nUse 'mojo --help'\n");
         return 1;
