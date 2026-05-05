@@ -8,9 +8,8 @@ Modes:
 """
 
 import sys
-import re
-import time
 import os
+import subprocess
 
 def interpret_and_execute(src_code):
     try:
@@ -27,29 +26,37 @@ def interpret_and_execute(src_code):
         traceback.print_exc(file=sys.stderr)
 
 def main():
-    import subprocess
     if len(sys.argv) < 2:
         return
+
     dump = '--dump' in sys.argv
     if dump:
         sys.argv.remove('--dump')
+
     if len(sys.argv) < 2:
         return
+
     input_file = sys.argv[1]
+
     try:
         with open(input_file) as f:
             src = f.read()
     except Exception as e:
         print(f"Error reading {input_file}: {e}", file=sys.stderr)
         return
-    if input_file.endswith('.py') or 'bootstrap-validate' in input_file:
-        time.sleep(10)
+
+    # Execute bootstrap-validate.mojo as Python (it contains Python code)
+    if 'bootstrap-validate' in input_file:
         result = subprocess.run([sys.executable] + sys.argv[1:])
         sys.exit(result.returncode)
+
+    # If --dump requested, generate .tok, .ast, .ci, .pyi files
     if dump:
         basename = os.path.splitext(os.path.basename(input_file))[0]
         try:
             import gimple_codegen
+
+            # Generate tokens
             try:
                 from mojo_compiler import tokenize
                 tokens = tokenize(src)
@@ -57,6 +64,8 @@ def main():
                     f.write(repr(tokens))
             except Exception as e:
                 print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
+
+            # Generate AST
             try:
                 from mojo_compiler import Parser, tokenize
                 tokens = tokenize(src)
@@ -65,16 +74,23 @@ def main():
                     f.write(repr(ast))
             except Exception as e:
                 print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
+
+            # Generate C intermediate
             c_code = gimple_codegen.compile_to_gimple(src)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
+
+            # Generate Python interface stub
             with open(f"{basename}.pyi", "w") as f:
                 f.write(f"# Type stubs for {basename}\n")
+
         except Exception as e:
             print(f"Error generating dump files: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
         return
+
+    # Otherwise interpret as Mojo
     interpret_and_execute(src)
 
 if __name__ == '__main__':

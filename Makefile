@@ -71,11 +71,6 @@ $(DYLIB): $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p build
 	cc -dynamiclib -I runtime -o $@ $(RUNTIME_SRC)
 
-# Build the mojo CLI tool
-$(MOJO_CLI): $(BUILD_MOJO_CLI) mojo_compiler.py gimple_codegen.py
-	python $(BUILD_MOJO_CLI)
-	@chmod +x $@
-
 # Build stdlib dylib (attempt compilation with -k flag to continue on errors)
 $(STDLIB_DYLIB): $(STDLIB_WRAPPER) $(STDLIB_STD_PATH) $(MOJO_CLI)
 	@mkdir -p build
