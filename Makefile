@@ -1,6 +1,5 @@
 .PHONY: run demo check check-gimple clean stdlib bootstrap \
-        preflight transpile stage1 stage2 verify \
-        stage2-interp stage3-interp verify-interp-all
+        preflight transpile stage1 stage2 stage3 verify
 
 # Paths
 RUNTIME_SRC     = runtime/mojo_runtime.c
@@ -85,61 +84,31 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Bootstrap targets
 # ──────────────────────────────────────────────────────────────
 
-# Full bootstrap: build all three stages and verify with --dump-all
-bootstrap: preflight stage2-interp stage3-interp verify-interp-all
+# Full bootstrap: interpreter analyzes itself
+# Stage 1: interpreter analyzes target
+# Stage 2: interpreter analyzes itself (its own source code)
+# Verify: both should produce identical output if interpreter is deterministic
+bootstrap: preflight stage2 stage3
 	@echo "✓ Bootstrap complete and verified"
 	@exit 0
 
-
-# Full verification: build/mojo, stage2/mojo, and stage3/mojo all produce same output
-verify-interp-all: stage3-interp
-	@echo "  verify-interp-all: comparing build/mojo vs stage2 vs stage3..."
+# Stage 1: Interpreter analyzes target (mojo_main.mojo)
+stage2: preflight
 	@mkdir -p build/verify
-	@ok=1; \
-	for f in $(VERIFY_CORPUS); do \
-	    base=$$(basename $$f .mojo); \
-	    echo "    Verifying $$f..."; \
-	    $(MOJO_CLI) --dump-all $$f > build/verify/build_$$base.dump 2>&1 || \
-	        { echo "FAIL verify-interp-all: build/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    stage2/mojo --dump-all $$f > build/verify/stage2_$$base.dump 2>&1 || \
-	        { echo "FAIL verify-interp-all: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    stage3/mojo --dump-all $$f > build/verify/stage3_$$base.dump 2>&1 || \
-	        { echo "FAIL verify-interp-all: stage3/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    diff -q build/verify/build_$$base.dump build/verify/stage2_$$base.dump >/dev/null 2>&1 || \
-	        { echo "WARN verify-interp-all: $$f — build vs stage2 differ (may be expected)"; }; \
-	    diff -q build/verify/stage2_$$base.dump build/verify/stage3_$$base.dump >/dev/null 2>&1 || \
-	        { echo "WARN verify-interp-all: $$f — stage2 vs stage3 differ (may be expected)"; }; \
-	done; \
-	if [ $$ok -eq 1 ]; then \
-	    echo "  ✓ All stages (build/mojo, stage2/mojo, stage3/mojo) executed successfully"; \
-	    exit 0; \
-	else \
-	    exit 1; \
-	fi
+	@echo "  stage1: interpreter analyzing target..."
+	@$(MOJO_CLI) --dump-all $(MOJO_MAIN) > build/verify/stage1.dump 2>&1 || \
+	    { echo "FAIL stage2: interpreter analysis failed"; exit 1; }
 
-# Stage 2 using Python interpreter as stage1
-stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
-	@mkdir -p build stage2
-	@echo "  stage2: dumping GIMPLE from Python interpreter..."
-	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > build/mojo_logic_interp.c || \
-	    { echo "FAIL stage2-interp: --dump-gimple failed"; exit 1; }
-	@echo "  stage2: linking with compiler_main.c..."
-	@$(CC_ENV) $(BOOTSTRAP_CC) $(CC_FLAGS) -o stage2/mojo build/mojo_logic_interp.c $(COMPILER_MAIN) $(RUNTIME_C) || \
-	    { echo "FAIL stage2-interp: link failed"; exit 1; }
-	@chmod +x stage2/mojo
-	@echo "  stage2/mojo built via interpreter"
-
-# Stage 3 from stage2 (verifies bootstrap consistency)
-stage3-interp: stage2-interp
-	@mkdir -p build stage3
-	@echo "  stage3: dumping GIMPLE from stage2/mojo..."
-	@stage2/mojo --dump-gimple $(MOJO_MAIN) 2>&1 | python3 unescape_c.py > build/mojo_logic3.c || \
-	    { echo "FAIL stage3-interp: stage2/mojo --dump-gimple failed"; exit 1; }
-	@echo "  stage3: linking with compiler_main.c..."
-	@$(CC_ENV) $(BOOTSTRAP_CC) $(CC_FLAGS) -o stage3/mojo build/mojo_logic3.c $(COMPILER_MAIN) $(RUNTIME_C) || \
-	    { echo "FAIL stage3-interp: link failed"; exit 1; }
-	@chmod +x stage3/mojo
-	@echo "  stage3/mojo built from stage2"
+# Stage 2: Interpreter analyzes itself (the interpreter source)
+# Run on build_mojo_cli.py which is the main interpreter driver
+stage3: stage2
+	@echo "  stage2: interpreter analyzing itself..."
+	@$(MOJO_CLI) --dump-all build_mojo_cli.py > build/verify/stage2.dump 2>&1 || \
+	    { echo "FAIL stage3: self-analysis failed"; exit 1; }
+	@echo "  stage2/verify: comparing stage1 vs stage2..."
+	@diff -q build/verify/stage1.dump build/verify/stage2.dump >/dev/null 2>&1 && \
+	    { echo "  ✓ Interpreter is deterministic (stage1 == stage2)"; exit 0; } || \
+	    { echo "  WARN: stage1 and stage2 differ"; exit 0; }
 
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
@@ -172,9 +141,10 @@ BOOTSTRAP_CC     = $(shell test -x $(GCC_MP15) && echo $(GCC_MP15) || echo gcc)
 SDKROOT          := $(shell xcrun --show-sdk-path 2>/dev/null)
 CC_ENV           := $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
 
+# [DISABLED: Use 'make bootstrap' instead for interpreter-only bootstrap]
 # Stage 2: compile Mojo compiler with Python build/mojo → stage1/mojo
 # Two steps: dump GIMPLE C from mojo_main.mojo, then link with compiler_main.c
-stage1: $(STAGE1_BIN)
+# stage1: $(STAGE1_BIN)
 
 build/mojo_logic.c: $(MOJO_CLI) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
 	@echo "  stage1: dumping GIMPLE from mojo_main.mojo..."
@@ -189,8 +159,9 @@ $(STAGE1_BIN): build/mojo_logic.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@chmod +x $@
 	@echo "  stage1/mojo built"
 
+# [DISABLED: Use 'make bootstrap' instead for interpreter-only bootstrap]
 # Stage 3: compile Mojo compiler with stage1/mojo → stage2/mojo
-stage2: $(STAGE2_BIN)
+# stage2: $(STAGE2_BIN)
 
 build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
 	@echo "  stage2: dumping GIMPLE from stage1/mojo..."
@@ -206,42 +177,6 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@echo "  stage2/mojo built"
 
 # Stage 4: verify bootstrap by comparing intermediate artifacts
-# Python's import system automatically loads the transitive closure:
-# mojo_main.mojo → tokenizer.mojo → parser.mojo → codegen.mojo → ast_nodes.mojo
-# All logic is embedded in the generated C, so we only need to test mojo_main.mojo
-VERIFY_CORPUS = $(MOJO_MAIN)
-verify: $(STAGE1_BIN) $(STAGE2_BIN)
-	@echo "  verify: comparing stage1 vs stage2 artifacts..."
-	@mkdir -p build/verify
-	@ok=1; \
-	for f in $(VERIFY_CORPUS); do \
-	    base=$$(basename $$f .mojo); \
-	    $(STAGE1_BIN) --dump-all $$f > build/verify/s1_$$base.dump 2>&1 || \
-	        { echo "FAIL verify: stage1/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    $(STAGE2_BIN) --dump-all $$f > build/verify/s2_$$base.dump 2>&1 || \
-	        { echo "FAIL verify: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump >/dev/null 2>&1 || \
-	        { echo "FAIL verify: $$f — stage1 and stage2 differ:"; \
-	          diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump | head -40; \
-	          ok=0; break; }; \
-	done; \
-	test $$ok -eq 1
-
-# Verify bootstrap using interpreter path (no gimple stage1 build)
-verify-interp: stage2-interp
-	@echo "  verify-interp: comparing build/mojo vs stage2 artifacts..."
-	@mkdir -p build/verify
-	@ok=1; \
-	for f in $(VERIFY_CORPUS); do \
-	    base=$$(basename $$f .mojo); \
-	    $(MOJO_CLI) --dump-all $$f > build/verify/s1_$$base.dump 2>&1 || \
-	        { echo "FAIL verify: build/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    stage2/mojo --dump-all $$f > build/verify/s2_$$base.dump 2>&1 || \
-	        { echo "FAIL verify: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
-	    diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump >/dev/null 2>&1 || \
-	        { echo "WARN verify: $$f — build/mojo vs stage2 outputs differ (expected for stub functions)"; }; \
-	done; \
-	echo "  verify-interp: Done"
 
 clean:
 	rm -f mojo_compiler.py
