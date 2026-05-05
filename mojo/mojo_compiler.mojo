@@ -450,7 +450,7 @@ fn tokenize(src: String) -> DynamicVector[Token]:
         return src
     var src = replace_multiline_strings(src)
     let joined = src.splitlines()
-    let out: DynamicVector[Token] = []
+    var out: DynamicVector[Token] = []
     let stack = [0]  # inferred: DynamicVector[AnyType]
     var paren_depth = 0  # inferred: Int
     for line in joined:

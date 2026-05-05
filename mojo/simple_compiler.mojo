@@ -17,17 +17,17 @@ this file will import and call the Mojo versions directly.
 
 from mojo_compiler import tokenize, Parser, compile as mojo_compile
 
-# TODO: Bootstrap blockers:
-# 1. simple_compiler.mojo imports from mojo_compiler, but mojo_compiler.mojo
-#    functions aren't available at link time (unresolved externals).
-# 2. For stage1, we need these as C symbols provided by the runtime, not Mojo imports.
-# 3. Once gimple_codegen.mojo transpiles cleanly, import and call it here instead
-#    of returning Python IR.
-# 4. gimple_codegen.mojo has parse errors from transpilation:
-#    - Indentation/scope issues (global stmts after methods lack DEDENT)
-#    - Dict[?, Type] uses ? which isn't tokenized (should be AnyType)
-#    - Comments with assignments eat the actual assignment  (fixed in mojo_compiler)
-# These require fixing the transpiler (apex py2mojo) to generate valid Mojo.
+# TODO: Bootstrap blockers (MUST FIX via agent):
+# 1. gimple_codegen.mojo parse errors from apex py2mojo transpiler:
+#    - Comment placement bug: "# Set → List)" ends up inside function args
+#    - Ternary/isinstance parsing: complex expressions with tuples fail
+#    - Need systematic transpiler fixes, not local workarounds
+# 2. simple_compiler.mojo imports mojo_compiler, but those symbols
+#    aren't available at link time (unresolved externals in stage1).
+#    Solution: either provide via C API or refactor imports.
+# 3. Once gimple_codegen.mojo parses successfully, update this file to:
+#    - import gimple_codegen instead of mojo_compiler
+#    - call gimple_codegen.gen_module() instead of returning Python IR
 
 
 fn mojo_gimple(src: String) -> String:

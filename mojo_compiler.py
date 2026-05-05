@@ -1207,41 +1207,48 @@ class Parser:
                         self._expect("RBRACKET")
                         expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
                     else:
-                        # Parse positional index
-                        idx = self._parse_expr(0)
-                        # Check for multiple indices or keywords
-                        if self._peek().kind == "COMMA":
-                            indices = [idx]
-                            while self._peek().kind == "COMMA":
-                                self._advance()
-                                if self._peek().kind == "RBRACKET": break
-                                # Check if next element is keyword argument (NAME = ...)
-                                # Check for unpacking (*expr)
-                                if self._peek().kind == "OP" and self._peek().value == "*":
-                                    self._advance()
-                                    indices.append(self._parse_expr(0))
-                                # Check if keyword argument
-                                elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                                    # Skip remaining keyword arguments
-                                    while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                                        if self._peek().kind in ("NAME", "KW"):
-                                            self._advance()  # skip name
-                                            if self._peek().kind == "ASSIGN": self._advance()  # skip =
-                                            self._parse_expr(0)  # parse and discard value
-                                        if self._peek().kind == "COMMA": self._advance()
-                                        elif self._peek().kind != "RBRACKET": break
-                                    break
-                                else:
-                                    indices.append(self._parse_expr(0))
-                            idx = TupleExpr(elements=indices)
-                        # Check for slice notation
+                        # Check for slice with empty start (e.g., [:10] or [:-2])
                         if self._peek().kind == "COLON":
                             self._advance()
                             stop = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
-                            expr = SliceExpr(obj=expr, start=idx, stop=stop)
+                            expr = SliceExpr(obj=expr, start=None, stop=stop)
+                            self._expect("RBRACKET")
                         else:
-                            expr = SubscriptExpr(obj=expr, index=idx)
-                        self._expect("RBRACKET")
+                            # Parse positional index
+                            idx = self._parse_expr(0)
+                            # Check for multiple indices or keywords
+                            if self._peek().kind == "COMMA":
+                                indices = [idx]
+                                while self._peek().kind == "COMMA":
+                                    self._advance()
+                                    if self._peek().kind == "RBRACKET": break
+                                    # Check if next element is keyword argument (NAME = ...)
+                                    # Check for unpacking (*expr)
+                                    if self._peek().kind == "OP" and self._peek().value == "*":
+                                        self._advance()
+                                        indices.append(self._parse_expr(0))
+                                    # Check if keyword argument
+                                    elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
+                                        # Skip remaining keyword arguments
+                                        while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
+                                            if self._peek().kind in ("NAME", "KW"):
+                                                self._advance()  # skip name
+                                                if self._peek().kind == "ASSIGN": self._advance()  # skip =
+                                                self._parse_expr(0)  # parse and discard value
+                                            if self._peek().kind == "COMMA": self._advance()
+                                            elif self._peek().kind != "RBRACKET": break
+                                        break
+                                    else:
+                                        indices.append(self._parse_expr(0))
+                                idx = TupleExpr(elements=indices)
+                            # Check for slice notation
+                            if self._peek().kind == "COLON":
+                                self._advance()
+                                stop = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
+                                expr = SliceExpr(obj=expr, start=idx, stop=stop)
+                            else:
+                                expr = SubscriptExpr(obj=expr, index=idx)
+                            self._expect("RBRACKET")
             elif t.kind == "LPAREN":
                 self._advance()
                 args = []

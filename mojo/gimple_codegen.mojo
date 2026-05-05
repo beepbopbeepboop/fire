@@ -22,28 +22,36 @@ struct TypeLattice:
     let _SIGNED = _GD_SIGNED
     let _UNSIGNED = _GD_UNSIGNED
     let _FLOAT = _GD_FLOAT
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_float(t: String) -> Bool:
         return t in TypeLattice._FLOAT
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_signed(t: String) -> Bool:
         return t in TypeLattice._SIGNED
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_unsigned(t: String) -> Bool:
         return t in TypeLattice._UNSIGNED
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_int(t: String) -> Bool:
         return t in TypeLattice._SIGNED or t in TypeLattice._UNSIGNED
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_numeric(t: String) -> Bool:
         return TypeLattice.is_float(t) or TypeLattice.is_int(t)
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_pointer(t: String) -> Bool:
         return '*' in t
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn is_bool(t: String) -> Bool:
         return t == '_Bool'
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn join(t1: String, t2: String) -> String:
         """LUB for binary arithmetic result type."""
         if t1 == t2:
@@ -77,7 +85,8 @@ struct TypeLattice:
         if ru1 and rs2:
             return t1 if ru1 >= rs2 else t2
         return 'int'
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn join_all(types: list) -> String:
         """LUB of a list of types (e.g. for return type inference)."""
         if not types:
@@ -89,7 +98,8 @@ struct TypeLattice:
             elif t != 'void':
                 let result = TypeLattice.join(result, t)
         return result
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn coerce(src: String, dst: String, val: String) -> String:
         """Return `val` cast to `dst` if types differ."""
         if src == dst:
@@ -99,7 +109,8 @@ struct TypeLattice:
         if src == '_Bool':
             return '(int)' + str(val) if dst == 'int' else '(' + str(dst) + ')(int)' + str(val)
         return '(' + str(dst) + ')' + str(val)
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn list_suffix(elem: String) -> String:
         """Select 'int'/'double'/'str' API suffix based on element C type."""
         if elem in TypeLattice._FLOAT:
@@ -107,7 +118,8 @@ struct TypeLattice:
         if elem == 'char *':
             return 'str'
         return 'int'
-    @staticmethod  # classmethod → @staticmethod in Mojo
+    # classmethod → @staticmethod in Mojo
+    @staticmethod
     fn printf_fmt(ctype: String) -> String:
         if ctype in ('double', 'float', '__fp16'):
             return '%g'
@@ -137,8 +149,8 @@ struct EscapeAnalyzer:
         self._struct_types = struct_types
     fn find_escaping(self, params: list, body: list) -> set:
         """Return the set of local variable names that escape `body`."""
-        let escaped: DynamicVector[String] = set()
-        let in_scope: DynamicVector[String] = _tmp1
+        var escaped: DynamicVector[String] = set()
+        var in_scope: DynamicVector[String] = _tmp1
         var _tmp1 = DynamicVector[AnyType]()
         for p in params:
             _tmp1.append(p[0])
@@ -267,9 +279,9 @@ struct LayoutSolver:
                 return True
         return False
 
-let _TYPE_MAP: Dict[AnyType, String] = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'Bool': 'int', 'String': 'char *', 'List': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *', 'Str': 'MojoStr *', 'None': 'void', None: 'int'}
+var _TYPE_MAP: Dict[AnyType, String] = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'Bool': 'int', 'String': 'char *', 'List': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *', 'Str': 'MojoStr *', 'None': 'void', None: 'int'}
 
-let _RUNTIME_FUNCS: Dict[String, String] = {'mojo_try_push': 'int', 'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double'}
+var _RUNTIME_FUNCS: Dict[String, String] = {'mojo_try_push': 'int', 'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double'}
 
 let _FLOAT_TYPES = ['double', 'float', '__fp16']  # Set → List
 
@@ -322,7 +334,7 @@ let _BIN_OPS = _GD_BIN_OPS
 
 let _CMP_OPS = _GD_CMP_OPS
 
-let _C_KEYWORDS = frozenset(['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while', '_Bool', '_Complex', '_Imaginary', '_Alignas', '_Alignof', '_Atomic', '_Generic', '_Noreturn', '_Static_assert', '_Thread_local']  # Set → List)
+let _C_KEYWORDS = frozenset(['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while', '_Bool', '_Complex', '_Imaginary', '_Alignas', '_Alignof', '_Atomic', '_Generic', '_Noreturn', '_Static_assert', '_Thread_local'])  # Set → List
 
 fn _safe_name(name: String) -> String:
     return 'mojo_' + str(name) if name in _C_KEYWORDS else name
@@ -360,12 +372,12 @@ def _used_idents_node(node) -> set:
     if isinstance(node, WalrusExpr):
         return ([node.name]  # Set → List | _used_idents_node(node.value))
     if isinstance(node, (ListExpr, SetExpr, TupleExpr)):
-        let r: set = set()
+        var r: set = set()
         for e in node.elements:
             r |= _used_idents_node(e)
         return r
     if isinstance(node, DictExpr):
-        let r2: set = set()
+        var r2: set = set()
         for (k, v) in node.pairs:
             r2 |= (_used_idents_node(k) | _used_idents_node(v))
         return r2
@@ -417,7 +429,7 @@ def _used_idents_node(node) -> set:
             r7 |= _used_idents_node(s)
         return r7
     if isinstance(node, TryStmt):
-        let r8: set = set()
+        var r8: set = set()
         for s in node.body:
             r8 |= _used_idents_node(s)
         for h in node.handlers:
@@ -431,7 +443,7 @@ def _used_idents_node(node) -> set:
                 r8 |= _used_idents_node(s)
         return r8
     if isinstance(node, WithStmt):
-        let r9: set = set()
+        var r9: set = set()
         for item in node.items:
             r9 |= _used_idents_node(item.expr)
         for s in node.body:
@@ -620,7 +632,7 @@ struct GimpleGen:
                 self._collect_return_types(node.body, acc)
     fn _infer_return_type(self, body: list) -> String:
         """Infer return type by scanning body for ReturnStmt nodes."""
-        let acc: DynamicVector[String] = []
+        var acc: DynamicVector[String] = []
         self._collect_return_types(body, acc)
         return TypeLattice.join_all(acc) if acc else 'void'
     fn _infer_list_elem_type(self, elements: list) -> String:
@@ -2501,7 +2513,7 @@ struct GimpleGen:
         for s in stmts:
             if not isinstance(s, FunctionDef):
                 continue
-            let outer_scope: dict = {}
+            var outer_scope: dict = {}
             for (pname, ptype) in s.params:
                 outer_scope[pname] = self._resolve_type(ptype)
             for stmt in s.body:
@@ -2537,7 +2549,7 @@ struct GimpleGen:
                         self.var_types[pname] = self._resolve_type(ptype)
                     self.func_return_types[lifted] = self._infer_return_type(inner.body)
                     self.var_types.clear()
-        let func_parts: DynamicVector[String] = []
+        var func_parts: DynamicVector[String] = []
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
                 for ci in self._all_closures.get(stmt.name, {}).values():
