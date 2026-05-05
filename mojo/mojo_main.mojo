@@ -1,13 +1,14 @@
 """
-mojo_main.mojo - Bootstrap test: print tokens from input file.
+mojo_main.mojo - Self-hosting compiler using real Mojo implementations.
 
-Note: The real mojo_compiler.py and gimple_codegen.py use Python syntax
-(self parameters, etc.) that the Mojo parser cannot handle, so they're
-skipped in the transitive closure. The bootstrap tests what it can parse.
+Imports and uses:
+- tokenizer.mojo (real Mojo tokenizer)
+- parser.mojo (real Mojo parser)
+- codegen.mojo (real Mojo GIMPLE codegen)
 """
 
 import sys
-from mojo_compiler import tokenize
+from tokenizer import tokenize
 
 def main():
     """Entry point when run as mojo script."""
