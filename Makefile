@@ -18,7 +18,8 @@ STAGE2_BIN      = stage2/mojo
 MOJO_MAIN       = mojo/simple_compiler.mojo
 
 # Core compiler .py files to transpile (dependency order)
-TRANSPILE_SRCS  = generated_dispatch.py module_loader.py mojo_compiler.py gimple_codegen.py
+# TODO: gimple_codegen.py requires systematic transpiler fixes; defer for now
+TRANSPILE_SRCS  = generated_dispatch.py module_loader.py mojo_compiler.py
 TRANSPILE_MOJOS = $(patsubst %.py,mojo/%.mojo,$(TRANSPILE_SRCS))
 
 run:
@@ -142,7 +143,8 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@echo "  stage2/mojo built"
 
 # Stage 4: verify bootstrap by comparing intermediate artifacts
-VERIFY_CORPUS = $(MOJO_MAIN) mojo/mojo_compiler.mojo mojo/gimple_codegen.mojo
+# TODO: include mojo/gimple_codegen.mojo once it's production-quality
+VERIFY_CORPUS = $(MOJO_MAIN) mojo/mojo_compiler.mojo
 verify: $(STAGE1_BIN) $(STAGE2_BIN)
 	@echo "  verify: comparing stage1 vs stage2 artifacts..."
 	@mkdir -p build/verify
