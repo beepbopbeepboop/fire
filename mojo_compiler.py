@@ -1,7 +1,33 @@
 """Generated Mojo compiler — produced by compiler_gen.py from .md spec."""
 from __future__ import annotations
 import re
+import time
 from dataclasses import dataclass, field
+
+# ── Timer utilities ────────────────────────────────────────────────
+import sys
+class Timer:
+    def __init__(self, name=""):
+        self.name = name
+        self.start_time = time.perf_counter()
+
+    def elapsed_us(self):
+        return int((time.perf_counter() - self.start_time) * 1e6)
+
+    def elapsed_ms(self):
+        return (time.perf_counter() - self.start_time) * 1e3
+
+    def report(self):
+        elapsed = self.elapsed_us()
+        if elapsed < 1000:
+            msg = f"{elapsed}µs"
+        elif elapsed < 1000000:
+            msg = f"{elapsed/1000:.1f}ms"
+        else:
+            msg = f"{elapsed/1e6:.2f}s"
+        if self.name:
+            print(f"⏱ {self.name}: {msg}", file=sys.stderr)
+        return msg
 
 # ── Mojo pointer type shims ────────────────────────────────────────
 class _MojoPointerBase:
@@ -1797,12 +1823,15 @@ def _generate_c_from_ast(stmts, src=None):
 
 def compile_with_interpreter(src: str) -> str:
     """Compile by parsing and interpreting the AST."""
+    timer = Timer("interpret")
     try:
         tokens = tokenize(src)
         stmts = Parser(tokens).parse_module()
         # Validate: parse succeeded, now generate C from AST
         # Pass src so we get real token and function counts
-        return _generate_c_from_ast(stmts, src=src)
+        result = _generate_c_from_ast(stmts, src=src)
+        timer.report()
+        return result
     except Exception as e:
         return f"""/* interpret error: {e} */
 #include <stdio.h>
