@@ -6,10 +6,11 @@ This allows us to run Mojo code by:
 2. Executing AST via this interpreter
 3. Comparing output to verify correctness
 
-This is the Mojo version, transpiled from myinterpreter.py.
+Eventually will be transpiled to .mojo for full bootstrap.
 """
 
 import ast_nodes as N
+# TODO: import re — no regex in Mojo stdlib yet; use external crate if needed
 
 
 class ReturnValue(Exception):
@@ -61,6 +62,7 @@ class MojoFunction:
         self.body = body
         self.closure_scope = closure_scope
 
+    # TODO: **kwargs — keyword args not supported in Mojo fn; use alternatives when porting
     def __call__(self, interpreter, *args, **kwargs):
         # Create new scope for function execution
         func_scope = Scope(parent=self.closure_scope)
@@ -96,6 +98,7 @@ class MojoClass:
         self.body = body
         self.methods = methods or {}
 
+    # TODO: **kwargs — keyword args not supported in Mojo fn; use alternatives when porting
     def __call__(self, *args, **kwargs):
         instance = type(self.name, (), {})()
         # Set attributes from body or initialization
