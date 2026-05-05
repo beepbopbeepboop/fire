@@ -201,13 +201,10 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@chmod +x $@
 	@echo "  stage2/mojo built"
 
-# Compute transitive closure of .mojo files used in bootstrap
-# Shows all dependencies: tokenizer.mojo, parser.mojo, codegen.mojo, ast_nodes.mojo, mojo_main.mojo
-MOJO_CLOSURE = $(shell python3 compute_mojo_closure.py $(MOJO_MAIN))
-
 # Stage 4: verify bootstrap by comparing intermediate artifacts
-# Test mojo_main.mojo (which includes the entire transitive closure of real compiler components)
-# Verifies that all three stages can compile and analyze the same input
+# Python's import system automatically loads the transitive closure:
+# mojo_main.mojo → tokenizer.mojo → parser.mojo → codegen.mojo → ast_nodes.mojo
+# All logic is embedded in the generated C, so we only need to test mojo_main.mojo
 VERIFY_CORPUS = $(MOJO_MAIN)
 verify: $(STAGE1_BIN) $(STAGE2_BIN)
 	@echo "  verify: comparing stage1 vs stage2 artifacts..."
