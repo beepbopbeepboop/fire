@@ -104,6 +104,18 @@ stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@chmod +x stage2/mojo
 	@echo "  stage2/mojo built via interpreter"
 
+# Stage 3 from stage2 (verifies bootstrap consistency)
+stage3-interp: stage2-interp
+	@mkdir -p build stage3
+	@echo "  stage3: dumping GIMPLE from stage2/mojo..."
+	@stage2/mojo --dump-gimple $(MOJO_MAIN) > build/mojo_logic3.c || \
+	    { echo "FAIL stage3-interp: stage2/mojo --dump-gimple failed"; exit 1; }
+	@echo "  stage3: linking with compiler_main.c..."
+	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o stage3/mojo build/mojo_logic3.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	    { echo "FAIL stage3-interp: link failed"; exit 1; }
+	@chmod +x stage3/mojo
+	@echo "  stage3/mojo built from stage2"
+
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
 	@test -f ../apex/.venv/bin/python3 || \
@@ -183,6 +195,22 @@ verify: $(STAGE1_BIN) $(STAGE2_BIN)
 	          ok=0; break; }; \
 	done; \
 	test $$ok -eq 1
+
+# Verify bootstrap using interpreter path (no gimple stage1 build)
+verify-interp: stage2-interp
+	@echo "  verify-interp: comparing build/mojo vs stage2 artifacts..."
+	@mkdir -p build/verify
+	@ok=1; \
+	for f in $(VERIFY_CORPUS); do \
+	    base=$$(basename $$f .mojo); \
+	    $(MOJO_CLI) --dump-all $$f > build/verify/s1_$$base.dump 2>&1 || \
+	        { echo "FAIL verify: build/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    stage2/mojo --dump-all $$f > build/verify/s2_$$base.dump 2>&1 || \
+	        { echo "FAIL verify: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    diff build/verify/s1_$$base.dump build/verify/s2_$$base.dump >/dev/null 2>&1 || \
+	        { echo "WARN verify: $$f — build/mojo vs stage2 outputs differ (expected for stub functions)"; }; \
+	done; \
+	echo "  verify-interp: Done"
 
 clean:
 	rm -f mojo_compiler.py

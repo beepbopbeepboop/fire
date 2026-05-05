@@ -1711,7 +1711,11 @@ def _generate_c_from_ast(stmts):
             if isinstance(stmt, ReturnStmt) and stmt.value:
                 body_generated = True
                 if isinstance(stmt.value, StringLiteral):
-                    c_str = stmt.value.value.replace('"', '\\"')
+                    # Handle string literals properly - preserve content but escape quotes
+                    raw_str = stmt.value.value
+                    # For multi-line strings or strings with special content, use a simpler approach
+                    # Replace backslash-n sequences with actual newlines for display
+                    c_str = raw_str.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
                     lines.append(f'    return mojo_str_new("{c_str}");')
                 else:
                     lines.append('    return mojo_str_new("");')
@@ -1720,7 +1724,7 @@ def _generate_c_from_ast(stmts):
                     if stmt.value.func.name == 'print':
                         for arg in stmt.value.args:
                             if isinstance(arg, StringLiteral):
-                                c_str = arg.value.replace('"', '\\"')
+                                c_str = arg.value.replace('\\', '\\\\').replace('"', '\\"')
                                 lines.append(f'    printf("%s\\n", "{c_str}");')
                         body_generated = True
 
