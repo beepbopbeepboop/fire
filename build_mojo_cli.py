@@ -146,15 +146,23 @@ def _collect_stmts(entry_path, visited=None):
         return []
 
     base_dir = os.path.dirname(path)
+    project_root = os.path.dirname(base_dir) if base_dir.endswith('/mojo') else base_dir
 
     # Walk imports in the order they appear so declaration order is preserved
     for stmt in stmts:
         if isinstance(stmt, (ImportStmt, FromImportStmt)):
             module = stmt.module
-            # Only follow local .mojo files — skip Python stdlib / packages
-            candidate = os.path.join(base_dir, module + '.mojo')
-            if os.path.exists(candidate):
-                results.extend(_collect_stmts(candidate, visited))
+            # Only follow local .mojo/.py files — skip Python stdlib / packages
+            candidates = [
+                os.path.join(base_dir, module + '.mojo'),
+                os.path.join(base_dir, module + '.py'),
+                os.path.join(project_root, module + '.mojo'),
+                os.path.join(project_root, module + '.py'),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    results.extend(_collect_stmts(candidate, visited))
+                    break
 
     results.append((path, stmts))
     return results
@@ -211,11 +219,14 @@ def handle_dump(flag, input_file):
         if flag == '--dump-tokens' or want_all:
             if want_all:
                 print("=== TOKENS ===")
-            with open(input_file) as f:
-                src = f.read()
-            tokens = tokenize(src)
-            for tok in tokens:
-                print(f"{tok.kind} {tok.value!r}")
+            # Collect all files in transitive closure
+            ordered = _collect_stmts(input_file)
+            for path, stmts in ordered:
+                with open(path) as f:
+                    src = f.read()
+                tokens = tokenize(src)
+                for tok in tokens:
+                    print(f"{tok.kind} {tok.value!r}")
             if want_all:
                 print()
 
