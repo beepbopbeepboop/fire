@@ -84,38 +84,40 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Bootstrap targets
 # ──────────────────────────────────────────────────────────────
 
-# Full bootstrap: interpreter analyzes itself
-# Stage 1: interpreter analyzes target
-# Stage 2: interpreter analyzes itself (its own source code)
-# Verify: both should produce identical output if interpreter is deterministic
-bootstrap: preflight stage2 stage3
+# Full bootstrap: interpreter on interpreter
+# Stage 1: Python interpreter dumps tokens from mojo_main.mojo
+# Stage 2: mojo run mojo_main.mojo (Mojo code) dumps tokens
+# Verify: Both token streams identical if bootstrap works
+bootstrap: preflight stage1 stage2 verify
 	@echo ""
 	@echo "╔════════════════════════════════════════════════════════════╗"
 	@echo "║  ✓ Bootstrap complete and verified (see timings above)     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 	@exit 0
 
-# Stage 1: Interpreter analyzes target (mojo_main.mojo) first time
-stage2: preflight
+# Stage 1: Python interpreter dumps tokens from mojo_main.mojo
+stage1: preflight
 	@mkdir -p build/verify
-	@echo "Stage 1: Interpreter analyzing target (first pass)..."
-	@/usr/bin/time -p $(MOJO_CLI) --dump-all $(MOJO_MAIN) > build/verify/stage1.dump 2> build/verify/stage1.time || \
-	    { echo "FAIL stage2: interpreter analysis failed"; exit 1; }
+	@echo "Stage 1: Python interpreter analyzing mojo_main.mojo..."
+	@/usr/bin/time -p $(MOJO_CLI) --dump-tokens $(MOJO_MAIN) > build/verify/stage1.dump 2> build/verify/stage1.time || \
+	    { echo "FAIL stage1: Python interpreter failed"; exit 1; }
 	@cat build/verify/stage1.time
 
-# Stage 2: Interpreter analyzes target (mojo_main.mojo) second time
-# If interpreter is deterministic, output should be identical
-stage3: stage2
+# Stage 2: Python interprets and runs mojo_main.mojo
+stage2: stage1
 	@echo ""
-	@echo "Stage 2: Interpreter analyzing target (second pass)..."
-	@/usr/bin/time -p $(MOJO_CLI) --dump-all $(MOJO_MAIN) > build/verify/stage2.dump 2> build/verify/stage2.time || \
-	    { echo "FAIL stage3: self-analysis failed"; exit 1; }
+	@echo "Stage 2: mojo run mojo_main.mojo analyzing mojo_main.mojo..."
+	@/usr/bin/time -p python3 scripts/run_mojo_main.py $(MOJO_MAIN) > build/verify/stage2.dump 2> build/verify/stage2.time || \
+	    { echo "FAIL stage2: mojo run mojo_main.mojo failed"; exit 1; }
 	@cat build/verify/stage2.time
+
+# Verification: compare stage outputs
+verify: stage2
 	@echo ""
 	@echo "Verification: comparing stage1 vs stage2..."
 	@diff -q build/verify/stage1.dump build/verify/stage2.dump >/dev/null 2>&1 && \
-	    { echo "✓ Interpreter is deterministic (stage1 == stage2)"; } || \
-	    { echo "✗ FAIL: stage1 and stage2 differ - interpreter is not deterministic"; exit 1; }
+	    { echo "✓ Bootstrap successful (stage1 == stage2)"; } || \
+	    { echo "✗ FAIL: stage outputs differ"; exit 1; }
 
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
