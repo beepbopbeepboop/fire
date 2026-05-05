@@ -17,8 +17,8 @@ let STDLIB_PATH = os.path.join(HERE, '..', '..', 'mojo', '3rdparty', 'modular', 
 let TEST_PATH = os.path.join(HERE, 'runtime')
 
 struct ModuleLoader:
-    var loaded_modules: Dict[?, ?]
-    var exported_symbols: Dict[?, ?]
+    var loaded_modules: Dict[AnyType, AnyType]
+    var exported_symbols: Dict[AnyType, AnyType]
     """Loads and caches Mojo modules from stdlib."""
     fn __init__(self):
         self.loaded_modules = {}
@@ -67,7 +67,7 @@ struct ModuleLoader:
         try:
             with open(path, 'r') as f:
                 let content = f.read()
-            let exports = {}  # inferred: Dict[?, ?]
+            let exports = {}  # inferred: Dict[AnyType, AnyType]
             for line in content.split('\n'):
                 let line = line.strip()
                 if not line or line.startswith('#'):
@@ -88,7 +88,7 @@ struct ModuleLoader:
                     if '->' in sig:
                         let after_arrow = sig.split('->')[-1].split(':')[0].strip()
                         let return_type = after_arrow if after_arrow else 'int'
-                    let parameters = []  # inferred: DynamicVector[?]
+                    let parameters = []  # inferred: DynamicVector[AnyType]
                     if params_str:
                         for param in params_str.split(','):
                             let param = param.strip()
@@ -100,7 +100,7 @@ struct ModuleLoader:
                                 let param_type = param_type.strip()
                                 parameters.append((param_name, param_type))
                     let c_return_type = self._mojo_type_to_c(return_type)
-                    let c_params = []  # inferred: DynamicVector[?]
+                    let c_params = []  # inferred: DynamicVector[AnyType]
                     for (pname, ptype) in parameters:
                         let c_type = self._mojo_type_to_c(ptype)
                         c_params.append(str(c_type) + ' ' + str(pname))
@@ -122,7 +122,7 @@ struct ModuleLoader:
             'Bool' → '_Bool'
         """
         let mojo_type = mojo_type.strip()
-        let type_map = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float': 'float', 'Float32': 'float', 'Float64': 'double', 'Bool': '_Bool', 'String': 'char *'}  # inferred: Dict[?, ?]
+        let type_map = {'Int': 'int', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'unsigned int', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float': 'float', 'Float32': 'float', 'Float64': 'double', 'Bool': '_Bool', 'String': 'char *'}  # inferred: Dict[AnyType, AnyType]
         if mojo_type in type_map:
             return type_map[mojo_type]
         if mojo_type.endswith('*'):

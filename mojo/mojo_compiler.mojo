@@ -95,10 +95,10 @@ struct TestSuite:
 fn struct_field_count(T) -> Int:  # inferred
     return 0
 
-fn struct_field_names(T) -> DynamicVector[?]:  # inferred
+fn struct_field_names(T) -> DynamicVector[AnyType]:  # inferred
     return []
 
-fn struct_field_types(T) -> DynamicVector[?]:  # inferred
+fn struct_field_types(T) -> DynamicVector[AnyType]:  # inferred
     return []
 
 def __struct_field_ref(idx, instance):
@@ -122,7 +122,7 @@ struct Layout:
         return Layout()
 
 struct LayoutTensor:
-    var _data: DynamicVector[?]
+    var _data: DynamicVector[AnyType]
     # TODO: **kw — keyword args not supported in Mojo fn
     fn __init__(a: VariadicList[AnyType], self):
         self._data = []
@@ -367,7 +367,7 @@ struct ComptimeForStmt:
     var iterable: AnyType
     var body: list
 
-let _KEYWORDS = ['comptime', 'else', 'while', 'not', 'try', 'True', 'or', 'assert', 'in', 'raises', 'elif', 'out', 'class', 'for', 'False', 'def', 'except', 'var', 'deinit', 'ref', 'return', 'struct', 'and', 'fn', 'mut', 'import', 'with', 'if', 'read', 'break', 'trait', 'raise', 'from', 'finally', 'pass', 'as', 'is', 'continue']  # Set → List
+let _KEYWORDS = ['True', 'break', 'from', 'deinit', 'else', 'trait', 'return', 'with', 'pass', 'is', 'continue', 'def', 'import', 'raises', 'mut', 'assert', 'let', 'var', 'not', 'out', 'in', 'except', 'if', 'or', 'for', 'while', 'comptime', 'ref', 'read', 'struct', 'as', 'finally', 'class', 'fn', 'elif', 'try', 'raise', 'False', 'and']  # Set → List
 
 let _TOKEN_RE = re.compile('(?P<FLOAT>\\d+\\.\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?|\\d+[eE][+-]?\\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\\*\\*=|//=|<<=|>>=|\\+=|\\-=|\\*=|/=|%=|@=|\\&=|\\|=|\\^=)|(?P<ARROW>->)|(?P<OP>\\*\\*|//|<<|>>|==|!=|<=|>=|:=|\\*|@|/|%|\\+|\\-|\\&|\\^|\\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\\^)|(?P<STRING>\\"\\"\\"[\\s\\S]*?\\"\\"\\"|\\\'\\\'\\\'[\\s\\S]*?\\\'\\\'\\\'|\\"(?:[^\\"\\\\]|\\\\.)*\\"|\\\'(?:[^\\\'\\\\]|\\\\.)*\\\'|`[^`]*`)|(?P<DOT>\\.)|(?P<COLON>:)|(?P<LPAREN>\\()|(?P<RPAREN>\\))|(?P<LBRACKET>\\[)|(?P<RBRACKET>\\])|(?P<LBRACE>\\{)|(?P<RBRACE>\\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\\S\\n]+)|(?P<UNK>.)')
 
@@ -423,7 +423,7 @@ fn _split_on_separators(s: String) -> DynamicVector[String]:
             buf.append(c)
         elif c == _SEP_CHAR:
             parts.append(''.join(buf))
-            let buf = []  # inferred: DynamicVector[?]
+            let buf = []  # inferred: DynamicVector[AnyType]
         else:
             buf.append(c)
         i += 1
@@ -437,8 +437,8 @@ fn tokenize(src: String) -> DynamicVector[Token]:
         - '#' → end-of-line comment
         - Multi-line statements use indentation (no backslash continuation)"""
     # TODO: import re — no regex in Mojo stdlib yet; use external crate
-    let string_cache = {}  # inferred: Dict[?, ?]
-    let string_idx = [0]  # inferred: DynamicVector[?]
+    let string_cache = {}  # inferred: Dict[AnyType, AnyType]
+    let string_idx = [0]  # inferred: DynamicVector[AnyType]
     def replace_multiline_strings(src) capturing:
         fn repl(m) -> String capturing:  # inferred
             let placeholder = '__MOJO_STR_' + str(string_idx[0]) + '__'  # inferred: String
@@ -451,7 +451,7 @@ fn tokenize(src: String) -> DynamicVector[Token]:
     var src = replace_multiline_strings(src)
     let joined = src.splitlines()
     let out: DynamicVector[Token] = []
-    let stack = [0]  # inferred: DynamicVector[?]
+    let stack = [0]  # inferred: DynamicVector[AnyType]
     var paren_depth = 0  # inferred: Int
     for line in joined:
         let expanded = line.expandtabs(_INDENT_SIZE)
@@ -498,14 +498,14 @@ fn tokenize(src: String) -> DynamicVector[Token]:
     out.append(Token('EOF', ''))
     return out
 
-let _PREC = {'**': 2, '*': 4, '@': 4, '/': 4, '//': 4, '%': 4, '+': 5, '-': 5, '<<': 6, '>>': 6, '&': 7, '^': 8, '|': 9, '==': 10, '!=': 10, '<': 10, '<=': 10, '>': 10, '>=': 10, ':=': 15}  # inferred: Dict[?, ?]
+let _PREC = {'**': 2, '*': 4, '@': 4, '/': 4, '//': 4, '%': 4, '+': 5, '-': 5, '<<': 6, '>>': 6, '&': 7, '^': 8, '|': 9, '==': 10, '!=': 10, '<': 10, '<=': 10, '>': 10, '>=': 10, ':=': 15}  # inferred: Dict[AnyType, AnyType]
 
-let _KW_PREC = {'in': 10, 'is': 10, 'not': 11, 'and': 12, 'or': 13}  # inferred: Dict[?, ?]
+let _KW_PREC = {'in': 10, 'is': 10, 'not': 11, 'and': 12, 'or': 13}  # inferred: Dict[AnyType, AnyType]
 
 struct Parser:
     var _tok: DynamicVector[Token]
     var _pos: Int
-    var _pending_decs: DynamicVector[?]
+    var _pending_decs: DynamicVector[AnyType]
     fn __init__(self, tokens: DynamicVector[Token]):
         self._tok = tokens
         self._pos = 0
@@ -534,7 +534,7 @@ struct Parser:
         let t = self._peek()
         return t.kind == 'KW' and t.value in w
     fn parse_module(self) -> list:
-        let stmts = []  # inferred: DynamicVector[?]
+        let stmts = []  # inferred: DynamicVector[AnyType]
         self._skip_newlines()
         while not self._at_end():
             stmts.append(self._parse_stmt())
@@ -544,7 +544,7 @@ struct Parser:
         self._expect('NEWLINE')
         self._skip_newlines()
         self._expect('INDENT')
-        let stmts = []  # inferred: DynamicVector[?]
+        let stmts = []  # inferred: DynamicVector[AnyType]
         self._skip_newlines()
         while self._peek().kind not in ('DEDENT', 'EOF'):
             stmts.append(self._parse_stmt())
@@ -624,7 +624,7 @@ struct Parser:
                     self._advance()
             return PassStmt()
         if t.kind == 'OP' and t.value == '@':
-            let decs = []  # inferred: DynamicVector[?]
+            let decs = []  # inferred: DynamicVector[AnyType]
             while self._peek().kind == 'OP' and self._peek().value == '@':
                 self._advance()
                 let dec_name = self._expect('NAME').value
@@ -651,7 +651,7 @@ struct Parser:
             return self._parse_funcdef(decs)
         let expr = self._parse_expr(0)
         if self._peek().kind == 'COMMA':
-            let targets = [expr]  # inferred: DynamicVector[?]
+            let targets = [expr]  # inferred: DynamicVector[AnyType]
             while self._peek().kind == 'COMMA':
                 self._advance()
                 if self._peek().kind == 'ASSIGN':
@@ -667,7 +667,7 @@ struct Parser:
             self._advance()
             let val = self._parse_expr(0)
             if self._peek().kind == 'ASSIGN':
-                let targets = [expr]  # inferred: DynamicVector[?]
+                let targets = [expr]  # inferred: DynamicVector[AnyType]
                 while True:
                     if self._peek().kind != 'ASSIGN':
                         break
@@ -714,7 +714,7 @@ struct Parser:
         if self._peek().kind == 'LPAREN':
             self._advance()
             let paren_import = True  # inferred: Bool
-        let names = []  # inferred: DynamicVector[?]
+        let names = []  # inferred: DynamicVector[AnyType]
         if paren_import:
             while self._peek().kind == 'NEWLINE':
                 self._advance()
@@ -754,7 +754,7 @@ struct Parser:
         self._expect('KW', 'var')
         let name = self._expect('NAME').value
         if self._peek().kind == 'COMMA':
-            let names = [name]  # inferred: DynamicVector[?]
+            let names = [name]  # inferred: DynamicVector[AnyType]
             while self._peek().kind == 'COMMA':
                 self._advance()
                 if self._peek().kind == 'NAME':
@@ -814,7 +814,7 @@ struct Parser:
             self._advance()
         if self._peek().kind == 'LPAREN':
             self._advance()
-            let names = []  # inferred: DynamicVector[?]
+            let names = []  # inferred: DynamicVector[AnyType]
             while self._peek().kind != 'RPAREN':
                 if self._peek().kind in ('NAME', 'KW'):
                     names.append(self._advance().value)
@@ -828,7 +828,7 @@ struct Parser:
             let tok = self._advance()
             let target = tok.value
             if self._peek().kind == 'COMMA':
-                let names = [target]  # inferred: DynamicVector[?]
+                let names = [target]  # inferred: DynamicVector[AnyType]
                 while self._peek().kind == 'COMMA':
                     self._advance()
                     let tok2 = self._advance()
@@ -844,16 +844,16 @@ struct Parser:
             self._expect('COLON')
             let else_body = self._parse_block()
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
-    let _CONV_KWS = ['deinit', 'mut', 'ref', 'read', 'var', 'out']  # Set → List
-    fn _parse_funcdef(self, decorators: DynamicVector[?]  # inferred):  # inferred
+    let _CONV_KWS = ['var', 'out', 'deinit', 'read', 'mut', 'ref']  # Set → List
+    fn _parse_funcdef(self, decorators: DynamicVector[AnyType]  # inferred):  # inferred
         if decorators is None:
-            let decorators = []  # inferred: DynamicVector[?]
+            let decorators = []  # inferred: DynamicVector[AnyType]
         let name = self._expect('NAME').value
         if self._peek().kind == 'LBRACKET':
             self._skip_bracketed()
         self._expect('LPAREN')
-        let params = []  # inferred: DynamicVector[?]
-        let param_convs = {}  # inferred: Dict[?, ?]
+        let params = []  # inferred: DynamicVector[AnyType]
+        let param_convs = {}  # inferred: Dict[AnyType, AnyType]
         while self._peek().kind != 'RPAREN':
             while self._peek().kind in ('NEWLINE', 'INDENT', 'DEDENT'):
                 self._advance()
@@ -1015,7 +1015,7 @@ struct Parser:
         self._expect('KW', 'try')
         self._expect('COLON')
         let body = self._parse_block()
-        let handlers = []  # inferred: DynamicVector[?]
+        let handlers = []  # inferred: DynamicVector[AnyType]
         while self._is_kw('except'):
             self._advance()
             var _tmp4 = (None, None)
@@ -1041,7 +1041,7 @@ struct Parser:
         return TryStmt(body=body, handlers=handlers, else_body=else_body, finally_body=finally_body)
     fn _parse_with(self):
         self._expect('KW', 'with')
-        let items = []  # inferred: DynamicVector[?]
+        let items = []  # inferred: DynamicVector[AnyType]
         var expr = self._parse_expr(0)
         var alias = None
         if self._is_kw('as'):
@@ -1232,7 +1232,7 @@ struct Parser:
                 else:
                     let idx = self._parse_expr(0)
                     if self._peek().kind == 'COMMA':
-                        let indices = [idx]  # inferred: DynamicVector[?]
+                        let indices = [idx]  # inferred: DynamicVector[AnyType]
                         while self._peek().kind == 'COMMA':
                             self._advance()
                             if self._peek().kind == 'RBRACKET':
@@ -1264,7 +1264,7 @@ struct Parser:
                     self._expect('RBRACKET')
             elif t.kind == 'LPAREN':
                 self._advance()
-                let args = []  # inferred: DynamicVector[?]
+                let args = []  # inferred: DynamicVector[AnyType]
                 while self._peek().kind != 'RPAREN':
                     if self._peek().kind == 'OP' and self._peek().value == '**':
                         self._advance()
@@ -1320,7 +1320,7 @@ struct Parser:
                 return TupleExpr(elements=[])
             let first = self._parse_expr(0)
             if self._peek().kind == 'COMMA':
-                let elems = [first]  # inferred: DynamicVector[?]
+                let elems = [first]  # inferred: DynamicVector[AnyType]
                 while self._peek().kind == 'COMMA':
                     self._advance()
                     if self._peek().kind == 'RPAREN':
@@ -1349,7 +1349,7 @@ struct Parser:
             let gen = self._parse_generator()
             self._expect('RBRACKET')
             return Comprehension(kind='list', element=first, generators=[gen])
-        let elems = [first]  # inferred: DynamicVector[?]
+        let elems = [first]  # inferred: DynamicVector[AnyType]
         while self._peek().kind == 'COMMA':
             self._advance()
             if self._peek().kind == 'RBRACKET':
@@ -1383,7 +1383,7 @@ struct Parser:
                 let gen = self._parse_generator()
                 self._expect('RBRACE')
                 return Comprehension(kind='dict', element=first, key=val, generators=[gen])
-            let pairs = [(first, val)]  # inferred: DynamicVector[?]
+            let pairs = [(first, val)]  # inferred: DynamicVector[AnyType]
             while self._peek().kind == 'COMMA':
                 self._advance()
                 if self._peek().kind == 'RBRACE':
@@ -1398,7 +1398,7 @@ struct Parser:
             let gen = self._parse_generator()
             self._expect('RBRACE')
             return Comprehension(kind='set', element=first, generators=[gen])
-        let elems = [first]  # inferred: DynamicVector[?]
+        let elems = [first]  # inferred: DynamicVector[AnyType]
         while self._peek().kind == 'COMMA':
             self._advance()
             if self._peek().kind == 'RBRACE':
@@ -1411,7 +1411,7 @@ struct Parser:
         let target = self._expect('NAME').value
         self._expect('KW', 'in')
         let iterable = self._parse_expr(1)
-        let conditions = []  # inferred: DynamicVector[?]
+        let conditions = []  # inferred: DynamicVector[AnyType]
         while self._is_kw('if'):
             self._advance()
             conditions.append(self._parse_expr(1))
@@ -1494,7 +1494,7 @@ struct Parser:
                     name += ('.' + self._expect('NAME').value)
         if self._peek().kind != 'LBRACKET':
             return name
-        let parts = [name]  # inferred: DynamicVector[?]
+        let parts = [name]  # inferred: DynamicVector[AnyType]
         while self._peek().kind == 'LBRACKET':
             self._advance()
             parts.append('[')
@@ -1620,7 +1620,7 @@ def emit(node, indent: Int) -> String:
         let names = ', '.join(_tmp15)
         return str(pad) + 'from ' + str(node.module) + ' import ' + str(names)
     if isinstance(node, IfStmt):
-        let out = [str(pad) + 'if ' + str(emit(node.condition)) + ':']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'if ' + str(emit(node.condition)) + ':']  # inferred: DynamicVector[AnyType]
         var _tmp16 = DynamicVector[AnyType]()
         for s in node.then_body:
             _tmp16.append(emit(s, (indent + 1)))
@@ -1639,7 +1639,7 @@ def emit(node, indent: Int) -> String:
             out += _tmp18
         return '\n'.join(out)
     if isinstance(node, WhileStmt):
-        let out = [str(pad) + 'while ' + str(emit(node.condition)) + ':']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'while ' + str(emit(node.condition)) + ':']  # inferred: DynamicVector[AnyType]
         var _tmp19 = DynamicVector[AnyType]()
         for s in node.body:
             _tmp19.append(emit(s, (indent + 1)))
@@ -1652,7 +1652,7 @@ def emit(node, indent: Int) -> String:
             out += _tmp20
         return '\n'.join(out)
     if isinstance(node, ForStmt):
-        let out = [str(pad) + 'for ' + str(emit(node.target) if not isinstance(node.target, str) else node.target) + ' in ' + str(emit(node.iterable)) + ':']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'for ' + str(emit(node.target) if not isinstance(node.target, str) else node.target) + ' in ' + str(emit(node.iterable)) + ':']  # inferred: DynamicVector[AnyType]
         var _tmp21 = DynamicVector[AnyType]()
         for s in node.body:
             _tmp21.append(emit(s, (indent + 1)))
@@ -1699,7 +1699,7 @@ def emit(node, indent: Int) -> String:
         let msg_s = ', ' + str(emit(node.msg)) if node.msg is not None else ''
         return str(pad) + 'assert' + str(val) + str(msg_s)
     if isinstance(node, TryStmt):
-        let out = [str(pad) + 'try:']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'try:']  # inferred: DynamicVector[AnyType]
         var _tmp25 = DynamicVector[AnyType]()
         for s in node.body:
             _tmp25.append(emit(s, (indent + 1)))
@@ -1730,14 +1730,14 @@ def emit(node, indent: Int) -> String:
         for i in node.items:
             _tmp29.append(str(emit(i.expr)) + ' as ' + str(i.alias) if i.alias else emit(i.expr))
         let items_str = ', '.join(_tmp29)
-        let out = [str(pad) + 'with ' + str(items_str) + ':']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'with ' + str(items_str) + ':']  # inferred: DynamicVector[AnyType]
         var _tmp30 = DynamicVector[AnyType]()
         for s in node.body:
             _tmp30.append(emit(s, (indent + 1)))
         out += _tmp30
         return '\n'.join(out)
     if isinstance(node, ComptimeIfStmt):
-        let out = [str(pad) + 'if ' + str(emit(node.condition)) + ':  # comptime']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'if ' + str(emit(node.condition)) + ':  # comptime']  # inferred: DynamicVector[AnyType]
         var _tmp31 = DynamicVector[AnyType]()
         for s in node.then_body:
             _tmp31.append(emit(s, (indent + 1)))
@@ -1756,7 +1756,7 @@ def emit(node, indent: Int) -> String:
             out += _tmp33
         return '\n'.join(out)
     if isinstance(node, ComptimeForStmt):
-        let out = [str(pad) + 'for ' + str(node.target) + ' in ' + str(emit(node.iterable)) + ':  # comptime']  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'for ' + str(node.target) + ' in ' + str(emit(node.iterable)) + ':  # comptime']  # inferred: DynamicVector[AnyType]
         var _tmp34 = DynamicVector[AnyType]()
         for s in node.body:
             _tmp34.append(emit(s, (indent + 1)))
@@ -1776,7 +1776,7 @@ def emit(node, indent: Int) -> String:
         for d in ext_decs:
             out.append(str(pad) + '@' + str(d))
         out.append(str(pad) + 'class ' + str(node.name) + ':')
-        let body = []  # inferred: DynamicVector[?]
+        let body = []  # inferred: DynamicVector[AnyType]
         if has_init and node.fields:
             var _tmp36 = DynamicVector[AnyType]()
             for f in node.fields:
@@ -1795,8 +1795,8 @@ def emit(node, indent: Int) -> String:
         out += body if body else [str(pad) + '    pass']
         return '\n'.join(out)
     if isinstance(node, TraitDef):
-        let out = [str(pad) + 'class ' + str(node.name) + ':  # trait']  # inferred: DynamicVector[?]
-        let body = []  # inferred: DynamicVector[?]
+        let out = [str(pad) + 'class ' + str(node.name) + ':  # trait']  # inferred: DynamicVector[AnyType]
+        let body = []  # inferred: DynamicVector[AnyType]
         for m in node.methods:
             let is_abs = not m.body or len(m.body) == 1 and isinstance(m.body[0], PassStmt) or len(m.body) == 1 and isinstance(m.body[0], ExprStmt) and isinstance(m.body[0].value, EllipsisLiteral)  # inferred: Bool
             if is_abs:

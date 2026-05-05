@@ -137,8 +137,8 @@ struct EscapeAnalyzer:
         self._struct_types = struct_types
     fn find_escaping(self, params: list, body: list) -> set:
         """Return the set of local variable names that escape `body`."""
-        let escaped: DynamicVector[String] = set()  # Set → DynamicVector
-        let in_scope: DynamicVector[String] = _tmp1  # Set → DynamicVector
+        let escaped: DynamicVector[String] = set()
+        let in_scope: DynamicVector[String] = _tmp1
         var _tmp1 = DynamicVector[AnyType]()
         for p in params:
             _tmp1.append(p[0])
@@ -222,7 +222,7 @@ struct LayoutSolver:
         let has_try = self._has_try(body)
         let escaped = self._ea.find_escaping(params, body)
         let locals_ = self._struct_locals(body)
-        let result = {}  # inferred: Dict[?, ?]
+        let result = {}  # inferred: Dict[AnyType, AnyType]
         for name in locals_:
             if has_try or name in escaped:
                 result[name] = self.HEAP
@@ -230,7 +230,7 @@ struct LayoutSolver:
                 result[name] = self.STACK
         return result
     fn _struct_locals(self, stmts: list) -> set:
-        var result: DynamicVector[String] = set()  # Set → DynamicVector
+        var result: DynamicVector[String] = set()
         for node in stmts:
             if isinstance(node, VarDecl) and node.type_ann in self._struct_types:
                 result.add(node.name)
@@ -309,7 +309,7 @@ fn _elem_type(ptr_type: String) -> String:
         return ptr_type.replace('*', '').strip()
     return 'int'
 
-let _C_ID_MAP = {'char *': 'charptr', 'void *': 'voidptr', '_Bool': 'bool'}  # inferred: Dict[?, ?]
+let _C_ID_MAP = {'char *': 'charptr', 'void *': 'voidptr', '_Bool': 'bool'}  # inferred: Dict[AnyType, AnyType]
 
 fn _c_id(ctype: String) -> String:
     """Convert a C type to a valid identifier suffix (for helper function names)."""
@@ -488,8 +488,8 @@ struct GimpleGen:
     var struct_field_types: Dict[String, Dict[String, String]]
     var imported_symbols: Dict[String, tuple]
     var _all_closures: dict
-    var _ptr_helpers_needed: DynamicVector[String]  # Set → DynamicVector
-    var _struct_allocs_needed: DynamicVector[String]  # Set → DynamicVector
+    var _ptr_helpers_needed: DynamicVector[String]
+    var _struct_allocs_needed: DynamicVector[String]
     fn __init__(self):
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
@@ -1567,7 +1567,7 @@ struct GimpleGen:
             let r = self._eval_const_int(node.right)
             if l is None or r is None:
                 return None
-            let ops = {'+': (l + r), '-': (l - r), '*': (l * r), '//': (l // r) if r else None, '%': (l % r) if r else None, '**': (l ** r)}  # inferred: Dict[?, ?]
+            let ops = {'+': (l + r), '-': (l - r), '*': (l * r), '//': (l // r) if r else None, '%': (l % r) if r else None, '**': (l ** r)}  # inferred: Dict[AnyType, AnyType]
             return ops.get(node.op)
         return None
     def _eval_const_bool(self, node):
@@ -1590,7 +1590,7 @@ struct GimpleGen:
             let r = self._eval_const_int(node.right)
             if l is None or r is None:
                 return None
-            let ops = {'==': l == r, '!=': l != r, '<': l < r, '<=': l <= r, '>': l > r, '>=': l >= r}  # inferred: Dict[?, ?]
+            let ops = {'==': l == r, '!=': l != r, '<': l < r, '<=': l <= r, '>': l > r, '>=': l >= r}  # inferred: Dict[AnyType, AnyType]
             return ops.get(node.op)
         return None
     def gen_stmt(self, node):
@@ -1914,7 +1914,7 @@ struct GimpleGen:
             self._emit('  goto ' + str(bb_after) + ';')
         self._emit_label(bb_after)
     def _gen_stmt_WithStmt(self, node):
-        let aliases = []  # inferred: DynamicVector[?]
+        let aliases = []  # inferred: DynamicVector[AnyType]
         for item in node.items:
             var _tmp84 = self.lower_expr(item.expr)
             let et = _tmp84[0]
@@ -2313,7 +2313,7 @@ struct GimpleGen:
         else:
             let ret_type = self._infer_return_type(node.body)
         self.func_ret_type = ret_type
-        let param_strs = []  # inferred: DynamicVector[?]
+        let param_strs = []  # inferred: DynamicVector[AnyType]
         if ci.env_struct:
             param_strs.append(str(ci.env_struct) + ' * _env')
         for (pname, ptype) in node.params:
@@ -2324,7 +2324,7 @@ struct GimpleGen:
         self._emit_label('bb_2')
         for stmt in node.body:
             self.gen_stmt(stmt)
-        let lines = [str(ret_type) + ' __GIMPLE ' + str(ci.lifted_name) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[?]
+        let lines = [str(ret_type) + ' __GIMPLE ' + str(ci.lifted_name) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[AnyType]
         self._captures = {}
         self._env_param = ''
         return '\n'.join(lines)
@@ -2401,7 +2401,7 @@ struct GimpleGen:
         self.func_ret_type = ret_type
         let solver = LayoutSolver(self.struct_field_types)
         self._struct_layout = solver.solve(node.params, node.body)
-        let param_strs = []  # inferred: DynamicVector[?]
+        let param_strs = []  # inferred: DynamicVector[AnyType]
         for (pname, ptype) in node.params:
             let ctype = self._param_ctype(pname, ptype, node)
             self.var_types[pname] = ctype
@@ -2414,7 +2414,7 @@ struct GimpleGen:
         if node.name == 'main' and ret_type == 'int' and not self.body_lines[-1:] == ['  return 0;']:
             if not self.body_lines and self.body_lines[-1].strip().startswith('return'):
                 self._emit('  return 0;')
-        let lines = [str(ret_type) + ' __GIMPLE ' + str(safe) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[?]
+        let lines = [str(ret_type) + ' __GIMPLE ' + str(safe) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[AnyType]
         return '\n'.join(lines)
     fn _gen_struct_method(self, struct_name: String, node: FunctionDef) -> String:
         self._reset_func()
@@ -2433,7 +2433,7 @@ struct GimpleGen:
         self.func_ret_type = ret_type
         let solver = LayoutSolver(self.struct_field_types)
         self._struct_layout = solver.solve(node.params, node.body)
-        let param_strs = []  # inferred: DynamicVector[?]
+        let param_strs = []  # inferred: DynamicVector[AnyType]
         for (i, (pname, ptype)) in enumerate(node.params):
             if i == 0 and pname == 'self':
                 let ctype = str(struct_name) + ' *'  # inferred: String
@@ -2446,7 +2446,7 @@ struct GimpleGen:
         self._emit_label('bb_2')
         for stmt in node.body:
             self.gen_stmt(stmt)
-        let lines = [str(ret_type) + ' __GIMPLE ' + str(mangled) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[?]
+        let lines = [str(ret_type) + ' __GIMPLE ' + str(mangled) + ' (' + str(params_str) + ')', '{', *self.decls, *self.body_lines, '}']  # inferred: DynamicVector[AnyType]
         return '\n'.join(lines)
     fn gen_module(self, stmts: list) -> String:
         self.struct_field_types = {}
@@ -2554,7 +2554,7 @@ struct GimpleGen:
                     func_parts.append(self._gen_struct_method(stmt.name, m))
                     func_parts.append('')
             elif isinstance(stmt, TraitDef):
-                let lines = ['typedef struct ' + str(stmt.name) + '_vtable {']  # inferred: DynamicVector[?]
+                let lines = ['typedef struct ' + str(stmt.name) + '_vtable {']  # inferred: DynamicVector[AnyType]
                 for m in stmt.methods:
                     let ret = self._resolve_type(m.return_type)
                     var _tmp100 = DynamicVector[AnyType]()
@@ -2569,7 +2569,7 @@ struct GimpleGen:
                 pass
             else:
                 func_parts.append('/* TODO: top-level ' + str(type(stmt).__name__) + ' */')
-        let parts = ['/* Generated by gimple_codegen.py */', '/* Compile with: gcc-mp-15 -fgimple -fsyntax-only file.c */', '#include <stdint.h>', '#include <stdlib.h>', '#include <math.h>', '#include <stdio.h>', '#include <setjmp.h>', '#include "mojo_runtime.h"', '', _HELPERS]  # inferred: DynamicVector[?]
+        let parts = ['/* Generated by gimple_codegen.py */', '/* Compile with: gcc-mp-15 -fgimple -fsyntax-only file.c */', '#include <stdint.h>', '#include <stdlib.h>', '#include <math.h>', '#include <stdio.h>', '#include <setjmp.h>', '#include "mojo_runtime.h"', '', _HELPERS]  # inferred: DynamicVector[AnyType]
         for et in sorted(self._ptr_helpers_needed):
             let cn = _c_id(et)
             parts.append('static ' + str(et) + ' * _mojo_at_' + str(cn) + ' (' + str(et) + ' * p, int64_t n) { return p + n; }')
@@ -2625,7 +2625,7 @@ struct GimpleGen:
         for sd in struct_defs:
             for m in sd.methods:
                 var ret = self.func_return_types.get(str(sd.name) + '_' + str(m.name), self._resolve_type(m.return_type))
-                let param_ctypes = []  # inferred: DynamicVector[?]
+                let param_ctypes = []  # inferred: DynamicVector[AnyType]
                 for (i, (pname, ptype)) in enumerate(m.params):
                     let ct = str(sd.name) + ' *' if i == 0 and pname == 'self' else self._resolve_type(ptype)
                     param_ctypes.append(ct)
@@ -2640,7 +2640,7 @@ struct GimpleGen:
                     parts.append(str(ci.env_struct) + ' * ' + str(alloc_fn) + ' (void);')
                 var ret = self.func_return_types.get(ci.lifted_name, 'int')
                 let node = ci.inner_def
-                let ptypes_list = []  # inferred: DynamicVector[?]
+                let ptypes_list = []  # inferred: DynamicVector[AnyType]
                 if ci.env_struct:
                     ptypes_list.append(str(ci.env_struct) + ' *')
                 for (pn, pt) in node.params:
