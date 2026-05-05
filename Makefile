@@ -16,7 +16,7 @@ BUILD_MOJO_CLI  = build_mojo_cli.py
 # Bootstrap paths
 STAGE1_BIN      = stage1/mojo
 STAGE2_BIN      = stage2/mojo
-MOJO_MAIN       = mojo/mojo_compiler.mojo
+MOJO_MAIN       = mojo/mojo_main.mojo
 
 # Core compiler .py files to transpile (dependency order)
 # TODO: gimple_codegen.py, mojo_compiler.py require systematic transpiler fixes
@@ -201,9 +201,14 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@chmod +x $@
 	@echo "  stage2/mojo built"
 
+# Compute transitive closure of .mojo files used in bootstrap
+# Shows all dependencies: tokenizer.mojo, parser.mojo, codegen.mojo, ast_nodes.mojo, mojo_main.mojo
+MOJO_CLOSURE = $(shell python3 compute_mojo_closure.py $(MOJO_MAIN))
+
 # Stage 4: verify bootstrap by comparing intermediate artifacts
-# TODO: include mojo/gimple_codegen.mojo once it's production-quality
-VERIFY_CORPUS = $(MOJO_MAIN) mojo/mojo_compiler.mojo
+# Test mojo_main.mojo (which includes the entire transitive closure of real compiler components)
+# Verifies that all three stages can compile and analyze the same input
+VERIFY_CORPUS = $(MOJO_MAIN)
 verify: $(STAGE1_BIN) $(STAGE2_BIN)
 	@echo "  verify: comparing stage1 vs stage2 artifacts..."
 	@mkdir -p build/verify
