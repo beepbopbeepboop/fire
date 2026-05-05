@@ -15,27 +15,49 @@ BUILD_MOJO_CLI  = build_mojo_cli.py
 # Bootstrap paths
 STAGE1_BIN      = stage1/mojo
 STAGE2_BIN      = stage2/mojo
-MOJO_MAIN       = mojo/mojo_main.mojo
+MOJO_MAIN       = mojo.mojo
+
+# Source files to validate through bootstrap
+MOJO_SRCS       = \
+	bootstrap-validate.mojo \
+	bootstrap_test_advanced.mojo \
+	bootstrap_test_classes.mojo \
+	bootstrap_test_conditionals.mojo \
+	bootstrap_test_edge_cases.mojo \
+	bootstrap_test_empty.mojo \
+	bootstrap_test_expressions.mojo \
+	bootstrap_test_input.mojo \
+	bootstrap_test_loops.mojo \
+	bootstrap_test_single_expr.mojo \
+	bootstrap_test_stress.mojo \
+	example_imports.mojo \
+	mojo/ast_nodes.mojo \
+	mojo/codegen.mojo \
+	mojo/generated_dispatch.mojo \
+	mojo/gimple_codegen.mojo \
+	mojo/module_loader.mojo \
+	mojo/mojo_compiler.mojo \
+	mojo/mojo_main.mojo \
+	mojo/myinterpreter.apex.mojo \
+	mojo/myinterpreter.mojo \
+	mojo/parser.mojo \
+	mojo/simple_compiler.mojo \
+	mojo/tokenizer.mojo \
+	runtime/stdlib_wrapper.mojo \
+	runtime/test_helper.mojo \
+	scripts/stage2_mojo_interpreter.mojo \
+	test_cli.mojo
 
 run:
 	python run.py
 
-demo: mojo_compiler.py
+demo:
 	echo "3 + 42 + 0xFF" | python mojo_compiler.py
 
-mojo_compiler.py: run.py fe_reader.py compiler_gen.py lang_spec.py \
-    mojo-literals.md mojo-operators.md mojo-compound-statements.md \
-    mojo-function-declarations.md mojo-simple-statements.md \
-    mojo-expressions.md mojo-keywords.md \
-    mojo-manual-language-basics.md mojo-manual-values.md \
-    mojo-manual-metaprogramming.md mojo-manual-pointers.md \
-    mojo-manual-python.md mojo-manual-gpu.md mojo-tools-and-faq.md
-	python run.py
-
-check: mojo_compiler.py
+check:
 	python test_mds.py
 
-check-gimple: mojo_compiler.py gimple_codegen.py $(DYLIB) $(STDLIB_DYLIB)
+check-gimple: gimple_codegen.py $(DYLIB) $(STDLIB_DYLIB)
 	python test_gimple.py
 
 check-runner: $(MOJO_CLI)
@@ -78,73 +100,49 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Bootstrap targets
 # ──────────────────────────────────────────────────────────────
 
-# Full bootstrap: Python (permanent) → Mojo → Mojo
-# Stage 1: Python bootstrap (mojo_main.py) — permanent, required foundation
-# Stage 2: Mojo self-hosting (mojo_main.mojo with real Mojo implementations)
-# Stage 3: Mojo again (verify determinism)
-#
-# On a system with Mojo already installed, start at stage2.
-# Stage 1 is always needed as the bootstrap foundation.
-verify: stage3
-	@echo ""
-	@echo "Verification: Comparing outputs..."
-	@if diff build/verify/stage1.c build/verify/stage2.c > /dev/null 2>&1; then \
-		echo "✓ Stage 1 ≡ Stage 2 (outputs identical)"; \
-	else \
-		echo "✗ Stage 1 ≠ Stage 2 (outputs differ)"; \
-		exit 1; \
-	fi
-	@if diff build/verify/stage2.c build/verify/stage3.c > /dev/null 2>&1; then \
-		echo "✓ Stage 2 ≡ Stage 3 (determinism verified)"; \
-	else \
-		echo "✗ Stage 2 ≠ Stage 3 (not deterministic)"; \
-		exit 1; \
-	fi
+# Bootstrap: Three-stage self-hosting verification
+# Stage 1: mojo.py --dump-all mojo.mojo (Python interpreter)
+# Stage 2: mojo.py mojo.mojo --dump-all mojo.mojo (Mojo interpreter on itself)
+# Stage 3: mojo.py mojo.mojo mojo.mojo --dump-all mojo.mojo (Verify determinism)
+# Success: all three stages produce identical output (silent exit 0)
+# Failure: show diff and name failing dump file, exit 1
 
-bootstrap: stage1 stage2 stage3 verify
-	@echo ""
-	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║  ✓ BOOTSTRAP COMPLETE & VERIFIED                          ║"
-	@echo "║                                                            ║"
-	@echo "║  Stage 1 (Python)   ≡ Stage 2 (Mojo)   ≡ Stage 3 (Verify) ║"
-	@echo "║  Self-hosting proven with deterministic output            ║"
-	@echo "╚════════════════════════════════════════════════════════════╝"
-	@echo ""
-	@echo "Timings:"
-	@echo "  Stage 1:" && cat build/verify/stage1.time
-	@echo "  Stage 2:" && cat build/verify/stage2.time
-	@echo "  Stage 3:" && cat build/verify/stage3.time
-
-# Stage 1: Python bootstrap (permanent foundation)
 stage1:
-	@mkdir -p build/verify
-	@echo "Stage 1: Python Interpreter - Reference Implementation"
-	@python3 scripts/stage1_python_interpreter.py bootstrap_test_input.mojo > build/verify/stage1.c 2>&1
-	@echo "✓ Stage 1: Generated $$(wc -l < build/verify/stage1.c) lines of C code"
+	@mkdir -p build/verify build/dump build/validate
+	./mojo.py --dump-all mojo.mojo > build/verify/stage1.c 2> build/dump/stage1.log
+	@for f in $(MOJO_SRCS); do \
+		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
+		./mojo.py --dump-all $$f > build/validate/$$base.stage1.c 2>/dev/null || true; \
+	done
 
-# Stage 2: Mojo self-hosting (first self-hosted stage)
 stage2: stage1
-	@echo ""
-	@echo "Stage 2: Mojo Interpreter - Self-Hosting Proof"
-	@mojo run scripts/stage2_mojo_interpreter.mojo bootstrap_test_input.mojo > build/verify/stage2.c 2>&1 || { echo "FAIL: mojo not available or stage2 failed"; exit 1; }
-	@echo "✓ Stage 2: Generated $$(wc -l < build/verify/stage2.c) lines of C code"
+	./mojo.py mojo.mojo --dump-all mojo.mojo > build/verify/stage2.c 2> build/dump/stage2.log
+	@for f in $(MOJO_SRCS); do \
+		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
+		./mojo.py mojo.mojo --dump-all $$f > build/validate/$$base.stage2.c 2>/dev/null || true; \
+	done
 
-# Stage 3: Mojo verification (determinism check)
 stage3: stage2
-	@echo ""
-	@echo "Stage 3: Verification - Determinism Check"
-	@mojo run scripts/stage2_mojo_interpreter.mojo bootstrap_test_input.mojo > build/verify/stage3.c 2>&1 || { echo "FAIL: stage3 failed"; exit 1; }
-	@echo "✓ Stage 3: Generated $$(wc -l < build/verify/stage3.c) lines of C code"
-	@cat build/verify/stage3.time
+	./mojo.py mojo.mojo mojo.mojo --dump-all mojo.mojo > build/verify/stage3.c 2> build/dump/stage3.log
+	@for f in $(MOJO_SRCS); do \
+		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
+		./mojo.py mojo.mojo mojo.mojo --dump-all $$f > build/validate/$$base.stage3.c 2>/dev/null || true; \
+	done
 
-# Verification: Stage 2 == Stage 3 (both Mojo-based)
 verify: stage3
-	@echo ""
-	@echo "Verification: comparing stage2 vs stage3 (both Mojo-based)..."
-	@diff -q build/verify/stage2.dump build/verify/stage3.dump >/dev/null 2>&1 && \
-	    { echo "✓ Bootstrap successful (stage2 == stage3)"; } || \
-	    { echo "✗ FAIL: Mojo stages differ — not deterministic"; exit 1; }
+	@if ! diff -q build/verify/stage1.c build/verify/stage2.c > /dev/null 2>&1; then \
+		echo "FAIL: build/dump/stage2.log"; \
+		exit 1; \
+	fi
+	@if ! diff -q build/verify/stage2.c build/verify/stage3.c > /dev/null 2>&1; then \
+		echo "FAIL: build/dump/stage3.log"; \
+		exit 1; \
+	fi
 
+validate-all:
+	./mojo.py bootstrap-validate.mojo
+
+bootstrap: verify validate-all
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
 	@test -f ../apex/.venv/bin/python3 || \
@@ -172,7 +170,7 @@ CC_ENV           := $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
 build/mojo_logic.c: $(MOJO_CLI) $(MOJO_MAIN)
 	@echo "  stage1: dumping GIMPLE from mojo_main.mojo..."
 	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > $@ || \
-	    { echo "FAIL stage1: --dump-gimple mojo/mojo_main.mojo failed"; rm -f $@; exit 1; }
+	    { echo "FAIL stage1: --dump-gimple mojo.mojo failed"; rm -f $@; exit 1; }
 
 $(STAGE1_BIN): build/mojo_logic.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@mkdir -p stage1
@@ -202,10 +200,7 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 # Stage 4: verify bootstrap by comparing intermediate artifacts
 
 clean:
-	rm -f mojo_compiler.py
-	rm -f $(DYLIB)
-	rm -f $(STDLIB_DYLIB)
-	rm -f $(MOJO_CLI)
+	rm -rf build
 
 clean-bootstrap:
 	rm -f build/mojo_logic.c build/mojo_logic2.c

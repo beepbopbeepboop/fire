@@ -273,7 +273,7 @@ class Interpreter:
 
     def execute_ExprStmt(self, node: N.ExprStmt):
         """Execute expression statement."""
-        return self.eval_expr(node.expr)
+        return self.eval_expr(node.value)
 
     def execute_PassStmt(self, node: N.PassStmt):
         """Execute pass statement."""
