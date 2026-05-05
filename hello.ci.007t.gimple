@@ -1,0 +1,30 @@
+int _gimple_main ()
+{
+  mojo_print ("Hello, World!");
+  mojo_print ("\n");
+  return 0;
+}
+
+
+int main ()
+{
+  int D.12871;
+
+  {
+    int result;
+
+    # DEBUG BEGIN_STMT
+    Py_Initialize ();
+    # DEBUG BEGIN_STMT
+    result = _gimple_main ();
+    # DEBUG BEGIN_STMT
+    Py_Finalize ();
+    # DEBUG BEGIN_STMT
+    D.12871 = result;
+    return D.12871;
+  }
+  D.12871 = 0;
+  return D.12871;
+}
+
+

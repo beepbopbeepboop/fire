@@ -1,0 +1,28 @@
+int main ()
+{
+  intD.6 D.12881;
+
+  {
+    # USE = anything 
+    # CLB = anything 
+    printfD.1736 ("Before init\n");
+    # USE = anything 
+    # CLB = anything 
+    Py_InitializeD.11990 ();
+    # USE = anything 
+    # CLB = anything 
+    printfD.1736 ("After init\n");
+    # USE = anything 
+    # CLB = anything 
+    Py_FinalizeD.11994 ();
+    # USE = anything 
+    # CLB = anything 
+    printfD.1736 ("After finalize\n");
+    D.12881 = 0;
+    return D.12881;
+  }
+  D.12881 = 0;
+  return D.12881;
+}
+
+

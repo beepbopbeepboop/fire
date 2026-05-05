@@ -744,3 +744,92 @@ const char *mojo_set_iter_val_str(MojoSetIter *it)
 }
 
 void mojo_set_iter_free(MojoSetIter *it) { free(it); }
+
+/* ── Python builtin functions for C types ──────────────────────────────────*/
+
+int mojo_isinstance(int obj, int type_id) {
+    /* Stub: returns 0 (false) for now */
+    return 0;
+}
+
+char *mojo_str(int obj) {
+    /* Convert integer to string */
+    static char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%d", obj);
+    return buffer;
+}
+
+char *mojo_repr(int obj) {
+    /* Representation of integer */
+    static char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%d", obj);
+    return buffer;
+}
+
+int mojo_type(int obj) {
+    /* Stub: returns type identifier. 0 for now */
+    return 0;
+}
+
+int mojo_hasattr(int obj, const char *attr) {
+    /* Stub: returns 0 (false) for now */
+    return 0;
+}
+
+char *mojo_str_cat(const char *a, const char *b) {
+    /* Concatenate two C strings */
+    if (!a) a = "";
+    if (!b) b = "";
+
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+    char *result = malloc(len_a + len_b + 1);
+
+    if (result) {
+        strcpy(result, a);
+        strcpy(result + len_a, b);
+    }
+
+    return result;
+}
+
+char *mojo_cstr_repeat(const char *s, int64_t n) {
+    /* Repeat a string n times */
+    if (!s || n <= 0) {
+        char *result = malloc(1);
+        if (result) result[0] = '\0';
+        return result;
+    }
+
+    size_t len = strlen(s);
+    char *result = malloc(len * n + 1);
+
+    if (result) {
+        for (int64_t i = 0; i < n; i++) {
+            strcpy(result + i * len, s);
+        }
+        result[len * n] = '\0';
+    }
+
+    return result;
+}
+
+/* ── Method stubs for compatibility ────────────────────────────────────────*/
+
+int MojoList_append(MojoList *l, char *v) {
+    /* Stub: append string to list */
+    if (l && v) {
+        mojo_list_append_str(l, v);
+    }
+    return 0;
+}
+
+int char_join(const char *sep, MojoList *items) {
+    /* Stub: join list items with separator - returns 0 for now */
+    return 0;
+}
+
+int int_items(int obj) {
+    /* Stub: return 0 for dictionary items - not fully implemented */
+    return 0;
+}

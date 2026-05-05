@@ -130,6 +130,20 @@ void     mojo_set_print(MojoSet *s);
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(const char *str);
 
+/* Python built-in functions for C strings */
+int mojo_isinstance(int obj, int type_id);
+char *mojo_str(int obj);
+char *mojo_repr(int obj);
+int mojo_type(int obj);
+int mojo_hasattr(int obj, const char *attr);
+char *mojo_str_cat(const char *a, const char *b);
+char *mojo_cstr_repeat(const char *s, int64_t n);
+
+/* Method stubs for compatibility */
+int MojoList_append(MojoList *l, char *v);
+int char_join(const char *sep, MojoList *items);
+int int_items(int obj);
+
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
 
