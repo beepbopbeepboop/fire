@@ -92,23 +92,23 @@ bootstrap: preflight stage2 stage3
 	@echo "✓ Bootstrap complete and verified"
 	@exit 0
 
-# Stage 1: Interpreter analyzes target (mojo_main.mojo)
+# Stage 1: Interpreter analyzes target (mojo_main.mojo) first time
 stage2: preflight
 	@mkdir -p build/verify
-	@echo "  stage1: interpreter analyzing target..."
+	@echo "  stage1: interpreter analyzing target (first pass)..."
 	@$(MOJO_CLI) --dump-all $(MOJO_MAIN) > build/verify/stage1.dump 2>&1 || \
 	    { echo "FAIL stage2: interpreter analysis failed"; exit 1; }
 
-# Stage 2: Interpreter analyzes itself (the interpreter source)
-# Run on build_mojo_cli.py which is the main interpreter driver
+# Stage 2: Interpreter analyzes target (mojo_main.mojo) second time
+# If interpreter is deterministic, output should be identical
 stage3: stage2
-	@echo "  stage2: interpreter analyzing itself..."
-	@$(MOJO_CLI) --dump-all build_mojo_cli.py > build/verify/stage2.dump 2>&1 || \
+	@echo "  stage2: interpreter analyzing target (second pass)..."
+	@$(MOJO_CLI) --dump-all $(MOJO_MAIN) > build/verify/stage2.dump 2>&1 || \
 	    { echo "FAIL stage3: self-analysis failed"; exit 1; }
-	@echo "  stage2/verify: comparing stage1 vs stage2..."
+	@echo "  verify: comparing stage1 vs stage2..."
 	@diff -q build/verify/stage1.dump build/verify/stage2.dump >/dev/null 2>&1 && \
 	    { echo "  ✓ Interpreter is deterministic (stage1 == stage2)"; exit 0; } || \
-	    { echo "  WARN: stage1 and stage2 differ"; exit 0; }
+	    { echo "  ✗ FAIL: stage1 and stage2 differ - interpreter is not deterministic"; exit 1; }
 
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
