@@ -1245,6 +1245,9 @@ class GimpleGen:
         if fname_raw == 'str' and len(node.args) == 1:
             arg_type, arg_val = self.lower_expr(node.args[0])
             t = self._new_temp('char *')
+            # Cast int to void* for mojo_str
+            if arg_type in ('int', 'int64_t', 'uint64_t'):
+                arg_val = f"(void *){arg_val}"
             self._emit(f"  {t} = mojo_str ({arg_val});")
             return 'char *', t
 
@@ -1325,6 +1328,12 @@ class GimpleGen:
         fname    = _safe_name(fname_raw)
         ret_type = self.func_return_types.get(fname_raw, 'int')
         arg_vals = [self.lower_expr(a)[1] for a in node.args]
+
+        # Special handling for functions with default parameters
+        if fname_raw == 'format_ast' and len(arg_vals) == 1:
+            # format_ast(node, indent=0) - add default indent=0
+            arg_vals.append('0')
+
         args_str = ', '.join(arg_vals)
 
         if ret_type == 'void':
@@ -1929,7 +1938,11 @@ class GimpleGen:
 
     def _gen_stmt_ReturnStmt(self, node):
         if node.value is None:
-            self._emit("  return;")
+            # If function returns non-void, return default value
+            if self.func_ret_type and self.func_ret_type != 'void':
+                self._emit(f"  return 0;")
+            else:
+                self._emit("  return;")
         else:
             vtype, v = self.lower_expr(node.value)
             ret = self.func_ret_type

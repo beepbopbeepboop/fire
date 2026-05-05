@@ -132,7 +132,7 @@ void mojo_print(const char *str);
 
 /* Python built-in functions for C strings */
 int mojo_isinstance(int obj, int type_id);
-char *mojo_str(int obj);
+char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr(int obj);
 int mojo_type(int obj);
 int mojo_hasattr(int obj, const char *attr);
@@ -151,3 +151,15 @@ MojoFileHandle mojo_open(const char *filename, const char *mode);
 void mojo_close(MojoFileHandle fh);
 int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
+
+/* Module function stubs */
+MojoFileHandle mojo_python_open(const char *filename);
+char *mojo_python_read(MojoFileHandle fh);
+int int_read(int fh);
+void *mojo_parse(const char *source);
+MojoList *mojo_tokenize(const char *source);
+
+/* Builtin functions that may be called directly - flexible signatures for compatibility */
+int open(int path);
+int parse(int src);
+int tokenize(int src);

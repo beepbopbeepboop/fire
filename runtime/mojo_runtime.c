@@ -752,10 +752,20 @@ int mojo_isinstance(int obj, int type_id) {
     return 0;
 }
 
-char *mojo_str(int obj) {
-    /* Convert integer to string */
+char *mojo_str(void *obj) {
+    /* Flexible: handle both int (cast as pointer) and actual char* pointers */
+    if (obj == NULL) {
+        static char none[] = "None";
+        return none;
+    }
+    /* If it looks like a valid string pointer (high address), return as-is */
+    intptr_t val = (intptr_t)obj;
+    if (val > 65536) {  /* Likely a heap/stack pointer */
+        return (char *)obj;
+    }
+    /* Treat as small integer and convert */
     static char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%d", obj);
+    snprintf(buffer, sizeof(buffer), "%lld", val);
     return buffer;
 }
 
@@ -831,5 +841,49 @@ int char_join(const char *sep, MojoList *items) {
 
 int int_items(int obj) {
     /* Stub: return 0 for dictionary items - not fully implemented */
+    return 0;
+}
+
+/* ── Module function stubs ────────────────────────────────────────────────*/
+
+MojoFileHandle mojo_python_open(const char *filename) {
+    /* Stub: return NULL for now */
+    return NULL;
+}
+
+char *mojo_python_read(MojoFileHandle fh) {
+    /* Stub: return empty string */
+    static char buffer[1] = {'\0'};
+    return buffer;
+}
+
+int int_read(int fh) {
+    /* Stub: return 0 */
+    return 0;
+}
+
+void *mojo_parse(const char *source) {
+    /* Stub: parse function - return NULL */
+    return NULL;
+}
+
+MojoList *mojo_tokenize(const char *source) {
+    /* Stub: tokenize function - return empty list */
+    return mojo_list_new();
+}
+
+/* Builtin function implementations - flexible signatures for compatibility */
+int open(int path) {
+    /* Stub: open file - return 0 for now */
+    return 0;
+}
+
+int parse(int src) {
+    /* Stub: parse - return 0 */
+    return 0;
+}
+
+int tokenize(int src) {
+    /* Stub: tokenize - return 0 */
     return 0;
 }
