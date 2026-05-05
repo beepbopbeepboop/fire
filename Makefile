@@ -168,9 +168,9 @@ CC_FLAGS         = -fgimple -I runtime
 GCC_MP15         = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC     = $(shell test -x $(GCC_MP15) && echo $(GCC_MP15) || echo gcc)
 
-# Set SDKROOT for compilation (macOS)
-SDKROOT          = $(shell xcrun --show-sdk-path 2>/dev/null)
-CC_ENV           = $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
+# Set SDKROOT for compilation (macOS) — := for single evaluation
+SDKROOT          := $(shell xcrun --show-sdk-path 2>/dev/null)
+CC_ENV           := $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
 
 # Stage 2: compile Mojo compiler with Python build/mojo → stage1/mojo
 # Two steps: dump GIMPLE C from mojo_main.mojo, then link with compiler_main.c
