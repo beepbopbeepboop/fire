@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'True', 'break', 'from', 'deinit', 'else', 'trait', 'return', 'with', 'pass', 'is', 'continue', 'def', 'import', 'raises', 'mut', 'assert', 'let', 'var', 'not', 'out', 'in', 'except', 'if', 'or', 'for', 'while', 'comptime', 'ref', 'read', 'struct', 'as', 'finally', 'class', 'fn', 'elif', 'try', 'raise', 'False', 'and'}
+_KEYWORDS = {'if', 'with', 'read', 'ref', 'fn', 'from', 'def', 'finally', 'for', 'raise', 'while', 'break', 'True', 'comptime', 'or', 'in', 'and', 'let', 'continue', 'try', 'except', 'not', 'elif', 'raises', 'out', 'is', 'assert', 'mut', 'struct', 'trait', 'class', 'pass', 'deinit', 'else', 'as', 'False', 'import', 'var', 'return'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -741,14 +741,19 @@ class Parser:
 
     def _parse_var_decl(self):
         self._expect("KW", 'var')
-        name = self._expect("NAME").value
+        # Allow KW tokens as variable names (e.g., "out", "fn", "class")
+        t = self._peek()
+        if t.kind == "NAME": name = self._advance().value
+        elif t.kind == "KW": name = self._advance().value
+        else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Check for tuple unpacking (var a, b, c = ...)
         if self._peek().kind == "COMMA":
             names = [name]
             while self._peek().kind == "COMMA":
                 self._advance()
-                if self._peek().kind == "NAME":
-                    names.append(self._expect("NAME").value)
+                t = self._peek()
+                if t.kind == "NAME": names.append(self._advance().value)
+                elif t.kind == "KW": names.append(self._advance().value)
                 elif self._peek().kind == "ASSIGN": break
                 else: break
             # Tuple unpacking: create as single VarDecl with tuple name
@@ -799,28 +804,12 @@ class Parser:
         # Skip optional convention keyword (var, ref, mut, etc.)
         if self._is_kw(*self._CONV_KWS):
             self._advance()
-        # Handle tuple unpacking: for (a, b) in ... or for a, b in ... or nested (a, (b, c))
+        # Handle tuple unpacking: for (a, b) in ... or for a, b in ...
         if self._peek().kind == "LPAREN":
             self._advance()
             names = []
             while self._peek().kind != "RPAREN":
-                if self._peek().kind == "LPAREN":
-                    # Nested tuple: recursively parse and add as a unit
-                    self._advance()
-                    nested = []
-                    while self._peek().kind != "RPAREN":
-                        if self._peek().kind in ("NAME", "KW"):
-                            nested.append(self._advance().value)
-                        elif self._peek().kind == "COMMA":
-                            self._advance()
-                        elif self._peek().kind == "LPAREN":
-                            # Further nesting: for simplicity, skip detailed parsing
-                            break
-                        else:
-                            break
-                    self._expect("RPAREN")
-                    names.append("(" + ", ".join(nested) + ")")
-                elif self._peek().kind in ("NAME", "KW"):
+                if self._peek().kind in ("NAME", "KW"):
                     names.append(self._advance().value)
                 elif self._peek().kind == "COMMA":
                     self._advance()
@@ -851,7 +840,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'var', 'out', 'deinit', 'read', 'mut', 'ref'}
+    _CONV_KWS = {'var', 'read', 'ref', 'out', 'deinit', 'mut'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -882,9 +871,11 @@ class Parser:
                 # Handle convention keywords after * (e.g., *, var x: Int)
                 while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
                     conv = self._advance().value
-                # If followed by NAME, it's a variadic parameter (*args) or keyword-only param
-                if self._peek().kind == "NAME":
-                    pname = self._expect("NAME").value
+                # If followed by NAME/KW, it's a variadic parameter (*args) or keyword-only param
+                t = self._peek()
+                if t.kind in ("NAME", "KW"):
+                    if t.kind == "NAME": pname = self._advance().value
+                    else: pname = self._advance().value
                     ptype = None
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
@@ -904,7 +895,11 @@ class Parser:
             if self._peek().kind == "RPAREN": break
             # Skip lifetime parameters in brackets: ref[origin] param_name
             if self._peek().kind == "LBRACKET": self._skip_bracketed()
-            pname = self._expect("NAME").value
+            # Allow KW tokens as parameter names (e.g., "if", "out")
+            t = self._peek()
+            if t.kind == "NAME": pname = self._advance().value
+            elif t.kind == "KW": pname = self._advance().value
+            else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
             ptype = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
@@ -1456,7 +1451,11 @@ class Parser:
                 else: name += t.value
             name += ")"
             return name
-        name = prefix + self._expect("NAME").value
+        # Allow KW tokens as type names (e.g., "let", "var", "if")
+        t = self._peek()
+        if t.kind == "NAME": name = prefix + self._advance().value
+        elif t.kind == "KW": name = prefix + self._advance().value
+        else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
