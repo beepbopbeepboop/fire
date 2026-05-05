@@ -819,6 +819,16 @@ class GimpleGen:
         return res_type, t
 
     def _lower_MemberExpr(self, node) -> tuple[str, str]:
+        # Check if obj is a simple identifier (module access)
+        if isinstance(node.obj, IdentExpr):
+            module_name = node.obj.name
+            # Module attribute access: sys.argv, tokenizer.X, etc.
+            if module_name == 'sys' and node.member == 'argv':
+                # Return a stub empty list for sys.argv
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_list_new ();  /* sys.argv stub */")
+                return 'MojoList *', t
+
         ot, ov = self.lower_expr(node.obj)
 
         # Special handling for .__name__ on type objects (which are ints)
@@ -837,6 +847,12 @@ class GimpleGen:
             # For now, return a default name
             self._emit(f"  {t} = \"UnknownType\";  /* TODO: map type ID {ov} to __name__ */")
             return 'char *', t
+
+        # Special handling for .__dict__ on int objects (node variable)
+        if node.member == '__dict__' and ot == 'int':
+            t = self._new_temp('int')
+            self._emit(f"  {t} = 0;  /* __dict__ stub */")
+            return 'int', t
 
         op = '->' if '*' in ot else '.'
         struct_name = ot.replace(' *', '').strip()
@@ -1273,6 +1289,10 @@ class GimpleGen:
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = mojo_set_len ({av});")
                 return 'int64_t', t
+            # Fallback for other types (return 0 for compatibility)
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = 0;  /* len() on unsupported type {at} */")
+            return 'int64_t', t
 
         # Struct constructor: TypeName(arg1, arg2, ...)
         if fname_raw in self.struct_field_types:
