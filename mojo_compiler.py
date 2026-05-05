@@ -1,33 +1,7 @@
 """Generated Mojo compiler — produced by compiler_gen.py from .md spec."""
 from __future__ import annotations
 import re
-import time
 from dataclasses import dataclass, field
-
-# ── Timer utilities ────────────────────────────────────────────────
-import sys
-class Timer:
-    def __init__(self, name=""):
-        self.name = name
-        self.start_time = time.perf_counter()
-
-    def elapsed_us(self):
-        return int((time.perf_counter() - self.start_time) * 1e6)
-
-    def elapsed_ms(self):
-        return (time.perf_counter() - self.start_time) * 1e3
-
-    def report(self):
-        elapsed = self.elapsed_us()
-        if elapsed < 1000:
-            msg = f"{elapsed}µs"
-        elif elapsed < 1000000:
-            msg = f"{elapsed/1000:.1f}ms"
-        else:
-            msg = f"{elapsed/1e6:.2f}s"
-        if self.name:
-            print(f"⏱ {self.name}: {msg}", file=sys.stderr)
-        return msg
 
 # ── Mojo pointer type shims ────────────────────────────────────────
 class _MojoPointerBase:
@@ -371,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'mut', 'trait', 'is', 'if', 'deinit', 'break', 'assert', 'False', 'True', 'except', 'or', 'while', 'fn', 'ref', 'struct', 'try', 'as', 'elif', 'pass', 'in', 'let', 'def', 'continue', 'class', 'return', 'for', 'else', 'read', 'from', 'and', 'comptime', 'raises', 'import', 'finally', 'with', 'not', 'out', 'var', 'raise'}
+_KEYWORDS = {'fn', 'else', 'not', 'is', 'struct', 'except', 'continue', 'trait', 'if', 'pass', 'import', 'out', 'deinit', 'for', 'var', 'in', 'mut', 'assert', 'raise', 'elif', 'return', 'let', 'class', 'try', 'with', 'read', 'and', 'as', 'from', 'while', 'def', 'comptime', 'finally', 'or', 'True', 'False', 'break', 'ref', 'raises'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -866,7 +840,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'out', 'deinit', 'ref', 'mut', 'read', 'var'}
+    _CONV_KWS = {'mut', 'deinit', 'out', 'ref', 'read', 'var'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -1702,144 +1676,11 @@ def compile(src: str) -> str:
     stmts  = Parser(tokens).parse_module()
     return emit_module(stmts)
 
-# ── Bootstrap compiler path (interpreter-based) ────────────────────
-def _generate_c_from_ast(stmts, src=None):
-    """Generate valid C code from AST for bootstrap compilation.
-
-    If src is provided, uses the real Python tokenizer to count tokens.
-    """
-    lines = []
-    lines.append("#include \"mojo_runtime.h\"")
-    lines.append("#include <stdio.h>")
-    lines.append("")
-
-    functions = []
-    for stmt in stmts:
-        if isinstance(stmt, FunctionDef):
-            functions.append(stmt)
-
-    # Forward declarations
-    for func in functions:
-        if func.name in ('mojo_gimple', 'mojo_pyir'):
-            lines.append(f"MojoStr* {func.name}(MojoStr *src);")
-        elif func.name in ('mojo_tokens', 'mojo_ast'):
-            lines.append(f"void {func.name}(MojoStr *src);")
-        else:
-            lines.append(f"MojoStr* {func.name}(MojoStr *src);")
-
-    lines.append("")
-
-    # If we have source, use real tokenization
-    real_token_count = None
-    real_function_count = None
-    if src:
-        try:
-            # Use the real tokenizer to count tokens
-            real_tokens = tokenize(src)
-            real_token_count = len([t for t in real_tokens if t.kind not in ('NEWLINE', 'INDENT', 'DEDENT', 'EOF')])
-            real_function_count = len([s for s in stmts if isinstance(s, FunctionDef)])
-        except:
-            pass
-
-    # Helper functions for fallback (simple) compilation
-    lines.append("/* __ Helper functions for compilation __ */")
-    lines.append("static int count_tokens(const char *src) {")
-    lines.append("    int count = 0;")
-    lines.append("    for (int i = 0; src[i]; i++) {")
-    lines.append("        if (src[i] == '(' || src[i] == ')' || src[i] == ':' || src[i] == '=') count++;")
-    lines.append("    }")
-    lines.append("    return count;")
-    lines.append("}")
-    lines.append("")
-    lines.append("static int count_functions(const char *src) {")
-    lines.append("    int count = 0;")
-    lines.append("    for (int i = 0; src[i]; i++) {")
-    lines.append("        if ((i == 0 || src[i-1] == '\\n') && src[i] == 'd' &&")
-    lines.append("            src[i+1] == 'e' && src[i+2] == 'f' && src[i+3] == ' ') {")
-    lines.append("            count++;")
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("    return count;")
-    lines.append("}")
-    lines.append("")
-
-    # Function implementations
-    for func in functions:
-        # Special handling for compiler functions
-        if func.name == 'mojo_gimple':
-            lines.append("MojoStr* mojo_gimple(MojoStr *src) {")
-            lines.append("    const char *src_data = mojo_str_data(src);")
-            if real_token_count is not None:
-                # Use the real counts from Python tokenizer
-                lines.append(f"    int tokens = {real_token_count};")
-                lines.append(f"    int funcs = {real_function_count};")
-            else:
-                # Fallback to simple counting
-                lines.append("    int tokens = count_tokens(src_data);")
-                lines.append("    int funcs = count_functions(src_data);")
-            lines.append("    char output[4096];")
-            lines.append("    snprintf(output, sizeof(output),")
-            lines.append('        "#include <stdio.h>\\\\n#include \\\\\\"mojo_runtime.h\\\\\\"\\\\n'
-                         'MojoStr*mojo_gimple(MojoStr*s){return mojo_str_new('
-                         '\\\\\\"/* stage: %d funcs, %d tokens */\\\\\\\\nint main(){return 0;}\\\\\\"'
-                         ');}'
-                         'MojoStr*mojo_pyir(MojoStr*s){return mojo_gimple(s);}'
-                         'void mojo_tokens(MojoStr*s){}'
-                         'void mojo_ast(MojoStr*s){}\\\\n",'
-                         '        funcs, tokens);')
-            lines.append("    return mojo_str_new(output);")
-            lines.append("}")
-        elif func.name == 'mojo_pyir':
-            lines.append("MojoStr* mojo_pyir(MojoStr *src) {")
-            lines.append("    return mojo_gimple(src);")
-            lines.append("}")
-        elif func.name == 'mojo_tokens':
-            lines.append("void mojo_tokens(MojoStr *src) {")
-            lines.append("    const char *src_data = mojo_str_data(src);")
-            lines.append("    int count = count_tokens(src_data);")
-            lines.append("    printf(\"/* %d tokens found */\\\\n\", count);")
-            lines.append("}")
-        elif func.name == 'mojo_ast':
-            lines.append("void mojo_ast(MojoStr *src) {")
-            lines.append("    const char *src_data = mojo_str_data(src);")
-            lines.append("    int funcs = count_functions(src_data);")
-            lines.append("    printf(\"/* %d functions found */\\\\n\", funcs);")
-            lines.append("}")
-        else:
-            # Generic function implementation
-            if func.name in ('tokenize', 'parse', 'compile'):
-                lines.append(f"MojoStr* {func.name}(MojoStr *src) {{")
-                lines.append(f'    return mojo_str_new("");')
-                lines.append("}")
-            else:
-                lines.append(f"MojoStr* {func.name}(MojoStr *src) {{")
-                lines.append(f'    return mojo_str_new("");')
-                lines.append("}")
-
-        lines.append("")
-
-    return "\n".join(lines)
-
-
 def compile_with_interpreter(src: str) -> str:
-    """Compile by parsing and interpreting the AST."""
-    timer = Timer("interpret")
-    try:
-        tokens = tokenize(src)
-        stmts = Parser(tokens).parse_module()
-        # Validate: parse succeeded, now generate C from AST
-        # Pass src so we get real token and function counts
-        result = _generate_c_from_ast(stmts, src=src)
-        timer.report()
-        return result
-    except Exception as e:
-        return f"""/* interpret error: {e} */
-#include <stdio.h>
-int main() {{
-    printf("/* compilation error: {e} */\\n");
-    return 1;
-}}"""
-
+    # Compile Mojo source to GIMPLE C using gimple_codegen.
+    # This is the interpreter-based compilation path used during bootstrap.
+    from gimple_codegen import compile_to_gimple
+    return compile_to_gimple(src)
 
 if __name__ == '__main__':
     import sys

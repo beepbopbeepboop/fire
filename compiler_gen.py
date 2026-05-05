@@ -2151,6 +2151,12 @@ class PythonCompilerGen:
                 stmts  = Parser(tokens).parse_module()
                 return emit_module(stmts)
 
+            def compile_with_interpreter(src: str) -> str:
+                # Compile Mojo source to GIMPLE C using gimple_codegen.
+                # This is the interpreter-based compilation path used during bootstrap.
+                from gimple_codegen import compile_to_gimple
+                return compile_to_gimple(src)
+
             if __name__ == '__main__':
                 import sys
                 src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()

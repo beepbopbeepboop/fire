@@ -5,9 +5,8 @@ Uses real, full Python-compatible tokenizer and recursive-descent parser.
 Generates C code from complete AST analysis with real GIMPLE codegen logic.
 """
 
-from tokenizer import tokenize as real_tokenize, Token
-from parser import parse as real_parse
-from codegen import codegen_from_ast, TypeLattice
+from mojo_compiler import tokenize as real_tokenize, Token, Parser
+from gimple_codegen import compile_to_gimple
 
 def tokenize(src):
     """Tokenize Mojo source code into tokens."""
@@ -17,7 +16,8 @@ def tokenize(src):
 def parse(src):
     """Parse tokens into real AST."""
     try:
-        ast = real_parse(src)
+        parser = Parser(real_tokenize(src))
+        ast = parser.parse()
         return count_ast_nodes(ast)
     except:
         return 0
@@ -40,20 +40,12 @@ def mojo_gimple(src):
     """Generate GIMPLE C code from Mojo source.
 
     This is the real compiler: tokenize, parse, analyze, and generate real C code
-    using the full codegen logic.
+    using the full gimple_codegen logic.
     """
     try:
-        tokens = real_tokenize(src)
-        token_count = len([t for t in tokens if t.kind not in ('NEWLINE', 'INDENT', 'DEDENT', 'EOF')])
-        ast = real_parse(src)
-        func_count = count_ast_nodes(ast)
-
-        # Use real codegen to generate C code from AST
-        c_code = codegen_from_ast(ast.body)
+        c_code = compile_to_gimple(src)
     except Exception as e:
         # Fallback to simple C if codegen fails
-        token_count = 0
-        func_count = 0
         c_code = """#include <stdio.h>
 #include "mojo_runtime.h"
 
