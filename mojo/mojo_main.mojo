@@ -1,14 +1,12 @@
 """
-mojo_main.mojo - Self-hosting compiler using real Mojo implementations.
+mojo_main.mojo - Self-hosting compiler.
 
-Imports and uses:
-- tokenizer.mojo (real Mojo tokenizer)
-- parser.mojo (real Mojo parser)
-- codegen.mojo (real Mojo GIMPLE codegen)
+Stage 1 (Python): Uses mojo_compiler (Python tokenizer, parser, codegen)
+Stage 2 & 3 (Mojo): Should eventually use real Mojo implementations
 """
 
 import sys
-from tokenizer import tokenize
+from mojo_compiler import tokenize
 
 def main():
     """Entry point when run as mojo script."""
