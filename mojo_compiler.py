@@ -1670,13 +1670,267 @@ def emit(node, indent: int = 0) -> str:
     # Transfer sigil ^ is stripped by the tokenizer (XFER ignored)
     raise TypeError(f"Cannot emit {type(node).__name__}")
 
+# ── AST Interpreter ────────────────────────────────────────────────────
+class Interpreter:
+    """Execute Mojo AST."""
+
+    def __init__(self):
+        self.globals = {}
+        self.locals_stack = [{}]  # Stack of local scopes
+        self._init_builtins()
+
+    def _init_builtins(self):
+        """Register built-in functions."""
+        builtins = {
+            'print': lambda *args, **kw: print(*args),
+            'len': len,
+            'range': range,
+            'str': str,
+            'int': int,
+            'float': float,
+            'bool': bool,
+            'list': list,
+            'dict': dict,
+            'set': set,
+            'tuple': tuple,
+            'type': type,
+            'isinstance': isinstance,
+            'abs': abs,
+            'min': min,
+            'max': max,
+            'sum': sum,
+            'any': any,
+            'all': all,
+            'enumerate': enumerate,
+            'zip': zip,
+            'reversed': reversed,
+            'sorted': sorted,
+            'repr': repr,
+        }
+        self.globals.update(builtins)
+
+    def _get_var(self, name: str):
+        """Look up variable in local then global scope."""
+        for scope in reversed(self.locals_stack):
+            if name in scope:
+                return scope[name]
+        if name in self.globals:
+            return self.globals[name]
+        raise NameError(f"name '{name}' is not defined")
+
+    def _set_var(self, name: str, value):
+        """Set variable in current local scope."""
+        self.locals_stack[-1][name] = value
+
+    def eval_expr(self, node):
+        """Evaluate an expression node."""
+        if node is None:
+            return None
+
+        if isinstance(node, IntLiteral):
+            return int(node.value)
+        if isinstance(node, FloatLiteral):
+            return float(node.value)
+        if isinstance(node, StringLiteral):
+            return node.value
+        if isinstance(node, BoolLiteral):
+            return node.value
+        if isinstance(node, IdentExpr):
+            return self._get_var(node.name)
+
+        if isinstance(node, ListExpr):
+            return [self.eval_expr(e) for e in node.elements]
+        if isinstance(node, DictExpr):
+            return {self.eval_expr(k): self.eval_expr(v) for k, v in node.pairs}
+        if isinstance(node, SetExpr):
+            return {self.eval_expr(e) for e in node.elements}
+        if isinstance(node, TupleExpr):
+            return tuple(self.eval_expr(e) for e in node.elements)
+
+        if isinstance(node, BinaryOp):
+            left = self.eval_expr(node.left)
+            right = self.eval_expr(node.right)
+            ops = {
+                '+': lambda a, b: a + b,
+                '-': lambda a, b: a - b,
+                '*': lambda a, b: a * b,
+                '/': lambda a, b: a / b,
+                '//': lambda a, b: a // b,
+                '%': lambda a, b: a % b,
+                '**': lambda a, b: a ** b,
+                '==': lambda a, b: a == b,
+                '!=': lambda a, b: a != b,
+                '<': lambda a, b: a < b,
+                '<=': lambda a, b: a <= b,
+                '>': lambda a, b: a > b,
+                '>=': lambda a, b: a >= b,
+                'and': lambda a, b: a and b,
+                'or': lambda a, b: a or b,
+                '&': lambda a, b: a & b,
+                '|': lambda a, b: a | b,
+                '^': lambda a, b: a ^ b,
+                '<<': lambda a, b: a << b,
+                '>>': lambda a, b: a >> b,
+            }
+            if node.op in ops:
+                return ops[node.op](left, right)
+            raise ValueError(f"Unknown binary op: {node.op}")
+
+        if isinstance(node, UnaryOp):
+            operand = self.eval_expr(node.operand)
+            ops = {
+                '-': lambda a: -a,
+                '+': lambda a: +a,
+                '~': lambda a: ~a,
+                'not': lambda a: not a,
+            }
+            if node.op in ops:
+                return ops[node.op](operand)
+            raise ValueError(f"Unknown unary op: {node.op}")
+
+        if isinstance(node, CallExpr):
+            func = self.eval_expr(node.func)
+            args = [self.eval_expr(arg) for arg in node.args]
+            return func(*args)
+
+        if isinstance(node, MemberExpr):
+            obj = self.eval_expr(node.obj)
+            return getattr(obj, node.member)
+
+        if isinstance(node, SubscriptExpr):
+            obj = self.eval_expr(node.obj)
+            idx = self.eval_expr(node.index)
+            return obj[idx]
+
+        if isinstance(node, TernaryExpr):
+            cond = self.eval_expr(node.condition)
+            if cond:
+                return self.eval_expr(node.then_val)
+            else:
+                return self.eval_expr(node.else_val)
+
+        raise NotImplementedError(f"Cannot evaluate {type(node).__name__}")
+
+    def exec_stmt(self, node):
+        """Execute a statement node."""
+        if node is None:
+            return
+
+        if isinstance(node, PassStmt):
+            return
+
+        if isinstance(node, ExprStmt):
+            self.eval_expr(node.value)
+            return
+
+        if isinstance(node, AssignStmt):
+            value = self.eval_expr(node.value)
+            if isinstance(node.target, IdentExpr):
+                self._set_var(node.target.name, value)
+            elif isinstance(node.target, TupleExpr):
+                for i, t in enumerate(node.target.elements):
+                    if isinstance(t, IdentExpr):
+                        self._set_var(t.name, value[i])
+            else:
+                raise NotImplementedError(f"Assignment to {type(node.target).__name__}")
+            return
+
+        if isinstance(node, VarDecl):
+            value = self.eval_expr(node.value) if node.value else None
+            self._set_var(node.name, value)
+            return
+
+        if isinstance(node, IfStmt):
+            cond = self.eval_expr(node.condition)
+            if cond:
+                for stmt in node.then_body:
+                    self.exec_stmt(stmt)
+            else:
+                for elif_cond, elif_body in node.elifs:
+                    cond = self.eval_expr(elif_cond)
+                    if cond:
+                        for stmt in elif_body:
+                            self.exec_stmt(stmt)
+                        return
+                if node.else_body:
+                    for stmt in node.else_body:
+                        self.exec_stmt(stmt)
+            return
+
+        if isinstance(node, WhileStmt):
+            while self.eval_expr(node.condition):
+                for stmt in node.body:
+                    self.exec_stmt(stmt)
+            return
+
+        if isinstance(node, ForStmt):
+            iterable = self.eval_expr(node.iterable)
+            for item in iterable:
+                if isinstance(node.target, IdentExpr):
+                    self._set_var(node.target, item)
+                elif isinstance(node.target, str):  # tuple unpacking
+                    names = node.target.split(',')
+                    for i, name in enumerate(names):
+                        self._set_var(name.strip(), item[i])
+                for stmt in node.body:
+                    self.exec_stmt(stmt)
+            return
+
+        if isinstance(node, FunctionDef):
+            def mojo_func(*args, **kwargs):
+                self.locals_stack.append({})
+                for i, (pname, _) in enumerate(node.params):
+                    if i < len(args):
+                        self._set_var(pname, args[i])
+                for k, v in kwargs.items():
+                    self._set_var(k, v)
+                result = None
+                for stmt in node.body:
+                    if isinstance(stmt, ReturnStmt):
+                        result = self.eval_expr(stmt.value)
+                        break
+                    self.exec_stmt(stmt)
+                self.locals_stack.pop()
+                return result
+            self._set_var(node.name, mojo_func)
+            return
+
+        if isinstance(node, ReturnStmt):
+            # Handled in FunctionDef
+            return
+
+        if isinstance(node, ImportStmt):
+            # TODO: Handle imports properly
+            return
+
+        raise NotImplementedError(f"Cannot execute {type(node).__name__}")
+
+    def execute(self, stmts):
+        """Execute a list of statements."""
+        for stmt in stmts:
+            self.exec_stmt(stmt)
+
 # ── Driver ──────────────────────────────────────────────────────────
 def compile(src: str) -> str:
     tokens = tokenize(src)
     stmts  = Parser(tokens).parse_module()
     return emit_module(stmts)
 
+def interpret(src: str):
+    """Parse and interpret Mojo code (for REPL, testing, bootstrap)."""
+    tokens = tokenize(src)
+    stmts = Parser(tokens).parse_module()
+    interp = Interpreter()
+    interp.execute(stmts)
+    return interp
+
 if __name__ == '__main__':
     import sys
-    src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()
-    print(compile(src))
+    if len(sys.argv) > 1 and sys.argv[1] == '--interpret':
+        # Interpret mode: python mojo_compiler.py --interpret <file.mojo>
+        src = sys.stdin.read() if len(sys.argv) < 3 else open(sys.argv[2]).read()
+        interpret(src)
+    else:
+        # Compile mode: python mojo_compiler.py [file.mojo]
+        src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()
+        print(compile(src))
