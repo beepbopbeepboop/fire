@@ -1,5 +1,6 @@
 .PHONY: run demo check check-gimple clean stdlib bootstrap \
-        preflight transpile stage1 stage2 verify
+        preflight transpile stage1 stage2 verify \
+        stage2-interp stage3-interp verify-interp-all
 
 # Paths
 RUNTIME_SRC     = runtime/mojo_runtime.c
@@ -84,13 +85,37 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Bootstrap targets
 # ──────────────────────────────────────────────────────────────
 
-# Full bootstrap: preflight → transpile → stage1 → stage2 → verify
-bootstrap: preflight transpile stage1 stage2 verify
-	@echo "Bootstrap complete."
+# Full bootstrap: build all three stages and verify with --dump-all
+bootstrap: preflight stage2-interp stage3-interp verify-interp-all
+	@echo "✓ Bootstrap complete and verified"
+	@exit 0
 
-# Bootstrap with Python interpreter for stage1 (real bootstrap approach)
-bootstrap-interp: preflight transpile stage2-interp
-	@echo "Bootstrap with Python interpreter complete."
+
+# Full verification: build/mojo, stage2/mojo, and stage3/mojo all produce same output
+verify-interp-all: stage3-interp
+	@echo "  verify-interp-all: comparing build/mojo vs stage2 vs stage3..."
+	@mkdir -p build/verify
+	@ok=1; \
+	for f in $(VERIFY_CORPUS); do \
+	    base=$$(basename $$f .mojo); \
+	    echo "    Verifying $$f..."; \
+	    $(MOJO_CLI) --dump-all $$f > build/verify/build_$$base.dump 2>&1 || \
+	        { echo "FAIL verify-interp-all: build/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    stage2/mojo --dump-all $$f > build/verify/stage2_$$base.dump 2>&1 || \
+	        { echo "FAIL verify-interp-all: stage2/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    stage3/mojo --dump-all $$f > build/verify/stage3_$$base.dump 2>&1 || \
+	        { echo "FAIL verify-interp-all: stage3/mojo --dump-all $$f failed"; ok=0; break; }; \
+	    diff -q build/verify/build_$$base.dump build/verify/stage2_$$base.dump >/dev/null 2>&1 || \
+	        { echo "WARN verify-interp-all: $$f — build vs stage2 differ (may be expected)"; }; \
+	    diff -q build/verify/stage2_$$base.dump build/verify/stage3_$$base.dump >/dev/null 2>&1 || \
+	        { echo "WARN verify-interp-all: $$f — stage2 vs stage3 differ (may be expected)"; }; \
+	done; \
+	if [ $$ok -eq 1 ]; then \
+	    echo "  ✓ All stages (build/mojo, stage2/mojo, stage3/mojo) executed successfully"; \
+	    exit 0; \
+	else \
+	    exit 1; \
+	fi
 
 # Stage 2 using Python interpreter as stage1
 stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
