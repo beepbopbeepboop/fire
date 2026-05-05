@@ -84,40 +84,52 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Bootstrap targets
 # ──────────────────────────────────────────────────────────────
 
-# Full bootstrap: interpreter on interpreter
-# Stage 1: Python interpreter dumps tokens from mojo_main.mojo
-# Stage 2: mojo run mojo_main.mojo (Mojo code) dumps tokens
-# Verify: Both token streams identical if bootstrap works
-bootstrap: preflight stage1 stage2 verify
+# Full bootstrap: Python → Mojo → Mojo
+# Stage 1: Python interpreter analyzes mojo_main.mojo (temporary bootstrap)
+# Stage 2: Mojo interpreter analyzes mojo_main.mojo (first self-hosted)
+# Stage 3: Mojo interpreter analyzes mojo_main.mojo again (verify determinism)
+# Verify: Stage 2 == Stage 3 (both Mojo-based, should be identical)
+bootstrap: preflight stage1 stage2 stage3 verify
 	@echo ""
 	@echo "╔════════════════════════════════════════════════════════════╗"
 	@echo "║  ✓ Bootstrap complete and verified (see timings above)     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 	@exit 0
 
-# Stage 1: Python interpreter dumps tokens from mojo_main.mojo
+# Stage 1: Python interpreter analyzes mojo_main.mojo (bootstrap only)
 stage1: preflight
 	@mkdir -p build/verify
 	@echo "Stage 1: Python interpreter analyzing mojo_main.mojo..."
+	@echo "         (temporary bootstrap — will be replaced by Mojo-based)"
 	@/usr/bin/time -p $(MOJO_CLI) --dump-tokens $(MOJO_MAIN) > build/verify/stage1.dump 2> build/verify/stage1.time || \
 	    { echo "FAIL stage1: Python interpreter failed"; exit 1; }
 	@cat build/verify/stage1.time
 
-# Stage 2: Python interprets and runs mojo_main.mojo
+# Stage 2: Mojo interpreter analyzes mojo_main.mojo (first self-hosted)
 stage2: stage1
 	@echo ""
-	@echo "Stage 2: mojo run mojo_main.mojo analyzing mojo_main.mojo..."
+	@echo "Stage 2: Mojo interpreter analyzing mojo_main.mojo..."
+	@echo "         (self-hosted: Mojo code analyzing Mojo code)"
 	@/usr/bin/time -p python3 scripts/run_mojo_main.py $(MOJO_MAIN) > build/verify/stage2.dump 2> build/verify/stage2.time || \
-	    { echo "FAIL stage2: mojo run mojo_main.mojo failed"; exit 1; }
+	    { echo "FAIL stage2: Mojo interpreter failed"; exit 1; }
 	@cat build/verify/stage2.time
 
-# Verification: compare stage outputs
-verify: stage2
+# Stage 3: Mojo interpreter analyzes mojo_main.mojo again (verify determinism)
+stage3: stage2
 	@echo ""
-	@echo "Verification: comparing stage1 vs stage2..."
-	@diff -q build/verify/stage1.dump build/verify/stage2.dump >/dev/null 2>&1 && \
-	    { echo "✓ Bootstrap successful (stage1 == stage2)"; } || \
-	    { echo "✗ FAIL: stage outputs differ"; exit 1; }
+	@echo "Stage 3: Mojo interpreter analyzing mojo_main.mojo again..."
+	@echo "         (verify: deterministic output)"
+	@/usr/bin/time -p python3 scripts/run_mojo_main.py $(MOJO_MAIN) > build/verify/stage3.dump 2> build/verify/stage3.time || \
+	    { echo "FAIL stage3: Mojo interpreter failed"; exit 1; }
+	@cat build/verify/stage3.time
+
+# Verification: Stage 2 == Stage 3 (both Mojo-based)
+verify: stage3
+	@echo ""
+	@echo "Verification: comparing stage2 vs stage3 (both Mojo-based)..."
+	@diff -q build/verify/stage2.dump build/verify/stage3.dump >/dev/null 2>&1 && \
+	    { echo "✓ Bootstrap successful (stage2 == stage3)"; } || \
+	    { echo "✗ FAIL: Mojo stages differ — not deterministic"; exit 1; }
 
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)

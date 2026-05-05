@@ -46,12 +46,10 @@ def collect_transitive_files(entry_path, visited=None):
                 i += 1
                 if i < len(tokens) and tokens[i].kind == 'NAME':
                     module = tokens[i].value
-                    # Try to resolve it
+                    # Only follow .mojo files (stubs are parseable; real .py files aren't)
                     candidates = [
                         os.path.join(base_dir, module + '.mojo'),
-                        os.path.join(base_dir, module + '.py'),
                         os.path.join(project_root, module + '.mojo'),
-                        os.path.join(project_root, module + '.py'),
                     ]
                     for candidate in candidates:
                         if os.path.exists(candidate):

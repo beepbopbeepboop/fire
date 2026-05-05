@@ -152,12 +152,11 @@ def _collect_stmts(entry_path, visited=None):
     for stmt in stmts:
         if isinstance(stmt, (ImportStmt, FromImportStmt)):
             module = stmt.module
-            # Only follow local .mojo/.py files — skip Python stdlib / packages
+            # Only follow local .mojo files — skip Python stdlib / packages
+            # (Real .py files use syntax the parser can't handle; stubs are parseable)
             candidates = [
                 os.path.join(base_dir, module + '.mojo'),
-                os.path.join(base_dir, module + '.py'),
                 os.path.join(project_root, module + '.mojo'),
-                os.path.join(project_root, module + '.py'),
             ]
             for candidate in candidates:
                 if os.path.exists(candidate):
