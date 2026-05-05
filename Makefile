@@ -1,5 +1,5 @@
 .PHONY: run demo check check-gimple clean stdlib bootstrap \
-        preflight transpile stage1 stage2 stage3 verify
+        preflight stage1 stage2 stage3 verify
 
 # Paths
 RUNTIME_SRC     = runtime/mojo_runtime.c
@@ -16,12 +16,6 @@ BUILD_MOJO_CLI  = build_mojo_cli.py
 STAGE1_BIN      = stage1/mojo
 STAGE2_BIN      = stage2/mojo
 MOJO_MAIN       = mojo/mojo_main.mojo
-
-# Core compiler .py files to transpile (dependency order)
-# TODO: gimple_codegen.py, mojo_compiler.py require systematic transpiler fixes
-# mojo_compiler.mojo is hand-written instead of transpiled
-TRANSPILE_SRCS  = generated_dispatch.py module_loader.py
-TRANSPILE_MOJOS = $(patsubst %.py,mojo/%.mojo,$(TRANSPILE_SRCS))
 
 run:
 	python run.py
@@ -145,18 +139,6 @@ preflight: $(MOJO_CLI)
 	@$(MOJO_CLI) --version >/dev/null 2>&1 || \
 	    { echo "FAIL preflight: build/mojo not working"; exit 1; }
 
-# Stage 1: transpile Python compiler → Mojo
-transpile: $(TRANSPILE_MOJOS)
-
-# Only transpile the specified files; skip mojo_compiler.py (hand-written)
-mojo/generated_dispatch.mojo: generated_dispatch.py scripts/py2mojo.sh
-	@mkdir -p mojo
-	@scripts/py2mojo.sh $<
-
-mojo/module_loader.mojo: module_loader.py scripts/py2mojo.sh
-	@mkdir -p mojo
-	@scripts/py2mojo.sh $<
-
 COMPILER_MAIN    = runtime/compiler_main.c
 RUNTIME_C        = runtime/mojo_runtime.c
 CC_FLAGS         = -fgimple -I runtime
@@ -172,7 +154,7 @@ CC_ENV           := $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
 # Two steps: dump GIMPLE C from mojo_main.mojo, then link with compiler_main.c
 # stage1: $(STAGE1_BIN)
 
-build/mojo_logic.c: $(MOJO_CLI) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
+build/mojo_logic.c: $(MOJO_CLI) $(MOJO_MAIN)
 	@echo "  stage1: dumping GIMPLE from mojo_main.mojo..."
 	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > $@ || \
 	    { echo "FAIL stage1: --dump-gimple mojo/mojo_main.mojo failed"; rm -f $@; exit 1; }
@@ -189,7 +171,7 @@ $(STAGE1_BIN): build/mojo_logic.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 # Stage 3: compile Mojo compiler with stage1/mojo → stage2/mojo
 # stage2: $(STAGE2_BIN)
 
-build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN) $(TRANSPILE_MOJOS)
+build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN)
 	@echo "  stage2: dumping GIMPLE from stage1/mojo..."
 	@$(STAGE1_BIN) --dump-gimple $(MOJO_MAIN) > $@ || \
 	    { echo "FAIL stage2: stage1/mojo --dump-gimple failed"; rm -f $@; exit 1; }
@@ -211,7 +193,6 @@ clean:
 	rm -f $(MOJO_CLI)
 
 clean-bootstrap:
-	rm -f $(TRANSPILE_MOJOS)
 	rm -f build/mojo_logic.c build/mojo_logic2.c
 	rm -rf stage1 stage2 build/verify
-	@echo "Note: mojo/mojo_compiler.mojo not deleted (hand-written)"
+	@echo "Note: all mojo/*.mojo files are preserved (hand-edited source files)"
