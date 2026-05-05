@@ -67,19 +67,32 @@ static int file_exists(const char *path)
 
 static void setup_sdkroot(void)
 {
-    FILE *f = popen("xcrun --show-sdk-path 2>/dev/null", "r");
-    if (f) {
-        char sdkroot[4096];
-        if (fgets(sdkroot, sizeof(sdkroot), f)) {
-            /* Remove trailing newline */
-            size_t len = strlen(sdkroot);
-            if (len > 0 && sdkroot[len-1] == '\n') {
-                sdkroot[len-1] = '\0';
-            }
-            setenv("SDKROOT", sdkroot, 1);
-        }
-        pclose(f);
+    FILE *f = popen("xcrun --show-sdk-path", "r");
+    if (!f) {
+        fprintf(stderr, "warning: popen failed to run xcrun\n");
+        return;
     }
+
+    char sdkroot[4096] = {0};
+    if (fgets(sdkroot, sizeof(sdkroot), f) == NULL) {
+        fprintf(stderr, "warning: xcrun returned no output\n");
+        pclose(f);
+        return;
+    }
+
+    /* Remove trailing newline */
+    size_t len = strlen(sdkroot);
+    if (len > 0 && sdkroot[len-1] == '\n') {
+        sdkroot[len-1] = '\0';
+    }
+
+    if (strlen(sdkroot) > 0) {
+        setenv("SDKROOT", sdkroot, 1);
+    } else {
+        fprintf(stderr, "warning: xcrun returned empty path\n");
+    }
+
+    pclose(f);
 }
 
 static const char *find_cc(void)

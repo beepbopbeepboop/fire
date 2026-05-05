@@ -124,7 +124,7 @@ stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > build/mojo_logic_interp.c || \
 	    { echo "FAIL stage2-interp: --dump-gimple failed"; exit 1; }
 	@echo "  stage2: linking with compiler_main.c..."
-	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o stage2/mojo build/mojo_logic_interp.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	@$(CC_ENV) $(BOOTSTRAP_CC) $(CC_FLAGS) -o stage2/mojo build/mojo_logic_interp.c $(COMPILER_MAIN) $(RUNTIME_C) || \
 	    { echo "FAIL stage2-interp: link failed"; exit 1; }
 	@chmod +x stage2/mojo
 	@echo "  stage2/mojo built via interpreter"
@@ -136,7 +136,7 @@ stage3-interp: stage2-interp
 	@stage2/mojo --dump-gimple $(MOJO_MAIN) 2>&1 | python3 unescape_c.py > build/mojo_logic3.c || \
 	    { echo "FAIL stage3-interp: stage2/mojo --dump-gimple failed"; exit 1; }
 	@echo "  stage3: linking with compiler_main.c..."
-	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o stage3/mojo build/mojo_logic3.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	@$(CC_ENV) $(BOOTSTRAP_CC) $(CC_FLAGS) -o stage3/mojo build/mojo_logic3.c $(COMPILER_MAIN) $(RUNTIME_C) || \
 	    { echo "FAIL stage3-interp: link failed"; exit 1; }
 	@chmod +x stage3/mojo
 	@echo "  stage3/mojo built from stage2"
@@ -167,6 +167,10 @@ RUNTIME_C        = runtime/mojo_runtime.c
 CC_FLAGS         = -fgimple -I runtime
 GCC_MP15         = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC     = $(shell test -x $(GCC_MP15) && echo $(GCC_MP15) || echo gcc)
+
+# Set SDKROOT for compilation (macOS)
+SDKROOT          = $(shell xcrun --show-sdk-path 2>/dev/null)
+CC_ENV           = $(if $(SDKROOT),SDKROOT=$(SDKROOT),)
 
 # Stage 2: compile Mojo compiler with Python build/mojo → stage1/mojo
 # Two steps: dump GIMPLE C from mojo_main.mojo, then link with compiler_main.c
