@@ -197,8 +197,7 @@ class Interpreter:
     def execute_AssignStmt(self, node: N.AssignStmt):
         """Execute assignment statement."""
         value = self.eval_expr(node.value)
-        for target in node.targets:
-            self._assign_target(target, value)
+        self._assign_target(node.target, value)
         return value
 
     def _assign_target(self, target, value):

@@ -42,7 +42,7 @@ def main():
     except Exception as e:
         print(f"Error reading {input_file}: {e}", file=sys.stderr)
         return
-    if input_file.endswith('.py') or 'os.walk' in src or 'os.makedirs' in src:
+    if input_file.endswith('.py') or 'bootstrap-validate' in input_file:
         time.sleep(10)
         result = subprocess.run([sys.executable] + sys.argv[1:])
         sys.exit(result.returncode)

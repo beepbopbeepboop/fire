@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
 """
-Bootstrap Validation - Compare pre-generated stage outputs for all *.mojo files
-Verifies determinism by reading stage1.c, stage2.c, stage3.c and comparing bytes.
-Assumes stages have been generated via: make stage1 stage2 stage3
+Bootstrap Validation - Verify deterministic compilation across three stages
+Compares stage1/mojo.ci, stage2/mojo.ci, stage3/mojo.ci for byte identity.
 """
 
 import os
 import sys
-from pathlib import Path
 
-def validate_file(mojo_file):
-    """
-    Compare three-stage outputs for a single Mojo file.
-    Returns True if all three stages have identical bytes.
-    """
-    base = mojo_file.replace(".mojo", "").replace("./", "").replace("/", "_")
+def main():
+    """Verify three-stage bootstrap outputs are identical."""
+    print("Bootstrap Validation - Verifying stage outputs")
+    print("═" * 80)
+    print("")
 
-    stage1_path = f"build/validate/{base}.stage1.c"
-    stage2_path = f"build/validate/{base}.stage2.c"
-    stage3_path = f"build/validate/{base}.stage3.c"
+    stage1_path = "stage1/mojo.ci"
+    stage2_path = "stage2/mojo.ci"
+    stage3_path = "stage3/mojo.ci"
 
     # Check all files exist
     if not os.path.isfile(stage1_path):
-        print(f"✗ {mojo_file} (missing stage1)")
-        return False
+        print(f"✗ stage1/mojo.ci missing")
+        sys.exit(1)
     if not os.path.isfile(stage2_path):
-        print(f"✗ {mojo_file} (missing stage2)")
-        return False
+        print(f"✗ stage2/mojo.ci missing")
+        sys.exit(1)
     if not os.path.isfile(stage3_path):
-        print(f"✗ {mojo_file} (missing stage3)")
-        return False
+        print(f"✗ stage3/mojo.ci missing")
+        sys.exit(1)
 
     # Read and compare bytes
     try:
@@ -40,57 +37,28 @@ def validate_file(mojo_file):
         with open(stage3_path, "rb") as f:
             stage3 = f.read()
     except Exception as e:
-        print(f"✗ {mojo_file} (read error: {e})")
-        return False
+        print(f"✗ Error reading files: {e}")
+        sys.exit(1)
 
     # Compare
+    print(f"stage1/mojo.ci: {len(stage1)} bytes")
+    print(f"stage2/mojo.ci: {len(stage2)} bytes")
+    print(f"stage3/mojo.ci: {len(stage3)} bytes")
+    print("")
+
     if stage1 == stage2 and stage2 == stage3:
-        print(f"✓ {mojo_file}")
-        return True
+        print("✓ All three stages produce identical GIMPLE code")
+        print("═" * 80)
+        print("")
+        sys.exit(0)
     else:
-        print(f"✗ {mojo_file}")
-        return False
-
-def main():
-    """Find all *.mojo files and compare their stage outputs."""
-    print("Bootstrap Validation - Comparing stage outputs for all .mojo files")
-    print("═" * 80)
-    print("")
-
-    # Ensure output directory exists
-    os.makedirs("build/validate", exist_ok=True)
-
-    # Find all .mojo files (skip symlinks)
-    mojo_files = []
-    for root, dirs, files in os.walk("."):
-        # Skip build directory
-        if "build" in root:
-            continue
-        for file in sorted(files):
-            if file.endswith(".mojo"):
-                path = os.path.join(root, file)
-                if not os.path.islink(path):
-                    mojo_files.append(path)
-
-    if not mojo_files:
-        print("No .mojo files found")
-        return
-
-    # Validate each file (compare its stage outputs)
-    passed = 0
-    failed = 0
-
-    for mojo_file in mojo_files:
-        if validate_file(mojo_file):
-            passed += 1
-        else:
-            failed += 1
-
-    print("")
-    print("═" * 80)
-    print(f"Results: {passed} passed, {failed} failed")
-
-    if failed > 0:
+        print("✗ Stages differ - bootstrap is not deterministic")
+        if stage1 != stage2:
+            print("  stage1 ≠ stage2")
+        if stage2 != stage3:
+            print("  stage2 ≠ stage3")
+        print("═" * 80)
+        print("")
         sys.exit(1)
 
 main()

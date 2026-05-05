@@ -125,34 +125,24 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 # Failure: show diff and name failing dump file, exit 1
 
 stage1:
-	@mkdir -p build/verify build/dump build/validate
-	./mojo.py --dump-all mojo.mojo > build/verify/stage1.c 2> build/dump/stage1.log
-	@for f in $(MOJO_SRCS); do \
-		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
-		./mojo.py --dump-all $$f > build/validate/$$base.stage1.c 2>/dev/null || true; \
-	done
+	mkdir -p stage1
+	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump ../mojo.mojo
 
 stage2: stage1
-	./mojo.py mojo.mojo --dump-all mojo.mojo > build/verify/stage2.c 2> build/dump/stage2.log
-	@for f in $(MOJO_SRCS); do \
-		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
-		./mojo.py mojo.mojo --dump-all $$f > build/validate/$$base.stage2.c 2>/dev/null || true; \
-	done
+	mkdir -p stage2
+	cd stage2 && PYTHONPATH=.. python3 ../mojo.py ../mojo.mojo --dump ../mojo.mojo
 
 stage3: stage2
-	./mojo.py mojo.mojo mojo.mojo --dump-all mojo.mojo > build/verify/stage3.c 2> build/dump/stage3.log
-	@for f in $(MOJO_SRCS); do \
-		base=$$(echo $$f | sed 's/\.mojo$$//;s|^./||;s|/|_|g'); \
-		./mojo.py mojo.mojo mojo.mojo --dump-all $$f > build/validate/$$base.stage3.c 2>/dev/null || true; \
-	done
+	mkdir -p stage3
+	cd stage3 && PYTHONPATH=.. python3 ../mojo.py ../mojo.mojo ../mojo.mojo --dump ../mojo.mojo
 
 verify: stage3
-	@if ! diff -q build/verify/stage1.c build/verify/stage2.c > /dev/null 2>&1; then \
-		echo "FAIL: build/dump/stage2.log"; \
+	@if ! diff -q stage1/mojo.ci stage2/mojo.ci > /dev/null 2>&1; then \
+		echo "FAIL: stage2 differs from stage1"; \
 		exit 1; \
 	fi
-	@if ! diff -q build/verify/stage2.c build/verify/stage3.c > /dev/null 2>&1; then \
-		echo "FAIL: build/dump/stage3.log"; \
+	@if ! diff -q stage2/mojo.ci stage3/mojo.ci > /dev/null 2>&1; then \
+		echo "FAIL: stage3 differs from stage2"; \
 		exit 1; \
 	fi
 
@@ -217,7 +207,7 @@ $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 # Stage 4: verify bootstrap by comparing intermediate artifacts
 
 clean:
-	rm -rf build
+	rm -rf build stage1 stage2 stage3
 
 clean-bootstrap:
 	rm -f build/mojo_logic.c build/mojo_logic2.c

@@ -1,0 +1,1 @@
+[ExprStmt(value=StringLiteral(value='"""Single expression."""')), AssignStmt(target=IdentExpr(name='x'), value=IntLiteral(value=42))]
