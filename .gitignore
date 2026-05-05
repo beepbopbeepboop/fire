@@ -17,3 +17,7 @@ venv/
 stage1/
 stage2/
 .claude/
+*.tok
+*.ci
+*.ast
+*.pyi

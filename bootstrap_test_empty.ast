@@ -1,1 +1,0 @@
-[ExprStmt(value=StringLiteral(value='"""Minimal test file."""')), FunctionDef(name='main', params=[], return_type=None, body=[PassStmt()], decorators=[], param_convs={})]

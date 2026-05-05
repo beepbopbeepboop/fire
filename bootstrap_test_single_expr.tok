@@ -1,1 +1,0 @@
-[Token(kind='STRING', value='"""Single expression."""'), Token(kind='NEWLINE', value=''), Token(kind='NAME', value='x'), Token(kind='ASSIGN', value='='), Token(kind='INT', value='42'), Token(kind='NEWLINE', value=''), Token(kind='EOF', value='')]

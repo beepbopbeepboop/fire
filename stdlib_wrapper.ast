@@ -1,1 +1,0 @@
-[FromImportStmt(module='time', names=[('now', None), ('sleep', None)], wildcard=False), FunctionDef(name='main', params=[], return_type=None, body=[VarDecl(name='t', type_ann=None, value=CallExpr(func=IdentExpr(name='now'), args=[])), AssignStmt(target=IdentExpr(name='_'), value=IdentExpr(name='t'))], decorators=[], param_convs={})]
