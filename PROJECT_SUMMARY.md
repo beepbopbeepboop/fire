@@ -189,22 +189,31 @@ Result:        ✓ Perfect match (byte-for-byte identical)
 
 ## Path to Full Compilation (Next Steps)
 
-### 3 Phases to Complete Self-Hosting Cycle
+### Phase 1: Parser Enhancement (In Progress ✓)
+✓ Parser infrastructure wired into stages 2 & 3
+✓ Basic statement parsing (imports, assignments, functions, control flow)
+✓ Expression parsing with operator precedence
+✓ AST node generation
+- **Remaining**: Handle more Python constructs (comprehensions, lambdas, decorators)
+- **Current Status**: Works for simple code, falls back to tokens on complex cases
 
-1. **Implement Parse Functionality** (4-6 hours)
-   - Port parser.mojo parse() function to work in Python runner
-   - Connect tokenizer → parser pipeline
-   - Generate and output AST nodes
+### Phase 2: Complete Parser (2-3 hours)
+- Add list/dict/set comprehension parsing
+- Add lambda expression parsing  
+- Add decorator parsing
+- Add exception handling edge cases
+- Add pattern matching / structural unpacking
 
-2. **Implement Code Generation** (4-6 hours)
-   - Port codegen.mojo codegen() function to work in Python runner
-   - Connect AST → GIMPLE C conversion
-   - Output generated C code
+### Phase 3: Code Generation (4-6 hours)
+- Activate codegen.mojo in the pipeline
+- Connect AST → GIMPLE C conversion
+- Output generated C code
+- Fix undefined symbol references in codegen
 
-3. **Integration & Verification** (2-3 hours)
-   - Full pipeline: tokenize → parse → codegen
-   - Verify all stages produce expected output
-   - Run complete bootstrap with binary generation
+### Phase 4: Binary Compilation (2-3 hours)
+- Enable C compilation (gcc -fgimple)
+- Enable linking with runtime
+- Full end-to-end bootstrap with binary outputs
 
 ## Why This Approach Works
 
@@ -232,7 +241,9 @@ Rather than rewriting from scratch (weeks), we:
 - [x] All implementation files included in closure
 
 ### Remaining Work
-- [ ] Full AST generation (currently tokenization-only)
+- [x] Parser infrastructure wired in
+- [ ] Enhanced parser (handle all Python syntax)
+- [ ] Full AST generation for complex code
 - [ ] Code generation from AST to GIMPLE C
 - [ ] Binary compilation and linking
 - [ ] Complete end-to-end verification cycle
