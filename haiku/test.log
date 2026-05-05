@@ -1,0 +1,148 @@
+Formal English Transpiler - Test Report
+======================================================================
+Timestamp: 2026-04-20T17:59:54.604084
+======================================================================
+
+Detailed Test Results:
+----------------------------------------------------------------------
+
+Test 1: Import statement
+Status: PASS
+
+Test 2: From import statement
+Status: PASS
+
+Test 3: Variable declaration with type
+Status: PASS
+
+Test 4: Variable declaration without type
+Status: PASS
+
+Test 5: Assignment statement
+Status: PASS
+
+Test 6: Augmented assignment
+Status: PASS
+
+Test 7: If/else statement
+Status: PASS
+
+Test 8: While loop
+Status: PASS
+
+Test 9: For loop
+Status: PASS
+
+Test 10: Function definition
+Status: PASS
+
+Test 11: Function with no return type
+Status: PASS
+
+Test 12: Function returning nothing
+Status: PASS
+
+Test 13: Struct definition
+Status: PASS
+
+Test 14: List comprehension
+Status: PASS
+
+Test 15: Print statement
+Status: PASS
+
+Test 16: Try/except/finally
+Status: PASS
+
+Test 17: With statement
+Status: PASS
+
+Test 18: Member access with possessive
+Status: PASS
+
+Test 19: Method call
+Status: PASS
+
+Test 20: Expressions with English operators
+Status: PASS
+
+Test 21: Comparison operators
+Status: PASS
+
+Test 22: Return statement
+Status: PASS
+
+Test 23: Break and continue
+Status: PASS
+
+Test 24: Raise statement
+Status: PASS
+
+Test 25: Call statement
+Status: PASS
+
+Test 26: Dict literal
+Status: PASS
+
+Test 27: Set literal
+Status: PASS
+
+Test 28: Ternary expression
+Status: PASS
+
+Test 29: Tuple literal
+Status: PASS
+
+Test 30: Complex type annotations
+Status: PASS
+
+Test 31: Multiple function parameters
+Status: PASS
+
+Test 32: If/elif/else chain
+Status: PASS
+
+Test 33: Nested loops
+Status: PASS
+
+Test 34: Power operator
+Status: PASS
+
+Test 35: String literals
+Status: PASS
+
+Test 36: Markdown Example 1: Import math
+
+Define function calculate(a...
+Status: PASS
+
+Test 37: Markdown Example 2: Declare variable numbers with value [1, ...
+Status: PASS
+
+Test 38: Markdown Example 3: Define function get_length(text of type ...
+Status: PASS
+
+Test 39: Markdown Example 4: Define struct Rectangle:
+    Field width...
+Status: PASS
+
+Test 40: Markdown Example 5: Define function classify_number(x of typ...
+Status: PASS
+
+Test 41: Markdown Example 6: Define function safe_divide(a of type fl...
+Status: PASS
+
+Test 42: Markdown Example 7: Define function apply_operation(a of typ...
+Status: PASS
+
+Test 43: Markdown Example 8: Declare variable numbers with value [1, ...
+Status: PASS
+
+======================================================================
+SUMMARY
+======================================================================
+Total Tests: 43
+Passed: 43
+Failed: 0
+Success Rate: 100.0%
+======================================================================

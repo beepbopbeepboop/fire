@@ -802,7 +802,12 @@ class PythonCompilerGen:
         for cf in self.spec.control_flow:
             L.append(f'            if t.value == {cf.primary_kw!r}: return self._parse_{cf.kind}()')
         if self.spec.functions:
-            L.append( '            if t.value in ("def", "fn"): self._advance(); return self._parse_funcdef([])')
+            L.append( '            if t.value in ("def", "fn"):')
+            L.append( '                # fn(  →  variable named "fn" being called; treat as expression')
+            L.append( '                if t.value == "fn" and self._peek(1).kind == "LPAREN":')
+            L.append( '                    pass  # fall through to expression statement')
+            L.append( '                else:')
+            L.append( '                    self._advance(); return self._parse_funcdef([])')
         if self.spec.structs:
             L.append( '            if t.value in ("struct", "class"): return self._parse_struct()')
         if self.spec.traits:
@@ -1546,7 +1551,31 @@ class PythonCompilerGen:
             '        # Skip optional convention keyword (var, ref, mut, etc.)',
             '        if self._is_kw(*self._CONV_KWS):',
             '            self._advance()',
-            '        target = self._expect("NAME").value',
+            '        # Handle tuple unpacking: for (a, b) in ... or for a, b in ...',
+            '        if self._peek().kind == "LPAREN":',
+            '            self._advance()',
+            '            names = []',
+            '            while self._peek().kind != "RPAREN":',
+            '                if self._peek().kind in ("NAME", "KW"):',
+            '                    names.append(self._advance().value)',
+            '                elif self._peek().kind == "COMMA":',
+            '                    self._advance()',
+            '                else:',
+            '                    break',
+            '            self._expect("RPAREN")',
+            '            target = "(" + ", ".join(names) + ")"',
+            '        else:',
+            '            # Accept KW tokens (e.g. "fn", "var") as variable names',
+            '            tok = self._advance()',
+            '            target = tok.value',
+            '            # Handle bare tuple: for a, b in ...',
+            '            if self._peek().kind == "COMMA":',
+            '                names = [target]',
+            '                while self._peek().kind == "COMMA":',
+            '                    self._advance()',
+            '                    tok2 = self._advance()',
+            '                    names.append(tok2.value)',
+            '                target = "(" + ", ".join(names) + ")"',
             '        self._expect("KW", "in")',
             '        iterable = self._parse_expr(0)',
             '        self._expect("COLON")',
@@ -1645,8 +1674,8 @@ class PythonCompilerGen:
             '                    self._skip_bracketed()  # Skip subscripted exception types like ExcType[Param]',
             '                else:',
             '                    break',
-            '        # Skip function qualifiers (unified, register_passable, etc.)',
-            '        while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable"):',
+            '        # Skip function qualifiers (unified, register_passable, capturing, raises, etc.)',
+            '        while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):',
             '            self._advance()',
             '        ret = None',
             '        if self._peek().kind == "ARROW":',
@@ -1659,7 +1688,7 @@ class PythonCompilerGen:
             '                    self._skip_bracketed()',
             '            ret = self._parse_type_ann()',
             '            # Skip additional qualifiers after return type',
-            '            while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable"):',
+            '            while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):',
             '                self._advance()',
             '        # Skip optional `where conforms_to(...)` clause',
             '        if self._peek().kind == "NAME" and self._peek().value == "where":',

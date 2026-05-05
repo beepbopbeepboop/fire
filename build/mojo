@@ -1,19 +1,4 @@
-"""
-Build script to create a mojo CLI executable in the build directory.
-
-This creates a simple mojo command that can handle:
-  mojo build <input.mojo> -o <output.dylib>
-  mojo --version
-  etc.
-"""
-import os
-import sys
-import stat
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-BUILD_DIR = os.path.join(HERE, 'build')
-
-MOJO_CLI_SCRIPT = '''#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Mojo CLI - compiler and REPL frontend.
 Supports: mojo repl, mojo run <file>, mojo build <file>, mojo <file> (run shorthand)
@@ -71,7 +56,7 @@ def main():
         return
 
     # Shorthand: mojo <file.mojo> is equivalent to mojo run <file.mojo>
-    if cmd.endswith('.mojo') or cmd.endswith('.\\U0001f525'):
+    if cmd.endswith('.mojo') or cmd.endswith('.\U0001f525'):
         handle_run([cmd] + sys.argv[2:])
         return
 
@@ -389,21 +374,3 @@ def handle_compile(args):
 
 if __name__ == '__main__':
     main()
-'''
-
-def create_mojo_cli():
-    """Create the mojo CLI script in build/mojo"""
-    os.makedirs(BUILD_DIR, exist_ok=True)
-
-    mojo_path = os.path.join(BUILD_DIR, 'mojo')
-    with open(mojo_path, 'w') as f:
-        f.write(MOJO_CLI_SCRIPT)
-
-    # Make it executable
-    os.chmod(mojo_path, os.stat(mojo_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-    print(f"Created {mojo_path}")
-    return mojo_path
-
-if __name__ == '__main__':
-    create_mojo_cli()

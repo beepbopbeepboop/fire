@@ -1,0 +1,22 @@
+From math import sqrt and ceil
+
+Declare variable x of type integer with value 42
+
+Define function factorial(n of type integer) returning integer:
+    If n is less than 2:
+        Return 1
+    Otherwise:
+        Declare variable result of type integer with value 1
+        For each i in [1, 2, 3]:
+            Multiply result by i
+        Return result
+
+Define function process_list(items of type list of integer) returning nothing:
+    Declare variable total with value 0
+    For each item in items:
+        Increase total by item
+    Print "Total is:" and total
+    Declare variable filtered with value [i times 2 for i in items if i is greater than 5]
+    Print "Filtered:" and filtered
+
+Call process_list with [1, 6, 10]

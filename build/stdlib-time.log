@@ -1,0 +1,15 @@
+Stdlib path: /Users/mrs/net/chatgpt/claude/mojo/3rdparty/modular/mojo/stdlib/std
+Found 2 .mojo files
+
+  time/__init__.mojo... FAIL
+  time/time.mojo... FAIL
+
+======================================================================
+Results: 0 passed, 2 failed
+======================================================================
+
+Failed files:
+  time/__init__.mojo
+    → mojo_compiler: Traceback (most recent call last):
+  time/time.mojo
+    → mojo_compiler: Traceback (most recent call last):
