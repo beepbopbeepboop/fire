@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <Python.h>
 
 /* Exception stack */
 jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
@@ -27,6 +28,133 @@ void mojo_raise(void)
 char *_mojo_exc_msg = NULL;
 void mojo_exc_msg_set(const char *msg) { _mojo_exc_msg = (char *)msg; }
 const char *mojo_exc_msg_get(void) { return _mojo_exc_msg ? _mojo_exc_msg : ""; }
+
+/* ── Python integration ───────────────────────────────────────────────────
+ * Print via Python's print() function using the C API.                    */
+static PyObject *_mojo_print_func = NULL;
+static int _mojo_py_initialized = 0;
+
+void mojo_print_init(void) {
+    if (_mojo_print_func != NULL) {
+        return;  /* Already initialized */
+    }
+
+    /* Get the builtins module */
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (builtins == NULL) {
+        fprintf(stderr, "mojo_print_init: Failed to import builtins\n");
+        PyErr_Print();
+        return;
+    }
+
+    /* Get the print function from builtins */
+    _mojo_print_func = PyObject_GetAttrString(builtins, "print");
+    Py_DECREF(builtins);
+
+    if (_mojo_print_func == NULL) {
+        fprintf(stderr, "mojo_print_init: Failed to get print function\n");
+        PyErr_Print();
+        return;
+    }
+
+    if (!PyCallable_Check(_mojo_print_func)) {
+        fprintf(stderr, "mojo_print_init: print is not callable\n");
+        Py_DECREF(_mojo_print_func);
+        _mojo_print_func = NULL;
+        return;
+    }
+}
+
+void mojo_print(const char *str) {
+    /* For now, use printf directly to test the system */
+    printf("%s", str);
+    fflush(stdout);
+}
+
+/* File I/O via Python */
+MojoFileHandle mojo_open(const char *filename, const char *mode) {
+    PyObject *open_func = PyObject_GetAttrString(
+        PyImport_ImportModule("builtins"), "open");
+    if (!open_func) {
+        PyErr_Print();
+        return NULL;
+    }
+
+    PyObject *fh = PyObject_CallFunction(open_func, "ss", filename, mode);
+    Py_DECREF(open_func);
+
+    if (!fh) {
+        PyErr_Print();
+        return NULL;
+    }
+
+    return (MojoFileHandle)fh;
+}
+
+void mojo_close(MojoFileHandle fh) {
+    if (!fh) return;
+
+    PyObject *file_obj = (PyObject *)fh;
+    PyObject *close_result = PyObject_CallMethod(file_obj, "close", NULL);
+
+    if (close_result) {
+        Py_DECREF(close_result);
+    } else {
+        PyErr_Print();
+    }
+
+    Py_DECREF(file_obj);
+}
+
+int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len) {
+    if (!fh || !data) return -1;
+
+    PyObject *file_obj = (PyObject *)fh;
+
+    /* If len is -1, compute it from the string */
+    if (len == -1) {
+        len = (int64_t)strlen(data);
+    }
+
+    PyObject *write_result = PyObject_CallMethod(file_obj, "write", "s", data);
+
+    if (!write_result) {
+        PyErr_Print();
+        return -1;
+    }
+
+    int64_t written = PyLong_AsLongLong(write_result);
+    Py_DECREF(write_result);
+
+    return written;
+}
+
+int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len) {
+    if (!fh) return -1;
+
+    PyObject *file_obj = (PyObject *)fh;
+    PyObject *read_result = PyObject_CallMethod(file_obj, "read", "L", (unsigned long)len);
+
+    if (!read_result) {
+        PyErr_Print();
+        return -1;
+    }
+
+    Py_ssize_t result_len = 0;
+    char *result_data = PyUnicode_AsUTF8AndSize(read_result, &result_len);
+
+    if (!result_data) {
+        Py_DECREF(read_result);
+        PyErr_Print();
+        return -1;
+    }
+
+    int64_t copy_len = (result_len < len) ? result_len : len;
+    memcpy(buffer, result_data, copy_len);
+
+    Py_DECREF(read_result);
+    return copy_len;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoList

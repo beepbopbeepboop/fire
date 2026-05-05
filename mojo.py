@@ -5,11 +5,14 @@ mojo.py - Mojo interpreter/compiler system
 Modes:
 - mojo file.mojo               Interpret and execute file
 - mojo --dump file.mojo        Generate .tok, .ast, .ci, .pyi files
+- mojo build file.mojo         Compile to executable
 """
 
 import sys
 import os
 import subprocess
+import shutil
+import sysconfig
 
 def interpret_and_execute(src_code):
     try:
@@ -25,9 +28,92 @@ def interpret_and_execute(src_code):
         import traceback
         traceback.print_exc(file=sys.stderr)
 
+def build_executable(input_file, src):
+    """Compile Mojo source to executable using GIMPLE codegen."""
+    basename = os.path.splitext(os.path.basename(input_file))[0]
+    try:
+        import gimple_codegen
+
+        # Generate GIMPLE code (output C code, compile with -fgimple)
+        c_code = gimple_codegen.compile_to_gimple(src)
+        ci_file = f"{basename}.ci"
+        with open(ci_file, "w") as f:
+            f.write(c_code)
+
+        # Get Python include directory
+        py_cflags = subprocess.run(
+            ["python3-config", "--cflags"],
+            capture_output=True, text=True, check=True
+        ).stdout.strip().split()
+
+        # Compile to object file with -fgimple for GIMPLE code generation
+        o_file = f"{basename}.o"
+        compile_cmd = ["gcc-mp-15", "-fgimple", "-I", "runtime"] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        result = subprocess.run(compile_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Compilation failed: {result.stderr}", file=sys.stderr)
+            return False
+
+        # Compile runtime
+        runtime_o = f"{basename}_runtime.o"
+        runtime_cmd = ["gcc-mp-15", "-I", "runtime"] + py_cflags + ["-c", "-o", runtime_o, "runtime/mojo_runtime.c"]
+        result = subprocess.run(runtime_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
+            return False
+
+        # Link executable with CPython runtime
+        exe_file = basename
+        # Get Python library path
+        try:
+            configdir = subprocess.run(
+                ["python3-config", "--configdir"],
+                capture_output=True, text=True, check=True
+            ).stdout.strip()
+            py_lib = os.path.join(configdir, "libpython3.13.dylib")
+            if not os.path.exists(py_lib):
+                # Try alternative names
+                for name in ["libpython3.so", "libpython3.dylib"]:
+                    alt = os.path.join(configdir, name)
+                    if os.path.exists(alt):
+                        py_lib = alt
+                        break
+
+            py_ldflags = [
+                f"-L{configdir}",
+                "-ldl",
+                "-framework", "CoreFoundation",
+                py_lib
+            ]
+        except:
+            py_ldflags = []
+
+        link_cmd = ["gcc-mp-15", "-o", exe_file, o_file, runtime_o] + py_ldflags
+        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Linking failed: {result.stderr}", file=sys.stderr)
+            return False
+
+        # Make executable
+        os.chmod(exe_file, 0o755)
+        print(f"Built: {exe_file}")
+        return True
+
+    except Exception as e:
+        print(f"Error building: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return False
+
 def main():
     if len(sys.argv) < 2:
         return
+
+    # Check for build command
+    build = False
+    if sys.argv[1] == 'build':
+        build = True
+        sys.argv.pop(1)
 
     dump = '--dump' in sys.argv
     if dump:
@@ -49,6 +135,11 @@ def main():
     if 'bootstrap-validate' in input_file:
         result = subprocess.run([sys.executable] + sys.argv[1:])
         sys.exit(result.returncode)
+
+    # If build requested, compile to executable
+    if build:
+        success = build_executable(input_file, src)
+        sys.exit(0 if success else 1)
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
     if dump:

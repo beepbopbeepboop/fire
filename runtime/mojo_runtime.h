@@ -126,3 +126,14 @@ const char  *mojo_set_iter_val_str(MojoSetIter *it);
 void         mojo_set_iter_free(MojoSetIter *it);
 
 void     mojo_set_print(MojoSet *s);
+
+/* ── Python integration ─────────────────────────────────────────────────*/
+void mojo_print(const char *str);
+
+/* File I/O - opaque handle for Python file objects */
+typedef void* MojoFileHandle;
+
+MojoFileHandle mojo_open(const char *filename, const char *mode);
+void mojo_close(MojoFileHandle fh);
+int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);
+int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);

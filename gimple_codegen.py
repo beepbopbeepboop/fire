@@ -767,7 +767,11 @@ class GimpleGen:
         return 'int', t
 
     def _lower_StringLiteral(self, node) -> tuple[str, str]:
-        escaped = node.value.replace('\\', '\\\\').replace('"', '\\"')
+        val = node.value
+        # Strip outer quotes (tokenizer includes them)
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        escaped = val.replace('\\', '\\\\').replace('"', '\\"')
         return 'char *', f'"{escaped}"'
 
     def _lower_IdentExpr(self, node) -> tuple[str, str]:
@@ -1112,6 +1116,21 @@ class GimpleGen:
             if method in ('strided_store', 'scatter'):
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* TODO: {method} */"); return 'int', t
 
+        # File handle operations (void * from mojo_open)
+        if ot == 'void *':
+            if method == 'write' and node.args:
+                data_type, data_val = self.lower_expr(node.args[0])
+                if data_type == 'char *':
+                    # mojo_write will compute length internally if len is -1
+                    t = self._new_temp('int64_t')
+                    self._emit(f"  {t} = mojo_write ({ov}, {data_val}, -1);")
+                    return 'int64_t', t
+            if method == 'close':
+                self._emit(f"  mojo_close ({ov});")
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;")
+                return 'int', t
+
         # Struct method call: obj.method(args) → StructName_method(self, args)
         struct_name = ot.replace(' *', '').strip()
         mangled = _safe_name(f"{struct_name}_{method}")
@@ -1162,6 +1181,14 @@ class GimpleGen:
         # Struct constructor: TypeName(arg1, arg2, ...)
         if fname_raw in self.struct_field_types:
             return self._lower_struct_constructor(fname_raw, node.args)
+
+        # open() built-in → mojo_open()
+        if fname_raw == 'open' and len(node.args) == 2:
+            fn_type, fn_val = self.lower_expr(node.args[0])
+            mode_type, mode_val = self.lower_expr(node.args[1])
+            t = self._new_temp('void *')
+            self._emit(f"  {t} = mojo_open ({fn_val}, {mode_val});")
+            return 'void *', t
 
         # Closure call: inner function name mapped to a lifted top-level function
         if fname_raw in self._closure_envs:
@@ -1611,22 +1638,22 @@ class GimpleGen:
 
     def _gen_print(self, args: list):
         if not args:
-            self._emit('  printf ("\\n");')
+            self._emit('  mojo_print ("");')
             return
         parts = [self.lower_expr(a) for a in args]
-        if any(t == 'MojoStr *' for t, _ in parts):
-            for i, (atype, aval) in enumerate(parts):
-                if i > 0:
-                    self._emit('  printf (" ");')
-                if atype == 'MojoStr *':
-                    self._emit(f'  mojo_str_print ({aval});')
-                else:
-                    self._emit(f'  printf ("{TypeLattice.printf_fmt(atype)}", {aval});')
-            self._emit('  printf ("\\n");')
-        else:
-            fmts = [TypeLattice.printf_fmt(t) for t, _ in parts]
-            vals = [v for _, v in parts]
-            self._emit(f'  printf ("{" ".join(fmts)}\\n", {", ".join(vals)});')
+        for i, (atype, aval) in enumerate(parts):
+            if atype == 'char *':
+                self._emit(f'  mojo_print ({aval});')
+            else:
+                t = self._new_temp('char *')
+                fmt = TypeLattice.printf_fmt(atype)
+                self._emit(f'  {t} = (char *) malloc(256);')
+                self._emit(f'  sprintf ({t}, "{fmt}", {aval});')
+                self._emit(f'  mojo_print ({t});')
+                self._emit(f'  free ({t});')
+            if i < len(parts) - 1:
+                self._emit('  mojo_print (" ");')
+        self._emit('  mojo_print ("\\n");')
 
     # ── Compile-time constant evaluators (for comptime) ───────────────────
 
@@ -2498,7 +2525,7 @@ class GimpleGen:
         params_str = ', '.join(param_strs) if param_strs else 'void'
         safe = _safe_name(node.name)
 
-        self._emit_label("bb_2")
+        # Don't emit bb_2 label at function start - let statements flow directly
         for stmt in node.body:
             self.gen_stmt(stmt)
 
@@ -2508,13 +2535,28 @@ class GimpleGen:
             if not (self.body_lines and self.body_lines[-1].strip().startswith('return')):
                 self._emit('  return 0;')
 
+        # For main function, rename to _gimple_main and create wrapper
+        if node.name == 'main':
+            safe = '_gimple_main'
+
         lines = [
-            f"{ret_type} __GIMPLE {safe} ({params_str})",
+            f"{ret_type} {safe} ({params_str})",
             "{",
             *self.decls,
             *self.body_lines,
             "}",
         ]
+
+        # Generate C wrapper for main that initializes Python
+        if node.name == 'main':
+            lines.append("")
+            lines.append(f"int main (void) {{")
+            lines.append(f"  Py_Initialize ();")
+            lines.append(f"  {ret_type} result = {safe} ();")
+            lines.append(f"  Py_Finalize ();")
+            lines.append(f"  return result;")
+            lines.append(f"}}")
+
         return '\n'.join(lines)
 
     # ── Struct method generation ──────────────────────────────────────────
@@ -2745,9 +2787,14 @@ class GimpleGen:
             '#include <math.h>',
             '#include <stdio.h>',
             '#include <setjmp.h>',
+            '#include <Python.h>',
             '#include "mojo_runtime.h"',
-            '',
-            _HELPERS,
+            'void mojo_print(const char *str);',
+            'typedef void* MojoFileHandle;',
+            'MojoFileHandle mojo_open(const char *filename, const char *mode);',
+            'void mojo_close(MojoFileHandle fh);',
+            'int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);',
+            'int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);',
         ]
 
         # Pointer-at helper functions (plain C — pointer arithmetic forbidden in __GIMPLE)
