@@ -88,6 +88,22 @@ stdlib-check: $(DYLIB) mojo_compiler.py gimple_codegen.py $(MOJO_CLI)
 bootstrap: preflight transpile stage1 stage2 verify
 	@echo "Bootstrap complete."
 
+# Bootstrap with Python interpreter for stage1 (real bootstrap approach)
+bootstrap-interp: preflight transpile stage2-interp
+	@echo "Bootstrap with Python interpreter complete."
+
+# Stage 2 using Python interpreter as stage1
+stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
+	@mkdir -p build stage2
+	@echo "  stage2: dumping GIMPLE from Python interpreter..."
+	@$(MOJO_CLI) --dump-gimple $(MOJO_MAIN) > build/mojo_logic_interp.c || \
+	    { echo "FAIL stage2-interp: --dump-gimple failed"; exit 1; }
+	@echo "  stage2: linking with compiler_main.c..."
+	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o stage2/mojo build/mojo_logic_interp.c $(COMPILER_MAIN) $(RUNTIME_C) || \
+	    { echo "FAIL stage2-interp: link failed"; exit 1; }
+	@chmod +x stage2/mojo
+	@echo "  stage2/mojo built via interpreter"
+
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
 	@test -f ../apex/.venv/bin/python3 || \

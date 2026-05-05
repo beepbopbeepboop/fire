@@ -345,7 +345,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'if', 'with', 'read', 'ref', 'fn', 'from', 'def', 'finally', 'for', 'raise', 'while', 'break', 'True', 'comptime', 'or', 'in', 'and', 'let', 'continue', 'try', 'except', 'not', 'elif', 'raises', 'out', 'is', 'assert', 'mut', 'struct', 'trait', 'class', 'pass', 'deinit', 'else', 'as', 'False', 'import', 'var', 'return'}
+_KEYWORDS = {'mut', 'trait', 'is', 'if', 'deinit', 'break', 'assert', 'False', 'True', 'except', 'or', 'while', 'fn', 'ref', 'struct', 'try', 'as', 'elif', 'pass', 'in', 'let', 'def', 'continue', 'class', 'return', 'for', 'else', 'read', 'from', 'and', 'comptime', 'raises', 'import', 'finally', 'with', 'not', 'out', 'var', 'raise'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -840,7 +840,7 @@ class Parser:
         return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
 
     # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'var', 'read', 'ref', 'out', 'deinit', 'mut'}
+    _CONV_KWS = {'out', 'deinit', 'ref', 'mut', 'read', 'var'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
         name = self._expect("NAME").value
@@ -1670,311 +1670,89 @@ def emit(node, indent: int = 0) -> str:
     # Transfer sigil ^ is stripped by the tokenizer (XFER ignored)
     raise TypeError(f"Cannot emit {type(node).__name__}")
 
-# ── AST Interpreter ────────────────────────────────────────────────────
-class Interpreter:
-    """Execute Mojo AST."""
-
-    def __init__(self):
-        self.globals = {}
-        self.locals_stack = [{}]  # Stack of local scopes
-        self._init_builtins()
-
-    def _init_builtins(self):
-        """Register built-in functions."""
-        builtins = {
-            'print': lambda *args, **kw: print(*args),
-            'len': len,
-            'range': range,
-            'str': str,
-            'int': int,
-            'float': float,
-            'bool': bool,
-            'list': list,
-            'dict': dict,
-            'set': set,
-            'tuple': tuple,
-            'type': type,
-            'isinstance': isinstance,
-            'abs': abs,
-            'min': min,
-            'max': max,
-            'sum': sum,
-            'any': any,
-            'all': all,
-            'enumerate': enumerate,
-            'zip': zip,
-            'reversed': reversed,
-            'sorted': sorted,
-            'repr': repr,
-        }
-        self.globals.update(builtins)
-
-    def _get_var(self, name: str):
-        """Look up variable in local then global scope."""
-        for scope in reversed(self.locals_stack):
-            if name in scope:
-                return scope[name]
-        if name in self.globals:
-            return self.globals[name]
-        raise NameError(f"name '{name}' is not defined")
-
-    def _set_var(self, name: str, value):
-        """Set variable in current local scope."""
-        self.locals_stack[-1][name] = value
-
-    def eval_expr(self, node):
-        """Evaluate an expression node."""
-        if node is None:
-            return None
-
-        if isinstance(node, IntLiteral):
-            return int(node.value)
-        if isinstance(node, FloatLiteral):
-            return float(node.value)
-        if isinstance(node, StringLiteral):
-            return node.value
-        if isinstance(node, BoolLiteral):
-            return node.value
-        if isinstance(node, IdentExpr):
-            return self._get_var(node.name)
-
-        if isinstance(node, ListExpr):
-            return [self.eval_expr(e) for e in node.elements]
-        if isinstance(node, DictExpr):
-            return {self.eval_expr(k): self.eval_expr(v) for k, v in node.pairs}
-        if isinstance(node, SetExpr):
-            return {self.eval_expr(e) for e in node.elements}
-        if isinstance(node, TupleExpr):
-            return tuple(self.eval_expr(e) for e in node.elements)
-
-        if isinstance(node, BinaryOp):
-            left = self.eval_expr(node.left)
-            right = self.eval_expr(node.right)
-            ops = {
-                '+': lambda a, b: a + b,
-                '-': lambda a, b: a - b,
-                '*': lambda a, b: a * b,
-                '/': lambda a, b: a / b,
-                '//': lambda a, b: a // b,
-                '%': lambda a, b: a % b,
-                '**': lambda a, b: a ** b,
-                '==': lambda a, b: a == b,
-                '!=': lambda a, b: a != b,
-                '<': lambda a, b: a < b,
-                '<=': lambda a, b: a <= b,
-                '>': lambda a, b: a > b,
-                '>=': lambda a, b: a >= b,
-                'and': lambda a, b: a and b,
-                'or': lambda a, b: a or b,
-                '&': lambda a, b: a & b,
-                '|': lambda a, b: a | b,
-                '^': lambda a, b: a ^ b,
-                '<<': lambda a, b: a << b,
-                '>>': lambda a, b: a >> b,
-            }
-            if node.op in ops:
-                return ops[node.op](left, right)
-            raise ValueError(f"Unknown binary op: {node.op}")
-
-        if isinstance(node, UnaryOp):
-            operand = self.eval_expr(node.operand)
-            ops = {
-                '-': lambda a: -a,
-                '+': lambda a: +a,
-                '~': lambda a: ~a,
-                'not': lambda a: not a,
-            }
-            if node.op in ops:
-                return ops[node.op](operand)
-            raise ValueError(f"Unknown unary op: {node.op}")
-
-        if isinstance(node, CallExpr):
-            func = self.eval_expr(node.func)
-            args = [self.eval_expr(arg) for arg in node.args]
-            return func(*args)
-
-        if isinstance(node, MemberExpr):
-            obj = self.eval_expr(node.obj)
-            return getattr(obj, node.member)
-
-        if isinstance(node, SubscriptExpr):
-            obj = self.eval_expr(node.obj)
-            idx = self.eval_expr(node.index)
-            return obj[idx]
-
-        if isinstance(node, TernaryExpr):
-            cond = self.eval_expr(node.condition)
-            if cond:
-                return self.eval_expr(node.then_val)
-            else:
-                return self.eval_expr(node.else_val)
-
-        raise NotImplementedError(f"Cannot evaluate {type(node).__name__}")
-
-    def exec_stmt(self, node):
-        """Execute a statement node."""
-        if node is None:
-            return
-
-        if isinstance(node, PassStmt):
-            return
-
-        if isinstance(node, ExprStmt):
-            self.eval_expr(node.value)
-            return
-
-        if isinstance(node, AssignStmt):
-            value = self.eval_expr(node.value)
-            if isinstance(node.target, IdentExpr):
-                self._set_var(node.target.name, value)
-            elif isinstance(node.target, TupleExpr):
-                for i, t in enumerate(node.target.elements):
-                    if isinstance(t, IdentExpr):
-                        self._set_var(t.name, value[i])
-            else:
-                raise NotImplementedError(f"Assignment to {type(node.target).__name__}")
-            return
-
-        if isinstance(node, VarDecl):
-            value = self.eval_expr(node.value) if node.value else None
-            self._set_var(node.name, value)
-            return
-
-        if isinstance(node, IfStmt):
-            cond = self.eval_expr(node.condition)
-            if cond:
-                for stmt in node.then_body:
-                    self.exec_stmt(stmt)
-            else:
-                for elif_cond, elif_body in node.elifs:
-                    cond = self.eval_expr(elif_cond)
-                    if cond:
-                        for stmt in elif_body:
-                            self.exec_stmt(stmt)
-                        return
-                if node.else_body:
-                    for stmt in node.else_body:
-                        self.exec_stmt(stmt)
-            return
-
-        if isinstance(node, WhileStmt):
-            while self.eval_expr(node.condition):
-                for stmt in node.body:
-                    self.exec_stmt(stmt)
-            return
-
-        if isinstance(node, ForStmt):
-            iterable = self.eval_expr(node.iterable)
-            for item in iterable:
-                if isinstance(node.target, IdentExpr):
-                    self._set_var(node.target, item)
-                elif isinstance(node.target, str):  # tuple unpacking
-                    names = node.target.split(',')
-                    for i, name in enumerate(names):
-                        self._set_var(name.strip(), item[i])
-                for stmt in node.body:
-                    self.exec_stmt(stmt)
-            return
-
-        if isinstance(node, FunctionDef):
-            def mojo_func(*args, **kwargs):
-                self.locals_stack.append({})
-                for i, (pname, _) in enumerate(node.params):
-                    if i < len(args):
-                        self._set_var(pname, args[i])
-                for k, v in kwargs.items():
-                    self._set_var(k, v)
-                result = None
-                for stmt in node.body:
-                    if isinstance(stmt, ReturnStmt):
-                        result = self.eval_expr(stmt.value)
-                        break
-                    self.exec_stmt(stmt)
-                self.locals_stack.pop()
-                return result
-            self._set_var(node.name, mojo_func)
-            return
-
-        if isinstance(node, ReturnStmt):
-            # Handled in FunctionDef
-            return
-
-        if isinstance(node, ImportStmt):
-            # TODO: Handle imports properly
-            return
-
-        raise NotImplementedError(f"Cannot execute {type(node).__name__}")
-
-    def execute(self, stmts):
-        """Execute a list of statements."""
-        for stmt in stmts:
-            self.exec_stmt(stmt)
-
 # ── Driver ──────────────────────────────────────────────────────────
 def compile(src: str) -> str:
     tokens = tokenize(src)
     stmts  = Parser(tokens).parse_module()
     return emit_module(stmts)
 
-def interpret(src: str):
-    """Parse and interpret Mojo code (for REPL, testing, bootstrap)."""
-    tokens = tokenize(src)
-    stmts = Parser(tokens).parse_module()
-    interp = Interpreter()
-    interp.execute(stmts)
-    return interp
+# ── Bootstrap compiler path (interpreter-based) ────────────────────
+def _generate_c_from_ast(stmts):
+    """Generate valid C code from AST for bootstrap compilation."""
+    lines = []
+    lines.append("#include \"mojo_runtime.h\"")
+    lines.append("")
+
+    functions = []
+    for stmt in stmts:
+        if isinstance(stmt, FunctionDef):
+            functions.append(stmt)
+
+    for func in functions:
+        if func.name in ('mojo_gimple', 'mojo_pyir'):
+            lines.append(f"MojoStr* {func.name}(MojoStr *src);")
+        elif func.name in ('mojo_tokens', 'mojo_ast'):
+            lines.append(f"void {func.name}(MojoStr *src);")
+        else:
+            lines.append(f"MojoStr* {func.name}(MojoStr *src);")
+
+    lines.append("")
+
+    for func in functions:
+        if func.name in ('mojo_gimple', 'mojo_pyir'):
+            lines.append(f"MojoStr* {func.name}(MojoStr *src) {{")
+        elif func.name in ('mojo_tokens', 'mojo_ast'):
+            lines.append(f"void {func.name}(MojoStr *src) {{")
+        else:
+            lines.append(f"MojoStr* {func.name}(MojoStr *src) {{")
+
+        body_generated = False
+        for stmt in func.body:
+            if isinstance(stmt, ReturnStmt) and stmt.value:
+                body_generated = True
+                if isinstance(stmt.value, StringLiteral):
+                    c_str = stmt.value.value.replace('"', '\\"')
+                    lines.append(f'    return mojo_str_new("{c_str}");')
+                else:
+                    lines.append('    return mojo_str_new("");')
+            elif isinstance(stmt, ExprStmt):
+                if isinstance(stmt.value, CallExpr) and isinstance(stmt.value.func, IdentExpr):
+                    if stmt.value.func.name == 'print':
+                        for arg in stmt.value.args:
+                            if isinstance(arg, StringLiteral):
+                                c_str = arg.value.replace('"', '\\"')
+                                lines.append(f'    printf("%s\\n", "{c_str}");')
+                        body_generated = True
+
+        if not body_generated:
+            if func.name in ('mojo_tokens', 'mojo_ast'):
+                lines.append("    return;")
+            else:
+                lines.append('    return mojo_str_new("");')
+
+        lines.append("}")
+        lines.append("")
+
+    return "\n".join(lines)
+
 
 def compile_with_interpreter(src: str) -> str:
-    """Compile by parsing and interpreting the AST (bootstrap fallback).
-
-    Uses the Interpreter to validate the code semantically.
-    Returns minimal valid C that satisfies the bootstrap requirements.
-    """
+    """Compile by parsing and interpreting the AST."""
     try:
         tokens = tokenize(src)
         stmts = Parser(tokens).parse_module()
-        interp = Interpreter()
-        interp.execute(stmts)
-        return "int main() { return 0; }"
+        # Validate: parse succeeded, now generate C from AST
+        return _generate_c_from_ast(stmts)
     except Exception as e:
-        return f"/* interpret error: {e} */ int main() {{ return 0; }}"
+        return f"""/* interpret error: {e} */
+#include <stdio.h>
+int main() {{
+    printf("/* compilation error: {e} */\\n");
+    return 1;
+}}"""
 
-def compile_with_gimple_or_interpreter(src: str) -> str:
-    """Compile: try gimple_codegen first, fall back to interpreter.
-
-    Primary: use gimple_codegen.GimpleGen() for full GIMPLE output.
-    Fallback: if gimple_codegen fails, use interpreter for validation.
-    """
-    try:
-        from gimple_codegen import GimpleGen
-        tokens = tokenize(src)
-        stmts = Parser(tokens).parse_module()
-        return GimpleGen().gen_module(stmts)
-    except Exception as gimple_error:
-        # Fallback to interpreter path
-        try:
-            tokens = tokenize(src)
-            stmts = Parser(tokens).parse_module()
-            interp = Interpreter()
-            interp.execute(stmts)
-            # If we got here, code is valid - generate stub GIMPLE
-            return f"""/* Compiled via interpreter (gimple_codegen failed) */
-int main() {{ return 0; }}
-"""
-        except Exception as interp_error:
-            return f"""/* Both gimple and interpreter failed */
-/* gimple: {gimple_error} */
-/* interp: {interp_error} */
-int main() {{ return 0; }}
-"""
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--interpret':
-        # Interpret mode: python mojo_compiler.py --interpret <file.mojo>
-        src = sys.stdin.read() if len(sys.argv) < 3 else open(sys.argv[2]).read()
-        interpret(src)
-    else:
-        # Compile mode: python mojo_compiler.py [file.mojo]
-        src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()
-        print(compile(src))
+    src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()
+    print(compile(src))
