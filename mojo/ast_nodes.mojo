@@ -170,6 +170,18 @@ struct TraitDef:
     body: list
 
 @dataclass
+struct WithStmt:
+    expr: object
+    var: str
+    body: list
+
+@dataclass
+struct TryStmt:
+    body: list
+    handlers: list = None
+    finally_body: list = None
+
+@dataclass
 struct Param:
     name: str
     type_ann: object = None

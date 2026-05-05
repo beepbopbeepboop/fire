@@ -89,6 +89,14 @@ def parse_stmt(ts: TokenStream) -> list:
             return [parse_struct_def(ts)]
         if t.value == "class":
             return [parse_struct_def(ts)]
+        if t.value == "import":
+            return [parse_import(ts)]
+        if t.value == "from":
+            return [parse_from_import(ts)]
+        if t.value == "with":
+            return [parse_with(ts)]
+        if t.value == "try":
+            return [parse_try(ts)]
 
     # Simple statement
     stmts.append(parse_simple_one(ts))
@@ -158,12 +166,18 @@ def parse_while(ts: TokenStream) -> N.WhileStmt:
 
 def parse_for(ts: TokenStream) -> N.ForStmt:
     ts.eat("KW")
-    target = ts.eat("NAME").value
-    ts.eat("KW")
+    # Parse target(s) - can be unpacking like: for x, y in ...
+    targets = [ts.eat("NAME").value]
+    while ts.match("COMMA"):
+        ts.advance()
+        if ts.match("KW") and ts.peek().value == "in":
+            break
+        targets.append(ts.eat("NAME").value)
+    ts.eat("KW")  # 'in'
     iterable = parse_expr(ts)
     ts.eat("COLON")
     body = parse_block(ts)
-    return N.ForStmt(targets=[target], iterable=iterable, body=body)
+    return N.ForStmt(targets=targets, iterable=iterable, body=body)
 
 def parse_func_def(ts: TokenStream) -> N.FunctionDef:
     ts.advance()
@@ -180,12 +194,22 @@ def parse_func_def(ts: TokenStream) -> N.FunctionDef:
 
 def parse_params(ts: TokenStream) -> list:
     params = []
-    params.append(ts.eat("NAME").value)
+    name = ts.eat("NAME").value
+    # Skip default values if present
+    if ts.match("ASSIGN"):
+        ts.advance()
+        parse_expr(ts)
+    params.append(name)
     while ts.match("COMMA"):
         ts.advance()
         if ts.match("RPAREN"):
             break
-        params.append(ts.eat("NAME").value)
+        name = ts.eat("NAME").value
+        # Skip default values if present
+        if ts.match("ASSIGN"):
+            ts.advance()
+            parse_expr(ts)
+        params.append(name)
     return params
 
 def parse_struct_def(ts: TokenStream) -> N.StructDef:
@@ -194,6 +218,71 @@ def parse_struct_def(ts: TokenStream) -> N.StructDef:
     ts.eat("COLON")
     body = parse_block(ts)
     return N.StructDef(name=name, body=body)
+
+def parse_import(ts: TokenStream) -> N.ImportStmt:
+    """Parse: import module [as alias]"""
+    ts.eat("KW")
+    module = ts.eat("NAME").value
+    alias = module
+    if ts.match_value("KW", "as"):
+        ts.advance()
+        alias = ts.eat("NAME").value
+    return N.ImportStmt(module=module, alias=alias)
+
+def parse_from_import(ts: TokenStream) -> N.FromImportStmt:
+    """Parse: from module import name [as alias], ..."""
+    ts.eat("KW")
+    module = ts.eat("NAME").value
+    ts.eat("KW")  # "import"
+    names = []
+    name = ts.eat("NAME").value
+    alias = name
+    if ts.match_value("KW", "as"):
+        ts.advance()
+        alias = ts.eat("NAME").value
+    names.append((name, alias))
+    while ts.match("COMMA"):
+        ts.advance()
+        name = ts.eat("NAME").value
+        alias = name
+        if ts.match_value("KW", "as"):
+            ts.advance()
+            alias = ts.eat("NAME").value
+        names.append((name, alias))
+    return N.FromImportStmt(module=module, names=names)
+
+def parse_with(ts: TokenStream) -> object:
+    """Parse: with expr as var: block"""
+    ts.eat("KW")
+    expr = parse_expr(ts)
+    ts.eat("KW")  # "as"
+    var = ts.eat("NAME").value
+    ts.eat("COLON")
+    body = parse_block(ts)
+    return N.WithStmt(expr=expr, var=var, body=body)
+
+def parse_try(ts: TokenStream) -> object:
+    """Parse: try: block except ...: block finally: block"""
+    ts.eat("KW")
+    ts.eat("COLON")
+    body = parse_block(ts)
+    handlers = []
+    ts.skip_newlines()
+    while ts.match_value("KW", "except"):
+        ts.advance()
+        exc_type = None
+        if not ts.match("COLON"):
+            exc_type = parse_expr(ts)
+        ts.eat("COLON")
+        handler_body = parse_block(ts)
+        handlers.append((exc_type, handler_body))
+        ts.skip_newlines()
+    finally_body = None
+    if ts.match_value("KW", "finally"):
+        ts.advance()
+        ts.eat("COLON")
+        finally_body = parse_block(ts)
+    return N.TryStmt(body=body, handlers=handlers, finally_body=finally_body)
 
 def parse_expr(ts: TokenStream) -> object:
     """Parse a full expression."""

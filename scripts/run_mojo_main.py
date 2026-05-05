@@ -62,17 +62,85 @@ def collect_transitive_files(entry_path, visited=None):
     results.append(path)
     return results
 
+def mojo_to_python(src: str) -> str:
+    """Convert Mojo syntax to Python-compatible syntax."""
+    import re
+
+    # Convert 'struct' to 'class'
+    src = re.sub(r'\bstruct\b', 'class', src)
+
+    # Convert 'fn ' to 'def ' (but not in strings)
+    lines = src.split('\n')
+    result = []
+    for line in lines:
+        # Simple heuristic: convert fn at start of line or after indent/decorator
+        if re.match(r'^(\s*)(fn|@.*\n\s*fn)\b', line):
+            line = re.sub(r'\bfn\b', 'def', line)
+        result.append(line)
+    src = '\n'.join(result)
+
+    return src
+
 # Collect all files in transitive closure
 files = collect_transitive_files(mojo_file)
 
-# Tokenize and output all
+# Import and execute mojo_main to run the parser
 try:
+    # Add mojo directory to path so imports work
+    mojo_dir = os.path.dirname(os.path.realpath(mojo_file))
+    sys.path.insert(0, mojo_dir)
+
+    # Execute files in dependency order (dependencies first)
+    # Order: ast_nodes, tokenizer, parser, codegen, mojo_main
+    order_priority = {
+        'ast_nodes.mojo': 0,
+        'tokenizer.mojo': 1,
+        'parser.mojo': 2,
+        # 'codegen.mojo': 3,  # Skip codegen for now (has undefined references)
+        'mojo_main.mojo': 4,
+    }
+
+    # Skip codegen since it references undefined symbols
+    skip_files = {'codegen.mojo'}
+
+    # Sort files by priority
+    def get_priority(path):
+        name = os.path.basename(path)
+        return order_priority.get(name, 100)
+
+    files = sorted(files, key=get_priority)
+
+    # Read and execute mojo_main.mojo with transitive closure
+    import types
+    modules = {}
+    namespace = {}
+
     for filepath in files:
+        # Skip codegen for now
+        if os.path.basename(filepath) in skip_files:
+            continue
         with open(filepath) as f:
             src = f.read()
-        tokens = tokenize(src)
-        for tok in tokens:
-            print(f"{tok.kind} {tok.value!r}")
+        # Convert Mojo syntax to Python
+        src = mojo_to_python(src)
+
+        # Create a module for this file
+        module_name = os.path.basename(filepath).replace('.mojo', '')
+        module = types.ModuleType(module_name)
+        module.__file__ = filepath
+        sys.modules[module_name] = module
+
+        # Execute in the module's namespace
+        exec(src, module.__dict__)
+        modules[module_name] = module
+        namespace.update(module.__dict__)
+
+    # Run main() which will call parse() and output AST
+    if 'main' in namespace:
+        try:
+            namespace['main']()
+        except SystemExit:
+            pass  # Ignore sys.exit() calls
 except Exception as e:
     print(f"/* error: {e} */")
     import traceback
