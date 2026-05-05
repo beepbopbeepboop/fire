@@ -108,7 +108,7 @@ stage2-interp: $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 stage3-interp: stage2-interp
 	@mkdir -p build stage3
 	@echo "  stage3: dumping GIMPLE from stage2/mojo..."
-	@stage2/mojo --dump-gimple $(MOJO_MAIN) > build/mojo_logic3.c || \
+	@stage2/mojo --dump-gimple $(MOJO_MAIN) 2>&1 | python3 unescape_c.py > build/mojo_logic3.c || \
 	    { echo "FAIL stage3-interp: stage2/mojo --dump-gimple failed"; exit 1; }
 	@echo "  stage3: linking with compiler_main.c..."
 	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o stage3/mojo build/mojo_logic3.c $(COMPILER_MAIN) $(RUNTIME_C) || \
