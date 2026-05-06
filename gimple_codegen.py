@@ -1268,9 +1268,20 @@ class GimpleGen:
         if ret_type == 'void':
             self._emit(f"  {mangled} ({all_args});")
             t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
-        t = self._new_temp(ret_type)
-        self._emit(f"  {t} = {mangled} ({all_args});")
-        return ret_type, t
+
+        # For pointer types, store as int64_t in GIMPLE for compatibility
+        if ret_type in ('char *', 'void *') or ret_type.endswith(' *'):
+            storage_type = 'int64_t'
+        else:
+            storage_type = ret_type
+
+        t = self._new_temp(storage_type)
+        if storage_type != ret_type:
+            # Cast pointer return to int64_t
+            self._emit(f"  {t} = (int64_t) {mangled} ({all_args});")
+        else:
+            self._emit(f"  {t} = {mangled} ({all_args});")
+        return storage_type, t
 
     # ── Call expression lowering ──────────────────────────────────────────
 
@@ -1419,13 +1430,13 @@ class GimpleGen:
 
         t = self._new_temp(storage_type)
         if storage_type != ret_type:
-            # Cast pointer return to int64_t
+            # Cast pointer return to int64_t for GIMPLE compatibility
             self._emit(f"  {t} = (int64_t) {fname} ({args_str});")
         else:
             self._emit(f"  {t} = {fname} ({args_str});")
 
-        # Return the actual type, not the storage type, so callers know how to use it
-        return ret_type, t
+        # Return the storage type that was actually assigned, so variable declarations match
+        return storage_type, t
 
     # ── Struct constructor lowering (data layout solver decision) ─────────
 
@@ -2927,8 +2938,10 @@ class GimpleGen:
                             break
 
         # Register struct constructors as functions returning T *
+        # Include both current module and imported module structs
         self.func_return_types = dict(_RUNTIME_FUNCS)
-        for s in stmts:
+        all_struct_defs_for_types = stmts + (imported_stmts if self.do_imports else [])
+        for s in all_struct_defs_for_types:
             if isinstance(s, StructDef):
                 self.func_return_types[s.name] = f"{s.name} *"
 
@@ -2965,13 +2978,15 @@ class GimpleGen:
                     # Gracefully ignore module load errors
                     pass
 
-        # Register user function return types
+        # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
-        for s in stmts:
+        all_functions = stmts + (imported_stmts if self.do_imports else [])
+        for s in all_functions:
             if isinstance(s, FunctionDef) and s.return_type is not None:
                 self.func_return_types[s.name] = self._resolve_type(s.return_type)
-        #   Pass 1b: struct method annotated return types
-        for s in stmts:
+        #   Pass 1b: struct method annotated return types (from current + imported modules)
+        all_structs_for_methods = stmts + (imported_stmts if self.do_imports else [])
+        for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
                     if m.return_type is not None:
@@ -2980,7 +2995,7 @@ class GimpleGen:
 
         #   Pass 2: infer return types for unannotated functions using
         #           already-seeded func_return_types for callee types
-        for s in stmts:
+        for s in all_functions:
             if isinstance(s, FunctionDef) and s.return_type is None:
                 # Seed param types so _quick_type works for param names
                 for pname, ptype in s.params:
@@ -2993,7 +3008,7 @@ class GimpleGen:
                 self.var_types.clear()
 
         #   Pass 2b: infer return types for unannotated struct methods
-        for s in stmts:
+        for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
                     if m.return_type is None:
