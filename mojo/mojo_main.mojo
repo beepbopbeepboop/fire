@@ -10,7 +10,11 @@ Modes:
 import sys
 
 def run_repl():
-    """Interactive REPL for Mojo code."""
+    """Interactive REPL for Mojo code.
+
+    TODO: Compiled version (stage2/mojo repl) segfaults during expression evaluation.
+    Python version (python3 mojo.py repl) works correctly.
+    """
     try:
         from mojo_compiler import tokenize, Parser
         from myinterpreter import Interpreter

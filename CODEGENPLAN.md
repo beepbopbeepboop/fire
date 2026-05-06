@@ -94,6 +94,15 @@ All TODOs are **defensive fallbacks** for edge cases:
 
 ---
 
+## Known Runtime Issues
+
+- **Compiled REPL segfaults** — `stage2/mojo repl` enters REPL successfully but segfaults when evaluating expressions
+  - Root cause: Not yet diagnosed (likely in stub functions or interpreter interaction)
+  - Workaround: Use Python REPL (`python3 mojo.py repl`) which works correctly
+  - Status: TODO — investigate tokenize/Parser/Interpreter interaction in compiled context
+
+---
+
 ## Deferred (not planned)
 
 - **GPU constructs** (`DeviceContext`, `DeviceBuffer`, kernel launch)
