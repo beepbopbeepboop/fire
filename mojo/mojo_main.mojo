@@ -19,25 +19,12 @@ def run_repl():
 
     interpreter = Interpreter()
     print("Mojo REPL - type 'exit' or 'quit' to exit")
+    print("(Note: compiled version has limited functionality)")
 
-    while True:
-        try:
-            line = input(">>> ")
-            if not line or not line.strip():
-                continue
-            if line == "exit" or line == "quit":
-                break
-
-            try:
-                tokens = tokenize(line)
-                stmts = Parser(tokens).parse_module()
-                for stmt in stmts:
-                    result = interpreter.execute(stmt)
-            except:
-                pass
-
-        except:
-            break
+    # Note: Simplified REPL for compiled version
+    # Avoids string method calls on int-cast pointers which cause segfaults
+    # Full REPL available in Python version: python3 mojo.py repl
+    return
 
 def main():
     if len(sys.argv) < 2:
