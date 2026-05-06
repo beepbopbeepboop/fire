@@ -78,7 +78,6 @@ def build_executable(input_file, src):
     basename = os.path.splitext(os.path.basename(input_file))[0]
     try:
         import gimple_codegen
-        from stdlib_linker import get_stdlib_link_flags
 
         # Resolve paths relative to mojo-reference directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -140,18 +139,7 @@ def build_executable(input_file, src):
         except:
             py_ldflags = []
 
-        # Link with stdlib .so files if available
-        stdlib_so_files = get_stdlib_link_flags(src)
-        # Convert relative paths to absolute for linking
-        stdlib_so_absolute = [os.path.abspath(f) for f in stdlib_so_files]
-
-        # Build link command with rpath to find stdlib at runtime
         link_cmd = ["gcc-mp-15", "-o", exe_file, o_file, runtime_o]
-        if stdlib_so_absolute:
-            # Add rpath so executable can find .so files relative to mojo-reference dir
-            stdlib_build_abs = os.path.abspath(os.path.join(script_dir, 'build', 'stdlib'))
-            link_cmd.extend([f"-Wl,-rpath,{stdlib_build_abs}"])
-        link_cmd.extend(stdlib_so_absolute)
         link_cmd.extend(py_ldflags)
 
         result = subprocess.run(link_cmd, capture_output=True, text=True)

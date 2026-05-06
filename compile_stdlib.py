@@ -80,9 +80,14 @@ def transpile_file(mojo_file):
                     error_line = lines[-2] if len(lines) > 1 else "unknown error"
                 return False, f"{error_line[:120]}"
 
-            # Check that compilation produced output
+            # Check that compilation produced output (empty files are OK)
             if not proc.stdout.strip():
-                return False, "mojo_compiler produced no output"
+                # A file with no Mojo declarations (e.g. license-only __init__)
+                # correctly produces no GIMPLE output — treat as success.
+                import re
+                stripped = re.sub(r'#[^\n]*', '', source_code).strip()
+                if stripped:
+                    return False, "mojo_compiler produced no output"
 
             return True, None
 
