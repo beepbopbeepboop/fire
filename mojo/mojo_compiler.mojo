@@ -15,15 +15,15 @@ class Parser:
     def parse_module(self):
         return []
 
-def tokenize(src):
+def tokenize(src: str):
     """Tokenize (stub - actual work in Python)."""
     return ""
 
-def compile(src) -> str:
+def compile(src: str) -> str:
     """Compile via interpretation (stub - actual work in Python)."""
     return ""
 
-def mojo_gimple(src) -> str:
+def mojo_gimple(src: str) -> str:
     """Generate GIMPLE C from Mojo source.
 
     Implementation: calls Python gimple_codegen.GimpleGen().gen_module()
@@ -31,15 +31,15 @@ def mojo_gimple(src) -> str:
     """
     return "int main() { return 0; }"
 
-def mojo_pyir(src) -> str:
+def mojo_pyir(src: str) -> str:
     """Python IR (intermediate representation)."""
     return mojo_gimple(src)
 
-def mojo_tokens(src):
+def mojo_tokens(src: str):
     """Print tokens."""
     pass
 
-def mojo_ast(src):
+def mojo_ast(src: str):
     """Print AST."""
     pass
 

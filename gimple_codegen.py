@@ -374,6 +374,11 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
+    # C-string utilities used by the REPL and string methods
+    'input':          'char *',
+    'string_lower':   'char *',
+    'string_strip':   'char *',
+    'string_upper':   'char *',
 }
 
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
@@ -1235,8 +1240,8 @@ class GimpleGen:
                 # gimple_codegen.compile_to_gimple(src) → returns char*
                 if len(node.args) == 1:
                     src_type, src_val = self.lower_expr(node.args[0])
-                    # Cast to char* if it's an int (gimple treats everything as int)
-                    if src_type == 'int':
+                    # Cast to char* if needed (legacy int-cast strings)
+                    if src_type not in ('char *', 'void *'):
                         src_val = f"(char *){src_val}"
                     t = self._new_temp('char *')
                     self._emit(f"  {t} = gimple_codegen_compile_to_gimple ({src_val});")
@@ -1244,6 +1249,9 @@ class GimpleGen:
 
         ot, ov = self.lower_expr(func.obj)
         method = func.member
+
+        # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
+        ot = self._get_actual_type(ot, ov)
 
         # Raw C pointer operations (UnsafePointer[T] lowers to T *)
         if ot.endswith(' *') and ot not in self._RUNTIME_PTRS:
@@ -1297,6 +1305,52 @@ class GimpleGen:
                 t = self._new_temp('int')
                 self._emit(f"  {t} = 0;")
                 return 'int', t
+
+        # char* string method calls — dispatch to C string utility functions
+        if ot == 'char *':
+            arg_vals = [self.lower_expr(a)[1] for a in node.args]
+            # Cast ov to char* if it's stored as int64_t (pointer stored as int)
+            stored_type = self.var_types.get(ov, ot)
+            cstr_ov = f"(char *){ov}" if stored_type == 'int64_t' else ov
+            _CSTR_METHODS: dict[str, str] = {
+                'lower': 'string_lower', 'upper': 'string_upper',
+                'strip': 'string_strip',
+            }
+            if method in _CSTR_METHODS:
+                fn = _CSTR_METHODS[method]
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = {fn} ({cstr_ov});")
+                return 'char *', t
+            if method == 'startswith' and arg_vals:
+                t = self._new_temp('int')
+                self._emit(f"  {t} = mojo_str_startswith ({cstr_ov}, {arg_vals[0]});")
+                return 'int', t
+            if method == 'endswith' and arg_vals:
+                t = self._new_temp('int')
+                self._emit(f"  {t} = mojo_str_endswith ({cstr_ov}, {arg_vals[0]});")
+                return 'int', t
+            if method == 'find' and arg_vals:
+                t = self._new_temp('int64_t')
+                self._emit(f"  {t} = mojo_str_find ({cstr_ov}, {arg_vals[0]});")
+                return 'int64_t', t
+            if method == 'split' and arg_vals:
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_str_split ({cstr_ov}, {arg_vals[0]});")
+                return 'MojoList *', t
+            if method in ('encode', 'decode', 'format'):
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = {cstr_ov};  /* TODO: {method} */")
+                return 'char *', t
+            # Unknown method on char* — return 0 (stub)
+            t = self._new_temp('int')
+            self._emit(f"  {t} = 0;  /* TODO: char*.{method} */")
+            return 'int', t
+
+        # File handle read: f.read() on int/int64_t handles → int_read(f) → char*
+        if method == 'read' and ot in ('int', 'int64_t') and not node.args:
+            t = self._new_temp('char *')
+            self._emit(f"  {t} = int_read ({ov});")
+            return 'char *', t
 
         # Struct method call: obj.method(args) → StructName_method(self, args)
         struct_name = ot.replace(' *', '').strip()
@@ -1462,6 +1516,17 @@ class GimpleGen:
             self._emit(f"  {t} = 0;")
             return 'int', t
 
+        # String utility functions — store char* result directly so callers can
+        # pass it to char* parameters and call string methods without casts.
+        _DIRECT_CHARPTR = frozenset({
+            'input', 'mojo_input',
+            'string_lower', 'string_strip', 'string_upper',
+        })
+        if ret_type == 'char *' and fname_raw in _DIRECT_CHARPTR:
+            t = self._new_temp('char *')
+            self._emit(f"  {t} = {fname} ({args_str});")
+            return 'char *', t
+
         # For pointer types (char *, MojoList *, etc), store as int64_t in GIMPLE
         # and cast when needed
         if ret_type in ('char *', 'void *') or ret_type.endswith(' *'):
@@ -1473,6 +1538,7 @@ class GimpleGen:
         if storage_type != ret_type:
             # Cast pointer return to int64_t for GIMPLE compatibility
             self._emit(f"  {t} = (int64_t) {fname} ({args_str});")
+            self._actual_types[t] = ret_type  # track actual type for method dispatch
         else:
             self._emit(f"  {t} = {fname} ({args_str});")
 

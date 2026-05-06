@@ -176,7 +176,6 @@ char *mojo_cstr_repeat(const char *s, int64_t n);
 int MojoList_append(MojoList *l, char *v);
 int char_join(const char *sep, MojoList *items);
 int int_items(int obj);
-int int_read(int fh);
 
 /* Command-line arguments */
 void mojo_set_argv(int argc, const char **argv);
@@ -192,21 +191,21 @@ int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
 char *mojo_file_read_all(const char *filename);
 
 /* Module function stubs */
-MojoFileHandle mojo_python_open(const char *filename);
-char *mojo_python_read(MojoFileHandle fh);
-int int_read(int fh);
 void *mojo_parse(const char *source);
 MojoList *mojo_tokenize(const char *source);
 
 /* Builtin file I/O - defined in runtime */
 int open(int path);
 
-/* REPL and string utilities */
-char *mojo_input(const char *prompt);  /* Read line from stdin - returns char* */
-int input(const char *prompt);         /* Wrapper - returns int cast of char* */
+/* Flattened method stubs for generated GIMPLE code */
+char *int_read(int f);
+int   int_write(int f, char *data);
+int   int_parse_module(int parser);
 
-char *string_strip(char *str);         /* Strip whitespace from string */
-char *string_lower(char *str);         /* Convert string to lowercase */
+/* REPL and string utilities — stdlib-equivalent C implementations */
+char *mojo_input(const char *prompt);  /* Read line from stdin */
+char *input(const char *prompt);       /* Alias for mojo_input */
 
-int int_strip(int str);                /* Legacy: int-cast version of string_strip */
-int int_lower(int str);                /* Legacy: int-cast version of string_lower */
+char *string_strip(char *str);         /* Strip whitespace */
+char *string_lower(char *str);         /* Convert to lowercase */
+char *string_upper(char *str);         /* Convert to uppercase */

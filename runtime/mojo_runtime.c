@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #define USE_PYTHON 0
 
@@ -948,22 +949,6 @@ int int_items(int obj) {
 
 /* ── Module function stubs ────────────────────────────────────────────────*/
 
-MojoFileHandle mojo_python_open(const char *filename) {
-    /* Stub: return NULL for now */
-    return NULL;
-}
-
-char *mojo_python_read(MojoFileHandle fh) {
-    /* Stub: return empty string */
-    static char buffer[1] = {'\0'};
-    return buffer;
-}
-
-int int_read(int fh) {
-    /* Stub: return 0 */
-    return 0;
-}
-
 void *mojo_parse(const char *source) {
     /* Basic parse stub - just return a simple AST node representation */
     if (!source || !source[0]) {
@@ -1077,13 +1062,12 @@ char *mojo_input(const char *prompt) {
     return _input_buffer;
 }
 
-/* Compatibility wrapper: returns int-cast pointer */
-int input(const char *prompt) {
-    char *result = mojo_input(prompt);
-    return (intptr_t)result;
+/* input() — stdlib-compatible: reads a line and returns char* */
+char *input(const char *prompt) {
+    return mojo_input(prompt);
 }
 
-/* String methods as proper C functions that work with pointers */
+/* String utilities — stdlib-equivalent implementations */
 
 char *string_strip(char *str) {
     if (!str) return str;
@@ -1122,15 +1106,16 @@ char *string_lower(char *str) {
     return lower;
 }
 
-/* Legacy int-cast versions for compatibility */
-int int_strip(int str_int) {
-    if (str_int <= 0) return str_int;
-    return (intptr_t)string_strip((char *)str_int);
-}
+char *string_upper(char *str) {
+    if (!str) return str;
 
-int int_lower(int str_int) {
-    if (str_int <= 0) return str_int;
-    return (intptr_t)string_lower((char *)str_int);
+    static char upper[4096];
+    for (size_t i = 0; i < sizeof(upper) - 1 && str[i]; i++) {
+        upper[i] = (str[i] >= 'a' && str[i] <= 'z') ? (str[i] - 32) : str[i];
+    }
+    upper[sizeof(upper) - 1] = '\0';
+
+    return upper;
 }
 
 /* ── Module function stubs ────────────────────────────────────────────*/
@@ -1146,6 +1131,16 @@ char *gimple_codegen_compile_to_gimple(const char *src) {
 }
 
 /* Flattened method calls */
+char *int_read(int f) {
+    /* Read all content from file handle (as file descriptor) */
+    if (f <= 0) return NULL;
+    static char buf[1 << 20];  /* 1 MiB */
+    ssize_t n = read(f, buf, sizeof(buf) - 1);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+    return buf;
+}
+
 int int_write(int f, char *data) {
     if (f > 0) {
         FILE *file = (FILE *)(intptr_t)f;
