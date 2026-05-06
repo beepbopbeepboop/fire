@@ -843,7 +843,14 @@ class Parser:
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
-        name = self._expect("NAME").value
+        # Allow keywords as function names (e.g., def read(...), def async(...))
+        t = self._peek()
+        if t.kind == "NAME":
+            name = self._advance().value
+        elif t.kind == "KW":
+            name = self._advance().value
+        else:
+            raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Skip generic type-param block [T: Trait, count: Int, //]
         if self._peek().kind == "LBRACKET": self._skip_bracketed()
         self._expect("LPAREN")
