@@ -71,15 +71,19 @@ $(DYLIB): $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p build
 	cc -dynamiclib -I runtime -o $@ $(RUNTIME_SRC)
 
-# Build stdlib dylib (attempt compilation with -k flag to continue on errors)
-$(STDLIB_DYLIB): $(STDLIB_WRAPPER) $(STDLIB_STD_PATH) $(MOJO_CLI)
-	@mkdir -p build
-	@echo "Building Mojo stdlib..."
-	$(MOJO_CLI) build $(STDLIB_WRAPPER) -o $@ 2>&1 || true
+# Build stdlib module registry and index
+stdlib-registry:
+	@echo "Building stdlib module registry..."
+	@python3 build_stdlib.py
 
-# Convenience target to build just the stdlib
-stdlib: $(STDLIB_DYLIB)
-	@echo "Stdlib build complete (or attempted)"
+# Build stdlib dylib from registry
+$(STDLIB_DYLIB): stdlib-registry
+	@mkdir -p build
+	@echo "Stdlib dylib build requires individual module compilation"
+	@echo "Use: build_module.py <module.mojo> to compile individual modules"
+
+# Convenience target to build stdlib registry
+stdlib: stdlib-registry
 
 # Build the Mojo system executable from GIMPLE-generated C code
 mojo.ci: $(MOJO_MAIN)
