@@ -306,6 +306,7 @@ _TYPE_MAP: dict[str | None, str] = {
     'Float64': 'double',
     'Bool':   'int',
     'String': 'char *',
+    'str':    'char *',
     'List':   'MojoList *',
     'Dict':   'MojoDict *',
     'Set':    'MojoSet *',
