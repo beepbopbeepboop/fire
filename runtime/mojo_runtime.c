@@ -1084,21 +1084,3 @@ int int_parse_module(int parser) {
     return (intptr_t)mojo_list_new();
 }
 
-int tokenize(int src) {
-    /* Tokenize source code */
-    if (src <= 1000) return 0;
-    const char *src_str = (const char *)src;
-    MojoList *tokens = mojo_tokenize(src_str);
-    return (intptr_t)tokens;
-}
-
-int Parser(int tokens) {
-    /* Create a parser from tokens */
-    return tokens;  /* Return the tokens list as the parser state */
-}
-
-int Interpreter() {
-    /* Create an interpreter instance */
-    return 1;  /* Return dummy interpreter object */
-}
-
