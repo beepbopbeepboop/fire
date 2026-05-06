@@ -7,7 +7,43 @@ import os
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STDLIB_PATH = os.path.join(HERE, '..', '..', 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
+
+def _find_stdlib_path():
+    """Find stdlib path using multiple strategies.
+
+    1. Check MOJO_STDLIB environment variable
+    2. Look relative to this file (project root structure: ../mojo/3rdparty/...)
+    3. Search upward from current directory
+    4. Return path (will fail gracefully if not found at runtime)
+    """
+    # Strategy 1: Environment variable override
+    if 'MOJO_STDLIB' in os.environ:
+        path = os.environ['MOJO_STDLIB']
+        if os.path.isdir(path):
+            return path
+
+    # Strategy 2: Relative to this module (from mojo-reference/)
+    # Pattern: mojo-reference/ -> ../mojo/3rdparty/modular/mojo/stdlib
+    relative_path = os.path.join(HERE, '..', 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
+    abs_path = os.path.abspath(relative_path)
+    if os.path.isdir(abs_path):
+        return abs_path
+
+    # Strategy 3: Search upward from current working directory
+    cwd = os.path.abspath(os.getcwd())
+    for _ in range(10):  # Search up to 10 levels
+        # Look for mojo/3rdparty/... at current level
+        candidate = os.path.join(cwd, 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
+        if os.path.isdir(candidate):
+            return candidate
+        cwd = os.path.dirname(cwd)
+        if cwd == '/':
+            break
+
+    # Fallback: return the computed path (runtime will handle missing stdlib gracefully)
+    return abs_path
+
+STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
 
 
