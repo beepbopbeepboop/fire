@@ -360,15 +360,15 @@ class Token:
 
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
-    """Remove trailing # comment, respecting quoted strings."""
+    """Remove trailing # comment, respecting quoted strings (including backtick strings)."""
     in_str = None
     i = 0
     while i < len(s):
         c = s[i]
         if in_str:
-            if c == "\\" : i += 2; continue
+            if c == "\\" and in_str != '`': i += 2; continue
             if c == in_str: in_str = None
-        elif c in ('"', "'"):
+        elif c in ('"', "'", '`'):
             in_str = c
         elif c == _CMT_CHAR:
             return s[:i]
@@ -376,18 +376,18 @@ def _strip_inline_comment(s: str) -> str:
     return s
 
 def _split_on_separators(s: str) -> list[str]:
-    """Split on ';' statement separator, respecting quoted strings."""
+    """Split on ';' statement separator, respecting quoted strings (including backtick strings)."""
     parts, buf, in_str = [], [], None
     i = 0
     while i < len(s):
         c = s[i]
         if in_str:
             buf.append(c)
-            if c == "\\" and i + 1 < len(s):
+            if c == "\\" and in_str != '`' and i + 1 < len(s):
                 i += 1; buf.append(s[i])
             elif c == in_str:
                 in_str = None
-        elif c in ('"', "'"):
+        elif c in ('"', "'", '`'):
             in_str = c; buf.append(c)
         elif c == _SEP_CHAR:
             parts.append("".join(buf)); buf = []

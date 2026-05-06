@@ -14,7 +14,8 @@ import subprocess
 from pathlib import Path
 from collections import defaultdict
 
-STDLIB_PATH = "../mojo/3rdparty/modular/mojo/stdlib/std"
+REPO_ROOT = Path(__file__).parent.parent
+STDLIB_PATH = REPO_ROOT / "../mojo/3rdparty/modular/mojo/stdlib/std"
 
 def transpile_file(mojo_file):
     """Transpile a single .mojo file and return error message if it fails."""
@@ -23,10 +24,10 @@ def transpile_file(mojo_file):
             source_code = f.read()
 
         proc = subprocess.run(
-            ['python', '../mojo_compiler.py'],
+            ['python', 'mojo_compiler.py'],
             input=source_code,
             capture_output=True,
-            cwd=Path(__file__).parent.parent,
+            cwd=REPO_ROOT,
             text=True,
             timeout=3
         )
@@ -46,7 +47,7 @@ def transpile_file(mojo_file):
         return str(e)
 
 def main():
-    stdlib_std_path = Path(STDLIB_PATH).resolve()
+    stdlib_std_path = STDLIB_PATH.resolve()
 
     if not stdlib_std_path.exists():
         print(f"ERROR: stdlib path does not exist: {stdlib_std_path}")
