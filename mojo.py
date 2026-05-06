@@ -77,10 +77,16 @@ def build_executable(input_file, src):
     basename = os.path.splitext(os.path.basename(input_file))[0]
     try:
         import gimple_codegen
+        from stdlib_linker import get_stdlib_link_flags
+
+        # Resolve paths relative to mojo-reference directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        runtime_dir = os.path.join(script_dir, 'runtime')
+        runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
-        # do_imports=True: transitively compile all imported modules
-        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
+        # do_imports=False: don't inline imports, we'll link against .so files instead
+        c_code = gimple_codegen.compile_to_gimple(src, do_imports=False)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -93,7 +99,7 @@ def build_executable(input_file, src):
 
         # Compile to object file with -fgimple for GIMPLE code generation
         o_file = f"{basename}.o"
-        compile_cmd = ["gcc-mp-15", "-fgimple", "-I", "runtime"] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        compile_cmd = ["gcc-mp-15", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Compilation failed: {result.stderr}", file=sys.stderr)
@@ -101,7 +107,7 @@ def build_executable(input_file, src):
 
         # Compile runtime
         runtime_o = f"{basename}_runtime.o"
-        runtime_cmd = ["gcc-mp-15", "-I", "runtime"] + py_cflags + ["-c", "-o", runtime_o, "runtime/mojo_runtime.c"]
+        runtime_cmd = ["gcc-mp-15", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
         result = subprocess.run(runtime_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
@@ -133,7 +139,20 @@ def build_executable(input_file, src):
         except:
             py_ldflags = []
 
-        link_cmd = ["gcc-mp-15", "-o", exe_file, o_file, runtime_o] + py_ldflags
+        # Link with stdlib .so files if available
+        stdlib_so_files = get_stdlib_link_flags(src)
+        # Convert relative paths to absolute for linking
+        stdlib_so_absolute = [os.path.abspath(f) for f in stdlib_so_files]
+
+        # Build link command with rpath to find stdlib at runtime
+        link_cmd = ["gcc-mp-15", "-o", exe_file, o_file, runtime_o]
+        if stdlib_so_absolute:
+            # Add rpath so executable can find .so files relative to mojo-reference dir
+            stdlib_build_abs = os.path.abspath(os.path.join(script_dir, 'build', 'stdlib'))
+            link_cmd.extend([f"-Wl,-rpath,{stdlib_build_abs}"])
+        link_cmd.extend(stdlib_so_absolute)
+        link_cmd.extend(py_ldflags)
+
         result = subprocess.run(link_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Linking failed: {result.stderr}", file=sys.stderr)

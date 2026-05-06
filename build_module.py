@@ -102,6 +102,14 @@ def build_module(input_file, output_so, output_symbols=None):
 
     print(f"✓ Built {output_so}")
 
+    # Fix install name on macOS to use absolute path
+    # This allows the .so to be loaded from anywhere, not just relative to current dir
+    import platform
+    if platform.system() == 'Darwin':
+        so_abs = os.path.abspath(output_so)
+        install_cmd = ['install_name_tool', '-id', so_abs, output_so]
+        subprocess.run(install_cmd, capture_output=True)
+
     # Write symbol table if requested
     if output_symbols:
         with open(output_symbols, 'w') as f:
