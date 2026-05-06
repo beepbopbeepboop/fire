@@ -1527,7 +1527,30 @@ class Parser:
         # Allow KW tokens as type names (e.g., "let", "var", "if")
         t = self._peek()
         if t.kind == "NAME": name = prefix + self._advance().value
-        elif t.kind == "KW": name = prefix + self._advance().value
+        elif t.kind == "KW":
+            kw_value = self._advance().value
+            # Handle function types: def() -> ReturnType
+            if kw_value == "def":
+                # Skip function parameters in parentheses and brackets
+                if self._peek().kind == "LBRACKET":
+                    self._skip_bracketed()  # skip generic parameters [T, ...]
+                if self._peek().kind == "LPAREN":
+                    # Skip parameter list: consume balanced parentheses
+                    self._advance()  # consume LPAREN
+                    depth = 1
+                    while depth > 0:
+                        t = self._advance()
+                        if t.kind == "LPAREN": depth += 1
+                        elif t.kind == "RPAREN": depth -= 1
+                        elif t.kind == "EOF": break
+                # Skip return type if present
+                if self._peek().kind == "ARROW":
+                    self._advance()  # skip ->
+                    # Recursively parse the return type
+                    return_type = self._parse_type_ann()
+                    return prefix + f"def ... -> {return_type}"
+                return prefix + "def"
+            name = prefix + kw_value
         else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
