@@ -4,6 +4,7 @@ mojo.py - Mojo interpreter/compiler system
 
 Modes:
 - mojo                         Interactive REPL
+- mojo repl                     Interactive REPL (explicit)
 - mojo file.mojo               Interpret and execute file
 - mojo --dump file.mojo        Generate .tok, .ast, .ci, .pyi files
 - mojo build file.mojo         Compile to executable
@@ -172,6 +173,11 @@ def build_executable(input_file, src):
 def main():
     # No arguments: run REPL
     if len(sys.argv) < 2:
+        run_repl()
+        return
+
+    # Check for repl command
+    if sys.argv[1] == 'repl':
         run_repl()
         return
 
