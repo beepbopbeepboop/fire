@@ -206,7 +206,7 @@ build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN)
 # Stage 4: verify bootstrap by comparing intermediate artifacts
 
 clean:
-	rm -rf build stage1 stage2 stage3
+	rm -rf build stage1 stage2 stage3 *.ci *.tok *.pyi *.ast *.o
 
 clean-bootstrap:
 	rm -f build/mojo_logic.c build/mojo_logic2.c

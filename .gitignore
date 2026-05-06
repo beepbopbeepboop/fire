@@ -21,3 +21,4 @@ stage2/
 *.ci
 *.ast
 *.pyi
+*.o

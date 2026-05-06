@@ -100,7 +100,7 @@ def build_executable(input_file, src):
 
         # Compile to object file with -fgimple for GIMPLE code generation
         o_file = f"{basename}.o"
-        compile_cmd = ["gcc-mp-15", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        compile_cmd = ["gcc-mp-15", "-O2", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Compilation failed: {result.stderr}", file=sys.stderr)
@@ -108,7 +108,7 @@ def build_executable(input_file, src):
 
         # Compile runtime
         runtime_o = f"{basename}_runtime.o"
-        runtime_cmd = ["gcc-mp-15", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
+        runtime_cmd = ["gcc-mp-15", "-O2", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
         result = subprocess.run(runtime_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)

@@ -13,6 +13,10 @@ import sys
 import re
 from dataclasses import dataclass
 import ast_nodes as N
+try:
+    import mojo_compiler
+except ImportError:
+    mojo_compiler = None
 
 
 class ReturnValue(Exception):
@@ -77,6 +81,7 @@ class MojoFunction:
             else:
                 func_scope.define(param, None)
 
+
         # Execute function body
         old_scope = interpreter.scope
         interpreter.scope = func_scope
@@ -116,6 +121,15 @@ class Interpreter:
     def __init__(self):
         self.scope = Scope()
         self._setup_builtins()
+
+    def _is_instance(self, obj, class_name):
+        """Check if obj is an instance of class_name from either ast_nodes or mojo_compiler."""
+        if isinstance(obj, getattr(N, class_name, type(None))):
+            return True
+        if mojo_compiler and hasattr(mojo_compiler, class_name):
+            if isinstance(obj, getattr(mojo_compiler, class_name)):
+                return True
+        return False
 
     def _setup_builtins(self):
         """Setup built-in functions and constants."""
@@ -174,7 +188,36 @@ class Interpreter:
 
     def execute_FunctionDef(self, node: N.FunctionDef):
         """Execute function definition."""
-        func = MojoFunction(node.name, node.params, node.body, self.scope)
+        # Extract parameter names from various formats
+        params = []
+        if hasattr(node, 'params') and node.params:
+            for p in node.params:
+                if isinstance(p, str):
+                    params.append(p)
+                elif isinstance(p, tuple):
+                    # Handle (name, type_annotation) tuples
+                    params.append(p[0])
+                elif hasattr(p, 'name'):
+                    params.append(p.name)
+                elif isinstance(p, dict) and 'name' in p:
+                    params.append(p['name'])
+                else:
+                    # Fallback: try to extract name from string representation
+                    p_str = str(p)
+                    if '(' in p_str:
+                        # Parse string like "('n', None)" to get 'n'
+                        try:
+                            import ast
+                            parsed = ast.literal_eval(p_str)
+                            if isinstance(parsed, tuple):
+                                params.append(parsed[0])
+                            else:
+                                params.append(parsed)
+                        except:
+                            params.append(p_str)
+                    else:
+                        params.append(p_str)
+        func = MojoFunction(node.name, params, node.body, self.scope)
         self.scope.define(node.name, func)
         return func
 
@@ -197,17 +240,23 @@ class Interpreter:
     def execute_AssignStmt(self, node: N.AssignStmt):
         """Execute assignment statement."""
         value = self.eval_expr(node.value)
-        self._assign_target(node.target, value)
+        # Handle both 'targets' (list) and 'target' (single) for compatibility
+        if hasattr(node, 'targets'):
+            targets = node.targets
+        else:
+            targets = [node.target]
+        for target in targets:
+            self._assign_target(target, value)
         return value
 
     def _assign_target(self, target, value):
         """Assign a value to a target (variable, member, subscript, etc.)."""
-        if isinstance(target, N.IdentExpr):
+        if self._is_instance(target, 'IdentExpr'):
             self.scope.define(target.name, value)
-        elif isinstance(target, N.MemberExpr):
+        elif self._is_instance(target, 'MemberExpr'):
             obj = self.eval_expr(target.obj)
             setattr(obj, target.member, value)
-        elif isinstance(target, N.SubscriptExpr):
+        elif self._is_instance(target, 'SubscriptExpr'):
             obj = self.eval_expr(target.obj)
             idx = self.eval_expr(target.index)
             obj[idx] = value
@@ -252,14 +301,31 @@ class Interpreter:
     def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
         iterable = self.eval_expr(node.iterable)
+        # Handle both 'targets' (list) and 'target' (single) for compatibility
+        if hasattr(node, 'targets'):
+            targets = node.targets
+        else:
+            targets = [node.target]
+
         for value in iterable:
             # Bind loop variable(s)
-            if len(node.targets) == 1:
-                self.scope.define(node.targets[0], value)
+            if len(targets) == 1:
+                # Extract name from target if it's an object
+                target_name = targets[0]
+                if hasattr(target_name, 'name'):
+                    target_name = target_name.name
+                elif not isinstance(target_name, str):
+                    target_name = str(target_name)
+                self.scope.define(target_name, value)
             else:
                 # Unpacking
-                for i, target in enumerate(node.targets):
-                    self.scope.define(target, value[i] if isinstance(value, (list, tuple)) else value)
+                for i, target in enumerate(targets):
+                    target_name = target
+                    if hasattr(target_name, 'name'):
+                        target_name = target_name.name
+                    elif not isinstance(target_name, str):
+                        target_name = str(target_name)
+                    self.scope.define(target_name, value[i] if isinstance(value, (list, tuple)) else value)
 
             try:
                 for stmt in node.body:
