@@ -1,0 +1,53 @@
+# Module build system - compile Mojo modules to shared libraries
+
+MODULES = \
+	generated_dispatch \
+	module_loader \
+	mojo_compiler \
+	mojo_main \
+	simple_compiler
+
+MOJO = ./stage2/mojo
+GCC = /opt/local/bin/gcc-mp-15
+RUNTIME_SRC = runtime/mojo_runtime.c
+RUNTIME_HDR = runtime/mojo_runtime.h
+BUILD_DIR = build/modules
+
+# Build all modules
+all: $(addprefix $(BUILD_DIR)/lib,$(addsuffix .so,$(MODULES)))
+
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
+
+# Compile module to shared library: mojo/MODULE.mojo -> build/modules/libMODULE.so
+$(BUILD_DIR)/lib%.so: mojo/%.mojo $(BUILD_DIR)
+	@echo "Building shared library for $*..."
+	python3 mojo.py --dump $< > $(BUILD_DIR)/$*.ci 2>/dev/null
+	@if [ -f $(BUILD_DIR)/$*.ci ]; then \
+		$(GCC) -fgimple -fPIC -shared \
+			-I runtime \
+			-o $@ \
+			$(BUILD_DIR)/$*.ci $(RUNTIME_SRC) 2>&1 | grep -v "warning:" || true; \
+		if [ -f $@ ]; then \
+			echo "✓ Built $@"; \
+		else \
+			echo "✗ Failed to build $@"; \
+		fi; \
+	else \
+		echo "✗ Failed to compile $<"; \
+	fi
+
+# Extract symbols from compiled module
+%.sym: $(BUILD_DIR)/lib%.so
+	nm -g $< | awk '{print $$3}' > $@
+
+# List compiled modules
+list:
+	@echo "Compilable modules:"
+	@ls -lh $(BUILD_DIR)/lib*.so 2>/dev/null || echo "None built yet"
+
+# Clean module builds
+clean-modules:
+	rm -rf $(BUILD_DIR)
+
+.PHONY: all list clean-modules

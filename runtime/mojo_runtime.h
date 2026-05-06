@@ -161,6 +161,7 @@ void     mojo_set_print(MojoSet *s);
 
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(const char *str);
+char *mojo_input(const char *prompt);
 
 /* Python built-in functions for C strings */
 int mojo_isinstance(int obj, int type_id);
