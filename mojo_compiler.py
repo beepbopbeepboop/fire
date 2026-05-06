@@ -347,7 +347,7 @@ class ComptimeForStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn'}
 
-_TOKEN_RE = re.compile(r'(?P<FLOAT>\d+\.\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F]+|(?:0o|0O)[0-7]+|(?:0b|0B)[01]+|(?P<INT>(?:0|[1-9][0-9]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 _SEP_CHAR       = ';'
 _CMT_CHAR       = '#'
@@ -571,8 +571,8 @@ class Parser:
             if t.value == 'break': return self._parse_break()
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
-        # Handle __mlir_op, __mlir_attr and other MLIR/special forms
-        if t.kind == "NAME" and t.value.startswith("__mlir"):
+        # Handle __mlir_op, __mlir_attr and other MLIR/special forms (but not __mlir_region)
+        if t.kind == "NAME" and t.value.startswith("__mlir") and t.value != "__mlir_region":
             self._advance()  # skip __mlir_op/__mlir_attr/etc
             # Skip string literal if present
             if self._peek().kind == "LPAREN":
@@ -627,6 +627,15 @@ class Parser:
             if kw.kind == "KW" and kw.value == "struct":
                 self._pending_decs = decs
                 return self._parse_struct()
+            if kw.kind == "KW" and kw.value == "trait":
+                self._pending_decs = decs
+                return self._parse_trait()
+            if kw.kind == "KW" and kw.value == "comptime":
+                return self._parse_comptime()
+            # Handle 'async def' — async is tokenized as NAME not KW
+            if kw.kind == "NAME" and kw.value == "async":
+                self._advance()
+                kw = self._peek()
             if kw.kind == "KW" and kw.value in ("def", "fn"):
                 self._advance()
                 return self._parse_funcdef(decs)
@@ -690,7 +699,12 @@ class Parser:
 
     def _parse_import(self):
         self._expect("KW", "import")
-        module = self._expect("NAME").value
+        # Handle relative imports: import .warp, import ..sibling
+        module = ""
+        while self._peek().kind == "DOT":
+            self._advance()
+            module += "."
+        module += self._expect("NAME").value
         while self._peek().kind == "DOT":
             self._advance()
             module += "." + self._expect("NAME").value
@@ -761,10 +775,11 @@ class Parser:
 
     def _parse_var_decl(self):
         self._expect("KW", 'var')
-        # Allow KW tokens as variable names (e.g., "out", "fn", "class")
+        # Allow KW, backtick identifiers as variable names (e.g., "out", "fn", `6bit`)
         t = self._peek()
         if t.kind == "NAME": name = self._advance().value
         elif t.kind == "KW": name = self._advance().value
+        elif t.kind == "STRING" and t.value.startswith("`"): name = self._advance().value
         else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Check for tuple unpacking (var a, b, c = ...)
         if self._peek().kind == "COMMA":
@@ -780,6 +795,14 @@ class Parser:
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 value = self._parse_expr(0)
+                # Handle tuple RHS: var a, b = x, y
+                if self._peek().kind == "COMMA":
+                    rhs = [value]
+                    while self._peek().kind == "COMMA":
+                        self._advance()
+                        if self._peek().kind == "NEWLINE": break
+                        rhs.append(self._parse_expr(0))
+                    value = TupleExpr(elements=rhs)
                 return VarDecl(name=",".join(names), type_ann=None, value=value)
             else:
                 # No assignment, treat as error or incomplete
@@ -863,12 +886,14 @@ class Parser:
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read'}
     def _parse_funcdef(self, decorators=None):
         if decorators is None: decorators = []
-        # Allow keywords as function names (e.g., def read(...), def async(...))
+        # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
         t = self._peek()
         if t.kind == "NAME":
             name = self._advance().value
         elif t.kind == "KW":
             name = self._advance().value
+        elif t.kind == "STRING" and t.value.startswith("`"):
+            name = self._advance().value  # backtick identifier
         else:
             raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
         # Skip generic type-param block [T: Trait, count: Int, //]
@@ -890,6 +915,21 @@ class Parser:
                 self._advance()
                 if self._peek().kind == "COMMA": self._advance()
                 if self._peek().kind == "RPAREN": break
+            # Handle ** (keyword variadic parameter: **kwargs)
+            if self._peek().kind == "OP" and self._peek().value == "**":
+                self._advance()
+                t = self._peek()
+                if t.kind in ("NAME", "KW"):
+                    pname = self._advance().value
+                    ptype = None
+                    if self._peek().kind == "COLON":
+                        self._advance(); ptype = self._parse_type_ann()
+                    params.append((pname, ptype))
+                    if conv is not None: param_convs[pname] = conv
+                    if self._peek().kind == "COMMA": self._advance()
+                    while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
+                        self._advance()
+                    continue
             # Handle * (keyword-only separator or variadic parameter)
             if self._peek().kind == "OP" and self._peek().value == "*":
                 self._advance()
@@ -945,6 +985,8 @@ class Parser:
             self._advance()  # skip raises
             # Skip exception type list: Type1, Type2, ... until we see -> or : or where
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF", "ARROW"):
+                # Stop at 'where' keyword to allow the where-clause handler below
+                if self._peek().kind == "NAME" and self._peek().value == "where": break
                 if self._peek().kind in ("NAME", "DOT", "STRING", "COMMA"):
                     self._advance()
                 elif self._peek().kind == "LBRACKET":
@@ -981,6 +1023,14 @@ class Parser:
                 if t.kind == "LBRACE": depth += 1
                 elif t.kind == "RBRACE": depth -= 1
                 elif t.kind == "EOF": break
+        # Return type may appear after the capture list
+        if ret is None and self._peek().kind == "ARROW":
+            self._advance()
+            if self._is_kw("ref"):
+                self._advance()
+                if self._peek().kind == "LBRACKET":
+                    self._skip_bracketed()
+            ret = self._parse_type_ann()
         self._expect("COLON")
         body = self._parse_block()
         return FunctionDef(name=name, params=params, return_type=ret,
@@ -1031,6 +1081,8 @@ class Parser:
         self._expect("COLON")
         body = self._parse_block()
         methods = [s for s in body if isinstance(s, FunctionDef)]
+        decs = getattr(self, "_pending_decs", [])
+        self._pending_decs = []
         return TraitDef(name=name, methods=methods)
 
     def _parse_try(self):
@@ -1080,7 +1132,8 @@ class Parser:
         # comptime assert expr[, msg]
         if t.value == "assert": return self._parse_assert()
         # comptime NAME [TypeParams] [: Type] = expr
-        if t.kind == "NAME":
+        # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
+        if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
             lhs = IdentExpr(self._advance().value)
             # Skip optional type parameters: comptime Alias[T, U]: Type = ...
             if self._peek().kind == "LBRACKET": self._skip_bracketed()
@@ -1280,12 +1333,37 @@ class Parser:
                         expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
                     # Check if this is a keyword-style bracket (func=value, attr=value)
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                        # Keyword arguments only
+                        # Keyword arguments (may include positional args with dotted names and slice values)
                         while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
                             if self._peek().kind in ("NAME", "KW"):
-                                self._advance()  # skip name
-                                if self._peek().kind == "ASSIGN": self._advance()  # skip =
-                                self._parse_expr(0)  # parse and discard value
+                                # Parse the full expression for the arg (handles dotted names Self.Ts, subscripts, etc.)
+                                arg_expr = self._parse_expr(0)
+                                if self._peek().kind == "ASSIGN":
+                                    # keyword arg: advance = and parse value
+                                    self._advance()
+                                    # Handle slice-value: key = :end
+                                    if self._peek().kind == "COLON":
+                                        self._advance()  # skip leading colon
+                                        if self._peek().kind not in ("RBRACKET", "COMMA"):
+                                            self._parse_expr(0)  # parse end of slice
+                                    else:
+                                        self._parse_expr(0)  # parse and discard value
+                                        # Handle function type qualifiers and return type: def(...) [qual] -> T
+                                        while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
+                                            self._advance()
+                                        if self._peek().kind == "ARROW":
+                                            self._advance(); self._parse_type_ann()
+                                        # Check for trailing colon: key = start:end or key = start:
+                                        elif self._peek().kind == "COLON":
+                                            self._advance()  # skip colon
+                                            if self._peek().kind not in ("RBRACKET", "COMMA"):
+                                                self._parse_expr(0)  # parse end of slice
+                                # else positional arg: arg_expr already fully parsed
+                            # Handle ellipsis (...) as an argument (three DOTs)
+                            elif (self._peek().kind == "DOT" and
+                                  self._peek(1).kind == "DOT" and
+                                  self._peek(2).kind == "DOT"):
+                                self._advance(); self._advance(); self._advance()
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
@@ -1300,6 +1378,11 @@ class Parser:
                         else:
                             # Parse positional index
                             idx = self._parse_expr(0)
+                            # Handle function type annotations: def(...) [qualifiers] -> ReturnType in subscripts
+                            while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
+                                self._advance()
+                            if self._peek().kind == "ARROW":
+                                self._advance(); self._parse_type_ann()
                             # Check for multiple indices or keywords
                             if self._peek().kind == "COMMA":
                                 indices = [idx]
@@ -1313,17 +1396,32 @@ class Parser:
                                         indices.append(self._parse_expr(0))
                                     # Check if keyword argument
                                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                                        # Skip remaining keyword arguments
+                                        # Skip remaining keyword arguments (may include positional args and ...)
                                         while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                                            if self._peek().kind in ("NAME", "KW"):
-                                                self._advance()  # skip name
-                                                if self._peek().kind == "ASSIGN": self._advance()  # skip =
-                                                self._parse_expr(0)  # parse and discard value
+                                            # Handle ellipsis (...) as an argument
+                                            if (self._peek().kind == "DOT" and
+                                                self._peek(1).kind == "DOT" and
+                                                self._peek(2).kind == "DOT"):
+                                                self._advance(); self._advance(); self._advance()
+                                            elif self._peek().kind in ("NAME", "KW"):
+                                                # Parse the whole argument expression (handles dotted names, subscripts, etc.)
+                                                self._parse_expr(0)
+                                                # Skip optional ASSIGN and value for keyword args
+                                                if self._peek().kind == "ASSIGN":
+                                                    self._advance(); self._parse_expr(0)
+                                            else:
+                                                break  # unexpected token
                                             if self._peek().kind == "COMMA": self._advance()
                                             elif self._peek().kind != "RBRACKET": break
                                         break
                                     else:
-                                        indices.append(self._parse_expr(0))
+                                        e = self._parse_expr(0)
+                                        # Handle function type annotations: def(...) [qualifiers] -> ReturnType
+                                        while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
+                                            self._advance()
+                                        if self._peek().kind == "ARROW":
+                                            self._advance(); self._parse_type_ann()
+                                        indices.append(e)
                                 idx = TupleExpr(elements=indices)
                             # Check for slice notation
                             if self._peek().kind == "COLON":
@@ -1360,7 +1458,7 @@ class Parser:
                 # Postfix: followed by statement-ending token or member/subscript access
                 # Binary: followed by expression start token
                 next_t = self._peek(1)
-                is_postfix = next_t.kind in ("NEWLINE", "DEDENT", "EOF", "COMMA", "RPAREN", "RBRACKET", "COLON", "SEMICOLON", "DOT", "LPAREN", "LBRACKET")
+                is_postfix = next_t.kind in ("NEWLINE", "DEDENT", "EOF", "COMMA", "RPAREN", "RBRACKET", "RBRACE", "COLON", "SEMICOLON", "DOT", "LPAREN", "LBRACKET")
                 if is_postfix:
                     self._advance()
                     expr = UnaryOp(op="^", operand=expr)
@@ -1465,11 +1563,31 @@ class Parser:
             gen = self._parse_generator()
             self._expect("RBRACE")
             return Comprehension(kind="set", element=first, generators=[gen])
+        # Handle named field if first element is followed by =
+        if self._peek().kind == "ASSIGN":
+            self._advance(); self._parse_expr(0)
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "RBRACE": break
+                self._parse_expr(0)  # field name or value
+                if self._peek().kind == "ASSIGN": self._advance(); self._parse_expr(0)
+            self._expect("RBRACE")
+            return DictExpr(pairs=[])
         elems = [first]
         while self._peek().kind == "COMMA":
             self._advance()
             if self._peek().kind == "RBRACE": break
-            elems.append(self._parse_expr(0))
+            e = self._parse_expr(0)
+            # Handle named field (positional then named): {ctx, field = value}
+            if self._peek().kind == "ASSIGN":
+                self._advance(); self._parse_expr(0)
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind == "RBRACE": break
+                    self._parse_expr(0)
+                    if self._peek().kind == "ASSIGN": self._advance(); self._parse_expr(0)
+                break
+            elems.append(e)
         self._expect("RBRACE")
         return SetExpr(elements=elems)
 
@@ -1543,6 +1661,9 @@ class Parser:
                         if t.kind == "LPAREN": depth += 1
                         elif t.kind == "RPAREN": depth -= 1
                         elif t.kind == "EOF": break
+                # Skip optional qualifiers like 'capturing', 'raises', 'unified'
+                while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
+                    self._advance()
                 # Skip return type if present
                 if self._peek().kind == "ARROW":
                     self._advance()  # skip ->
@@ -1586,21 +1707,30 @@ class Parser:
                 else:
                     name += "." + self._expect("NAME").value
         if self._peek().kind != "LBRACKET": return name
-        # Consume [TypeArgs] and any chained subscripts — build a string representation
+        # Consume [TypeArgs] and any chained subscripts or .member accesses
         parts = [name]
-        while self._peek().kind == "LBRACKET":
-            self._advance()  # [
-            parts.append("[")
-            depth = 1
-            while depth > 0:
-                t = self._advance()
-                if t.kind == "LBRACKET": depth += 1; parts.append("[")
-                elif t.kind == "RBRACKET":
-                    depth -= 1
-                    if depth > 0: parts.append("]")
-                elif t.kind == "EOF": break
-                else: parts.append(t.value)
-            parts.append("]")
+        while self._peek().kind == "LBRACKET" or self._peek().kind == "DOT":
+            if self._peek().kind == "DOT":
+                self._advance()  # consume dot
+                if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
+                    parts.append("." + self._advance().value)
+                elif self._peek().kind in ("NAME", "KW"):
+                    parts.append("." + self._advance().value)
+                else:
+                    break
+            else:
+                self._advance()  # [
+                parts.append("[")
+                depth = 1
+                while depth > 0:
+                    t = self._advance()
+                    if t.kind == "LBRACKET": depth += 1; parts.append("[")
+                    elif t.kind == "RBRACKET":
+                        depth -= 1
+                        if depth > 0: parts.append("]")
+                    elif t.kind == "EOF": break
+                    else: parts.append(t.value)
+                parts.append("]")
         return "".join(parts)
 
 # ── Code generator ─────────────────────────────────────────────────
