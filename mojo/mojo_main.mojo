@@ -11,9 +11,37 @@ import sys
 
 def run_repl():
     """Interactive REPL for Mojo code."""
+    try:
+        from mojo_compiler import tokenize, Parser
+        from myinterpreter import Interpreter
+    except:
+        return
+
+    try:
+        interpreter = Interpreter()
+    except:
+        return
+
     print("Mojo REPL - type 'exit' or 'quit' to exit")
-    print("(Use python3 mojo.py repl for full REPL functionality)")
-    return
+
+    while True:
+        try:
+            line = input(">>> ")
+            if not line or not line.strip():
+                continue
+            if line.lower() in ("exit", "quit"):
+                break
+
+            try:
+                tokens = tokenize(line)
+                stmts = Parser(tokens).parse_module()
+                for stmt in stmts:
+                    result = interpreter.execute(stmt)
+            except:
+                pass
+
+        except:
+            break
 
 def main():
     if len(sys.argv) < 2:

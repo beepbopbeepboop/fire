@@ -595,6 +595,8 @@ class GimpleGen:
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
         self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
+        self._struct_has_init: set[str] = set()      # structs that have __init__ methods
+        self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
         self._reset_func()
 
     def _reset_func(self):
@@ -690,7 +692,11 @@ class GimpleGen:
 
     def _elem_of(self, name: str) -> str:
         """Element type for a container variable."""
-        return self._elem_types.get(name, 'int64_t')
+        # First, check if this is an int64_t-stored pointer with tracked element type
+        if name in self._elem_types:
+            return self._elem_types[name]
+        # If no tracked element type, return default
+        return 'int64_t'
 
     def _dict_val_of(self, name: str) -> str:
         """Value C type for a dict variable."""
@@ -1154,7 +1160,12 @@ class GimpleGen:
         ti = self._new_temp('int')
 
         if rt == 'MojoList *':
-            suf = TypeLattice.list_suffix(xt)
+            # Determine list element type: prefer actual list elem type over left operand
+            if rv in self._elem_types:
+                list_elem = self._elem_types[rv]
+            else:
+                list_elem = xt
+            suf = TypeLattice.list_suffix(list_elem)
             xv_cast = self._cast_for_list(xt, xv, suf)
             self._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
         elif rt == 'MojoDict *':
@@ -1192,7 +1203,10 @@ class GimpleGen:
             t = self._new_temp('double')
             self._emit(f"  {t} = (double){val};")
             return t
-        return val  # str
+        # str: cast int-cast strings to char*
+        if suf == 'str' and elem_type == 'int':
+            return f"(char *){val}"
+        return val  # already char*
 
     def _to_int64(self, ctype: str, val: str) -> str:
         """Cast val to int64_t; emits to a temp so the result is always an lvalue."""
@@ -1303,8 +1317,9 @@ class GimpleGen:
 
         t = self._new_temp(storage_type)
         if storage_type != ret_type:
-            # Cast pointer return to int64_t
+            # Cast pointer return to int64_t, but track actual type
             self._emit(f"  {t} = (int64_t) {mangled} ({all_args});")
+            self._actual_types[t] = ret_type  # Remember the actual pointer type
         else:
             self._emit(f"  {t} = {mangled} ({all_args});")
         return storage_type, t
@@ -1469,7 +1484,7 @@ class GimpleGen:
     def _lower_struct_constructor(self, struct_name: str,
                                   args: list) -> tuple[str, str]:
         """
-        Lower TypeName(field1, field2, ...) to allocation + field init.
+        Lower TypeName(field1, field2, ...) to allocation + field init + __init__ call.
 
         Uses _alloc_StructName() helper (emitted in preamble) because
         sizeof(T) is invalid in __GIMPLE body when T is not in the signature.
@@ -1479,11 +1494,22 @@ class GimpleGen:
         self._struct_allocs_needed.add(struct_name)
         self._emit(f"  {t} = _alloc_{struct_name} ();")
 
-        fields = list(self.struct_field_types[struct_name].items())
-        for i, (fname, ftype) in enumerate(fields):
-            if i < len(args):
-                at, av = self.lower_expr(args[i])
-                self._emit(f"  {t}->{fname} = {self._coerce(at, ftype, av)};")
+        # If struct has __init__, call it with the provided arguments
+        if struct_name in self._struct_has_init:
+            arg_strs = []
+            arg_strs.append(t)  # self parameter
+            for arg in args:
+                at, av = self.lower_expr(arg)
+                arg_strs.append(av)
+            args_str = ", ".join(arg_strs)
+            self._emit(f"  {struct_name}___init__ ({args_str});")
+        else:
+            # Otherwise, assign fields from positional arguments (legacy behavior)
+            fields = list(self.struct_field_types[struct_name].items())
+            for i, (fname, ftype) in enumerate(fields):
+                if i < len(args):
+                    at, av = self.lower_expr(args[i])
+                    self._emit(f"  {t}->{fname} = {self._coerce(at, ftype, av)};")
         return ctype, t
 
     # ── Subscript lowering ────────────────────────────────────────────────
@@ -1982,6 +2008,18 @@ class GimpleGen:
                     self._elem_types[tname] = self._elem_types[v]
                 if v in self._dict_val_types:
                     self._dict_val_types[tname] = self._dict_val_types[v]
+            # Track actual type if storing a pointer as int64_t
+            if dst == 'int64_t' and v in self._actual_types:
+                actual_type = self._actual_types[v]
+                self._actual_types[tname] = actual_type
+                # If actual type is a list, track element types
+                if actual_type == 'MojoList *' and v in self._elem_types:
+                    self._elem_types[tname] = self._elem_types[v]
+                elif actual_type == 'MojoDict *':
+                    if v in self._elem_types:
+                        self._elem_types[tname] = self._elem_types[v]
+                    if v in self._dict_val_types:
+                        self._dict_val_types[tname] = self._dict_val_types[v]
             self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
@@ -2470,9 +2508,20 @@ class GimpleGen:
 
     # ── for-iter lowering (non-range) ─────────────────────────────────────
 
+    def _get_actual_type(self, ctype: str, val: str) -> str:
+        """Get actual type, checking _actual_types for int64_t-stored pointers."""
+        if ctype == 'int64_t' and val in self._actual_types:
+            return self._actual_types[val]
+        if val in self.var_types and self.var_types[val] == 'int64_t' and val in self._actual_types:
+            return self._actual_types[val]
+        return ctype
+
     def _gen_for_iter(self, node: ForStmt):
         it_type, it_val = self.lower_expr(node.iterable)
         var = node.target if isinstance(node.target, str) else node.target.name
+
+        # Check if this is an int64_t-stored pointer (from method call returning pointer)
+        it_type = self._get_actual_type(it_type, it_val)
 
         if it_type == 'MojoList *':
             self._gen_for_list(var, it_val, node.body)
@@ -2500,7 +2549,11 @@ class GimpleGen:
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int')
         idx_t = self._new_temp('int')
-        self._emit(f"  {len64} = mojo_list_len ({it_val});")
+        # Cast it_val back to MojoList* if it's stored as int64_t (from method call)
+        list_ptr = it_val
+        if it_val in self.var_types and self.var_types[it_val] == 'int64_t':
+            list_ptr = f"(MojoList *){it_val}"
+        self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
         self._emit(f"  {len_t} = (int) {len64};")
         self._emit(f"  {idx_t} = 0;")
 
@@ -2518,12 +2571,12 @@ class GimpleGen:
         self._emit(f"  {idx64} = (int64_t) {idx_t};")
         suf = TypeLattice.list_suffix(elem)
         if suf == 'double':
-            self._emit(f"  {var} = mojo_list_get_double ({it_val}, {idx64});")
+            self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx64});")
         elif suf == 'str':
-            self._emit(f"  {var} = mojo_list_get_str ({it_val}, {idx64});")
+            self._emit(f"  {var} = mojo_list_get_str ({list_ptr}, {idx64});")
         else:
             elem64 = self._new_temp('int64_t')
-            self._emit(f"  {elem64} = mojo_list_get_int ({it_val}, {idx64});")
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
             self._emit(f"  {var} = ({elem}) {elem64};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
@@ -3037,6 +3090,8 @@ class GimpleGen:
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
+                    if m.name == '__init__':
+                        self._struct_has_init.add(s.name)
                     if m.return_type is None:
                         # Seed param types so _quick_type works for param names
                         for i, (pname, ptype) in enumerate(m.params):
