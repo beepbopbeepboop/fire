@@ -3,6 +3,7 @@
 mojo.py - Mojo interpreter/compiler system
 
 Modes:
+- mojo                         Interactive REPL
 - mojo file.mojo               Interpret and execute file
 - mojo --dump file.mojo        Generate .tok, .ast, .ci, .pyi files
 - mojo build file.mojo         Compile to executable
@@ -27,6 +28,49 @@ def interpret_and_execute(src_code):
         print(f"Error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+
+def run_repl():
+    """Interactive REPL for Mojo code."""
+    try:
+        from mojo_compiler import tokenize, Parser
+        from myinterpreter import Interpreter
+    except ImportError as e:
+        print(f"Error: Could not import interpreter components: {e}")
+        return
+
+    interpreter = Interpreter()
+    print("Mojo REPL - type 'exit' or 'quit' to exit")
+    print()
+
+    while True:
+        try:
+            # Read
+            line = input(">>> ")
+            if not line.strip():
+                continue
+            if line.lower() in ('exit', 'quit'):
+                break
+
+            # Eval
+            try:
+                tokens = tokenize(line)
+                stmts = Parser(tokens).parse_module()
+
+                # Print results for expressions
+                for stmt in stmts:
+                    result = interpreter.execute(stmt)
+                    # If it's an expression statement with a result, print it
+                    if result is not None and not isinstance(result, str):
+                        print(result)
+            except Exception as e:
+                print(f"Error: {e}")
+
+        except KeyboardInterrupt:
+            print("\nInterrupt")
+            break
+        except EOFError:
+            print()
+            break
 
 def build_executable(input_file, src):
     """Compile Mojo source to executable using GIMPLE codegen."""
@@ -107,7 +151,9 @@ def build_executable(input_file, src):
         return False
 
 def main():
+    # No arguments: run REPL
     if len(sys.argv) < 2:
+        run_repl()
         return
 
     # Check for build command
@@ -121,6 +167,7 @@ def main():
         sys.argv.remove('--dump')
 
     if len(sys.argv) < 2:
+        run_repl()
         return
 
     input_file = sys.argv[1]
