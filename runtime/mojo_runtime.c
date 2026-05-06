@@ -1056,6 +1056,71 @@ int open(int path) {
 }
 #endif
 
+/* ── REPL and utility functions ──────────────────────────────────────*/
+
+int input(const char *prompt) {
+    if (prompt) fputs(prompt, stdout);
+    fflush(stdout);
+
+    static char buffer[4096];
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+        return 0;
+    }
+
+    /* Remove trailing newline */
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
+    }
+
+    return (intptr_t)buffer;
+}
+
+int int_strip(int str_int) {
+    /* String strip - remove leading/trailing whitespace */
+    if (str_int <= 0) return str_int;
+
+    const char *str = (const char *)str_int;
+    if (!str) return str_int;
+
+    /* Skip leading whitespace */
+    const char *start = str;
+    while (*start && (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')) {
+        start++;
+    }
+
+    /* Find end (skip trailing whitespace) */
+    const char *end = str + strlen(str) - 1;
+    while (end > start && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
+        end--;
+    }
+
+    /* Return as int cast */
+    static char trimmed[4096];
+    size_t len = (end - start) + 1;
+    if (len >= sizeof(trimmed)) len = sizeof(trimmed) - 1;
+    strncpy(trimmed, start, len);
+    trimmed[len] = '\0';
+
+    return (intptr_t)trimmed;
+}
+
+int int_lower(int str_int) {
+    /* String lower - convert to lowercase */
+    if (str_int <= 0) return str_int;
+
+    const char *str = (const char *)str_int;
+    if (!str) return str_int;
+
+    static char lower[4096];
+    for (size_t i = 0; i < sizeof(lower) - 1 && str[i]; i++) {
+        lower[i] = (str[i] >= 'A' && str[i] <= 'Z') ? (str[i] + 32) : str[i];
+    }
+    lower[sizeof(lower) - 1] = '\0';
+
+    return (intptr_t)lower;
+}
+
 /* ── Module function stubs ────────────────────────────────────────────*/
 
 char *gimple_codegen_compile_to_gimple(const char *src) {

@@ -200,3 +200,8 @@ MojoList *mojo_tokenize(const char *source);
 
 /* Builtin file I/O - defined in runtime */
 int open(int path);
+
+/* REPL and string utilities */
+int input(const char *prompt);    /* Read line from stdin - returns int cast of char* */
+int int_strip(int str);           /* String strip whitespace */
+int int_lower(int str);           /* String to lowercase */

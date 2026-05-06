@@ -2,14 +2,46 @@
 mojo_main.mojo - Mojo interpreter/compiler system
 
 Modes:
+- mojo                         Interactive REPL
 - mojo file.mojo               Interpret and execute file
 - mojo --dump file.mojo        Generate .ci file
 """
 
 import sys
 
+def run_repl():
+    """Interactive REPL for Mojo code."""
+    try:
+        from mojo_compiler import tokenize, Parser
+        from myinterpreter import Interpreter
+    except:
+        return
+
+    interpreter = Interpreter()
+    print("Mojo REPL - type 'exit' or 'quit' to exit")
+
+    while True:
+        try:
+            line = input(">>> ")
+            if not line or not line.strip():
+                continue
+            if line == "exit" or line == "quit":
+                break
+
+            try:
+                tokens = tokenize(line)
+                stmts = Parser(tokens).parse_module()
+                for stmt in stmts:
+                    result = interpreter.execute(stmt)
+            except:
+                pass
+
+        except:
+            break
+
 def main():
     if len(sys.argv) < 2:
+        run_repl()
         return
 
     dump_mode = False
