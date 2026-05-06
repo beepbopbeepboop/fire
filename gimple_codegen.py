@@ -855,6 +855,10 @@ class GimpleGen:
             t = self._new_temp('_Bool')
             self._emit(f"  {t} = {ov} == 0;")
             return '_Bool', t
+        # Ownership transfer operator (^) - just pass the value through
+        # In the interpreter, we don't enforce lifetime semantics
+        if node.op == '^':
+            return ot, ov
         c_op = {'-': '-', '~': '~', '+': '+'}.get(node.op, node.op)
         t = self._new_temp(ot)
         self._emit(f"  {t} = {c_op}{ov};")
