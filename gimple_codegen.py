@@ -1006,6 +1006,27 @@ class GimpleGen:
             self._emit(f"  {t} = {eq_t} {cmp};")
             return '_Bool', t
 
+        # char * == / != → strcmp
+        if node.op in ('==', '!=') and lt == 'char *' and rt == 'char *':
+            eq_t = self._new_temp('int')
+            self._emit(f"  {eq_t} = strcmp ({lv}, {rv});")
+            t = self._new_temp('_Bool')
+            cmp = '== 0' if node.op == '==' else '!= 0'
+            self._emit(f"  {t} = {eq_t} {cmp};")
+            return '_Bool', t
+
+        # (int-cast string) == / != char * → strcmp (e.g., input() result == "exit")
+        if node.op in ('==', '!=') and ((lt == 'int' and rt == 'char *') or (lt == 'char *' and rt == 'int')):
+            # Cast int to char * and compare
+            left_str = f"(char *){lv}" if lt == 'int' else lv
+            right_str = f"(char *){rv}" if rt == 'int' else rv
+            eq_t = self._new_temp('int')
+            self._emit(f"  {eq_t} = strcmp ({left_str}, {right_str});")
+            t = self._new_temp('_Bool')
+            cmp = '== 0' if node.op == '==' else '!= 0'
+            self._emit(f"  {t} = {eq_t} {cmp};")
+            return '_Bool', t
+
         # is / is not → pointer identity
         if node.op in ('is', 'is not'):
             c_op = '==' if node.op == 'is' else '!='

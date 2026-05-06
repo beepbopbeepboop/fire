@@ -11,19 +11,8 @@ import sys
 
 def run_repl():
     """Interactive REPL for Mojo code."""
-    try:
-        from mojo_compiler import tokenize, Parser
-        from myinterpreter import Interpreter
-    except:
-        return
-
-    interpreter = Interpreter()
     print("Mojo REPL - type 'exit' or 'quit' to exit")
-    print("(Note: compiled version has limited functionality)")
-
-    # Note: Simplified REPL for compiled version
-    # Avoids string method calls on int-cast pointers which cause segfaults
-    # Full REPL available in Python version: python3 mojo.py repl
+    print("(Use python3 mojo.py repl for full REPL functionality)")
     return
 
 def main():

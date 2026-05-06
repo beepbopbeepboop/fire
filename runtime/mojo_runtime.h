@@ -202,6 +202,11 @@ MojoList *mojo_tokenize(const char *source);
 int open(int path);
 
 /* REPL and string utilities */
-int input(const char *prompt);    /* Read line from stdin - returns int cast of char* */
-int int_strip(int str);           /* String strip whitespace */
-int int_lower(int str);           /* String to lowercase */
+char *mojo_input(const char *prompt);  /* Read line from stdin - returns char* */
+int input(const char *prompt);         /* Wrapper - returns int cast of char* */
+
+char *string_strip(char *str);         /* Strip whitespace from string */
+char *string_lower(char *str);         /* Convert string to lowercase */
+
+int int_strip(int str);                /* Legacy: int-cast version of string_strip */
+int int_lower(int str);                /* Legacy: int-cast version of string_lower */

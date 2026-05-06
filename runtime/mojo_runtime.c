@@ -1058,30 +1058,35 @@ int open(int path) {
 
 /* ── REPL and utility functions ──────────────────────────────────────*/
 
-int input(const char *prompt) {
+static char _input_buffer[4096];
+
+char *mojo_input(const char *prompt) {
     if (prompt) fputs(prompt, stdout);
     fflush(stdout);
 
-    static char buffer[4096];
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        return 0;
+    if (fgets(_input_buffer, sizeof(_input_buffer), stdin) == NULL) {
+        return NULL;
     }
 
     /* Remove trailing newline */
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n') {
-        buffer[len - 1] = '\0';
+    size_t len = strlen(_input_buffer);
+    if (len > 0 && _input_buffer[len - 1] == '\n') {
+        _input_buffer[len - 1] = '\0';
     }
 
-    return (intptr_t)buffer;
+    return _input_buffer;
 }
 
-int int_strip(int str_int) {
-    /* String strip - remove leading/trailing whitespace */
-    if (str_int <= 0) return str_int;
+/* Compatibility wrapper: returns int-cast pointer */
+int input(const char *prompt) {
+    char *result = mojo_input(prompt);
+    return (intptr_t)result;
+}
 
-    const char *str = (const char *)str_int;
-    if (!str) return str_int;
+/* String methods as proper C functions that work with pointers */
+
+char *string_strip(char *str) {
+    if (!str) return str;
 
     /* Skip leading whitespace */
     const char *start = str;
@@ -1095,22 +1100,18 @@ int int_strip(int str_int) {
         end--;
     }
 
-    /* Return as int cast */
+    /* Return pointer to trimmed string (modifies in place for simplicity) */
     static char trimmed[4096];
     size_t len = (end - start) + 1;
     if (len >= sizeof(trimmed)) len = sizeof(trimmed) - 1;
     strncpy(trimmed, start, len);
     trimmed[len] = '\0';
 
-    return (intptr_t)trimmed;
+    return trimmed;
 }
 
-int int_lower(int str_int) {
-    /* String lower - convert to lowercase */
-    if (str_int <= 0) return str_int;
-
-    const char *str = (const char *)str_int;
-    if (!str) return str_int;
+char *string_lower(char *str) {
+    if (!str) return str;
 
     static char lower[4096];
     for (size_t i = 0; i < sizeof(lower) - 1 && str[i]; i++) {
@@ -1118,7 +1119,18 @@ int int_lower(int str_int) {
     }
     lower[sizeof(lower) - 1] = '\0';
 
-    return (intptr_t)lower;
+    return lower;
+}
+
+/* Legacy int-cast versions for compatibility */
+int int_strip(int str_int) {
+    if (str_int <= 0) return str_int;
+    return (intptr_t)string_strip((char *)str_int);
+}
+
+int int_lower(int str_int) {
+    if (str_int <= 0) return str_int;
+    return (intptr_t)string_lower((char *)str_int);
 }
 
 /* ── Module function stubs ────────────────────────────────────────────*/
