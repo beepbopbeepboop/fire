@@ -644,10 +644,30 @@ class Parser:
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 val = self._parse_expr(0)
+                # Check for tuple RHS: a, b = x, y
+                if self._peek().kind == "COMMA":
+                    rhs_elements = [val]
+                    while self._peek().kind == "COMMA":
+                        self._advance()
+                        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                            break
+                        rhs_elements.append(self._parse_expr(0))
+                    val = TupleExpr(elements=rhs_elements)
                 tuple_target = TupleExpr(elements=targets)
                 return AssignStmt(target=tuple_target, value=val)
             # Not an assignment, treat as expression statement with comma operator
             return ExprStmt(TupleExpr(elements=targets))
+        # Annotated assignment: target: Type = value
+        if self._peek().kind == "COLON":
+            self._advance()
+            self._parse_type_ann()  # skip type annotation
+            if self._peek().kind == "ASSIGN":
+                self._advance()
+                val = self._parse_expr(0)
+                return AssignStmt(target=expr, value=val)
+            else:
+                # Just an annotation without assignment (rare)
+                return ExprStmt(expr)
         # Assignment / augmented assignment
         if self._peek().kind == "ASSIGN":
             self._advance()
