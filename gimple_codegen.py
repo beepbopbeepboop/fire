@@ -585,13 +585,15 @@ static int __mojo_floordiv (int a, int b)
 # ---------------------------------------------------------------------------
 
 class GimpleGen:
-    def __init__(self):
+    def __init__(self, do_imports: bool = False):
+        self.do_imports = do_imports
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
         self._all_closures: dict = {}   # populated by gen_module pre-pass
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
+        self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
         self._reset_func()
 
     def _reset_func(self):
@@ -615,6 +617,54 @@ class GimpleGen:
         self._env_param:  str               = ''  # name of env pointer ('_env')
         # Active env pointers for this outer function (inner_name → env_var)
         self._closure_envs: dict[str, str]  = {}
+
+    def _compile_imported_module(self, module_name: str) -> tuple:
+        """Find and compile an imported .mojo module, extracting type information.
+
+        Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+        """
+        import os
+        import pathlib
+        import re
+
+        # Get the directory where gimple_codegen.py is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Look for module relative to script location
+        mojo_paths = [
+            os.path.join(script_dir, "mojo", f"{module_name}.mojo"),
+            os.path.join(script_dir, f"{module_name}.mojo"),
+            # Also check current directory and parent
+            f"./mojo/{module_name}.mojo",
+            f"mojo/{module_name}.mojo",
+            f"../{module_name}.mojo",
+            f"../mojo/{module_name}.mojo",
+            f"./{module_name}.mojo",
+        ]
+
+        for path in mojo_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        source = f.read()
+
+                    # Compile the module to get both code and type info
+                    tokens = tokenize(source)
+                    stmts = Parser(tokens).parse_module()
+
+                    # Create a temporary codegen to extract types
+                    # Use do_imports=False to avoid circular imports and parsing complex modules
+                    temp_gen = GimpleGen(do_imports=False)
+                    code = temp_gen.gen_module(stmts)
+
+                    # Return both code and parsed statements
+                    return (code, stmts)
+                except Exception as e:
+                    # Failed to compile this module - continue to next path
+                    continue
+
+        # Module not found
+        return (None, [])
 
     def _new_bb(self) -> str:
         self.bb_counter += 1
@@ -956,10 +1006,10 @@ class GimpleGen:
             c_op = '==' if node.op == 'is' else '!='
             t = self._new_temp('_Bool')
             if '*' in lt or '*' in rt:
-                p1 = self._new_temp('void *')
-                p2 = self._new_temp('void *')
-                self._emit(f"  {p1} = (void *) {lv};")
-                self._emit(f"  {p2} = (void *) {rv};")
+                p1 = self._new_temp('int64_t')
+                p2 = self._new_temp('int64_t')
+                self._emit(f"  {p1} = (int64_t) {lv};")
+                self._emit(f"  {p2} = (int64_t) {rv};")
                 self._emit(f"  {t} = {p1} {c_op} {p2};")
             else:
                 self._emit(f"  {t} = {lv} {c_op} {rv};")
@@ -1132,8 +1182,26 @@ class GimpleGen:
                                 'MojoDictIter *', 'MojoSetIter *'})
 
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
-        """Lower obj.method(args) — handles raw C pointers (UnsafePointer) and structs."""
+        """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
+
+        # Handle module method calls: module_name.function(args)
+        if isinstance(func.obj, IdentExpr):
+            module_name = func.obj.name
+            method_name = func.member
+
+            # Check if this is a known module method
+            if module_name == 'gimple_codegen' and method_name == 'compile_to_gimple':
+                # gimple_codegen.compile_to_gimple(src) → returns char*
+                if len(node.args) == 1:
+                    src_type, src_val = self.lower_expr(node.args[0])
+                    # Cast to char* if it's an int (gimple treats everything as int)
+                    if src_type == 'int':
+                        src_val = f"(char *){src_val}"
+                    t = self._new_temp('char *')
+                    self._emit(f"  {t} = gimple_codegen_compile_to_gimple ({src_val});")
+                    return 'char *', t
+
         ot, ov = self.lower_expr(func.obj)
         method = func.member
 
@@ -1305,9 +1373,9 @@ class GimpleGen:
         if fname_raw == 'open' and len(node.args) == 2:
             fn_type, fn_val = self.lower_expr(node.args[0])
             mode_type, mode_val = self.lower_expr(node.args[1])
-            t = self._new_temp('void *')
-            self._emit(f"  {t} = mojo_open ({fn_val}, {mode_val});")
-            return 'void *', t
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = (int64_t) mojo_open ({fn_val}, {mode_val});")
+            return 'int64_t', t
 
         # Closure call: inner function name mapped to a lifted top-level function
         if fname_raw in self._closure_envs:
@@ -1342,8 +1410,21 @@ class GimpleGen:
             self._emit(f"  {t} = 0;")
             return 'int', t
 
-        t = self._new_temp(ret_type)
-        self._emit(f"  {t} = {fname} ({args_str});")
+        # For pointer types (char *, MojoList *, etc), store as int64_t in GIMPLE
+        # and cast when needed
+        if ret_type in ('char *', 'void *') or ret_type.endswith(' *'):
+            storage_type = 'int64_t'
+        else:
+            storage_type = ret_type
+
+        t = self._new_temp(storage_type)
+        if storage_type != ret_type:
+            # Cast pointer return to int64_t
+            self._emit(f"  {t} = (int64_t) {fname} ({args_str});")
+        else:
+            self._emit(f"  {t} = {fname} ({args_str});")
+
+        # Return the actual type, not the storage type, so callers know how to use it
         return ret_type, t
 
     # ── Struct constructor lowering (data layout solver decision) ─────────
@@ -2206,10 +2287,23 @@ class GimpleGen:
             self._closure_envs[node.name] = ''
 
     def _gen_stmt_ImportStmt(self, node):
-        self._emit("  /* TODO: import */")
+        # import module_name - record for extern declarations
+        self.imported_symbols[node.module] = {
+            'module': node.module,
+            'return_type': 'unknown',
+        }
 
     def _gen_stmt_FromImportStmt(self, node):
-        self._emit("  /* TODO: from import */")
+        # from module import name1, name2, ...
+        for name, alias in node.names:
+            symbol_name = alias if alias else name
+            self.imported_symbols[symbol_name] = {
+                'module': node.module,
+                'return_type': 'int',  # Default to int for imported functions
+            }
+            # Track in func_return_types so calls know the return type
+            if symbol_name not in self.func_return_types:
+                self.func_return_types[symbol_name] = 'int'
 
     def _gen_stmt_ComptimeIfStmt(self, node):
         val = self._eval_const_bool(node.condition)
@@ -2676,13 +2770,17 @@ class GimpleGen:
             "}",
         ]
 
-        # Generate C wrapper for main that initializes Python
+        # Generate C wrapper for main that optionally initializes Python
         if node.name == 'main':
             lines.append("")
             lines.append(f"int main (void) {{")
+            lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Initialize ();")
+            lines.append(f"#endif")
             lines.append(f"  {ret_type} result = {safe} ();")
+            lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Finalize ();")
+            lines.append(f"#endif")
             lines.append(f"  return result;")
             lines.append(f"}}")
 
@@ -2741,16 +2839,92 @@ class GimpleGen:
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
+        # ── Phase 0: Compile imported modules and extract their type info ────
+        # Do this FIRST so imported function types are available for everything
+        imported_code = []
+        imported_stmts = []
+        if self.do_imports:
+            modules_to_compile = set()
+            # Recursively scan for all imports (including in function bodies)
+            def find_imports(node_list):
+                for stmt in node_list:
+                    if isinstance(stmt, FromImportStmt):
+                        modules_to_compile.add(stmt.module)
+                    elif isinstance(stmt, ImportStmt):
+                        modules_to_compile.add(stmt.module)
+                    elif isinstance(stmt, FunctionDef):
+                        find_imports(stmt.body)
+                    elif isinstance(stmt, IfStmt):
+                        find_imports(stmt.then_body)
+                        for _, elif_body in stmt.elifs:
+                            find_imports(elif_body)
+                        if stmt.else_body:
+                            find_imports(stmt.else_body)
+                    elif isinstance(stmt, (WhileStmt, ForStmt, TryStmt)):
+                        find_imports(stmt.body)
+
+            find_imports(stmts)
+
+            # Compile imported modules to extract type information
+            for module_name in sorted(modules_to_compile):
+                if module_name not in self._compiled_modules:
+                    code, module_stmts = self._compile_imported_module(module_name)
+                    if code:
+                        imported_code.append(f"/* ─── Imported module: {module_name} ───────────────────── */")
+                        imported_code.append(code)
+                        imported_code.append('')
+                        imported_stmts.extend(module_stmts)
+                    self._compiled_modules.add(module_name)
+
+            # Imported types are now in self._imported_func_types and struct_field_types
+
         # ── Phase 1: build complete type tables (pre-pass) ────────────────
 
         # Register struct field types first so _resolve_type works for funcs
+        # Include both current module and imported module structs
         self.struct_field_types = {}
-        for s in stmts:
+        all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
+        for s in all_struct_defs:
             if isinstance(s, StructDef):
                 self.struct_field_types[s.name] = {}
+                # Explicit field declarations
                 for field in s.fields:
                     if isinstance(field, VarDecl):
                         self.struct_field_types[s.name][field.name] = _mojo_type(field.type_ann)
+
+                # Infer fields from __init__ method (e.g., self.tokens = tokens)
+                # This enriches empty StructDef.fields for proper code generation
+                if not s.fields:  # Only infer if no explicit fields
+                    for method in s.methods:
+                        if method.name == '__init__':
+                            # Build param type map
+                            param_types = {}
+                            for pname, ptype in method.params:
+                                if pname != 'self':
+                                    param_types[pname] = self._resolve_type(ptype) if ptype else 'int'
+
+                            # Extract field assignments from __init__ body
+                            inferred_fields = []
+                            for stmt in method.body:
+                                if isinstance(stmt, AssignStmt) and isinstance(stmt.target, MemberExpr):
+                                    target = stmt.target
+                                    # Check if it's self.field = value
+                                    if isinstance(target.obj, IdentExpr) and target.obj.name == 'self':
+                                        field_name = target.member
+                                        # Infer field type from value
+                                        if isinstance(stmt.value, IdentExpr):
+                                            field_type = param_types.get(stmt.value.name, 'int')
+                                        else:
+                                            field_type = 'int'
+
+                                        # Create VarDecl node for the field
+                                        field_decl = VarDecl(name=field_name, type_ann=None, value=None)
+                                        inferred_fields.append(field_decl)
+                                        self.struct_field_types[s.name][field_name] = field_type
+
+                            # Update struct definition with inferred fields
+                            s.fields.extend(inferred_fields)
+                            break
 
         # Register struct constructors as functions returning T *
         self.func_return_types = dict(_RUNTIME_FUNCS)
@@ -2817,6 +2991,21 @@ class GimpleGen:
                     inferred = 'int'
                 self.func_return_types[s.name] = inferred
                 self.var_types.clear()
+
+        #   Pass 2b: infer return types for unannotated struct methods
+        for s in stmts:
+            if isinstance(s, StructDef):
+                for m in s.methods:
+                    if m.return_type is None:
+                        # Seed param types so _quick_type works for param names
+                        for i, (pname, ptype) in enumerate(m.params):
+                            if i == 0 and pname == 'self':
+                                self.var_types[pname] = f"{s.name} *"
+                            else:
+                                self.var_types[pname] = self._resolve_type(ptype)
+                        inferred = self._infer_return_type(m.body)
+                        self.func_return_types[f"{s.name}_{m.name}"] = inferred
+                        self.var_types.clear()
 
         # ── Pass 3: collect closures (nested FunctionDef nodes) ──────────
         self._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
@@ -2911,20 +3100,26 @@ class GimpleGen:
         parts = [
             '/* Generated by gimple_codegen.py */',
             '/* Compile with: gcc-mp-15 -fgimple -fsyntax-only file.c */',
+            '#define USE_PYTHON 0',
             '#include <stdint.h>',
             '#include <stdlib.h>',
             '#include <math.h>',
             '#include <stdio.h>',
             '#include <setjmp.h>',
+            '#if USE_PYTHON',
             '#include <Python.h>',
+            '#endif',
             '#include "mojo_runtime.h"',
             'void mojo_print(const char *str);',
-            'typedef void* MojoFileHandle;',
-            'MojoFileHandle mojo_open(const char *filename, const char *mode);',
-            'void mojo_close(MojoFileHandle fh);',
-            'int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);',
-            'int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);',
+            'char *gimple_codegen_compile_to_gimple(const char *src);',
+            'int int_write (int, char *);',
+            'int int_parse_module (int);',
         ]
+
+        # Include compiled imported modules
+        if imported_code:
+            parts.append('')
+            parts.extend(imported_code)
 
         # Pointer-at helper functions (plain C — pointer arithmetic forbidden in __GIMPLE)
         for et in sorted(self._ptr_helpers_needed):
@@ -2941,7 +3136,11 @@ class GimpleGen:
             parts.append(f"typedef struct {sd.name} {{")
             for field in sd.fields:
                 if isinstance(field, VarDecl):
-                    ft = _mojo_type(field.type_ann)
+                    # Use inferred type from struct_field_types, or resolve from annotation
+                    if sd.name in self.struct_field_types and field.name in self.struct_field_types[sd.name]:
+                        ft = self.struct_field_types[sd.name][field.name]
+                    else:
+                        ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
                     parts.append(f"  {ft} {field.name};")
             parts.append(f"}} {sd.name};")
             parts.append('')
@@ -2973,7 +3172,14 @@ class GimpleGen:
             parts.append('')
 
         # Extern declarations: imported symbols with full parameter information
+        # Skip symbols that are already hardcoded in the preamble
+        hardcoded = {
+            'mojo_print', 'gimple_codegen_compile_to_gimple', 'int_write',
+            'int_parse_module', 'tokenize', 'Parser', 'Interpreter'
+        }
         for sym_name in sorted(self.imported_symbols.keys()):
+            if sym_name in hardcoded:
+                continue
             sym_info = self.imported_symbols[sym_name]
 
             if 'signature' in sym_info:
@@ -2982,11 +3188,11 @@ class GimpleGen:
                 module = sym_info['module']
                 parts.append(f"extern {signature};  /* from {module} */")
             else:
-                # Legacy format fallback
+                # Legacy format fallback - use empty parens for flexible signature
                 ret_type = sym_info.get('return_type', 'int')
                 module = sym_info.get('module', '')
                 ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
-                parts.append(f"extern {ret_type} {_safe_name(sym_name)} (void);  /* from {module} */")
+                parts.append(f"extern {ret_type} {_safe_name(sym_name)} ();  /* from {module} */")
 
         if self.imported_symbols:
             parts.append('')
@@ -3056,8 +3262,12 @@ def compile_to_c(mojo_src: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def compile_to_gimple(mojo_src: str) -> str:
-    """Parse Mojo source and return a C string with __GIMPLE annotations."""
+def compile_to_gimple(mojo_src: str, do_imports: bool = False) -> str:
+    """Parse Mojo source and return a C string with __GIMPLE annotations.
+
+    If do_imports=True, recursively compile imported modules and inline their code.
+    If do_imports=False, generate extern declarations for imports.
+    """
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
-    return GimpleGen().gen_module(stmts)
+    return GimpleGen(do_imports=do_imports).gen_module(stmts)

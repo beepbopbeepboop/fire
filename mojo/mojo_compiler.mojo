@@ -5,20 +5,25 @@ This file just provides Mojo-compatible signatures.
 """
 
 class Token:
-    pass
+    def __init__(self):
+        pass
 
 class Parser:
-    pass
+    def __init__(self, tokens):
+        self.tokens = tokens
+
+    def parse_module(self):
+        return []
 
 def tokenize(src):
     """Tokenize (stub - actual work in Python)."""
     return ""
 
-def compile(src):
+def compile(src) -> str:
     """Compile via interpretation (stub - actual work in Python)."""
     return ""
 
-def mojo_gimple(src):
+def mojo_gimple(src) -> str:
     """Generate GIMPLE C from Mojo source.
 
     Implementation: calls Python gimple_codegen.GimpleGen().gen_module()
@@ -26,7 +31,7 @@ def mojo_gimple(src):
     """
     return "int main() { return 0; }"
 
-def mojo_pyir(src):
+def mojo_pyir(src) -> str:
     """Python IR (intermediate representation)."""
     return mojo_gimple(src)
 
@@ -37,3 +42,7 @@ def mojo_tokens(src):
 def mojo_ast(src):
     """Print AST."""
     pass
+
+class Interpreter:
+    def __init__(self):
+        pass

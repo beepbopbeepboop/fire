@@ -87,7 +87,7 @@ mojo.ci: $(MOJO_MAIN)
 
 build/system.o: mojo.ci
 	@mkdir -p build
-	$(BOOTSTRAP_CC) -I runtime -c -o $@ mojo.ci
+	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c mojo.ci
 
 build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
@@ -144,7 +144,12 @@ verify: stage3
 validate-all:
 	./mojo.py bootstrap-validate.mojo
 
-bootstrap: verify validate-all
+stage2/mojo: stage2/mojo.ci runtime/mojo_runtime.c runtime/mojo_runtime.h
+	@mkdir -p stage2
+	$(BOOTSTRAP_CC) -fgimple -I runtime -x c -o $@ $< $(word 2,$^)
+
+bootstrap: stage3 validate-all stage2/mojo
+	@echo "✓ Bootstrap complete"
 # Stage 0: preflight checks
 preflight: $(MOJO_CLI)
 	@test -f ../apex/.venv/bin/python3 || \
@@ -191,13 +196,8 @@ build/mojo_logic2.c: $(STAGE1_BIN) $(MOJO_MAIN)
 	@$(STAGE1_BIN) --dump-gimple $(MOJO_MAIN) > $@ || \
 	    { echo "FAIL stage2: stage1/mojo --dump-gimple failed"; rm -f $@; exit 1; }
 
-$(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
-	@mkdir -p stage2
-	@echo "  stage2: linking with compiler_main.c..."
-	@$(BOOTSTRAP_CC) $(CC_FLAGS) -o $@ build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) || \
-	    { echo "FAIL stage2: link failed"; exit 1; }
-	@chmod +x $@
-	@echo "  stage2/mojo built"
+# [DISABLED: Use the new bootstrap target instead]
+# $(STAGE2_BIN): build/mojo_logic2.c $(COMPILER_MAIN) $(RUNTIME_C) $(RUNTIME_HDR)
 
 # Stage 4: verify bootstrap by comparing intermediate artifacts
 

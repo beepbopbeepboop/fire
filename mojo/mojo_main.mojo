@@ -1,74 +1,51 @@
 """
-mojo_main.mojo - Self-hosting compiler (Mojo version for Stages 2 & 3)
+mojo_main.mojo - Mojo interpreter/compiler system
 
-Uses real Mojo implementations:
-- tokenizer.mojo (Mojo tokenizer)
-- parser.mojo (Mojo parser)
-- codegen.mojo (Mojo GIMPLE codegen)
+Modes:
+- mojo file.mojo               Interpret and execute file
+- mojo --dump file.mojo        Generate .ci file
 """
 
 import sys
-from tokenizer import tokenize
-from parser import parse
-# from codegen import codegen  # Skip codegen for now
-import ast_nodes
-
-def format_ast(node, indent=0):
-    """Format AST node for output."""
-    prefix = "  " * indent
-
-    if node is None:
-        return prefix + "None"
-
-    if isinstance(node, bool):
-        return prefix + str(node)
-
-    if isinstance(node, (int, float)):
-        return prefix + str(node)
-
-    if isinstance(node, str):
-        return prefix + repr(node)
-
-    if isinstance(node, list):
-        if not node:
-            return prefix + "[]"
-        lines = [prefix + "["]
-        for item in node:
-            lines.append(format_ast(item, indent + 1) + ",")
-        lines.append(prefix + "]")
-        return "\n".join(lines)
-
-    # Handle AST nodes
-    node_type = type(node).__name__
-    lines = [prefix + node_type + "("]
-
-    if hasattr(node, "__dict__"):
-        for key, val in node.__dict__.items():
-            lines.append(prefix + "  " + key + "=")
-            lines.append(format_ast(val, indent + 2) + ",")
-
-    lines.append(prefix + ")")
-    return "\n".join(lines)
 
 def main():
-    """Entry point when run as mojo script."""
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         return
 
-    path = sys.argv[1]
+    dump_mode = False
+    if len(sys.argv) > 2 and sys.argv[1] == '--dump':
+        dump_mode = True
+        input_file = sys.argv[2]
+    else:
+        input_file = sys.argv[1]
+
     try:
-        with open(path) as f:
+        with open(input_file) as f:
             src = f.read()
     except:
         return
 
-    # Parse source and output AST
+    if dump_mode:
+        try:
+            import gimple_codegen
+            c_code = gimple_codegen.compile_to_gimple(src)
+            with open("mojo.ci", "w") as f:
+                f.write(c_code)
+        except:
+            pass
+        return
+
+    # Otherwise interpret as Mojo
     try:
-        ast = parse(src)
-        print(format_ast(ast))
-    except Exception as e:
-        # Fallback to tokenization if parsing fails
-        print("/* parse error: " + str(e) + " */")
+        from mojo_compiler import tokenize, Parser
+        from myinterpreter import Interpreter
         tokens = tokenize(src)
-        for tok in tokens:
-            print(tok.kind + " " + repr(tok.value))
+        stmts = Parser(tokens).parse_module()
+        interpreter = Interpreter()
+        for stmt in stmts:
+            interpreter.execute(stmt)
+    except:
+        pass
+
+if __name__ == '__main__':
+    main()

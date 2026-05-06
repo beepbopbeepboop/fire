@@ -25,7 +25,11 @@ const char *mojo_exc_msg_get(void);
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
  * string pointers are stored as uintptr_t casts (64-bit only).           */
-typedef struct MojoList MojoList;
+typedef struct {
+    int64_t *data;
+    int64_t  len;
+    int64_t  cap;
+} MojoList;
 
 MojoList *mojo_list_new(void);
 void      mojo_list_free(MojoList *l);
@@ -54,7 +58,10 @@ MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 void mojo_list_print(MojoList *l);
 
 /* ── String ───────────────────────────────────────────────────────────────*/
-typedef struct MojoStr MojoStr;
+typedef struct {
+    char    *data;
+    int64_t  len;
+} MojoStr;
 
 MojoStr    *mojo_str_new(const char *s);
 void        mojo_str_free(MojoStr *s);
@@ -76,7 +83,16 @@ double      mojo_str_to_float(MojoStr *s);
 /* ── Dict ─────────────────────────────────────────────────────────────────
  * Open-addressing hash map with string keys and int64_t values.
  * Double and string values are stored as bit-casts / pointer casts.      */
-typedef struct MojoDict MojoDict;
+typedef struct {
+    char    *key;   /* NULL = empty slot */
+    int64_t  val;
+} _DictSlot;
+
+typedef struct {
+    _DictSlot *slots;
+    int64_t    used;
+    int64_t    cap;
+} MojoDict;
 
 MojoDict   *mojo_dict_new(void);
 void        mojo_dict_free(MojoDict *d);
@@ -94,7 +110,10 @@ void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
 /* Dict iterator — advance, then read key/value via accessor calls */
-typedef struct MojoDictIter MojoDictIter;
+typedef struct {
+    MojoDict *dict;
+    int64_t   pos;    /* current slot index (-1 = not yet started) */
+} MojoDictIter;
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 const char    *mojo_dict_iter_key(MojoDictIter *it);
@@ -105,7 +124,17 @@ void           mojo_dict_iter_free(MojoDictIter *it);
 
 /* ── Set ──────────────────────────────────────────────────────────────────
  * Hash set over int64_t or string values.                                 */
-typedef struct MojoSet MojoSet;
+typedef struct {
+    int     tag;   /* -1 = empty, 0 = int, 1 = str */
+    int64_t val_i;
+    char   *val_s;
+} _SetSlot;
+
+typedef struct {
+    _SetSlot *slots;
+    int64_t   used;
+    int64_t   cap;
+} MojoSet;
 
 MojoSet *mojo_set_new(void);
 void     mojo_set_free(MojoSet *s);
@@ -118,7 +147,10 @@ int      mojo_set_contains_str(MojoSet *s, const char *v);
 int64_t  mojo_set_len(MojoSet *s);
 
 /* Set iterator */
-typedef struct MojoSetIter MojoSetIter;
+typedef struct {
+    MojoSet *set;
+    int64_t  pos;   /* current slot index */
+} MojoSetIter;
 MojoSetIter *mojo_set_iter_new(MojoSet *s);
 int          mojo_set_iter_next(MojoSetIter *it);      /* 1=has entry, 0=done */
 int64_t      mojo_set_iter_val_int(MojoSetIter *it);
@@ -143,6 +175,11 @@ char *mojo_cstr_repeat(const char *s, int64_t n);
 int MojoList_append(MojoList *l, char *v);
 int char_join(const char *sep, MojoList *items);
 int int_items(int obj);
+int int_read(int fh);
+
+/* Command-line arguments */
+void mojo_set_argv(int argc, const char **argv);
+MojoList *mojo_get_argv(void);
 
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
@@ -151,6 +188,7 @@ MojoFileHandle mojo_open(const char *filename, const char *mode);
 void mojo_close(MojoFileHandle fh);
 int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
+char *mojo_file_read_all(const char *filename);
 
 /* Module function stubs */
 MojoFileHandle mojo_python_open(const char *filename);
@@ -159,7 +197,5 @@ int int_read(int fh);
 void *mojo_parse(const char *source);
 MojoList *mojo_tokenize(const char *source);
 
-/* Builtin functions that may be called directly - flexible signatures for compatibility */
+/* Builtin file I/O - defined in runtime */
 int open(int path);
-int parse(int src);
-int tokenize(int src);

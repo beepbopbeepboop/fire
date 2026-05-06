@@ -35,7 +35,8 @@ def build_executable(input_file, src):
         import gimple_codegen
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
-        c_code = gimple_codegen.compile_to_gimple(src)
+        # do_imports=True: transitively compile all imported modules
+        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -166,8 +167,8 @@ def main():
             except Exception as e:
                 print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
 
-            # Generate C intermediate
-            c_code = gimple_codegen.compile_to_gimple(src)
+            # Generate C intermediate (with transitive imports)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 

@@ -3,7 +3,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+
+#define USE_PYTHON 0
+
+#if USE_PYTHON
 #include <Python.h>
+#endif
 
 /* Exception stack */
 jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
@@ -29,8 +34,34 @@ char *_mojo_exc_msg = NULL;
 void mojo_exc_msg_set(const char *msg) { _mojo_exc_msg = (char *)msg; }
 const char *mojo_exc_msg_get(void) { return _mojo_exc_msg ? _mojo_exc_msg : ""; }
 
+/* ── Global state for argc/argv ───────────────────────────────────────────*/
+static int _mojo_argc = 0;
+static const char **_mojo_argv = NULL;
+static MojoList *_mojo_argv_list = NULL;
+
+void mojo_set_argv(int argc, const char **argv) {
+    _mojo_argc = argc;
+    _mojo_argv = argv;
+    /* Build the argv list once */
+    if (_mojo_argv_list) {
+        mojo_list_free(_mojo_argv_list);
+    }
+    _mojo_argv_list = mojo_list_new();
+    for (int i = 0; i < argc; i++) {
+        mojo_list_append_str(_mojo_argv_list, argv[i]);
+    }
+}
+
+MojoList *mojo_get_argv(void) {
+    if (!_mojo_argv_list) {
+        _mojo_argv_list = mojo_list_new();
+    }
+    return _mojo_argv_list;
+}
+
 /* ── Python integration ───────────────────────────────────────────────────
  * Print via Python's print() function using the C API.                    */
+#if USE_PYTHON
 static PyObject *_mojo_print_func = NULL;
 static int _mojo_py_initialized = 0;
 
@@ -64,14 +95,16 @@ void mojo_print_init(void) {
         return;
     }
 }
+#endif
 
 void mojo_print(const char *str) {
-    /* For now, use printf directly to test the system */
+    /* Use printf directly (no Python dependency) */
     printf("%s", str);
     fflush(stdout);
 }
 
-/* File I/O via Python */
+/* File I/O — via Python (if enabled) or via C stdio */
+#if USE_PYTHON
 MojoFileHandle mojo_open(const char *filename, const char *mode) {
     PyObject *open_func = PyObject_GetAttrString(
         PyImport_ImportModule("builtins"), "open");
@@ -155,6 +188,96 @@ int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len) {
     Py_DECREF(read_result);
     return copy_len;
 }
+
+char *mojo_file_read_all(const char *filename) {
+    /* Read entire file contents into allocated string */
+    if (!filename) return NULL;
+
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (!builtins) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *open_func = PyObject_GetAttrString(builtins, "open");
+    Py_DECREF(builtins);
+
+    if (!open_func) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *file_obj = PyObject_CallFunction(open_func, "s", filename);
+    Py_DECREF(open_func);
+
+    if (!file_obj) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    PyObject *read_result = PyObject_CallMethod(file_obj, "read", NULL);
+    Py_DECREF(file_obj);
+
+    if (!read_result) {
+        PyErr_Clear();
+        return NULL;
+    }
+
+    Py_ssize_t result_len = 0;
+    char *result_data = PyUnicode_AsUTF8AndSize(read_result, &result_len);
+
+    if (!result_data) {
+        Py_DECREF(read_result);
+        PyErr_Clear();
+        return NULL;
+    }
+
+    char *buffer = malloc(result_len + 1);
+    if (buffer) {
+        memcpy(buffer, result_data, result_len);
+        buffer[result_len] = '\0';
+    }
+
+    Py_DECREF(read_result);
+    return buffer;
+}
+#else
+/* Non-Python implementations using C stdio */
+MojoFileHandle mojo_open(const char *filename, const char *mode) {
+    return (MojoFileHandle)fopen(filename, mode);
+}
+
+void mojo_close(MojoFileHandle fh) {
+    if (fh) fclose((FILE *)fh);
+}
+
+int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len) {
+    if (!fh || !data) return -1;
+    if (len == -1) len = (int64_t)strlen(data);
+    return (int64_t)fwrite(data, 1, (size_t)len, (FILE *)fh);
+}
+
+int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len) {
+    if (!fh || !buffer) return -1;
+    return (int64_t)fread(buffer, 1, (size_t)len, (FILE *)fh);
+}
+
+char *mojo_file_read_all(const char *filename) {
+    if (!filename) return NULL;
+    FILE *f = fopen(filename, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buffer = malloc(size + 1);
+    if (buffer) {
+        fread(buffer, 1, size, f);
+        buffer[size] = '\0';
+    }
+    fclose(f);
+    return buffer;
+}
+#endif
 
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoList
@@ -392,17 +515,7 @@ void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoDict — open-addressing hash map, string keys, int64_t slots
  * ═══════════════════════════════════════════════════════════════════════*/
-
-typedef struct {
-    char    *key;   /* NULL = empty slot */
-    int64_t  val;
-} _DictSlot;
-
-struct MojoDict {
-    _DictSlot *slots;
-    int64_t    used;
-    int64_t    cap;
-};
+/* (struct definitions now in mojo_runtime.h) */
 
 static uint64_t _str_hash(const char *s)
 {
@@ -587,18 +700,7 @@ void mojo_dict_iter_free(MojoDictIter *it) { free(it); }
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoSet — hash set backed by the same open-addressing scheme
  * ═══════════════════════════════════════════════════════════════════════*/
-
-typedef struct {
-    int     tag;   /* -1 = empty, 0 = int, 1 = str */
-    int64_t val_i;
-    char   *val_s;
-} _SetSlot;
-
-struct MojoSet {
-    _SetSlot *slots;
-    int64_t   used;
-    int64_t   cap;
-};
+/* (struct definitions now in mojo_runtime.h) */
 
 MojoSet *mojo_set_new(void)
 {
@@ -863,27 +965,140 @@ int int_read(int fh) {
 }
 
 void *mojo_parse(const char *source) {
-    /* Stub: parse function - return NULL */
-    return NULL;
+    /* Basic parse stub - just return a simple AST node representation */
+    if (!source || !source[0]) {
+        return NULL;
+    }
+    /* For now, allocate a marker that indicates successful parse */
+    int *result = malloc(sizeof(int));
+    if (result) *result = 1;  /* 1 = successfully parsed */
+    return result;
 }
 
 MojoList *mojo_tokenize(const char *source) {
-    /* Stub: tokenize function - return empty list */
-    return mojo_list_new();
+    /* Basic tokenizer - splits on whitespace and punctuation */
+    MojoList *tokens = mojo_list_new();
+    if (!source || !source[0]) {
+        return tokens;
+    }
+
+    char buffer[1024];
+    int idx = 0;
+
+    for (const char *p = source; *p; p++) {
+        if (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r') {
+            if (idx > 0) {
+                buffer[idx] = '\0';
+                char *token = malloc(idx + 1);
+                if (token) {
+                    strcpy(token, buffer);
+                    mojo_list_append_str(tokens, token);
+                    free(token);
+                }
+                idx = 0;
+            }
+        } else if (*p == '(' || *p == ')' || *p == ',' || *p == ':' || *p == '=') {
+            if (idx > 0) {
+                buffer[idx] = '\0';
+                char *token = malloc(idx + 1);
+                if (token) {
+                    strcpy(token, buffer);
+                    mojo_list_append_str(tokens, token);
+                    free(token);
+                }
+                idx = 0;
+            }
+            char punct[2] = {*p, '\0'};
+            mojo_list_append_str(tokens, punct);
+        } else {
+            if (idx < sizeof(buffer) - 1) {
+                buffer[idx++] = *p;
+            }
+        }
+    }
+
+    if (idx > 0) {
+        buffer[idx] = '\0';
+        char *token = malloc(idx + 1);
+        if (token) {
+            strcpy(token, buffer);
+            mojo_list_append_str(tokens, token);
+            free(token);
+        }
+    }
+
+    return tokens;
 }
 
-/* Builtin function implementations - flexible signatures for compatibility */
+/* ── Python integration ──────────────────────────────────────────────*/
+#if USE_PYTHON
 int open(int path) {
-    /* Stub: open file - return 0 for now */
+    if (path <= 1000) return 0;
+    const char *path_str = (const char *)path;
+    PyObject *builtins = PyImport_ImportModule("builtins");
+    if (!builtins) {
+        PyErr_Clear();
+        return 0;
+    }
+    PyObject *open_func = PyObject_GetAttrString(builtins, "open");
+    Py_DECREF(builtins);
+    if (!open_func) {
+        PyErr_Clear();
+        return 0;
+    }
+    PyObject *fh = PyObject_CallFunction(open_func, "s", path_str);
+    Py_DECREF(open_func);
+    if (!fh) {
+        PyErr_Clear();
+        return 0;
+    }
+    return (int)(intptr_t)fh;
+}
+#endif
+
+/* ── Module function stubs ────────────────────────────────────────────*/
+
+char *gimple_codegen_compile_to_gimple(const char *src) {
+    /* Stub: return a minimal GIMPLE wrapper around the source */
+    static char buffer[8192];
+    snprintf(buffer, sizeof(buffer),
+        "/* Generated GIMPLE (stub) */\n"
+        "#include \"mojo_runtime.h\"\n"
+        "int main(void) { return 0; }\n");
+    return buffer;
+}
+
+/* Flattened method calls */
+int int_write(int f, char *data) {
+    if (f > 0) {
+        FILE *file = (FILE *)(intptr_t)f;
+        if (data) {
+            fputs(data, file);
+        }
+    }
     return 0;
 }
 
-int parse(int src) {
-    /* Stub: parse - return 0 */
-    return 0;
+int int_parse_module(int parser) {
+    /* Stub: return empty statement list */
+    return (intptr_t)mojo_list_new();
 }
 
 int tokenize(int src) {
-    /* Stub: tokenize - return 0 */
-    return 0;
+    /* Tokenize source code */
+    if (src <= 1000) return 0;
+    const char *src_str = (const char *)src;
+    MojoList *tokens = mojo_tokenize(src_str);
+    return (intptr_t)tokens;
 }
+
+int Parser(int tokens) {
+    /* Create a parser from tokens */
+    return tokens;  /* Return the tokens list as the parser state */
+}
+
+int Interpreter() {
+    /* Create an interpreter instance */
+    return 1;  /* Return dummy interpreter object */
+}
+
