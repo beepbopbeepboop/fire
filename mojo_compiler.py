@@ -1599,6 +1599,7 @@ def emit(node, indent: int = 0) -> str:
     if isinstance(node,BinaryOp): return f"({emit(node.left)} {node.op} {emit(node.right)})"
     if isinstance(node,UnaryOp):  return f"({node.op} {emit(node.operand)})"
     if isinstance(node,TernaryExpr): return f"({emit(node.then_val)} if {emit(node.condition)} else {emit(node.else_val)})"
+    if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value)})"
     if isinstance(node,MemberExpr): return f"{emit(node.obj)}.{node.member}"
     if isinstance(node,SubscriptExpr): return f"{emit(node.obj)}[{emit(node.index)}]"
     if isinstance(node,SliceExpr):
