@@ -69,7 +69,6 @@ MojoStr    *mojo_str_concat(MojoStr *a, MojoStr *b);
 int64_t     mojo_str_len(MojoStr *s);
 char *mojo_str_data(MojoStr *s);
 int         mojo_str_eq(MojoStr *a, MojoStr *b);
-int         mojo_str_contains(MojoStr *haystack, char *needle);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 
@@ -83,6 +82,7 @@ double      mojo_str_to_float(MojoStr *s);
 /* String method operations on char* */
 int mojo_str_startswith(char *s, char *prefix);
 int mojo_str_endswith(char *s, char *suffix);
+int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
 
@@ -232,3 +232,10 @@ char *input(char *prompt);       /* Alias for mojo_input */
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
+
+/* ── Integer arithmetic helpers ──────────────────────────────────────────
+ * Lowered floor-division for use in __GIMPLE code.                      */
+static inline int __mojo_floordiv(int a, int b) {
+    int q = a / b;
+    return q - (a % b != 0 && (a ^ b) < 0);
+}

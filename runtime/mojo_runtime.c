@@ -506,9 +506,9 @@ int mojo_str_eq(MojoStr *a, MojoStr *b)
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
-int mojo_str_contains(MojoStr *haystack, char *needle)
+int mojo_str_contains(char *haystack, char *needle)
 {
-    return strstr(haystack->data, needle) != NULL;
+    return strstr(haystack, needle) != NULL;
 }
 
 char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i]; }
