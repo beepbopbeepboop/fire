@@ -1546,9 +1546,20 @@ class Parser:
             return BoolLiteral(t.value == "True")
         if t.kind == "STRING":
             val = self._advance().value
+            # Strip surrounding quotes from string literal
+            if val and val[0] in ('"', "'"):
+                quote = val[0]
+                if val.endswith(quote) and len(val) >= 2:
+                    val = val[1:-1]
             # Handle implicit string concatenation (adjacent strings)
             while self._peek().kind == "STRING":
-                val += self._advance().value
+                s = self._advance().value
+                # Strip quotes from concatenated string
+                if s and s[0] in ('"', "'"):
+                    quote = s[0]
+                    if s.endswith(quote) and len(s) >= 2:
+                        s = s[1:-1]
+                val += s
             return StringLiteral(val)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()

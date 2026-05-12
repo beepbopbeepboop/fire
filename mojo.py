@@ -15,11 +15,10 @@ import os
 import subprocess
 import shutil
 import sysconfig
-import platform
 
 # Platform detection for cross-platform build support
-_IS_DARWIN = platform.system() == 'Darwin'
-_GCC_BIN = "gcc-mp-15" if _IS_DARWIN else "gcc"
+# Check if gcc-mp-15 exists (macOS via MacPorts), otherwise use gcc
+_GCC_BIN = "gcc-mp-15" if os.path.exists("/opt/local/bin/gcc-mp-15") else "gcc"
 
 def interpret_and_execute(src_code):
     try:
@@ -69,7 +68,7 @@ def run_repl():
                     if result is not None and not isinstance(result, str):
                         print(result)
             except Exception as e:
-                print(f"Error: {e}")
+                print("Error:", e)
 
         except KeyboardInterrupt:
             print("\nInterrupt")
@@ -195,6 +194,11 @@ def main():
         return
 
     input_file = sys.argv[1]
+
+    # Bootstrap case: if interpreting a .py file with 'repl' next arg,
+    # modify sys.argv so the interpreted code will run repl on next main() call
+    if input_file.endswith('.py') and len(sys.argv) > 2 and sys.argv[2] == 'repl':
+        sys.argv = [sys.argv[0], 'repl']
 
     try:
         with open(input_file) as f:

@@ -136,6 +136,7 @@ class Interpreter:
         self.scope.define('None', None)
         self.scope.define('True', True)
         self.scope.define('False', False)
+        self.scope.define('__name__', '__main__')
 
         # Built-in functions
         self.scope.define('len', len)
@@ -150,6 +151,7 @@ class Interpreter:
         self.scope.define('set', set)
         self.scope.define('tuple', tuple)
         self.scope.define('open', open)
+        self.scope.define('input', input)
         self.scope.define('isinstance', isinstance)
         self.scope.define('hasattr', hasattr)
         self.scope.define('getattr', getattr)
@@ -165,6 +167,36 @@ class Interpreter:
         self.scope.define('map', map)
         self.scope.define('filter', filter)
         self.scope.define('Exception', Exception)
+        self.scope.define('BaseException', BaseException)
+        self.scope.define('KeyboardInterrupt', KeyboardInterrupt)
+        self.scope.define('EOFError', EOFError)
+        self.scope.define('ValueError', ValueError)
+        self.scope.define('TypeError', TypeError)
+        self.scope.define('RuntimeError', RuntimeError)
+        self.scope.define('StopIteration', StopIteration)
+
+        # Standard library modules
+        import os
+        import sys
+        import subprocess
+        import shutil
+        import sysconfig
+        self.scope.define('os', os)
+        self.scope.define('sys', sys)
+        self.scope.define('subprocess', subprocess)
+        self.scope.define('shutil', shutil)
+        self.scope.define('sysconfig', sysconfig)
+
+        # Interpreter itself for bootstrapping
+        self.scope.define('Interpreter', Interpreter)
+
+        # Parser and compiler functions
+        try:
+            from mojo_compiler import tokenize, Parser as MojoParser
+            self.scope.define('tokenize', tokenize)
+            self.scope.define('Parser', MojoParser)
+        except ImportError:
+            pass
 
     def execute(self, node):
         """Execute an AST node."""
@@ -375,10 +407,47 @@ class Interpreter:
         except Exception as e:
             if node.handlers:
                 handled = False
-                for exc_type, handler_body in node.handlers:
-                    if exc_type is None or isinstance(e, self.eval_expr(exc_type)):
+                for handler in node.handlers:
+                    exc_type = handler.exc_type
+                    handler_body = handler.body
+                    # exc_type can be None (catch all), a string (exc name), or an expression
+                    should_handle = False
+                    if exc_type is None:
+                        should_handle = True
+                    elif isinstance(exc_type, str):
+                        # If exc_type is a string, look it up in the scope
+                        try:
+                            exc_class = self.scope.get(exc_type)
+                            should_handle = isinstance(e, exc_class)
+                        except:
+                            should_handle = False
+                    else:
+                        # Otherwise evaluate it as an expression
+                        try:
+                            exc_class = self.eval_expr(exc_type)
+                            should_handle = isinstance(e, exc_class)
+                        except:
+                            should_handle = False
+
+                    if should_handle:
+                        # Bind exception to variable if handler has a name
+                        if handler.name:
+                            old_val = None
+                            had_old = handler.name in self.scope.vars
+                            if had_old:
+                                old_val = self.scope.vars[handler.name]
+                            self.scope.define(handler.name, e)
+
                         for stmt in handler_body:
                             self.execute(stmt)
+
+                        # Restore old value if it existed
+                        if handler.name:
+                            if had_old:
+                                self.scope.vars[handler.name] = old_val
+                            else:
+                                del self.scope.vars[handler.name]
+
                         handled = True
                         break
                 if not handled:
@@ -472,13 +541,14 @@ class Interpreter:
         elif op == 'or': return left or right
         elif op == 'in': return left in right
         elif op == 'is': return left is right
+        elif op == 'is not': return left is not right
         elif op == '&': return left & right
         elif op == '|': return left | right
         elif op == '^': return left ^ right
         elif op == '<<': return left << right
         elif op == '>>': return left >> right
         else:
-            raise NotImplementedError(f"Binary operator {op} not implemented")
+            raise NotImplementedError(f"Binary operator {op!r} not implemented")
 
     def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""
@@ -528,3 +598,7 @@ class Interpreter:
             return self.eval_expr(expr.then_val)
         else:
             return self.eval_expr(expr.else_val)
+
+    def eval_TupleExpr(self, expr):
+        """Evaluate tuple expression."""
+        return tuple(self.eval_expr(e) for e in expr.elements)
