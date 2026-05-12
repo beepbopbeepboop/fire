@@ -514,6 +514,43 @@ int mojo_str_contains(MojoStr *haystack, char *needle)
 char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i]; }
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
+int mojo_str_startswith(char *s, char *prefix) {
+    if (!s || !prefix) return 0;
+    while (*prefix) {
+        if (!*s || *s != *prefix) return 0;
+        s++; prefix++;
+    }
+    return 1;
+}
+
+int mojo_str_endswith(char *s, char *suffix) {
+    if (!s || !suffix) return 0;
+    int slen = strlen(s);
+    int suflen = strlen(suffix);
+    if (suflen > slen) return 0;
+    return strcmp(s + slen - suflen, suffix) == 0;
+}
+
+int64_t mojo_str_find(char *s, char *needle) {
+    if (!s || !needle) return -1;
+    char *found = strstr(s, needle);
+    if (!found) return -1;
+    return (int64_t)(found - s);
+}
+
+MojoList *mojo_str_split(char *s, char *sep) {
+    MojoList *l = mojo_list_new();
+    if (!s || !sep) return l;
+    char *copy = strdup(s);
+    char *token = strtok(copy, sep);
+    while (token) {
+        mojo_list_append_str(l, token);
+        token = strtok(NULL, sep);
+    }
+    free(copy);
+    return l;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoDict — open-addressing hash map, string keys, int64_t slots
  * ═══════════════════════════════════════════════════════════════════════*/
@@ -1278,7 +1315,7 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
     for (int64_t i = 0; i < src->cap; i++)
         if (src->slots[i].key)
-            mojo_dict_set_str_int(dst, src->slots[i].key, src->slots[i].val);
+            mojo_dict_set_int(dst, src->slots[i].key, src->slots[i].val);
 }
 
 int64_t mojo_dict_pop_int(MojoDict *d, char *key) {

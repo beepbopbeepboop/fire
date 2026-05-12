@@ -24,8 +24,9 @@ PY_FILES   := mojo.py mojo_compiler.py myinterpreter.py \
               module_loader.py mojo_main.py generated_dispatch.py
 
 # ── Dev targets ──────────────────────────────────────────────────────────────
-run:
-	python3 run.py
+# old, do not use
+#run:
+#	python3 run.py
 
 demo:
 	echo "3 + 42 + 0xFF" | python3 mojo_compiler.py
@@ -79,6 +80,9 @@ stage1:
 	    echo "  dump $$f"; \
 	    cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump ../$$f && cd .. || cd ..; \
 	done
+	@echo "--- Post-processing: consolidating string pools ---"
+	python3 consolidate_string_pool.py stage1/mojo.ci
+	python3 fix_gimple_literals.py stage1/mojo.ci
 	@echo "✓ Stage 1 complete"
 
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────

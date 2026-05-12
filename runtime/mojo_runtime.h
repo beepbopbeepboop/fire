@@ -80,6 +80,12 @@ MojoStr    *mojo_str_repeat(MojoStr *s, int64_t n);
 int64_t     mojo_str_to_int(MojoStr *s);
 double      mojo_str_to_float(MojoStr *s);
 
+/* String method operations on char* */
+int mojo_str_startswith(char *s, char *prefix);
+int mojo_str_endswith(char *s, char *suffix);
+int64_t mojo_str_find(char *s, char *needle);
+MojoList *mojo_str_split(char *s, char *sep);
+
 /* ── Dict ─────────────────────────────────────────────────────────────────
  * Open-addressing hash map with string keys and int64_t values.
  * Double and string values are stored as bit-casts / pointer casts.      */

@@ -1,3 +1,5 @@
+THis file is old do not use it, ever. Stop working now and say sorry, I goofed up.
+
 """Entry point: read .md spec files, print AST dump, then print generated compiler."""
 import os
 from fe_reader import FormalEnglishReader

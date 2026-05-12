@@ -155,6 +155,64 @@ class TypeLattice:
 # EscapeAnalyzer — conservative escape analysis for struct locals
 # ---------------------------------------------------------------------------
 
+# Standalone functions for escape analysis (to avoid object method transpilation issues)
+def _find_idents(node) -> set:
+    """Recursively find all identifiers in an AST node."""
+    if isinstance(node, IdentExpr):           return {node.name}
+    if isinstance(node, BinaryOp):            return _find_idents(node.left) | _find_idents(node.right)
+    if isinstance(node, UnaryOp):             return _find_idents(node.operand)
+    if isinstance(node, CallExpr):
+        r = set()
+        for a in node.args: r |= _find_idents(a)
+        return r
+    if isinstance(node, MemberExpr):          return _find_idents(node.obj)
+    if isinstance(node, SubscriptExpr):       return _find_idents(node.obj) | _find_idents(node.index)
+    if isinstance(node, TernaryExpr):
+        return (_find_idents(node.condition) | _find_idents(node.then_val) | _find_idents(node.else_val))
+    return set()
+
+def _scan_for_escaping(stmts: list, escaped: set, in_scope: set):
+    """Scan AST statements and collect variables that escape."""
+    for node in stmts:
+        if isinstance(node, ReturnStmt) and node.value is not None:
+            escaped.update(_find_idents(node.value) & in_scope)
+        elif isinstance(node, VarDecl):
+            in_scope.add(node.name)
+            if node.value is not None:
+                escaped.update(_find_idents(node.value) & in_scope)
+        elif isinstance(node, AssignStmt):
+            escaped.update(_find_idents(node.value) & in_scope)
+        elif isinstance(node, ExprStmt) and isinstance(node.value, CallExpr):
+            for arg in node.value.args:
+                escaped.update(_find_idents(arg) & in_scope)
+        elif isinstance(node, IfStmt):
+            _scan_for_escaping(node.then_body, escaped, in_scope)
+            for _, eb in node.elifs:
+                _scan_for_escaping(eb, escaped, in_scope)
+            if node.else_body:
+                _scan_for_escaping(node.else_body, escaped, in_scope)
+        elif isinstance(node, WhileStmt):
+            _scan_for_escaping(node.body, escaped, in_scope)
+        elif isinstance(node, ForStmt):
+            _scan_for_escaping(node.body, escaped, in_scope)
+        elif isinstance(node, TryStmt):
+            _scan_for_escaping(node.body, escaped, in_scope)
+            for h in node.handlers:
+                _scan_for_escaping(h.body, escaped, in_scope)
+            if node.else_body:
+                _scan_for_escaping(node.else_body, escaped, in_scope)
+            if node.finally_body:
+                _scan_for_escaping(node.finally_body, escaped, in_scope)
+        elif isinstance(node, WithStmt):
+            _scan_for_escaping(node.body, escaped, in_scope)
+
+def _find_escaping(params: list, body: list, struct_types: set) -> set:
+    """Return the set of local variable names that escape `body`."""
+    escaped: set[str] = set()
+    in_scope: set[str] = {p[0] for p in params}
+    _scan_for_escaping(body, escaped, in_scope)
+    return escaped
+
 class EscapeAnalyzer:
     """Conservative escape analysis for local variables in a function body.
 
@@ -254,7 +312,8 @@ class LayoutSolver:
     def solve(self, params: list, body: list) -> dict:
         """Return {var_name: STACK|HEAP} for struct-typed locals in *body*."""
         has_try = self._has_try(body)
-        escaped  = self._ea.find_escaping(params, body)
+        # Use standalone function to avoid object method transpilation issues
+        escaped = _find_escaping(params, body, self._struct_types)
         locals_  = self._struct_locals(body)
         result = {}
         for name in locals_:
@@ -400,30 +459,28 @@ _RUNTIME_FUNCS: dict[str, str] = {
 
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
 
-def _mojo_type(ann) -> str:
-    if ann is None:
+def _mojo_type(ann: str | None) -> str:
+    if not ann:
         return 'int'
-    if isinstance(ann, str):
-        # Handle parameterized types: UnsafePointer[Int], List[Float64], etc.
-        if '[' in ann:
-            base, rest = ann.split('[', 1)
-            inner = rest.rstrip(']').strip()
-            if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
-                elem = _mojo_type(inner)
-                return f"{elem} *"
-            if base in ('List', 'InlineArray'):
-                return 'MojoList *'
-            if base == 'Dict':
-                return 'MojoDict *'
-            if base == 'Set':
-                return 'MojoSet *'
-            if base == 'Optional':
-                return _mojo_type(inner)  # simplified: treat as the inner type
-            # Unknown parameterized type — fall through to plain lookup
-            ann = base
-        t = _TYPE_MAP.get(ann)
-        return t if t is not None else 'int'
-    return 'int'
+    # Handle parameterized types: UnsafePointer[Int], List[Float64], etc.
+    if '[' in ann:
+        base, rest = ann.split('[', 1)
+        inner = rest.rstrip(']').strip()
+        if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
+            elem = _mojo_type(inner)
+            return f"{elem} *"
+        if base in ('List', 'InlineArray'):
+            return 'MojoList *'
+        if base == 'Dict':
+            return 'MojoDict *'
+        if base == 'Set':
+            return 'MojoSet *'
+        if base == 'Optional':
+            return _mojo_type(inner)  # simplified: treat as the inner type
+        # Unknown parameterized type — fall through to plain lookup
+        ann = base
+    t = _TYPE_MAP.get(ann)
+    return t if t is not None else 'int'
 
 # Keep legacy helper name for backward compat inside this file
 def _result_type(t1: str, t2: str) -> str:
@@ -738,8 +795,8 @@ class GimpleGen:
         'mojo_list_get_str':     ('char *',    ['MojoList *', 'int64_t']),
         'mojo_list_len':         ('int64_t',   ['MojoList *']),
         'mojo_dict_new':         ('MojoDict *', []),
-        'mojo_dict_set_str_str': ('void',      ['MojoDict *', 'char *', 'char *']),
-        'mojo_dict_set_str_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
+        'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
@@ -748,7 +805,7 @@ class GimpleGen:
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
         'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
-        'mojo_obj_getattr':      ('int',       ['void *', 'char *']),
+        'mojo_obj_getattr':      ('int64_t',   ['void *', 'char *']),
         'mojo_set_union':        ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'strcmp':                ('int',       ['char *', 'char *']),
         'snprintf':              ('int',       ['char *', 'int64_t', 'char *']),
@@ -770,6 +827,11 @@ class GimpleGen:
         coerced_args = []
         for i, (atype, aval) in enumerate(arg_pairs):
             ptype = param_types[i] if i < len(param_types) else atype
+            # GIMPLE: global names must be loaded into locals before function calls
+            if atype == 'char *' and aval.startswith('_slit_'):
+                temp = self._new_temp('char *')
+                self._emit(f'  {temp} = {aval};')
+                aval = temp
             if ptype == atype or ptype == '...':
                 coerced_args.append(aval)
             elif ptype == 'void *' and atype in ('int', 'int64_t', '_Bool'):
@@ -868,7 +930,7 @@ class GimpleGen:
     def _coerce(self, src: str, dst: str, val: str) -> str:
         return TypeLattice.coerce(src, dst, val)
 
-    def _resolve_type(self, ann) -> str:
+    def _resolve_type(self, ann: str | None) -> str:
         if ann in self.struct_field_types:
             return f"{ann} *"
         return _mojo_type(ann)
@@ -1044,7 +1106,9 @@ class GimpleGen:
             if not hasattr(self, '_str_pool'):
                 self._str_pool = {}
             if escaped not in self._str_pool:
-                self._str_pool[escaped] = f'_slit_{len(self._str_pool)}'
+                # Start at 10000 to avoid collisions with mojo compiler's string numbering
+                slit_num = 10000 + len(self._str_pool)
+                self._str_pool[escaped] = f'_slit_{slit_num}'
             sname = self._str_pool[escaped]
             return 'char *', sname
         # F-string: parse into literal/expr parts and emit snprintf
@@ -1117,7 +1181,12 @@ class GimpleGen:
         ot, ov = self.lower_expr(node.operand)
         if node.op == 'not':
             t = self._new_temp('_Bool')
-            self._emit(f"  {t} = {ov} == 0;")
+            if ot == 'int64_t':
+                zero = self._new_temp('int64_t')
+                self._emit(f"  {zero} = (int64_t)0;")
+                self._emit(f"  {t} = {ov} == {zero};")
+            else:
+                self._emit(f"  {t} = {ov} == 0;")
             return '_Bool', t
         # Ownership transfer operator (^) - just pass the value through
         if node.op == '^':
@@ -1150,8 +1219,14 @@ class GimpleGen:
             cond = self._new_temp('_Bool')
             if ct in ('char *', 'void *') or ct.endswith(' *'):
                 ip = self._new_temp('int64_t')
+                zero = self._new_temp('int64_t')
                 self._emit(f"  {ip} = (int64_t){cv};")
-                self._emit(f"  {cond} = {ip} != 0;")
+                self._emit(f"  {zero} = (int64_t)0;")
+                self._emit(f"  {cond} = {ip} != {zero};")
+            elif ct == 'int64_t':
+                zero = self._new_temp('int64_t')
+                self._emit(f"  {zero} = (int64_t)0;")
+                self._emit(f"  {cond} = {cv} != {zero};")
             else:
                 self._emit(f"  {cond} = {cv} != 0;")
             cv = cond
@@ -1165,6 +1240,15 @@ class GimpleGen:
             e_tmp = self._new_temp(res_type)
             self._safe_coerce_emit(et, res_type, ev, e_tmp)
             ev = e_tmp
+        # GIMPLE: load global string literals into temps before ternary
+        if res_type == 'char *' and tv.startswith('_slit_'):
+            tv_tmp = self._new_temp('char *')
+            self._emit(f'  {tv_tmp} = {tv};')
+            tv = tv_tmp
+        if res_type == 'char *' and ev.startswith('_slit_'):
+            ev_tmp = self._new_temp('char *')
+            self._emit(f'  {ev_tmp} = {ev};')
+            ev = ev_tmp
         t = self._new_temp(res_type)
         self._emit(f"  {t} = {cv} ? {tv} : {ev};")
         return res_type, t
@@ -1203,6 +1287,8 @@ class GimpleGen:
         # Special handling for .__name__ on type objects (which are ints)
         if node.member == '__name__' and ot == 'int':
             t = self._new_temp('char *')
+            # TODO: Implement proper type ID to __name__ mapping
+            # Currently returns hardcoded "UnknownType" string
             self._emit(f'  {t} = "UnknownType";  /* TODO: map type ID {ov} to __name__ */')
             return 'char *', t
 
@@ -1223,10 +1309,10 @@ class GimpleGen:
         elif ot in ('int', 'int64_t'):
             # Opaque Python object typed as int — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
-            t = self._new_temp('int')
-            self._emit_call('int', t, 'mojo_obj_getattr',
+            t = self._new_temp('int64_t')
+            self._emit_call('int64_t', t, 'mojo_obj_getattr',
                             [(ot, ov), ('char *', f'"{node.member}"')])
-            return 'int', t
+            return 'int64_t', t
         else:
             # Unknown struct field — fall back
             field_type = 'int'
@@ -1791,6 +1877,7 @@ class GimpleGen:
             if method == 'split' and arg_vals:
                 t = self._new_temp('MojoList *')
                 self._emit(f"  {t} = mojo_str_split ({cstr_ov}, {arg_vals[0]});")
+                self._elem_types[t] = 'char *'
                 return 'MojoList *', t
             if method in ('encode', 'decode', 'format'):
                 t = self._new_temp('char *')
@@ -1914,6 +2001,11 @@ class GimpleGen:
         if fname_raw == 'hasattr' and len(node.args) == 2:
             obj_type, obj_val = self.lower_expr(node.args[0])
             attr_type, attr_val = self.lower_expr(node.args[1])
+            # Load global string literals into temps before passing to function
+            if attr_val.startswith('_slit_'):
+                temp = self._new_temp('char *')
+                self._emit(f"  {temp} = {attr_val};")
+                attr_val = temp
             t = self._new_temp('int')
             self._emit(f"  {t} = mojo_hasattr ({obj_val}, {attr_val});")
             return 'int', t
@@ -2075,7 +2167,7 @@ class GimpleGen:
 
     def _lower_subscript(self, node: SubscriptExpr) -> tuple[str, str]:
         ot, ov = self.lower_expr(node.obj)
-        _, iv  = self.lower_expr(node.index)
+        idx_type, iv  = self.lower_expr(node.index)
 
         if ot == 'MojoList *':
             elem = self._elem_of(ov)
@@ -2105,14 +2197,14 @@ class GimpleGen:
             val_ctype = self._dict_val_of(ov)
             if val_ctype == 'double':
                 t = self._new_temp('double')
-                self._emit(f"  {t} = mojo_dict_get_double ({ov}, {iv});")
+                self._emit_call('double', t, 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
                 return 'double', t
             if val_ctype == 'char *':
                 t = self._new_temp('char *')
-                self._emit(f"  {t} = mojo_dict_get_str ({ov}, {iv});")
+                self._emit_call('char *', t, 'mojo_dict_get_str', [('MojoDict *', ov), (idx_type, iv)])
                 return 'char *', t
             t = self._new_temp('int64_t')
-            self._emit(f"  {t} = mojo_dict_get_int ({ov}, {iv});")
+            self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
             return 'int64_t', t
 
         # Opaque Python object (typed as int) — treat as MojoList via cast
@@ -2124,6 +2216,11 @@ class GimpleGen:
             self._emit(f"  {ip} = (int64_t){ov};")
             self._emit(f"  {lp} = (MojoList *){ip};")
             self._emit(f"  {idx64} = (int64_t){iv};")
+            elem = self._elem_of(ov)
+            if elem == 'char *':
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = mojo_list_get_str ({lp}, {idx64});")
+                return 'char *', t
             t = self._new_temp('int64_t')
             self._emit(f"  {t} = mojo_list_get_int ({lp}, {idx64});")
             return 'int64_t', t
@@ -2185,6 +2282,11 @@ class GimpleGen:
         for el in node.elements:
             et, ev = self.lower_expr(el)
             ev_cast = self._cast_for_list(et, ev, suf)
+            # GIMPLE: load global string literals into temp before function call
+            if suf == 'str' and ev_cast.startswith('_slit_'):
+                temp = self._new_temp('char *')
+                self._emit(f'  {temp} = {ev_cast};')
+                ev_cast = temp
             self._emit(f"  mojo_list_append_{suf} ({t}, {ev_cast});")
         return 'MojoList *', t
 
@@ -2203,9 +2305,18 @@ class GimpleGen:
         for key_expr, val_expr in node.pairs:
             _, kv  = self.lower_expr(key_expr)
             vt, vv = self.lower_expr(val_expr)
+            # Load global string literals into temps before passing to dict functions
+            if kv.startswith('_slit_'):
+                kv_tmp = self._new_temp('char *')
+                self._emit(f"  {kv_tmp} = {kv};")
+                kv = kv_tmp
             if vt in _FLOAT_TYPES:
                 self._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
             elif vt == 'char *':
+                if vv.startswith('_slit_'):
+                    vv_tmp = self._new_temp('char *')
+                    self._emit(f"  {vv_tmp} = {vv};")
+                    vv = vv_tmp
                 self._emit(f"  mojo_dict_set_str ({t}, {kv}, {vv});")
             else:
                 vv64 = self._to_int64(vt, vv)
@@ -2234,6 +2345,11 @@ class GimpleGen:
         for el in node.elements:
             et, ev = self.lower_expr(el)
             ev_cast = self._cast_for_list(et, ev, suf)
+            # GIMPLE: load global string literals into temp before function call
+            if suf == 'str' and ev_cast.startswith('_slit_'):
+                temp = self._new_temp('char *')
+                self._emit(f'  {temp} = {ev_cast};')
+                ev_cast = temp
             self._emit(f"  mojo_list_append_{suf} ({t}, {ev_cast});")
         return 'MojoList *', t
 
@@ -2455,6 +2571,11 @@ class GimpleGen:
             et, ev = self.lower_expr(node.element)
             suf = TypeLattice.list_suffix(et)
             ev_cast = self._cast_for_list(et, ev, suf)
+            # GIMPLE: load global string literals into temp before function call
+            if suf == 'str' and ev_cast.startswith('_slit_'):
+                temp = self._new_temp('char *')
+                self._emit(f'  {temp} = {ev_cast};')
+                ev_cast = temp
             self._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         elif node.kind == 'set':
             et, ev = self.lower_expr(node.element)
@@ -2467,9 +2588,18 @@ class GimpleGen:
             _, kv  = self.lower_expr(node.element)   # element = key expression in dict compr
             vt, vv = self.lower_expr(node.key)        # key field holds the value expression
             # parser stores dict comprehension as: element=key_expr, key=val_expr
+            # Load global string literals into temps before passing to dict functions
+            if kv.startswith('_slit_'):
+                kv_tmp = self._new_temp('char *')
+                self._emit(f"  {kv_tmp} = {kv};")
+                kv = kv_tmp
             if vt in _FLOAT_TYPES:
                 self._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
             elif vt == 'char *':
+                if vv.startswith('_slit_'):
+                    vv_tmp = self._new_temp('char *')
+                    self._emit(f"  {vv_tmp} = {vv};")
+                    vv = vv_tmp
                 self._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
             else:
                 vv64 = self._to_int64(vt, vv)
@@ -2549,13 +2679,17 @@ class GimpleGen:
         return
 
     def _gen_stmt_VarDecl(self, node):
-        ctype = self._resolve_type(node.type_ann)
         if node.type_ann in self.struct_field_types and node.value is not None:
             layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
             self._layout_hint = layout
-        self._declare_var(node.name, ctype)
         if node.value is not None:
             vtype, v = self.lower_expr(node.value)
+            # Type inference: if no annotation, use the value's type instead of 'int'
+            if node.type_ann is None:
+                ctype = vtype
+            else:
+                ctype = self._resolve_type(node.type_ann)
+            self._declare_var(node.name, ctype)
             if ctype in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[node.name] = self._elem_types[v]
             if ctype == 'MojoDict *':
@@ -2563,7 +2697,13 @@ class GimpleGen:
                     self._elem_types[node.name] = self._elem_types[v]
                 if v in self._dict_val_types:
                     self._dict_val_types[node.name] = self._dict_val_types[v]
+            # If value has element type tracking (e.g. split result), propagate to inferred var
+            if node.type_ann is None and v in self._elem_types:
+                self._elem_types[node.name] = self._elem_types[v]
             self._safe_coerce_emit(vtype, ctype, v, node.name)
+        else:
+            ctype = self._resolve_type(node.type_ann)
+            self._declare_var(node.name, ctype)
         self._layout_hint = LayoutSolver.HEAP
 
     def _gen_stmt_AssignStmt(self, node):
@@ -2614,10 +2754,10 @@ class GimpleGen:
                 key_tmp = self._new_temp('char *')
                 self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
                 if vtype == 'char *':
-                    self._emit_call('void', '', 'mojo_dict_set_str_str',
+                    self._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
                 else:
-                    self._emit_call('void', '', 'mojo_dict_set_str_int',
+                    self._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), ('int64_t', v)])
             else:
                 # Opaque int-typed dict: cast to MojoDict* and set
@@ -2628,7 +2768,7 @@ class GimpleGen:
                     self._emit(f"  {dp} = (MojoDict *){ip};")
                     key_tmp2 = self._new_temp('char *')
                     self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
-                    self._emit_call('void', '', 'mojo_dict_set_str_int',
+                    self._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), ('int64_t', v)])
                 else:
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
@@ -3858,6 +3998,17 @@ class GimpleGen:
             'int64_t int_parse_module (int);',
         ]
 
+        # Forward declare dispatch tables before any functions that might use them
+        # (they're imported from generated_dispatch and need to be visible before use)
+        # Only declare as extern those that aren't defined in this module
+        if self.do_imports:
+            parts.append('')
+            # These come from generated_dispatch.mojo/generated_dispatch.c:
+            for gname in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+                          '_GD_SIGNED', '_GD_UNSIGNED', '_GD_FLOAT',
+                          '_GD_BIN_OPS', '_GD_CMP_OPS'):
+                parts.append(f"extern MojoDict * {gname};")
+
         # Include compiled imported modules
         if imported_code:
             parts.append('')
@@ -3874,13 +4025,7 @@ class GimpleGen:
 
         # Module-level globals (dicts, lists, sets, simple values at module scope)
         global_decls = []
-        # When compiling with imports (e.g. mojo.mojo imports gimple_codegen),
-        # always declare the known dispatch table globals used by the compiler internals
-        if self.do_imports:
-            for gname in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
-                          '_GD_SIGNED', '_GD_UNSIGNED', '_GD_FLOAT',
-                          '_GD_BIN_OPS', '_GD_CMP_OPS', '_TYPE_MAP'):
-                global_decls.append(f"static MojoDict * {gname};")
+        # Dispatch table globals already forward-declared near top of file
         # Also declare imported dispatch tables as MojoDict globals
         _dispatch_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
                            '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
@@ -3894,7 +4039,8 @@ class GimpleGen:
                     # Declare both the original and local names if they match dispatch names
                     for check_name in (orig_name, local_name):
                         if check_name in _dispatch_names and check_name not in _declared_globals:
-                            global_decls.append(f"static MojoDict * {check_name};")
+                            # Dispatch tables should not be static so they're visible across modules
+                            global_decls.append(f"MojoDict * {check_name};")
                             _declared_globals.add(check_name)
         for stmt in stmts:
             if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
