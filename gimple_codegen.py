@@ -106,14 +106,31 @@ class TypeLattice:
 
     @classmethod
     def coerce(cls, src: str, dst: str, val: str) -> str:
-        """Return `val` cast to `dst` if types differ."""
+        """Return `val` cast to `dst` if types differ.
+        NOTE: GIMPLE only allows single-level casts on simple variables.
+        This method must be called only when val is guaranteed to be a simple
+        variable name, not a function call or compound expression.
+        """
         if src == dst:
             return val
-        # _Bool → numeric: go through int to avoid GIMPLE type-mismatch rejection
-        if src == '_Bool' and cls.is_int(dst):
-            return f"({dst})(int){val}" if dst != 'int' else f"(int){val}"
+        # No-op casts between compatible int types
+        if src in ('int', 'int64_t', '_Bool') and dst in ('int', 'int64_t', '_Bool'):
+            if src == dst:
+                return val
+            return f"({dst}){val}"
+        # _Bool → int: single cast is fine
         if src == '_Bool':
-            return f"(int){val}" if dst == 'int' else f"({dst})(int){val}"
+            if dst == 'int':
+                return f"(int){val}"
+            return f"({dst}){val}"
+        # int → _Bool
+        if dst == '_Bool':
+            return f"(_Bool){val}"
+        # pointer ↔ int64_t: single level
+        if src.endswith(' *') and dst == 'int64_t':
+            return f"(int64_t){val}"
+        if src == 'int64_t' and dst.endswith(' *'):
+            return f"({dst}){val}"
         return f"({dst}){val}"
 
     @classmethod
@@ -707,6 +724,147 @@ class GimpleGen:
         """Value C type for a dict variable."""
         return self._dict_val_types.get(name, 'int64_t')
 
+    # Known runtime function signatures: fname -> (ret_type, [arg_types])
+    # Used by _emit_call to ensure GIMPLE-valid argument types.
+    _KNOWN_SIGS: dict = {
+        'mojo_str':              ('char *',    ['void *']),
+        'mojo_repr':             ('char *',    ['void *']),
+        'mojo_print':            ('void',      ['char *']),
+        'mojo_list_new':         ('MojoList *', []),
+        'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
+        'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
+        'mojo_list_append_obj':  ('void',      ['MojoList *', 'void *']),
+        'mojo_list_get_int':     ('int64_t',   ['MojoList *', 'int64_t']),
+        'mojo_list_get_str':     ('char *',    ['MojoList *', 'int64_t']),
+        'mojo_list_len':         ('int64_t',   ['MojoList *']),
+        'mojo_dict_new':         ('MojoDict *', []),
+        'mojo_dict_set_str_str': ('void',      ['MojoDict *', 'char *', 'char *']),
+        'mojo_dict_set_str_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
+        'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
+        'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
+        'mojo_set_new':          ('MojoSet *', []),
+        'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
+        'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
+        'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
+        'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
+        'mojo_obj_getattr':      ('int',       ['void *', 'char *']),
+        'mojo_set_union':        ('MojoSet *', ['MojoSet *', 'MojoSet *']),
+        'strcmp':                ('int',       ['char *', 'char *']),
+        'snprintf':              ('int',       ['char *', 'int64_t', 'char *']),
+        'strlen':                ('int64_t',   ['char *']),
+        'strcat':                ('char *',    ['char *', 'char *']),
+        'mojo_str_cat':          ('char *',    ['char *', 'char *']),
+        'mojo_str_format':       ('char *',    ['char *']),
+    }
+
+    def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
+        """Emit a function call with GIMPLE-valid argument coercions.
+
+        arg_pairs: list of (ctype, varname) for each argument.
+        For each argument, if the declared parameter type differs from the
+        passed type, emit an intermediate temp with the correct cast.
+        """
+        sig = self._KNOWN_SIGS.get(fname)
+        param_types = sig[1] if sig else []
+        coerced_args = []
+        for i, (atype, aval) in enumerate(arg_pairs):
+            ptype = param_types[i] if i < len(param_types) else atype
+            if ptype == atype or ptype == '...':
+                coerced_args.append(aval)
+            elif ptype == 'void *' and atype in ('int', 'int64_t', '_Bool'):
+                ip = self._new_temp('int64_t')
+                vp = self._new_temp('void *')
+                self._emit(f'  {ip} = (int64_t){aval};')
+                self._emit(f'  {vp} = (void *){ip};')
+                coerced_args.append(vp)
+            elif ptype == 'void *' and atype.endswith(' *'):
+                vp = self._new_temp('void *')
+                self._emit(f'  {vp} = (void *){aval};')
+                coerced_args.append(vp)
+            elif ptype == 'int64_t' and atype in ('int', '_Bool', 'char *'):
+                ct = self._new_temp('int64_t')
+                if atype == 'char *':
+                    ip2 = self._new_temp('void *')
+                    self._emit(f'  {ip2} = (void *){aval};')
+                    self._emit(f'  {ct} = (int64_t){ip2};')
+                else:
+                    self._emit(f'  {ct} = (int64_t){aval};')
+                coerced_args.append(ct)
+            elif ptype == 'char *' and atype in ('int', 'int64_t'):
+                vp = self._new_temp('void *')
+                cp = self._new_temp('char *')
+                self._emit(f'  {vp} = (void *){aval};')
+                self._emit(f'  {cp} = (char *){vp};')
+                coerced_args.append(cp)
+            elif ptype.endswith(' *') and atype in ('int', 'int64_t'):
+                ip3 = self._new_temp('int64_t')
+                pp = self._new_temp(ptype)
+                self._emit(f'  {ip3} = (int64_t){aval};')
+                self._emit(f'  {pp} = ({ptype}){ip3};')
+                coerced_args.append(pp)
+            elif ptype == 'int' and atype in ('int64_t', '_Bool'):
+                ct = self._new_temp('int')
+                self._emit(f'  {ct} = (int){aval};')
+                coerced_args.append(ct)
+            elif ptype == 'int' and atype.endswith(' *'):
+                # char*/pointer passed where int expected — convert via int64_t
+                ip = self._new_temp('int64_t')
+                it = self._new_temp('int')
+                self._emit(f'  {ip} = (int64_t){aval};')
+                self._emit(f'  {it} = (int){ip};')
+                coerced_args.append(it)
+            elif ptype.endswith(' *') and atype == 'int':
+                # int passed where pointer expected — convert via int64_t
+                ip = self._new_temp('int64_t')
+                pp = self._new_temp(ptype)
+                self._emit(f'  {ip} = (int64_t){aval};')
+                self._emit(f'  {pp} = ({ptype}){ip};')
+                coerced_args.append(pp)
+            else:
+                coerced_args.append(aval)
+        args_str = ', '.join(coerced_args)
+        if result_var:
+            self._emit(f'  {result_var} = {fname} ({args_str});')
+        else:
+            self._emit(f'  {fname} ({args_str});')
+
+    def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
+        """Emit `lhs = val` coercing src→dst; routes struct-field LHS and literal RHS
+        through register temps as required by GIMPLE."""
+        is_field = '->' in lhs
+        val_is_literal = val.startswith('"') or val.startswith("'") or (
+            val.lstrip('-').replace('.','',1).isdigit() and val not in ('0','1','2','3','4','5','6','7','8','9'))
+        needs_temp = is_field
+
+        def _simple_emit(dest, v, s, d):
+            # GIMPLE: integer constant assigned to int64_t needs explicit cast
+            if s == d:
+                if d == 'int64_t' and v.lstrip('-').isdigit():
+                    self._emit(f'  {dest} = (int64_t){v};')
+                else:
+                    self._emit(f'  {dest} = {v};')
+            elif s.endswith(' *') and d in ('int', 'int64_t'):
+                ip = self._new_temp('int64_t')
+                self._emit(f'  {ip} = (int64_t){v};')
+                if d == 'int64_t':
+                    self._emit(f'  {dest} = {ip};')
+                else:
+                    self._emit(f'  {dest} = (int){ip};')
+            elif d.endswith(' *') and s in ('int', 'int64_t'):
+                ip = self._new_temp('int64_t')
+                self._emit(f'  {ip} = (int64_t){v};')
+                self._emit(f'  {dest} = ({d}){ip};')
+            else:
+                self._emit(f'  {dest} = ({d}){v};')
+
+        if needs_temp:
+            t = self._new_temp(dst)
+            _simple_emit(t, val, src, dst)
+            self._emit(f'  {lhs} = {t};')
+        else:
+            _simple_emit(lhs, val, src, dst)
+
     def _coerce(self, src: str, dst: str, val: str) -> str:
         return TypeLattice.coerce(src, dst, val)
 
@@ -828,28 +986,123 @@ class GimpleGen:
         self._emit(f"  {t} = 0;  /* ... */")
         return 'int', t
 
-    def _lower_StringLiteral(self, node) -> tuple[str, str]:
-        val = node.value
-        # Strip outer quotes (tokenizer includes them)
-        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-            val = val[1:-1]
-        escaped = val.replace('\\', '\\\\').replace('"', '\\"')
-        return 'char *', f'"{escaped}"'
+    def _parse_fstring_parts(self, inner):
+        """Parse f-string body into [('lit',text) | ('expr',code)] parts."""
+        parts = []
+        i = 0
+        buf = []
+        while i < len(inner):
+            c = inner[i]
+            if c == '{':
+                if i + 1 < len(inner) and inner[i+1] == '{':
+                    buf.append('{'); i += 2; continue
+                if buf:
+                    parts.append(('lit', ''.join(buf))); buf = []
+                i += 1
+                depth = 1
+                expr_chars = []
+                while i < len(inner) and depth > 0:
+                    ch = inner[i]
+                    if ch == '{': depth += 1
+                    elif ch == '}': depth -= 1
+                    if depth > 0:
+                        expr_chars.append(ch)
+                    i += 1
+                expr_src = ''.join(expr_chars).split('!')[0].split(':')[0].strip()
+                parts.append(('expr', expr_src))
+            elif c == '}' and i + 1 < len(inner) and inner[i+1] == '}':
+                buf.append('}'); i += 2
+            else:
+                buf.append(c); i += 1
+        if buf:
+            parts.append(('lit', ''.join(buf)))
+        return parts
 
+    def _lower_StringLiteral(self, node):
+        val = node.value
+        # Detect and strip f/r/b/u prefix
+        is_fstring = False
+        while val and val[0] in 'fFrRbBuU':
+            if val[0] in 'fF':
+                is_fstring = True
+            val = val[1:]
+        # Strip outer triple or single quotes
+        if val.startswith('"""') and val.endswith('"""'):
+            val = val[3:-3]
+        elif val.startswith("'''") and val.endswith("'''"):
+            val = val[3:-3]
+        elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        if not is_fstring:
+            escaped = (val.replace('\\', '\\\\')
+                           .replace('"', '\\"')
+                           .replace('\n', '\\n')
+                           .replace('\r', '\\r')
+                           .replace('\t', '\\t'))
+            # GIMPLE: char[] literal can't directly assign to char* in __GIMPLE functions.
+            # Register in the module-level string pool (emitted as C global char arrays).
+            if not hasattr(self, '_str_pool'):
+                self._str_pool = {}
+            if escaped not in self._str_pool:
+                self._str_pool[escaped] = f'_slit_{len(self._str_pool)}'
+            sname = self._str_pool[escaped]
+            return 'char *', sname
+        # F-string: parse into literal/expr parts and emit snprintf
+        parts = self._parse_fstring_parts(val)
+        if not parts or all(k == 'lit' for k, _ in parts):
+            plain = ''.join(v for _, v in parts)
+            escaped = plain.replace('\\', '\\\\').replace('"', '\\"')
+            return 'char *', '"' + escaped + '"'
+        fmt_parts = []
+        args = []
+        for kind, text in parts:
+            if kind == 'lit':
+                fmt_parts.append(text.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%'))
+            else:
+                try:
+                    from mojo_compiler import tokenize, Parser, ExprStmt
+                    toks = tokenize(text)
+                    expr_ast = Parser(toks).parse_module()
+                    if expr_ast:
+                        expr_node = expr_ast[0].value if isinstance(expr_ast[0], ExprStmt) else expr_ast[0]
+                        etype, evar = self.lower_expr(expr_node)
+                        if etype in ('char *', 'MojoStr *'):
+                            fmt_parts.append('%s'); args.append(evar)
+                        elif etype in ('int64_t', 'int', '_Bool', 'int32_t', 'int16_t', 'int8_t'):
+                            fmt_parts.append('%lld'); args.append('(long long)' + evar)
+                        elif etype in ('double', 'float'):
+                            fmt_parts.append('%g'); args.append(evar)
+                        else:
+                            fmt_parts.append('%s'); args.append('(char *)' + evar)
+                    else:
+                        fmt_parts.append('%s'); args.append('"' + text + '"')
+                except Exception:
+                    fmt_parts.append('%s'); args.append('"' + text + '"')
+        fmt_str = ''.join(fmt_parts)
+        t = self._new_temp('char *')
+        buf_name = t + '_fsbuf'
+        self._emit('  static char ' + buf_name + '[8192];')
+        args_str = ', '.join(args)
+        if args_str:
+            self._emit('  snprintf(' + buf_name + ', sizeof(' + buf_name + '), "' + fmt_str + '", ' + args_str + ');')
+        else:
+            self._emit('  snprintf(' + buf_name + ', sizeof(' + buf_name + '), "' + fmt_str + '");')
+        return 'char *', buf_name
     def _lower_IdentExpr(self, node) -> tuple[str, str]:
         name = node.name
-        # Special handling for Python built-in constants
-        if name == 'None':
-            return 'int', '0'
-        if name == 'True':
-            return 'int', '1'
-        if name == 'False':
-            return 'int', '0'
+        if name == 'None':  return 'int', '0'
+        if name == 'True':  return 'int', '1'
+        if name == 'False': return 'int', '0'
         if name in self._captures and self._env_param:
             ctype = self._captures[name]
             t = self._new_temp(ctype)
-            self._emit(f"  {t} = {self._env_param}->{name};")
+            self._emit(f'  {t} = {self._env_param}->{name};')
             return ctype, t
+        # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
+        if name in self.struct_field_types and name not in self.var_types:
+            t = self._new_temp('int')
+            self._emit(f'  {t} = 0;  /* class ref {name} as value */')
+            return 'int', t
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -857,7 +1110,7 @@ class GimpleGen:
         if node.name not in self.var_types:
             self._declare_var(node.name, vtype)
         dst = self.var_types[node.name]
-        self._emit(f"  {node.name} = {self._coerce(vtype, dst, vv)};")
+        self._safe_coerce_emit(vtype, dst, vv, node.name)
         return dst, node.name
 
     def _lower_UnaryOp(self, node) -> tuple[str, str]:
@@ -867,9 +1120,22 @@ class GimpleGen:
             self._emit(f"  {t} = {ov} == 0;")
             return '_Bool', t
         # Ownership transfer operator (^) - just pass the value through
-        # In the interpreter, we don't enforce lifetime semantics
         if node.op == '^':
             return ot, ov
+        # Spread/unpack operators (* and **) — just pass the value through;
+        # the list/call context handles iteration
+        if node.op in ('*', '**') and ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'int'):
+            return ot, ov
+        # Pointer dereference * on a known pointer type
+        if node.op == '*':
+            if ot.endswith(' *'):
+                elem_type = ot[:-2].strip() or 'int'
+                t = self._new_temp(elem_type)
+                self._emit(f"  {t} = *{ov};")
+                return elem_type, t
+            else:
+                # int typed as pointer — can't safely dereference; return as-is
+                return ot, ov
         c_op = {'-': '-', '~': '~', '+': '+'}.get(node.op, node.op)
         t = self._new_temp(ot)
         self._emit(f"  {t} = {c_op}{ov};")
@@ -879,7 +1145,26 @@ class GimpleGen:
         ct, cv = self.lower_expr(node.condition)
         tt, tv = self.lower_expr(node.then_val)
         et, ev = self.lower_expr(node.else_val)
+        # GIMPLE: condition must be _Bool, branches must have identical types
+        if ct != '_Bool':
+            cond = self._new_temp('_Bool')
+            if ct in ('char *', 'void *') or ct.endswith(' *'):
+                ip = self._new_temp('int64_t')
+                self._emit(f"  {ip} = (int64_t){cv};")
+                self._emit(f"  {cond} = {ip} != 0;")
+            else:
+                self._emit(f"  {cond} = {cv} != 0;")
+            cv = cond
+        # Coerce branches to common type
         res_type = TypeLattice.join(tt, et)
+        if tt != res_type:
+            t_tmp = self._new_temp(res_type)
+            self._safe_coerce_emit(tt, res_type, tv, t_tmp)
+            tv = t_tmp
+        if et != res_type:
+            e_tmp = self._new_temp(res_type)
+            self._safe_coerce_emit(et, res_type, ev, e_tmp)
+            ev = e_tmp
         t = self._new_temp(res_type)
         self._emit(f"  {t} = {cv} ? {tv} : {ev};")
         return res_type, t
@@ -890,44 +1175,64 @@ class GimpleGen:
             module_name = node.obj.name
             # Module attribute access: sys.argv, tokenizer.X, etc.
             if module_name == 'sys' and node.member == 'argv':
-                # Return a stub empty list for sys.argv
+                # Return the argv list wired from C main(argc, argv)
                 t = self._new_temp('MojoList *')
-                self._emit(f"  {t} = mojo_list_new ();  /* sys.argv stub */")
+                self._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
+                # Track element type so subscript uses mojo_list_get_str
+                self._elem_types[t] = 'char *'
                 return 'MojoList *', t
 
+            # Class attribute access: ClassName.ATTR
+            # Check if module_name is a known struct/class (not an instance variable)
+            if module_name in self.struct_field_types and module_name not in self.var_types:
+                # This is a class-level access like TypeLattice._FLOAT
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} */")
+                return 'int', t
+
         ot, ov = self.lower_expr(node.obj)
+
+        # If the object lowered to a C type name (class used as cls argument),
+        # treat it as NULL — the method shouldn't use cls for value access
+        if ov in self.struct_field_types and ot == 'int':
+            null_tmp = self._new_temp('int')
+            self._emit(f"  {null_tmp} = 0;  /* class ref {ov} as NULL */")
+            ov = null_tmp
+
 
         # Special handling for .__name__ on type objects (which are ints)
         if node.member == '__name__' and ot == 'int':
             t = self._new_temp('char *')
-            type_names = {
-                '0': '"NoneType"',
-                '1': '"bool"',
-                '2': '"int"',
-                '3': '"float"',
-                '4': '"str"',
-                '5': '"list"',
-                '6': '"dict"',
-                '7': '"set"'
-            }
-            # For now, return a default name
-            self._emit(f"  {t} = \"UnknownType\";  /* TODO: map type ID {ov} to __name__ */")
+            self._emit(f'  {t} = "UnknownType";  /* TODO: map type ID {ov} to __name__ */')
             return 'char *', t
 
         # Special handling for .__dict__ on int objects (node variable)
         if node.member == '__dict__' and ot == 'int':
             t = self._new_temp('int')
-            self._emit(f"  {t} = 0;  /* __dict__ stub */")
+            self._emit(f'  {t} = 0;  /* __dict__ stub */')
             return 'int', t
 
         op = '->' if '*' in ot else '.'
         struct_name = ot.replace(' *', '').strip()
-        field_type = (self.struct_field_types.get(struct_name, {})
-                      .get(node.member, 'int'))
-        t = self._new_temp(field_type)
-        self._emit(f"  {t} = {ov}{op}{node.member};")
-        return field_type, t
-
+        field_map = self.struct_field_types.get(struct_name, {})
+        if node.member in field_map:
+            field_type = field_map[node.member]
+            t = self._new_temp(field_type)
+            self._emit(f'  {t} = {ov}{op}{node.member};')
+            return field_type, t
+        elif ot in ('int', 'int64_t'):
+            # Opaque Python object typed as int — use runtime attribute accessor
+            # GIMPLE requires function args to be simple vars, not cast expressions
+            t = self._new_temp('int')
+            self._emit_call('int', t, 'mojo_obj_getattr',
+                            [(ot, ov), ('char *', f'"{node.member}"')])
+            return 'int', t
+        else:
+            # Unknown struct field — fall back
+            field_type = 'int'
+            t = self._new_temp(field_type)
+            self._emit(f'  {t} = {ov}{op}{node.member};')
+            return field_type, t
     # ── Binary operator lowering ──────────────────────────────────────────
 
     def _lower_binary(self, node: BinaryOp) -> tuple[str, str]:
@@ -938,14 +1243,14 @@ class GimpleGen:
                 if nm not in self.var_types:
                     self._declare_var(nm, vtype)
                 dst = self.var_types[nm]
-                self._emit(f"  {nm} = {self._coerce(vtype, dst, vv)};")
+                self._safe_coerce_emit(vtype, dst, vv, nm)
                 return dst, nm
             if isinstance(node.left, MemberExpr):
                 ot, ov = self.lower_expr(node.left.obj)
                 op = '->' if '*' in ot else '.'
                 sn = ot.replace(' *', '').strip()
                 field_type = self.struct_field_types.get(sn, {}).get(node.left.member, vtype)
-                self._emit(f"  {ov}{op}{node.left.member} = {self._coerce(vtype, field_type, vv)};")
+                self._safe_coerce_emit(vtype, field_type, vv, f"{ov}{op}{node.left.member}")
                 return field_type, vv
             if isinstance(node.left, SubscriptExpr):
                 ot, obj_v = self.lower_expr(node.left.obj)
@@ -973,6 +1278,28 @@ class GimpleGen:
         if node.op == 'not in':
             return self._lower_in_impl(node, negate=True)
 
+        if node.op in ('and', 'or'):
+            # GIMPLE does not allow && or || in assignments; lower to branching form.
+            ltype, lval = self.lower_expr(node.left)
+            result = self._new_temp('_Bool')
+            bb_right = self._new_bb()
+            bb_merge = self._new_bb()
+            lcast = self._new_temp('_Bool')
+            self._emit(f'  {lcast} = (_Bool){lval};')
+            self._emit(f'  {result} = {lcast};')
+            if node.op == 'and':
+                self._emit(f'  if ({lcast}) goto {bb_right}; else goto {bb_merge};')
+            else:
+                self._emit(f'  if ({lcast}) goto {bb_merge}; else goto {bb_right};')
+            self._emit_label(bb_right)
+            rtype, rval = self.lower_expr(node.right)
+            rcast = self._new_temp('_Bool')
+            self._emit(f'  {rcast} = (_Bool){rval};')
+            self._emit(f'  {result} = {rcast};')
+            self._emit(f'  goto {bb_merge};')
+            self._emit_label(bb_merge)
+            return '_Bool', result
+
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
 
@@ -990,11 +1317,25 @@ class GimpleGen:
             self._emit(f"  {t} = mojo_str_concat ({lv}, {rv});")
             return 'MojoStr *', t
 
-        # char * + char * → mojo_str_cat (C string concatenation)
-        if node.op == '+' and lt == 'char *' and rt == 'char *':
-            t = self._new_temp('char *')
-            self._emit(f"  {t} = mojo_str_cat ({lv}, {rv});")
-            return 'char *', t
+        # char * + char * → mojo_str_cat (including int64_t holding char* via actual_types)
+        def _as_charptr(typ, val):
+            if typ == 'char *':
+                return 'char *', val
+            actual = self._actual_types.get(val)
+            if actual == 'char *':
+                cp = self._new_temp('char *')
+                ip = self._new_temp('int64_t')
+                self._emit(f"  {ip} = (int64_t){val};")
+                self._emit(f"  {cp} = (char *){ip};")
+                return 'char *', cp
+            return typ, val
+        if node.op == '+':
+            lt2, lv2 = _as_charptr(lt, lv)
+            rt2, rv2 = _as_charptr(rt, rv)
+            if lt2 == 'char *' and rt2 == 'char *':
+                t = self._new_temp('char *')
+                self._emit_call('char *', t, 'mojo_str_cat', [('char *', lv2), ('char *', rv2)])
+                return 'char *', t
 
         # char * * int → string repetition (e.g., "  " * 3)
         if node.op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
@@ -1017,26 +1358,30 @@ class GimpleGen:
             self._emit(f"  {t} = {eq_t} {cmp};")
             return '_Bool', t
 
-        # char * == / != → strcmp
-        if node.op in ('==', '!=') and lt == 'char *' and rt == 'char *':
-            eq_t = self._new_temp('int')
-            self._emit(f"  {eq_t} = strcmp ({lv}, {rv});")
-            t = self._new_temp('_Bool')
-            cmp = '== 0' if node.op == '==' else '!= 0'
-            self._emit(f"  {t} = {eq_t} {cmp};")
-            return '_Bool', t
+        # String equality: char*, int64_t-stored-char*, or string literals → strcmp
+        rv_is_str_lit = isinstance(node.right, StringLiteral)
+        lv_is_str_lit = isinstance(node.left, StringLiteral)
+        if node.op in ('==', '!='):
+            uses_str = (lt == 'char *' or rt == 'char *' or rv_is_str_lit or lv_is_str_lit or
+                        (lt == 'int64_t' and (rv_is_str_lit or rt == 'char *')) or
+                        (rt == 'int64_t' and (lv_is_str_lit or lt == 'char *')))
+            if uses_str:
+                def _to_char_star(typ, var):
+                    if typ == 'char *':
+                        t2 = self._new_temp('char *'); self._emit(f'  {t2} = {var};'); return t2
+                    ip = self._new_temp('int64_t'); cp = self._new_temp('char *')
+                    self._emit(f'  {ip} = (int64_t){var};')
+                    self._emit(f'  {cp} = (char *){ip};')
+                    return cp
+                ls = _to_char_star(lt, lv)
+                rs = _to_char_star(rt, rv)
+                eq_t = self._new_temp('int')
+                self._emit_call('int', eq_t, 'strcmp', [('char *', ls), ('char *', rs)])
+                t = self._new_temp('_Bool')
+                cmp = '== 0' if node.op == '==' else '!= 0'
+                self._emit(f'  {t} = {eq_t} {cmp};')
+                return '_Bool', t
 
-        # (int-cast string) == / != char * → strcmp (e.g., input() result == "exit")
-        if node.op in ('==', '!=') and ((lt == 'int' and rt == 'char *') or (lt == 'char *' and rt == 'int')):
-            # Cast int to char * and compare
-            left_str = f"(char *){lv}" if lt == 'int' else lv
-            right_str = f"(char *){rv}" if rt == 'int' else rv
-            eq_t = self._new_temp('int')
-            self._emit(f"  {eq_t} = strcmp ({left_str}, {right_str});")
-            t = self._new_temp('_Bool')
-            cmp = '== 0' if node.op == '==' else '!= 0'
-            self._emit(f"  {t} = {eq_t} {cmp};")
-            return '_Bool', t
 
         # is / is not → pointer identity
         if node.op in ('is', 'is not'):
@@ -1054,13 +1399,18 @@ class GimpleGen:
 
         c_op      = _BIN_OPS.get(node.op, node.op)
         res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
+        # For | on set/list/dict pointer types, use runtime union, not C bitwise |
+        if node.op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
+            t = self._new_temp('MojoSet *')
+            self._emit(f"  {t} = mojo_set_union ((MojoSet *){lv}, (MojoSet *){rv});")
+            return 'MojoSet *', t
         # Cast operands to result type to satisfy GIMPLE strict type checking
         arith_type = TypeLattice.join(lt, rt)  # common type for arithmetic
-        if lt != arith_type and arith_type not in ('_Bool',):
+        if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
             ct = self._new_temp(arith_type)
             self._emit(f"  {ct} = ({arith_type}){lv};")
             lv = ct
-        if rt != arith_type and arith_type not in ('_Bool',):
+        if rt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
             ct = self._new_temp(arith_type)
             self._emit(f"  {ct} = ({arith_type}){rv};")
             rv = ct
@@ -1253,7 +1603,112 @@ class GimpleGen:
         # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
         ot = self._get_actual_type(ot, ov)
 
-        # Raw C pointer operations (UnsafePointer[T] lowers to T *)
+        # ── Opaque int → coerce to appropriate container type FIRST ──────────
+        # Must happen before container-type checks so the casted type is seen below.
+        if ot in ('int', 'int64_t') and method in (
+            'keys', 'values', 'items', 'get', 'update', 'pop', 'copy',
+            'append', 'extend', 'sort', 'reverse', 'clear',
+            'add', 'discard', 'remove',
+            'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
+            'split', 'join', 'replace', 'find', 'lower', 'upper',
+            'format', 'encode',
+        ):
+            ip = self._new_temp('int64_t')
+            self._emit(f"  {ip} = (int64_t){ov};")
+            if method in ('keys', 'values', 'items', 'get', 'update'):
+                dp = self._new_temp('MojoDict *')
+                self._emit(f"  {dp} = (MojoDict *){ip};")
+                ot, ov = 'MojoDict *', dp
+            elif method in ('append', 'extend', 'sort', 'reverse', 'clear'):
+                lp = self._new_temp('MojoList *')
+                self._emit(f"  {lp} = (MojoList *){ip};")
+                ot, ov = 'MojoList *', lp
+            elif method in ('add', 'discard', 'remove'):
+                sp = self._new_temp('MojoSet *')
+                self._emit(f"  {sp} = (MojoSet *){ip};")
+                ot, ov = 'MojoSet *', sp
+            else:
+                cp = self._new_temp('char *')
+                self._emit(f"  {cp} = (char *){ip};")
+                ot, ov = 'char *', cp
+
+        # ── MojoDict method dispatch ───────────────────────────────────────
+        if ot == 'MojoDict *':
+            if method == 'keys':
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_dict_keys ({ov});")
+                self._elem_types[t] = 'char *'
+                return 'MojoList *', t
+            if method == 'values':
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_dict_values ({ov});")
+                return 'MojoList *', t
+            if method == 'items':
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_dict_items ({ov});")
+                return 'MojoList *', t
+            if method == 'get' and node.args:
+                key_type, key_val = self.lower_expr(node.args[0])
+                default_val = '0'
+                if len(node.args) > 1:
+                    _, default_val = self.lower_expr(node.args[1])
+                t = self._new_temp('int64_t')
+                self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', ov), ('char *', key_val)])
+                return 'int64_t', t
+            if method == 'update' and node.args:
+                other_type, other_val = self.lower_expr(node.args[0])
+                self._emit(f"  mojo_dict_update ({ov}, {other_val});")
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            if method == 'pop' and node.args:
+                key_type, key_val = self.lower_expr(node.args[0])
+                t = self._new_temp('int64_t')
+                self._emit_call('int64_t', t, 'mojo_dict_pop_int', [('MojoDict *', ov), ('char *', key_val)])
+                return 'int64_t', t
+            if method in ('copy',):
+                t = self._new_temp('MojoDict *')
+                self._emit(f"  {t} = mojo_dict_copy ({ov});")
+                return 'MojoDict *', t
+
+        # ── MojoList method dispatch ──────────────────────────────────────
+        if ot == 'MojoList *':
+            if method == 'append' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                if at == 'char *':
+                    self._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
+                else:
+                    self._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), ('int64_t', av)])
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            if method == 'extend' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                self._emit(f"  mojo_list_extend ({ov}, {av});")
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            if method == 'pop':
+                t = self._new_temp('int64_t')
+                self._emit(f"  {t} = mojo_list_pop ({ov});")
+                return 'int64_t', t
+            if method in ('sort', 'reverse', 'clear'):
+                self._emit(f"  mojo_list_{method} ({ov});")
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            if method == 'copy':
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_list_copy ({ov});")
+                return 'MojoList *', t
+
+        # ── MojoSet method dispatch ───────────────────────────────────────
+        if ot == 'MojoSet *':
+            if method == 'add' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                if at == 'char *':
+                    self._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
+                else:
+                    self._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av)])
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            if method == 'discard' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                self._emit(f"  mojo_set_discard ({ov}, (int64_t){av});")
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+
+
         if ot.endswith(' *') and ot not in self._RUNTIME_PTRS:
             elem = _elem_type(ot)
             if method == 'load':
@@ -1346,37 +1801,55 @@ class GimpleGen:
             self._emit(f"  {t} = 0;  /* TODO: char*.{method} */")
             return 'int', t
 
-        # File handle read: f.read() on int/int64_t handles → int_read(f) → char*
-        if method == 'read' and ot in ('int', 'int64_t') and not node.args:
-            t = self._new_temp('char *')
-            self._emit(f"  {t} = int_read ({ov});")
-            return 'char *', t
+        # File handle operations (int64_t handles from mojo_open_file)
+        if ot in ('int', 'int64_t'):
+            if method == 'read' and not node.args:
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = int_read ({ov});")
+                return 'char *', t
+            if method == 'write' and node.args:
+                data_type, data_val = self.lower_expr(node.args[0])
+                t = self._new_temp('int64_t')
+                self._emit(f"  {t} = int_write ({ov}, {data_val});")
+                return 'int64_t', t
+            if method == 'close':
+                self._emit(f"  mojo_close ((void *){ov});")
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;")
+                return 'int', t
 
         # Struct method call: obj.method(args) → StructName_method(self, args)
-        struct_name = ot.replace(' *', '').strip()
+        # If the object was a class name reference (ot='int', ov='0'), recover the class name
+        # from the original AST node rather than using 'int' as the struct name.
+        is_class_ref = False
+        if isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
+            struct_name = func.obj.name
+            is_class_ref = True
+        else:
+            struct_name = ot.replace(' *', '').strip()
         mangled = _safe_name(f"{struct_name}_{method}")
         ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'int')
-        arg_vals = [self.lower_expr(a)[1] for a in node.args]
-        all_args = ', '.join([ov] + arg_vals)
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        # For class method calls (ClassName.method()), don't prepend the fake cls=0 arg
+        if is_class_ref:
+            all_args = ', '.join(av for _, av in arg_pairs)
+        else:
+            all_args = ', '.join([ov] + [av for _, av in arg_pairs])
 
         if ret_type == 'void':
             self._emit(f"  {mangled} ({all_args});")
             t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
-        # For pointer types, store as int64_t in GIMPLE for compatibility
-        if ret_type in ('char *', 'void *') or ret_type.endswith(' *'):
-            storage_type = 'int64_t'
-        else:
-            storage_type = ret_type
-
-        t = self._new_temp(storage_type)
-        if storage_type != ret_type:
-            # Cast pointer return to int64_t, but track actual type
-            self._emit(f"  {t} = (int64_t) {mangled} ({all_args});")
-            self._actual_types[t] = ret_type  # Remember the actual pointer type
-        else:
-            self._emit(f"  {t} = {mangled} ({all_args});")
-        return storage_type, t
+        # Return the actual type directly — no int64_t storage pattern
+        # (GIMPLE can handle pointer-typed locals fine; the int64_t pattern caused
+        # downstream type-mismatch errors when char* results were used in binary ops)
+        t = self._new_temp(ret_type)
+        # Use _emit_call for proper argument coercion
+        arg_pair_list = [(self._type_of(av) if i < len(arg_pairs) else 'int', av)
+                         for i, (_, av) in enumerate(arg_pairs)]
+        self._emit_call(ret_type, t, mangled,
+                        ([(ot, ov)] + arg_pairs) if not is_class_ref else arg_pairs)
+        return ret_type, t
 
     # ── Call expression lowering ──────────────────────────────────────────
 
@@ -1419,17 +1892,15 @@ class GimpleGen:
         if fname_raw == 'str' and len(node.args) == 1:
             arg_type, arg_val = self.lower_expr(node.args[0])
             t = self._new_temp('char *')
-            # Cast int to void* for mojo_str
-            if arg_type in ('int', 'int64_t', 'uint64_t'):
-                arg_val = f"(void *){arg_val}"
-            self._emit(f"  {t} = mojo_str ({arg_val});")
+            # Always use _emit_call so void* coercion is handled correctly in GIMPLE
+            self._emit_call('char *', t, 'mojo_str', [(arg_type, arg_val)])
             return 'char *', t
 
         # repr() built-in
         if fname_raw == 'repr' and len(node.args) == 1:
             arg_type, arg_val = self.lower_expr(node.args[0])
             t = self._new_temp('char *')
-            self._emit(f"  {t} = mojo_repr ({arg_val});")
+            self._emit_call('char *', t, 'mojo_repr', [(arg_type, arg_val)])
             return 'char *', t
 
         # type() built-in
@@ -1475,7 +1946,36 @@ class GimpleGen:
         if fname_raw in self.struct_field_types:
             return self._lower_struct_constructor(fname_raw, node.args)
 
-        # open() built-in → mojo_open()
+        # set() / frozenset() built-in constructors
+        if fname_raw in ('set', 'frozenset'):
+            t = self._new_temp('MojoSet *')
+            self._emit(f"  {t} = mojo_set_new ();")
+            for arg in node.args:
+                # If arg is an iterable literal, add its elements
+                at, av = self.lower_expr(arg)
+                # For now just return empty set; runtime can populate if needed
+            return 'MojoSet *', t
+
+        # dict() built-in constructor
+        if fname_raw == 'dict' and len(node.args) == 0:
+            t = self._new_temp('MojoDict *')
+            self._emit(f"  {t} = mojo_dict_new ();")
+            return 'MojoDict *', t
+
+        # list() / tuple() constructor
+        if fname_raw in ('list', 'tuple') and len(node.args) <= 1:
+            t = self._new_temp('MojoList *')
+            self._emit(f"  {t} = mojo_list_new ();")
+            return 'MojoList *', t
+
+
+        if fname_raw == 'open' and len(node.args) == 1:
+            # open(path) — read mode
+            fn_type, fn_val = self.lower_expr(node.args[0])
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = mojo_open_file ({fn_val});")
+            return 'int64_t', t
+
         if fname_raw == 'open' and len(node.args) == 2:
             fn_type, fn_val = self.lower_expr(node.args[0])
             mode_type, mode_val = self.lower_expr(node.args[1])
@@ -1501,46 +2001,39 @@ class GimpleGen:
 
         fname    = _safe_name(fname_raw)
         ret_type = self.func_return_types.get(fname_raw, 'int')
-        arg_vals = [self.lower_expr(a)[1] for a in node.args]
+        arg_pairs = [self.lower_expr(a) for a in node.args]
 
         # Special handling for functions with default parameters
-        if fname_raw == 'format_ast' and len(arg_vals) == 1:
-            # format_ast(node, indent=0) - add default indent=0
-            arg_vals.append('0')
-
-        args_str = ', '.join(arg_vals)
+        if fname_raw == 'format_ast' and len(arg_pairs) == 1:
+            arg_pairs.append(('int', '0'))
 
         if ret_type == 'void':
-            self._emit(f"  {fname} ({args_str});")
+            self._emit_call('void', '', fname, arg_pairs)
             t = self._new_temp('int')
             self._emit(f"  {t} = 0;")
             return 'int', t
 
-        # String utility functions — store char* result directly so callers can
-        # pass it to char* parameters and call string methods without casts.
+        # String utility functions — store char* result directly
         _DIRECT_CHARPTR = frozenset({
             'input', 'mojo_input',
             'string_lower', 'string_strip', 'string_upper',
         })
         if ret_type == 'char *' and fname_raw in _DIRECT_CHARPTR:
             t = self._new_temp('char *')
-            self._emit(f"  {t} = {fname} ({args_str});")
+            self._emit_call('char *', t, fname, arg_pairs)
             return 'char *', t
 
-        # For pointer types (char *, MojoList *, etc), store as int64_t in GIMPLE
-        # and cast when needed
-        if ret_type in ('char *', 'void *') or ret_type.endswith(' *'):
-            storage_type = 'int64_t'
+        # For pointer types, store as int64_t storage and track actual type
+        if ret_type.endswith(' *'):
+            # Return pointer directly — GIMPLE is fine with pointer-typed locals
+            t = self._new_temp(ret_type)
+            self._emit_call(ret_type, t, fname, arg_pairs)
+            return ret_type, t
         else:
             storage_type = ret_type
 
         t = self._new_temp(storage_type)
-        if storage_type != ret_type:
-            # Cast pointer return to int64_t for GIMPLE compatibility
-            self._emit(f"  {t} = (int64_t) {fname} ({args_str});")
-            self._actual_types[t] = ret_type  # track actual type for method dispatch
-        else:
-            self._emit(f"  {t} = {fname} ({args_str});")
+        self._emit_call(storage_type, t, fname, arg_pairs)
 
         # Return the storage type that was actually assigned, so variable declarations match
         return storage_type, t
@@ -1622,7 +2115,20 @@ class GimpleGen:
             self._emit(f"  {t} = mojo_dict_get_int ({ov}, {iv});")
             return 'int64_t', t
 
-        # p[i] is invalid GIMPLE — use _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
+        # Opaque Python object (typed as int) — treat as MojoList via cast
+        if ot in ('int', 'int64_t'):
+            # The object is likely a MojoList* stored as int; cast and subscript
+            lp = self._new_temp('MojoList *')
+            ip = self._new_temp('int64_t')
+            idx64 = self._new_temp('int64_t')
+            self._emit(f"  {ip} = (int64_t){ov};")
+            self._emit(f"  {lp} = (MojoList *){ip};")
+            self._emit(f"  {idx64} = (int64_t){iv};")
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = mojo_list_get_int ({lp}, {idx64});")
+            return 'int64_t', t
+
+        # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
         et = _elem_type(ot)
         cn = _c_id(et)
         self._ptr_helpers_needed.add(et)
@@ -1712,10 +2218,10 @@ class GimpleGen:
         for el in node.elements:
             et, ev = self.lower_expr(el)
             if et == 'char *':
-                self._emit(f"  mojo_set_add_str ({t}, {ev});")
+                self._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', t), ('char *', ev)])
             else:
                 ev64 = self._to_int64(et, ev)
-                self._emit(f"  mojo_set_add_int ({t}, {ev64});")
+                self._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', t), ('int64_t', ev64)])
         return 'MojoSet *', t
 
     def _lower_tuple_literal(self, node: TupleExpr) -> tuple[str, str]:
@@ -1953,10 +2459,10 @@ class GimpleGen:
         elif node.kind == 'set':
             et, ev = self.lower_expr(node.element)
             if et == 'char *':
-                self._emit(f"  mojo_set_add_str ({res}, {ev});")
+                self._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', res), ('char *', ev)])
             else:
                 ev64 = self._to_int64(et, ev)
-                self._emit(f"  mojo_set_add_int ({res}, {ev64});")
+                self._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])
         elif node.kind == 'dict':
             _, kv  = self.lower_expr(node.element)   # element = key expression in dict compr
             vt, vv = self.lower_expr(node.key)        # key field holds the value expression
@@ -2057,7 +2563,7 @@ class GimpleGen:
                     self._elem_types[node.name] = self._elem_types[v]
                 if v in self._dict_val_types:
                     self._dict_val_types[node.name] = self._dict_val_types[v]
-            self._emit(f"  {node.name} = {self._coerce(vtype, ctype, v)};")
+            self._safe_coerce_emit(vtype, ctype, v, node.name)
         self._layout_hint = LayoutSolver.HEAP
 
     def _gen_stmt_AssignStmt(self, node):
@@ -2086,16 +2592,16 @@ class GimpleGen:
                         self._elem_types[tname] = self._elem_types[v]
                     if v in self._dict_val_types:
                         self._dict_val_types[tname] = self._dict_val_types[v]
-            self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+            self._safe_coerce_emit(vtype, dst, v, tname)
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
             op = '->' if '*' in ot else '.'
             struct_name = ot.replace(' *', '').strip()
             field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
-            self._emit(f"  {ov}{op}{node.target.member} = {self._coerce(vtype, field_type, v)};")
+            self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{node.target.member}")
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
-            _, idx_v  = self.lower_expr(node.target.index)
+            it, idx_v  = self.lower_expr(node.target.index)
             if ot == 'MojoList *':
                 elem = self._elem_of(obj_v)
                 suf  = TypeLattice.list_suffix(elem)
@@ -2103,8 +2609,29 @@ class GimpleGen:
                 self._emit(f"  {idx64} = (int64_t) {idx_v};")
                 ev_cast = self._cast_for_list(vtype, v, suf)
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
+            elif ot == 'MojoDict *':
+                # dict[key] = val → mojo_dict_set_str_*
+                key_tmp = self._new_temp('char *')
+                self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
+                if vtype == 'char *':
+                    self._emit_call('void', '', 'mojo_dict_set_str_str',
+                                    [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
+                else:
+                    self._emit_call('void', '', 'mojo_dict_set_str_int',
+                                    [('MojoDict *', obj_v), ('char *', key_tmp), ('int64_t', v)])
             else:
-                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+                # Opaque int-typed dict: cast to MojoDict* and set
+                if ot in ('int', 'int64_t'):
+                    ip = self._new_temp('int64_t')
+                    dp = self._new_temp('MojoDict *')
+                    self._emit(f"  {ip} = (int64_t){obj_v};")
+                    self._emit(f"  {dp} = (MojoDict *){ip};")
+                    key_tmp2 = self._new_temp('char *')
+                    self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                    self._emit_call('void', '', 'mojo_dict_set_str_int',
+                                    [('MojoDict *', dp), ('char *', key_tmp2), ('int64_t', v)])
+                else:
+                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
             self._emit("  /* TODO: complex assignment target */")
 
@@ -2139,7 +2666,7 @@ class GimpleGen:
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
             dst   = self._type_of(tname)
-            self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+            self._safe_coerce_emit(vtype, dst, v, tname)
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
             op     = '->' if '*' in ot else '.'
@@ -2238,7 +2765,7 @@ class GimpleGen:
                 if tname not in self.var_types:
                     self._declare_var(tname, vtype)
                 dst = self.var_types[tname]
-                self._emit(f"  {tname} = {self._coerce(vtype, dst, v)};")
+                self._safe_coerce_emit(vtype, dst, v, tname)
             elif isinstance(target, MemberExpr):
                 ot, ov = self.lower_expr(target.obj)
                 op = '->' if '*' in ot else '.'
@@ -2929,7 +3456,8 @@ class GimpleGen:
         # Generate C wrapper for main that optionally initializes Python
         if node.name == 'main':
             lines.append("")
-            lines.append(f"int main (void) {{")
+            lines.append(f"int main (int argc, const char **argv) {{")
+            lines.append(f"  mojo_set_argv(argc, argv);")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Initialize ();")
             lines.append(f"#endif")
@@ -3043,44 +3571,83 @@ class GimpleGen:
         for s in all_struct_defs:
             if isinstance(s, StructDef):
                 self.struct_field_types[s.name] = {}
+                # Collect class-level attributes (non-self, non-method assignments at class body)
+                if not hasattr(self, '_class_attrs'):
+                    self._class_attrs = {}  # class_name -> {attr -> value_str}
+                self._class_attrs[s.name] = {}
+                for field in s.fields:
+                    if isinstance(field, AssignStmt):
+                        if isinstance(field.target, IdentExpr):
+                            aname = field.target.name
+                            # Store a C-safe mangled name for this class attribute
+                            mangled = f"_classattr_{s.name}__{aname}"
+                            self._class_attrs[s.name][aname] = mangled
                 # Explicit field declarations
                 for field in s.fields:
                     if isinstance(field, VarDecl):
                         self.struct_field_types[s.name][field.name] = _mojo_type(field.type_ann)
 
-                # Infer fields from __init__ method (e.g., self.tokens = tokens)
-                # This enriches empty StructDef.fields for proper code generation
-                if not s.fields:  # Only infer if no explicit fields
-                    for method in s.methods:
-                        if method.name == '__init__':
-                            # Build param type map
-                            param_types = {}
-                            for pname, ptype in method.params:
-                                if pname != 'self':
-                                    param_types[pname] = self._resolve_type(ptype) if ptype else 'int'
-
-                            # Extract field assignments from __init__ body
-                            inferred_fields = []
-                            for stmt in method.body:
-                                if isinstance(stmt, AssignStmt) and isinstance(stmt.target, MemberExpr):
-                                    target = stmt.target
-                                    # Check if it's self.field = value
-                                    if isinstance(target.obj, IdentExpr) and target.obj.name == 'self':
-                                        field_name = target.member
-                                        # Infer field type from value
-                                        if isinstance(stmt.value, IdentExpr):
-                                            field_type = param_types.get(stmt.value.name, 'int')
+                # Always scan ALL methods for self.x = ... to build complete field list
+                def _collect_self_assigns(body, param_types, found):
+                    for stmt in body:
+                        if isinstance(stmt, AssignStmt) and isinstance(stmt.target, MemberExpr):
+                            t = stmt.target
+                            if isinstance(t.obj, IdentExpr) and t.obj.name == 'self':
+                                fn = t.member
+                                if fn not in found:
+                                    v = stmt.value
+                                    if isinstance(v, IdentExpr):
+                                        ft = param_types.get(v.name, 'int')
+                                    elif isinstance(v, IntLiteral):
+                                        ft = 'int64_t'
+                                    elif isinstance(v, StringLiteral):
+                                        ft = 'char *'
+                                    elif isinstance(v, BoolLiteral):
+                                        ft = '_Bool'
+                                    elif isinstance(v, DictExpr):
+                                        ft = 'MojoDict *'
+                                    elif isinstance(v, (ListExpr, TupleExpr)):
+                                        ft = 'MojoList *'
+                                    elif isinstance(v, SetExpr):
+                                        ft = 'MojoSet *'
+                                    elif isinstance(v, CallExpr):
+                                        cfn = v.func
+                                        cn = cfn.name if isinstance(cfn, IdentExpr) else ''
+                                        if cn in ('list', 'DynamicVector', 'mojo_list_new'):
+                                            ft = 'MojoList *'
+                                        elif cn in ('dict', 'Dict', 'mojo_dict_new'):
+                                            ft = 'MojoDict *'
+                                        elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
+                                            ft = 'MojoSet *'
+                                        elif cn.startswith('_alloc_'):
+                                            # _alloc_StructName() returns StructName *
+                                            sname = cn[len('_alloc_'):]
+                                            ft = sname + ' *'
+                                        elif cn in self.struct_field_types:
+                                            ft = cn + ' *'
                                         else:
-                                            field_type = 'int'
+                                            ft = 'int'
+                                    else:
+                                        ft = 'int'
+                                    found[fn] = ft
+                        for attr in ('then_body', 'body', 'else_body'):
+                            sub = getattr(stmt, attr, None)
+                            if isinstance(sub, list):
+                                _collect_self_assigns(sub, param_types, found)
 
-                                        # Create VarDecl node for the field
-                                        field_decl = VarDecl(name=field_name, type_ann=None, value=None)
-                                        inferred_fields.append(field_decl)
-                                        self.struct_field_types[s.name][field_name] = field_type
-
-                            # Update struct definition with inferred fields
-                            s.fields.extend(inferred_fields)
-                            break
+                already = set(self.struct_field_types[s.name].keys())
+                for method in s.methods:
+                    pm = {}
+                    for pname, ptype in method.params:
+                        if pname != 'self':
+                            pm[pname] = self._resolve_type(ptype) if ptype else 'int'
+                    new_fields = {}
+                    _collect_self_assigns(method.body, pm, new_fields)
+                    for fn, ft in new_fields.items():
+                        if fn not in already:
+                            self.struct_field_types[s.name][fn] = ft
+                            s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            already.add(fn)
 
         # Register struct constructors as functions returning T *
         # Include both current module and imported module structs
@@ -3254,6 +3821,17 @@ class GimpleGen:
                 func_parts.append('')
             elif isinstance(stmt, (ImportStmt, FromImportStmt)):
                 pass  # Imports processed in pre-pass; extern declarations generated in preamble
+            elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+                # Module-level assignment: e.g. _STMT_DISPATCH = {...}
+                gname = stmt.target.name
+                if isinstance(stmt.value, DictExpr):
+                    func_parts.append(f"/* global dict {gname} — declared as MojoDict * */")
+                elif isinstance(stmt.value, (ListExpr, TupleExpr)):
+                    func_parts.append(f"/* global list {gname} — declared as MojoList * */")
+                elif isinstance(stmt.value, SetExpr):
+                    func_parts.append(f"/* global set {gname} — declared as MojoSet * */")
+                else:
+                    func_parts.append(f"/* TODO: global {gname} */")
             else:
                 func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
 
@@ -3265,6 +3843,7 @@ class GimpleGen:
             '#define USE_PYTHON 0',
             '#include <stdint.h>',
             '#include <stdlib.h>',
+            '#include <string.h>',
             '#include <math.h>',
             '#include <stdio.h>',
             '#include <setjmp.h>',
@@ -3272,10 +3851,11 @@ class GimpleGen:
             '#include <Python.h>',
             '#endif',
             '#include "mojo_runtime.h"',
-            'void mojo_print(const char *str);',
-            'char *gimple_codegen_compile_to_gimple(const char *src);',
-            'int int_write (int, char *);',
-            'int int_parse_module (int);',
+            'void mojo_print(char *str);',
+            'char *gimple_codegen_compile_to_gimple(char *src);',
+            'int64_t mojo_open_file(char *path);',
+            'int64_t int_write (int64_t, char *);',
+            'int64_t int_parse_module (int);',
         ]
 
         # Include compiled imported modules
@@ -3290,6 +3870,50 @@ class GimpleGen:
                 f"static {et} * _mojo_at_{cn} ({et} * p, int64_t n) {{ return p + n; }}"
             )
         if self._ptr_helpers_needed:
+            parts.append('')
+
+        # Module-level globals (dicts, lists, sets, simple values at module scope)
+        global_decls = []
+        # When compiling with imports (e.g. mojo.mojo imports gimple_codegen),
+        # always declare the known dispatch table globals used by the compiler internals
+        if self.do_imports:
+            for gname in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+                          '_GD_SIGNED', '_GD_UNSIGNED', '_GD_FLOAT',
+                          '_GD_BIN_OPS', '_GD_CMP_OPS', '_TYPE_MAP'):
+                global_decls.append(f"static MojoDict * {gname};")
+        # Also declare imported dispatch tables as MojoDict globals
+        _dispatch_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+                           '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
+        _declared_globals = set()
+        all_scan = stmts + (imported_stmts if self.do_imports else [])
+        for stmt in all_scan:
+            if isinstance(stmt, FromImportStmt):
+                for alias in stmt.names:
+                    orig_name = alias[0]           # original name
+                    local_name = alias[1] if len(alias) > 1 and alias[1] else orig_name  # as-alias
+                    # Declare both the original and local names if they match dispatch names
+                    for check_name in (orig_name, local_name):
+                        if check_name in _dispatch_names and check_name not in _declared_globals:
+                            global_decls.append(f"static MojoDict * {check_name};")
+                            _declared_globals.add(check_name)
+        for stmt in stmts:
+            if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+                gname = stmt.target.name
+                if isinstance(stmt.value, DictExpr):
+                    global_decls.append(f"static MojoDict * {gname};")
+                elif isinstance(stmt.value, (ListExpr, TupleExpr)):
+                    global_decls.append(f"static MojoList * {gname};")
+                elif isinstance(stmt.value, SetExpr):
+                    global_decls.append(f"static MojoSet * {gname};")
+                elif isinstance(stmt.value, (IntLiteral, BoolLiteral)):
+                    global_decls.append(f"static int {gname};")
+                elif isinstance(stmt.value, StringLiteral):
+                    global_decls.append(f"static char * {gname};")
+            elif isinstance(stmt, VarDecl) and stmt.type_ann and 'dict' in str(stmt.type_ann).lower():
+                # Annotated module-level dict: _TYPE_MAP: dict[...] = {...}
+                global_decls.append(f"static MojoDict * {stmt.name};")
+        if global_decls:
+            parts.extend(global_decls)
             parts.append('')
 
         # Struct typedefs
@@ -3359,9 +3983,11 @@ class GimpleGen:
         if self.imported_symbols:
             parts.append('')
 
-        # Forward declarations: free functions
+        # Forward declarations: free functions (skip main — handled specially)
         func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
         for fn in func_defs:
+            if fn.name == 'main':
+                continue
             ret    = self.func_return_types.get(fn.name, 'int')
             ptypes = (', '.join(self._param_ctype(pn, pt, fn) for pn, pt in fn.params)
                       if fn.params else 'void')
@@ -3401,6 +4027,18 @@ class GimpleGen:
             parts.append('')
 
         # Function bodies (generated in Phase 2a)
+        # Collect string literals from all GimpleGen instances used in Phase 2a
+        # and emit them as true global char arrays (required by GIMPLE strict mode)
+        str_pool: dict = {}
+        for attr in dir(self):
+            pass  # self is the GimpleGenModule-level object, not per-function gen
+        # Gather _str_pool from all lowering contexts (stored on the module gen)
+        if hasattr(self, '_str_pool') and self._str_pool:
+            parts.append("/* String literal globals (char * to avoid char[]→char* conversion) */")
+            for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
+                parts.append(f'char * {sname} = "{escaped}";')
+            parts.append('')
+        # Also collect from func_parts generators (they share self._str_pool via gen_func)
         parts.extend(func_parts)
 
         return '\n'.join(parts)

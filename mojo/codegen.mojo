@@ -30,10 +30,10 @@ from_mojo_compiler = (
 )
 # Stubbed: from module_loader import load_module, get_symbol_type
 # Stubbed: from generated_dispatch import (
-    _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
-    _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
-    _STMT_DISPATCH, _EXPR_DISPATCH,
-)
+#     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
+#     _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
+#     _STMT_DISPATCH, _EXPR_DISPATCH,
+# )
 
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers
@@ -2196,26 +2196,26 @@ class GimpleGen:
         var = node.target if isinstance(node.target, str) else node.target.name
 
         if it_type == 'MojoList *':
-            self._gen_for_list(var, it_val, node.body)
+            self._gen_for_list(loop_var, it_val, node.body)
         elif it_type == 'MojoStr *':
-            self._gen_for_str(var, it_val, node.body)
+            self._gen_for_str(loop_var, it_val, node.body)
         elif it_type == 'MojoDict *':
-            self._gen_for_dict(var, it_val, node.body)
+            self._gen_for_dict(loop_var, it_val, node.body)
         elif it_type == 'MojoSet *':
-            self._gen_for_set(var, it_val, node.body)
+            self._gen_for_set(loop_var, it_val, node.body)
         elif it_type.endswith(' *') or it_type.endswith('*'):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
             base = it_type.replace(' *', '').strip()
             has_next = f"{base}___has_next__"
             nxt      = f"{base}___next__"
             if has_next in self.func_return_types or nxt in self.func_return_types:
-                self._gen_for_struct_iter(var, it_type, it_val, node.body)
+                self._gen_for_struct_iter(loop_var, it_type, it_val, node.body)
             else:
                 self._emit(f"  /* TODO: for loop over {it_type} (no iterator protocol) */")
         else:
             self._emit(f"  /* TODO: for loop over {it_type} */")
 
-    def _gen_for_list(self, var: str, it_val: str, body: list):
+    def _gen_for_list(self, loop_var: str, it_val: str, body: list):
         elem = self._elem_of(it_val)
         self._declare_var(var, elem)
         len64 = self._new_temp('int64_t')
@@ -2259,7 +2259,7 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
-    def _gen_for_str(self, var: str, it_val: str, body: list):
+    def _gen_for_str(self, loop_var: str, it_val: str, body: list):
         self._declare_var(var, 'char')
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int')
@@ -2294,7 +2294,7 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
-    def _gen_for_dict(self, var: str, it_val: str, body: list):
+    def _gen_for_dict(self, loop_var: str, it_val: str, body: list):
         """for k in dict — iterates over keys as char *."""
         self._declare_var(var, 'char *')
         iter_t = self._new_temp('MojoDictIter *')
@@ -2326,7 +2326,7 @@ class GimpleGen:
         self._emit_label(bb_after)
         self._emit(f"  mojo_dict_iter_free ({iter_t});")
 
-    def _gen_for_set(self, var: str, it_val: str, body: list):
+    def _gen_for_set(self, loop_var: str, it_val: str, body: list):
         """for x in set — iterates over int64_t values (int set assumed)."""
         self._declare_var(var, 'int64_t')
         iter_t = self._new_temp('MojoSetIter *')
@@ -2404,7 +2404,7 @@ class GimpleGen:
 
     # ── Struct iterator protocol (for x in obj where obj has __iter__) ────
 
-    def _gen_for_struct_iter(self, var: str, struct_type: str,
+    def _gen_for_struct_iter(self, loop_var: str, struct_type: str,
                               obj_val: str, body: list):
         """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
         base = struct_type.replace(' *', '').strip()

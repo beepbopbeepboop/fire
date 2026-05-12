@@ -2044,18 +2044,18 @@ struct GimpleGen:
                 let stop = _tmp87[1]
                 let step = _tmp87[2]
                 let unrolled = True  # inferred: Bool
-            elvar _tmp88 = DynamicVector[AnyType]()
-                for v in ivals:
-                    _tmp88.append(v is not None)
+            var _tmp88 = DynamicVector[AnyType]()
+            for v in ivals:
+                _tmp88.append(v is not None)
             if len(ivals) == 2 and all(_tmp88):
                 var _tmp89 = (ivals[0], ivals[1], 1)
                 let start = _tmp89[0]
                 let stop = _tmp89[1]
                 let step = _tmp89[2]
                 let unrolled = True  # inferred: Bool
-            elvar _tmp90 = DynamicVector[AnyType]()
-                for v in ivals:
-                    _tmp90.append(v is not None)
+            var _tmp90 = DynamicVector[AnyType]()
+            for v in ivals:
+                _tmp90.append(v is not None)
             if len(ivals) == 3 and all(_tmp90):
                 var _tmp91 = (ivals[0], ivals[1], ivals[2])
                 let start = _tmp91[0]
@@ -2157,24 +2157,24 @@ struct GimpleGen:
         let it_val = _tmp98[1]
         let var = node.target if isinstance(node.target, str) else node.target.name
         if it_type == 'MojoList *':
-            self._gen_for_list(var, it_val, node.body)
+            self._gen_for_list(loop_var, it_val, node.body)
         elif it_type == 'MojoStr *':
-            self._gen_for_str(var, it_val, node.body)
+            self._gen_for_str(loop_var, it_val, node.body)
         elif it_type == 'MojoDict *':
-            self._gen_for_dict(var, it_val, node.body)
+            self._gen_for_dict(loop_var, it_val, node.body)
         elif it_type == 'MojoSet *':
-            self._gen_for_set(var, it_val, node.body)
+            self._gen_for_set(loop_var, it_val, node.body)
         elif it_type.endswith(' *') or it_type.endswith('*'):
             let base = it_type.replace(' *', '').strip()
             let has_next = str(base) + '___has_next__'  # inferred: String
             let nxt = str(base) + '___next__'  # inferred: String
             if has_next in self.func_return_types or nxt in self.func_return_types:
-                self._gen_for_struct_iter(var, it_type, it_val, node.body)
+                self._gen_for_struct_iter(loop_var, it_type, it_val, node.body)
             else:
                 self._emit('  /* TODO: for loop over ' + str(it_type) + ' (no iterator protocol) */')
         else:
             self._emit('  /* TODO: for loop over ' + str(it_type) + ' */')
-    fn _gen_for_list(self, var: String, it_val: String, body: list):
+    fn _gen_for_list(self, loop_var: String, it_val: String, body: list):
         let elem = self._elem_of(it_val)
         self._declare_var(var, elem)
         let len64 = self._new_temp('int64_t')
@@ -2217,7 +2217,7 @@ struct GimpleGen:
         self._emit('  ' + str(idx_t) + ' = ' + str(st) + ';')
         self._emit('  goto ' + str(bb_cond) + ';')
         self._emit_label(bb_after)
-    fn _gen_for_str(self, var: String, it_val: String, body: list):
+    fn _gen_for_str(self, loop_var: String, it_val: String, body: list):
         self._declare_var(var, 'char')
         let len64 = self._new_temp('int64_t')
         let len_t = self._new_temp('int')
@@ -2251,7 +2251,7 @@ struct GimpleGen:
         self._emit('  ' + str(idx_t) + ' = ' + str(st) + ';')
         self._emit('  goto ' + str(bb_cond) + ';')
         self._emit_label(bb_after)
-    fn _gen_for_dict(self, var: String, it_val: String, body: list):
+    fn _gen_for_dict(self, loop_var: String, it_val: String, body: list):
         """for k in dict — iterates over keys as char *."""
         self._declare_var(var, 'char *')
         let iter_t = self._new_temp('MojoDictIter *')
@@ -2282,7 +2282,7 @@ struct GimpleGen:
         self._emit('  goto ' + str(bb_cond) + ';')
         self._emit_label(bb_after)
         self._emit('  mojo_dict_iter_free (' + str(iter_t) + ');')
-    fn _gen_for_set(self, var: String, it_val: String, body: list):
+    fn _gen_for_set(self, loop_var: String, it_val: String, body: list):
         """for x in set — iterates over int64_t values (int set assumed)."""
         self._declare_var(var, 'int64_t')
         let iter_t = self._new_temp('MojoSetIter *')
@@ -2340,7 +2340,7 @@ struct GimpleGen:
         self._captures = {}
         self._env_param = ''
         return '\n'.join(lines)
-    fn _gen_for_struct_iter(self, var: String, struct_type: String, obj_val: String, body: list):
+    fn _gen_for_struct_iter(self, loop_var: String, struct_type: String, obj_val: String, body: list):
         """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
         let base = struct_type.replace(' *', '').strip()
         let iter_fn = str(base) + '___iter__'  # inferred: String

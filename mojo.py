@@ -15,6 +15,11 @@ import os
 import subprocess
 import shutil
 import sysconfig
+import platform
+
+# Platform detection for cross-platform build support
+_IS_DARWIN = platform.system() == 'Darwin'
+_GCC_BIN = "gcc-mp-15" if _IS_DARWIN else "gcc"
 
 def interpret_and_execute(src_code):
     try:
@@ -99,7 +104,7 @@ def build_executable(input_file, src):
 
         # Compile to object file with -fgimple for GIMPLE code generation
         o_file = f"{basename}.o"
-        compile_cmd = ["gcc-mp-15", "-O2", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        compile_cmd = [_GCC_BIN, "-O2", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Compilation failed: {result.stderr}", file=sys.stderr)
@@ -107,7 +112,7 @@ def build_executable(input_file, src):
 
         # Compile runtime
         runtime_o = f"{basename}_runtime.o"
-        runtime_cmd = ["gcc-mp-15", "-O2", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
+        runtime_cmd = [_GCC_BIN, "-O2", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
         result = subprocess.run(runtime_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
@@ -121,25 +126,31 @@ def build_executable(input_file, src):
                 ["python3-config", "--configdir"],
                 capture_output=True, text=True, check=True
             ).stdout.strip()
-            py_lib = os.path.join(configdir, "libpython3.13.dylib")
-            if not os.path.exists(py_lib):
-                # Try alternative names
-                for name in ["libpython3.so", "libpython3.dylib"]:
-                    alt = os.path.join(configdir, name)
-                    if os.path.exists(alt):
-                        py_lib = alt
-                        break
+            if _IS_DARWIN:
+                py_lib = os.path.join(configdir, "libpython3.13.dylib")
+                if not os.path.exists(py_lib):
+                    for name in ["libpython3.so", "libpython3.dylib"]:
+                        alt = os.path.join(configdir, name)
+                        if os.path.exists(alt):
+                            py_lib = alt
+                            break
+            else:
+                py_lib = os.path.join(configdir, "libpython3.12.so")
+                if not os.path.exists(py_lib):
+                    for name in ["libpython3.so", "libpython3.12.so"]:
+                        alt = os.path.join(configdir, name)
+                        if os.path.exists(alt):
+                            py_lib = alt
+                            break
 
-            py_ldflags = [
-                f"-L{configdir}",
-                "-ldl",
-                "-framework", "CoreFoundation",
-                py_lib
-            ]
+            py_ldflags = [f"-L{configdir}", "-ldl", py_lib]
+            if _IS_DARWIN:
+                py_ldflags.append("-framework")
+                py_ldflags.append("CoreFoundation")
         except:
             py_ldflags = []
 
-        link_cmd = ["gcc-mp-15", "-o", exe_file, o_file, runtime_o]
+        link_cmd = [_GCC_BIN, "-o", exe_file, o_file, runtime_o]
         link_cmd.extend(py_ldflags)
 
         result = subprocess.run(link_cmd, capture_output=True, text=True)

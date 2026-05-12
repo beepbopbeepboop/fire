@@ -19,8 +19,8 @@ void mojo_exc_pop(void);
 void mojo_raise(void);
 /* Exception message slot (optional string payload for raise). */
 extern char *_mojo_exc_msg;
-void        mojo_exc_msg_set(const char *msg);
-const char *mojo_exc_msg_get(void);
+void        mojo_exc_msg_set(char *msg);
+char *mojo_exc_msg_get(void);
 
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
@@ -36,7 +36,7 @@ void      mojo_list_free(MojoList *l);
 
 void    mojo_list_append_int(MojoList *l, int64_t v);
 void    mojo_list_append_double(MojoList *l, double v);
-void    mojo_list_append_str(MojoList *l, const char *v);
+void    mojo_list_append_str(MojoList *l, char *v);
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);
@@ -45,12 +45,12 @@ int64_t mojo_list_len(MojoList *l);
 
 int mojo_list_contains_int(MojoList *l, int64_t v);
 int mojo_list_contains_double(MojoList *l, double v);
-int mojo_list_contains_str(MojoList *l, const char *v);
+int mojo_list_contains_str(MojoList *l, char *v);
 
 /* Item mutation and extra accessors */
 void     mojo_list_set_int(MojoList *l, int64_t i, int64_t v);
 void     mojo_list_set_double(MojoList *l, int64_t i, double v);
-void     mojo_list_set_str(MojoList *l, int64_t i, const char *v);
+void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
@@ -63,13 +63,13 @@ typedef struct {
     int64_t  len;
 } MojoStr;
 
-MojoStr    *mojo_str_new(const char *s);
+MojoStr    *mojo_str_new(char *s);
 void        mojo_str_free(MojoStr *s);
 MojoStr    *mojo_str_concat(MojoStr *a, MojoStr *b);
 int64_t     mojo_str_len(MojoStr *s);
-const char *mojo_str_data(MojoStr *s);
+char *mojo_str_data(MojoStr *s);
 int         mojo_str_eq(MojoStr *a, MojoStr *b);
-int         mojo_str_contains(MojoStr *haystack, const char *needle);
+int         mojo_str_contains(MojoStr *haystack, char *needle);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 
@@ -97,15 +97,30 @@ typedef struct {
 MojoDict   *mojo_dict_new(void);
 void        mojo_dict_free(MojoDict *d);
 
-void        mojo_dict_set_int(MojoDict *d, const char *key, int64_t v);
-void        mojo_dict_set_double(MojoDict *d, const char *key, double v);
-void        mojo_dict_set_str(MojoDict *d, const char *key, const char *v);
+void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+void        mojo_dict_set_double(MojoDict *d, char *key, double v);
+void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
 
-int64_t     mojo_dict_get_int(MojoDict *d, const char *key);
-double      mojo_dict_get_double(MojoDict *d, const char *key);
-const char *mojo_dict_get_str(MojoDict *d, const char *key);
+int64_t     mojo_dict_get_int(MojoDict *d, char *key);
+double      mojo_dict_get_double(MojoDict *d, char *key);
+char *mojo_dict_get_str(MojoDict *d, char *key);
+MojoList   *mojo_dict_keys(MojoDict *d);
+MojoList   *mojo_dict_values(MojoDict *d);
+MojoList   *mojo_dict_items(MojoDict *d);
+void        mojo_dict_update(MojoDict *dst, MojoDict *src);
+int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
+MojoDict   *mojo_dict_copy(MojoDict *d);
+MojoList   *mojo_list_copy(MojoList *l);
+int64_t     mojo_list_pop(MojoList *l);
+void        mojo_list_extend(MojoList *dst, MojoList *src);
+void        mojo_list_sort(MojoList *l);
+void        mojo_list_reverse(MojoList *l);
+void        mojo_list_clear(MojoList *l);
 
-int         mojo_dict_contains(MojoDict *d, const char *key);
+/* Generic Python-object attribute accessor (used by GIMPLE codegen for opaque int nodes) */
+int64_t     mojo_obj_getattr(void *obj, char *attr);
+
+int         mojo_dict_contains(MojoDict *d, char *key);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
@@ -116,10 +131,10 @@ typedef struct {
 } MojoDictIter;
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
-const char    *mojo_dict_iter_key(MojoDictIter *it);
+char *mojo_dict_iter_key(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
-const char    *mojo_dict_iter_val_str(MojoDictIter *it);
+char *mojo_dict_iter_val_str(MojoDictIter *it);
 void           mojo_dict_iter_free(MojoDictIter *it);
 
 /* ── Set ──────────────────────────────────────────────────────────────────
@@ -140,11 +155,13 @@ MojoSet *mojo_set_new(void);
 void     mojo_set_free(MojoSet *s);
 
 void     mojo_set_add_int(MojoSet *s, int64_t v);
-void     mojo_set_add_str(MojoSet *s, const char *v);
+void     mojo_set_add_str(MojoSet *s, char *v);
 
 int      mojo_set_contains_int(MojoSet *s, int64_t v);
-int      mojo_set_contains_str(MojoSet *s, const char *v);
+int      mojo_set_contains_str(MojoSet *s, char *v);
 int64_t  mojo_set_len(MojoSet *s);
+MojoSet *mojo_set_union(MojoSet *a, MojoSet *b);
+void     mojo_set_discard(MojoSet *s, int64_t v);
 
 /* Set iterator */
 typedef struct {
@@ -154,57 +171,57 @@ typedef struct {
 MojoSetIter *mojo_set_iter_new(MojoSet *s);
 int          mojo_set_iter_next(MojoSetIter *it);      /* 1=has entry, 0=done */
 int64_t      mojo_set_iter_val_int(MojoSetIter *it);
-const char  *mojo_set_iter_val_str(MojoSetIter *it);
+char *mojo_set_iter_val_str(MojoSetIter *it);
 void         mojo_set_iter_free(MojoSetIter *it);
 
 void     mojo_set_print(MojoSet *s);
 
 /* ── Python integration ─────────────────────────────────────────────────*/
-void mojo_print(const char *str);
-char *mojo_input(const char *prompt);
+void mojo_print(char *str);
+char *mojo_input(char *prompt);
 
 /* Python built-in functions for C strings */
 int mojo_isinstance(int obj, int type_id);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr(int obj);
 int mojo_type(int obj);
-int mojo_hasattr(int obj, const char *attr);
-char *mojo_str_cat(const char *a, const char *b);
-char *mojo_cstr_repeat(const char *s, int64_t n);
+int mojo_hasattr(int obj, char *attr);
+char *mojo_str_cat(char *a, char *b);
+char *mojo_cstr_repeat(char *s, int64_t n);
 
 /* Method stubs for compatibility */
 int MojoList_append(MojoList *l, char *v);
-int char_join(const char *sep, MojoList *items);
+int char_join(char *sep, MojoList *items);
 int int_items(int obj);
 
 /* Command-line arguments */
-void mojo_set_argv(int argc, const char **argv);
+void mojo_set_argv(int argc, char **argv);
 MojoList *mojo_get_argv(void);
 
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
 
-MojoFileHandle mojo_open(const char *filename, const char *mode);
+MojoFileHandle mojo_open(char *filename, char *mode);
 void mojo_close(MojoFileHandle fh);
-int64_t mojo_write(MojoFileHandle fh, const char *data, int64_t len);
+int64_t mojo_write(MojoFileHandle fh, char *data, int64_t len);
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
-char *mojo_file_read_all(const char *filename);
+char *mojo_file_read_all(char *filename);
 
 /* Module function stubs */
-void *mojo_parse(const char *source);
-MojoList *mojo_tokenize(const char *source);
+void *mojo_parse(char *source);
+MojoList *mojo_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
-int open(int path);
+int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
 
 /* Flattened method stubs for generated GIMPLE code */
-char *int_read(int f);
-int   int_write(int f, char *data);
-int   int_parse_module(int parser);
+char *int_read(int64_t f);
+int64_t int_write(int64_t f, char *data);
+int64_t int_parse_module(int parser);
 
 /* REPL and string utilities — stdlib-equivalent C implementations */
-char *mojo_input(const char *prompt);  /* Read line from stdin */
-char *input(const char *prompt);       /* Alias for mojo_input */
+char *mojo_input(char *prompt);  /* Read line from stdin */
+char *input(char *prompt);       /* Alias for mojo_input */
 
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */
