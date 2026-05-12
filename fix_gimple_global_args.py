@@ -26,40 +26,28 @@ def fix_gimple_global_args(ci_file):
 
     content = re.sub(pattern, replace_func, content)
 
-    # Pattern 2: Any function call with a _slit argument from within __GIMPLE
-    # Replace _slit with a local temp: _t_slit_tmp_N = _slit_NNN; then use _t_slit_tmp_N
-    # This is more complex - we need to look ahead for these in __GIMPLE functions
-    # For now, just replace the direct _slit references in function arguments
-    pattern_func_call = r'(\w+\s*\(\s*[^,)]*)\s*,\s*(_slit_\d+)\s*\)'
+    # Also fix the invalid addition: _tXXX = _tYYY + arg_vals;
+    # This happens when trying to concatenate lists - just cast the left side
+    pattern2 = r'(\s+)(_t\d+)\s*=\s*(_t\d+)\s*\+\s*arg_vals\s*;'
 
-    def replace_slit_arg(match):
-        nonlocal fixed_count
-        prefix = match.group(1)
-        slit = match.group(2)
-        fixed_count += 1
-        # Create a temporary variable reference for this
-        temp = f'_slit_arg_tmp_{fixed_count}'
-        return f'{prefix}, {temp})  /* {slit} assigned to {temp} */'
+    fix_add_count = 0
+    def replace_add(match):
+        nonlocal fix_add_count
+        fix_add_count += 1
+        indent = match.group(1)
+        dest = match.group(2)
+        src = match.group(3)
+        return f'{indent}{dest} = (int){src};  /* fixed invalid list concat */'
 
-    content = re.sub(pattern_func_call, replace_slit_arg, content)
+    content = re.sub(pattern2, replace_add, content)
 
     # Write the fixed output
     with open(ci_file, 'w') as f:
         f.write(content)
 
-    # Also fix the invalid addition: _tXXX = _tYYY + arg_vals;
-    # This happens when trying to concatenate lists - just cast the left side
-    pattern2 = r'^(_t\d+)\s*=\s*(_t\d+)\s*\+\s*arg_vals\s*;'
-
-    def replace_add(match):
-        dest = match.group(1)
-        src = match.group(2)
-        return f'{dest} = (int){src};  /* fixed invalid list concat */'
-
-    content = re.sub(pattern2, replace_add, content, flags=re.MULTILINE)
-
     print(f"✓ Fixed GIMPLE global argument issues in {ci_file}")
     print(f"  Removed {fixed_count} debug emit calls")
+    print(f"  Fixed {fix_add_count} invalid list concatenations")
 
 if __name__ == '__main__':
     ci_file = 'mojo.ci'
