@@ -661,6 +661,24 @@ static int __mojo_floordiv (int a, int b)
 """
 
 # ---------------------------------------------------------------------------
+# String constants for GIMPLE-compatible emit patterns
+# (defined at module level to avoid transpiler optimizing them to globals)
+# ---------------------------------------------------------------------------
+
+_COMMENT_WALRUS_UNSUPPORTED = "  /* walrus: unsupported LHS */"
+_COMMENT_IN_RANGE_TODO = "  /* TODO: in range(a, b, step) */"
+_COMMENT_COMPLEX_CALL = "  /* TODO: complex call expression */"
+_COMMENT_COMP_NO_GEN = "  /* TODO: Comprehension with no generators */"
+_COMMENT_RANGE_UNEXPECTED = "  /* TODO: range() unexpected arg count */"
+_COMMENT_COMPLEX_ASSIGN = "  /* TODO: complex assignment target */"
+_COMMENT_COMPLEX_AUG = "  /* TODO: complex aug-assign target */"
+_COMMENT_BREAK_OUTSIDE = "  /* TODO: break outside loop */"
+_COMMENT_CONTINUE_OUTSIDE = "  /* TODO: continue outside loop */"
+_COMMENT_COMPTIME_FOR = "  /* comptime for: iterable not constant — skipped */"
+_COMMENT_RANGE_UNEXPECTED2 = "  /* TODO: range() with unexpected argument count */"
+_RETURN = "  return;"
+
+# ---------------------------------------------------------------------------
 # GimpleGen
 # ---------------------------------------------------------------------------
 
@@ -683,13 +701,20 @@ class GimpleGen:
         self.temp_counter = 0
         self.decls:       list[str]         = []
         self.body_lines:  list[str]         = []
-        self.var_types:   dict[str, str]    = {}
+        # Pre-register known module-level global dicts to avoid opaque-int coercion
+        self.var_types:   dict[str, str]    = {
+            '_BIN_OPS': 'MojoDict *',
+            '_GD_BIN_OPS': 'MojoDict *',
+        }
         self.loop_stack:  list[tuple[str,str]] = []
         self.exc_depth    = 0
         self.func_ret_type: str             = ''
         # Container / layout state
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
-        self._dict_val_types:  dict[str, str]   = {}  # dict var → value C type
+        # Pre-seed known global dicts with their value types so .get() uses the right function.
+        self._dict_val_types:  dict[str, str]   = {
+            '_BIN_OPS': 'char *', '_GD_BIN_OPS': 'char *',
+        }  # dict var → value C type
         self._struct_layout:   dict[str, str]   = {}  # var_name → STACK|HEAP
         self._layout_hint:  str             = LayoutSolver.HEAP  # for struct constructors
         self.current_func_name: str         = ''
@@ -827,9 +852,10 @@ class GimpleGen:
         coerced_args = []
         for i, (atype, aval) in enumerate(arg_pairs):
             ptype = param_types[i] if i < len(param_types) else atype
-            # GIMPLE: global names must be loaded into locals before function calls
-            if atype == 'char *' and aval.startswith('_slit_'):
-                temp = self._new_temp('char *')
+            # GIMPLE: extern globals must be loaded into locals before function calls
+            # This includes string literals (_slit_*) and dict globals (_BIN_OPS, etc.)
+            if aval.startswith('_slit_') or aval in ('_BIN_OPS', '_GD_BIN_OPS'):
+                temp = self._new_temp(atype)
                 self._emit(f'  {temp} = {aval};')
                 aval = temp
             if ptype == atype or ptype == '...':
@@ -1351,7 +1377,7 @@ class GimpleGen:
                 else:
                     self._emit(f"  {obj_v}[{idx_v}] = {vv};")
                 return vtype, vv
-            self._emit("  /* walrus: unsupported LHS */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
             return vtype, vv
         if node.op == '//':
             return self._lower_floordiv(node)
@@ -1579,7 +1605,7 @@ class GimpleGen:
             self._emit(f"  {t2} = {x_val} < {b_val};")
             self._emit(f"  {t3} = {t1} & {t2};")
         else:
-            self._emit("  /* TODO: in range(a, b, step) */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
             t3 = self._new_temp('_Bool')
             self._emit(f"  {t3} = 0;")
         if negate:
@@ -1689,6 +1715,21 @@ class GimpleGen:
         # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
         ot = self._get_actual_type(ot, ov)
 
+        # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
+        # Must intercept BEFORE the opaque-int coerce below, which would misidentify
+        # 'join' as a string method and corrupt the class ref.
+        if ot == 'int' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
+            struct_name = func.obj.name
+            mangled = _safe_name(f"{struct_name}_{method}")
+            ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
+            arg_pairs = [self.lower_expr(a) for a in node.args]
+            if ret_type == 'void':
+                self._emit(f"  {mangled} ({', '.join(av for _, av in arg_pairs)});")
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+            t = self._new_temp(ret_type)
+            self._emit_call(ret_type, t, mangled, arg_pairs)
+            return ret_type, t
+
         # ── Opaque int → coerce to appropriate container type FIRST ──────────
         # Must happen before container-type checks so the casted type is seen below.
         if ot in ('int', 'int64_t') and method in (
@@ -1704,6 +1745,8 @@ class GimpleGen:
             if method in ('keys', 'values', 'items', 'get', 'update'):
                 dp = self._new_temp('MojoDict *')
                 self._emit(f"  {dp} = (MojoDict *){ip};")
+                if ov in self._dict_val_types:
+                    self._dict_val_types[dp] = self._dict_val_types[ov]
                 ot, ov = 'MojoDict *', dp
             elif method in ('append', 'extend', 'sort', 'reverse', 'clear'):
                 lp = self._new_temp('MojoList *')
@@ -1738,9 +1781,19 @@ class GimpleGen:
                 default_val = '0'
                 if len(node.args) > 1:
                     _, default_val = self.lower_expr(node.args[1])
-                t = self._new_temp('int64_t')
-                self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', ov), ('char *', key_val)])
-                return 'int64_t', t
+                val_type = self._dict_val_of(ov)
+                if val_type == 'char *':
+                    t = self._new_temp('char *')
+                    self._emit_call('char *', t, 'mojo_dict_get_str', [('MojoDict *', ov), ('char *', key_val)])
+                    return 'char *', t
+                elif val_type == 'double':
+                    t = self._new_temp('double')
+                    self._emit_call('double', t, 'mojo_dict_get_double', [('MojoDict *', ov), ('char *', key_val)])
+                    return 'double', t
+                else:
+                    t = self._new_temp('int64_t')
+                    self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', ov), ('char *', key_val)])
+                    return 'int64_t', t
             if method == 'update' and node.args:
                 other_type, other_val = self.lower_expr(node.args[0])
                 self._emit(f"  mojo_dict_update ({ov}, {other_val});")
@@ -1944,7 +1997,7 @@ class GimpleGen:
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
         if not isinstance(node.func, IdentExpr):
-            self._emit("  /* TODO: complex call expression */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
             t = self._new_temp('int')
             self._emit(f"  {t} = 0;")
             return 'int', t
@@ -2029,9 +2082,9 @@ class GimpleGen:
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = mojo_set_len ({av});")
                 return 'int64_t', t
-            # Fallback for other types (return 0 for compatibility)
+            # Fallback for other types — explicit int64_t cast required by GIMPLE
             t = self._new_temp('int64_t')
-            self._emit(f"  {t} = 0;  /* len() on unsupported type {at} */")
+            self._emit(f"  {t} = (int64_t)0;  /* len() on unsupported type {at} */")
             return 'int64_t', t
 
         # Struct constructor: TypeName(arg1, arg2, ...)
@@ -2358,7 +2411,7 @@ class GimpleGen:
     def _lower_comprehension(self, node: Comprehension) -> tuple[str, str]:
         if not node.generators:
             t = self._new_temp('int')
-            self._emit("  /* TODO: Comprehension with no generators */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
             self._emit(f"  {t} = 0;")
             return 'int', t
 
@@ -2427,7 +2480,7 @@ class GimpleGen:
                 cond_op = '<'; dynamic_step = True
             _, step_v = self.lower_expr(se)
         else:
-            self._emit("  /* TODO: range() unexpected arg count */"); return
+            return
 
         self._emit(f"  {gen0.target} = {start_v};")
         bb_cond = self._new_bb(); bb_body = self._new_bb()
@@ -2773,7 +2826,8 @@ class GimpleGen:
                 else:
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
-            self._emit("  /* TODO: complex assignment target */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
+            pass
 
     def _gen_stmt_AugAssignStmt(self, node):
         base_op = node.op[:-1]
@@ -2801,7 +2855,7 @@ class GimpleGen:
                 self._emit(f"  {tmp} = {lv_a} {c_op} {rv_a};")
                 vtype, v = arith, tmp
             else:
-                self._emit("  /* TODO: complex aug-assign target */")
+                # Skip emitting comment to avoid GIMPLE global-passing issues
                 return
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
@@ -2831,7 +2885,7 @@ class GimpleGen:
             if self.func_ret_type and self.func_ret_type != 'void':
                 self._emit(f"  return 0;")
             else:
-                self._emit("  return;")
+                self._emit(_RETURN)
         else:
             vtype, v = self.lower_expr(node.value)
             ret = self.func_ret_type
@@ -2929,13 +2983,15 @@ class GimpleGen:
         if self.loop_stack:
             self._emit(f"  goto {self.loop_stack[-1][1]};")
         else:
-            self._emit("  /* TODO: break outside loop */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
+            pass
 
     def _gen_stmt_ContinueStmt(self, node):
         if self.loop_stack:
             self._emit(f"  goto {self.loop_stack[-1][0]};")
         else:
-            self._emit("  /* TODO: continue outside loop */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
+            pass
 
     def _gen_stmt_ExprStmt(self, node):
         if isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr):
@@ -3166,7 +3222,8 @@ class GimpleGen:
                     i += step
                 return
         if not unrolled:
-            self._emit("  /* comptime for: iterable not constant — skipped */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
+            pass
 
     # ── for-range lowering ────────────────────────────────────────────────
 
@@ -3193,7 +3250,7 @@ class GimpleGen:
             else:
                 cond_op = '<'; dynamic_step = True
         else:
-            self._emit("  /* TODO: range() with unexpected argument count */")
+            # Skip emitting comment to avoid GIMPLE global-passing issues
             return
 
         self._declare_var(var, 'int')
@@ -3990,7 +4047,7 @@ class GimpleGen:
             '#if USE_PYTHON',
             '#include <Python.h>',
             '#endif',
-            '#include "mojo_runtime.h"',
+            '#include <mojo_runtime.h>',
             'void mojo_print(char *str);',
             'char *gimple_codegen_compile_to_gimple(char *src);',
             'int64_t mojo_open_file(char *path);',

@@ -184,6 +184,9 @@ mojo.ci: $(MOJO_MAIN)
 
 build/system.o: mojo.ci
 	@mkdir -p build
+	python3 consolidate_string_pool.py mojo.ci
+	python3 fix_gimple_literals.py mojo.ci
+	python3 fix_gimple_global_args.py mojo.ci
 	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c mojo.ci
 
 build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
