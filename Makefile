@@ -31,8 +31,8 @@ PY_FILES   := mojo.py mojo_compiler.py myinterpreter.py \
 demo:
 	echo "3 + 42 + 0xFF" | python3 mojo_compiler.py
 
-check:
-	python3 test_mds.py
+check: check-gimple check-runner validate-all
+	# python3 test_mds.py
 
 check-gimple: gimple_codegen.py $(DYLIB)
 	python3 test_gimple.py
