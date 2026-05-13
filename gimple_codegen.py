@@ -3236,7 +3236,15 @@ class GimpleGen:
                         if method == 'set' and func.obj.member == 'parent':
                             struct_name = 'Scope'
         mangled = _safe_name(f"{struct_name}_{method}")
-        ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'int')
+        ret_type = self.func_return_types.get(f"{struct_name}_{method}", None)
+        # Infer return type from common patterns if not found
+        if ret_type is None:
+            if method in ('get', 'get_symbol_type', 'pop', 'keys', 'values', 'items'):
+                ret_type = 'char *' if method in ('get', 'get_symbol_type', 'pop') else 'MojoList *'
+            elif method in ('load',):
+                ret_type = 'int64_t'
+            else:
+                ret_type = 'int'  # default fallback
         arg_pairs = [self.lower_expr(a) for a in node.args]
         # For class method calls (ClassName.method()), don't prepend the fake cls=0 arg
         if is_class_ref:
@@ -3836,7 +3844,17 @@ class GimpleGen:
         if suf == 'double':
             self._emit(f"  {gen0.target} = mojo_list_get_double ({it_val}, {idx64});")
         elif suf == 'str':
-            self._emit(f"  {gen0.target} = mojo_list_get_str ({it_val}, {idx64});")
+            # mojo_list_get_str returns char*, handle type mismatch with target variable
+            temp_str = self._new_temp('char *')
+            self._emit(f"  {temp_str} = mojo_list_get_str ({it_val}, {idx64});")
+            target_type = self._type_of(gen0.target)
+            if target_type == 'char *':
+                self._emit(f"  {gen0.target} = {temp_str};")
+            else:
+                # Cast to int64_t if target is opaque
+                int_ptr = self._new_temp('int64_t')
+                self._emit(f"  {int_ptr} = (int64_t){temp_str};")
+                self._emit(f"  {gen0.target} = {int_ptr};")
         else:
             raw64 = self._new_temp('int64_t')
             self._emit(f"  {raw64} = mojo_list_get_int ({it_val}, {idx64});")
@@ -4743,7 +4761,18 @@ class GimpleGen:
             if suf == 'double':
                 self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx64});")
             elif suf == 'str':
-                self._emit(f"  {var} = mojo_list_get_str ({list_ptr}, {idx64});")
+                # mojo_list_get_str returns char*, but var might be int64_t
+                # Use a temp to handle the conversion
+                temp_str = self._new_temp('char *')
+                self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx64});")
+                # If var is int64_t, cast the char* to it; otherwise assign directly
+                if self._type_of(var) == 'char *':
+                    self._emit(f"  {var} = {temp_str};")
+                else:
+                    # Cast char* to int64_t (opaque pointer storage)
+                    int_ptr = self._new_temp('int64_t')
+                    self._emit(f"  {int_ptr} = (int64_t){temp_str};")
+                    self._emit(f"  {var} = {int_ptr};")
             else:
                 elem64 = self._new_temp('int64_t')
                 self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
