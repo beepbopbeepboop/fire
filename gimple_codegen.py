@@ -1805,8 +1805,12 @@ class GimpleGen:
     # Used by _emit_call to ensure GIMPLE-valid argument types.
     _KNOWN_SIGS: dict = {
         'mojo_str':              ('char *',    ['void *']),
-        'mojo_repr':             ('char *',    ['void *']),
+        'mojo_repr':             ('char *',    ['int']),  # expects int, not void*
         'mojo_print':            ('void',      ['char *']),
+        'mojo_open_file':        ('int64_t',   ['char *']),  # Added: returns handle, takes path
+        'mojo_close':            ('void',      ['void *']),
+        'mojo_write':            ('int64_t',   ['void *', 'char *', 'int64_t']),
+        'mojo_read':             ('int64_t',   ['void *', 'char *', 'int64_t']),
         'mojo_list_new':         ('MojoList *', []),
         'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
         'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
@@ -1961,19 +1965,29 @@ class GimpleGen:
         return _mojo_type(ann)
 
     def _infer_param_types(self, func: FunctionDef) -> dict[str, str]:
-        """Infer parameter types from member accesses in function body.
+        """Infer parameter types from member accesses and function calls in function body.
 
         If a parameter is accessed with .field, infer it's a struct with that field.
+        If a parameter is passed to a known function, infer type from that function.
         """
         inferred = {}
-        param_names = {pn for pn, _ in func.params}
 
-        def find_member_accesses(nodes: list, param_name: str):
-            """Find all member accesses on a parameter."""
+        # Map builtin/common functions to their first parameter type
+        BUILTIN_PARAM_TYPES = {
+            'open': 'char *',
+            'mojo_open_file': 'char *',
+            'len': 'int',
+            'print': 'char *',
+            'str': 'int',
+        }
+
+        def analyze_param_usage(nodes: list, param_name: str):
+            """Analyze how a parameter is used in a list of statements."""
             accessed_fields = set()
+            function_calls = []  # List of (function_name, arg_index)
 
             def scan_expr(expr):
-                """Recursively scan an expression for member accesses."""
+                """Recursively scan an expression."""
                 if isinstance(expr, MemberExpr):
                     if isinstance(expr.obj, IdentExpr) and expr.obj.name == param_name:
                         accessed_fields.add(expr.member)
@@ -1984,47 +1998,64 @@ class GimpleGen:
                 elif isinstance(expr, UnaryOp):
                     scan_expr(expr.operand)
                 elif isinstance(expr, CallExpr):
+                    # Track which functions this parameter is passed to
+                    if isinstance(expr.func, IdentExpr):
+                        func_name = expr.func.name
+                        for i, arg in enumerate(expr.args):
+                            if isinstance(arg, IdentExpr) and arg.name == param_name:
+                                function_calls.append((func_name, i))
                     scan_expr(expr.func)
                     for arg in expr.args:
                         scan_expr(arg)
 
-            for node in nodes:
-                if isinstance(node, AssignStmt):
-                    # Check both target and value
-                    scan_expr(node.target)
-                    scan_expr(node.value)
-                elif isinstance(node, ExprStmt):
-                    scan_expr(node.value)
-                elif isinstance(node, ReturnStmt):
-                    if node.value:
+            def scan_nodes(node_list):
+                """Recursively scan a list of statements."""
+                for node in node_list:
+                    if isinstance(node, AssignStmt):
+                        scan_expr(node.target)
                         scan_expr(node.value)
-                elif isinstance(node, (IfStmt, WhileStmt, ForStmt, TryStmt)):
-                    # Recursively scan nested blocks
-                    if hasattr(node, 'body'):
-                        find_member_accesses(node.body, param_name)
-                    if hasattr(node, 'else_body') and node.else_body:
-                        find_member_accesses(node.else_body, param_name)
-                    if hasattr(node, 'elifs'):
-                        for _, elif_body in node.elifs:
-                            find_member_accesses(elif_body, param_name)
-                    if hasattr(node, 'except_clauses'):
-                        for _, handler_body in node.except_clauses:
-                            find_member_accesses(handler_body, param_name)
-                    if hasattr(node, 'finally_body') and node.finally_body:
-                        find_member_accesses(node.finally_body, param_name)
+                    elif isinstance(node, ExprStmt):
+                        scan_expr(node.value)
+                    elif isinstance(node, ReturnStmt):
+                        if node.value:
+                            scan_expr(node.value)
+                    elif isinstance(node, (IfStmt, WhileStmt, ForStmt)):
+                        scan_nodes(node.body)
+                        if hasattr(node, 'else_body') and node.else_body:
+                            scan_nodes(node.else_body)
+                        if hasattr(node, 'elifs'):
+                            for _, elif_body in node.elifs:
+                                scan_nodes(elif_body)
+                    elif isinstance(node, TryStmt):
+                        scan_nodes(node.body)
+                        if hasattr(node, 'except_clauses'):
+                            for _, handler_body in node.except_clauses:
+                                scan_nodes(handler_body)
+                        if node.finally_body:
+                            scan_nodes(node.finally_body)
 
-            return accessed_fields
+            scan_nodes(nodes)
+            return accessed_fields, function_calls
 
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                # Check if this parameter has member accesses
-                fields_accessed = find_member_accesses(func.body, pname)
-                # Try to infer struct type from accessed fields
-                for struct_name, struct_fields in self.struct_field_types.items():
-                    if fields_accessed and all(f in struct_fields for f in fields_accessed):
-                        inferred[pname] = f"{struct_name} *"
-                        break
+                fields_accessed, function_calls = analyze_param_usage(func.body, pname)
+
+                # First, try to infer from function calls
+                if function_calls:
+                    for func_name, arg_index in function_calls:
+                        # For first argument (index 0) of known functions, use known types
+                        if arg_index == 0 and func_name in BUILTIN_PARAM_TYPES:
+                            inferred[pname] = BUILTIN_PARAM_TYPES[func_name]
+                            break
+
+                # If no type inferred from functions, try from struct member accesses
+                if pname not in inferred and fields_accessed:
+                    for struct_name, struct_fields in self.struct_field_types.items():
+                        if all(f in struct_fields for f in fields_accessed):
+                            inferred[pname] = f"{struct_name} *"
+                            break
 
         return inferred
 
@@ -3271,7 +3302,8 @@ class GimpleGen:
             # open(path) — read mode
             fn_type, fn_val = self.lower_expr(node.args[0])
             t = self._new_temp('int64_t')
-            self._emit(f"  {t} = mojo_open_file ({fn_val});")
+            # Use _emit_call for proper type coercion
+            self._emit_call('int64_t', t, 'mojo_open_file', [(fn_type, fn_val)])
             return 'int64_t', t
 
         if fname_raw == 'open' and len(node.args) == 2:
