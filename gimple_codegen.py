@@ -1865,12 +1865,16 @@ class GimpleGen:
                 vp = self._new_temp('void *')
                 self._emit(f'  {vp} = (void *){aval};')
                 coerced_args.append(vp)
-            elif ptype == 'int64_t' and atype in ('int', '_Bool', 'char *'):
+            elif ptype == 'int64_t' and atype in ('int', '_Bool', 'char *', 'void *'):
                 ct = self._new_temp('int64_t')
                 if atype == 'char *':
                     ip2 = self._new_temp('void *')
                     self._emit(f'  {ip2} = (void *){aval};')
                     self._emit(f'  {ct} = (int64_t){ip2};')
+                elif atype == 'void *':
+                    # Function pointer or void* passed where int64_t expected
+                    # Cast void* → int64_t
+                    self._emit(f'  {ct} = (int64_t){aval};')
                 else:
                     self._emit(f'  {ct} = (int64_t){aval};')
                 coerced_args.append(ct)
@@ -2231,9 +2235,12 @@ class GimpleGen:
         # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
         if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
             c_name = self.BUILTIN_VALUE_MAP[name]
-            # For builtins, just return the function name directly without conversion
-            # The calling code (Scope_define) will need to handle the void* conversion
-            return 'void *', c_name
+            # For builtins, store the function pointer in a temporary to avoid GIMPLE issues
+            # with bare function names as arguments
+            t = self._new_temp('void *')
+            # Take the address of the function explicitly (function decay to pointer)
+            self._emit(f'  {t} = (void *)&{c_name};')
+            return 'void *', t
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -3569,6 +3576,10 @@ class GimpleGen:
             res_type, res_new = 'MojoSet *', 'mojo_set_new'
         elif node.kind == 'dict':
             res_type, res_new = 'MojoDict *', 'mojo_dict_new'
+        elif node.kind == 'generator':
+            # Generator expressions: convert to list for simplicity
+            # (In a full implementation, these would be lazily evaluated)
+            res_type, res_new = 'MojoList *', 'mojo_list_new'
         else:
             t = self._new_temp('int')
             self._emit(f"  /* TODO: comprehension kind {node.kind!r} */")
@@ -4214,7 +4225,11 @@ class GimpleGen:
 
                 self._declare_var(handler.name, exc_ctype)
                 # Retrieve the exception object from the runtime
-                self._emit(f"  {handler.name} = ({exc_ctype}) mojo_exc_obj_get ();")
+                # Use a temp to avoid casting function call results in GIMPLE
+                temp_var = self._fresh_var('exc_obj')
+                self._declare_var(temp_var, 'void *')
+                self._emit(f"  {temp_var} = mojo_exc_obj_get ();")
+                self._emit(f"  {handler.name} = ({exc_ctype}) {temp_var};")
             for s in handler.body:
                 self.gen_stmt(s)
         if node.finally_body:
@@ -5293,6 +5308,46 @@ class GimpleGen:
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
         ]
+
+        # Emit struct typedefs early, before any functions that use them
+        # This includes structs from struct_field_types (like Interpreter, Scope, etc.)
+        # Emit in dependency order: structs with no struct dependencies first
+        # Self-referential dependencies (e.g. Scope->Scope*) are allowed in C
+        if hasattr(self, 'struct_field_types') and self.struct_field_types:
+            parts.append('')
+            emitted = set()
+            max_iterations = len(self.struct_field_types) + 1
+            iteration = 0
+            while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
+                iteration += 1
+                for struct_name in sorted(self.struct_field_types.keys()):
+                    if struct_name in emitted:
+                        continue
+                    fields = self.struct_field_types[struct_name]
+                    # Check if all dependencies are emitted (excluding self-references)
+                    dependencies_met = True
+                    for field_type in fields.values():
+                        # Extract struct name from type (e.g., "Scope *" → "Scope")
+                        base_type = field_type.rstrip(' *')
+                        # Allow self-references: Scope can have a field of type Scope*
+                        if base_type == struct_name:
+                            continue  # Self-reference is OK
+                        if base_type in self.struct_field_types and base_type not in emitted:
+                            dependencies_met = False
+                            break
+                    if not dependencies_met:
+                        continue
+                    # All dependencies met (or are self-references), emit this struct
+                    parts.append(f"typedef struct {struct_name} {{")
+                    if fields:
+                        for field_name, field_type in sorted(fields.items()):
+                            parts.append(f"  {field_type} {field_name};")
+                    else:
+                        # Empty struct - add a dummy field for valid C
+                        parts.append(f"  int _dummy;")
+                    parts.append(f"}} {struct_name};")
+                    emitted.add(struct_name)
+            parts.append('')
 
         # Forward declare dispatch tables before any functions that might use them
         # (they're imported from generated_dispatch and need to be visible before use)
