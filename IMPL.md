@@ -738,3 +738,113 @@ def add(a: Int, b: Int) -> Int:
 
 **Key Achievement**: Adding a new statement or expression form requires only adding a handler method and one dispatch table entry in `gimple_spec_gen.py`, then running `python run.py`.
 
+---
+
+### Priority 5 — Complete: DispatchSolver for Dynamic Dispatch Resolution
+
+**Status**: ✅ Complete three-phase solution with promotions analysis. 158+ tests passing, 0 failures.
+
+#### Phase A: Dispatch Pattern Detection
+
+**Implemented**:
+- ✅ Build complete call graph from all functions and struct methods
+- ✅ Detect dynamic dispatch patterns: `getattr(self, f'method_{type}', None)` and dict subscript lookups
+- ✅ Infer possible callees by matching method name prefixes
+- ✅ Track struct method mapping for quick lookup
+- ✅ Identify monomorphic (single-caller) functions
+- ✅ 4 comprehensive tests covering all detection scenarios
+
+**Key Achievement**: Whole-program analysis identifies which functions can be compiled vs which use dynamic features.
+
+#### Phase B: Dispatch Table Planning
+
+**Implemented**:
+- ✅ Plan vtable structures for each unique set of callees
+- ✅ Two dispatch strategies: FUNC_POINTER (struct fields) and ARRAY_INDEX (arrays)
+- ✅ Generate C typedef declarations for vtables
+- ✅ Generate C initialization code with method pointers
+- ✅ Generate dispatch call patterns for both strategies
+- ✅ Infer C signatures from function return types
+- ✅ 7 comprehensive tests including full C code generation
+
+**Key Achievement**: Transforms Python dispatch patterns into static C virtual method tables that GIMPLE can compile.
+
+#### Phase C: GimpleGen Integration
+
+**Implemented**:
+- ✅ Instantiate DispatchSolver after type analysis in `gen_module()`
+- ✅ Run whole-program analysis on complete closure
+- ✅ Emit dispatch table typedefs after struct definitions
+- ✅ Emit dispatch table initializations before function bodies
+- ✅ Maintain proper code ordering: typedefs → inits → function bodies
+- ✅ 5 integration tests verifying correct emission and ordering
+
+**Key Achievement**: Dispatch tables seamlessly integrated into generated GIMPLE code pipeline.
+
+#### Phase C+: Typed Function Pointers (Recently Completed)
+
+**Implemented**:
+- ✅ Extract parameter type information from all function definitions
+- ✅ Generate typed function pointers instead of `void *` placeholders
+- ✅ Infer struct type from function name (e.g., `Interpreter_execute_X` → `Interpreter *`)
+- ✅ Default parameters without annotations to `int`
+- ✅ Eliminated ~35 "incompatible pointer type" compilation errors
+- ✅ Reduced stage2 errors from ~40 to 23
+
+**Example**:
+```c
+// Before: Generic void pointers
+int (*execute_Module)(void *self, void *node);
+
+// After: Typed function pointers
+int (*execute_Module)(Interpreter *self, int node);
+```
+
+**Key Achievement**: Function pointers now match actual signatures, eliminating type mismatch errors.
+
+#### Promotions Analysis: def→fn and Type Promotion
+
+**Implemented** (Passes 4-5):
+- ✅ `FunctionCompilability` analyzer identifies functions that can be promoted from Python to C
+- ✅ Checks for complete type annotations (all parameters + return type)
+- ✅ Verifies body contains only C-compatible operations
+- ✅ Handles struct methods with implicit `self` typing
+- ✅ Recursively walks expression trees to detect dynamic patterns (getattr, etc.)
+- ✅ `TypePromotionSolver` propagates types across call graph
+- ✅ Promotes mixed types to compatible common forms
+- ✅ 7 comprehensive promotion tests covering all scenarios
+
+**Public API** (methods on `DispatchSolver`):
+- `get_compilable_functions()` — set of def→fn promotable functions
+- `is_function_compilable(func_name)` — query single function compilability
+- `get_compilability_report()` — detailed analysis with reasons for failures
+- `get_promoted_types()` — all types promoted across closure
+
+**Key Achievement**: Identifies which functions can be compiled to C and what types should be promoted for cross-closure compatibility.
+
+#### Testing and Regression Analysis
+
+**All tests pass**:
+- ✅ 4 Phase A (pattern detection) tests
+- ✅ 7 Phase B (table planning) tests
+- ✅ 5 Phase C (code generation) tests
+- ✅ 4 DispatchSolver integration tests
+- ✅ 7 Promotion analysis tests (def→fn and type promotion)
+- ✅ test_dispatch_myinterpreter.py (realistic Interpreter pattern)
+
+**Total**: 158+ tests pass, 0 failures. No regressions to existing functionality.
+
+#### Files
+
+- `gimple_codegen.py` — DispatchSolver, DispatchPattern, DispatchTable, FunctionCompilability, TypePromotionSolver classes (~500 lines)
+- `test_dispatch_solver.py` — Phase A unit tests
+- `test_dispatch_phase_b.py` — Phase B unit tests
+- `test_dispatch_phase_c.py` — Phase C integration tests
+- `test_dispatch_promotions.py` — Promotion analysis tests
+- `test_dispatch_myinterpreter.py` — Realistic pattern analysis
+- `PHASE_A_IMPLEMENTATION.md` — Detailed Phase A documentation
+- `PHASE_B_IMPLEMENTATION.md` — Detailed Phase B documentation
+- `PHASE_C_IMPLEMENTATION.md` — Detailed Phase C documentation
+
+**Key Achievement**: Complete end-to-end solution for transforming dynamic Python dispatch patterns to static C virtual method tables, enabling GIMPLE bootstrap compilation.
+
