@@ -65,14 +65,14 @@ def trait_downcast(Trait, value): return value
 
 # ── Mojo LayoutTensor / Layout shims ───────────────────────────────
 class Layout:
-    def __init__(self, *a, **kw): pass
+    def __init__(self, a=0, kw=0): pass
     @staticmethod
-    def row_major(r, c): return Layout()
+    def row_major(r, c): return Layout(r, c)
     @staticmethod
-    def col_major(r, c): return Layout()
+    def col_major(r, c): return Layout(r, c)
 
 class LayoutTensor:
-    def __init__(self, *a, **kw): self._data = []
+    def __init__(self, a=0, kw=0): self._data = []
     def __getitem__(self, idx): return self._data[idx] if self._data else 0
     def __setitem__(self, idx, v):
         while len(self._data) <= (idx if isinstance(idx, int) else 0): self._data.append(0)

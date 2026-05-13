@@ -5102,6 +5102,34 @@ class GimpleGen:
             'scope': 'Scope *',
         }
 
+        # Pre-populate AST node struct fields
+        self.struct_field_types['CallExpr'] = {
+            'func': 'int',
+            'args': 'MojoList *',
+        }
+        self.struct_field_types['BinaryOp'] = {
+            'op': 'char *',
+            'left': 'int',
+            'right': 'int',
+        }
+        self.struct_field_types['UnaryOp'] = {
+            'op': 'char *',
+            'operand': 'int',
+        }
+        self.struct_field_types['TernaryExpr'] = {
+            'condition': 'int',
+            'then_val': 'int',
+            'else_val': 'int',
+        }
+        self.struct_field_types['MemberExpr'] = {
+            'obj': 'int',
+            'member': 'char *',
+        }
+        self.struct_field_types['SubscriptExpr'] = {
+            'obj': 'int',
+            'index': 'int',
+        }
+
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         for s in all_struct_defs:
             if isinstance(s, StructDef):
