@@ -2231,9 +2231,11 @@ class GimpleGen:
         # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
         if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
             c_name = self.BUILTIN_VALUE_MAP[name]
-            # Declare the function pointer type if not already declared
+            # Create a temp variable to hold the function pointer
             t = self._new_temp('void *')
-            self._emit(f'  {t} = (void *)&{c_name};  /* builtin {name} */')
+            # In GIMPLE, casts are done via assignment with type conversion
+            # Function names decay to function pointers in C
+            self._emit(f'  {t} = {c_name};  /* builtin {name} */')
             return 'void *', t
         return self._type_of(name), name
 

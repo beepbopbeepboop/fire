@@ -291,3 +291,6 @@ char *int64_t_splitext(char *path);    /* splitext() from os.path */
 int tokenize(char *source);           /* tokenize function */
 int Parser(int tokens);               /* Parser class constructor */
 int int_compile_to_gimple(char *source);  /* compile_to_gimple function */
+
+/* Python builtin exception classes and types */
+int Exception;  /* Exception base class */
