@@ -271,3 +271,23 @@ static inline int __mojo_floordiv(int a, int b) {
     int q = a / b;
     return q - (a % b != 0 && (a ^ b) < 0);
 }
+
+/* ── Missing function stubs for interpreter ──────────────────────────────
+ * These are called by generated interpreter code and need stub declarations */
+
+/* Python builtins that appear as function calls */
+void setattr(int obj, int attr, int value);  /* setattr builtin */
+int tuple(int *args);                         /* tuple constructor */
+
+/* Magic methods for context managers */
+int int___enter__(int obj);   /* __enter__ magic method */
+int int___exit__(int obj, int exc_type, int exc_val, int exc_tb);  /* __exit__ */
+
+/* String utility functions for method access */
+char *int64_t_basename(char *path);    /* basename() from os.path */
+char *int64_t_splitext(char *path);    /* splitext() from os.path */
+
+/* Module functions that are imported */
+int tokenize(char *source);           /* tokenize function */
+int Parser(int tokens);               /* Parser class constructor */
+int int_compile_to_gimple(char *source);  /* compile_to_gimple function */
