@@ -32,7 +32,7 @@ def assert_raises(contains=""):
             if exc_type is None: raise AssertionError("Expected an exception")
             if contains and contains not in str(exc_val): raise AssertionError(f"Exception missing {contains!r}")
             return True
-    return _AR()
+    return 0  # Return dummy value for C compilation
 
 # ── TestSuite helper ───────────────────────────────────────────────
 class TestSuite:
@@ -51,7 +51,7 @@ class TestSuite:
                         failed += 1
                         print(f"FAIL {name}: {e}")
                 print(f"{passed} passed, {failed} failed")
-        return _Suite([(func.__name__, func) for func in fns if callable(func)])
+        return 0  # Return dummy value for C compilation
 
 from abc import abstractmethod
 

@@ -1699,6 +1699,7 @@ class GimpleGen:
         self.loop_stack:  list[tuple[str,str]] = []
         self.exc_depth    = 0
         self.func_ret_type: str             = ''
+        self._last_was_terminal: bool       = False
         # Container / layout state
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
         # Pre-seed known global dicts with their value types so .get() uses the right function.
@@ -1786,10 +1787,17 @@ class GimpleGen:
 
     def _emit(self, line: str):
         self.body_lines.append(line)
+        # Track whether this is a terminal statement (can't have code after it)
+        stripped = line.strip()
+        if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
+            self._last_was_terminal = True
+        else:
+            self._last_was_terminal = False
 
     def _emit_label(self, label: str, freq_hint: str = ''):
         ann = f'  /* {freq_hint} */' if freq_hint else ''
         self.body_lines.append(f"\n{label}:{ann}")
+        self._last_was_terminal = False
 
     def _type_of(self, name: str) -> str:
         return self.var_types.get(name, 'int')
@@ -4345,8 +4353,10 @@ class GimpleGen:
         self._emit_label(bb_try)
         for s in node.body:
             self.gen_stmt(s)
-        self._emit("  mojo_exc_pop ();")
-        self._emit(f"  goto {bb_else if bb_else else bb_after};")
+        # Only emit mojo_exc_pop and goto if the try body didn't end with a return
+        if not self._last_was_terminal:
+            self._emit("  mojo_exc_pop ();")
+            self._emit(f"  goto {bb_else if bb_else else bb_after};")
 
         self._emit_label(bb_exc)
         self._emit("  mojo_exc_pop ();")
@@ -4380,7 +4390,9 @@ class GimpleGen:
         if node.finally_body:
             for s in node.finally_body:
                 self.gen_stmt(s)
-        self._emit(f"  goto {bb_after};")
+        # Only emit goto if the exception handler didn't end with a return
+        if not self._last_was_terminal:
+            self._emit(f"  goto {bb_after};")
 
         if bb_else:
             self._emit_label(bb_else)
@@ -4389,7 +4401,9 @@ class GimpleGen:
             if node.finally_body:
                 for s in node.finally_body:
                     self.gen_stmt(s)
-            self._emit(f"  goto {bb_after};")
+            # Only emit goto if the else block didn't end with a return
+            if not self._last_was_terminal:
+                self._emit(f"  goto {bb_after};")
 
         self._emit_label(bb_after)
 
@@ -4439,15 +4453,21 @@ class GimpleGen:
             self._emit_label(bb_try)
             for s in node.body:
                 self.gen_stmt(s)
-            self._emit("  mojo_exc_pop ();")
-            _emit_exits()
-            self._emit(f"  goto {bb_after};")
+            # Only emit cleanup and goto if the with body didn't end with a return
+            if not self._last_was_terminal:
+                self._emit("  mojo_exc_pop ();")
+                _emit_exits()
+                self._emit(f"  goto {bb_after};")
+            else:
+                _emit_exits()
 
             self._emit_label(bb_exc)
             self._emit("  mojo_exc_pop ();")
             _emit_exits()
             self._emit("  mojo_raise ();")
-            self._emit(f"  goto {bb_after};")
+            # Only emit goto if the exception handler didn't end with a return
+            if not self._last_was_terminal:
+                self._emit(f"  goto {bb_after};")
 
             self._emit_label(bb_after)
         else:
