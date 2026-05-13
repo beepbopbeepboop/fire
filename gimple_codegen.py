@@ -1677,6 +1677,8 @@ class GimpleGen:
         # Phase C: Dispatch solver for static dispatch table planning
         self._dispatch_solver: DispatchSolver | None = None  # Instantiated in gen_module Phase 1.5
         self._dispatch_tables: dict = {}  # dispatch_table_name → DispatchTable (from _dispatch_solver)
+        self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
+        self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._reset_func()
 
     def _reset_func(self):
@@ -5290,10 +5292,12 @@ class GimpleGen:
             # Emit vtable struct typedefs for all planned dispatch tables
             if self._dispatch_solver and self._dispatch_tables:
                 for callee_set, dispatch_table in self._dispatch_tables.items():
-                    typedef = dispatch_table.emit_typedef()
-                    if typedef:
-                        parts.append(typedef)
-                        parts.append('')
+                    if dispatch_table.name not in self._emitted_dispatch_typedefs:
+                        typedef = dispatch_table.emit_typedef()
+                        if typedef:
+                            parts.append(typedef)
+                            parts.append('')
+                            self._emitted_dispatch_typedefs.add(dispatch_table.name)
 
         # Struct alloc helpers — __GIMPLE OK because StructName * is the return type
         # Emitted before user-function forward decls so no forward decl needed.
@@ -5383,12 +5387,15 @@ class GimpleGen:
 
         # ── Dispatch table initializations (from Phase C) ──────────────────
         # Emit static const initializations for all planned dispatch tables
-        if self._dispatch_solver and self._dispatch_tables:
+        # Only for main module (same as dispatch solving)
+        if self.emit_struct_defs and self._dispatch_solver and self._dispatch_tables:
             parts.append("/* Dispatch table initializations (virtual method tables) */")
             for callee_set, dispatch_table in self._dispatch_tables.items():
-                table_init = dispatch_table.emit_table_init()
-                if table_init:
-                    parts.append(table_init)
+                if dispatch_table.name not in self._emitted_dispatch_tables:
+                    table_init = dispatch_table.emit_table_init()
+                    if table_init:
+                        parts.append(table_init)
+                        self._emitted_dispatch_tables.add(dispatch_table.name)
             parts.append('')
 
         # Function bodies (generated in Phase 2a)
