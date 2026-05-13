@@ -298,7 +298,7 @@ char *int64_t_splitext(char *path);    /* splitext() from os.path */
 
 /* Module functions that are imported */
 MojoList *tokenize(char *source);            /* tokenize function */
-int Parser(int tokens);                      /* Parser class constructor (opaque) */
+int Parser(void *tokens);                    /* Parser class constructor (opaque) */
 char *gimple_codegen_compile_to_gimple(char *source);  /* compile_to_gimple function */
 
 /* os.path bridge functions (called from compiled module_loader code) */
@@ -324,15 +324,16 @@ int int__skip_bracketed(int parser);            /* Parser._skip_bracketed method
 int int__parse_type_ann(int parser);            /* Parser._parse_type_ann method */
 
 /* Type checking functions */
-int int_is_pointer(int cls, int type_id);      /* Check if type is pointer */
-int int_is_float(int cls, int type_id);        /* Check if type is float */
+int int_is_pointer(int cls, void *type_id);    /* Check if type is pointer */
+int int_is_float(int cls, void *type_id);      /* Check if type is float */
+int int_is_int(int cls, void *type_id);        /* Check if type is int */
 int int_analyze(int obj);                       /* Analyze function */
 
 /* Import function (not used in C, but may be called) */
 int int_import_module(int importlib_obj, char *module_name);  /* _python_import wrapper */
 
 /* Python builtin any() function */
-int any(int iterable);                          /* Python any() builtin */
+int any(void *iterable);                        /* Python any() builtin */
 
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */

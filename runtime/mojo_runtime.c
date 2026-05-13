@@ -1514,18 +1514,45 @@ int int__parse_type_ann(int parser) {
 }
 
 /* Type checking functions */
-int int_is_pointer(int cls, int type_id) {
-    /* Stub: return 0 (not a pointer) */
+int int_is_pointer(int cls, void *type_id) {
+    /* Check if type_id (as char* or int) indicates a pointer */
     (void)cls;  /* unused parameter */
-    (void)type_id;  /* unused parameter */
+    if (!type_id) return 0;
+    /* If it looks like a string, check for * */
+    char *type_str = (char *)type_id;
+    if (type_str && type_str[0] != '\0') {
+        return strstr(type_str, "*") != NULL ? 1 : 0;
+    }
+    /* Otherwise treat as int (type ID) */
     return 0;
 }
 
-int int_is_float(int cls, int type_id) {
-    /* Stub: return 0 (not a float) */
+int int_is_float(int cls, void *type_id) {
+    /* Check if type_id (as char* or int) indicates a float */
     (void)cls;  /* unused parameter */
-    (void)type_id;  /* unused parameter */
+    if (!type_id) return 0;
+    /* If it looks like a string, check for float/double */
+    char *type_str = (char *)type_id;
+    if (type_str && type_str[0] != '\0') {
+        return (strcmp(type_str, "float") == 0 ||
+                strcmp(type_str, "double") == 0) ? 1 : 0;
+    }
+    /* Otherwise treat as int (type ID) */
     return 0;
+}
+
+int int_is_int(int cls, void *type_id) {
+    /* Check if type_id (as char* or int) indicates an int */
+    (void)cls;  /* unused parameter */
+    if (!type_id) return 0;
+    /* If it looks like a string, check for int/int64_t */
+    char *type_str = (char *)type_id;
+    if (type_str && type_str[0] != '\0') {
+        return (strcmp(type_str, "int") == 0 ||
+                strcmp(type_str, "int64_t") == 0) ? 1 : 0;
+    }
+    /* Otherwise treat as int (type ID) */
+    return 1;  /* Assume it's an int ID if not a string */
 }
 
 int int_analyze(int obj) {

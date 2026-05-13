@@ -2860,7 +2860,7 @@ class GimpleGen:
             self._emit(f"  {t} = (double){val};")
             return t
         # str: cast int-cast strings to char*
-        if suf == 'str' and elem_type in ('int', 'int64_t'):
+        if suf == 'str' and elem_type in ('int', 'int64_t', 'char'):
             # For int64_t-stored strings, create a temp char*
             if elem_type == 'int64_t':
                 ip = self._new_temp('int64_t')
@@ -2868,7 +2868,7 @@ class GimpleGen:
                 self._emit(f"  {ip} = (int64_t){val};")
                 self._emit(f"  {cp} = (char *){ip};")
                 return cp
-            return f"(char *){val}"  # int can be directly cast
+            return f"(char *){val}"  # int/char can be directly cast
         return val  # already char*
 
     def _to_int64(self, ctype: str, val: str) -> str:
@@ -4762,7 +4762,12 @@ class GimpleGen:
             tuple_ptr = self._new_temp('MojoList *')
             self._emit(f"  {tuple_ptr} = (MojoList *){elem64};")
             for i, vn in enumerate(var_names):
-                self._emit(f"  {vn} = mojo_list_get_str ({tuple_ptr}, {i});")
+                # mojo_list_get_str returns char*, but var is int64_t
+                temp_str = self._new_temp('char *')
+                self._emit(f"  {temp_str} = mojo_list_get_str ({tuple_ptr}, {i});")
+                int_ptr = self._new_temp('int64_t')
+                self._emit(f"  {int_ptr} = (int64_t){temp_str};")
+                self._emit(f"  {vn} = {int_ptr};")
         else:
             suf = TypeLattice.list_suffix(elem)
             if suf == 'double':
@@ -5575,6 +5580,7 @@ class GimpleGen:
             'void mojo_print(char *str);',
             'char *gimple_codegen_compile_to_gimple(char *src);',
             'int64_t mojo_open_file(char *path);',
+            'void *mojo_open(char *filename, char *mode);',
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
         ]
@@ -5640,9 +5646,11 @@ class GimpleGen:
         # Module-level globals (imported modules, dicts, lists, sets, values at module scope)
         global_decls = []
         # Dispatch table globals already forward-declared near top of file
-        # Also declare imported dispatch tables as MojoDict globals
-        _dispatch_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
-                           '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
+        # Also declare imported dispatch tables as MojoDict/MojoSet globals
+        _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
+                                '_TYPE_MAP', '_SIGNED', '_UNSIGNED', '_FLOAT'}
+        _dispatch_set_names = {'_CMP_OPS'}
+        _dispatch_names = _dispatch_dict_names | _dispatch_set_names
         _declared_globals = set()
         all_scan = stmts + (imported_stmts if self.do_imports else [])
         for stmt in all_scan:
@@ -5651,8 +5659,11 @@ class GimpleGen:
                     orig_name = alias[0]
                     local_name = alias[1] if len(alias) > 1 and alias[1] else orig_name
                     for check_name in (orig_name, local_name):
-                        if check_name in _dispatch_names and check_name not in _declared_globals:
+                        if check_name in _dispatch_dict_names and check_name not in _declared_globals:
                             global_decls.append(f"MojoDict * {check_name};")
+                            _declared_globals.add(check_name)
+                        elif check_name in _dispatch_set_names and check_name not in _declared_globals:
+                            global_decls.append(f"MojoSet * {check_name};")
                             _declared_globals.add(check_name)
             elif isinstance(stmt, ImportStmt):
                 if stmt.module not in _declared_globals:
@@ -5668,13 +5679,22 @@ class GimpleGen:
                     continue
                 _declared_globals.add(gname)
                 if isinstance(stmt.value, DictExpr):
-                    global_decls.append(f"int64_t {gname};  /* MojoDict * */")
+                    if gname in _dispatch_names:
+                        global_decls.append(f"MojoDict * {gname};")
+                    else:
+                        global_decls.append(f"int64_t {gname};  /* MojoDict * */")
                     self._global_var_types[gname] = 'MojoDict *'
                 elif isinstance(stmt.value, (ListExpr, TupleExpr)):
-                    global_decls.append(f"int64_t {gname};  /* MojoList * */")
+                    if gname in _dispatch_names:
+                        global_decls.append(f"MojoList * {gname};")
+                    else:
+                        global_decls.append(f"int64_t {gname};  /* MojoList * */")
                     self._global_var_types[gname] = 'MojoList *'
                 elif isinstance(stmt.value, SetExpr):
-                    global_decls.append(f"int64_t {gname};  /* MojoSet * */")
+                    if gname in _dispatch_names:
+                        global_decls.append(f"MojoSet * {gname};")
+                    else:
+                        global_decls.append(f"int64_t {gname};  /* MojoSet * */")
                     self._global_var_types[gname] = 'MojoSet *'
                 elif isinstance(stmt.value, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")
