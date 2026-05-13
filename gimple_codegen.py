@@ -1296,6 +1296,9 @@ class GimpleGen:
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
+        # Phase C: Dispatch solver for static dispatch table planning
+        self._dispatch_solver: DispatchSolver | None = None  # Instantiated in gen_module Phase 1.5
+        self._dispatch_tables: dict = {}  # dispatch_table_name → DispatchTable (from _dispatch_solver)
         self._reset_func()
 
     def _reset_func(self):
@@ -4663,6 +4666,16 @@ class GimpleGen:
                         self.func_return_types[f"{s.name}_{m.name}"] = inferred
                         self.var_types.clear()
 
+        # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
+        # Run DispatchSolver to identify dynamic dispatch patterns and plan
+        # virtual method tables before generating code. This enables static
+        # dispatch instead of dynamic getattr/dict lookups.
+        if self.emit_struct_defs:  # Only main module does dispatch solving
+            self._dispatch_solver = DispatchSolver(self.struct_field_types, self.func_return_types)
+            all_stmts_for_dispatch = stmts + (imported_stmts if self.do_imports else [])
+            self._dispatch_solver.analyze(all_stmts_for_dispatch)
+            self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
+
         # ── Pass 3: collect closures (nested FunctionDef nodes) ──────────
         self._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
         for s in stmts:
@@ -4895,6 +4908,15 @@ class GimpleGen:
                         parts.append('')
                         self._emitted_structs.add(ci.env_struct)
 
+            # ── Phase C: Dispatch table typedefs (from solver) ──────────────
+            # Emit vtable struct typedefs for all planned dispatch tables
+            if self._dispatch_solver and self._dispatch_tables:
+                for callee_set, dispatch_table in self._dispatch_tables.items():
+                    typedef = dispatch_table.emit_typedef()
+                    if typedef:
+                        parts.append(typedef)
+                        parts.append('')
+
         # Struct alloc helpers — __GIMPLE OK because StructName * is the return type
         # Emitted before user-function forward decls so no forward decl needed.
         for sn in sorted(self._struct_allocs_needed):
@@ -4979,6 +5001,16 @@ class GimpleGen:
                 ptypes = ', '.join(ptypes_list) if ptypes_list else 'void'
                 parts.append(f"{ret} {ci.lifted_name} ({ptypes});")
         if self._all_closures:
+            parts.append('')
+
+        # ── Dispatch table initializations (from Phase C) ──────────────────
+        # Emit static const initializations for all planned dispatch tables
+        if self._dispatch_solver and self._dispatch_tables:
+            parts.append("/* Dispatch table initializations (virtual method tables) */")
+            for callee_set, dispatch_table in self._dispatch_tables.items():
+                table_init = dispatch_table.emit_table_init()
+                if table_init:
+                    parts.append(table_init)
             parts.append('')
 
         # Function bodies (generated in Phase 2a)
