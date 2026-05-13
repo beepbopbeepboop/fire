@@ -909,8 +909,9 @@ class DispatchSolver:
                             struct_name = callee.split('_')[0] if '_' in callee else 'void'
                             c_params.append(f"{struct_name} *self")
                         elif ptype:
-                            # Use the annotated type, defaulting to int if unrecognized
-                            c_params.append(f"{ptype} {pname}")
+                            # Map Python types to C types, use fallback for unresolved
+                            c_type = self._map_to_c_type(ptype)
+                            c_params.append(f"{c_type} {pname}")
                         else:
                             # No type annotation, default to int
                             c_params.append(f"int {pname}")
@@ -925,6 +926,44 @@ class DispatchSolver:
 
         # Store the planned dispatch tables
         self.dispatch_tables = tables_by_callees
+
+    def _map_to_c_type(self, ptype: str) -> str:
+        """Map Python type annotation to C type.
+
+        Handles both built-in types and AST node types (e.g., N.BinaryOp → int).
+        """
+        if not ptype:
+            return "int"
+
+        # Strip module prefix (e.g., "N.BinaryOp" → use int for AST nodes)
+        if '.' in ptype:
+            # Module-qualified type like N.BinaryOp, ast.Module, etc.
+            # For AST nodes, use int (node ID/index)
+            if any(ast_type in ptype for ast_type in ['Module', 'BinaryOp', 'UnaryOp', 'AssignStmt',
+                   'IfStmt', 'WhileStmt', 'ForStmt', 'ReturnStmt', 'FunctionDef', 'StructDef',
+                   'BreakStmt', 'ContinueStmt', 'PassStmt', 'ImportStmt', 'FromImportStmt',
+                   'ExprStmt', 'TryStmt', 'WithStmt', 'BoolLiteral', 'IntLiteral', 'FloatLiteral',
+                   'StringLiteral', 'NoneLiteral', 'ListLiteral', 'DictLiteral', 'SetLiteral',
+                   'TupleLiteral', 'IdentExpr', 'MemberExpr', 'SubscriptExpr', 'SliceExpr',
+                   'CallExpr', 'BinaryOp', 'UnaryOp', 'TernaryExpr']):
+                return "int"  # AST node represented as int (ID or index)
+            return "void *"  # Unknown module type, use generic pointer
+
+        # Map common Python types to C
+        type_map = {
+            'int': 'int',
+            'Int': 'int',
+            'float': 'double',
+            'Float': 'double',
+            'Float64': 'double',
+            'bool': '_Bool',
+            'Bool': '_Bool',
+            'str': 'char *',
+            'object': 'void *',
+            'Any': 'void *',
+        }
+
+        return type_map.get(ptype, 'int')  # Default to int for unrecognized types
 
     def _generate_table_name(self, pattern_id: str, pattern: DispatchPattern) -> str:
         """Generate a C-safe name for a dispatch table."""
