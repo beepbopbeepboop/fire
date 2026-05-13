@@ -2860,8 +2860,15 @@ class GimpleGen:
             self._emit(f"  {t} = (double){val};")
             return t
         # str: cast int-cast strings to char*
-        if suf == 'str' and elem_type == 'int':
-            return f"(char *){val}"
+        if suf == 'str' and elem_type in ('int', 'int64_t'):
+            # For int64_t-stored strings, create a temp char*
+            if elem_type == 'int64_t':
+                ip = self._new_temp('int64_t')
+                cp = self._new_temp('char *')
+                self._emit(f"  {ip} = (int64_t){val};")
+                self._emit(f"  {cp} = (char *){ip};")
+                return cp
+            return f"(char *){val}"  # int can be directly cast
         return val  # already char*
 
     def _to_int64(self, ctype: str, val: str) -> str:
