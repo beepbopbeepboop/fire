@@ -302,4 +302,4 @@ int Parser(int tokens);               /* Parser class constructor */
 int int_compile_to_gimple(char *source);  /* compile_to_gimple function */
 
 /* Python builtin exception classes and types */
-int Exception;  /* Exception base class */
+/* Exception defined by generated code, not here */

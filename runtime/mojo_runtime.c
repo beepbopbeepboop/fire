@@ -1364,3 +1364,36 @@ void mojo_list_reverse(MojoList *l) {
 }
 void mojo_list_clear(MojoList *l) { if (l) l->len = 0; }
 void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
+
+
+/* Missing stubs for imported modules */
+int tokenize(char *source) {
+    (void)source;
+    return 0;
+}
+
+int Parser(int tokens) {
+    (void)tokens;
+    return 0;
+}
+
+char *int64_t_basename(char *path) {
+    if (!path) return "";
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+    return (char *)base;
+}
+
+char *int64_t_splitext(char *path) {
+    if (!path) return "";
+    const char *dot = NULL;
+    for (const char *p = path; *p; p++) {
+        if (*p == '.') dot = p;
+    }
+    if (dot) {
+        return (char *)dot;
+    }
+    return (char *)path;
+}
