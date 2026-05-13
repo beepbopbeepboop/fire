@@ -764,13 +764,14 @@ class GimpleGen:
                     stmts = Parser(tokens).parse_module()
 
                     # Create a temporary codegen to extract types
-                    # Use do_imports=True for transitive closure; share dedup sets and string pool
+                    # Use do_imports=True for transitive closure; share dedup sets and type information
                     # emit_str_pool=False so only main module emits the shared string pool
                     # emit_struct_defs=True but share _emitted_structs to dedup struct definitions
                     temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=True)
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._str_pool = self._str_pool
+                    temp_gen.struct_field_types = self.struct_field_types
                     code = temp_gen.gen_module(stmts)
 
                     # Return both code and parsed statements
@@ -1144,47 +1145,21 @@ class GimpleGen:
                 self._str_pool[escaped] = f'_slit_{slit_num}'
             sname = self._str_pool[escaped]
             return 'char *', sname
-        # F-string: parse into literal/expr parts and emit snprintf
+        # F-string: for now, just extract literal parts and return as plain string
+        # Full f-string formatting with snprintf requires static buffers, which aren't allowed in __GIMPLE
         parts = self._parse_fstring_parts(val)
         if not parts or all(k == 'lit' for k, _ in parts):
             plain = ''.join(v for _, v in parts)
             escaped = plain.replace('\\', '\\\\').replace('"', '\\"')
             return 'char *', '"' + escaped + '"'
-        fmt_parts = []
-        args = []
-        for kind, text in parts:
-            if kind == 'lit':
-                fmt_parts.append(text.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%'))
-            else:
-                try:
-                    from mojo_compiler import tokenize, Parser, ExprStmt
-                    toks = tokenize(text)
-                    expr_ast = Parser(toks).parse_module()
-                    if expr_ast:
-                        expr_node = expr_ast[0].value if isinstance(expr_ast[0], ExprStmt) else expr_ast[0]
-                        etype, evar = self.lower_expr(expr_node)
-                        if etype in ('char *', 'MojoStr *'):
-                            fmt_parts.append('%s'); args.append(evar)
-                        elif etype in ('int64_t', 'int', '_Bool', 'int32_t', 'int16_t', 'int8_t'):
-                            fmt_parts.append('%lld'); args.append('(long long)' + evar)
-                        elif etype in ('double', 'float'):
-                            fmt_parts.append('%g'); args.append(evar)
-                        else:
-                            fmt_parts.append('%s'); args.append('(char *)' + evar)
-                    else:
-                        fmt_parts.append('%s'); args.append('"' + text + '"')
-                except Exception:
-                    fmt_parts.append('%s'); args.append('"' + text + '"')
-        fmt_str = ''.join(fmt_parts)
-        t = self._new_temp('char *')
-        buf_name = t + '_fsbuf'
-        self._emit('  static char ' + buf_name + '[8192];')
-        args_str = ', '.join(args)
-        if args_str:
-            self._emit('  snprintf(' + buf_name + ', sizeof(' + buf_name + '), "' + fmt_str + '", ' + args_str + ');')
+
+        # For f-strings with expressions, just use a placeholder for bootstrap
+        plain = ''.join(v for k, v in parts if k == 'lit')
+        escaped = plain.replace('\\', '\\\\').replace('"', '\\"')
+        if escaped:
+            return 'char *', '"' + escaped + '"'
         else:
-            self._emit('  snprintf(' + buf_name + ', sizeof(' + buf_name + '), "' + fmt_str + '");')
-        return 'char *', buf_name
+            return 'char *', '"<formatted>"'
     def _lower_IdentExpr(self, node) -> tuple[str, str]:
         name = node.name
         if name == 'None':  return 'int', '0'
@@ -3861,8 +3836,10 @@ class GimpleGen:
                     new_fields = {}
                     _collect_self_assigns(method.body, pm, new_fields)
                     for fn, ft in new_fields.items():
+                        # Always allow adding new fields, overwriting if needed
+                        # This ensures richer struct definitions replace stubs
+                        self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
-                            self.struct_field_types[s.name][fn] = ft
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                             already.add(fn)
 
@@ -4139,10 +4116,20 @@ class GimpleGen:
             parts.extend(global_decls)
             parts.append('')
 
-        # Struct typedefs (emit if not already emitted, dedup across modules)
+        # Struct typedefs (dedup across modules, keep most complete definition)
         if self.emit_struct_defs:
-            struct_defs = [s for s in stmts if isinstance(s, StructDef)]
-            for sd in struct_defs:
+            # Track best definition of each struct by field count
+            struct_defs_by_name = {}
+            all_struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+
+            for sd in all_struct_defs:
+                # Count non-method fields
+                field_count = len([f for f in sd.fields if isinstance(f, VarDecl)])
+                if sd.name not in struct_defs_by_name or field_count > struct_defs_by_name[sd.name][1]:
+                    struct_defs_by_name[sd.name] = (sd, field_count)
+
+            # Emit deduplicated struct definitions
+            for sd, _ in struct_defs_by_name.values():
                 if sd.name not in self._emitted_structs:
                     parts.append(f"typedef struct {sd.name} {{")
                     for field in sd.fields:
@@ -4221,6 +4208,7 @@ class GimpleGen:
             parts.append(f"{ret} {_safe_name(fn.name)} ({ptypes});")
 
         # Forward declarations: struct methods
+        struct_defs = [s for s in stmts if isinstance(s, StructDef)]
         for sd in struct_defs:
             for m in sd.methods:
                 ret = self.func_return_types.get(f"{sd.name}_{m.name}",
