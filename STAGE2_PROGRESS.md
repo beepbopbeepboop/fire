@@ -2,9 +2,10 @@
 
 ## Summary
 - **Starting errors**: ~75
-- **Current errors**: 18
-- **Errors fixed**: ~57
-- **Commits made**: 4
+- **Current errors**: 13
+- **Errors fixed**: ~62
+- **Commits made**: 7
+- **Overall reduction**: 83%
 
 ## Fixed Issues
 
@@ -25,6 +26,33 @@
   - Added support for self-referential structs (e.g., Scope.parent is Scope*)
   - Structs now properly appear before functions that use them
 - **Impact**: Fixed "unknown type name" errors for 7 structs, reduced errors from 64 to 18
+
+### 7. Parameter Type Inference Enhancement (b330ff5)
+- **Problem**: Unannotated function parameters were defaulting to int type, even when used as arguments to functions expecting different types
+- **Solution**: Enhanced parameter type inference to detect function calls where parameter is used as an argument
+  - Added BUILTIN_PARAM_TYPES mapping for common functions (open, mojo_open_file, print, etc.)
+  - Improved analyze_param_usage to track function call arguments
+  - Infers parameter type from known function parameter types
+- **Impact**: Better type inference for function parameters (though not all cases handled due to import complexity)
+
+### 8. Function Signature Definitions (b330ff5)
+- **Problem**: Missing function signatures in _KNOWN_SIGS prevented proper type coercion in _emit_call
+- **Solution**: Added missing function signatures:
+  - mojo_open_file: (int64_t, ['char *'])
+  - mojo_close, mojo_write, mojo_read
+  - Fixed mojo_repr to expect int instead of void*
+- **Impact**: Enabled proper type coercion for file operations and other functions
+
+### 9. Open() Builtin Translation (b330ff5)
+- **Problem**: The open() builtin was being translated to mojo_open_file() without proper type coercion
+- **Solution**: Changed from direct _emit to using _emit_call for proper parameter coercion
+- **Impact**: Automatic casting of string arguments to mojo_open_file
+
+### 10. Self-Referential Struct Definitions (8147454)
+- **Problem**: Structs with self-referential pointers (e.g., Scope.parent is Scope*) failed compilation with "unknown type name 'Scope'"
+- **Solution**: Use 'struct StructName *' syntax for self-references within typedef structs
+  - C requirement: Within a typedef struct body, self-references need explicit 'struct' keyword
+- **Impact**: Fixed Scope struct compilation error
 
 ### 6. Builtin Function Pointer Handling (ef53539)
 - **Problem**: Bare function names like `mojo_len` couldn't be passed as arguments to GIMPLE functions
@@ -57,33 +85,68 @@
 - **Solution**: Simplified code generation to avoid problematic casting syntax
 - **Impact**: Reduced GIMPLE parser conflicts
 
-## Remaining Issues (18 errors)
+## Remaining Issues (13 errors)
 
-### Type Conversion Issues (7-8 errors)
-1. **String/Integer Type Mismatches** (6 errors)
-   - `mojo_open_file` expects `char*` but receives `int`
-   - `mojo_repr` expects `int` but receives `void*`
-   - Assignment from `char*` to `int` type variables
-   - Likely due to incorrect type inference in method calls
+### Module/Import Issues (7 errors)
+1. **Undeclared Module** (1 error)
+   - 'os' module not declared/imported
+   - `import os` statement not properly handled in gimple_codegen
 
-2. **Undeclared Variables** (1 error)
-   - 'os' undeclared - import handling issue
-   - Module references not being recognized
+2. **Attribute Chain Translation** (5+ errors)
+   - `os.path.basename()` and `os.path.splitext()` incorrectly translated
+   - Called with wrong number of arguments (2 instead of 1)
+   - Functions being treated as methods with implicit `self` parameter
+   - Root cause: gimple_codegen doesn't properly handle chained attribute access
 
-### Function Signature Mismatches (5 errors)
-1. **Variable Argument Count** (3 errors)
-   - `int64_t_basename` called with 2 args, expects 1
-   - `int64_t_splitext` called with 2 args, expects 1  
-   - `int_compile_to_gimple` called with 3 args, expects 1
+3. **Module Method Dispatch** (1 error)
+   - Functions from modules being called with incorrect signatures
+   - `int_compile_to_gimple` called with function pointer instead of expected string
 
-2. **Pointer Type Incompatibilities** (2 errors)
-   - `mojo_set_argv` second argument type mismatch
-   - `int_compile_to_gimple` called with function pointer instead of char*
+### Type Assignment Mismatches (2 errors)
+- Assignment of `char*` return values to `int` variables
+- Likely due to incorrect return type inference for module function calls
 
-### Remaining Struct Issues (1 error)
-- One lingering "unknown type name 'Scope'" - ordering or forward reference issue
+### Function Call Type Errors (4 errors)
+1. **interpret_file Parameter** - receives `char*` but function parameter is `int`
+2. **dump_file Parameter** - receives `char*` but function parameter is `int`
+3. **int_write Parameter** - type mismatch on second argument
+4. **mojo_set_argv Parameter** - incompatible pointer type on second argument
 
-## Architectural Issues Requiring Larger Refactoring
+## Issues Requiring Larger Refactoring
+
+### 1. Module/Import System
+The current implementation doesn't properly handle:
+- Python module imports (import os, import sys, etc.)
+- Attribute chains on modules (os.path.basename, sys.argv, etc.)
+- Module-level functions vs methods confusion
+
+**Fix Strategy**:
+- Implement proper module import handling in gimple_codegen
+- Create a symbol table for module attributes
+- Properly translate chained attribute access (obj.attr.method) to C function calls
+- Handle module function calls with correct signatures
+
+### 2. Function Signature Mismatches
+Several issues with how functions are being called:
+- Functions like `int_compile_to_gimple` being called with wrong argument count
+- Module functions (int64_t_basename, int64_t_splitext) getting implicit self parameter
+
+**Fix Strategy**:
+- Track actual function signatures (not just built-in ones)
+- Remove implicit self parameter for non-method functions
+- Add proper function signature definitions to _KNOWN_SIGS
+
+### 3. Type System Limitations
+Current type inference has edge cases:
+- Return types from module functions not properly inferred
+- Type assignment from function calls to variables with different types
+
+**Fix Strategy**:
+- Improve return type inference for all functions
+- Track function return types in a global registry
+- Better type coercion in assignments
+
+## Architectural Issues Requiring Larger Refactoring (OBSOLETE)
 
 1. **Unified Type System**: The system treats everything as `int` but then tries to use those ints as function pointers, structs, and callable objects. This requires either:
    - A proper type representation system
@@ -107,8 +170,26 @@
 - `STAGE2_PROGRESS.md` - Progress tracking (this file)
 
 ## Next Steps (Priority Order)
-1. Implement proper dispatch table for method calls
-2. Fix loop variable declaration issues
-3. Add type wrapper functions for dynamic dispatch
-4. Improve GIMPLE code generation for function pointers
-5. Refactor type system to be more GIMPLE-friendly
+
+### Phase 1: Module/Import System (highest impact - fixes ~7 errors)
+1. Implement Python module import tracking in gimple_codegen
+2. Create symbol table for module attributes (e.g., os.path.*)
+3. Properly translate attribute chains to function calls
+4. Handle `import os` and `import sys` statements
+5. Map module functions to their C equivalents with correct signatures
+
+### Phase 2: Function Signature Registry (fixes ~3 errors)
+1. Create comprehensive function signature registry
+2. Track return types for all functions
+3. Remove implicit self parameter for non-method functions
+4. Add missing function signatures to _KNOWN_SIGS
+
+### Phase 3: Type System Improvements (fixes remaining 3 errors)
+1. Improve return type inference for module functions
+2. Better type coercion in variable assignments
+3. Handle function result type assignment to mismatched variable types
+
+### Low Priority (architectural improvements)
+1. Refactor dispatch table mechanism for dynamic method calls
+2. Improve GIMPLE code generation for complex type conversions
+3. Consider type wrapper functions for safer function pointer handling
