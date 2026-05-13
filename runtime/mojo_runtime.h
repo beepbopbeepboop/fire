@@ -242,7 +242,7 @@ int char_join(char *sep, MojoList *items);
 int int_items(int obj);
 
 /* Command-line arguments */
-void mojo_set_argv(int argc, char **argv);
+void mojo_set_argv(int argc, const char **argv);
 MojoList *mojo_get_argv(void);
 
 /* File I/O - opaque handle for Python file objects */

@@ -43,10 +43,10 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
 /* ── Global state for argc/argv ───────────────────────────────────────────*/
 static int _mojo_argc = 0;
-static char **_mojo_argv = NULL;
+static const char **_mojo_argv = NULL;
 static MojoList *_mojo_argv_list = NULL;
 
-void mojo_set_argv(int argc, char **argv) {
+void mojo_set_argv(int argc, const char **argv) {
     _mojo_argc = argc;
     _mojo_argv = argv;
     /* Build the argv list once */

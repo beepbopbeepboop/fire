@@ -1811,6 +1811,8 @@ class GimpleGen:
         'mojo_close':            ('void',      ['void *']),
         'mojo_write':            ('int64_t',   ['void *', 'char *', 'int64_t']),
         'mojo_read':             ('int64_t',   ['void *', 'char *', 'int64_t']),
+        'int64_t_basename':      ('char *',    ['char *']),  # os.path.basename(path)
+        'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
         'mojo_list_new':         ('MojoList *', []),
         'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
         'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
@@ -2026,6 +2028,11 @@ class GimpleGen:
                         if hasattr(node, 'elifs'):
                             for _, elif_body in node.elifs:
                                 scan_nodes(elif_body)
+                    elif isinstance(node, WithStmt):
+                        # Scan the context expressions (e.g., open(input_file))
+                        for item in node.items:
+                            scan_expr(item.expr)
+                        scan_nodes(node.body)
                     elif isinstance(node, TryStmt):
                         scan_nodes(node.body)
                         if hasattr(node, 'except_clauses'):
@@ -2370,6 +2377,14 @@ class GimpleGen:
                 # Track element type so subscript uses mojo_list_get_str
                 self._elem_types[t] = 'char *'
                 return 'MojoList *', t
+
+            # Special handling for os.path attribute access
+            if module_name == 'os' and node.member == 'path':
+                # os.path is a marker - return a special value indicating path module
+                # The actual function call will be handled at the call site
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;  /* os.path module marker */")
+                return 'int', t
 
             # Class attribute access: ClassName.ATTR
             # Check if module_name is a known struct/class (not an instance variable)
@@ -2811,6 +2826,27 @@ class GimpleGen:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
 
+        # Handle chained attribute calls: os.path.basename(arg) → int64_t_basename(arg)
+        if isinstance(func.obj, MemberExpr):
+            inner_obj = func.obj.obj
+            inner_member = func.obj.member
+            outer_member = func.member
+
+            # Handle os.path.basename() and os.path.splitext()
+            if isinstance(inner_obj, IdentExpr) and inner_obj.name == 'os' and inner_member == 'path':
+                if outer_member == 'basename' and len(node.args) == 1:
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    t = self._new_temp('char *')
+                    # Use _emit_call for proper type coercion
+                    self._emit_call('char *', t, 'int64_t_basename', [(arg_type, arg_val)])
+                    return 'char *', t
+                elif outer_member == 'splitext' and len(node.args) == 1:
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    t = self._new_temp('char *')
+                    # Use _emit_call for proper type coercion
+                    self._emit_call('char *', t, 'int64_t_splitext', [(arg_type, arg_val)])
+                    return 'char *', t
+
         # Handle module method calls: module_name.function(args)
         if isinstance(func.obj, IdentExpr):
             module_name = func.obj.name
@@ -2818,8 +2854,9 @@ class GimpleGen:
 
             # Check if this is a known module method
             if module_name == 'gimple_codegen' and method_name == 'compile_to_gimple':
-                # gimple_codegen.compile_to_gimple(src) → returns char*
-                if len(node.args) == 1:
+                # gimple_codegen.compile_to_gimple(src, do_imports=True) → returns char*
+                # Only src is passed to C function (do_imports is Python-only)
+                if len(node.args) >= 1:
                     src_type, src_val = self.lower_expr(node.args[0])
                     # Cast to char* if needed (legacy int-cast strings)
                     if src_type not in ('char *', 'void *'):
@@ -4366,6 +4403,12 @@ class GimpleGen:
             'module': node.module,
             'return_type': 'unknown',
         }
+        # Declare the module as an int marker for attribute access
+        # This allows code like os.path.basename() to work
+        if node.module not in self.var_types:
+            self._declare_var(node.module, 'int')
+            self._emit(f"  {node.module} = 0;  /* module marker */")
+
 
     def _gen_stmt_FromImportStmt(self, node):
         # from module import name1, name2, ...
