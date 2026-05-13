@@ -185,6 +185,10 @@ def main():
         build = True
         sys.argv.pop(1)
 
+    dump_full = '--dump-full' in sys.argv
+    if dump_full:
+        sys.argv.remove('--dump-full')
+
     dump = '--dump' in sys.argv
     if dump:
         sys.argv.remove('--dump')
@@ -216,6 +220,21 @@ def main():
     if build:
         success = build_executable(input_file, src)
         sys.exit(0 if success else 1)
+
+    # If --dump-full requested, generate single .ci with transitive closure (for bootstrap)
+    if dump_full:
+        basename = os.path.splitext(os.path.basename(input_file))[0]
+        try:
+            import gimple_codegen
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
+            with open(f"{basename}.ci", "w") as f:
+                f.write(c_code)
+            print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
+        except Exception as e:
+            print(f"Error generating --dump-full: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
     if dump:

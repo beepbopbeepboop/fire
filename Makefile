@@ -69,20 +69,7 @@ stdlib:
 stage1:
 	@mkdir -p stage1
 	@echo "=== Stage 1: Python → stage1/ ==="
-	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump ../$(MOJO_MAIN)
-	@echo "--- Dumping all .mojo source files ---"
-	@for f in $(MOJO_FILES); do \
-	    echo "  dump $$f"; \
-	    cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "--- Dumping core .py source files ---"
-	@for f in $(PY_FILES); do \
-	    echo "  dump $$f"; \
-	    cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "--- Post-processing: consolidating string pools ---"
-	python3 consolidate_string_pool.py stage1/mojo.ci
-	python3 fix_gimple_literals.py stage1/mojo.ci
+	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 	@echo "✓ Stage 1 complete"
 
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────

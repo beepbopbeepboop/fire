@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include <setjmp.h>
 
+/* Mojo type aliases */
+typedef int mojo_int;
+typedef float mojo_float;
+typedef char* mojo_string;
+typedef void* mojo_any;
+
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
  * Generated __GIMPLE code calls mojo_try_push/mojo_exc_pop/mojo_raise so
  * that jmp_buf pointer arithmetic stays out of GIMPLE functions.          */

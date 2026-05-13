@@ -24,10 +24,11 @@ def consolidate_string_pool(ci_file):
     # Pattern: char * _slit_123 = "...";
     slit_pattern = r'^(char \* (_slit_\d+) = ("(?:[^"\\]|\\.)*");)$'
 
-    string_pool = OrderedDict()  # value -> (slit_name, line)
+    value_to_canonical = {}  # string value -> canonical_slit_name
+    slit_id_to_entries = {}  # slit_id (e.g., 10040) -> list of (slit_name, slit_value, line_idx)
     slit_to_canonical = {}  # old_slit_name -> canonical_slit_name
 
-    # First pass: collect all string definitions
+    # First pass: collect all string definitions and detect conflicts
     for i, line in enumerate(lines):
         match = re.match(slit_pattern, line)
         if match:
@@ -35,40 +36,86 @@ def consolidate_string_pool(ci_file):
             slit_name = match.group(2)
             slit_value = match.group(3)
 
-            # Use the value as the key - if we've seen this value before, reuse it
-            if slit_value not in string_pool:
-                # First time seeing this value
-                string_pool[slit_value] = (slit_name, i)
-                slit_to_canonical[slit_name] = slit_name
-            else:
-                # We've seen this value - map to the canonical name
-                canonical_name = string_pool[slit_value][0]
-                slit_to_canonical[slit_name] = canonical_name
+            # Extract the numeric ID
+            slit_id = int(slit_name.split('_')[2])
 
-    # Second pass: build output with consolidated pool
+            # Track entries by ID to detect conflicts
+            if slit_id not in slit_id_to_entries:
+                slit_id_to_entries[slit_id] = []
+            slit_id_to_entries[slit_id].append((slit_name, slit_value, i))
+
+    # Resolve conflicts: for each ID, if there are multiple entries with different values,
+    # rename the later ones to new unique IDs
+    next_new_id = 20000  # Use a different range for renamed entries
+    rename_map = {}  # old_slit_name -> new_slit_name
+
+    for slit_id in sorted(slit_id_to_entries.keys()):
+        entries = slit_id_to_entries[slit_id]
+        if len(entries) > 1:
+            # Multiple entries with same ID - check if they have different values
+            values_seen = {}
+            for slit_name, slit_value, line_idx in entries:
+                if slit_value not in values_seen:
+                    values_seen[slit_value] = slit_name
+                else:
+                    # Same value with same ID - will be handled by consolidation
+                    pass
+
+            if len(values_seen) > 1:
+                # Conflict! Different values for same ID. Rename later occurrences.
+                canonical_name = None
+                for slit_name, slit_value, line_idx in entries:
+                    if canonical_name is None:
+                        canonical_name = slit_name
+                    else:
+                        # Rename this one
+                        new_name = f'_slit_{next_new_id}'
+                        rename_map[slit_name] = new_name
+                        next_new_id += 1
+
+    # Second pass: build consolidated pool mapping
+    for i, line in enumerate(lines):
+        match = re.match(slit_pattern, line)
+        if match:
+            slit_name = match.group(2)
+            slit_value = match.group(3)
+
+            # Apply any renames first
+            canonical_name = rename_map.get(slit_name, slit_name)
+
+            # Then check if this value already has a canonical name
+            if slit_value not in value_to_canonical:
+                value_to_canonical[slit_value] = canonical_name
+                slit_to_canonical[slit_name] = canonical_name
+            else:
+                # Consolidate to existing name
+                slit_to_canonical[slit_name] = value_to_canonical[slit_value]
+
+    # Third pass: build output with consolidated pool
     output_lines = []
     emitted_values = set()
-
-    # Track where we are in the file
-    in_function = False
-    current_line_no = 0
+    emitted_names = set()
 
     for i, line in enumerate(lines):
-        current_line_no = i
-
         # Check if this is a string definition
         match = re.match(slit_pattern, line)
         if match:
             slit_name = match.group(2)
             slit_value = match.group(3)
 
-            # Only emit this string if:
+            # Apply rename if needed
+            if slit_name in rename_map:
+                slit_name = rename_map[slit_name]
+
+            # Get the canonical name for this value
+            canonical_name = slit_to_canonical.get(slit_name, slit_name)
+
+            # Only emit if:
             # 1. It's the canonical definition for this value, AND
             # 2. We haven't emitted it yet
-            canonical_name = slit_to_canonical[slit_name]
-            if slit_name == canonical_name and slit_value not in emitted_values:
+            if slit_name == canonical_name and canonical_name not in emitted_names:
                 output_lines.append(f'char * {canonical_name} = {slit_value};')
-                emitted_values.add(slit_value)
+                emitted_names.add(canonical_name)
             # Skip non-canonical definitions (duplicates)
             continue
 
@@ -80,16 +127,25 @@ def consolidate_string_pool(ci_file):
                 modified_line = re.sub(r'\b' + re.escape(old_name) + r'\b',
                                        canonical_name, modified_line)
 
+        # Also apply the rename map
+        for old_name, new_name in rename_map.items():
+            if old_name != new_name:
+                modified_line = re.sub(r'\b' + re.escape(old_name) + r'\b',
+                                       new_name, modified_line)
+
         output_lines.append(modified_line)
 
     # Write the consolidated output
     with open(ci_file, 'w') as f:
         f.write('\n'.join(output_lines))
 
+    unique_canonical = len(value_to_canonical)
     print(f"✓ Consolidated string pool in {ci_file}")
-    print(f"  Total unique strings: {len(string_pool)}")
+    print(f"  Total unique strings: {unique_canonical}")
     print(f"  Consolidated from {len(slit_to_canonical)} references")
-    print(f"  Removed {len(slit_to_canonical) - len(string_pool)} duplicate definitions")
+    print(f"  Removed {len(slit_to_canonical) - unique_canonical} duplicate definitions")
+    if rename_map:
+        print(f"  Renamed {len(rename_map)} conflicting IDs")
 
 if __name__ == '__main__':
     ci_file = 'stage1/mojo.ci'
