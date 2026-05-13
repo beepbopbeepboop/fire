@@ -158,6 +158,11 @@ class TernaryExpr:
     else_val: object
 
 @dataclass
+class LambdaExpr:
+    params: list
+    body: object
+
+@dataclass
 class WalrusExpr:
     name: str
     value: object
@@ -576,6 +581,12 @@ class Parser:
 
     def _parse_stmt(self):
         t = self._peek()
+        # Handle "yield from expr" — yield is NAME('yield'), from is KW('from')
+        if t.kind == "NAME" and t.value == "yield" and self._peek(1).kind == "KW" and self._peek(1).value == "from":
+            self._advance()  # consume yield
+            self._advance()  # consume from
+            self._parse_expr(0)  # parse the delegated generator expression
+            return ExprStmt(value=IdentExpr(name='yield'))
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
@@ -591,7 +602,8 @@ class Parser:
             if t.value == 'for': return self._parse_for()
             if t.value in ("def", "fn"):
                 # fn(  →  variable named "fn" being called; treat as expression
-                if t.value == "fn" and self._peek(1).kind == "LPAREN":
+                # fn =  →  variable named "fn" being assigned; treat as expression
+                if t.value == "fn" and self._peek(1).kind in ("LPAREN", "ASSIGN", "AUGASSIGN", "DOT"):
                     pass  # fall through to expression statement
                 else:
                     self._advance(); return self._parse_funcdef([])
@@ -909,6 +921,13 @@ class Parser:
         # Handle tuple unpacking: for (a, b) in ... or for a, b in ...
         if self._peek().kind == "LPAREN":
             target = _parse_for_target()
+            # Handle (a, b), c in ...
+            if self._peek().kind == "COMMA":
+                names = [target]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    names.append(_parse_for_target())
+                target = "(" + ", ".join(names) + ")"
         else:
             # Accept KW tokens (e.g. "fn", "var") as variable names
             tok = self._advance()
@@ -956,8 +975,11 @@ class Parser:
                 self._advance()
             if self._peek().kind == "RPAREN": break
             # Capture last argument-convention prefix (read/mut/var/ref/out/deinit)
+            # Disambiguation: KW followed by COLON/ASSIGN/COMMA/RPAREN is a param name, not a convention
             conv = None
             while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+                if self._peek(1).kind in ("COLON", "ASSIGN", "COMMA", "RPAREN"):
+                    break
                 conv = self._advance().value
             # Skip positional-only parameter separator /
             if self._peek().kind == "OP" and self._peek().value == "/":
@@ -986,6 +1008,8 @@ class Parser:
                 if self._peek().kind == "LBRACKET": self._skip_bracketed()
                 # Handle convention keywords after * (e.g., *, var x: Int)
                 while self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+                    if self._peek(1).kind in ("COLON", "ASSIGN", "COMMA", "RPAREN"):
+                        break
                     conv = self._advance().value
                 # If followed by NAME/KW, it's a variadic parameter (*args) or keyword-only param
                 t = self._peek()
@@ -1516,7 +1540,12 @@ class Parser:
                         self._advance()  # skip =
                         args.append(self._parse_expr(0))  # parse and keep value
                     else:
-                        args.append(self._parse_expr(0))
+                        first = self._parse_expr(0)
+                        if self._is_kw("for"):
+                            gen = self._parse_generator()
+                            args = [Comprehension(kind="generator", element=first, generators=[gen])]
+                            continue
+                        args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
                 self._expect("RPAREN")
                 expr = CallExpr(func=expr, args=args)
@@ -1568,6 +1597,10 @@ class Parser:
             if self._peek().kind == "RPAREN":
                 self._advance(); return TupleExpr(elements=[])
             first = self._parse_expr(0)
+            if self._is_kw("for"):
+                gen = self._parse_generator()
+                self._expect("RPAREN")
+                return Comprehension(kind="generator", element=first, generators=[gen])
             if self._peek().kind == "COMMA":
                 elems = [first]
                 while self._peek().kind == "COMMA":
@@ -1580,11 +1613,41 @@ class Parser:
             return first
         if t.kind in ("NAME", "KW"):
             self._advance()
+            if t.value == "lambda" and t.kind == "NAME":
+                return self._parse_lambda()
             return IdentExpr(t.value)
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()
             return EllipsisLiteral()
         raise SyntaxError(f"Unexpected {t.kind}({t.value!r})")
+
+    def _parse_lambda(self):
+        params = []
+        while self._peek().kind != "COLON":
+            if self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
+                self._advance(); continue
+            if self._peek().kind == "RPAREN": break
+            if self._peek().kind == "OP" and self._peek().value == "*":
+                self._advance()
+                if self._peek().kind in ("NAME", "KW"):
+                    params.append(("*" + self._advance().value, None))
+                continue
+            if self._peek().kind == "OP" and self._peek().value == "**":
+                self._advance()
+                if self._peek().kind in ("NAME", "KW"):
+                    params.append(("**" + self._advance().value, None))
+                continue
+            if self._peek().kind in ("NAME", "KW"):
+                pname = self._advance().value
+                default = None
+                if self._peek().kind == "ASSIGN":
+                    self._advance()
+                    default = self._parse_expr(0)
+                params.append((pname, default))
+            if self._peek().kind == "COMMA": self._advance()
+        self._expect("COLON")
+        body = self._parse_expr(0)
+        return LambdaExpr(params=params, body=body)
 
     def _parse_list_or_compr(self):
         self._expect("LBRACKET")
@@ -1669,31 +1732,36 @@ class Parser:
         self._expect("RBRACE")
         return SetExpr(elements=elems)
 
-    def _parse_generator(self):
-        self._expect("KW", "for")
-        # Allow KW tokens and tuple targets like 'for t, _ in ...' or 'for (a, b) in ...'
+    def _parse_generator_target(self):
         t = self._peek()
         if t.kind == "LPAREN":
-            # Parenthesised tuple: for (a, b) in ...
             self._advance()
-            names = []
-            while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
-                names.append(self._advance().value)
-                if self._peek().kind == "COMMA": self._advance()
+            sub = self._parse_generator_target()
             self._expect("RPAREN")
-            target = "(" + ", ".join(names) + ")"
+            target = f"({sub})"
         elif t.kind in ("NAME", "KW"):
             target = self._advance().value
-            # Bare tuple: for a, b in ...
-            if self._peek().kind == "COMMA":
-                names = [target]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    if self._peek().kind == "KW" and self._peek().value == "in": break
-                    names.append(self._advance().value)
-                target = "(" + ", ".join(names) + ")"
         else:
             target = self._expect("NAME").value
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._is_kw("in"):
+                break
+            sub_t = self._peek()
+            if sub_t.kind == "LPAREN":
+                self._advance()
+                inner = self._parse_generator_target()
+                self._expect("RPAREN")
+                target += f", ({inner})"
+            elif sub_t.kind in ("NAME", "KW"):
+                target += ", " + self._advance().value
+            else:
+                target += ", " + self._expect("NAME").value
+        return target
+
+    def _parse_generator(self):
+        self._expect("KW", "for")
+        target = self._parse_generator_target()
         self._expect("KW", "in")
         iterable = self._parse_expr(1)
         conditions = []
@@ -1874,40 +1942,43 @@ def emit(node, indent: int = 0) -> str:
     if isinstance(node,EllipsisLiteral): return "..."
     if isinstance(node,IdentExpr): return node.name
     if isinstance(node,CallExpr):
-        f = emit(node.func) if not isinstance(node.func,str) else node.func
-        args = ", ".join(emit(a) for a in node.args)
+        f = emit(node.func, 0) if not isinstance(node.func,str) else node.func
+        args = ", ".join(emit(a, 0) for a in node.args)
         return f"{f}({args})"
-    if isinstance(node,BinaryOp): return f"({emit(node.left)} {node.op} {emit(node.right)})"
-    if isinstance(node,UnaryOp):  return f"({node.op} {emit(node.operand)})"
-    if isinstance(node,TernaryExpr): return f"({emit(node.then_val)} if {emit(node.condition)} else {emit(node.else_val)})"
-    if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value)})"
-    if isinstance(node,MemberExpr): return f"{emit(node.obj)}.{node.member}"
-    if isinstance(node,SubscriptExpr): return f"{emit(node.obj)}[{emit(node.index)}]"
+    if isinstance(node,BinaryOp): return f"({emit(node.left, 0)} {node.op} {emit(node.right, 0)})"
+    if isinstance(node,UnaryOp):  return f"({node.op} {emit(node.operand, 0)})"
+    if isinstance(node,TernaryExpr): return f"({emit(node.then_val, 0)} if {emit(node.condition, 0)} else {emit(node.else_val, 0)})"
+    if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value, 0)})"
+    if isinstance(node,MemberExpr): return f"{emit(node.obj, 0)}.{node.member}"
+    if isinstance(node,SubscriptExpr): return f"{emit(node.obj, 0)}[{emit(node.index, 0)}]"
     if isinstance(node,SliceExpr):
-        start = emit(node.start) if node.start is not None else ""
-        stop  = emit(node.stop)  if node.stop  is not None else ""
-        return f"{emit(node.obj)}[{start}:{stop}]"
-    if isinstance(node,ListExpr): return "[" + ", ".join(emit(e) for e in node.elements) + "]"
-    if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k)}: {emit(v)}" for k,v in node.pairs) + "}"
-    if isinstance(node,SetExpr): return "{" + ", ".join(emit(e) for e in node.elements) + "}"
+        start = emit(node.start, 0) if node.start is not None else ""
+        stop  = emit(node.stop, 0)  if node.stop  is not None else ""
+        return f"{emit(node.obj, 0)}[{start}:{stop}]"
+    if isinstance(node,ListExpr): return "[" + ", ".join(emit(e, 0) for e in node.elements) + "]"
+    if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k, 0)}: {emit(v, 0)}" for k,v in node.pairs) + "}"
+    if isinstance(node,SetExpr): return "{" + ", ".join(emit(e, 0) for e in node.elements) + "}"
     if isinstance(node,TupleExpr):
         if not node.elements: return "()"
-        return "(" + ", ".join(emit(e) for e in node.elements) + ("," if len(node.elements)==1 else "") + ")"
+        return "(" + ", ".join(emit(e, 0) for e in node.elements) + ("," if len(node.elements)==1 else "") + ")"
+    if isinstance(node,LambdaExpr):
+        pstr = ", ".join(p[0] + (f"={emit(p[1])}" if p[1] is not None else "") for p in node.params)
+        return f"lambda {pstr}: {emit(node.body)}"
     if isinstance(node,Comprehension):
         gens = " ".join(f"for {g.target} in {emit(g.iterable)}" + "".join(f" if {emit(c)}" for c in g.conditions) for g in node.generators)
         if node.kind == "list": return f"[{emit(node.element)} {gens}]"
         if node.kind == "set":  return "{" + f"{emit(node.element)} {gens}" + "}"
         if node.kind == "dict": return "{" + f"{emit(node.element)}: {emit(node.key)} {gens}" + "}"
         return f"({emit(node.element)} {gens})"
-    if isinstance(node,ExprStmt): return f"{pad}{emit(node.value)}"
-    if isinstance(node,AssignStmt): return f"{pad}{emit(node.target)} = {emit(node.value)}"
-    if isinstance(node,AugAssignStmt): return f"{pad}{emit(node.target)} {node.op} {emit(node.value)}"
+    if isinstance(node,ExprStmt): return f"{pad}{emit(node.value, 0)}"
+    if isinstance(node,AssignStmt): return f"{pad}{emit(node.target)} = {emit(node.value, 0)}"
+    if isinstance(node,AugAssignStmt): return f"{pad}{emit(node.target)} {node.op} {emit(node.value, 0)}"
     if isinstance(node,VarDecl):
         ann = f": {node.type_ann}" if node.type_ann else ""
-        val = f" = {emit(node.value)}" if node.value is not None else ""
+        val = f" = {emit(node.value, 0)}" if node.value is not None else ""
         return f"{pad}{node.name}{ann}{val}"
     if isinstance(node,MultiAssignStmt):
-        return f"{pad}" + " = ".join(emit(t) for t in node.targets) + " = " + emit(node.value)
+        return f"{pad}" + " = ".join(emit(t) for t in node.targets) + " = " + emit(node.value, 0)
     if isinstance(node,ImportStmt):
         alias = f" as {node.alias}" if node.alias else ""
         return f"{pad}import {node.module}{alias}"
@@ -1916,7 +1987,7 @@ def emit(node, indent: int = 0) -> str:
         names = ", ".join(n + (f" as {a}" if a else "") for n,a in node.names)
         return f"{pad}from {node.module} import {names}"
     if isinstance(node,IfStmt):
-        out = [f"{pad}if {emit(node.condition)}:"]
+        out = [f"{pad}if {emit(node.condition, 0)}:"]
         out += [emit(s,indent+1) for s in node.then_body]
         for (ec,eb) in node.elifs:
             out.append(f"{pad}elif {emit(ec)}:"); out += [emit(s,indent+1) for s in eb]
@@ -1924,7 +1995,7 @@ def emit(node, indent: int = 0) -> str:
             out.append(f"{pad}else:"); out += [emit(s,indent+1) for s in node.else_body]
         return "\n".join(out)
     if isinstance(node,WhileStmt):
-        out = [f"{pad}while {emit(node.condition)}:"]
+        out = [f"{pad}while {emit(node.condition, 0)}:"]
         out += [emit(s,indent+1) for s in node.body]
         if node.else_body is not None:
             out.append(f"{pad}else:"); out += [emit(s,indent+1) for s in node.else_body]
@@ -1947,15 +2018,15 @@ def emit(node, indent: int = 0) -> str:
         return "\n".join(out)
     if isinstance(node,PassStmt): return f"{pad}pass"
     if isinstance(node,ReturnStmt):
-        val = f" {emit(node.value)}" if node.value is not None else ""
+        val = f" {emit(node.value, 0)}" if node.value is not None else ""
         return f"{pad}return{val}"
     if isinstance(node,RaiseStmt):
-        val = f" {emit(node.value)}" if node.value is not None else ""
+        val = f" {emit(node.value, 0)}" if node.value is not None else ""
         return f"{pad}raise{val}"
     if isinstance(node,BreakStmt): return f"{pad}break"
     if isinstance(node,ContinueStmt): return f"{pad}continue"
     if isinstance(node,AssertStmt):
-        val = f" {emit(node.value)}" if node.value is not None else ""
+        val = f" {emit(node.value, 0)}" if node.value is not None else ""
         msg_s = f", {emit(node.msg)}" if node.msg is not None else ""
         return f"{pad}assert{val}{msg_s}"
     if isinstance(node,TryStmt):
@@ -1977,7 +2048,7 @@ def emit(node, indent: int = 0) -> str:
         out += [emit(s,indent+1) for s in node.body]
         return "\n".join(out)
     if isinstance(node,ComptimeIfStmt):
-        out = [f"{pad}if {emit(node.condition)}:  # comptime"]
+        out = [f"{pad}if {emit(node.condition, 0)}:  # comptime"]
         out += [emit(s,indent+1) for s in node.then_body]
         for (ec,eb) in node.elifs:
             out.append(f"{pad}elif {emit(ec)}:"); out += [emit(s,indent+1) for s in eb]

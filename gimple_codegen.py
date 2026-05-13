@@ -1154,7 +1154,7 @@ class FunctionCompilability:
             elif isinstance(stmt, ReturnStmt) and stmt.value:
                 yield from self._walk_expr_nodes(stmt.value)
             elif isinstance(stmt, ExprStmt):
-                yield from self._walk_expr_nodes(stmt.expr)
+                yield from self._walk_expr_nodes(stmt.value)
             elif isinstance(stmt, IfStmt):
                 yield from self._walk_expr_nodes(stmt.condition)
                 yield from self._walk_all_nodes(stmt.then_body)
@@ -1678,6 +1678,7 @@ class GimpleGen:
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
+        self._global_var_types: dict[str, str] = {}  # module-level global name -> C type (persists across functions)
         # Phase C: Dispatch solver for static dispatch table planning
         self._dispatch_solver: DispatchSolver | None = None  # Instantiated in gen_module Phase 1.5
         self._dispatch_tables: dict = {}  # dispatch_table_name → DispatchTable (from _dispatch_solver)
@@ -1720,23 +1721,26 @@ class GimpleGen:
         Returns (code: str, stmts: list) where stmts are parsed statements from the module.
         """
         import os
+        import sys
         import pathlib
         import re
+        import traceback
 
         # Get the directory where gimple_codegen.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Look for module relative to script location
-        mojo_paths = [
-            os.path.join(script_dir, "mojo", f"{module_name}.mojo"),
-            os.path.join(script_dir, f"{module_name}.mojo"),
-            # Also check current directory and parent
-            f"./mojo/{module_name}.mojo",
-            f"mojo/{module_name}.mojo",
-            f"../{module_name}.mojo",
-            f"../mojo/{module_name}.mojo",
-            f"./{module_name}.mojo",
-        ]
+        # Look for module relative to script location.
+        # Try .py first (the working Python reference implementations),
+        # then .mojo (self-hosting versions).  Skip the mojo/ subdirectory
+        # (those .mojo files are stale and use syntax the parser can't handle).
+        extensions = ['.py', '.mojo']
+        mojo_paths = []
+        for ext in extensions:
+            mojo_paths += [
+                os.path.join(script_dir, f"{module_name}{ext}"),
+                f"./{module_name}{ext}",
+                f"../{module_name}{ext}",
+            ]
 
         for path in mojo_paths:
             if os.path.exists(path):
@@ -1752,20 +1756,21 @@ class GimpleGen:
                     # Use do_imports=True for transitive closure; share dedup sets and type information
                     # emit_str_pool=False so only main module emits the shared string pool
                     # emit_struct_defs=True but share _emitted_structs to dedup struct definitions
-                    temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=True)
+                    temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False)
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._str_pool = self._str_pool
                     temp_gen.struct_field_types = self.struct_field_types
+                    temp_gen._global_var_types = self._global_var_types
                     code = temp_gen.gen_module(stmts)
 
                     # Return both code and parsed statements
                     return (code, stmts)
                 except Exception as e:
-                    # Failed to compile this module - continue to next path
+                    __import__('sys').stderr.write(f"# ERROR: compiling imported module {module_name!r} from {path}: {e}\n")
                     continue
 
-        # Module not found
+        # Module not found (e.g. stdlib module like sys, os)
         return (None, [])
 
     def _new_bb(self) -> str:
@@ -1839,6 +1844,8 @@ class GimpleGen:
         'strcat':                ('char *',    ['char *', 'char *']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str_format':       ('char *',    ['char *']),
+        'int_load_module':       ('int',       ['ModuleLoader *', 'char *']),
+        'int_get_symbol_type':   ('char *',    ['ModuleLoader *', 'char *', 'char *']),
     }
 
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
@@ -2021,13 +2028,16 @@ class GimpleGen:
                     elif isinstance(node, ReturnStmt):
                         if node.value:
                             scan_expr(node.value)
-                    elif isinstance(node, (IfStmt, WhileStmt, ForStmt)):
-                        scan_nodes(node.body)
-                        if hasattr(node, 'else_body') and node.else_body:
+                    elif isinstance(node, IfStmt):
+                        scan_nodes(node.then_body)
+                        if node.else_body:
                             scan_nodes(node.else_body)
-                        if hasattr(node, 'elifs'):
-                            for _, elif_body in node.elifs:
-                                scan_nodes(elif_body)
+                        for _, elif_body in node.elifs:
+                            scan_nodes(elif_body)
+                    elif isinstance(node, (WhileStmt, ForStmt)):
+                        scan_nodes(node.body)
+                        if node.else_body:
+                            scan_nodes(node.else_body)
                     elif isinstance(node, WithStmt):
                         # Scan the context expressions (e.g., open(input_file))
                         for item in node.items:
@@ -2279,6 +2289,12 @@ class GimpleGen:
             # Take the address of the function explicitly (function decay to pointer)
             self._emit(f'  {t} = (void *)&{c_name};')
             return 'void *', t
+        # Module-level global variable (persistent type known across functions)
+        if name not in self.var_types and name in self._global_var_types:
+            gtype = self._global_var_types[name]
+            t = self._new_temp(gtype)
+            self._emit(f'  {t} = {name};')
+            return gtype, t
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -3542,8 +3558,13 @@ class GimpleGen:
             return 'MojoList *', t
 
         # Plain pointer: return pointer to start (no bounds check)
+        # GIMPLE forbids pointer + integer on char*; cast through int64_t
         t = self._new_temp(ot)
-        self._emit(f"  {t} = {ov} + {start_v};")
+        cast_t = self._new_temp('int64_t')
+        self._emit(f"  {cast_t} = (int64_t){ov};")
+        add_t = self._new_temp('int64_t')
+        self._emit(f"  {add_t} = {cast_t} + {start_v};")
+        self._emit(f"  {t} = ({ot}){add_t};")
         return ot, t
 
     # ── Collection literal lowering ───────────────────────────────────────
@@ -4295,7 +4316,7 @@ class GimpleGen:
                 self._declare_var(handler.name, exc_ctype)
                 # Retrieve the exception object from the runtime
                 # Use a temp to avoid casting function call results in GIMPLE
-                temp_var = self._fresh_var('exc_obj')
+                temp_var = self._new_temp('void *')
                 self._declare_var(temp_var, 'void *')
                 self._emit(f"  {temp_var} = mojo_exc_obj_get ();")
                 self._emit(f"  {handler.name} = ({exc_ctype}) {temp_var};")
@@ -4587,8 +4608,17 @@ class GimpleGen:
             self._emit(f"  /* TODO: for loop over {it_type} */")
 
     def _gen_for_list(self, var: str, it_val: str, body: list):
-        elem = self._elem_of(it_val)
-        self._declare_var(var, elem)
+        # Handle tuple unpacking: for (a, b) in list_of_tuples:
+        is_tuple = var.startswith('(') and var.endswith(')')
+        elem = None if is_tuple else self._elem_of(it_val)
+        if is_tuple:
+            inner = var[1:-1].strip()
+            var_names = [v.strip() for v in inner.split(',')]
+            for vn in var_names:
+                self._declare_var(vn, 'int64_t')
+        else:
+            var_names = None
+            self._declare_var(var, elem)
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int')
         idx_t = self._new_temp('int')
@@ -4612,15 +4642,23 @@ class GimpleGen:
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         idx64  = self._new_temp('int64_t')
         self._emit(f"  {idx64} = (int64_t) {idx_t};")
-        suf = TypeLattice.list_suffix(elem)
-        if suf == 'double':
-            self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx64});")
-        elif suf == 'str':
-            self._emit(f"  {var} = mojo_list_get_str ({list_ptr}, {idx64});")
-        else:
+        if is_tuple:
             elem64 = self._new_temp('int64_t')
             self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
-            self._emit(f"  {var} = ({elem}) {elem64};")
+            tuple_ptr = self._new_temp('MojoList *')
+            self._emit(f"  {tuple_ptr} = (MojoList *){elem64};")
+            for i, vn in enumerate(var_names):
+                self._emit(f"  {vn} = mojo_list_get_str ({tuple_ptr}, {i});")
+        else:
+            suf = TypeLattice.list_suffix(elem)
+            if suf == 'double':
+                self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx64});")
+            elif suf == 'str':
+                self._emit(f"  {var} = mojo_list_get_str ({list_ptr}, {idx64});")
+            else:
+                elem64 = self._new_temp('int64_t')
+                self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+                self._emit(f"  {var} = ({elem}) {elem64};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -5018,6 +5056,7 @@ class GimpleGen:
             # Compile imported modules to extract type information
             for module_name in sorted(modules_to_compile):
                 if module_name not in self._compiled_modules:
+                    self._compiled_modules.add(module_name)
                     code, module_stmts = self._compile_imported_module(module_name)
                     if code:
                         imported_code.append(f"/* ─── Imported module: {module_name} ───────────────────── */")
@@ -5032,7 +5071,10 @@ class GimpleGen:
 
         # Register struct field types first so _resolve_type works for funcs
         # Include both current module and imported module structs
-        self.struct_field_types = {}
+        # NOTE: do NOT clear struct_field_types here — it was already populated
+        # by temp_gens during Phase 0 import compilation.  Clearing it would
+        # lose structs from transitive imports (ModuleLoader, Layout, etc.)
+        # that were added to the shared dict by nested temp_gens.
 
         # Pre-populate known interpreter structs with their field types
         # This handles cases where field type inference from method bodies fails
@@ -5388,7 +5430,7 @@ class GimpleGen:
         # This includes structs from struct_field_types (like Interpreter, Scope, etc.)
         # Emit in dependency order: structs with no struct dependencies first
         # Self-referential dependencies (e.g. Scope->Scope*) are allowed in C
-        if hasattr(self, 'struct_field_types') and self.struct_field_types:
+        if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
             parts.append('')
             emitted = set()
             max_iterations = len(self.struct_field_types) + 1
@@ -5428,17 +5470,6 @@ class GimpleGen:
                     emitted.add(struct_name)
             parts.append('')
 
-        # Forward declare dispatch tables before any functions that might use them
-        # (they're imported from generated_dispatch and need to be visible before use)
-        # Only declare as extern those that aren't defined in this module
-        if self.do_imports:
-            parts.append('')
-            # These come from generated_dispatch.mojo/generated_dispatch.c:
-            for gname in ('_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
-                          '_GD_SIGNED', '_GD_UNSIGNED', '_GD_FLOAT',
-                          '_GD_BIN_OPS', '_GD_CMP_OPS'):
-                parts.append(f"extern MojoDict * {gname};")
-
         # Include compiled imported modules
         if imported_code:
             parts.append('')
@@ -5453,7 +5484,7 @@ class GimpleGen:
         if self._ptr_helpers_needed:
             parts.append('')
 
-        # Module-level globals (dicts, lists, sets, simple values at module scope)
+        # Module-level globals (imported modules, dicts, lists, sets, values at module scope)
         global_decls = []
         # Dispatch table globals already forward-declared near top of file
         # Also declare imported dispatch tables as MojoDict globals
@@ -5464,48 +5495,81 @@ class GimpleGen:
         for stmt in all_scan:
             if isinstance(stmt, FromImportStmt):
                 for alias in stmt.names:
-                    orig_name = alias[0]           # original name
-                    local_name = alias[1] if len(alias) > 1 and alias[1] else orig_name  # as-alias
-                    # Declare both the original and local names if they match dispatch names
+                    orig_name = alias[0]
+                    local_name = alias[1] if len(alias) > 1 and alias[1] else orig_name
                     for check_name in (orig_name, local_name):
                         if check_name in _dispatch_names and check_name not in _declared_globals:
-                            # Dispatch tables should not be static so they're visible across modules
                             global_decls.append(f"MojoDict * {check_name};")
                             _declared_globals.add(check_name)
-        for stmt in stmts:
+            elif isinstance(stmt, ImportStmt):
+                if stmt.module not in _declared_globals:
+                    global_decls.append(f"int64_t {stmt.module};")
+                    _declared_globals.add(stmt.module)
+                    self._global_var_types[stmt.module] = 'int64_t'
+        # Scan current module + imported stmts for module-level variable declarations
+        all_global_scan = stmts + (imported_stmts if self.do_imports else [])
+        for stmt in all_global_scan:
             if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
                 gname = stmt.target.name
+                if gname in _declared_globals:
+                    continue
+                _declared_globals.add(gname)
                 if isinstance(stmt.value, DictExpr):
-                    global_decls.append(f"static MojoDict * {gname};")
+                    global_decls.append(f"int64_t {gname};  /* MojoDict * */")
+                    self._global_var_types[gname] = 'MojoDict *'
                 elif isinstance(stmt.value, (ListExpr, TupleExpr)):
-                    global_decls.append(f"static MojoList * {gname};")
+                    global_decls.append(f"int64_t {gname};  /* MojoList * */")
+                    self._global_var_types[gname] = 'MojoList *'
                 elif isinstance(stmt.value, SetExpr):
-                    global_decls.append(f"static MojoSet * {gname};")
+                    global_decls.append(f"int64_t {gname};  /* MojoSet * */")
+                    self._global_var_types[gname] = 'MojoSet *'
                 elif isinstance(stmt.value, (IntLiteral, BoolLiteral)):
-                    global_decls.append(f"static int {gname};")
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
                 elif isinstance(stmt.value, StringLiteral):
-                    global_decls.append(f"static char * {gname};")
-            elif isinstance(stmt, VarDecl) and stmt.type_ann and 'dict' in str(stmt.type_ann).lower():
-                # Annotated module-level dict: _TYPE_MAP: dict[...] = {...}
-                global_decls.append(f"static MojoDict * {stmt.name};")
+                    global_decls.append(f"char * {gname};")
+                    self._global_var_types[gname] = 'char *'
+                elif isinstance(stmt.value, CallExpr):
+                    if isinstance(stmt.value.func, IdentExpr) and stmt.value.func.name in self.struct_field_types:
+                        struct_name = stmt.value.func.name
+                        global_decls.append(f"{struct_name} * {gname};")
+                        self._global_var_types[gname] = f"{struct_name} *"
+                    elif isinstance(stmt.value.func, IdentExpr):
+                        ret = self.func_return_types.get(stmt.value.func.name, '')
+                        if ret.endswith(' *'):
+                            global_decls.append(f"{ret} {gname};")
+                            self._global_var_types[gname] = ret
+                        elif ret == 'char *':
+                            global_decls.append(f"char * {gname};")
+                            self._global_var_types[gname] = 'char *'
+                        else:
+                            global_decls.append(f"int64_t {gname};")
+                            self._global_var_types[gname] = 'int64_t'
+                    else:
+                        global_decls.append(f"int64_t {gname};")
+                        self._global_var_types[gname] = 'int64_t'
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+            elif isinstance(stmt, VarDecl) and stmt.name not in _declared_globals:
+                _declared_globals.add(stmt.name)
+                ctype = self._resolve_type(stmt.type_ann) if stmt.type_ann else 'int64_t'
+                global_decls.append(f"{ctype} {stmt.name};")
+                self._global_var_types[stmt.name] = ctype
         if global_decls:
             parts.extend(global_decls)
             parts.append('')
 
         # Struct typedefs (dedup across modules, keep most complete definition)
         if self.emit_struct_defs:
-            # Track best definition of each struct by field count
-            struct_defs_by_name = {}
-            all_struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+            track_best = {}
+            for s in stmts + (imported_stmts if self.do_imports else []):
+                if isinstance(s, StructDef):
+                    field_count = len([f for f in s.fields if isinstance(f, VarDecl)])
+                    if s.name not in track_best or field_count > track_best[s.name][1]:
+                        track_best[s.name] = (s, field_count)
 
-            for sd in all_struct_defs:
-                # Count non-method fields
-                field_count = len([f for f in sd.fields if isinstance(f, VarDecl)])
-                if sd.name not in struct_defs_by_name or field_count > struct_defs_by_name[sd.name][1]:
-                    struct_defs_by_name[sd.name] = (sd, field_count)
-
-            # Emit deduplicated struct definitions
-            for sd, _ in struct_defs_by_name.values():
+            for sd, _ in track_best.values():
                 if sd.name not in self._emitted_structs:
                     parts.append(f"typedef struct {sd.name} {{")
                     emitted_fields = set()
@@ -5602,7 +5666,7 @@ class GimpleGen:
             parts.append(f"{ret} {_safe_name(fn.name)} ({ptypes});")
 
         # Forward declarations: struct methods
-        struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+        struct_defs = [s for s in stmts + (imported_stmts if self.do_imports else []) if isinstance(s, StructDef)]
         for sd in struct_defs:
             for m in sd.methods:
                 ret = self.func_return_types.get(f"{sd.name}_{m.name}",

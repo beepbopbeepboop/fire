@@ -81,6 +81,11 @@ class TernaryExpr:
     else_val: object   # Expr
 
 @dataclass
+class LambdaExpr:
+    params: list  # list of (name, default) tuples
+    body: object  # Expr
+
+@dataclass
 class WalrusExpr:
     name: str
     value: object  # Expr

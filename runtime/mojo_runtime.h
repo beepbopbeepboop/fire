@@ -297,9 +297,23 @@ char *int64_t_basename(char *path);    /* basename() from os.path */
 char *int64_t_splitext(char *path);    /* splitext() from os.path */
 
 /* Module functions that are imported */
-int tokenize(char *source);           /* tokenize function */
-int Parser(int tokens);               /* Parser class constructor */
-int int_compile_to_gimple(char *source);  /* compile_to_gimple function */
+MojoList *tokenize(char *source);            /* tokenize function */
+int Parser(int tokens);                      /* Parser class constructor (opaque) */
+char *gimple_codegen_compile_to_gimple(char *source);  /* compile_to_gimple function */
+
+/* os.path bridge functions (called from compiled module_loader code) */
+int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
+int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
+int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
+int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
+int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
+
+/* Forward declare ModuleLoader (defined in generated code) */
+typedef struct ModuleLoader ModuleLoader;
+
+/* Module loader bridge functions (called from compiled module_loader code) */
+int int_load_module(ModuleLoader *ml_ptr, char *module_name);                           /* ModuleLoader.load_module */
+char *int_get_symbol_type(ModuleLoader *ml_ptr, char *module_name, char *symbol_name);  /* ModuleLoader.get_symbol_type */
 
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */

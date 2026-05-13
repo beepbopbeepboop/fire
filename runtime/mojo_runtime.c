@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #define USE_PYTHON 0
 
@@ -1367,14 +1368,70 @@ void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
 
 
 /* Missing stubs for imported modules */
-int tokenize(char *source) {
-    (void)source;
-    return 0;
-}
+/* tokenize is provided by compiled mojo_compiler code, not the runtime */
 
 int Parser(int tokens) {
     (void)tokens;
     return 0;
+}
+
+/* os.path bridge functions (stubs - real impl uses POSIX) */
+int int_isdir(int64_t marker, int64_t path) {
+    (void)marker;
+    char *p = (char *)path;
+    if (!p) return 0;
+    struct stat st;
+    return (stat(p, &st) == 0 && S_ISDIR(st.st_mode));
+}
+
+int64_t int_abspath(int64_t marker, int64_t path) {
+    (void)marker;
+    char *p = (char *)path;
+    if (!p) return (int64_t)"";
+    static char buf[4096];
+    if (*p == '/') return (int64_t)p;
+    if (!getcwd(buf, sizeof(buf))) return (int64_t)p;
+    size_t plen = strlen(p);
+    size_t dlen = strlen(buf);
+    char *result = malloc(dlen + 1 + plen + 1);
+    if (!result) return (int64_t)p;
+    memcpy(result, buf, dlen);
+    result[dlen] = '/';
+    memcpy(result + dlen + 1, p, plen + 1);
+    return (int64_t)result;
+}
+
+int64_t int_dirname(int64_t marker, int64_t path) {
+    (void)marker;
+    char *p = (char *)path;
+    if (!p || !*p) return (int64_t)".";
+    char *copy = strdup(p);
+    if (!copy) return (int64_t)".";
+    char *last = NULL;
+    for (char *cp = copy; *cp; cp++) {
+        if (*cp == '/') last = cp;
+    }
+    if (!last) { free(copy); return (int64_t)"."; }
+    *last = '\0';
+    if (*copy == '\0') { free(copy); return (int64_t)"/"; }
+    char *result = strdup(copy);
+    free(copy);
+    return (int64_t)result;
+}
+
+int int_exists(int64_t marker, int64_t path) {
+    (void)marker;
+    char *p = (char *)path;
+    if (!p) return 0;
+    struct stat st;
+    return (stat(p, &st) == 0);
+}
+
+int64_t int_getcwd(int64_t marker) {
+    (void)marker;
+    static char buf[4096];
+    if (getcwd(buf, sizeof(buf))) return (int64_t)buf;
+    return (int64_t)"";
 }
 
 char *int64_t_basename(char *path) {
@@ -1396,4 +1453,23 @@ char *int64_t_splitext(char *path) {
         return (char *)dot;
     }
     return (char *)path;
+}
+
+/* Forward declare ModuleLoader (defined in generated code) */
+typedef struct ModuleLoader ModuleLoader;
+
+/* Module loader bridge implementations */
+int int_load_module(ModuleLoader *ml_ptr, char *module_name) {
+    /* Stub: return 0 (empty dict encoded as int) */
+    (void)ml_ptr;  /* unused parameter */
+    (void)module_name;  /* unused parameter */
+    return 0;
+}
+
+char *int_get_symbol_type(ModuleLoader *ml_ptr, char *module_name, char *symbol_name) {
+    /* Stub: return "int" as default type */
+    (void)ml_ptr;  /* unused parameter */
+    (void)module_name;  /* unused parameter */
+    (void)symbol_name;  /* unused parameter */
+    return "int";
 }
