@@ -366,6 +366,151 @@ class LayoutSolver:
 # DispatchSolver — whole-program dispatch analysis for closure patterns
 # ---------------------------------------------------------------------------
 
+class DispatchTable:
+    """Plan for a virtual method table or dispatch array.
+
+    Stores the planned structure of a dispatch table (vtable), with methods
+    to emit C code for the typedef, initialization, and dispatch calls.
+
+    Examples:
+        - Interpreter's execute dispatch: maps execute_* methods
+        - Generic container dispatch: maps operation names to implementations
+    """
+
+    def __init__(self, name: str, pattern_id: str, dispatch_type: str):
+        self.name = name                      # "interpreter_execute_dispatch"
+        self.pattern_id = pattern_id          # Original pattern identifier
+        self.dispatch_type = dispatch_type    # "FUNC_POINTER", "ARRAY_INDEX", "TYPE_SWITCH"
+        self.methods: list = []               # [(method_name, c_signature, full_c_name)]
+        self.struct_fields: dict = {}         # field_name → c_type (for FUNC_POINTER)
+        self.dispatch_index_map: dict = {}    # method_name → index (for ARRAY_INDEX)
+
+    def add_method(self, method_name: str, c_signature: str, full_c_name: str):
+        """Add a method to this dispatch table.
+
+        Args:
+            method_name: Short name (e.g., 'execute_Module')
+            c_signature: Function pointer signature (e.g., 'int (*name)(void *self, void *node)')
+            full_c_name: Full C function name (e.g., 'Interpreter_execute_Module')
+        """
+        self.methods.append((method_name, c_signature, full_c_name))
+        # For FUNC_POINTER style, each method becomes a struct field
+        if self.dispatch_type == 'FUNC_POINTER':
+            self.struct_fields[method_name] = c_signature
+
+    def emit_typedef(self) -> str:
+        """Emit C typedef for this dispatch table struct.
+
+        For FUNC_POINTER dispatch:
+            typedef struct {
+                int (*execute_Module)(void *self, void *node);
+                int (*execute_FunctionDef)(void *self, void *node);
+                ...
+            } interpreter_execute_dispatch_t;
+        """
+        if self.dispatch_type == 'FUNC_POINTER':
+            lines = [f"typedef struct {{"]
+            for method_name, c_signature in self.struct_fields.items():
+                # c_signature is like: "int (*execute_Module)(void *self, void *node)"
+                # Already has the field name, just add as-is
+                lines.append(f"  {c_signature};")
+            lines.append(f"}} {self.name}_t;")
+            return '\n'.join(lines)
+
+        elif self.dispatch_type == 'ARRAY_INDEX':
+            # Array of function pointers
+            # Need to extract common signature from methods
+            if self.methods:
+                _, sig, _ = self.methods[0]
+                # Extract return type and params from first method
+                # This is simplified; Phase C can improve
+                lines = [f"typedef int (*{self.name}_fn)(void *, void *);"]
+                return '\n'.join(lines)
+
+        return f"/* TODO: {self.dispatch_type} dispatch typedef */"
+
+    def emit_table_init(self) -> str:
+        """Emit C initialization for this dispatch table.
+
+        For FUNC_POINTER dispatch:
+            static const interpreter_execute_dispatch_t execute_dispatch = {
+                .execute_Module = Interpreter_execute_Module,
+                .execute_FunctionDef = Interpreter_execute_FunctionDef,
+                ...
+            };
+        """
+        if self.dispatch_type == 'FUNC_POINTER':
+            lines = [f"static const {self.name}_t {self.name} = {{"]
+            for method_name, _, full_c_name in self.methods:
+                lines.append(f"  .{method_name} = {full_c_name},")
+            lines.append(f"}};")
+            return '\n'.join(lines)
+
+        elif self.dispatch_type == 'ARRAY_INDEX':
+            lines = [f"static const {self.name}_fn {self.name}[] = {{"]
+            for _, _, full_c_name in self.methods:
+                lines.append(f"  {full_c_name},")
+            lines.append(f"}};")
+            return '\n'.join(lines)
+
+        return f"/* TODO: {self.dispatch_type} dispatch init */"
+
+    def emit_dispatch_call(self, obj: str, method_idx: int | str, args: str) -> str:
+        """Emit C code to dispatch through this table.
+
+        Args:
+            obj: Object holding the dispatch table (e.g., 'self->dispatch' or 'execute_dispatch')
+            method_idx: Either int index (0, 1, 2) or method name
+            args: Arguments to pass to dispatched function
+
+        Returns:
+            C code for the dispatch call
+
+        Examples:
+            FUNC_POINTER: execute_dispatch.execute_Module(self, node)
+            ARRAY_INDEX: execute_dispatch[0](self, node)
+        """
+        if self.dispatch_type == 'FUNC_POINTER':
+            if isinstance(method_idx, int) and 0 <= method_idx < len(self.methods):
+                method_name, _, _ = self.methods[method_idx]
+                return f"{obj}.{method_name}({args})"
+            elif isinstance(method_idx, str):
+                # Direct method name
+                return f"{obj}.{method_idx}({args})"
+
+        elif self.dispatch_type == 'ARRAY_INDEX':
+            if isinstance(method_idx, int):
+                return f"{obj}[{method_idx}]({args})"
+            else:
+                # Need to map method name to index
+                for i, (method_name, _, _) in enumerate(self.methods):
+                    if method_name == method_idx:
+                        return f"{obj}[{i}]({args})"
+
+        return f"/* TODO: dispatch call */"
+
+    def get_method_index(self, method_name: str) -> int | None:
+        """Get the index of a method in this dispatch table."""
+        for i, (name, _, _) in enumerate(self.methods):
+            if name == method_name:
+                return i
+        return None
+
+    def get_method_count(self) -> int:
+        """Get the number of methods in this dispatch table."""
+        return len(self.methods)
+
+    def get_c_function_pointer_type(self) -> str:
+        """Get the C function pointer type for this dispatch table."""
+        if self.methods:
+            _, sig, _ = self.methods[0]
+            # Extract the function pointer type from the first signature
+            # "int (*name)(void *self, void *node)" → "int (*)(void *self, void *node)"
+            # For now, return a generic type
+            return "void (*)(void *, void *)"
+        return "void (*)(void)"
+
+
 class DispatchPattern:
     """Describes a dynamic dispatch pattern found in the code.
 
@@ -683,17 +828,81 @@ class DispatchSolver:
         self.dispatch_patterns[pattern_key] = pattern
 
     def _plan_dispatch_tables(self):
-        """For each dispatch pattern, determine possible callees and plan vtable.
+        """For each dispatch pattern, plan the vtable structure.
 
         This phase:
-        1. Uses call graph to determine which functions are reachable from each pattern
-        2. Groups patterns that dispatch to the same set of functions
-        3. Prepares for vtable struct generation in next phase
+        1. Groups patterns by their callees to identify unique dispatch tables
+        2. Creates DispatchTable for each pattern with full vtable planning
+        3. Infers parameter types from function return types
         """
-        # For now, this is a placeholder that will be extended in later phases
-        # The patterns are already identified in dispatch_patterns dict
-        # Future: merge similar patterns, plan vtable layouts, etc.
-        pass
+        # Track planned tables to avoid duplicates
+        # Key: frozenset of callee names (normalized set of targets)
+        # Value: DispatchTable
+        tables_by_callees: dict = {}
+
+        for pattern_id, pattern in self.dispatch_patterns.items():
+            if not pattern.possible_callees:
+                continue
+
+            # Normalize: use sorted frozenset as key for deduplication
+            callee_key = frozenset(pattern.possible_callees)
+
+            # If we haven't planned a table for this set of callees yet, create one
+            if callee_key not in tables_by_callees:
+                # Create table name from pattern
+                table_name = self._generate_table_name(pattern_id, pattern)
+
+                # Plan the dispatch table
+                table = DispatchTable(
+                    name=table_name,
+                    pattern_id=pattern_id,
+                    dispatch_type='FUNC_POINTER'  # Primary mode for Phase B
+                )
+
+                # Add methods to the table
+                for callee in sorted(pattern.possible_callees):
+                    # Extract method name from full name
+                    # E.g., "Interpreter_execute_Module" → "execute_Module"
+                    method_name = self._extract_method_name(callee)
+
+                    # Infer C signature from function return type
+                    return_type = self.func_return_types.get(callee, 'int')
+
+                    # For now, use void * for parameter (will be typed in Phase C)
+                    c_signature = f"{return_type} (*{method_name})(void *self, void *node)"
+
+                    table.add_method(method_name, c_signature, callee)
+
+                tables_by_callees[callee_key] = table
+
+        # Store the planned dispatch tables
+        self.dispatch_tables = tables_by_callees
+
+    def _generate_table_name(self, pattern_id: str, pattern: DispatchPattern) -> str:
+        """Generate a C-safe name for a dispatch table."""
+        # Pattern: "Interpreter_execute:getattr_self:12345"
+        # Result: "interpreter_execute_dispatch"
+        parts = pattern_id.split(':')
+        base = parts[0].lower()
+        if pattern.pattern_type == 'getattr':
+            return f"{base}_dispatch"
+        elif pattern.pattern_type == 'subscript':
+            return f"{base}_dispatch"
+        else:
+            return f"dispatch_{self._pattern_counter}"
+
+    def _extract_method_name(self, full_name: str) -> str:
+        """Extract method name from mangled C name.
+
+        Examples:
+            "Interpreter_execute_Module" → "execute_Module"
+            "Scope_set" → "set"
+        """
+        # Find the struct separator (underscore before method)
+        parts = full_name.split('_', 1)
+        if len(parts) == 2:
+            return parts[1]
+        return full_name
 
     def get_patterns_for_function(self, func_name: str) -> list[DispatchPattern]:
         """Get all dispatch patterns used in a specific function."""
@@ -715,6 +924,10 @@ class DispatchSolver:
     def get_call_count(self, func_name: str) -> int:
         """Get number of direct callers of a function."""
         return len(self.callers_of.get(func_name, set()))
+
+    def get_dispatch_tables(self) -> dict:
+        """Get all planned dispatch tables keyed by callee set."""
+        return self.dispatch_tables
 
 
 # ---------------------------------------------------------------------------
