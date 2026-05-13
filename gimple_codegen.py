@@ -5373,6 +5373,10 @@ class GimpleGen:
                     parts.append(f"typedef struct {struct_name} {{")
                     if fields:
                         for field_name, field_type in sorted(fields.items()):
+                            # For self-references in typedef, use 'struct Name *' syntax
+                            if field_type == f"{struct_name} *":
+                                # Change Scope * to struct Scope * for self-references
+                                field_type = f"struct {struct_name} *"
                             parts.append(f"  {field_type} {field_name};")
                     else:
                         # Empty struct - add a dummy field for valid C
