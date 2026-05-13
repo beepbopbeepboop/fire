@@ -363,6 +363,361 @@ class LayoutSolver:
 
 
 # ---------------------------------------------------------------------------
+# DispatchSolver — whole-program dispatch analysis for closure patterns
+# ---------------------------------------------------------------------------
+
+class DispatchPattern:
+    """Describes a dynamic dispatch pattern found in the code.
+
+    Examples:
+        - getattr(self, f'execute_{type}', None) — method lookup on interpreter
+        - _STMT_DISPATCH[node_type] — dict-based dispatch
+        - node.method() — direct method reference
+    """
+    def __init__(self, pattern_id: str, pattern_type: str, location: tuple):
+        self.pattern_id = pattern_id      # Unique identifier for this pattern
+        self.pattern_type = pattern_type  # 'getattr', 'subscript', 'member'
+        self.location = location          # (function_name, line_num) for debugging
+        self.possible_callees: set = set()  # Which functions could be called here
+        self.call_sites: list = []        # AST nodes that use this pattern
+
+    def add_call_site(self, node):
+        """Record an AST node that uses this dispatch pattern."""
+        self.call_sites.append(node)
+
+    def add_callee(self, func_name: str):
+        """Record a function that could be called via this pattern."""
+        self.possible_callees.add(func_name)
+
+
+class DispatchSolver:
+    """Whole-program dispatch analysis for dynamic patterns in closure.
+
+    Analyzes entire transitive closure (all modules) to:
+    1. Build static call graph (direct calls)
+    2. Identify dynamic dispatch patterns (getattr, dict subscripts, etc.)
+    3. Plan dispatch tables for those patterns
+
+    Input: Complete AST of all modules (from do_imports=True)
+    Output: Planned dispatch tables and call graph analysis
+    """
+
+    def __init__(self, struct_field_types: dict, func_return_types: dict):
+        self.struct_field_types = struct_field_types
+        self.func_return_types = func_return_types
+
+        # Call graph: caller_name → Set[callee_name]
+        # Only includes direct, static calls (not through getattr/dict)
+        self.call_graph: dict[str, set] = {}
+
+        # Dispatch patterns found: pattern_id → DispatchPattern
+        self.dispatch_patterns: dict[str, DispatchPattern] = {}
+
+        # Reverse call graph: callee_name → Set[caller_name]
+        # Useful for determining monomorphism
+        self.callers_of: dict[str, set] = {}
+
+        # Method lookup: struct_name → {method_name → full_function_name}
+        # E.g., "Interpreter" → {"execute_Module" → "Interpreter_execute_Module"}
+        self.struct_methods: dict[str, dict] = {}
+
+        # Counter for unique pattern IDs
+        self._pattern_counter = 0
+
+    def analyze(self, all_stmts: list):
+        """Run complete dispatch analysis on entire closure."""
+        # Pass 1: Build call graph and struct method mapping
+        self._build_call_graph(all_stmts)
+
+        # Pass 2: Find all dynamic dispatch patterns
+        self._find_dispatch_patterns(all_stmts)
+
+        # Pass 3: Plan dispatch tables for each pattern
+        self._plan_dispatch_tables()
+
+    def _build_call_graph(self, stmts: list):
+        """Traverse all functions and structs, record direct calls.
+
+        Direct calls = those where the callee is statically known.
+        Dynamic calls (getattr, dict lookup) are skipped here and handled separately.
+        """
+        # First pass: collect all function/method names
+        all_functions = set()
+
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                all_functions.add(stmt.name)
+            elif isinstance(stmt, StructDef):
+                # Record struct methods
+                if stmt.name not in self.struct_methods:
+                    self.struct_methods[stmt.name] = {}
+                for method in stmt.methods:
+                    method_name = f"{stmt.name}_{method.name}"
+                    all_functions.add(method_name)
+                    self.struct_methods[stmt.name][method.name] = method_name
+
+        # Second pass: analyze call graph in all functions and methods
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                self._scan_for_calls(stmt.name, stmt.body, all_functions)
+            elif isinstance(stmt, StructDef):
+                for method in stmt.methods:
+                    method_full_name = f"{stmt.name}_{method.name}"
+                    self._scan_for_calls(method_full_name, method.body, all_functions)
+
+    def _scan_for_calls(self, func_name: str, body: list, all_functions: set):
+        """Scan function body for direct calls, build call graph."""
+        if func_name not in self.call_graph:
+            self.call_graph[func_name] = set()
+
+        for node in self._walk_stmts(body):
+            if isinstance(node, CallExpr):
+                # Check if this is a direct call
+                callee = self._extract_callee_name(node.func)
+                if callee and callee in all_functions:
+                    self.call_graph[func_name].add(callee)
+                    # Update reverse graph
+                    if callee not in self.callers_of:
+                        self.callers_of[callee] = set()
+                    self.callers_of[callee].add(func_name)
+
+    def _walk_stmts(self, stmts: list):
+        """Generator: yield all expression nodes in statement list."""
+        for stmt in stmts:
+            if isinstance(stmt, ExprStmt):
+                yield from self._walk_expr(stmt.value)
+            elif isinstance(stmt, ReturnStmt) and stmt.value:
+                yield from self._walk_expr(stmt.value)
+            elif isinstance(stmt, AssignStmt):
+                yield from self._walk_expr(stmt.value)
+            elif isinstance(stmt, IfStmt):
+                yield from self._walk_expr(stmt.condition)
+                yield from self._walk_stmts(stmt.then_body)
+                for _, elif_body in stmt.elifs:
+                    yield from self._walk_stmts(elif_body)
+                if stmt.else_body:
+                    yield from self._walk_stmts(stmt.else_body)
+            elif isinstance(stmt, (WhileStmt, ForStmt)):
+                if isinstance(stmt, WhileStmt):
+                    yield from self._walk_expr(stmt.condition)
+                elif isinstance(stmt, ForStmt):
+                    yield from self._walk_expr(stmt.iterable)
+                yield from self._walk_stmts(stmt.body)
+            elif isinstance(stmt, TryStmt):
+                yield from self._walk_stmts(stmt.body)
+                for h in stmt.handlers:
+                    yield from self._walk_stmts(h.body)
+                if stmt.else_body:
+                    yield from self._walk_stmts(stmt.else_body)
+                if stmt.finally_body:
+                    yield from self._walk_stmts(stmt.finally_body)
+            elif isinstance(stmt, WithStmt):
+                yield from self._walk_stmts(stmt.body)
+
+    def _walk_expr(self, expr):
+        """Generator: yield expr and all sub-expressions."""
+        if expr is None:
+            return
+        yield expr
+        if isinstance(expr, BinaryOp):
+            yield from self._walk_expr(expr.left)
+            yield from self._walk_expr(expr.right)
+        elif isinstance(expr, UnaryOp):
+            yield from self._walk_expr(expr.operand)
+        elif isinstance(expr, CallExpr):
+            yield from self._walk_expr(expr.func)
+            for arg in expr.args:
+                yield from self._walk_expr(arg)
+        elif isinstance(expr, MemberExpr):
+            yield from self._walk_expr(expr.obj)
+        elif isinstance(expr, SubscriptExpr):
+            yield from self._walk_expr(expr.obj)
+            yield from self._walk_expr(expr.index)
+        elif isinstance(expr, SliceExpr):
+            yield from self._walk_expr(expr.obj)
+            if expr.start:
+                yield from self._walk_expr(expr.start)
+            if expr.stop:
+                yield from self._walk_expr(expr.stop)
+        elif isinstance(expr, TernaryExpr):
+            yield from self._walk_expr(expr.condition)
+            yield from self._walk_expr(expr.then_val)
+            yield from self._walk_expr(expr.else_val)
+        elif isinstance(expr, (ListExpr, SetExpr, TupleExpr)):
+            for e in expr.elements:
+                yield from self._walk_expr(e)
+        elif isinstance(expr, DictExpr):
+            for k, v in expr.pairs:
+                yield from self._walk_expr(k)
+                yield from self._walk_expr(v)
+
+    def _extract_callee_name(self, func_expr) -> str | None:
+        """Extract function name if func_expr is a simple identifier or method.
+
+        Returns:
+            - Simple name: "foo" → "foo"
+            - Method: obj.method() → None (not direct call, would be getattr pattern)
+            - Subscript: dispatch[x]() → None (dynamic dispatch)
+            - Complex: any nesting → None
+        """
+        if isinstance(func_expr, IdentExpr):
+            return func_expr.name
+        # Don't extract from getattr, subscripts, or member access — those are dynamic
+        return None
+
+    def _find_dispatch_patterns(self, stmts: list):
+        """Identify all dynamic dispatch patterns in the code.
+
+        Patterns to detect:
+        1. getattr(obj, name_expr, default) — method lookup
+        2. dict[key] where dict is a dispatch table — subscript dispatch
+        3. obj.method(args) where obj is 'self' and method has dynamic selector
+        """
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                self._find_patterns_in_body(stmt.name, stmt.body, None)
+            elif isinstance(stmt, StructDef):
+                for method in stmt.methods:
+                    method_full_name = f"{stmt.name}_{method.name}"
+                    self._find_patterns_in_body(method_full_name, method.body, stmt.name)
+
+    def _find_patterns_in_body(self, func_name: str, body: list, struct_name: str | None):
+        """Find dispatch patterns in a function/method body."""
+        for node in self._walk_stmts(body):
+            if isinstance(node, CallExpr):
+                # Pattern 1: getattr(obj, name, default)
+                if (isinstance(node.func, IdentExpr) and
+                    node.func.name == 'getattr' and
+                    len(node.args) >= 2):
+                    self._analyze_getattr_pattern(func_name, node, struct_name)
+
+                # Pattern 2: subscript dispatch — obj[key]()
+                if isinstance(node.func, SubscriptExpr):
+                    self._analyze_subscript_dispatch(func_name, node.func)
+
+    def _analyze_getattr_pattern(self, func_name: str, call_node: CallExpr, struct_name: str | None):
+        """Analyze getattr(obj, name_expr, default) pattern.
+
+        Tries to determine:
+        - Which object is being inspected (obj)
+        - What methods might be retrieved (from name_expr pattern)
+        """
+        if len(call_node.args) < 2:
+            return
+
+        obj_expr = call_node.args[0]
+        name_expr = call_node.args[1]
+
+        # Identify the object
+        obj_name = None
+        if isinstance(obj_expr, IdentExpr):
+            obj_name = obj_expr.name
+
+        # Pattern: f'execute_{type(node).__name__}' → getattr for execute_* methods
+        # Or: f'{prefix}_{something}' → look for matching method names
+        if obj_name == 'self' and struct_name:
+            # This is a method lookup on current struct
+            pattern_key = f"{struct_name}_{func_name.split('_')[-1]}:getattr_self:{id(call_node)}"
+            pattern = DispatchPattern(pattern_key, 'getattr', (func_name, 0))
+            pattern.add_call_site(call_node)
+
+            # Try to infer which methods could be called
+            if isinstance(name_expr, BinaryOp) and name_expr.op == '+':
+                # Pattern like f'{prefix}_{something}'
+                # Find all methods matching this pattern
+                self._infer_getattr_targets(pattern, name_expr, struct_name)
+            else:
+                # If we can't analyze the pattern, assume all methods might be called
+                # This is conservative but correct
+                if struct_name in self.struct_methods:
+                    for method_name, full_name in self.struct_methods[struct_name].items():
+                        # Skip __init__ and the method doing the dispatch itself
+                        if method_name not in ('__init__', 'execute'):
+                            pattern.add_callee(full_name)
+
+            self.dispatch_patterns[pattern_key] = pattern
+
+    def _infer_getattr_targets(self, pattern: DispatchPattern, name_expr, struct_name: str):
+        """Try to infer which methods could be retrieved by this getattr.
+
+        For patterns like f'execute_{type_name}', find all methods starting with 'execute_'.
+        """
+        # Try to extract a prefix from the name expression
+        prefix = None
+
+        if isinstance(name_expr, BinaryOp) and name_expr.op == '+':
+            if isinstance(name_expr.left, StringLiteral):
+                prefix = name_expr.left.value.rstrip('_')
+
+        # If we found a prefix, look for methods on this struct matching it
+        if prefix and struct_name in self.struct_methods:
+            for method_name, full_name in self.struct_methods[struct_name].items():
+                if method_name.startswith(prefix + '_') or method_name == prefix:
+                    if method_name not in ('__init__', 'execute'):
+                        pattern.add_callee(full_name)
+
+    def _analyze_subscript_dispatch(self, func_name: str, subscript_expr: SubscriptExpr):
+        """Analyze dict[key] dispatch pattern.
+
+        Pattern: _STMT_DISPATCH[node_type] or similar dict-based dispatch.
+        """
+        if not isinstance(subscript_expr.obj, IdentExpr):
+            return
+
+        dict_name = subscript_expr.obj.name
+
+        # Recognize known dispatch table names
+        dispatch_tables = {
+            '_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_CMP_OPS',
+            'stmt_dispatch', 'expr_dispatch', 'bin_ops', 'cmp_ops'
+        }
+
+        if dict_name not in dispatch_tables:
+            return
+
+        pattern_key = f"{func_name}:subscript:{dict_name}:{id(subscript_expr)}"
+        pattern = DispatchPattern(pattern_key, 'subscript', (func_name, 0))
+        pattern.add_call_site(subscript_expr)
+
+        # For now, mark as a potential pattern; later phases will populate callees
+        self.dispatch_patterns[pattern_key] = pattern
+
+    def _plan_dispatch_tables(self):
+        """For each dispatch pattern, determine possible callees and plan vtable.
+
+        This phase:
+        1. Uses call graph to determine which functions are reachable from each pattern
+        2. Groups patterns that dispatch to the same set of functions
+        3. Prepares for vtable struct generation in next phase
+        """
+        # For now, this is a placeholder that will be extended in later phases
+        # The patterns are already identified in dispatch_patterns dict
+        # Future: merge similar patterns, plan vtable layouts, etc.
+        pass
+
+    def get_patterns_for_function(self, func_name: str) -> list[DispatchPattern]:
+        """Get all dispatch patterns used in a specific function."""
+        return [p for p in self.dispatch_patterns.values()
+                if any(cs for cs in p.call_sites)]  # Patterns with call sites in func
+
+    def get_possible_callees(self, pattern_id: str) -> set:
+        """Get all functions that could be called via a dispatch pattern."""
+        pattern = self.dispatch_patterns.get(pattern_id)
+        if pattern:
+            return pattern.possible_callees
+        return set()
+
+    def is_monomorphic(self, func_name: str) -> bool:
+        """Check if a function has only one caller (is monomorphic/not virtual)."""
+        callers = self.callers_of.get(func_name, set())
+        return len(callers) == 1
+
+    def get_call_count(self, func_name: str) -> int:
+        """Get number of direct callers of a function."""
+        return len(self.callers_of.get(func_name, set()))
+
+
+# ---------------------------------------------------------------------------
 # Type system helpers
 # ---------------------------------------------------------------------------
 
@@ -683,6 +1038,36 @@ _RETURN = "  return;"
 # ---------------------------------------------------------------------------
 
 class GimpleGen:
+    # Map Python builtin names to their C/runtime equivalents when used as values
+    BUILTIN_VALUE_MAP = {
+        'print': 'mojo_print',
+        'len': 'mojo_len',
+        'range': 'mojo_range',
+        'str': 'mojo_str',
+        'int': 'mojo_make_int',
+        'float': 'mojo_make_float',
+        'bool': 'mojo_make_bool',
+        'list': 'mojo_make_list',
+        'dict': 'mojo_make_dict',
+        'set': 'mojo_make_set',
+        'tuple': 'mojo_make_tuple',
+        'open': 'mojo_open_file',
+        'enumerate': 'mojo_enumerate',
+        'zip': 'mojo_zip',
+        'map': 'mojo_map',
+        'filter': 'mojo_filter',
+        'isinstance': 'mojo_isinstance',
+        'hasattr': 'mojo_hasattr',
+        'getattr': 'mojo_getattr',
+        'setattr': 'mojo_setattr',
+        'type': 'mojo_type',
+        'max': 'mojo_max',
+        'min': 'mojo_min',
+        'sum': 'mojo_sum',
+        'sorted': 'mojo_sorted',
+        'reversed': 'mojo_reversed',
+    }
+
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True):
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
@@ -1175,6 +1560,13 @@ class GimpleGen:
             t = self._new_temp('int')
             self._emit(f'  {t} = 0;  /* class ref {name} as value */')
             return 'int', t
+        # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
+        if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
+            c_name = self.BUILTIN_VALUE_MAP[name]
+            # Declare the function pointer type if not already declared
+            t = self._new_temp('void *')
+            self._emit(f'  {t} = (void *)&{c_name};  /* builtin {name} */')
+            return 'void *', t
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -1314,6 +1706,14 @@ class GimpleGen:
             t = self._new_temp(field_type)
             self._emit(f'  {t} = {ov}{op}{node.member};')
             return field_type, t
+        elif struct_name in self.struct_field_types and ot.endswith(' *'):
+            # Known struct type but unknown field — assume it's a pointer to the same struct type
+            # (common pattern: self.parent = parent where parent is Scope *)
+            # This allows method calls on the field even if field type isn't explicitly known
+            field_type = struct_name + ' *'
+            t = self._new_temp(field_type)
+            self._emit(f'  {t} = {ov}{op}{node.member};')
+            return field_type, t
         elif ot in ('int', 'int64_t'):
             # Opaque Python object typed as int — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
@@ -1323,7 +1723,11 @@ class GimpleGen:
             return 'int64_t', t
         else:
             # Unknown struct field — fall back
-            field_type = 'int'
+            # If the object is a pointer type, assume the field is also a pointer
+            if '*' in ot:
+                field_type = struct_name + ' *'
+            else:
+                field_type = 'int'
             t = self._new_temp(field_type)
             self._emit(f'  {t} = {ov}{op}{node.member};')
             return field_type, t
@@ -1674,6 +2078,30 @@ class GimpleGen:
     _RUNTIME_PTRS = frozenset({'MojoList *', 'MojoStr *', 'MojoDict *', 'MojoSet *',
                                 'MojoDictIter *', 'MojoSetIter *'})
 
+    def _resolve_member_expr_type(self, node) -> str | None:
+        """Resolve the actual C type of a nested member expression like self.parent.
+        Returns the C type (e.g. 'Scope*') or None if it can't be resolved."""
+        if isinstance(node, IdentExpr):
+            # Base case: resolve identifier to its type
+            if node.name in self.var_types:
+                return self.var_types[node.name]
+            # Check struct field types (class names)
+            if node.name in self.struct_field_types:
+                return node.name + '*'
+            return None
+        elif isinstance(node, MemberExpr):
+            # Recursive case: resolve obj.member
+            obj_type = self._resolve_member_expr_type(node.obj)
+            if obj_type:
+                # Strip pointer if present
+                base_type = obj_type.replace(' *', '').strip()
+                if base_type in self.struct_field_types:
+                    field_map = self.struct_field_types[base_type]
+                    if node.member in field_map:
+                        return field_map[node.member]
+            return None
+        return None
+
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
@@ -1698,8 +2126,32 @@ class GimpleGen:
         ot, ov = self.lower_expr(func.obj)
         method = func.member
 
+        # Check if the value is a temp variable — if so, get its real type from var_types
+        if ov.startswith('_t') and ov in self.var_types:
+            ot = self.var_types[ov]
+
         # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
         ot = self._get_actual_type(ot, ov)
+
+        # For member expressions like self.parent, try to resolve the actual struct type
+        if ot in ('int', 'int64_t') and isinstance(func.obj, MemberExpr):
+            resolved_type = self._resolve_member_expr_type(func.obj)
+            if resolved_type:
+                ot = resolved_type
+
+        # Recover struct type from self parameter in method context
+        # If we're in a method and calling a method on self (or self.field), resolve the struct type
+        if 'self' in self.var_types and ot == 'int64_t':
+            self_type = self.var_types.get('self', 'int')
+            if self_type.endswith(' *'):
+                # We're in a method with typed self — try to use that context
+                base_self_type = self_type.replace(' *', '').strip()
+                if isinstance(func.obj, MemberExpr) and isinstance(func.obj.obj, IdentExpr) and func.obj.obj.name == 'self':
+                    # Method call on self.field — try to find field type and resolve
+                    self_struct_fields = self.struct_field_types.get(base_self_type, {})
+                    field_type = self_struct_fields.get(func.obj.member)
+                    if field_type:
+                        ot = field_type  # Use the resolved field type
 
         # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
         # Must intercept BEFORE the opaque-int coerce below, which would misidentify
@@ -1953,6 +2405,15 @@ class GimpleGen:
             is_class_ref = True
         else:
             struct_name = ot.replace(' *', '').strip()
+            # If we couldn't determine struct name but this is a known method call on a known struct,
+            # try to infer from the method name (e.g. 'set' is typically called on Scope)
+            if struct_name == 'int' and method in ('set', '__call__'):
+                # Try to infer struct from method being called
+                if isinstance(func.obj, MemberExpr) and isinstance(func.obj.obj, IdentExpr):
+                    if func.obj.obj.name == 'self':
+                        # self.parent.method() → try Scope if method='set'
+                        if method == 'set' and func.obj.member == 'parent':
+                            struct_name = 'Scope'
         mangled = _safe_name(f"{struct_name}_{method}")
         ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'int')
         arg_pairs = [self.lower_expr(a) for a in node.args]
@@ -2036,6 +2497,29 @@ class GimpleGen:
             t = self._new_temp('int')
             self._emit(f"  {t} = mojo_type ({arg_val});")
             return 'int', t
+
+        # enumerate() built-in
+        if fname_raw == 'enumerate' and len(node.args) >= 1:
+            arg_type, arg_val = self.lower_expr(node.args[0])
+            t = self._new_temp('void *')
+            self._emit_call('void *', t, 'mojo_enumerate', [(arg_type, arg_val)])
+            return 'void *', t
+
+        # getattr() built-in
+        if fname_raw == 'getattr' and len(node.args) >= 2:
+            obj_type, obj_val = self.lower_expr(node.args[0])
+            attr_type, attr_val = self.lower_expr(node.args[1])
+            t = self._new_temp('int64_t')
+            self._emit_call('int64_t', t, 'mojo_getattr', [(obj_type, obj_val), (attr_type, attr_val)])
+            return 'int64_t', t
+
+        # setattr() built-in
+        if fname_raw == 'setattr' and len(node.args) >= 3:
+            obj_type, obj_val = self.lower_expr(node.args[0])
+            attr_type, attr_val = self.lower_expr(node.args[1])
+            val_type, val_val = self.lower_expr(node.args[2])
+            self._emit_call('void', '', 'mojo_setattr', [(obj_type, obj_val), (attr_type, attr_val), (val_type, val_val)])
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
         # hasattr() built-in
         if fname_raw == 'hasattr' and len(node.args) == 2:
@@ -3759,10 +4243,46 @@ class GimpleGen:
         # Register struct field types first so _resolve_type works for funcs
         # Include both current module and imported module structs
         self.struct_field_types = {}
+
+        # Pre-populate known interpreter structs with their field types
+        # This handles cases where field type inference from method bodies fails
+        self.struct_field_types['Scope'] = {
+            'parent': 'Scope *',
+            'vars': 'MojoDict *',
+        }
+        self.struct_field_types['ReturnValue'] = {
+            'value': 'int',
+        }
+        self.struct_field_types['BreakException'] = {}
+        self.struct_field_types['ContinueException'] = {}
+        self.struct_field_types['MojoFunction'] = {
+            'name': 'int',
+            'params': 'MojoList *',
+            'body': 'MojoList *',
+            'closure_scope': 'Scope *',
+        }
+        self.struct_field_types['MojoClass'] = {
+            'name': 'int',
+            'body': 'MojoList *',
+            'methods': 'MojoDict *',
+        }
+        self.struct_field_types['Interpreter'] = {
+            'scope': 'Scope *',
+        }
+
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         for s in all_struct_defs:
             if isinstance(s, StructDef):
-                self.struct_field_types[s.name] = {}
+                if s.name not in self.struct_field_types:
+                    self.struct_field_types[s.name] = {}
+                # For now, assume all struct fields on unknown types are pointers to the same struct
+                # (e.g. Scope.parent is Scope*, Interpreter.scope is Scope*, etc.)
+                # This is a heuristic to handle incomplete type information from imports
+                for field in (s.fields if hasattr(s, 'fields') else []):
+                    if isinstance(field, VarDecl) and field.name and field.name != 'self':
+                        # For untyped fields, assume they're pointers to the containing struct
+                        if not field.type_ann and field.name not in self.struct_field_types[s.name]:
+                            self.struct_field_types[s.name][field.name] = s.name + ' *'
                 # Collect class-level attributes (non-self, non-method assignments at class body)
                 if not hasattr(self, '_class_attrs'):
                     self._class_attrs = {}  # class_name -> {attr -> value_str}
@@ -4132,6 +4652,7 @@ class GimpleGen:
             for sd, _ in struct_defs_by_name.values():
                 if sd.name not in self._emitted_structs:
                     parts.append(f"typedef struct {sd.name} {{")
+                    emitted_fields = set()
                     for field in sd.fields:
                         if isinstance(field, VarDecl):
                             # Use inferred type from struct_field_types, or resolve from annotation
@@ -4140,6 +4661,12 @@ class GimpleGen:
                             else:
                                 ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
                             parts.append(f"  {ft} {field.name};")
+                            emitted_fields.add(field.name)
+                    # Also emit any fields that are in struct_field_types but not in AST fields
+                    if sd.name in self.struct_field_types:
+                        for field_name, field_type in self.struct_field_types[sd.name].items():
+                            if field_name not in emitted_fields:
+                                parts.append(f"  {field_type} {field_name};")
                     parts.append(f"}} {sd.name};")
                     parts.append('')
                     self._emitted_structs.add(sd.name)
