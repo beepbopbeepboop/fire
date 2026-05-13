@@ -51,7 +51,7 @@ void      mojo_list_free(MojoList *l);
 
 void    mojo_list_append_int(MojoList *l, int64_t v);
 void    mojo_list_append_double(MojoList *l, double v);
-void    mojo_list_append_str(MojoList *l, char *v);
+void    mojo_list_append_str(MojoList *l, const char *v);
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);

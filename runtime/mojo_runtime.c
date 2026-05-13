@@ -331,7 +331,7 @@ void mojo_list_append_double(MojoList *l, double v)
     mojo_list_append_int(l, bits);
 }
 
-void mojo_list_append_str(MojoList *l, char *v)
+void mojo_list_append_str(MojoList *l, const char *v)
 {
     mojo_list_append_int(l, (int64_t)(uintptr_t)v);
 }
