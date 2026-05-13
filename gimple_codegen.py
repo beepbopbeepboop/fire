@@ -935,6 +935,10 @@ class DispatchSolver:
         if not ptype:
             return "int"
 
+        # Check if it's a struct type (takes priority)
+        if ptype in self.struct_field_types:
+            return f"{ptype} *"
+
         # Strip module prefix (e.g., "N.BinaryOp" → use int for AST nodes)
         if '.' in ptype:
             # Module-qualified type like N.BinaryOp, ast.Module, etc.
@@ -963,7 +967,7 @@ class DispatchSolver:
             'Any': 'void *',
         }
 
-        return type_map.get(ptype, 'int')  # Default to int for unrecognized types
+        return type_map.get(ptype, 'void *')  # Default to void * for unrecognized types
 
     def _generate_table_name(self, pattern_id: str, pattern: DispatchPattern) -> str:
         """Generate a C-safe name for a dispatch table."""
@@ -1951,6 +1955,74 @@ class GimpleGen:
         if ann in self.struct_field_types:
             return f"{ann} *"
         return _mojo_type(ann)
+
+    def _infer_param_types(self, func: FunctionDef) -> dict[str, str]:
+        """Infer parameter types from member accesses in function body.
+
+        If a parameter is accessed with .field, infer it's a struct with that field.
+        """
+        inferred = {}
+        param_names = {pn for pn, _ in func.params}
+
+        def find_member_accesses(nodes: list, param_name: str):
+            """Find all member accesses on a parameter."""
+            accessed_fields = set()
+
+            def scan_expr(expr):
+                """Recursively scan an expression for member accesses."""
+                if isinstance(expr, MemberExpr):
+                    if isinstance(expr.obj, IdentExpr) and expr.obj.name == param_name:
+                        accessed_fields.add(expr.member)
+                    scan_expr(expr.obj)
+                elif isinstance(expr, BinaryOp):
+                    scan_expr(expr.left)
+                    scan_expr(expr.right)
+                elif isinstance(expr, UnaryOp):
+                    scan_expr(expr.operand)
+                elif isinstance(expr, CallExpr):
+                    scan_expr(expr.func)
+                    for arg in expr.args:
+                        scan_expr(arg)
+
+            for node in nodes:
+                if isinstance(node, AssignStmt):
+                    # Check both target and value
+                    scan_expr(node.target)
+                    scan_expr(node.value)
+                elif isinstance(node, ExprStmt):
+                    scan_expr(node.value)
+                elif isinstance(node, ReturnStmt):
+                    if node.value:
+                        scan_expr(node.value)
+                elif isinstance(node, (IfStmt, WhileStmt, ForStmt, TryStmt)):
+                    # Recursively scan nested blocks
+                    if hasattr(node, 'body'):
+                        find_member_accesses(node.body, param_name)
+                    if hasattr(node, 'else_body') and node.else_body:
+                        find_member_accesses(node.else_body, param_name)
+                    if hasattr(node, 'elifs'):
+                        for _, elif_body in node.elifs:
+                            find_member_accesses(elif_body, param_name)
+                    if hasattr(node, 'except_clauses'):
+                        for _, handler_body in node.except_clauses:
+                            find_member_accesses(handler_body, param_name)
+                    if hasattr(node, 'finally_body') and node.finally_body:
+                        find_member_accesses(node.finally_body, param_name)
+
+            return accessed_fields
+
+        # For each parameter without a type annotation, infer from usage
+        for pname, ptype in func.params:
+            if ptype is None:
+                # Check if this parameter has member accesses
+                fields_accessed = find_member_accesses(func.body, pname)
+                # Try to infer struct type from accessed fields
+                for struct_name, struct_fields in self.struct_field_types.items():
+                    if fields_accessed and all(f in struct_fields for f in fields_accessed):
+                        inferred[pname] = f"{struct_name} *"
+                        break
+
+        return inferred
 
     def _declare_var(self, name: str, ctype: str, elem: str | None = None):
         if name not in self.var_types:
@@ -4661,7 +4733,15 @@ class GimpleGen:
         """Resolve parameter C type, applying argument convention qualifiers."""
         if is_self:
             return f"{node.name} *"
-        ctype = self._resolve_type(ptype)
+        # Check inferred parameter types first (for unannotated parameters)
+        if ptype is None and hasattr(self, '_inferred_param_types'):
+            func_key = node.name
+            if func_key in self._inferred_param_types and pname in self._inferred_param_types[func_key]:
+                ctype = self._inferred_param_types[func_key][pname]
+            else:
+                ctype = self._resolve_type(ptype)
+        else:
+            ctype = self._resolve_type(ptype)
         conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
         if conv in ('read', 'ref') and TypeLattice.is_pointer(ctype):
             # Immutable borrow of a pointer arg → const T *
@@ -4767,12 +4847,20 @@ class GimpleGen:
         solver = LayoutSolver(self.struct_field_types)
         self._struct_layout = solver.solve(node.params, node.body)
 
+        method_full_name = f"{struct_name}_{node.name}"
         param_strs = []
         for i, (pname, ptype) in enumerate(node.params):
             if i == 0 and pname == 'self':
                 ctype = f"{struct_name} *"
             else:
-                ctype = self._param_ctype(pname, ptype, node)
+                # Check inferred parameter types first (for unannotated parameters)
+                if ptype is None and hasattr(self, '_inferred_param_types'):
+                    if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
+                        ctype = self._inferred_param_types[method_full_name][pname]
+                    else:
+                        ctype = self._resolve_type(ptype)
+                else:
+                    ctype = self._param_ctype(pname, ptype, node)
             self.var_types[pname] = ctype
             param_strs.append(f"{ctype} {pname}")
 
@@ -5045,6 +5133,18 @@ class GimpleGen:
                         inferred = self._infer_return_type(m.body)
                         self.func_return_types[f"{s.name}_{m.name}"] = inferred
                         self.var_types.clear()
+
+        # ── Pass 1.3: Infer parameter types from usage ─────────────────────
+        # For parameters without type annotations, infer from member accesses
+        self._inferred_param_types: dict[str, dict[str, str]] = {}  # func_name -> {param_name -> type}
+        for s in all_functions:
+            if isinstance(s, FunctionDef):
+                self._inferred_param_types[s.name] = self._infer_param_types(s)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                for m in s.methods:
+                    key = f"{s.name}_{m.name}"
+                    self._inferred_param_types[key] = self._infer_param_types(m)
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
@@ -5358,8 +5458,20 @@ class GimpleGen:
                 ret = self.func_return_types.get(f"{sd.name}_{m.name}",
                                                   self._resolve_type(m.return_type))
                 param_ctypes = []
+                # Use the full func name for parameter type inference
+                method_full_name = f"{sd.name}_{m.name}"
                 for i, (pname, ptype) in enumerate(m.params):
-                    ct = f"{sd.name} *" if (i == 0 and pname == 'self') else self._resolve_type(ptype)
+                    if i == 0 and pname == 'self':
+                        ct = f"{sd.name} *"
+                    else:
+                        # Check inferred parameter types first (for unannotated parameters)
+                        if ptype is None and hasattr(self, '_inferred_param_types'):
+                            if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
+                                ct = self._inferred_param_types[method_full_name][pname]
+                            else:
+                                ct = self._resolve_type(ptype)
+                        else:
+                            ct = self._resolve_type(ptype)
                     param_ctypes.append(ct)
                 ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
                 parts.append(f"{ret} {sd.name}_{_safe_name(m.name)} ({ptypes});")
