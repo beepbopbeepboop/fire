@@ -9,6 +9,10 @@ typedef float mojo_float;
 typedef char* mojo_string;
 typedef void* mojo_any;
 
+/* Generic function pointer type (for storing any function as void*) */
+typedef void* (*mojo_func_ptr)(void);
+typedef void* mojo_generic_func;
+
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
  * Generated __GIMPLE code calls mojo_try_push/mojo_exc_pop/mojo_raise so
  * that jmp_buf pointer arithmetic stays out of GIMPLE functions.          */
@@ -27,6 +31,11 @@ void mojo_raise(void);
 extern char *_mojo_exc_msg;
 void        mojo_exc_msg_set(char *msg);
 char *mojo_exc_msg_get(void);
+
+/* Exception object slot (for typed exceptions like ReturnValue). */
+extern void *_mojo_exc_obj;
+void        mojo_exc_obj_set(void *obj);
+void *      mojo_exc_obj_get(void);
 
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;

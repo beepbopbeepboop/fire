@@ -2231,12 +2231,9 @@ class GimpleGen:
         # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
         if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
             c_name = self.BUILTIN_VALUE_MAP[name]
-            # Create a temp variable to hold the function pointer
-            t = self._new_temp('void *')
-            # In GIMPLE, casts are done via assignment with type conversion
-            # Function names decay to function pointers in C
-            self._emit(f'  {t} = {c_name};  /* builtin {name} */')
-            return 'void *', t
+            # For builtins, just return the function name directly without conversion
+            # The calling code (Scope_define) will need to handle the void* conversion
+            return 'void *', c_name
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -4199,8 +4196,25 @@ class GimpleGen:
         self._emit("  mojo_exc_pop ();")
         for handler in node.handlers:
             if handler.name:
-                self._declare_var(handler.name, 'char *')
-                self._emit(f"  {handler.name} = (char *) mojo_exc_msg_get ();")
+                # Exception handlers are typed as pointers to exception objects
+                # Use the exception type from the handler (e.g., ReturnValue, Exception)
+                exc_type_name = None
+                if handler.exc_type:
+                    # Extract the type name from the exception type annotation
+                    if hasattr(handler.exc_type, 'name'):
+                        exc_type_name = handler.exc_type.name
+                    elif isinstance(handler.exc_type, str):
+                        exc_type_name = handler.exc_type
+
+                # Determine the C type for the exception
+                if exc_type_name and exc_type_name in self.struct_field_types:
+                    exc_ctype = f"{exc_type_name} *"
+                else:
+                    exc_ctype = 'void *'
+
+                self._declare_var(handler.name, exc_ctype)
+                # Retrieve the exception object from the runtime
+                self._emit(f"  {handler.name} = ({exc_ctype}) mojo_exc_obj_get ();")
             for s in handler.body:
                 self.gen_stmt(s)
         if node.finally_body:

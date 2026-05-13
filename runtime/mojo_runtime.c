@@ -36,6 +36,11 @@ char *_mojo_exc_msg = NULL;
 void mojo_exc_msg_set(char *msg) { _mojo_exc_msg = (char *)msg; }
 char *mojo_exc_msg_get(void) { return _mojo_exc_msg ? _mojo_exc_msg : ""; }
 
+/* Exception object slot (for typed exceptions) */
+void *_mojo_exc_obj = NULL;
+void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
+void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
+
 /* ── Global state for argc/argv ───────────────────────────────────────────*/
 static int _mojo_argc = 0;
 static char **_mojo_argv = NULL;
