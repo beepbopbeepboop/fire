@@ -4084,17 +4084,29 @@ class GimpleGen:
                 if v in self._dict_val_types:
                     self._dict_val_types[tname] = self._dict_val_types[v]
             # Track actual type if storing a pointer as int64_t
-            if dst == 'int64_t' and v in self._actual_types:
-                actual_type = self._actual_types[v]
-                self._actual_types[tname] = actual_type
-                # If actual type is a list, track element types
-                if actual_type == 'MojoList *' and v in self._elem_types:
-                    self._elem_types[tname] = self._elem_types[v]
-                elif actual_type == 'MojoDict *':
+            if dst == 'int64_t':
+                # If source has tracked actual type, copy it
+                if v in self._actual_types:
+                    actual_type = self._actual_types[v]
+                    self._actual_types[tname] = actual_type
+                # If value type itself is a pointer, track it as the actual type
+                elif vtype in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                    self._actual_types[tname] = vtype
+                    # Also copy element/value type tracking
                     if v in self._elem_types:
                         self._elem_types[tname] = self._elem_types[v]
                     if v in self._dict_val_types:
                         self._dict_val_types[tname] = self._dict_val_types[v]
+                # If actual type is a container, track element types
+                if tname in self._actual_types:
+                    actual_type = self._actual_types[tname]
+                    if actual_type == 'MojoList *' and v in self._elem_types:
+                        self._elem_types[tname] = self._elem_types[v]
+                    elif actual_type == 'MojoDict *':
+                        if v in self._elem_types:
+                            self._elem_types[tname] = self._elem_types[v]
+                        if v in self._dict_val_types:
+                            self._dict_val_types[tname] = self._dict_val_types[v]
             self._safe_coerce_emit(vtype, dst, v, tname)
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
@@ -4141,7 +4153,9 @@ class GimpleGen:
 
     def _gen_stmt_AugAssignStmt(self, node):
         base_op = node.op[:-1]
-        if base_op in ('//', '**'):
+        # For augmented assignments, use lower_expr with a fake BinaryOp to get proper type handling
+        # This includes string concatenation, list concatenation, etc.
+        if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>'):
             fake  = BinaryOp(op=base_op, left=node.target, right=node.value)
             vtype, v = self.lower_expr(fake)
         else:
