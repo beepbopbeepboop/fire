@@ -315,5 +315,24 @@ typedef struct ModuleLoader ModuleLoader;
 int int_load_module(ModuleLoader *ml_ptr, char *module_name);                           /* ModuleLoader.load_module */
 char *int_get_symbol_type(ModuleLoader *ml_ptr, char *module_name, char *symbol_name);  /* ModuleLoader.get_symbol_type */
 
+/* Parser bridge functions (called from compiled parser code) */
+int int__peek(int parser);                      /* Parser._peek method */
+int int__advance(int parser);                   /* Parser._advance method */
+int int__is_kw(int parser, char *keyword);      /* Parser._is_kw method */
+int int__expect(int parser, char *kind);        /* Parser._expect method */
+int int__skip_bracketed(int parser);            /* Parser._skip_bracketed method */
+int int__parse_type_ann(int parser);            /* Parser._parse_type_ann method */
+
+/* Type checking functions */
+int int_is_pointer(int cls, int type_id);      /* Check if type is pointer */
+int int_is_float(int cls, int type_id);        /* Check if type is float */
+int int_analyze(int obj);                       /* Analyze function */
+
+/* Import function (not used in C, but may be called) */
+int int_import_module(int importlib_obj, char *module_name);  /* _python_import wrapper */
+
+/* Python builtin any() function */
+int any(int iterable);                          /* Python any() builtin */
+
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */

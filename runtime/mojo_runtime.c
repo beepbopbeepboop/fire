@@ -1473,3 +1473,78 @@ char *int_get_symbol_type(ModuleLoader *ml_ptr, char *module_name, char *symbol_
     (void)symbol_name;  /* unused parameter */
     return "int";
 }
+
+/* Parser bridge implementations */
+int int__peek(int parser) {
+    /* Stub: return 0 (no token) */
+    (void)parser;  /* unused parameter */
+    return 0;
+}
+
+int int__advance(int parser) {
+    /* Stub: advance parser and return 0 */
+    (void)parser;  /* unused parameter */
+    return 0;
+}
+
+int int__is_kw(int parser, char *keyword) {
+    /* Stub: return 0 (not a keyword) */
+    (void)parser;  /* unused parameter */
+    (void)keyword;  /* unused parameter */
+    return 0;
+}
+
+int int__expect(int parser, char *kind) {
+    /* Stub: expect a token and return 0 */
+    (void)parser;  /* unused parameter */
+    (void)kind;  /* unused parameter */
+    return 0;
+}
+
+int int__skip_bracketed(int parser) {
+    /* Stub: skip bracketed expression and return 0 */
+    (void)parser;  /* unused parameter */
+    return 0;
+}
+
+int int__parse_type_ann(int parser) {
+    /* Stub: parse type annotation and return 0 */
+    (void)parser;  /* unused parameter */
+    return 0;
+}
+
+/* Type checking functions */
+int int_is_pointer(int cls, int type_id) {
+    /* Stub: return 0 (not a pointer) */
+    (void)cls;  /* unused parameter */
+    (void)type_id;  /* unused parameter */
+    return 0;
+}
+
+int int_is_float(int cls, int type_id) {
+    /* Stub: return 0 (not a float) */
+    (void)cls;  /* unused parameter */
+    (void)type_id;  /* unused parameter */
+    return 0;
+}
+
+int int_analyze(int obj) {
+    /* Stub: analyze object and return 0 */
+    (void)obj;  /* unused parameter */
+    return 0;
+}
+
+/* Import function stub */
+int int_import_module(int importlib_obj, char *module_name) {
+    /* Stub: import module and return 0 (empty module) */
+    (void)importlib_obj;  /* unused parameter */
+    (void)module_name;  /* unused parameter */
+    return 0;
+}
+
+/* Python builtin any() function */
+int any(int iterable) {
+    /* Stub: return 0 (empty/falsy iterable) */
+    (void)iterable;  /* unused parameter */
+    return 0;
+}
