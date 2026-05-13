@@ -1921,6 +1921,30 @@ class GimpleGen:
                 self._emit(f'  {ip} = (int64_t){aval};')
                 self._emit(f'  {pp} = ({ptype}){ip};')
                 coerced_args.append(pp)
+            elif ptype == 'char *' and atype == 'void *':
+                # void* to char* conversion
+                cp = self._new_temp('char *')
+                self._emit(f'  {cp} = (char *){aval};')
+                coerced_args.append(cp)
+            elif ptype == 'void *' and atype == 'char *':
+                # char* to void* conversion
+                vp = self._new_temp('void *')
+                self._emit(f'  {vp} = (void *){aval};')
+                coerced_args.append(vp)
+            elif ptype.endswith(' *') and atype == 'char *':
+                # char* passed where other pointer type expected
+                ip = self._new_temp('int64_t')
+                pp = self._new_temp(ptype)
+                self._emit(f'  {ip} = (int64_t){aval};')
+                self._emit(f'  {pp} = ({ptype}){ip};')
+                coerced_args.append(pp)
+            elif ptype == 'ModuleLoader *' and atype in ('int', 'int64_t'):
+                # Handle ModuleLoader* type coercions
+                ip = self._new_temp('int64_t')
+                pp = self._new_temp('ModuleLoader *')
+                self._emit(f'  {ip} = (int64_t){aval};')
+                self._emit(f'  {pp} = (ModuleLoader *){ip};')
+                coerced_args.append(pp)
             else:
                 coerced_args.append(aval)
         args_str = ', '.join(coerced_args)
@@ -2476,8 +2500,14 @@ class GimpleGen:
                 nm = node.left.name
                 if nm not in self.var_types:
                     self._declare_var(nm, vtype)
+                    # Track that this variable holds this type for concatenation detection
+                    if vtype == 'char *':
+                        self._actual_types[nm] = 'char *'
                 dst = self.var_types[nm]
                 self._safe_coerce_emit(vtype, dst, vv, nm)
+                # Update actual type tracking for string types
+                if dst == 'int' and vtype == 'char *':
+                    self._actual_types[nm] = 'char *'
                 return dst, nm
             if isinstance(node.left, MemberExpr):
                 ot, ov = self.lower_expr(node.left.obj)
@@ -2556,9 +2586,11 @@ class GimpleGen:
             return 'MojoStr *', t
 
         # char * + char * → mojo_str_cat (including int64_t holding char* via actual_types)
-        def _as_charptr(typ, val):
+        # Also handle int + char * when int is likely a string pointer
+        def _as_charptr(typ, val, is_string_literal=False):
             if typ == 'char *':
                 return 'char *', val
+            # Check if actual type is char*
             actual = self._actual_types.get(val)
             if actual == 'char *':
                 cp = self._new_temp('char *')
@@ -2566,10 +2598,20 @@ class GimpleGen:
                 self._emit(f"  {ip} = (int64_t){val};")
                 self._emit(f"  {cp} = (char *){ip};")
                 return 'char *', cp
+            # If one operand is definitely a string literal, treat int as potential string
+            if is_string_literal and typ in ('int', 'int64_t') and val.startswith('_slit_'):
+                cp = self._new_temp('char *')
+                ip = self._new_temp('int64_t')
+                self._emit(f"  {ip} = (int64_t){val};")
+                self._emit(f"  {cp} = (char *){ip};")
+                return 'char *', cp
             return typ, val
         if node.op == '+':
-            lt2, lv2 = _as_charptr(lt, lv)
-            rt2, rv2 = _as_charptr(rt, rv)
+            # Check if the OTHER operand is a string literal - helps identify string concatenation
+            right_is_lit = isinstance(node.right, StringLiteral)
+            left_is_lit = isinstance(node.left, StringLiteral)
+            lt2, lv2 = _as_charptr(lt, lv, is_string_literal=right_is_lit)
+            rt2, rv2 = _as_charptr(rt, rv, is_string_literal=left_is_lit)
             if lt2 == 'char *' and rt2 == 'char *':
                 t = self._new_temp('char *')
                 self._emit_call('char *', t, 'mojo_str_cat', [('char *', lv2), ('char *', rv2)])
@@ -2634,6 +2676,19 @@ class GimpleGen:
             else:
                 self._emit(f"  {t} = {lv} {c_op} {rv};")
             return '_Bool', t
+
+        # Fallback: catch string concatenation that wasn't handled above
+        if node.op == '+' and lt == 'char *' and rt == 'char *':
+            t = self._new_temp('char *')
+            self._emit_call('char *', t, 'mojo_str_cat', [('char *', lv), ('char *', rv)])
+            return 'char *', t
+        # Fallback: catch list concatenation that wasn't handled above
+        if node.op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+            t = self._new_temp('MojoList *')
+            self._emit(f"  {t} = mojo_list_concat ({lv}, {rv});")
+            if lv in self._elem_types:
+                self._elem_types[t] = self._elem_types[lv]
+            return 'MojoList *', t
 
         c_op      = _BIN_OPS.get(node.op, node.op)
         res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
