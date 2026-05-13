@@ -126,6 +126,17 @@
 
 - **Impact**: Eliminated 1 type compatibility error, final fix for clean compilation
 
+### 14. mojo_list_append_str const-correctness
+- **Problem**: Discarded const qualifier warning when passing const char * argv strings to mojo_list_append_str
+  - mojo_set_argv builds the argument list using const char ** from main()
+  - mojo_list_append_str expected char * not const char *
+
+- **Solution**: Updated mojo_list_append_str signature to accept const char *
+  - Changed in both mojo_runtime.h and mojo_runtime.c
+  - No implementation changes needed (just pointer casting)
+
+- **Impact**: Eliminated const-correctness warning, compilation now fully clean
+
 ## Remaining Issues (0 errors)
 
 ### Module/Import Issues (7 errors)
