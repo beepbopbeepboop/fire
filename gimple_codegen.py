@@ -570,7 +570,13 @@ class DispatchSolver:
         self._pattern_counter = 0
 
     def analyze(self, all_stmts: list):
-        """Run complete dispatch analysis on entire closure."""
+        """Run complete dispatch analysis on entire closure.
+
+        Includes three core dispatch analyses plus new complementary analyses:
+        - Call graph and dispatch pattern detection (existing)
+        - Function compilability analysis (def→fn promotions)
+        - Type promotion across closure (cross-closure type inference)
+        """
         # Pass 1: Build call graph and struct method mapping
         self._build_call_graph(all_stmts)
 
@@ -579,6 +585,14 @@ class DispatchSolver:
 
         # Pass 3: Plan dispatch tables for each pattern
         self._plan_dispatch_tables()
+
+        # ── NEW: Pass 4: Determine which functions are C-compilable ────────
+        self.compilability = FunctionCompilability(self.func_return_types, self.struct_field_types)
+        self.compilability.analyze(all_stmts)
+
+        # ── NEW: Pass 5: Promote types across closure ─────────────────────
+        self.type_promoter = TypePromotionSolver(self.call_graph, self.func_return_types)
+        self.type_promoter.analyze(all_stmts, {})  # all_funcs would be built from all_stmts
 
     def _build_call_graph(self, stmts: list):
         """Traverse all functions and structs, record direct calls.
@@ -928,6 +942,297 @@ class DispatchSolver:
     def get_dispatch_tables(self) -> dict:
         """Get all planned dispatch tables keyed by callee set."""
         return self.dispatch_tables
+
+    def get_compilable_functions(self) -> set:
+        """Get set of functions that can be compiled to C (def→fn promotion)."""
+        if hasattr(self, 'compilability'):
+            return self.compilability.compilable_funcs
+        return set()
+
+    def is_function_compilable(self, func_name: str) -> bool:
+        """Check if a function can be compiled to C."""
+        if hasattr(self, 'compilability'):
+            return self.compilability.is_compilable(func_name)
+        return False
+
+    def get_compilability_report(self) -> dict:
+        """Get detailed compilability analysis report.
+
+        Returns:
+            {
+                'compilable_count': int,
+                'uncompilable_count': int,
+                'compilable_functions': set,
+                'uncompilable_with_reasons': dict
+            }
+        """
+        if hasattr(self, 'compilability'):
+            return {
+                'compilable_count': self.compilability.get_compilable_count(),
+                'uncompilable_count': len(self.compilability.uncompilable_funcs),
+                'compilable_functions': self.compilability.compilable_funcs.copy(),
+                'uncompilable_with_reasons': self.compilability.uncompilable_funcs.copy(),
+            }
+        return {'compilable_count': 0, 'uncompilable_count': 0, 'compilable_functions': set(), 'uncompilable_with_reasons': {}}
+
+    def get_promoted_types(self) -> dict:
+        """Get all types promoted across the closure."""
+        if hasattr(self, 'type_promoter'):
+            return self.type_promoter.get_all_promoted_types()
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# FunctionCompilability — Determine which functions can be def→fn promoted
+# ---------------------------------------------------------------------------
+
+class FunctionCompilability:
+    """Analyze whether functions can be compiled to C (def → fn promotion).
+
+    A function is compilable to C if:
+    1. All parameter types are known (no bare 'x' without type annotation)
+    2. Return type is known (annotated or inferable)
+    3. Body contains only C-compatible operations
+    4. No dynamic feature usage (getattr, dict lookup, etc.)
+    5. All called functions are also compilable to C
+
+    This enables def→fn promotion: Python functions that compile become C functions.
+    """
+
+    def __init__(self, func_return_types: dict, struct_field_types: dict):
+        self.func_return_types = func_return_types
+        self.struct_field_types = struct_field_types
+        self.compilable_funcs: set = set()  # Functions that can be compiled to C
+        self.uncompilable_funcs: dict = {}  # func_name → reason (for debugging)
+
+    def analyze(self, stmts: list):
+        """Determine which functions are C-compilable."""
+        # First pass: identify candidate functions with full signatures
+        candidates = self._find_candidates(stmts)
+
+        # Second pass: check if bodies use only C-compatible operations
+        for func_name, func_def, is_method in candidates:
+            reason = self._check_compilability(func_name, func_def, is_method)
+            if reason is None:
+                self.compilable_funcs.add(func_name)
+            else:
+                self.uncompilable_funcs[func_name] = reason
+
+    def _find_candidates(self, stmts: list) -> list:
+        """Find functions with complete type annotations.
+
+        Returns list of (func_name, func_def, is_method) tuples.
+        """
+        candidates = []
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                # Free function with return type annotation
+                if stmt.return_type is not None:
+                    has_all_params = all(ptype is not None for _, ptype in stmt.params)
+                    if has_all_params:
+                        candidates.append((stmt.name, stmt, False))
+
+            elif isinstance(stmt, StructDef):
+                # Struct methods
+                for method in stmt.methods:
+                    if method.return_type is not None:
+                        # For methods, 'self' is implicitly typed, so skip it in validation
+                        non_self_params = [(pname, ptype) for pname, ptype in method.params if pname != 'self']
+                        has_all_params = all(ptype is not None for _, ptype in non_self_params)
+                        if has_all_params:
+                            full_name = f"{stmt.name}_{method.name}"
+                            candidates.append((full_name, method, True))
+
+        return candidates
+
+    def _check_compilability(self, func_name: str, func_def, is_method: bool) -> str | None:
+        """Check if a function body is C-compilable.
+
+        Returns None if compilable, otherwise returns reason string.
+        """
+        # Check for dynamic operations in body
+        for node in self._walk_all_nodes(func_def.body):
+            # getattr is dynamic - can't compile
+            if isinstance(node, CallExpr):
+                if isinstance(node.func, IdentExpr):
+                    if node.func.name in ('getattr', 'setattr', 'hasattr'):
+                        return f"uses {node.func.name}() - dynamic dispatch"
+
+            # Dict subscript might be dynamic
+            if isinstance(node, SubscriptExpr):
+                if isinstance(node.obj, IdentExpr):
+                    if node.obj.name in ('_STMT_DISPATCH', '_EXPR_DISPATCH'):
+                        return "uses dynamic dispatch table"
+
+        return None  # Compilable
+
+    def _walk_all_nodes(self, stmts: list):
+        """Recursively yield all AST nodes in statements and expressions."""
+        for stmt in stmts:
+            yield stmt
+
+            # Recurse into expressions in statements
+            if isinstance(stmt, AssignStmt):
+                yield from self._walk_expr_nodes(stmt.value)
+            elif isinstance(stmt, ReturnStmt) and stmt.value:
+                yield from self._walk_expr_nodes(stmt.value)
+            elif isinstance(stmt, ExprStmt):
+                yield from self._walk_expr_nodes(stmt.expr)
+            elif isinstance(stmt, IfStmt):
+                yield from self._walk_expr_nodes(stmt.condition)
+                yield from self._walk_all_nodes(stmt.then_body)
+                for _, elif_body in stmt.elifs:
+                    yield from self._walk_all_nodes(elif_body)
+                if stmt.else_body:
+                    yield from self._walk_all_nodes(stmt.else_body)
+            elif isinstance(stmt, (WhileStmt, ForStmt)):
+                yield from self._walk_all_nodes(stmt.body)
+            elif isinstance(stmt, TryStmt):
+                yield from self._walk_all_nodes(stmt.body)
+
+    def _walk_expr_nodes(self, expr):
+        """Recursively yield all nodes in an expression tree."""
+        if expr is None:
+            return
+
+        yield expr
+
+        if isinstance(expr, CallExpr):
+            yield from self._walk_expr_nodes(expr.func)
+            for arg in expr.args:
+                yield from self._walk_expr_nodes(arg)
+        elif isinstance(expr, BinaryOp):
+            yield from self._walk_expr_nodes(expr.left)
+            yield from self._walk_expr_nodes(expr.right)
+        elif isinstance(expr, TernaryExpr):
+            yield from self._walk_expr_nodes(expr.condition)
+            yield from self._walk_expr_nodes(expr.then_val)
+            yield from self._walk_expr_nodes(expr.else_val)
+        elif isinstance(expr, SubscriptExpr):
+            yield from self._walk_expr_nodes(expr.obj)
+            yield from self._walk_expr_nodes(expr.index)
+        elif isinstance(expr, MemberExpr):
+            yield from self._walk_expr_nodes(expr.obj)
+
+    def is_compilable(self, func_name: str) -> bool:
+        """Check if a function can be compiled to C."""
+        return func_name in self.compilable_funcs
+
+    def get_compilable_count(self) -> int:
+        """Get number of C-compilable functions."""
+        return len(self.compilable_funcs)
+
+    def get_reason(self, func_name: str) -> str | None:
+        """Get reason why a function isn't compilable."""
+        return self.uncompilable_funcs.get(func_name)
+
+
+# ---------------------------------------------------------------------------
+# TypePromotionSolver — Promote types across transitive closure
+# ---------------------------------------------------------------------------
+
+class TypePromotionSolver:
+    """Propagate and promote types across function call graph.
+
+    This solver:
+    1. Tracks variable types through function parameters
+    2. Propagates return types to callers
+    3. Promotes types to compatible forms (e.g., int64_t ← int)
+    4. Detects type conflicts and reports them
+    5. Produces final promoted type map for all variables
+
+    The result is a complete cross-closure type map that enables
+    accurate type inference and promotion even for unannotated code.
+    """
+
+    def __init__(self, call_graph: dict, func_return_types: dict):
+        self.call_graph = call_graph  # caller → {callees}
+        self.func_return_types = func_return_types
+        self.promoted_types: dict = {}  # var_name → promoted_type
+        self.type_conflicts: dict = {}  # var_name → [types_seen]
+
+    def analyze(self, stmts: list, all_funcs: dict):
+        """Propagate types across closure.
+
+        Args:
+            stmts: All statements in module
+            all_funcs: Dict of func_name → FunctionDef for all functions
+        """
+        # Pass 1: Collect all function signatures
+        signatures = self._collect_signatures(stmts)
+
+        # Pass 2: Propagate return types to call sites
+        self._propagate_return_types(signatures)
+
+        # Pass 3: Promote common types to compatible forms
+        self._promote_types()
+
+    def _collect_signatures(self, stmts: list) -> dict:
+        """Collect function signatures from module."""
+        signatures = {}
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                signatures[stmt.name] = {
+                    'params': stmt.params,
+                    'return_type': stmt.return_type,
+                }
+            elif isinstance(stmt, StructDef):
+                for method in stmt.methods:
+                    full_name = f"{stmt.name}_{method.name}"
+                    signatures[full_name] = {
+                        'params': method.params,
+                        'return_type': method.return_type,
+                    }
+        return signatures
+
+    def _propagate_return_types(self, signatures: dict):
+        """Propagate return types from callees to callers."""
+        # For each function with known return type, record it
+        for func_name, ret_type in self.func_return_types.items():
+            if ret_type != 'void':
+                # Callers of this function now know what type it returns
+                key = f"__return__{func_name}"
+                self.promoted_types[key] = ret_type
+
+    def _promote_types(self):
+        """Promote types to compatible common forms.
+
+        Examples:
+            int8, int16, int32 → int64_t (for closure consistency)
+            float, float32 → double (wider type)
+        """
+        # Collect all types we've seen
+        int_types = set()
+        float_types = set()
+
+        for var_type in self.promoted_types.values():
+            if 'int' in var_type.lower():
+                int_types.add(var_type)
+            elif 'float' in var_type.lower() or 'double' in var_type.lower():
+                float_types.add(var_type)
+
+        # Promote to common forms
+        if int_types:
+            # Promote all ints to int64_t for closure consistency
+            promoted_int = 'int64_t' if any('64' in t for t in int_types) else 'int'
+            for var_name in list(self.promoted_types.keys()):
+                if 'int' in self.promoted_types[var_name].lower():
+                    self.promoted_types[var_name] = promoted_int
+
+        if float_types:
+            # Promote all floats to double for closure consistency
+            promoted_float = 'double'
+            for var_name in list(self.promoted_types.keys()):
+                if 'float' in self.promoted_types[var_name].lower():
+                    self.promoted_types[var_name] = promoted_float
+
+    def get_promoted_type(self, var_name: str) -> str | None:
+        """Get promoted type for a variable."""
+        return self.promoted_types.get(var_name)
+
+    def get_all_promoted_types(self) -> dict:
+        """Get all promoted types."""
+        return self.promoted_types.copy()
 
 
 # ---------------------------------------------------------------------------

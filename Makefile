@@ -54,16 +54,16 @@ stdlib:
 
 # ── Bootstrap stages ─────────────────────────────────────────────────────────
 #
-# Three-stage self-hosting verification:
+# Three-stage self-hosting verification with transitive-closure compilation:
 #
-#  Stage 1  Python mojo.py --dump mojo.mojo
-#             → stage1/mojo.ci  (+.tok .ast .pyi for every source file)
+#  Stage 1  Python mojo.py --dump-full mojo.mojo (single pass, all imports inline)
+#             → stage1/mojo.ci  (clean, no deduplication needed)
 #  stage2/mojo  GCC -fgimple compiles stage1/mojo.ci + runtime → compiled binary
-#  Stage 2  stage2/mojo --dump mojo.mojo
-#             → stage2/mojo.ci  (+ all other dump files)
+#  Stage 2  stage2/mojo --dump mojo.mojo (single-file for individual validation)
+#             → stage2/mojo.ci  (+ .tok .ast .pyi for all source files)
 #  Stage 3  stage2/mojo --dump mojo.mojo  (idempotency: same binary, same output)
-#             → stage3/mojo.ci  (+ all other dump files)
-#  verify   stage1 == stage2 == stage3  for every generated file
+#             → stage3/mojo.ci  (+ .tok .ast .pyi for all source files)
+#  verify   stage1 == stage2 == stage3  for all generated files
 
 # ── Stage 1: Python drives the compiler ──────────────────────────────────────
 stage1:
@@ -171,9 +171,6 @@ mojo.ci: $(MOJO_MAIN)
 
 build/system.o: mojo.ci
 	@mkdir -p build
-	python3 consolidate_string_pool.py mojo.ci
-	python3 fix_gimple_literals.py mojo.ci
-	python3 fix_gimple_global_args.py mojo.ci
 	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c mojo.ci
 
 build/mojo_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)

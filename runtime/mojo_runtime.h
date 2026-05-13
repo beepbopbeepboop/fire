@@ -198,8 +198,34 @@ char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr(int obj);
 int mojo_type(int obj);
 int mojo_hasattr(int obj, char *attr);
+int mojo_getattr(int obj, char *attr);
+void mojo_setattr(int obj, char *attr, int val);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_cstr_repeat(char *s, int64_t n);
+
+/* Additional Python builtins */
+int64_t mojo_len(int obj);
+void *mojo_range(int64_t start, int64_t stop);
+void *mojo_enumerate(void *iterable);
+void *mojo_zip(void *a, void *b);
+void *mojo_map(void *func, void *iterable);
+void *mojo_filter(void *func, void *iterable);
+void *mojo_make_list(void);
+void *mojo_make_dict(void);
+void *mojo_make_set(void);
+void *mojo_make_tuple(void);
+int64_t mojo_make_int(char *s);
+double mojo_make_float(char *s);
+int mojo_make_bool(int val);
+int64_t mojo_max(void *args);
+int64_t mojo_min(void *args);
+int64_t mojo_sum(void *args);
+void *mojo_sorted(void *iterable);
+void *mojo_reversed(void *iterable);
+
+/* Context manager protocol */
+int mojo_obj_enter(int obj);
+int mojo_obj_exit(int obj, int exc_type, int exc_val, int exc_tb);
 
 /* Method stubs for compatibility */
 int MojoList_append(MojoList *l, char *v);

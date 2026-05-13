@@ -683,6 +683,36 @@ _RETURN = "  return;"
 # ---------------------------------------------------------------------------
 
 class GimpleGen:
+    # Map Python builtin names to their C/runtime equivalents when used as values
+    BUILTIN_VALUE_MAP = {
+        'print': 'mojo_print',
+        'len': 'mojo_len',
+        'range': 'mojo_range',
+        'str': 'mojo_str',
+        'int': 'mojo_int',
+        'float': 'mojo_float',
+        'bool': 'mojo_bool',
+        'list': 'mojo_list',
+        'dict': 'mojo_dict',
+        'set': 'mojo_set',
+        'tuple': 'mojo_tuple',
+        'open': 'mojo_open_file',
+        'enumerate': 'mojo_enumerate',
+        'zip': 'mojo_zip',
+        'map': 'mojo_map',
+        'filter': 'mojo_filter',
+        'isinstance': 'mojo_isinstance',
+        'hasattr': 'mojo_hasattr',
+        'getattr': 'mojo_getattr',
+        'setattr': 'mojo_setattr',
+        'type': 'mojo_type',
+        'max': 'mojo_max',
+        'min': 'mojo_min',
+        'sum': 'mojo_sum',
+        'sorted': 'mojo_sorted',
+        'reversed': 'mojo_reversed',
+    }
+
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True):
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
@@ -1175,6 +1205,13 @@ class GimpleGen:
             t = self._new_temp('int')
             self._emit(f'  {t} = 0;  /* class ref {name} as value */')
             return 'int', t
+        # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
+        if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
+            c_name = self.BUILTIN_VALUE_MAP[name]
+            # Declare the function pointer type if not already declared
+            t = self._new_temp('void *')
+            self._emit(f'  {t} = (void *)&{c_name};  /* builtin {name} */')
+            return 'void *', t
         return self._type_of(name), name
 
     def _lower_WalrusExpr(self, node) -> tuple[str, str]:
@@ -1674,6 +1711,30 @@ class GimpleGen:
     _RUNTIME_PTRS = frozenset({'MojoList *', 'MojoStr *', 'MojoDict *', 'MojoSet *',
                                 'MojoDictIter *', 'MojoSetIter *'})
 
+    def _resolve_member_expr_type(self, node) -> str | None:
+        """Resolve the actual C type of a nested member expression like self.parent.
+        Returns the C type (e.g. 'Scope*') or None if it can't be resolved."""
+        if isinstance(node, IdentExpr):
+            # Base case: resolve identifier to its type
+            if node.name in self.var_types:
+                return self.var_types[node.name]
+            # Check struct field types (class names)
+            if node.name in self.struct_field_types:
+                return node.name + '*'
+            return None
+        elif isinstance(node, MemberExpr):
+            # Recursive case: resolve obj.member
+            obj_type = self._resolve_member_expr_type(node.obj)
+            if obj_type:
+                # Strip pointer if present
+                base_type = obj_type.replace(' *', '').strip()
+                if base_type in self.struct_field_types:
+                    field_map = self.struct_field_types[base_type]
+                    if node.member in field_map:
+                        return field_map[node.member]
+            return None
+        return None
+
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
@@ -1700,6 +1761,12 @@ class GimpleGen:
 
         # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
         ot = self._get_actual_type(ot, ov)
+
+        # For member expressions like self.parent, try to resolve the actual struct type
+        if ot in ('int', 'int64_t') and isinstance(func.obj, MemberExpr):
+            resolved_type = self._resolve_member_expr_type(func.obj)
+            if resolved_type:
+                ot = resolved_type
 
         # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
         # Must intercept BEFORE the opaque-int coerce below, which would misidentify
