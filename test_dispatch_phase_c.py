@@ -98,7 +98,8 @@ def test_dispatch_table_structure():
 
     # Should have function pointer syntax
     assert '(*' in typedef_section, "Should have function pointer syntax"
-    assert 'void *self' in typedef_section or 'void' in typedef_section, "Should have parameters"
+    # Parameters can be typed (Interpreter *self, int node) or generic (void *self, void *node)
+    assert '*self' in typedef_section, "Should have self parameter"
     print("  ✓ Function pointer syntax correct")
 
     # Extract init section

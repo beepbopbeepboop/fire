@@ -577,6 +577,10 @@ class DispatchSolver:
         - Function compilability analysis (def→fn promotions)
         - Type promotion across closure (cross-closure type inference)
         """
+        # Collect function parameter types early for use in dispatch table generation
+        self.func_param_types: dict = {}  # func_name → [(param_name, param_type)]
+        self._collect_function_param_types(all_stmts)
+
         # Pass 1: Build call graph and struct method mapping
         self._build_call_graph(all_stmts)
 
@@ -593,6 +597,16 @@ class DispatchSolver:
         # ── NEW: Pass 5: Promote types across closure ─────────────────────
         self.type_promoter = TypePromotionSolver(self.call_graph, self.func_return_types)
         self.type_promoter.analyze(all_stmts, {})  # all_funcs would be built from all_stmts
+
+    def _collect_function_param_types(self, stmts: list):
+        """Collect parameter type information for all functions."""
+        for stmt in stmts:
+            if isinstance(stmt, FunctionDef):
+                self.func_param_types[stmt.name] = stmt.params
+            elif isinstance(stmt, StructDef):
+                for method in stmt.methods:
+                    method_full_name = f"{stmt.name}_{method.name}"
+                    self.func_param_types[method_full_name] = method.params
 
     def _build_call_graph(self, stmts: list):
         """Traverse all functions and structs, record direct calls.
@@ -879,11 +893,31 @@ class DispatchSolver:
                     # E.g., "Interpreter_execute_Module" → "execute_Module"
                     method_name = self._extract_method_name(callee)
 
-                    # Infer C signature from function return type
+                    # Infer C signature from function return type and parameter types
                     return_type = self.func_return_types.get(callee, 'int')
 
-                    # For now, use void * for parameter (will be typed in Phase C)
-                    c_signature = f"{return_type} (*{method_name})(void *self, void *node)"
+                    # Get parameter types for this function
+                    params = self.func_param_types.get(callee, [])
+
+                    # Convert parameter types to C
+                    # Skip 'self' for methods (first param)
+                    c_params = []
+                    for pname, ptype in params:
+                        if pname == 'self':
+                            # For struct methods, infer the struct type
+                            # Try to extract from callee name (e.g., "Interpreter_execute_Module" → "Interpreter")
+                            struct_name = callee.split('_')[0] if '_' in callee else 'void'
+                            c_params.append(f"{struct_name} *self")
+                        elif ptype:
+                            # Use the annotated type, defaulting to int if unrecognized
+                            c_params.append(f"{ptype} {pname}")
+                        else:
+                            # No type annotation, default to int
+                            c_params.append(f"int {pname}")
+
+                    # Join parameters
+                    param_str = ', '.join(c_params) if c_params else "void"
+                    c_signature = f"{return_type} (*{method_name})({param_str})"
 
                     table.add_method(method_name, c_signature, callee)
 
