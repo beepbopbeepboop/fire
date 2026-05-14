@@ -410,6 +410,15 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
     return r;
 }
 
+MojoList *mojo_list_repeat(MojoList *l, int64_t n)
+{
+    MojoList *r = mojo_list_new();
+    for (int64_t rep = 0; rep < n; rep++)
+        for (int64_t i = 0; i < l->len; i++)
+            mojo_list_append_int(r, l->data[i]);
+    return r;
+}
+
 void mojo_list_print(MojoList *l)
 {
     printf("[");
@@ -535,6 +544,17 @@ int mojo_str_endswith(char *s, char *suffix) {
     int suflen = strlen(suffix);
     if (suflen > slen) return 0;
     return strcmp(s + slen - suflen, suffix) == 0;
+}
+
+int mojo_str_startswith_char(char *s, char c) {
+    if (!s) return 0;
+    return s[0] == c;
+}
+
+int mojo_str_endswith_char(char *s, char c) {
+    if (!s || !*s) return 0;
+    int len = strlen(s);
+    return s[len - 1] == c;
 }
 
 int64_t mojo_str_find(char *s, char *needle) {
@@ -867,6 +887,28 @@ MojoSet *mojo_set_union(MojoSet *a, MojoSet *b) {
             mojo_set_add_int(out, b->slots[i].val_i);
     }
     return out;
+}
+
+MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b) {
+    MojoSet *out = mojo_set_new();
+    if (!a || !b) return out;
+    for (int64_t i = 0; i < a->cap; i++) {
+        if (a->slots[i].tag == 0 && mojo_set_contains_int(b, a->slots[i].val_i))
+            mojo_set_add_int(out, a->slots[i].val_i);
+        else if (a->slots[i].tag == 1 && mojo_set_contains_str(b, a->slots[i].val_s))
+            mojo_set_add_str(out, a->slots[i].val_s);
+    }
+    return out;
+}
+
+void mojo_set_update(MojoSet *dst, MojoSet *src) {
+    if (!dst || !src) return;
+    for (int64_t i = 0; i < src->cap; i++) {
+        if (src->slots[i].tag == 0)
+            mojo_set_add_int(dst, src->slots[i].val_i);
+        else if (src->slots[i].tag == 1)
+            mojo_set_add_str(dst, src->slots[i].val_s);
+    }
 }
 
 /* ── MojoSetIter ─────────────────────────────────────────────────────────*/
@@ -1370,10 +1412,7 @@ void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
 /* Missing stubs for imported modules */
 /* tokenize is provided by compiled mojo_compiler code, not the runtime */
 
-int Parser(int tokens) {
-    (void)tokens;
-    return 0;
-}
+/* Parser is defined as a struct in generated code; no runtime stub needed */
 
 /* os.path bridge functions (stubs - real impl uses POSIX) */
 int int_isdir(int64_t marker, int64_t path) {
@@ -1570,8 +1609,70 @@ int int_import_module(int importlib_obj, char *module_name) {
 }
 
 /* Python builtin any() function */
-int any(int iterable) {
-    /* Stub: return 0 (empty/falsy iterable) */
-    (void)iterable;  /* unused parameter */
+int any(void *iterable) {
+    (void)iterable;
     return 0;
+}
+
+/* ── Regex substitution with callback ──────────────────────────────────── */
+/* Implements re.sub(pattern, callback, src) for POSIX ERE.
+ * callback(env, matched_str) → replacement string.
+ * Each match is replaced with the callback's return value.
+ * Uses POSIX regcomp/regexec for portability (no PCRE dependency).        */
+#include <regex.h>
+char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src) {
+    if (!pattern || !src) return src ? src : "";
+    regex_t re;
+    /* Compile as extended regex (ERE); treat . as matching newlines via REG_NEWLINE off */
+    if (regcomp(&re, pattern, REG_EXTENDED) != 0) return src;
+
+    size_t src_len = strlen(src);
+    /* Result buffer: start with 4× source capacity, grow as needed */
+    size_t out_cap = src_len * 4 + 64;
+    char *out = (char *)malloc(out_cap);
+    if (!out) { regfree(&re); return src; }
+    size_t out_len = 0;
+
+    const char *pos = src;
+    regmatch_t pmatch[1];
+    while (*pos) {
+        int rc = regexec(&re, pos, 1, pmatch, 0);
+        if (rc != 0) {
+            /* No more matches — copy the rest */
+            size_t rest = strlen(pos);
+            while (out_len + rest + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, pos, rest);
+            out_len += rest;
+            break;
+        }
+        /* Copy text before match */
+        size_t pre = (size_t)pmatch[0].rm_so;
+        while (out_len + pre + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, pos, pre);
+        out_len += pre;
+
+        /* Extract matched substring */
+        size_t mlen = (size_t)(pmatch[0].rm_eo - pmatch[0].rm_so);
+        char *matched = (char *)malloc(mlen + 1);
+        memcpy(matched, pos + pmatch[0].rm_so, mlen);
+        matched[mlen] = '\0';
+
+        /* Call the replacement callback */
+        char *repl = callback(env, matched);
+        free(matched);
+        if (repl) {
+            size_t rlen = strlen(repl);
+            while (out_len + rlen + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, repl, rlen);
+            out_len += rlen;
+        }
+
+        /* Advance past the match (avoid infinite loop on zero-length match) */
+        size_t adv = (size_t)pmatch[0].rm_eo;
+        if (adv == 0) { if (*pos) { out[out_len++] = *pos++; } else break; }
+        else pos += adv;
+    }
+    out[out_len] = '\0';
+    regfree(&re);
+    return out;
 }

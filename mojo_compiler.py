@@ -425,9 +425,11 @@ def tokenize(src: str) -> list[Token]:
             string_cache[placeholder] = m.group(0)
             string_idx[0] += 1
             return placeholder
-        # Match triple-quoted strings (both """ and ''') with optional f/r/b/u prefix
-        src = re.sub(r'[fFrRbBuU]{0,2}"""[\s\S]*?"""', repl, src)
-        src = re.sub(r"[fFrRbBuU]{0,2}'''[\s\S]*?'''", repl, src)
+        # Build patterns without literal triple-quotes in source (avoids bootstrap self-match)
+        _dq = '"' * 3
+        _sq = "'" * 3
+        src = re.sub(r'[fFrRbBuU]{0,2}' + _dq + r'[\s\S]*?' + _dq, repl, src)
+        src = re.sub(r'[fFrRbBuU]{0,2}' + _sq + r'[\s\S]*?' + _sq, repl, src)
         return src
     src = replace_multiline_strings(src)
     raw_lines = src.splitlines()
@@ -715,16 +717,19 @@ class Parser:
                 return AssignStmt(target=tuple_target, value=val)
             # Not an assignment, treat as expression statement with comma operator
             return ExprStmt(TupleExpr(elements=targets))
-        # Annotated assignment: target: Type = value
+        # Annotated assignment: target: Type [= value]
         if self._peek().kind == "COLON":
             self._advance()
-            self._parse_type_ann()  # skip type annotation
+            type_ann = self._parse_type_ann()
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 val = self._parse_expr(0)
                 return AssignStmt(target=expr, value=val)
             else:
-                # Just an annotation without assignment (rare)
+                # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields
+                name = expr.name if isinstance(expr, IdentExpr) else None
+                if name:
+                    return VarDecl(name=name, type_ann=type_ann, value=None)
                 return ExprStmt(expr)
         # Assignment / augmented assignment
         if self._peek().kind == "ASSIGN":
@@ -900,7 +905,7 @@ class Parser:
     def _parse_for(self):
         self._expect("KW", "for")
         # Skip optional convention keyword (var, ref, mut, etc.)
-        if self._is_kw(*self._CONV_KWS):
+        if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
             self._advance()
 
         def _parse_for_target():
@@ -1136,7 +1141,7 @@ class Parser:
                     break
         self._expect("COLON")
         body = self._parse_block()
-        fields  = [s for s in body if isinstance(s, VarDecl)]
+        fields  = [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []

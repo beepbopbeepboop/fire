@@ -69,6 +69,7 @@ void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
+MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 
 void mojo_list_print(MojoList *l);
 
@@ -97,6 +98,8 @@ double      mojo_str_to_float(MojoStr *s);
 /* String method operations on char* */
 int mojo_str_startswith(char *s, char *prefix);
 int mojo_str_endswith(char *s, char *suffix);
+int mojo_str_startswith_char(char *s, char c);
+int mojo_str_endswith_char(char *s, char c);
 int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
@@ -182,6 +185,8 @@ int      mojo_set_contains_int(MojoSet *s, int64_t v);
 int      mojo_set_contains_str(MojoSet *s, char *v);
 int64_t  mojo_set_len(MojoSet *s);
 MojoSet *mojo_set_union(MojoSet *a, MojoSet *b);
+MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b);
+void     mojo_set_update(MojoSet *dst, MojoSet *src);
 void     mojo_set_discard(MojoSet *s, int64_t v);
 
 /* Set iterator */
@@ -298,7 +303,7 @@ char *int64_t_splitext(char *path);    /* splitext() from os.path */
 
 /* Module functions that are imported */
 MojoList *tokenize(char *source);            /* tokenize function */
-int Parser(void *tokens);                    /* Parser class constructor (opaque) */
+/* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source);  /* compile_to_gimple function */
 
 /* os.path bridge functions (called from compiled module_loader code) */
@@ -337,3 +342,7 @@ int any(void *iterable);                        /* Python any() builtin */
 
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */
+
+/* ── Regex substitution with callback (for re.sub(pattern, fn, src)) ────── */
+/* callback receives (env, matched_substring) and returns replacement string */
+char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src);
