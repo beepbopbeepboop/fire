@@ -3835,6 +3835,14 @@ class GimpleGen:
                 self._emit_call('MojoList *', t, 'mojo_str_split', [('char *', cstr_ov), ('char *', arg_vals[0])])
                 self._elem_types[t] = 'char *'
                 return 'MojoList *', t
+            if method == 'splitlines':
+                t = self._new_temp('MojoList *')
+                sep = self._str_literal_to_slit('"\n"')
+                sep_tmp = self._new_temp('char *')
+                self._emit(f"  {sep_tmp} = {sep};")
+                self._emit_call('MojoList *', t, 'mojo_str_split', [('char *', cstr_ov), ('char *', sep_tmp)])
+                self._elem_types[t] = 'char *'
+                return 'MojoList *', t
             if method in ('encode', 'decode', 'format'):
                 t = self._new_temp('char *')
                 self._emit(f"  {t} = {cstr_ov};  /* TODO: {method} */")
@@ -5607,13 +5615,16 @@ class GimpleGen:
         # from module import name1, name2, ...
         for name, alias in node.names:
             symbol_name = alias if alias else name
+            # Use known signature if available
+            sig = self._KNOWN_SIGS.get(symbol_name)
+            ret = sig[0] if sig else 'int'
             self.imported_symbols[symbol_name] = {
                 'module': node.module,
-                'return_type': 'int',  # Default to int for imported functions
+                'return_type': ret,
             }
             # Track in func_return_types so calls know the return type
             if symbol_name not in self.func_return_types:
-                self.func_return_types[symbol_name] = 'int'
+                self.func_return_types[symbol_name] = ret
 
     def _gen_stmt_ComptimeIfStmt(self, node):
         val = self._eval_const_bool(node.condition)
@@ -5847,7 +5858,11 @@ class GimpleGen:
             else:
                 elem64 = self._new_temp('int64_t')
                 self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
-                self._emit(f"  {var} = ({elem}) {elem64};")
+                var_type = self._type_of(var)
+                if var_type != 'int64_t':
+                    self._safe_coerce_emit('int64_t', var_type, elem64, var)
+                else:
+                    self._emit(f"  {var} = ({elem}) {elem64};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)

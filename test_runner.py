@@ -37,7 +37,8 @@ def compile_mojo_to_executable(mojo_src: str) -> str:
         result = subprocess.run(
             ['/opt/local/bin/gcc-mp-15',
              f'-I{runtime_dir}',
-             '-o', exe_file, c_file],
+             '-o', exe_file, c_file,
+             os.path.join(runtime_dir, 'mojo_runtime.c')],
             capture_output=True,
             text=True,
             timeout=30
