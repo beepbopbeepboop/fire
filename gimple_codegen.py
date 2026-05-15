@@ -3199,6 +3199,12 @@ class GimpleGen:
             ct = self._new_temp(arith_type)
             self._safe_coerce_emit(rt, arith_type, rv, ct)
             rv = ct
+        if node.op in ('==', '!=') and lt.endswith(' *') != rt.endswith(' *'):
+            ip_l = self._new_temp('int64_t')
+            ip_r = self._new_temp('int64_t')
+            self._emit(f'  {ip_l} = (int64_t){lv};')
+            self._emit(f'  {ip_r} = (int64_t){rv};')
+            lv = ip_l; rv = ip_r
         t = self._new_temp(res_type)
         self._emit(f"  {t} = {lv} {c_op} {rv};")
         return res_type, t

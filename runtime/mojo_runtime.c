@@ -1813,3 +1813,25 @@ void mojo_setattr(int obj, char *attr, int val) {
 void setattr(int obj, int attr, int value) {
     (void)obj; (void)attr; (void)value;
 }
+
+int64_t mojo_max(void *args) {
+    MojoList *l = (MojoList *)args;
+    if (!l || l->len == 0) return 0;
+    int64_t m = mojo_list_get_int(l, 0);
+    for (int64_t i = 1; i < l->len; i++) {
+        int64_t v = mojo_list_get_int(l, i);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+int64_t mojo_min(void *args) {
+    MojoList *l = (MojoList *)args;
+    if (!l || l->len == 0) return 0;
+    int64_t m = mojo_list_get_int(l, 0);
+    for (int64_t i = 1; i < l->len; i++) {
+        int64_t v = mojo_list_get_int(l, i);
+        if (v < m) m = v;
+    }
+    return m;
+}
