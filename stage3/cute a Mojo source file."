@@ -12,12 +12,13 @@
 #endif
 #include <mojo_runtime.h>
 void mojo_print(char *str);
-char *gimple_codegen_compile_to_gimple(char *src);
-char *compile_to_gimple(char *mojo_src, int do_imports);
+char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);
+char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);
 int64_t mojo_open_file(char *path);
 void *mojo_open(char *filename, char *mode);
 int64_t int_write (int64_t, char *);
 int64_t int_parse_module (int);
+#line 1 "../generated_dispatch.py"
 
 typedef struct BinaryOp {
   int left;

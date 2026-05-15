@@ -1763,7 +1763,8 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
-        self._current_filename: str = ""  # filename for initial #line directive
+        self._current_filename: str = ""  # filename for #line directives
+        self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         self._reset_func()
 
     def _reset_func(self):
@@ -5008,8 +5009,25 @@ class GimpleGen:
     # ── Statement generation ───────────────────────────────────────────────
 
     def gen_stmt(self, node):
-        # Don't emit #line directives here - the initial #line at module start
-        # is sufficient. The C preprocessor automatically tracks line numbers.
+        # Emit #line directive to track source location. Critical for debugging:
+        # optimizations intermix and reorder code from different lines and files.
+        # Only emit if we haven't emitted this exact (filename, line) pair before.
+        if hasattr(node, 'line') and node.line and node.line > 0:
+            filename = getattr(self, '_current_filename', '')
+            emitted_pairs = getattr(self, '_emitted_line_pairs', set())
+
+            # Create unique key for this (filename, line) combination
+            pair_key = (filename, node.line)
+
+            # Emit #line only if we haven't emitted this exact pair before
+            if pair_key not in emitted_pairs:
+                if filename:
+                    self._emit(f"#line {node.line} \"{filename}\"")
+                else:
+                    self._emit(f"#line {node.line}")
+                emitted_pairs.add(pair_key)
+                self._emitted_line_pairs = emitted_pairs
+
         handler_name = _STMT_DISPATCH.get(type(node).__name__)
         if handler_name:
             getattr(self, handler_name)(node)
