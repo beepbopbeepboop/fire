@@ -2050,10 +2050,15 @@ class GimpleGen:
                 else:
                     self._emit(f'  {ct} = (int64_t){aval};')
                 coerced_args.append(ct)
-            elif ptype == 'char *' and atype in ('int', 'int64_t'):
+            elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
                 vp = self._new_temp('void *')
                 cp = self._new_temp('char *')
-                self._emit(f'  {vp} = (void *){aval};')
+                if atype in ('int', 'char'):
+                    ip = self._new_temp('int64_t')
+                    self._emit(f'  {ip} = (int64_t){aval};')
+                    self._emit(f'  {vp} = (void *){ip};')
+                else:
+                    self._emit(f'  {vp} = (void *){aval};')
                 self._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
             elif ptype.endswith(' *') and atype in ('int', 'int64_t'):
@@ -3341,12 +3346,9 @@ class GimpleGen:
         # str: cast int-cast strings to char*
         if suf == 'str' and elem_type in ('int', 'int64_t', 'char'):
             cp = self._new_temp('char *')
-            if elem_type == 'int64_t':
-                ip = self._new_temp('int64_t')
-                self._emit(f"  {ip} = (int64_t){val};")
-                self._emit(f"  {cp} = (char *){ip};")
-            else:
-                self._emit(f"  {cp} = (char *){val};")
+            ip = self._new_temp('int64_t')
+            self._emit(f"  {ip} = (int64_t){val};")
+            self._emit(f"  {cp} = (char *){ip};")
             return cp
         return val  # already char*
 
