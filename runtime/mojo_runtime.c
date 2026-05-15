@@ -1836,17 +1836,19 @@ int64_t mojo_min(void *args) {
     return m;
 }
 
-/* ── Stubs for interpreter dispatch (function-pointer targets) ──────── */
-int MojoParser() { return 0; }
-void *mojo_enumerate(void *iterable) { (void)iterable; return mojo_list_new(); }
-void *mojo_filter(void *func, void *iterable) { (void)func; (void)iterable; return mojo_list_new(); }
-void *mojo_map(void *func, void *iterable) { (void)func; (void)iterable; return mojo_list_new(); }
-int64_t mojo_len(int obj) { (void)obj; return 0; }
-int mojo_getattr(int obj, char *attr) { (void)obj; (void)attr; return 0; }
+/* ── String/Number conversion (used directly in compiled code) ─────── */
+int64_t mojo_make_int(char *s) { return s ? (int64_t)atoll(s) : 0; }
+double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
+int mojo_make_bool(int val) { return val ? 1 : 0; }
 void *mojo_make_list(void) { return mojo_list_new(); }
 void *mojo_make_dict(void) { return mojo_dict_new(); }
 void *mojo_make_set(void) { return mojo_set_new(); }
 void *mojo_make_tuple(void) { return mojo_list_new(); }
-int64_t mojo_make_int(char *s) { (void)s; return 0; }
-double mojo_make_float(char *s) { (void)s; return 0.0; }
-int mojo_make_bool(int val) { return val ? 1 : 0; }
+
+/* ── Stubs for interpreter dispatch (only used as function-pointer targets) ── */
+int MojoParser() { return 0; }
+int64_t mojo_len(int obj) { (void)obj; return 0; }
+int mojo_getattr(int obj, char *attr) { (void)obj; (void)attr; return 0; }
+void *mojo_enumerate(void *iterable) { return iterable; }
+void *mojo_filter(void *func, void *iterable) { (void)func; return iterable; }
+void *mojo_map(void *func, void *iterable) { (void)func; return iterable; }
