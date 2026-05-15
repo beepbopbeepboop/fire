@@ -2220,11 +2220,11 @@ def compile(src: str) -> str:
     stmts  = Parser(tokens).parse_module()
     return emit_module(stmts)
 
-def compile_with_interpreter(src: str) -> str:
+def compile_with_interpreter(src: str, filename: str = "") -> str:
     # Compile Mojo source to GIMPLE C using gimple_codegen.
     # This is the interpreter-based compilation path used during bootstrap.
     from gimple_codegen import compile_to_gimple
-    return compile_to_gimple(src, do_imports=False, filename="")
+    return compile_to_gimple(src, do_imports=False, filename=filename)
 
 if __name__ == '__main__':
     import sys

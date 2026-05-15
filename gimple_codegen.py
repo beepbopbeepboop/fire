@@ -1844,6 +1844,7 @@ class GimpleGen:
                     # emit_str_pool=False so only main module emits the shared string pool
                     # emit_struct_defs=True but share _emitted_structs to dedup struct definitions
                     temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False)
+                    temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._str_pool = self._str_pool

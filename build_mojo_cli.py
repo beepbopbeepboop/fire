@@ -201,7 +201,7 @@ def _compile_transitive_interpreter(entry_path):
     with open(entry_path) as f:
         src = f.read()
 
-    return compile_with_interpreter(src)
+    return compile_with_interpreter(src, filename=entry_path)
 
 
 def handle_dump(flag, input_file):
