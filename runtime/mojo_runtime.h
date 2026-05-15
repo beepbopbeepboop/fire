@@ -134,7 +134,9 @@ MojoList   *mojo_dict_items(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
+MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
 MojoList   *mojo_list_copy(MojoList *l);
+int         mojo_list_all(MojoList *l);
 int64_t     mojo_list_pop(MojoList *l);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
 void        mojo_list_sort(MojoList *l);
@@ -186,6 +188,8 @@ int      mojo_set_contains_str(MojoSet *s, char *v);
 int64_t  mojo_set_len(MojoSet *s);
 MojoSet *mojo_set_union(MojoSet *a, MojoSet *b);
 MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b);
+MojoSet *mojo_set_difference(MojoSet *a, MojoSet *b);
+MojoSet *mojo_set_copy(MojoSet *s);
 void     mojo_set_update(MojoSet *dst, MojoSet *src);
 void     mojo_set_discard(MojoSet *s, int64_t v);
 
@@ -241,6 +245,9 @@ void *mojo_reversed(void *iterable);
 int mojo_obj_enter(int obj);
 int mojo_obj_exit(int obj, int exc_type, int exc_val, int exc_tb);
 
+/* Call a method by name on an opaque object */
+int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1);
+
 /* Method stubs for compatibility */
 int MojoList_append(MojoList *l, char *v);
 int char_join(char *sep, MojoList *items);
@@ -286,6 +293,28 @@ static inline int __mojo_floordiv(int a, int b) {
     return q - (a % b != 0 && (a ^ b) < 0);
 }
 
+/* ── Python exception type sentinels (bootstrap) ────────────────────────
+ * Used as integer tokens when registering exception types in interpreter scope. */
+#define Exception          1001
+#define BaseException      1002
+#define KeyboardInterrupt  1003
+#define EOFError           1004
+#define ValueError         1005
+#define TypeError          1006
+#define RuntimeError       1007
+#define StopIteration      1008
+#define NameError          1009
+#define AttributeError     1010
+#define IndexError         1011
+#define KeyError           1012
+#define ImportError        1013
+#define FileNotFoundError  1014
+#define OverflowError      1015
+#define ZeroDivisionError  1016
+#define NotImplementedError 1017
+#define SystemExit         1018
+#define RecursionError     1019
+
 /* ── Missing function stubs for interpreter ──────────────────────────────
  * These are called by generated interpreter code and need stub declarations */
 
@@ -311,6 +340,8 @@ int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
 int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
 int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
 int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
+int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */
+int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*list) */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 
 /* Forward declare ModuleLoader (defined in generated code) */

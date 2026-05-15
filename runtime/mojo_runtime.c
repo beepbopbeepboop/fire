@@ -901,6 +901,30 @@ MojoSet *mojo_set_intersection(MojoSet *a, MojoSet *b) {
     return out;
 }
 
+MojoSet *mojo_set_difference(MojoSet *a, MojoSet *b) {
+    MojoSet *out = mojo_set_new();
+    if (!a) return out;
+    for (int64_t i = 0; i < a->cap; i++) {
+        if (a->slots[i].tag == 0 && !mojo_set_contains_int(b, a->slots[i].val_i))
+            mojo_set_add_int(out, a->slots[i].val_i);
+        else if (a->slots[i].tag == 1 && !mojo_set_contains_str(b, a->slots[i].val_s))
+            mojo_set_add_str(out, a->slots[i].val_s);
+    }
+    return out;
+}
+
+MojoSet *mojo_set_copy(MojoSet *s) {
+    MojoSet *out = mojo_set_new();
+    if (!s) return out;
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag == 0)
+            mojo_set_add_int(out, s->slots[i].val_i);
+        else if (s->slots[i].tag == 1)
+            mojo_set_add_str(out, s->slots[i].val_s);
+    }
+    return out;
+}
+
 void mojo_set_update(MojoSet *dst, MojoSet *src) {
     if (!dst || !src) return;
     for (int64_t i = 0; i < src->cap; i++) {
@@ -1378,12 +1402,32 @@ MojoDict *mojo_dict_copy(MojoDict *d) {
     return out;
 }
 
+MojoDict *mojo_dict_from_pairs(MojoList *pairs) {
+    MojoDict *out = mojo_dict_new();
+    if (!pairs) return out;
+    for (int64_t i = 0; i < pairs->len; i++) {
+        MojoList *pair = (MojoList *)pairs->data[i];
+        if (!pair || pair->len < 2) continue;
+        char *key = (char *)pair->data[0];
+        int64_t val = pair->data[1];
+        mojo_dict_set_int(out, key, val);
+    }
+    return out;
+}
+
 MojoList *mojo_list_copy(MojoList *l) {
     MojoList *out = mojo_list_new();
     if (!l) return out;
     for (int64_t i = 0; i < l->len; i++)
         mojo_list_append_int(out, l->data[i]);
     return out;
+}
+
+int mojo_list_all(MojoList *l) {
+    if (!l) return 1;
+    for (int64_t i = 0; i < l->len; i++)
+        if (!l->data[i]) return 0;
+    return 1;
 }
 
 int64_t mojo_list_pop(MojoList *l) {
@@ -1464,6 +1508,38 @@ int int_exists(int64_t marker, int64_t path) {
     if (!p) return 0;
     struct stat st;
     return (stat(p, &st) == 0);
+}
+
+int64_t int_join_list(int64_t marker, int64_t path_list) {
+    (void)marker;
+    MojoList *lst = (MojoList *)path_list;
+    if (!lst || lst->len == 0) return (int64_t)"";
+    /* Start with first element */
+    int64_t result = lst->data[0];
+    /* Join with each subsequent element */
+    for (int64_t i = 1; i < lst->len; i++) {
+        result = int_join(marker, result, lst->data[i]);
+    }
+    return result;
+}
+
+int64_t int_join(int64_t marker, int64_t base, int64_t part) {
+    (void)marker;
+    char *b = (char *)base;
+    char *p = (char *)part;
+    if (!b || !*b) return part;
+    if (!p || !*p) return base;
+    /* If part is absolute, return it directly */
+    if (*p == '/') return part;
+    size_t blen = strlen(b);
+    size_t plen = strlen(p);
+    int need_sep = (b[blen - 1] != '/');
+    char *result = malloc(blen + need_sep + plen + 1);
+    if (!result) return part;
+    memcpy(result, b, blen);
+    if (need_sep) result[blen++] = '/';
+    memcpy(result + blen, p, plen + 1);
+    return (int64_t)result;
 }
 
 int64_t int_getcwd(int64_t marker) {
@@ -1675,4 +1751,12 @@ char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env
     out[out_len] = '\0';
     regfree(&re);
     return out;
+}
+
+int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
+    /* Stub: dynamic method call on opaque Python object.
+     * In the bootstrap, interpreter execute() calls are not needed
+     * since we compile rather than interpret. Returns 0 (None). */
+    (void)obj; (void)method; (void)arg1;
+    return 0;
 }
