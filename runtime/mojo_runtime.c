@@ -1760,3 +1760,56 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
     (void)obj; (void)method; (void)arg1;
     return 0;
 }
+
+/* ── Additional Python builtins (stubs for bootstrap) ──────────────── */
+
+void *mojo_range(int64_t start, int64_t stop) {
+    MojoList *l = mojo_list_new();
+    for (int64_t i = start; i < stop; i++)
+        mojo_list_append_int(l, i);
+    return l;
+}
+
+void *mojo_reversed(void *iterable) {
+    MojoList *src = (MojoList *)iterable;
+    MojoList *dst = mojo_list_copy(src);
+    mojo_list_reverse(dst);
+    return dst;
+}
+
+void *mojo_sorted(void *iterable) {
+    MojoList *src = (MojoList *)iterable;
+    MojoList *dst = mojo_list_copy(src);
+    /* Bubble sort on stored int64_t values */
+    for (int64_t i = 0; i < dst->len; i++) {
+        for (int64_t j = i + 1; j < dst->len; j++) {
+            if (mojo_list_get_int(dst, i) > mojo_list_get_int(dst, j)) {
+                int64_t tmp = dst->data[i];
+                dst->data[i] = dst->data[j];
+                dst->data[j] = tmp;
+            }
+        }
+    }
+    return dst;
+}
+
+int64_t mojo_sum(void *args) {
+    MojoList *l = (MojoList *)args;
+    int64_t total = 0;
+    for (int64_t i = 0; i < l->len; i++)
+        total += mojo_list_get_int(l, i);
+    return total;
+}
+
+void *mojo_zip(void *a, void *b) {
+    (void)a; (void)b;
+    return mojo_list_new();
+}
+
+void mojo_setattr(int obj, char *attr, int val) {
+    (void)obj; (void)attr; (void)val;
+}
+
+void setattr(int obj, int attr, int value) {
+    (void)obj; (void)attr; (void)value;
+}
