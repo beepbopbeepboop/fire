@@ -90,7 +90,7 @@ def build_executable(input_file, src):
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
         # do_imports=False: don't inline imports, we'll link against .so files instead
-        c_code = gimple_codegen.compile_to_gimple(src, do_imports=False)
+        c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -226,7 +226,7 @@ def main():
         basename = os.path.splitext(os.path.basename(input_file))[0]
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -262,7 +262,7 @@ def main():
                 print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
 
             # Generate C intermediate (with transitive imports)
-            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 

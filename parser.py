@@ -26,9 +26,10 @@ import ast_nodes as N
 # ---------------------------------------------------------------------------
 
 class TokenStream:
-    def __init__(self, tokens: list[Token]):
+    def __init__(self, tokens: list[Token], filename: str = ""):
         self._tokens = tokens
         self._pos = 0
+        self.filename = filename
 
     def peek(self, offset: int = 0) -> Token:
         pos = self._pos + offset
@@ -97,12 +98,13 @@ def _peek_words(ts: TokenStream, n: int) -> list[str]:
 # Top-level parser
 # ---------------------------------------------------------------------------
 
-def parse(source: str) -> N.Module:
+def parse(source: str, filename: str = "") -> N.Module:
     tokens = tokenize(source)
-    ts = TokenStream(tokens)
+    ts = TokenStream(tokens, filename=filename)
     body = parse_stmts(ts, top_level=True)
     ts.eat(TT.EOF)
-    return N.Module(body=body)
+    t = ts.peek()
+    return N.Module(body=body, filename=filename, line=t.line, col=t.col)
 
 
 def parse_stmts(ts: TokenStream, top_level: bool = False) -> list:
@@ -210,6 +212,8 @@ def parse_simple_one(ts: TokenStream):
 # ---------------------------------------------------------------------------
 
 def parse_import(ts: TokenStream):
+    t = ts.peek()
+    line, col = t.line, t.col
     ts.eat_name('Import')
     parts = [ts.eat(TT.NAME).value]
     while ts.match(TT.DOT):
@@ -220,7 +224,7 @@ def parse_import(ts: TokenStream):
     if ts.match_name('as'):
         ts.advance()
         alias = ts.eat(TT.NAME).value
-    return N.ImportStmt(module=module, alias=alias)
+    return N.ImportStmt(module=module, alias=alias, line=line, col=col)
 
 
 def parse_from_import(ts: TokenStream):
@@ -253,6 +257,8 @@ def parse_from_import(ts: TokenStream):
 
 
 def parse_declare(ts: TokenStream):
+    t = ts.peek()
+    line, col = t.line, t.col
     ts.eat_name('Declare')
     name = ts.eat(TT.NAME).value
     type_ann = None
@@ -266,16 +272,18 @@ def parse_declare(ts: TokenStream):
         if ts.match_name('value'):
             ts.advance()
         value = parse_expr(ts)
-    return N.DeclareStmt(name=name, type_ann=type_ann, value=value)
+    return N.DeclareStmt(name=name, type_ann=type_ann, value=value, line=line, col=col)
 
 
 def parse_set(ts: TokenStream):
     """Set <target> to <expr>  |  Set <target>'s <field> to <expr>"""
+    t = ts.peek()
+    line, col = t.line, t.col
     ts.eat_name('Set')
     target = parse_expr(ts)
     ts.eat_name('to')
     value = parse_expr(ts)
-    return N.AssignStmt(targets=[target], value=value)
+    return N.AssignStmt(targets=[target], value=value, line=line, col=col)
 
 
 def parse_aug_assign(ts: TokenStream):
@@ -298,10 +306,12 @@ def parse_aug_assign(ts: TokenStream):
 
 
 def parse_return(ts: TokenStream):
+    t = ts.peek()
+    line, col = t.line, t.col
     ts.eat_name('Return')
     if ts.match(TT.NEWLINE) or ts.match(TT.SEMICOLON) or ts.match(TT.EOF):
-        return N.ReturnStmt()
-    return N.ReturnStmt(value=parse_expr(ts))
+        return N.ReturnStmt(line=line, col=col)
+    return N.ReturnStmt(value=parse_expr(ts), line=line, col=col)
 
 
 def parse_raise(ts: TokenStream):
@@ -344,6 +354,8 @@ def parse_field(ts: TokenStream):
 # ---------------------------------------------------------------------------
 
 def parse_if(ts: TokenStream):
+    t = ts.peek()
+    line, col = t.line, t.col
     ts.eat_name('If')
     cond = parse_expr(ts)
     ts.eat(TT.COLON)
@@ -366,7 +378,7 @@ def parse_if(ts: TokenStream):
                 break
         else:
             break
-    return N.IfStmt(condition=cond, then_body=body, elifs=elifs, else_body=else_body)
+    return N.IfStmt(condition=cond, then_body=body, elifs=elifs, else_body=else_body, line=line, col=col)
 
 
 def parse_while(ts: TokenStream):
@@ -481,6 +493,8 @@ def parse_define(ts: TokenStream):
 
 
 def parse_func_def(ts: TokenStream):
+    t = ts.peek()
+    line, col = t.line, t.col
     kind = ts.advance().value  # 'function' or 'method'
     name = ts.eat(TT.NAME).value
     params = []
@@ -494,7 +508,7 @@ def parse_func_def(ts: TokenStream):
         return_type = parse_type_expr(ts)
     ts.eat(TT.COLON)
     body = parse_block(ts)
-    return N.FunctionDef(name=name, params=params, return_type=return_type, body=body)
+    return N.FunctionDef(name=name, params=params, return_type=return_type, body=body, line=line, col=col)
 
 
 def parse_params(ts: TokenStream) -> list:
@@ -718,11 +732,13 @@ def parse_binary(ts: TokenStream, min_prec: int = 0, stop_at_and: bool = False) 
     while True:
         # Special: ternary "X if COND otherwise Y"
         if ts.match_name('if') and min_prec <= 0:
+            t = ts.peek()
+            line, col = t.line, t.col
             ts.advance()
             cond = parse_binary(ts, min_prec=1)
             ts.eat_name('otherwise')
             right = parse_binary(ts, min_prec=0)
-            left = N.TernaryExpr(condition=cond, then_val=left, else_val=right)
+            left = N.TernaryExpr(condition=cond, then_val=left, else_val=right, line=line, col=col)
             continue
 
         if stop_at_and and ts.match_name('and'):
@@ -732,6 +748,8 @@ def parse_binary(ts: TokenStream, min_prec: int = 0, stop_at_and: bool = False) 
         if result is None:
             break
         py_op, n_tokens = result
+        t = ts.peek()
+        line, col = t.line, t.col
         prec = _OP_PRECEDENCE.get(py_op, 3)
         if prec < min_prec:
             break
@@ -743,21 +761,23 @@ def parse_binary(ts: TokenStream, min_prec: int = 0, stop_at_and: bool = False) 
         if py_op == '**':
             next_prec = prec  # right-associative
         right = parse_binary(ts, min_prec=next_prec, stop_at_and=stop_at_and)
-        left = N.BinaryOp(left=left, op=py_op, right=right)
+        left = N.BinaryOp(left=left, op=py_op, right=right, line=line, col=col)
 
     return left
 
 
 def parse_unary(ts: TokenStream) -> object:
+    t = ts.peek()
+    line, col = t.line, t.col
     if ts.match_name('not'):
         ts.advance()
-        return N.UnaryOp(op='not', operand=parse_unary(ts))
+        return N.UnaryOp(op='not', operand=parse_unary(ts), line=line, col=col)
     if ts.match_name('negative'):
         ts.advance()
-        return N.UnaryOp(op='-', operand=parse_unary(ts))
+        return N.UnaryOp(op='-', operand=parse_unary(ts), line=line, col=col)
     if ts.match_name('bitwise') and ts.peek(1).value == 'not':
         ts.advance(); ts.advance()
-        return N.UnaryOp(op='~', operand=parse_unary(ts))
+        return N.UnaryOp(op='~', operand=parse_unary(ts), line=line, col=col)
     return parse_postfix(ts)
 
 
@@ -805,6 +825,7 @@ def parse_postfix(ts: TokenStream) -> object:
 
 def parse_primary(ts: TokenStream) -> object:
     t = ts.peek()
+    line, col = t.line, t.col
 
     # call expression
     if t.type == TT.NAME and t.value == 'call':
@@ -813,32 +834,32 @@ def parse_primary(ts: TokenStream) -> object:
     # Literals
     if t.type == TT.INT:
         ts.advance()
-        return N.IntLiteral(value=int(t.value, 0))
+        return N.IntLiteral(value=int(t.value, 0), line=line, col=col)
     if t.type == TT.FLOAT:
         ts.advance()
-        return N.FloatLiteral(value=float(t.value))
+        return N.FloatLiteral(value=float(t.value), line=line, col=col)
     if t.type == TT.STRING:
         ts.advance()
-        return N.StringLiteral(value=t.value)
+        return N.StringLiteral(value=t.value, line=line, col=col)
     if t.type == TT.NAME and t.value == 'True':
         ts.advance()
-        return N.BoolLiteral(value=True)
+        return N.BoolLiteral(value=True, line=line, col=col)
     if t.type == TT.NAME and t.value == 'False':
         ts.advance()
-        return N.BoolLiteral(value=False)
+        return N.BoolLiteral(value=False, line=line, col=col)
     if t.type == TT.NAME and t.value == 'None':
         ts.advance()
-        return N.NoneLiteral()
+        return N.NoneLiteral(line=line, col=col)
     if t.type == TT.NAME and t.value == 'Self':
         ts.advance()
-        return N.SelfExpr()
+        return N.SelfExpr(line=line, col=col)
 
     # Parenthesized or tuple
     if t.type == TT.LPAREN:
         ts.advance()
         if ts.match(TT.RPAREN):
             ts.advance()
-            return N.TupleLiteral([])
+            return N.TupleLiteral([], line=line, col=col)
         expr = parse_expr(ts)
         if ts.match(TT.COMMA):
             # Tuple
@@ -849,7 +870,7 @@ def parse_primary(ts: TokenStream) -> object:
                     break
                 elements.append(parse_expr(ts))
             ts.eat(TT.RPAREN)
-            return N.TupleLiteral(elements)
+            return N.TupleLiteral(elements, line=line, col=col)
         ts.eat(TT.RPAREN)
         return expr
 
@@ -864,7 +885,7 @@ def parse_primary(ts: TokenStream) -> object:
     # Identifier
     if t.type == TT.NAME:
         ts.advance()
-        return N.IdentExpr(name=t.value)
+        return N.IdentExpr(name=t.value, line=line, col=col)
 
     raise SyntaxError(f"Unexpected token {t.type.name} ({t.value!r}) at {t.line}:{t.col}")
 

@@ -1763,6 +1763,7 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
+        self._current_filename: str = ""  # filename for initial #line directive
         self._reset_func()
 
     def _reset_func(self):
@@ -3510,15 +3511,24 @@ class GimpleGen:
                     return 'char *', t
 
             if module_name == 'gimple_codegen' and method_name == 'compile_to_gimple':
-                # gimple_codegen.compile_to_gimple(src, do_imports=True) → returns char*
-                # Only src is passed to C function (do_imports is Python-only)
+                # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
                 if len(node.args) >= 1:
                     src_type, src_val = self.lower_expr(node.args[0])
                     # Cast to char* if needed (legacy int-cast strings)
                     if src_type not in ('char *', 'void *'):
                         src_val = f"(char *){src_val}"
+                    # Extract do_imports if provided, default to 0 (false)
+                    do_imports_val = '0'
+                    if len(node.args) >= 2:
+                        di_type, di_val = self.lower_expr(node.args[1])
+                        do_imports_val = di_val
+                    # Extract filename if provided, default to ""
+                    filename_val = '""'
+                    if len(node.args) >= 3:
+                        fn_type, fn_val = self.lower_expr(node.args[2])
+                        filename_val = fn_val
                     t = self._new_temp('char *')
-                    self._emit(f"  {t} = gimple_codegen_compile_to_gimple ({src_val});")
+                    self._emit(f"  {t} = gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val});")
                     return 'char *', t
 
         ot, ov = self.lower_expr(func.obj)
@@ -4998,6 +5008,8 @@ class GimpleGen:
     # ── Statement generation ───────────────────────────────────────────────
 
     def gen_stmt(self, node):
+        # Don't emit #line directives here - the initial #line at module start
+        # is sufficient. The C preprocessor automatically tracks line numbers.
         handler_name = _STMT_DISPATCH.get(type(node).__name__)
         if handler_name:
             getattr(self, handler_name)(node)
@@ -7027,13 +7039,18 @@ class GimpleGen:
             '#endif',
             '#include <mojo_runtime.h>',
             'void mojo_print(char *str);',
-            'char *gimple_codegen_compile_to_gimple(char *src);',
-            'char *compile_to_gimple(char *mojo_src, int do_imports);',
+            'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
+            'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
             'int64_t mojo_open_file(char *path);',
             'void *mojo_open(char *filename, char *mode);',
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
         ]
+
+        # Emit initial #line directive at the start if we have a filename
+        # This sets the context for all subsequent code
+        if self._current_filename:
+            parts.append(f'#line 1 "{self._current_filename}"')
 
         # Emit struct typedefs early, before any functions that use them
         # This includes structs from struct_field_types (like Interpreter, Scope, etc.)
@@ -7547,12 +7564,15 @@ def compile_to_c(mojo_src: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def compile_to_gimple(mojo_src: str, do_imports: bool = False) -> str:
+def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
     """Parse Mojo source and return a C string with __GIMPLE annotations.
 
     If do_imports=True, recursively compile imported modules and inline their code.
     If do_imports=False, generate extern declarations for imports.
+    If filename is provided, emit #line directives with the filename.
     """
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
-    return GimpleGen(do_imports=do_imports).gen_module(stmts)
+    gen = GimpleGen(do_imports=do_imports)
+    gen._current_filename = filename
+    return gen.gen_module(stmts)

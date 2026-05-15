@@ -1261,11 +1261,11 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
 }
 
 
-char *gimple_codegen_compile_to_gimple(char *src) {
+char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename) {
     /*
      * Call Python's gimple_codegen.compile_to_gimple() via subprocess.
      * We write src to a temp file, then run:
-     *   python3 -c "import gimple_codegen; print(gimple_codegen.compile_to_gimple(open('TMP').read()))"
+     *   python3 -c "import gimple_codegen; print(gimple_codegen.compile_to_gimple(open('TMP').read(), do_imports, filename))"
      * and capture the output.  Falls back to a valid-but-empty stub only on
      * hard failures (popen/write errors).
      */
@@ -1295,8 +1295,8 @@ char *gimple_codegen_compile_to_gimple(char *src) {
         "PYTHONPATH='%s' python3 -c \""
         "import sys; import gimple_codegen; "
         "src = open('%s').read(); "
-        "print(gimple_codegen.compile_to_gimple(src), end='')\" 2>/dev/null",
-        pythonpath, tmppath);
+        "print(gimple_codegen.compile_to_gimple(src, %d, '%s'), end='')\" 2>/dev/null",
+        pythonpath, tmppath, do_imports, filename ? filename : "");
 
     FILE *fp = popen(cmd, "r");
     if (!fp) { unlink(tmppath); goto fallback; }

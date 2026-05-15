@@ -333,7 +333,7 @@ char *int64_t_splitext(char *path);    /* splitext() from os.path */
 /* Module functions that are imported */
 MojoList *tokenize(char *source);            /* tokenize function */
 /* Parser is defined as a struct in generated code; no function stub needed */
-char *gimple_codegen_compile_to_gimple(char *source);  /* compile_to_gimple function */
+char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 
 /* os.path bridge functions (called from compiled module_loader code) */
 int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */

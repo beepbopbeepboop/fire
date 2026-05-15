@@ -106,76 +106,107 @@ class HostBuffer:
 @dataclass
 class IntLiteral:
     value: int
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class FloatLiteral:
     value: float
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class StringLiteral:
     value: str
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class TstringLiteral:
     value: str
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class BoolLiteral:
     value: bool
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class StringLiteral:
     value: str
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class EllipsisLiteral:
-    pass
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class IdentExpr:
     name: str
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class CallExpr:
     func: object
     args: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class BinaryOp:
     op: str
     left: object
     right: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class UnaryOp:
     op: str
     operand: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class TernaryExpr:
     condition: object
     then_val: object
     else_val: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class LambdaExpr:
     params: list
     body: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class WalrusExpr:
     name: str
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class MemberExpr:
     obj: object
     member: str
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class SubscriptExpr:
     obj: object
     index: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class SliceExpr:
@@ -183,22 +214,32 @@ class SliceExpr:
     start: object
     stop: object
     step: object = None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ListExpr:
     elements: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class DictExpr:
     pairs: list  # [(key_expr, val_expr), ...]
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class SetExpr:
     elements: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class TupleExpr:
     elements: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class Comprehension:
@@ -206,49 +247,67 @@ class Comprehension:
     element: object
     key: object = None     # dict key
     generators: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class Generator:
     target: str
     iterable: object
     conditions: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ExprStmt:
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class AssignStmt:
     target: object
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class AugAssignStmt:
     target: object
     op: str
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class VarDecl:
     name: str
     type_ann: object
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class MultiAssignStmt:
     targets: list
     value: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ImportStmt:
     module: str
     alias: object  # str|None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class FromImportStmt:
     module: str
     names: list      # [(name, alias|None), ...]
     wildcard: bool = False
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class IfStmt:
@@ -256,12 +315,16 @@ class IfStmt:
     then_body: list
     elifs: list
     else_body: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class WhileStmt:
     condition: object
     body: list
     else_body: object = None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ForStmt:
@@ -269,6 +332,8 @@ class ForStmt:
     iterable: object
     body: list
     else_body: object = None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class FunctionDef:
@@ -278,31 +343,42 @@ class FunctionDef:
     body: list
     decorators: list = field(default_factory=list)
     param_convs: dict = field(default_factory=dict)  # name -> convention str|None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class PassStmt:
-    pass
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ReturnStmt:
     value: object  # None if bare
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class RaiseStmt:
     value: object  # None if bare
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class BreakStmt:
-    pass
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ContinueStmt:
-    pass
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class AssertStmt:
     value: object  # None if bare
     msg: object = None
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class StructDef:
@@ -310,18 +386,24 @@ class StructDef:
     fields: list
     methods: list
     decorators: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class TraitDef:
     name: str
     methods: list
     decorators: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ExceptHandler:
     exc_type: object
     name: object
     body: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class TryStmt:
@@ -329,16 +411,22 @@ class TryStmt:
     handlers: list
     else_body: object
     finally_body: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class WithItem:
     expr: object
     alias: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class WithStmt:
     items: list
     body: list
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ComptimeIfStmt:
@@ -346,12 +434,16 @@ class ComptimeIfStmt:
     then_body: list
     elifs: list
     else_body: object
+    line: int = 0
+    col: int = 0
 
 @dataclass
 class ComptimeForStmt:
     target: str
     iterable: object
     body: list
+    line: int = 0
+    col: int = 0
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
@@ -367,6 +459,8 @@ _HAS_INDENT     = True
 class Token:
     kind: str
     value: str
+    line: int = 0
+    col: int = 0
 
 # ── Layout helpers ──────────────────────────────────────────────────
 def _strip_inline_comment(s: str) -> str:
@@ -435,8 +529,10 @@ def tokenize(src: str) -> list[Token]:
     raw_lines = src.splitlines()
     # Join backslash-continued lines: "expr = \\\n    continuation" → one logical line
     joined = []
+    line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
     while i < len(raw_lines):
+        start_line = i + 1  # 1-indexed physical line number
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
             line = line.rstrip()[:-1]  # strip the backslash
@@ -446,12 +542,14 @@ def tokenize(src: str) -> list[Token]:
             else:
                 break
         joined.append(line)
+        line_nums.append(start_line)
         i += 1
     # Phase 2: lex line by line
     out: list[Token] = []
     stack = [0]
     paren_depth = 0  # Track (), [], {} nesting to suppress INDENT/DEDENT inside
-    for line in joined:
+    for line_idx, line in enumerate(joined):
+        physical_line = line_nums[line_idx]
         expanded = line.expandtabs(_INDENT_SIZE)
         raw_content = expanded.lstrip()
         if not raw_content or raw_content.startswith(_CMT_CHAR): continue
@@ -466,14 +564,15 @@ def tokenize(src: str) -> list[Token]:
             if stmt_idx == 0 and paren_depth == 0:
                 if indent > stack[-1]:
                     stack.append(indent)
-                    out.append(Token("INDENT", ""))
+                    out.append(Token("INDENT", "", line=physical_line))
                 else:
                     while indent < stack[-1]:
                         stack.pop()
-                        out.append(Token("DEDENT", ""))
+                        out.append(Token("DEDENT", "", line=physical_line))
             for m in _TOKEN_RE.finditer(stmt):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
+                col  = m.start()
                 if kind in ("WS", "UNK", "XFER"): continue
                 if kind == "NAME" and val in _KEYWORDS: kind = "KW"
                 # Restore multi-line strings from cache
@@ -483,14 +582,14 @@ def tokenize(src: str) -> list[Token]:
                 # Track paren/bracket/brace depth to suppress INDENT/NEWLINE inside
                 if kind in ("LPAREN", "LBRACKET", "LBRACE") or val in ("(", "[", "{"): paren_depth += 1
                 elif kind in ("RPAREN", "RBRACKET", "RBRACE") or val in (")", "]", "}"): paren_depth = max(0, paren_depth - 1)
-                out.append(Token(kind, val))
+                out.append(Token(kind, val, line=physical_line, col=col))
             # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens)
             if paren_depth == 0:
-                out.append(Token("NEWLINE", ""))
+                out.append(Token("NEWLINE", "", line=physical_line))
     while len(stack) > 1:
         stack.pop()
-        out.append(Token("DEDENT", ""))
-    out.append(Token("EOF", ""))
+        out.append(Token("DEDENT", "", line=line_nums[-1] if line_nums else 0))
+    out.append(Token("EOF", "", line=line_nums[-1] if line_nums else 0))
     return out
 
 # ── Parser ─────────────────────────────────────────────────────────
@@ -532,7 +631,7 @@ class Parser:
 
     def _peek(self, offset: int = 0) -> Token:
         i = self._pos + offset
-        return self._tok[i] if i < len(self._tok) else Token("EOF", "")
+        return self._tok[i] if i < len(self._tok) else Token("EOF", "", line=self._tok[-1].line if self._tok else 0)
 
     def _advance(self) -> Token:
         t = self._tok[self._pos]
@@ -583,12 +682,13 @@ class Parser:
 
     def _parse_stmt(self):
         t = self._peek()
+        line, col = t.line, t.col
         # Handle "yield from expr" — yield is NAME('yield'), from is KW('from')
         if t.kind == "NAME" and t.value == "yield" and self._peek(1).kind == "KW" and self._peek(1).value == "from":
             self._advance()  # consume yield
             self._advance()  # consume from
             self._parse_expr(0)  # parse the delegated generator expression
-            return ExprStmt(value=IdentExpr(name='yield'))
+            return ExprStmt(value=IdentExpr(name='yield'), line=line, col=col)
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
@@ -656,7 +756,7 @@ class Parser:
                 while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
                     self._advance()
             # Treat as a pass statement
-            return PassStmt()
+            return PassStmt(line=line, col=col)
         if t.kind == "OP" and t.value == "@":
             decs = []
             while self._peek().kind == "OP" and self._peek().value == "@":
@@ -716,7 +816,7 @@ class Parser:
                 tuple_target = TupleExpr(elements=targets)
                 return AssignStmt(target=tuple_target, value=val)
             # Not an assignment, treat as expression statement with comma operator
-            return ExprStmt(TupleExpr(elements=targets))
+            return ExprStmt(TupleExpr(elements=targets), line=line, col=col)
         # Annotated assignment: target: Type [= value]
         if self._peek().kind == "COLON":
             self._advance()
@@ -724,13 +824,13 @@ class Parser:
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 val = self._parse_expr(0)
-                return AssignStmt(target=expr, value=val)
+                return AssignStmt(target=expr, value=val, line=line, col=col)
             else:
                 # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields
                 name = expr.name if isinstance(expr, IdentExpr) else None
                 if name:
-                    return VarDecl(name=name, type_ann=type_ann, value=None)
-                return ExprStmt(expr)
+                    return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
+                return ExprStmt(expr, line=line, col=col)
         # Assignment / augmented assignment
         if self._peek().kind == "ASSIGN":
             self._advance()
@@ -742,16 +842,17 @@ class Parser:
                     targets.append(val)
                     self._advance()
                     val = self._parse_expr(0)
-                return MultiAssignStmt(targets=targets, value=val)
-            return AssignStmt(target=expr, value=val)
+                return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
+            return AssignStmt(target=expr, value=val, line=line, col=col)
         if self._peek().kind == "AUGASSIGN":
             op = self._advance().value
             val = self._parse_expr(0)
-            return AugAssignStmt(target=expr, op=op, value=val)
+            return AugAssignStmt(target=expr, op=op, value=val, line=line, col=col)
         self._skip_newlines()
-        return ExprStmt(expr)
+        return ExprStmt(expr, line=line, col=col)
 
     def _parse_import(self):
+        t = self._peek()
         self._expect("KW", "import")
         # Handle relative imports: import .warp, import ..sibling
         module = ""
@@ -765,9 +866,10 @@ class Parser:
         alias = None
         if self._is_kw("as"):
             self._advance(); alias = self._expect("NAME").value
-        return ImportStmt(module=module, alias=alias)
+        return ImportStmt(module=module, alias=alias, line=t.line, col=t.col)
 
     def _parse_from_import(self):
+        t = self._peek()
         self._expect("KW", "from")
         # Handle relative imports: from . or from .. or from .module
         module = ""
@@ -786,7 +888,7 @@ class Parser:
         self._expect("KW", "import")
         if self._peek().kind == "OP" and self._peek().value == "*":
             self._advance()
-            return FromImportStmt(module=module, names=[], wildcard=True)
+            return FromImportStmt(module=module, names=[], wildcard=True, line=t.line, col=t.col)
         # Handle parenthesized multi-line imports: from x import (a, b, c)
         paren_import = False
         if self._peek().kind == "LPAREN":
@@ -799,7 +901,7 @@ class Parser:
         if self._peek().kind == "RPAREN":
             # Empty parens: from x import ()
             self._advance()
-            return FromImportStmt(module=module, names=names, wildcard=False)
+            return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
         name = self._expect("NAME").value
         alias = None
         if self._is_kw("as"):
@@ -825,7 +927,7 @@ class Parser:
             if self._is_kw("as"):
                 self._advance(); alias = self._expect("NAME").value
             names.append((name, alias))
-        return FromImportStmt(module=module, names=names, wildcard=False)
+        return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
 
     def _parse_var_decl(self):
         self._expect("KW", 'var')
@@ -1290,13 +1392,15 @@ class Parser:
         return ComptimeForStmt(target=target,iterable=iterable,body=self._parse_block())
 
     def _parse_pass(self):
+        t = self._peek()
         self._expect("KW", 'pass')
-        return PassStmt()
+        return PassStmt(line=t.line, col=t.col)
 
     def _parse_return(self):
+        t = self._peek()
         self._expect("KW", 'return')
         if self._peek().kind in ("NEWLINE","EOF","DEDENT"):
-            return ReturnStmt(value=None)
+            return ReturnStmt(value=None, line=t.line, col=t.col)
         expr = self._parse_expr(0)
         # Check for tuple return: return a, b, c
         if self._peek().kind == "COMMA":
@@ -1306,8 +1410,8 @@ class Parser:
                 if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
                     break
                 elements.append(self._parse_expr(0))
-            expr = TupleExpr(elements=elements)
-        return ReturnStmt(value=expr)
+            expr = TupleExpr(elements=elements, line=expr.line, col=expr.col)
+        return ReturnStmt(value=expr, line=t.line, col=t.col)
 
     def _parse_raise(self):
         self._expect("KW", 'raise')
@@ -1387,6 +1491,7 @@ class Parser:
         expr = self._parse_primary()
         while True:
             t = self._peek()
+            line, col = t.line, t.col
             if t.kind == "DOT":
                 self._advance()
                 # Member can be a NAME (including KW like mut, ref) or a backtick-quoted type
@@ -1396,7 +1501,7 @@ class Parser:
                     member = self._advance().value
                 else:
                     member = self._expect("NAME").value  # error for invalid syntax
-                expr = MemberExpr(obj=expr, member=member)
+                expr = MemberExpr(obj=expr, member=member, line=line, col=col)
             elif t.kind == "LBRACKET":
                 self._advance()
                 # Check for empty subscript [] (dereference/special case)
@@ -1553,7 +1658,7 @@ class Parser:
                         args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
                 self._expect("RPAREN")
-                expr = CallExpr(func=expr, args=args)
+                expr = CallExpr(func=expr, args=args, line=line, col=col)
             elif t.kind == "OP" and t.value == "^":
                 # Check if ^ is postfix (ownership transfer) or binary (XOR)
                 # Postfix: followed by statement-ending token or member/subscript access
@@ -1562,7 +1667,7 @@ class Parser:
                 is_postfix = next_t.kind in ("NEWLINE", "DEDENT", "EOF", "COMMA", "RPAREN", "RBRACKET", "RBRACE", "COLON", "SEMICOLON", "DOT", "LPAREN", "LBRACKET")
                 if is_postfix:
                     self._advance()
-                    expr = UnaryOp(op="^", operand=expr)
+                    expr = UnaryOp(op="^", operand=expr, line=line, col=col)
                 else:
                     break  # Let binary operator precedence handle it
             else:
@@ -1571,13 +1676,14 @@ class Parser:
 
     def _parse_primary(self):
         t = self._peek()
+        line, col = t.line, t.col
         if t.kind == "INT":
-            self._advance(); return IntLiteral(int(t.value, 0))
+            self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col)
         if t.kind == "FLOAT":
-            self._advance(); return FloatLiteral(float(t.value))
+            self._advance(); return FloatLiteral(float(t.value), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):
             self._advance()
-            return BoolLiteral(t.value == "True")
+            return BoolLiteral(t.value == "True", line=line, col=col)
         if t.kind == "STRING":
             val = self._advance().value
             # Strip surrounding quotes from string literal
@@ -1594,18 +1700,18 @@ class Parser:
                     if s.endswith(quote) and len(s) >= 2:
                         s = s[1:-1]
                 val += s
-            return StringLiteral(val)
+            return StringLiteral(val, line=line, col=col)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
             self._advance()
             if self._peek().kind == "RPAREN":
-                self._advance(); return TupleExpr(elements=[])
+                self._advance(); return TupleExpr(elements=[], line=line, col=col)
             first = self._parse_expr(0)
             if self._is_kw("for"):
                 gen = self._parse_generator()
                 self._expect("RPAREN")
-                return Comprehension(kind="generator", element=first, generators=[gen])
+                return Comprehension(kind="generator", element=first, generators=[gen], line=line, col=col)
             if self._peek().kind == "COMMA":
                 elems = [first]
                 while self._peek().kind == "COMMA":
@@ -1613,17 +1719,17 @@ class Parser:
                     if self._peek().kind == "RPAREN": break
                     elems.append(self._parse_expr(0))
                 self._expect("RPAREN")
-                return TupleExpr(elements=elems)
+                return TupleExpr(elements=elems, line=line, col=col)
             self._expect("RPAREN")
             return first
         if t.kind in ("NAME", "KW"):
             self._advance()
             if t.value == "lambda" and t.kind == "NAME":
                 return self._parse_lambda()
-            return IdentExpr(t.value)
+            return IdentExpr(t.value, line=line, col=col)
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()
-            return EllipsisLiteral()
+            return EllipsisLiteral(line=line, col=col)
         raise SyntaxError(f"Unexpected {t.kind}({t.value!r})")
 
     def _parse_lambda(self):
@@ -2118,7 +2224,7 @@ def compile_with_interpreter(src: str) -> str:
     # Compile Mojo source to GIMPLE C using gimple_codegen.
     # This is the interpreter-based compilation path used during bootstrap.
     from gimple_codegen import compile_to_gimple
-    return compile_to_gimple(src)
+    return compile_to_gimple(src, do_imports=False, filename="")
 
 if __name__ == '__main__':
     import sys

@@ -49,7 +49,7 @@ def dump_file(input_file):
 
     # Generate GIMPLE C intermediate file
     try:
-        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True)
+        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
         with open(basename + ".ci", "w") as f:
             f.write(c_code)
     except:
