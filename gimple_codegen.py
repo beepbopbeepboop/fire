@@ -2729,7 +2729,9 @@ class GimpleGen:
             else:
                 # int typed as pointer — can't safely dereference; return as-is
                 return ot, ov
-        c_op = {'-': '-', '~': '~', '+': '+'}.get(node.op, node.op)
+        if node.op == '+':
+            return ot, ov
+        c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
         t = self._new_temp(ot)
         self._emit(f"  {t} = {c_op}{ov};")
         return ot, t
@@ -3864,7 +3866,7 @@ class GimpleGen:
                 t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
         if method == 'get' and ot in ('_Bool', 'int', 'int64_t', 'double'):
             for a in node.args: self.lower_expr(a)
-            t = self._new_temp('int64_t'); self._emit(f"  {t} = 0;  /* {ot}.get() stubbed */"); return 'int64_t', t
+            t = self._new_temp('int64_t'); self._emit(f"  {t} = (int64_t)0;  /* {ot}.get() stubbed */"); return 'int64_t', t
         if method in ('strip', 'lstrip', 'rstrip') and ot in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             for a in node.args: self.lower_expr(a)
             t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.{method}() stubbed */"); return 'int', t
@@ -3920,7 +3922,7 @@ class GimpleGen:
                 self._safe_coerce_emit(arg_type, 'int64_t', arg_val, arg64)
             else:
                 arg64 = self._new_temp('int64_t')
-                self._emit(f"  {arg64} = 0;")
+                self._emit(f"  {arg64} = (int64_t)0;")
             t = self._new_temp('int64_t')
             self._emit_call('int64_t', t, 'mojo_obj_call1',
                             [('int64_t', obj64), ('char *', method_key), ('int64_t', arg64)])
