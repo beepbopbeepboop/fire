@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Persistent REPL wrapper — one-shot commands against a daemonized subprocess.
+
+Usage:
+  gdbtool serve <program> [args...]     # Start server in foreground
+  gdbtool <command>                     # Send one command, print output, exit
+  gdbtool terminate                     # Kill server + child
+
+Socket at ./.gdbtool-socket in the CWD --- one per directory.
+"""
+
+import sys, os, socket, pty, time, signal, select
+
+SOCKET = os.path.join(os.getcwd(), '.gdbtool-socket')
+
+_PROMPTS = {b'(lldb) ', b'(gdb) ', b'(lldb) ', b'$ ', b'# ', b'>>> '}
+
+def _read(mfd, idle=0.3, maxwait=60.0):
+    out = b''
+    deadline = time.time() + maxwait
+    while time.time() < deadline:
+        r, _, _ = select.select([mfd], [], [], idle)
+        if not r:
+            if out:
+                break
+            continue
+        chunk = os.read(mfd, 65536)
+        if not chunk:
+            break
+        out += chunk
+        # fast path: if we see a prompt marker, we're done
+        for p in _PROMPTS:
+            if p in out:
+                # trim prompt from end before returning
+                idx = out.rfind(p)
+                if idx + len(p) >= len(out) - 2:
+                    return out[:idx].rstrip(b'\r\n')
+    return out
+
+def _read_until_prompt(mfd, maxwait=5.0):
+    out = b''
+    deadline = time.time() + maxwait
+    while time.time() < deadline:
+        r, _, _ = select.select([mfd], [], [], max(0.1, deadline - time.time()))
+        if not r:
+            continue
+        chunk = os.read(mfd, 65536)
+        if not chunk:
+            break
+        out += chunk
+        for p in _PROMPTS:
+            if p in out:
+                return out
+    return out
+
+def _cleanup(sock, mfd, pid):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.write(mfd, b'quit\n')
+        except OSError:
+            pass
+        time.sleep(0.3)
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            break
+        time.sleep(0.3)
+    for fd in (mfd, sock.fileno()):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        os.unlink(SOCKET)
+    except OSError:
+        pass
+    os._exit(0)
+
+def serve(argv):
+    if len(argv) < 1:
+        print("usage: gdbtool serve <program> [args...]", file=sys.stderr)
+        sys.exit(1)
+
+    mfd, sfd = pty.openpty()
+    pid = os.fork()
+    if pid == 0:
+        os.close(mfd)
+        os.setsid()
+        for fd in (0, 1, 2):
+            os.dup2(sfd, fd)
+        if sfd > 2:
+            os.close(sfd)
+        os.execvp(argv[0], argv)
+        sys.exit(1)
+    os.close(sfd)
+
+    # drain until first prompt
+    _read_until_prompt(mfd)
+
+    try:
+        os.unlink(SOCKET)
+    except OSError:
+        pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(SOCKET)
+    sock.listen(5)
+    os.chmod(SOCKET, 0o600)
+
+    print(f"gdbtool: pid={pid} prog={argv[0]} socket={SOCKET}", file=sys.stderr)
+
+    def _h(*_):
+        _cleanup(sock, mfd, pid)
+    signal.signal(signal.SIGINT, _h)
+    signal.signal(signal.SIGTERM, _h)
+
+    try:
+        while True:
+            conn, _ = sock.accept()
+            try:
+                raw = conn.recv(4096)
+                if not raw:
+                    continue
+                cmd = raw.decode('utf-8', errors='replace').strip()
+                if cmd == 'terminate':
+                    _cleanup(sock, mfd, pid)
+                os.write(mfd, (cmd + '\n').encode())
+                conn.sendall(_read(mfd))
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+    finally:
+        _cleanup(sock, mfd, pid)
+
+_CLIENT_TIMEOUT = 30  # seconds before client gives up
+
+def client(args):
+    if not os.path.exists(SOCKET):
+        print(f"gdbtool: no server socket at {SOCKET}", file=sys.stderr)
+        print(f"  Start: gdbtool serve <program> [args...]", file=sys.stderr)
+        sys.exit(1)
+    cmd = ' '.join(args)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(_CLIENT_TIMEOUT)
+    try:
+        sock.connect(SOCKET)
+    except ConnectionRefusedError:
+        print(f"gdbtool: stale socket {SOCKET} removed", file=sys.stderr)
+        os.unlink(SOCKET)
+        sys.exit(1)
+    sock.sendall((cmd + '\n').encode())
+    out = b''
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            out += chunk
+    except socket.timeout:
+        print(f"\ngdbtool: command timed out ({_CLIENT_TIMEOUT}s)", file=sys.stderr)
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(1)
+    if sys.argv[1] == 'serve':
+        serve(sys.argv[2:])
+    elif sys.argv[1] == 'terminate':
+        client(['terminate'])
+    else:
+        client(sys.argv[1:])
