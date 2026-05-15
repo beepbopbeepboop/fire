@@ -2073,22 +2073,15 @@ def emit(node, indent: int = 0) -> str:
         out.append(f"{pad}class {node.name}:")
         body = []
         if has_init and node.fields:
-            ps = ", ".join(f.name for f in node.fields if isinstance(f, VarDecl))
+            ps = ", ".join(f.name for f in node.fields)
             body.append(f"{pad}    def __init__(self, {ps}):")
             for f in node.fields:
-                if isinstance(f, VarDecl):
-                    body.append(f"{pad}        self.{f.name} = {f.name}")
-                else:
-                    body.append(f"{pad}        self.{emit(f.target)} = {emit(f.target)}")
+                body.append(f"{pad}        self.{f.name} = {f.name}")
         elif node.fields:
             for f in node.fields:
-                if isinstance(f, VarDecl):
-                    ann = f": {f.type_ann}" if f.type_ann else ""
-                    val = f" = {emit(f.value)}" if f.value is not None else " = None"
-                    body.append(f"{pad}    {f.name}{ann}{val}")
-                else:
-                    val = f" = {emit(f.value)}" if f.value is not None else " = None"
-                    body.append(f"{pad}    {emit(f.target)}{val}")
+                ann = f": {f.type_ann}" if f.type_ann else ""
+                val = f" = {emit(f.value)}" if f.value is not None else " = None"
+                body.append(f"{pad}    {f.name}{ann}{val}")
         for m in node.methods:
             body.append(emit(m,indent+1))
         out += body if body else [f"{pad}    pass"]
