@@ -122,8 +122,8 @@ class Interpreter:
         # Increase recursion limit for meta-programming (interpreter on itself)
         import sys
         old_limit = sys.getrecursionlimit()
-        if old_limit < 10000:
-            sys.setrecursionlimit(10000)
+        if old_limit < 50000:
+            sys.setrecursionlimit(50000)
 
         self.scope = Scope()
         self.filename = filename
