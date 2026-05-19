@@ -3,11 +3,14 @@
 mojo.py - Mojo interpreter/compiler system
 
 Modes:
-- mojo                         Interactive REPL
-- mojo repl                     Interactive REPL (explicit)
-- mojo file.mojo               Interpret and execute file
-- mojo --dump file.mojo        Generate .tok, .ast, .ci, .pyi files
-- mojo build file.mojo         Compile to executable
+- mojo                             Interactive REPL
+- mojo repl                        Interactive REPL (explicit)
+- mojo <file.mojo>                 Interpret and execute file
+- mojo build <file.mojo>           Compile to executable (output name = file basename)
+- mojo build -o <output> <file>    Compile to executable with specified output name
+- mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
+- mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
+- mojo -h, --help                  Show usage
 """
 
 import sys
@@ -16,6 +19,9 @@ import subprocess
 import shutil
 import sysconfig
 import platform
+
+# Set PATH to ensure tools like python3-config can be found
+os.environ['PATH'] = '/Users/mrs/bin:/opt/local/bin:/opt/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/Apple/usr/bin'
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
@@ -78,7 +84,7 @@ def run_repl():
             print()
             break
 
-def build_executable(input_file, src):
+def build_executable(input_file, src, output=None):
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0]
     try:
@@ -90,8 +96,8 @@ def build_executable(input_file, src):
         runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
-        # do_imports=False: don't inline imports, we'll link against .so files instead
-        c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
+        # do_imports=True: inline transitive closure for a standalone binary
+        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -119,29 +125,26 @@ def build_executable(input_file, src):
             return False
 
         # Link executable with CPython runtime
-        exe_file = basename
+        exe_file = output if output else basename
         # Get Python library path
         try:
             configdir = subprocess.run(
                 ["python3-config", "--configdir"],
                 capture_output=True, text=True, check=True
             ).stdout.strip()
-            if _IS_DARWIN:
-                py_lib = os.path.join(configdir, "libpython3.13.dylib")
-                if not os.path.exists(py_lib):
-                    for name in ["libpython3.so", "libpython3.dylib"]:
-                        alt = os.path.join(configdir, name)
-                        if os.path.exists(alt):
-                            py_lib = alt
-                            break
-            else:
-                py_lib = os.path.join(configdir, "libpython3.12.so")
-                if not os.path.exists(py_lib):
-                    for name in ["libpython3.so", "libpython3.12.so"]:
-                        alt = os.path.join(configdir, name)
-                        if os.path.exists(alt):
-                            py_lib = alt
-                            break
+            # Find the Python dylib/so by glob — version-agnostic
+            import glob
+            ext = "dylib" if _IS_DARWIN else "so"
+            matches = glob.glob(os.path.join(configdir, f"libpython3*.{ext}"))
+            if not matches:
+                # Fall back to parent lib dir
+                lib_dir = os.path.dirname(configdir)
+                while lib_dir and lib_dir != os.path.dirname(lib_dir):
+                    matches = glob.glob(os.path.join(lib_dir, f"libpython3*.{ext}"))
+                    if matches:
+                        break
+                    lib_dir = os.path.dirname(lib_dir)
+            py_lib = matches[0] if matches else ""
 
             py_ldflags = [f"-L{configdir}", "-ldl", py_lib]
             if _IS_DARWIN:
@@ -175,6 +178,19 @@ def main():
         run_repl()
         return
 
+    # Check for help
+    if sys.argv[1] in ('-h', '--help', 'help'):
+        print("""Usage:
+  mojo                             Interactive REPL
+  mojo repl                        Interactive REPL (explicit)
+  mojo <file.mojo>                 Interpret and execute file
+  mojo build <file.mojo>           Compile to executable (same name as file, no extension)
+  mojo build -o <output> <file>    Compile to executable with specified output name
+  mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
+  mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
+  mojo -h, --help                  Show this help message""")
+        return
+
     # Check for repl command
     if sys.argv[1] == 'repl':
         run_repl()
@@ -182,9 +198,17 @@ def main():
 
     # Check for build command
     build = False
+    build_output = None
     if sys.argv[1] == 'build':
         build = True
         sys.argv.pop(1)
+        # Check for -o <output> flag
+        if '-o' in sys.argv:
+            idx = sys.argv.index('-o')
+            if idx + 1 < len(sys.argv):
+                build_output = sys.argv[idx + 1]
+                sys.argv.pop(idx)   # remove -o
+                sys.argv.pop(idx)   # remove output filename
 
     dump_full = '--dump-full' in sys.argv
     if dump_full:
@@ -219,7 +243,7 @@ def main():
 
     # If build requested, compile to executable
     if build:
-        success = build_executable(input_file, src)
+        success = build_executable(input_file, src, output=build_output)
         sys.exit(0 if success else 1)
 
     # If --dump-full requested, generate single .ci with transitive closure (for bootstrap)

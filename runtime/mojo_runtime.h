@@ -142,6 +142,11 @@ void        mojo_list_extend(MojoList *dst, MojoList *src);
 void        mojo_list_sort(MojoList *l);
 void        mojo_list_reverse(MojoList *l);
 void        mojo_list_clear(MojoList *l);
+void        mojo_list_remove_str(MojoList *l, const char *v);
+void        mojo_list_remove_int(MojoList *l, int64_t v);
+int64_t     mojo_list_index_str(MojoList *l, const char *v);
+int64_t     mojo_list_index_int(MojoList *l, int64_t v);
+int64_t     MojoList_index(MojoList *l, int v);
 
 /* Generic Python-object attribute accessor (used by GIMPLE codegen for opaque int nodes) */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
@@ -217,7 +222,7 @@ char *mojo_repr(int obj);
 int mojo_type(int obj);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
-void mojo_setattr(int obj, char *attr, int val);
+void mojo_setattr(void *obj, char *attr, int64_t val);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_cstr_repeat(char *s, int64_t n);
 
@@ -329,6 +334,9 @@ int int___exit__(int obj, int exc_type, int exc_val, int exc_tb);  /* __exit__ *
 /* String utility functions for method access */
 char *int64_t_basename(char *path);    /* basename() from os.path */
 char *int64_t_splitext(char *path);    /* splitext() from os.path */
+
+/* eval() stub — Python's eval() cannot run in C bootstrap; returns first arg unchanged */
+int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
 /* Module functions that are imported */
 MojoList *tokenize(char *source);            /* tokenize function */

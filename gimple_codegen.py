@@ -1733,6 +1733,8 @@ class GimpleGen:
         'sum': 'mojo_sum',
         'sorted': 'mojo_sorted',
         'reversed': 'mojo_reversed',
+        '__builtins__': '0',
+        'eval':         'mojo_eval',
     }
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True):
@@ -1996,6 +1998,15 @@ class GimpleGen:
         'mojo_list_clear':       ('void',       ['MojoList *']),
         'mojo_list_reverse':     ('void',       ['MojoList *']),
         'mojo_list_remove_at':   ('void',       ['MojoList *', 'int64_t']),
+        'mojo_list_remove_str':  ('void',       ['MojoList *', 'char *']),
+        'mojo_list_remove_int':  ('void',       ['MojoList *', 'int64_t']),
+        'mojo_list_index_str':   ('int64_t',    ['MojoList *', 'char *']),
+        'mojo_list_index_int':   ('int64_t',    ['MojoList *', 'int64_t']),
+        'MojoList_index':        ('int64_t',    ['MojoList *', 'int']),
+        'tokenize':              ('MojoList *', ['char *']),
+        'Parser_parse_module':   ('MojoList *', ['Parser *']),
+        'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
+        'interpret_and_execute': ('void',        ['char *', 'int']),
     }
 
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
@@ -2646,11 +2657,18 @@ class GimpleGen:
             c_name = self.BUILTIN_VALUE_MAP[name]
             # Use a pre-declared static void* (emitted in non-GIMPLE context) to avoid
             # the invalid `&func_name` syntax that GIMPLE strict mode rejects.
-            self._funcptr_builtins_needed.add(c_name)
-            static_name = f'_funcptr_{c_name}'
-            t = self._new_temp('void *')
-            self._emit(f'  {t} = {static_name};')
-            return 'void *', t
+            # Only add if c_name is a valid C identifier (skip casts like ((int)0))
+            if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
+                self._funcptr_builtins_needed.add(c_name)
+                static_name = f'_funcptr_{c_name}'
+                t = self._new_temp('void *')
+                self._emit(f'  {t} = {static_name};')
+                return 'void *', t
+            else:
+                # For non-identifier expressions like ((int)0), emit directly
+                t = self._new_temp('void *')
+                self._emit(f'  {t} = (void *){c_name};')
+                return 'void *', t
         # C function name used as a value (e.g. tokenize, MojoParser passed to Scope_define).
         # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
         if (name in self.func_return_types and name not in self.var_types
@@ -3710,6 +3728,22 @@ class GimpleGen:
                 t = self._new_temp('MojoList *')
                 self._emit(f"  {t} = mojo_list_copy ({ov});")
                 return 'MojoList *', t
+            if method == 'remove' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                if at == 'char *':
+                    self._emit_call('void', '', 'mojo_list_remove_str', [('MojoList *', ov), ('char *', av)])
+                else:
+                    self._emit_call('void', '', 'mojo_list_remove_int', [('MojoList *', ov), (at, av)])
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
+
+            if method == 'index' and node.args:
+                at, av = self.lower_expr(node.args[0])
+                t = self._new_temp('int64_t')
+                if at == 'char *':
+                    self._emit_call('int64_t', t, 'mojo_list_index_str', [('MojoList *', ov), ('char *', av)])
+                else:
+                    self._emit_call('int64_t', t, 'mojo_list_index_int', [('MojoList *', ov), ('int64_t', av)])
+                return 'int64_t', t
 
         # ── MojoSet method dispatch ───────────────────────────────────────
         if ot == 'MojoSet *':
@@ -3979,6 +4013,9 @@ class GimpleGen:
                             struct_name = 'Scope'
         mangled = _safe_name(f"{struct_name}_{method}")
         ret_type = self.func_return_types.get(f"{struct_name}_{method}", None)
+        # Check _KNOWN_SIGS if not found in func_return_types
+        if ret_type is None and mangled in self._KNOWN_SIGS:
+            ret_type = self._KNOWN_SIGS[mangled][0]
         # Infer return type from common patterns if not found
         if ret_type is None:
             if method in ('get', 'get_symbol_type', 'pop', 'keys', 'values', 'items'):
@@ -4304,18 +4341,46 @@ class GimpleGen:
             ret_type = self._KNOWN_SIGS[fname][0]
         arg_pairs = [self.lower_expr(a) for a in node.args]
 
+        # Handle keyword arguments: convert to positional args for known functions
+        kwargs = getattr(node, 'kwargs', []) or []
+        kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
+
+        # For compile_to_gimple: pad with do_imports and filename kwargs
+        if fname_raw == 'compile_to_gimple':
+            if 'do_imports' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['do_imports'])
+            elif len(arg_pairs) < 2:
+                arg_pairs.append(('int', '0'))
+            if 'filename' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['filename'])
+            elif len(arg_pairs) < 3:
+                arg_pairs.append(('char *', '0'))
+
+        # For interpret_and_execute: pad with filename kwarg
+        if fname_raw == 'interpret_and_execute':
+            if 'filename' in kwarg_dict:
+                arg_pairs.append(kwarg_dict['filename'])
+            elif len(arg_pairs) < 2:
+                arg_pairs.append(('int', '0'))
+
         # Special handling for functions with default parameters
         if fname_raw == 'format_ast' and len(arg_pairs) == 1:
             arg_pairs.append(('int', '0'))
         if fname_raw == 'emit_module' and len(arg_pairs) == 1:
             arg_pairs.append(('int', '0'))
-        if fname_raw == 'compile_to_gimple' and len(arg_pairs) == 1:
-            arg_pairs.append(('int', '0'))
-        # General: pad missing args with 0 when expected param count is known
+
+        # General: pad missing args with kwargs or 0 when expected param count is known
         expected_params = self.func_param_types.get(fname_raw, [])
         if expected_params and len(arg_pairs) < len(expected_params):
+            # For kwargs, assume they fill missing parameters in order
+            kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
             while len(arg_pairs) < len(expected_params):
-                arg_pairs.append(('int', '0'))
+                if kwarg_values:
+                    # Use next kwarg value
+                    arg_pairs.append(kwarg_values.pop(0))
+                else:
+                    # Pad with 0
+                    arg_pairs.append(('int', '0'))
         # int(s, base) — mojo_make_int only takes one arg; always drop the base arg
         if fname_raw == 'int' and len(arg_pairs) > 1:
             arg_pairs = arg_pairs[:1]
@@ -5423,6 +5488,21 @@ class GimpleGen:
                 lifted   = f"{self.current_func_name}_{raw_name}"
                 env_var  = self._closure_envs[raw_name]
                 arg_pairs = [self.lower_expr(a) for a in node.value.args]
+                # Handle kwargs for closure calls
+                kwargs = getattr(node.value, 'kwargs', []) or []
+                kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
+                # Pad kwargs to expected arity
+                # Note: expected_params[0] is the env pointer, which gets prepended separately
+                expected_params = self.func_param_types.get(lifted, [])
+                # Subtract 1 for the env pointer that will be prepended
+                user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
+                if expected_params and len(arg_pairs) < user_param_count:
+                    kwarg_values = list(kwarg_dict.values())
+                    while len(arg_pairs) < user_param_count:
+                        if kwarg_values:
+                            arg_pairs.append(kwarg_values.pop(0))
+                        else:
+                            arg_pairs.append(('int', '0'))
                 fname_c  = _safe_name(lifted)
                 if env_var:
                     env_type = self.func_param_types.get(lifted, ['void *'])[0]
@@ -5433,6 +5513,39 @@ class GimpleGen:
                 return
             fname     = _safe_name(raw_name)
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
+
+            # Handle keyword arguments for regular function calls
+            kwargs = getattr(node.value, 'kwargs', []) or []
+            kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
+
+            # For compile_to_gimple: pad with do_imports and filename kwargs
+            if raw_name == 'compile_to_gimple':
+                if 'do_imports' in kwarg_dict:
+                    arg_pairs.append(kwarg_dict['do_imports'])
+                elif len(arg_pairs) < 2:
+                    arg_pairs.append(('int', '0'))
+                if 'filename' in kwarg_dict:
+                    arg_pairs.append(kwarg_dict['filename'])
+                elif len(arg_pairs) < 3:
+                    arg_pairs.append(('char *', '0'))
+
+            # For interpret_and_execute: pad with filename kwarg
+            if raw_name == 'interpret_and_execute':
+                if 'filename' in kwarg_dict:
+                    arg_pairs.append(kwarg_dict['filename'])
+                elif len(arg_pairs) < 2:
+                    arg_pairs.append(('int', '0'))
+
+            # General: pad missing args with kwargs when expected param count is known
+            expected_params = self.func_param_types.get(raw_name, [])
+            if expected_params and len(arg_pairs) < len(expected_params):
+                kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
+                while len(arg_pairs) < len(expected_params):
+                    if kwarg_values:
+                        arg_pairs.append(kwarg_values.pop(0))
+                    else:
+                        arg_pairs.append(('int', '0'))
+
             if fname in self._KNOWN_SIGS:
                 ret_type = self._KNOWN_SIGS[fname][0]
                 self._emit_call(ret_type, '', fname, arg_pairs)
@@ -6421,6 +6534,12 @@ class GimpleGen:
         }
         self.struct_field_types['Interpreter'] = {
             'scope': 'Scope *',
+            'filename': 'int',
+        }
+        self.struct_field_types['Parser'] = {
+            '_tok': 'MojoList *',
+            '_pos': 'int64_t',
+            '_pending_decs': 'MojoList *',
         }
 
         # Pre-populate AST node struct fields
@@ -7469,6 +7588,14 @@ class GimpleGen:
         if func_defs or struct_defs:
             parts.append('')
 
+        # Always add forward decls for cross-module struct methods that may be called
+        # (e.g. Parser_parse_module from mojo_compiler, Interpreter from myinterpreter)
+        parts.append("MojoList * Parser_parse_module (Parser *);")
+        parts.append("void Parser___init__ (Parser *, MojoList *);")
+        parts.append("void Interpreter___init__ (Interpreter *, int);")
+        parts.append("int Interpreter_execute (Interpreter *, int);")
+        parts.append('')
+
         # Forward declarations for lifted closures + env allocator helpers
         # For imported modules (emit_struct_defs=False), emit closure env struct typedefs here
         # (main module emits them inside the emit_struct_defs block above)
@@ -7515,7 +7642,9 @@ class GimpleGen:
         # ── Static function pointer vars for builtins (avoids &func in GIMPLE) ──
         if self._funcptr_builtins_needed:
             for c_name in sorted(self._funcptr_builtins_needed):
-                parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
+                # Sanitize name to be valid C identifier (skip casts like ((int)0))
+                if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
+                    parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
             parts.append('')
 
         # ── Dispatch table initializations (from Phase C) ──────────────────

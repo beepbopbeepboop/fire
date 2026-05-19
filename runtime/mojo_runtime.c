@@ -1450,6 +1450,47 @@ void mojo_list_reverse(MojoList *l) {
     }
 }
 void mojo_list_clear(MojoList *l) { if (l) l->len = 0; }
+void mojo_list_remove_str(MojoList *l, const char *v) {
+    if (!l || !v) return;
+    for (int64_t i = 0; i < l->len; i++) {
+        char *s = (char *)l->data[i];
+        if (s && strcmp(s, v) == 0) {
+            for (int64_t j = i; j < l->len - 1; j++)
+                l->data[j] = l->data[j+1];
+            l->len--;
+            return;
+        }
+    }
+}
+void mojo_list_remove_int(MojoList *l, int64_t v) {
+    if (!l) return;
+    for (int64_t i = 0; i < l->len; i++) {
+        if (l->data[i] == v) {
+            for (int64_t j = i; j < l->len - 1; j++)
+                l->data[j] = l->data[j+1];
+            l->len--;
+            return;
+        }
+    }
+}
+int64_t MojoList_index(MojoList *l, int v) {
+    return mojo_list_index_int(l, (int64_t)v);
+}
+int64_t mojo_list_index_str(MojoList *l, const char *v) {
+    if (!l) return -1;
+    for (int64_t i = 0; i < l->len; i++) {
+        char *s = (char *)l->data[i];
+        if (s && strcmp(s, v) == 0) return i;
+    }
+    return -1;
+}
+int64_t mojo_list_index_int(MojoList *l, int64_t v) {
+    if (!l) return -1;
+    for (int64_t i = 0; i < l->len; i++) {
+        if (l->data[i] == v) return i;
+    }
+    return -1;
+}
 void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
 
 
@@ -1457,6 +1498,12 @@ void mojo_set_discard(MojoSet *s, int64_t v) { (void)s; (void)v; /* stub */ }
 /* tokenize is provided by compiled mojo_compiler code, not the runtime */
 
 /* Parser is defined as a struct in generated code; no runtime stub needed */
+
+/* eval() stub — Python's eval() cannot run in C bootstrap; returns first arg unchanged */
+int mojo_eval(int expr, MojoDict *globals, MojoDict *locals) {
+    (void)globals; (void)locals;
+    return expr;  /* return the expression value unchanged */
+}
 
 /* os.path bridge functions (stubs - real impl uses POSIX) */
 int int_isdir(int64_t marker, int64_t path) {
@@ -1806,7 +1853,7 @@ void *mojo_zip(void *a, void *b) {
     return mojo_list_new();
 }
 
-void mojo_setattr(int obj, char *attr, int val) {
+void mojo_setattr(void *obj, char *attr, int64_t val) {
     (void)obj; (void)attr; (void)val;
 }
 

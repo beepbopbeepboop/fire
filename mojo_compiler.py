@@ -151,10 +151,11 @@ class IdentExpr:
     col: int = 0
 
 @dataclass
+@dataclass
 class CallExpr:
     func: object
-    args: list
-    keywords: dict = field(default_factory=dict)
+    args: list = field(default_factory=list)
+    kwargs: list = field(default_factory=list)  # list of (str, Expr) tuples
     line: int = 0
     col: int = 0
 
@@ -1679,7 +1680,9 @@ class Parser:
                         args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
                 self._expect("RPAREN")
-                expr = CallExpr(func=expr, args=args, keywords=keywords, line=line, col=col)
+                # Convert keywords dict to list of (name, expr) tuples for CallExpr.kwargs
+                kwargs_list = [(k, v) for k, v in keywords.items()]
+                expr = CallExpr(func=expr, args=args, kwargs=kwargs_list, line=line, col=col)
             elif t.kind == "OP" and t.value == "^":
                 # Check if ^ is postfix (ownership transfer) or binary (XOR)
                 # Postfix: followed by statement-ending token or member/subscript access
