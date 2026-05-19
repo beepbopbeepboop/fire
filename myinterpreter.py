@@ -119,6 +119,12 @@ class Interpreter:
     """Executes Mojo AST nodes."""
 
     def __init__(self, filename=None):
+        # Increase recursion limit for meta-programming (interpreter on itself)
+        import sys
+        old_limit = sys.getrecursionlimit()
+        if old_limit < 10000:
+            sys.setrecursionlimit(10000)
+
         self.scope = Scope()
         self.filename = filename
         self._setup_builtins()
@@ -185,6 +191,7 @@ class Interpreter:
         import sysconfig
         import platform
         import tempfile
+        import traceback
         self.scope.define('os', os)
         self.scope.define('sys', sys)
         self.scope.define('subprocess', subprocess)
@@ -192,6 +199,7 @@ class Interpreter:
         self.scope.define('sysconfig', sysconfig)
         self.scope.define('platform', platform)
         self.scope.define('tempfile', tempfile)
+        self.scope.define('traceback', traceback)
 
         # Interpreter itself for bootstrapping
         self.scope.define('Interpreter', Interpreter)
