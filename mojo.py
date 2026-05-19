@@ -15,18 +15,19 @@ import os
 import subprocess
 import shutil
 import sysconfig
+import platform
 
 # Platform detection for cross-platform build support
-# Check if gcc-mp-15 exists (macOS via MacPorts), otherwise use gcc
-_GCC_BIN = "gcc-mp-15" if os.path.exists("/opt/local/bin/gcc-mp-15") else "gcc"
+_IS_DARWIN = platform.system() == 'Darwin'
+_GCC_BIN = "/opt/local/bin/gcc-mp-15" if _IS_DARWIN else "gcc"
 
-def interpret_and_execute(src_code):
+def interpret_and_execute(src_code, filename=None):
     try:
         from mojo_compiler import tokenize, Parser
         from myinterpreter import Interpreter
         tokens = tokenize(src_code)
         stmts = Parser(tokens).parse_module()
-        interpreter = Interpreter()
+        interpreter = Interpreter(filename=filename)
         for stmt in stmts:
             interpreter.execute(stmt)
     except Exception as e:
@@ -246,8 +247,14 @@ def main():
             try:
                 from mojo_compiler import tokenize
                 tokens = tokenize(src)
+                # Format tokens for consistent output
+                def format_token(tok):
+                    kind_str = tok.kind
+                    val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
+                    return f"Token(kind={kind_str}, value={val_repr}, line={tok.line}, col={tok.col})"
+                formatted = [format_token(t) for t in tokens]
                 with open(f"{basename}.tok", "w") as f:
-                    f.write(repr(tokens))
+                    f.write("[" + ", ".join(formatted) + "]")
             except Exception as e:
                 print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
 
@@ -277,7 +284,7 @@ def main():
         return
 
     # Otherwise interpret as Mojo
-    interpret_and_execute(src)
+    interpret_and_execute(src, filename=input_file)
 
 if __name__ == '__main__':
     main()

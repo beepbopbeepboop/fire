@@ -154,6 +154,7 @@ class IdentExpr:
 class CallExpr:
     func: object
     args: list
+    keywords: dict = field(default_factory=dict)
     line: int = 0
     col: int = 0
 
@@ -374,6 +375,12 @@ class ContinueStmt:
     col: int = 0
 
 @dataclass
+class GlobalStmt:
+    names: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class AssertStmt:
     value: object  # None if bare
     msg: object = None
@@ -447,7 +454,7 @@ class ComptimeForStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuU]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -720,6 +727,7 @@ class Parser:
             if t.value == 'break': return self._parse_break()
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
+            if t.value == 'global': return self._parse_global()
         # Handle __mlir_op, __mlir_attr and other MLIR/special forms (but not __mlir_region)
         if t.kind == "NAME" and t.value.startswith("__mlir") and t.value != "__mlir_region":
             self._advance()  # skip __mlir_op/__mlir_attr/etc
@@ -1435,6 +1443,18 @@ class Parser:
             self._advance(); msg = self._parse_expr(0)
         return AssertStmt(value=value, msg=msg)
 
+    def _parse_global(self):
+        t = self._peek()
+        self._expect("KW", 'global')
+        names = []
+        names.append(self._expect("NAME").value)
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                break
+            names.append(self._expect("NAME").value)
+        return GlobalStmt(names=names, line=t.line, col=t.col)
+
     # ── Expressions ──────────────────────────────────────────────────
     def _parse_expr(self, min_prec: int):
         left = self._parse_unary()
@@ -1635,6 +1655,7 @@ class Parser:
             elif t.kind == "LPAREN":
                 self._advance()
                 args = []
+                keywords = {}
                 while self._peek().kind != "RPAREN":
                     # Handle dictionary unpacking (**expr)
                     if self._peek().kind == "OP" and self._peek().value == "**":
@@ -1646,9 +1667,9 @@ class Parser:
                         args.append(self._parse_expr(0))  # parse unpacked value
                     # Handle keyword arguments (name=value) — name can be NAME or KW token
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                        self._advance()  # skip keyword name
+                        keyword_name = self._advance().value  # get keyword name
                         self._advance()  # skip =
-                        args.append(self._parse_expr(0))  # parse and keep value
+                        keywords[keyword_name] = self._parse_expr(0)  # parse and store value
                     else:
                         first = self._parse_expr(0)
                         if self._is_kw("for"):
@@ -1658,7 +1679,7 @@ class Parser:
                         args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
                 self._expect("RPAREN")
-                expr = CallExpr(func=expr, args=args, line=line, col=col)
+                expr = CallExpr(func=expr, args=args, keywords=keywords, line=line, col=col)
             elif t.kind == "OP" and t.value == "^":
                 # Check if ^ is postfix (ownership transfer) or binary (XOR)
                 # Postfix: followed by statement-ending token or member/subscript access

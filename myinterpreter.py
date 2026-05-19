@@ -118,8 +118,9 @@ class MojoClass:
 class Interpreter:
     """Executes Mojo AST nodes."""
 
-    def __init__(self):
+    def __init__(self, filename=None):
         self.scope = Scope()
+        self.filename = filename
         self._setup_builtins()
 
     def _is_instance(self, obj, class_name):
@@ -137,6 +138,7 @@ class Interpreter:
         self.scope.define('True', True)
         self.scope.define('False', False)
         self.scope.define('__name__', '__main__')
+        self.scope.define('__file__', self.filename or '<input>')
 
         # Built-in functions
         self.scope.define('len', len)
@@ -181,11 +183,15 @@ class Interpreter:
         import subprocess
         import shutil
         import sysconfig
+        import platform
+        import tempfile
         self.scope.define('os', os)
         self.scope.define('sys', sys)
         self.scope.define('subprocess', subprocess)
         self.scope.define('shutil', shutil)
         self.scope.define('sysconfig', sysconfig)
+        self.scope.define('platform', platform)
+        self.scope.define('tempfile', tempfile)
 
         # Interpreter itself for bootstrapping
         self.scope.define('Interpreter', Interpreter)
@@ -195,6 +201,13 @@ class Interpreter:
             from mojo_compiler import tokenize, Parser as MojoParser
             self.scope.define('tokenize', tokenize)
             self.scope.define('Parser', MojoParser)
+        except ImportError:
+            pass
+
+        # GIMPLE codegen
+        try:
+            from gimple_codegen import compile_to_gimple
+            self.scope.define('compile_to_gimple', compile_to_gimple)
         except ImportError:
             pass
 
@@ -281,10 +294,57 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
+    def execute_AugAssignStmt(self, node):
+        """Execute augmented assignment (+=, -=, etc.)."""
+        # Get current value
+        current = self.eval_expr(node.target)
+        # Get RHS value
+        rhs = self.eval_expr(node.value)
+        # Apply operator
+        op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
+        if op == '+':
+            new_value = current + rhs
+        elif op == '-':
+            new_value = current - rhs
+        elif op == '*':
+            new_value = current * rhs
+        elif op == '/':
+            new_value = current / rhs
+        elif op == '%':
+            new_value = current % rhs
+        elif op == '//':
+            new_value = current // rhs
+        elif op == '**':
+            new_value = current ** rhs
+        elif op == '&':
+            new_value = current & rhs
+        elif op == '|':
+            new_value = current | rhs
+        elif op == '^':
+            new_value = current ^ rhs
+        elif op == '<<':
+            new_value = current << rhs
+        elif op == '>>':
+            new_value = current >> rhs
+        else:
+            raise NotImplementedError(f"Augmented operator {node.op} not implemented")
+        # Assign new value
+        self._assign_target(node.target, new_value)
+        return new_value
+
     def _assign_target(self, target, value):
-        """Assign a value to a target (variable, member, subscript, etc.)."""
+        """Assign a value to a target (variable, member, subscript, tuple, etc.)."""
         if self._is_instance(target, 'IdentExpr'):
-            self.scope.define(target.name, value)
+            # Check if this is a global variable
+            global_vars = getattr(self, 'global_vars', set())
+            if target.name in global_vars:
+                # Find and update the global scope
+                scope = self.scope
+                while scope.parent:
+                    scope = scope.parent
+                scope.define(target.name, value)
+            else:
+                self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
             obj = self.eval_expr(target.obj)
             setattr(obj, target.member, value)
@@ -292,6 +352,14 @@ class Interpreter:
             obj = self.eval_expr(target.obj)
             idx = self.eval_expr(target.index)
             obj[idx] = value
+        elif self._is_instance(target, 'TupleExpr') or self._is_instance(target, 'TupleLiteral'):
+            # Tuple unpacking: a, b, c = expr or (a, b, c) = expr
+            values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
+            elements = target.elements
+            if len(values) != len(elements):
+                raise ValueError(f"Cannot unpack {len(values)} values into {len(elements)} targets")
+            for t, v in zip(elements, values):
+                self._assign_target(t, v)
         else:
             raise NotImplementedError(f"Cannot assign to {type(target).__name__}")
 
@@ -376,6 +444,14 @@ class Interpreter:
         """Execute pass statement."""
         return None
 
+    def execute_GlobalStmt(self, node):
+        """Execute global statement."""
+        if hasattr(node, 'names'):
+            if not hasattr(self, 'global_vars'):
+                self.global_vars = set()
+            self.global_vars.update(node.names)
+        return None
+
     def execute_BreakStmt(self, node: N.BreakStmt):
         """Execute break statement."""
         raise BreakException()
@@ -386,11 +462,19 @@ class Interpreter:
 
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
-        # For now, simple implementation without context manager protocol
-        ctx = self.eval_expr(node.expr)
+        # With statement: with expr as var: body
+        if not node.items:
+            # No items, just execute body
+            for stmt in node.body:
+                self.execute(stmt)
+            return None
+
+        item = node.items[0]  # Support single with item for now
+        ctx = self.eval_expr(item.expr)
         if hasattr(ctx, '__enter__'):
             ctx.__enter__()
-        self.scope.define(node.var, ctx)
+        if item.alias:
+            self.scope.define(item.alias, ctx)
         try:
             for stmt in node.body:
                 self.execute(stmt)
@@ -489,7 +573,26 @@ class Interpreter:
 
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
-        return expr.value
+        value = expr.value
+        # Handle f-strings: if value starts with f" or f', evaluate it as f-string
+        if value.startswith('f"') or value.startswith("f'"):
+            try:
+                # Convert to Python f-string and evaluate
+                # Create a scope with current variables
+                local_vars = {}
+                # Add all variables from current scope
+                scope = self.scope
+                while scope:
+                    for name in scope.vars:
+                        if name not in local_vars:
+                            local_vars[name] = scope.vars[name]
+                    scope = scope.parent
+                # Evaluate the f-string
+                return eval(value, {"__builtins__": __builtins__}, local_vars)
+            except Exception as e:
+                # If f-string evaluation fails, return the literal
+                return value
+        return value
 
     def eval_BoolLiteral(self, expr: N.BoolLiteral):
         """Evaluate boolean literal."""
@@ -568,6 +671,10 @@ class Interpreter:
         args = [self.eval_expr(arg) for arg in expr.args]
         kwargs = {}
 
+        # Evaluate keyword arguments
+        if hasattr(expr, 'keywords') and expr.keywords:
+            kwargs = {k: self.eval_expr(v) for k, v in expr.keywords.items()}
+
         if isinstance(func, MojoFunction):
             return func(self, *args, **kwargs)
         else:
@@ -602,3 +709,16 @@ class Interpreter:
     def eval_TupleExpr(self, expr):
         """Evaluate tuple expression."""
         return tuple(self.eval_expr(e) for e in expr.elements)
+
+    # Aliases for mojo_compiler node types (ListExpr, DictExpr, SetExpr)
+    def eval_ListExpr(self, expr):
+        """Evaluate list expression (mojo_compiler naming)."""
+        return self.eval_ListLiteral(expr)
+
+    def eval_DictExpr(self, expr):
+        """Evaluate dict expression (mojo_compiler naming)."""
+        return self.eval_DictLiteral(expr)
+
+    def eval_SetExpr(self, expr):
+        """Evaluate set expression (mojo_compiler naming)."""
+        return self.eval_SetLiteral(expr)
