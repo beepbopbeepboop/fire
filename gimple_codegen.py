@@ -138,9 +138,21 @@ class TypeLattice:
         if src.endswith(' *') and dst == 'int64_t':
             if src == 'void *':
                 return f"(int64_t){val}"
+            # Non-void pointer requires type tracking on unboxing (caller's responsibility)
             return f"(int64_t)(void *){val}"
         if src == 'int64_t' and dst.endswith(' *'):
-            return f"({dst}){val}"
+            # CRITICAL: Unboxing int64_t to specific pointer type requires type validation
+            # Safe only for: void * (generic handle)
+            # UNSAFE: casting to specific types (char*, MojoDict*, etc) without verifying actual type
+            if dst == 'void *':
+                # void * is safe - it's a generic opaque handle
+                return f"(void *){val}"
+            # Casting int64_t to specific pointer type without validation is a silent type-safety bug
+            raise TypeError(
+                f"UNSAFE CAST: int64_t → {dst} requires type validation in _actual_types. "
+                f"Call must verify via _actual_types[{val}] before casting. "
+                f"Use (void *){val} as intermediate if truly generic."
+            )
         return f"({dst}){val}"
 
     @classmethod
