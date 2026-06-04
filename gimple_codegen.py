@@ -2003,6 +2003,11 @@ class GimpleGen:
         'mojo_list_index_str':   ('int64_t',    ['MojoList *', 'char *']),
         'mojo_list_index_int':   ('int64_t',    ['MojoList *', 'int64_t']),
         'MojoList_index':        ('int64_t',    ['MojoList *', 'int']),
+        # Scope methods — name is always char*, value is boxed int
+        'Scope_define':          ('void',       ['Scope *', 'char *', 'int']),
+        'Scope_get':             ('int',        ['Scope *', 'char *']),
+        'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
+        'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
         'tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
@@ -3848,11 +3853,34 @@ class GimpleGen:
             _CSTR_METHODS: dict[str, str] = {
                 'lower': 'string_lower', 'upper': 'string_upper',
                 'strip': 'string_strip',
+                'lstrip': 'mojo_str_lstrip', 'rstrip': 'mojo_str_rstrip',
             }
             if method in _CSTR_METHODS:
                 fn = _CSTR_METHODS[method]
                 t = self._new_temp('char *')
                 self._emit(f"  {t} = {fn} ({cstr_ov});")
+                return 'char *', t
+            if method == 'expandtabs':
+                tabsize = '8'
+                if arg_vals:
+                    tabsize = arg_vals[0]
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = mojo_str_expandtabs ({cstr_ov}, {tabsize});")
+                return 'char *', t
+            if method == 'join':
+                if arg_vals:
+                    # sep.join(iterable) — iterable is a MojoList*
+                    iter_val = arg_vals[0]
+                    iter_type = arg_pairs[0][0] if arg_pairs else 'MojoList *'
+                    if iter_type != 'MojoList *':
+                        lp = self._new_temp('MojoList *')
+                        self._emit(f"  {lp} = (MojoList *){iter_val};")
+                        iter_val = lp
+                    t = self._new_temp('char *')
+                    self._emit_call('char *', t, 'mojo_str_join', [('char *', cstr_ov), ('MojoList *', iter_val)])
+                    return 'char *', t
+                t = self._new_temp('char *')
+                self._emit(f"  {t} = {cstr_ov};  /* join: no iterable */")
                 return 'char *', t
             if method == 'startswith' and arg_vals:
                 t = self._new_temp('int')
@@ -4443,21 +4471,22 @@ class GimpleGen:
             while len(arg_pairs) - 1 < expected:
                 arg_pairs.append(('int', '0'))
             self._emit_call('void', '', init_fname, arg_pairs)
-        elif kwargs:
-            # Keyword args: assign each named field
-            fields = self.struct_field_types[struct_name]
-            for kname, kexpr in kwargs:
-                if kname in fields:
-                    ftype = fields[kname]
+        elif kwargs or args:
+            # Positional args + keyword args — assign fields by position then by name
+            fields_list = list(self.struct_field_types.get(struct_name, {}).items())
+            fields_dict = dict(fields_list)
+            # Assign positional args first (by field declaration order)
+            for i, arg in enumerate(args):
+                if i < len(fields_list):
+                    fname, ftype = fields_list[i]
+                    at, av = self.lower_expr(arg)
+                    self._safe_coerce_emit(at, ftype, av, f"{t}->{fname}")
+            # Then assign kwargs by name (may override positional, as in Python)
+            for kname, kexpr in (kwargs or []):
+                if kname in fields_dict:
+                    ftype = fields_dict[kname]
                     at, av = self.lower_expr(kexpr)
                     self._safe_coerce_emit(at, ftype, av, f"{t}->{kname}")
-        else:
-            # Positional arguments: assign fields in declaration order
-            fields = list(self.struct_field_types[struct_name].items())
-            for i, (fname, ftype) in enumerate(fields):
-                if i < len(args):
-                    at, av = self.lower_expr(args[i])
-                    self._safe_coerce_emit(at, ftype, av, f"{t}->{fname}")
         return ctype, t
 
     # ── Subscript lowering ────────────────────────────────────────────────
@@ -5451,6 +5480,10 @@ class GimpleGen:
                 isinstance(node.iterable.func, IdentExpr) and
                 node.iterable.func.name == 'range'):
             self._gen_for_range(node)
+        elif (isinstance(node.iterable, CallExpr) and
+                isinstance(node.iterable.func, IdentExpr) and
+                node.iterable.func.name == 'enumerate'):
+            self._gen_for_enumerate(node)
         else:
             self._gen_for_iter(node)
 
@@ -5934,6 +5967,132 @@ class GimpleGen:
         else:
             self._emit(f"  /* TODO: for loop over {it_type} */")
 
+    @staticmethod
+    def _split_top_level_comma(s: str) -> list[str]:
+        """Split s by top-level commas only (bracket-aware)."""
+        parts, depth, start = [], 0, 0
+        for i, c in enumerate(s):
+            if c in '([': depth += 1
+            elif c in ')]': depth -= 1
+            elif c == ',' and depth == 0:
+                parts.append(s[start:i].strip())
+                start = i + 1
+        parts.append(s[start:].strip())
+        return parts
+
+    def _gen_for_enumerate(self, node):
+        """Handle: for (idx, val) in enumerate(lst): ..."""
+        lst_arg = node.iterable.args[0]
+        lst_type, lst_val = self.lower_expr(lst_arg)
+        lst_type = self._get_actual_type(lst_type, lst_val)
+
+        target = node.target
+        if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
+            # Use bracket-aware split to handle nested tuples like (i, (a, b, c))
+            parts = self._split_top_level_comma(target[1:-1])
+        elif isinstance(target, str):
+            parts = [target, '_enum_val']
+        else:
+            self._emit(f"  /* TODO: enumerate non-string target */")
+            return
+
+        idx_var = parts[0] if len(parts) >= 1 else '_enum_i'
+        raw_val = parts[1] if len(parts) >= 2 else '_enum_val'
+
+        # If the value part is itself a tuple like (a, b, c), use a temp for the element
+        val_is_tuple = (isinstance(raw_val, str) and
+                        raw_val.startswith('(') and raw_val.endswith(')'))
+        val_var = self._new_temp('int64_t') if val_is_tuple else raw_val
+
+        # Ensure underlying list
+        if lst_type == 'MojoList *':
+            list_ptr = lst_val
+            if lst_val in self.var_types and self.var_types[lst_val] == 'int64_t':
+                list_ptr = self._new_temp('MojoList *')
+                self._emit(f"  {list_ptr} = (MojoList *){lst_val};")
+        else:
+            list_ptr = self._new_temp('MojoList *')
+            self._emit(f"  {list_ptr} = (MojoList *){lst_val};")
+
+        elem = self._elem_of(list_ptr)
+        self._declare_var(idx_var, 'int64_t')
+        if not val_is_tuple:
+            self._declare_var(val_var, elem if elem else 'int64_t')
+
+        len64 = self._new_temp('int64_t')
+        len_t = self._new_temp('int')
+        idx_t = self._new_temp('int')
+        self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
+        self._emit(f"  {len_t} = (int) {len64};")
+        self._emit(f"  {idx_t} = 0;")
+
+        bb_cond  = self._new_bb(); bb_body  = self._new_bb()
+        bb_post  = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        cond_t = self._new_temp('_Bool')
+        self._emit(f"  {cond_t} = {idx_t} < {len_t};")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+        self._loop_depth += 1
+        self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
+        self.loop_stack.append((bb_post, bb_after))
+
+        idx64 = self._new_temp('int64_t')
+        self._emit(f"  {idx64} = (int64_t) {idx_t};")
+        self._emit(f"  {idx_var} = {idx64};")
+
+        suf = TypeLattice.list_suffix(elem) if elem else 'int'
+        if val_is_tuple:
+            # Get element as opaque int64_t for tuple unpacking below
+            elem64 = self._new_temp('int64_t')
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+            self._emit(f"  {val_var} = {elem64};")
+            # Emit tuple unpacking: (a, b, c) = val_var
+            inner = raw_val[1:-1].strip()
+            tuple_vars = self._split_top_level_comma(inner)
+            tuple_ptr = self._new_temp('MojoList *')
+            self._emit(f"  {tuple_ptr} = (MojoList *){val_var};")
+            for vi, vname in enumerate(tuple_vars):
+                if vname == '_':
+                    continue
+                self._declare_var(vname, 'int64_t')
+                ti = self._new_temp('int64_t')
+                self._emit(f"  {ti} = mojo_list_get_int ({tuple_ptr}, {vi});")
+                self._emit(f"  {vname} = {ti};")
+        elif suf == 'double':
+            self._emit(f"  {val_var} = mojo_list_get_double ({list_ptr}, {idx64});")
+        elif suf == 'str':
+            temp_str = self._new_temp('char *')
+            self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx64});")
+            if self._type_of(val_var) == 'char *':
+                self._emit(f"  {val_var} = {temp_str};")
+            else:
+                int_ptr = self._new_temp('int64_t')
+                self._emit(f"  {int_ptr} = (int64_t){temp_str};")
+                self._emit(f"  {val_var} = {int_ptr};")
+        else:
+            elem64 = self._new_temp('int64_t')
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+            vt = self._type_of(val_var)
+            if vt and vt != 'int64_t':
+                self._safe_coerce_emit('int64_t', vt, elem64, val_var)
+            else:
+                self._emit(f"  {val_var} = {elem64};")
+
+        for s in node.body:
+            self.gen_stmt(s)
+        self.loop_stack.pop()
+        self._loop_depth -= 1
+
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        st = self._new_temp('int')
+        self._emit(f"  {st} = {idx_t} + 1;")
+        self._emit(f"  {idx_t} = {st};")
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+
     def _gen_for_list(self, var: str, it_val: str, body: list):
         # Handle tuple unpacking: for (a, b) in list_of_tuples:
         is_tuple = var.startswith('(') and var.endswith(')')
@@ -6399,9 +6558,13 @@ class GimpleGen:
 
         method_full_name = f"{struct_name}_{node.name}"
         param_strs = []
+        # If we have hardcoded param types for this method, use them (indexed by position)
+        hardcoded_params = self.func_param_types.get(method_full_name, [])
         for i, (pname, ptype) in enumerate(node.params):
             if i == 0 and pname == 'self':
                 ctype = f"{struct_name} *"
+            elif hardcoded_params and i < len(hardcoded_params):
+                ctype = hardcoded_params[i]
             else:
                 # Check inferred parameter types first (for unannotated parameters)
                 if ptype is None and hasattr(self, '_inferred_param_types'):
@@ -6516,6 +6679,12 @@ class GimpleGen:
             'parent': 'Scope *',
             'vars': 'MojoDict *',
         }
+        self.struct_field_types['Token'] = {
+            'kind':  'char *',
+            'value': 'char *',
+            'line':  'int64_t',
+            'col':   'int64_t',
+        }
         self.struct_field_types['ReturnValue'] = {
             'value': 'int',
         }
@@ -6541,6 +6710,16 @@ class GimpleGen:
             '_pos': 'int64_t',
             '_pending_decs': 'MojoList *',
         }
+        self.struct_field_types['Scope'] = {
+            'parent': 'Scope *',
+            'vars': 'MojoDict *',
+        }
+
+        # Hardcode Scope method param types so 'name' is char* not int
+        self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int']
+        self.func_param_types['Scope_get']    = ['Scope *', 'char *']
+        self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
+        self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
 
         # Pre-populate AST node struct fields
         self.struct_field_types['CallExpr'] = {
@@ -6760,7 +6939,9 @@ class GimpleGen:
                                 ctypes.append(f"{s.name} *")
                             else:
                                 ctypes.append(self._param_ctype(pn, pt, m))
-                        self.func_param_types[mangled] = ctypes
+                        # Don't overwrite hardcoded entries (e.g. Scope_define uses char* for name)
+                        if mangled not in self.func_param_types:
+                            self.func_param_types[mangled] = ctypes
 
         #   Pass 2: infer return types for unannotated functions using
         #           already-seeded func_return_types for callee types
@@ -7164,7 +7345,7 @@ class GimpleGen:
 
         parts = [
             '/* Generated by gimple_codegen.py */',
-            '/* Compile with: gcc-mp-15 -fgimple -fsyntax-only file.c */',
+            '/* Compile with: gcc -fgimple -fsyntax-only file.c (uses gcc-15 if available) */',
             '#define USE_PYTHON 0',
             '#include <stdint.h>',
             '#include <stdlib.h>',
@@ -7569,9 +7750,12 @@ class GimpleGen:
                 param_ctypes = []
                 # Use the full func name for parameter type inference
                 method_full_name = f"{sd.name}_{m.name}"
+                hardcoded = self.func_param_types.get(method_full_name, [])
                 for i, (pname, ptype) in enumerate(m.params):
                     if i == 0 and pname == 'self':
                         ct = f"{sd.name} *"
+                    elif hardcoded and i < len(hardcoded):
+                        ct = hardcoded[i]
                     else:
                         # Check inferred parameter types first (for unannotated parameters)
                         if ptype is None and hasattr(self, '_inferred_param_types'):

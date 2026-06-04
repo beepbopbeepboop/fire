@@ -12,13 +12,11 @@ import sys
 import subprocess
 import argparse
 from pathlib import Path
+from module_loader import STDLIB_PATH
 
 def get_stdlib_path():
-    """Return the path to STDLIB_STD_PATH from the Makefile."""
-    repo_root = Path(__file__).parent
-    # Based on Makefile: STDLIB_PATH = ../mojo/3rdparty/modular/mojo/stdlib
-    stdlib_path = repo_root / "../mojo/3rdparty/modular/mojo/stdlib"
-    stdlib_std_path = stdlib_path / "std"
+    """Return the path to the stdlib std directory."""
+    stdlib_std_path = Path(STDLIB_PATH) / "std"
     return stdlib_std_path.resolve()
 
 def find_mojo_files(base_path, module=None):

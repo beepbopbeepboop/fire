@@ -1,13 +1,14 @@
 """Test runner that compiles and executes GIMPLE programs.
 
-Uses gcc-mp-15 with -fgimple to compile and execute GIMPLE-annotated C code.
-This tests the GIMPLE backend which is used for the gimple codegen tests.
+Uses gcc (gcc-15 if available, else fallback) with -fgimple to compile and execute
+GIMPLE-annotated C code. This tests the GIMPLE backend which is used for the gimple codegen tests.
 """
 import os
 import sys
 import subprocess
 import tempfile
 from io import StringIO
+from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_HDR = os.path.join(HERE, 'runtime', 'mojo_runtime.h')
@@ -29,10 +30,10 @@ def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
     exe_file = c_file.replace('.c', '.exe')
 
     try:
-        # Compile GIMPLE C to executable using gcc-mp-15 -fgimple
+        # Compile GIMPLE C to executable using gcc -fgimple
         runtime_dir = os.path.join(HERE, 'runtime')
         result = subprocess.run(
-            ['/opt/local/bin/gcc-mp-15', '-fgimple',
+            [find_gcc(), '-fgimple',
              f'-I{runtime_dir}',
              '-o', exe_file, c_file,
              os.path.join(runtime_dir, 'mojo_runtime.c')],
@@ -176,8 +177,10 @@ def main() -> Int:
 
 
 def main():
-    if not os.path.exists('/opt/local/bin/gcc-mp-15'):
-        print(f"ERROR: gcc-mp-15 not found", file=sys.stderr)
+    gcc = find_gcc()
+    result = subprocess.run([gcc, '--version'], capture_output=True)
+    if result.returncode != 0:
+        print(f"ERROR: gcc not found: {gcc}", file=sys.stderr)
         sys.exit(1)
 
     print("=" * 60)

@@ -11,11 +11,14 @@ issues are most impactful.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from collections import defaultdict
 
 REPO_ROOT = Path(__file__).parent.parent
-STDLIB_PATH = REPO_ROOT / "../mojo/3rdparty/modular/mojo/stdlib/std"
+sys.path.insert(0, str(REPO_ROOT))
+from module_loader import STDLIB_PATH
+STDLIB_PATH = Path(STDLIB_PATH) / "std"
 
 def transpile_file(mojo_file):
     """Transpile a single .mojo file and return error message if it fails."""

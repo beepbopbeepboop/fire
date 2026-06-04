@@ -23,8 +23,8 @@ def _find_stdlib_path():
             return path
 
     # Strategy 2: Relative to this module (from mojo-reference/)
-    # Pattern: mojo-reference/ -> ../mojo/3rdparty/modular/mojo/stdlib
-    relative_path = os.path.join(HERE, '..', 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
+    # Pattern: mojo-reference/ -> ../modular/mojo/stdlib
+    relative_path = os.path.join(HERE, '..', 'modular', 'mojo', 'stdlib')
     abs_path = os.path.abspath(relative_path)
     if os.path.isdir(abs_path):
         return abs_path
@@ -32,8 +32,8 @@ def _find_stdlib_path():
     # Strategy 3: Search upward from current working directory
     cwd = os.path.abspath(os.getcwd())
     for _ in range(10):  # Search up to 10 levels
-        # Look for mojo/3rdparty/... at current level
-        candidate = os.path.join(cwd, 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
+        # Look for modular/... at current level
+        candidate = os.path.join(cwd, 'modular', 'mojo', 'stdlib')
         if os.path.isdir(candidate):
             return candidate
         cwd = os.path.dirname(cwd)

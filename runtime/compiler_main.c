@@ -97,6 +97,9 @@ static void setup_sdkroot(void)
 
 static const char *find_cc(void)
 {
+    /* Try to find gcc-15 in PATH via system(), or fallback to MacPorts, then generic gcc */
+    int ret = system("command -v gcc-15 >/dev/null 2>&1");
+    if (ret == 0) return "gcc-15";
     if (file_exists("/opt/local/bin/gcc-mp-15")) return "/opt/local/bin/gcc-mp-15";
     return "gcc";
 }

@@ -144,8 +144,32 @@ import os
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STDLIB_PATH = os.path.join(HERE, '..', '..', 'mojo', '3rdparty', 'modular', 'mojo', 'stdlib')
-TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
+
+def _find_stdlib_path():
+    """Find stdlib path using multiple strategies."""
+    if 'MOJO_STDLIB' in os.environ:
+        path = os.environ['MOJO_STDLIB']
+        if os.path.isdir(path):
+            return path
+
+    relative_path = os.path.join(HERE, '..', 'modular', 'mojo', 'stdlib')
+    abs_path = os.path.abspath(relative_path)
+    if os.path.isdir(abs_path):
+        return abs_path
+
+    cwd = os.path.abspath(os.getcwd())
+    for _ in range(10):
+        candidate = os.path.join(cwd, 'modular', 'mojo', 'stdlib')
+        if os.path.isdir(candidate):
+            return candidate
+        cwd = os.path.dirname(cwd)
+        if cwd == '/':
+            break
+
+    return abs_path
+
+STDLIB_PATH = _find_stdlib_path()
+TEST_PATH = os.path.join(HERE, 'runtime')
 
 
 class ModuleLoader:

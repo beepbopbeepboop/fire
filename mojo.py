@@ -25,7 +25,8 @@ os.environ['PATH'] = '/Users/mrs/bin:/opt/local/bin:/opt/local/sbin:/usr/local/b
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-_GCC_BIN = "/opt/local/bin/gcc-mp-15" if _IS_DARWIN else "gcc"
+from build_config import find_gcc
+_GCC_BIN = find_gcc()
 
 def interpret_and_execute(src_code, filename=None):
     try:
@@ -110,7 +111,7 @@ def build_executable(input_file, src, output=None):
 
         # Compile to object file with -fgimple for GIMPLE code generation
         o_file = f"{basename}.o"
-        compile_cmd = [_GCC_BIN, "-O2", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        compile_cmd = [_GCC_BIN, "-O0", "-g3", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Compilation failed: {result.stderr}", file=sys.stderr)
@@ -118,7 +119,7 @@ def build_executable(input_file, src, output=None):
 
         # Compile runtime
         runtime_o = f"{basename}_runtime.o"
-        runtime_cmd = [_GCC_BIN, "-O2", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
+        runtime_cmd = [_GCC_BIN, "-O0", "-g3", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
         result = subprocess.run(runtime_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)

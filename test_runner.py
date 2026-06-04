@@ -10,6 +10,7 @@ import tempfile
 import ctypes
 from ctypes import c_int, CFUNCTYPE
 from io import StringIO
+from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO_CLI = os.path.join(HERE, 'build', 'mojo')
@@ -35,7 +36,7 @@ def compile_mojo_to_executable(mojo_src: str) -> str:
         # Compile C to executable using gcc
         runtime_dir = os.path.join(HERE, 'runtime')
         result = subprocess.run(
-            ['/opt/local/bin/gcc-mp-15',
+            [find_gcc(),
              f'-I{runtime_dir}',
              '-o', exe_file, c_file,
              os.path.join(runtime_dir, 'mojo_runtime.c')],

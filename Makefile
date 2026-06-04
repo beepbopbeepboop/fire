@@ -11,7 +11,7 @@ MOJO_CLI     = build/mojo
 MOJO_MAIN    = mojo.mojo
 
 GCC_MP15     = /opt/local/bin/gcc-mp-15
-BOOTSTRAP_CC = $(shell test -x $(GCC_MP15) && echo $(GCC_MP15) || echo gcc)
+BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
 
 # MacPorts GCC can't find SDK headers without this
 SDKROOT := $(shell xcrun --show-sdk-path 2>/dev/null)

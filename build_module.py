@@ -10,6 +10,7 @@ from pathlib import Path
 
 from gimple_codegen import compile_to_gimple, GimpleGen
 from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
+from build_config import find_gcc
 
 
 def extract_symbols(stmts):
@@ -84,7 +85,7 @@ def build_module(input_file, output_so, output_symbols=None):
         f.write(c_code)
 
     # Compile to shared library
-    cc = '/opt/local/bin/gcc-mp-15' if os.path.exists('/opt/local/bin/gcc-mp-15') else 'gcc'
+    cc = find_gcc()
     cmd = [
         cc, '-fgimple', '-fPIC', '-shared',
         '-I', 'runtime',

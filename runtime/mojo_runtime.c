@@ -1226,6 +1226,69 @@ char *string_strip(char *str) {
     return trimmed;
 }
 
+char *mojo_str_lstrip(char *str) {
+    if (!str) return str;
+    while (*str && (*str == ' ' || *str == '\t' || *str == '\n' || *str == '\r')) str++;
+    return str;
+}
+
+char *mojo_str_rstrip(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = (char *)malloc(len + 1);
+    if (!out) return str;
+    memcpy(out, str, len + 1);
+    char *end = out + len;
+    while (end > out && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r'))
+        end--;
+    *end = '\0';
+    return out;
+}
+
+char *mojo_str_expandtabs(char *str, int tabsize) {
+    if (!str) return str;
+    if (tabsize <= 0) tabsize = 8;
+    size_t out_cap = strlen(str) * tabsize + 64;
+    char *out = (char *)malloc(out_cap);
+    if (!out) return str;
+    size_t col = 0, oi = 0;
+    for (const char *p = str; *p; p++) {
+        if (*p == '\t') {
+            size_t spaces = (size_t)tabsize - (col % (size_t)tabsize);
+            while (oi + spaces + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            for (size_t k = 0; k < spaces; k++) out[oi++] = ' ';
+            col += spaces;
+        } else {
+            if (oi + 2 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            out[oi++] = *p;
+            col = (*p == '\n') ? 0 : col + 1;
+        }
+    }
+    out[oi] = '\0';
+    return out;
+}
+
+char *mojo_str_join(char *sep, MojoList *parts) {
+    if (!sep || !parts || parts->len == 0) return sep ? sep : "";
+    size_t sep_len = strlen(sep);
+    size_t total = 0;
+    for (int64_t i = 0; i < parts->len; i++) {
+        char *s = mojo_list_get_str(parts, i);
+        if (s) total += strlen(s);
+        if (i < parts->len - 1) total += sep_len;
+    }
+    char *out = (char *)malloc(total + 1);
+    if (!out) return "";
+    char *p = out;
+    for (int64_t i = 0; i < parts->len; i++) {
+        char *s = mojo_list_get_str(parts, i);
+        if (s) { size_t n = strlen(s); memcpy(p, s, n); p += n; }
+        if (i < parts->len - 1) { memcpy(p, sep, sep_len); p += sep_len; }
+    }
+    *p = '\0';
+    return out;
+}
+
 char *string_lower(char *str) {
     if (!str) return str;
 

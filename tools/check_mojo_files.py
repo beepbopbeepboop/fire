@@ -10,7 +10,9 @@ import argparse, re, subprocess, sys
 from pathlib import Path
 
 REPO = Path(__file__).parent.parent
-MOJO_ROOT = REPO / "../mojo/3rdparty/modular/mojo"
+sys.path.insert(0, str(REPO))
+from module_loader import STDLIB_PATH
+MOJO_ROOT = Path(STDLIB_PATH).parent.parent
 
 DEFAULT_SOURCES = [
     MOJO_ROOT / "stdlib/test",

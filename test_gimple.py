@@ -1,6 +1,6 @@
 """Tests for the GIMPLE codegen backend.
 
-Each test compiles generated C with gcc-mp-15 -fgimple -fsyntax-only to
+Each test compiles generated C with gcc -fgimple -fsyntax-only to
 verify the output is accepted by the GIMPLE parser.
 """
 import subprocess
@@ -9,10 +9,11 @@ import os
 import sys
 from gimple_codegen import compile_to_gimple
 import platform
+from build_config import find_gcc
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-GCC = "/opt/local/bin/gcc-mp-15" if _IS_DARWIN else "gcc"
+GCC = find_gcc()
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 _RUNTIME_INC = os.path.join(_PROJECT_DIR, 'runtime')
 _PASS = 0

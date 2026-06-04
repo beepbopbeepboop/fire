@@ -329,6 +329,9 @@ def handle_repl(args):
             continue
 
 def _find_cc():
+    import shutil
+    if shutil.which('gcc-15'):
+        return ['gcc-15', '-fgimple']
     cc = '/opt/local/bin/gcc-mp-15'
     if os.path.exists(cc):
         return [cc, '-fgimple']

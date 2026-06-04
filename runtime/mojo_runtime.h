@@ -290,6 +290,10 @@ char *input(char *prompt);       /* Alias for mojo_input */
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
+char *mojo_str_lstrip(char *str);
+char *mojo_str_rstrip(char *str);
+char *mojo_str_expandtabs(char *str, int tabsize);
+char *mojo_str_join(char *sep, MojoList *parts);
 
 /* ── Integer arithmetic helpers ──────────────────────────────────────────
  * Lowered floor-division for use in __GIMPLE code.                      */

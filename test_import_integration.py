@@ -8,6 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from gimple_codegen import compile_to_gimple
+from build_config import find_gcc
 
 def compile_and_link(main_src: str, helper_srcs: dict) -> str:
     """Compile Mojo code with imports and link against helper modules.
@@ -32,7 +33,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
             # Compile helper C to object file
             helper_obj = os.path.join(tmpdir, f"{module_name}.o")
             result = subprocess.run(
-                ['/opt/local/bin/gcc-mp-15', '-fgimple', '-c',
+                [find_gcc(), '-fgimple', '-c',
                  f'-I{HERE}/runtime',
                  '-o', helper_obj, helper_c_file],
                 capture_output=True,
@@ -53,7 +54,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
 
         # Link main with helper objects
         exe_file = os.path.join(tmpdir, 'program.exe')
-        link_cmd = ['/opt/local/bin/gcc-mp-15', '-fgimple',
+        link_cmd = [find_gcc(), '-fgimple',
                     f'-I{HERE}/runtime',
                     '-o', exe_file, main_c_file] + helper_objs
 
