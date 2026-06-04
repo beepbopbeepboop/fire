@@ -123,11 +123,11 @@ int main() {{
             runtime_dir = os.path.join(script_dir, 'runtime')
             runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
 
-            # Compile to object file with -fgimple
+            # Compile to object file with -fgimple (use -O2 for optimization)
             o_file = os.path.join(self.temp_dir, "jit_code.o")
             compile_cmd = [
                 _GCC_BIN,
-                "-O0", "-g2",
+                "-O2",
                 "-fgimple",
                 f"-I{runtime_dir}",
                 "-c",
@@ -148,7 +148,7 @@ int main() {{
             runtime_o = os.path.join(self.temp_dir, "mojo_runtime.o")
             runtime_cmd = [
                 _GCC_BIN,
-                "-O0", "-g2",
+                "-O2",
                 f"-I{runtime_dir}",
                 "-c",
                 "-o", runtime_o,
