@@ -97,7 +97,7 @@ class TypeLattice:
         if ru1 and ru2:  return t1 if ru1 >= ru2 else t2   # both unsigned
         if rs1 and ru2:  return t2 if ru2 >= rs1 else t1   # t1 signed, t2 unsigned
         if ru1 and rs2:  return t1 if ru1 >= rs2 else t2   # t1 unsigned, t2 signed
-        return 'int'
+        return 'int64_t'
 
     @classmethod
     def join_all(cls, types: list) -> str:
@@ -1467,7 +1467,7 @@ _FLOAT_TYPES = {'double', 'float', '__fp16'}
 
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
-        return 'int'
+        return 'int64_t'  # Default to 64-bit signed integer
     if isinstance(ann, type):
         ann = ann.__name__
     # Handle Union types: X | Y | ... → resolve to first non-None type
@@ -2366,11 +2366,11 @@ class GimpleGen:
 
     def _quick_type(self, node) -> str:
         """Estimate C type of an expression without emitting code."""
-        if isinstance(node, IntLiteral):    return 'int'
+        if isinstance(node, IntLiteral):    return 'int64_t'
         if isinstance(node, FloatLiteral):  return 'double'
         if isinstance(node, BoolLiteral):   return '_Bool'
         if isinstance(node, StringLiteral): return 'char *'
-        if isinstance(node, IdentExpr):     return self.var_types.get(node.name, 'int')
+        if isinstance(node, IdentExpr):     return self.var_types.get(node.name, 'int64_t')
         if isinstance(node, BinaryOp):
             if node.op in _CMP_OPS:         return '_Bool'
             lt = self._quick_type(node.left)
