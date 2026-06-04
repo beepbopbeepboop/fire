@@ -8,6 +8,7 @@ Modes:
 - mojo <file.mojo>                 Interpret and execute file
 - mojo build <file.mojo>           Compile to executable (output name = file basename)
 - mojo build -o <output> <file>    Compile to executable with specified output name
+- mojo --jit <file.mojo>           JIT compile and execute (ARM64)
 - mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
 - mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
 - mojo -h, --help                  Show usage
@@ -20,8 +21,8 @@ import shutil
 import sysconfig
 import platform
 
-# Set PATH to ensure tools like python3-config can be found
-os.environ['PATH'] = '/Users/mrs/bin:/opt/local/bin:/opt/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/Apple/usr/bin'
+# Set PATH to ensure tools like python3-config and gcc-15 can be found
+os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/Apple/usr/bin'
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
@@ -41,6 +42,44 @@ def interpret_and_execute(src_code, filename=None):
         print(f"Error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+
+def run_jit_repl():
+    """Interactive REPL for Mojo code using JIT compilation."""
+    from jit.arm64 import ARM64JIT
+
+    jit = ARM64JIT()
+    print("Mojo JIT REPL - type 'exit' or 'quit' to exit")
+    print("(Note: Each expression is independently compiled)")
+    print()
+
+    while True:
+        try:
+            line = input(">>> ")
+            if not line.strip():
+                continue
+            if line.lower() in ('exit', 'quit'):
+                break
+
+            try:
+                # Wrap the expression in a main() function and print the result
+                wrapped_code = f"""def main():
+    result = {line}
+    print(result)
+
+main()
+"""
+                jit.compile_and_execute(wrapped_code)
+            except Exception as e:
+                print("Error:", e)
+
+        except KeyboardInterrupt:
+            print("\nInterrupt")
+            break
+        except EOFError:
+            print()
+            break
+
+    jit.cleanup()
 
 def run_repl():
     """Interactive REPL for Mojo code."""
@@ -84,6 +123,18 @@ def run_repl():
         except EOFError:
             print()
             break
+
+def jit_compile_and_execute(input_file, src):
+    """JIT compile and execute Mojo source code for ARM64."""
+    try:
+        from jit.arm64 import ARM64JIT
+        jit = ARM64JIT()
+        jit.compile_and_execute(src)
+        jit.cleanup()
+    except Exception as e:
+        print(f"JIT error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
 
 def build_executable(input_file, src, output=None):
     """Compile Mojo source to executable using GIMPLE codegen."""
@@ -182,9 +233,12 @@ def main():
     # Check for help
     if sys.argv[1] in ('-h', '--help', 'help'):
         print("""Usage:
-  mojo                             Interactive REPL
-  mojo repl                        Interactive REPL (explicit)
+  mojo                             Interactive REPL (interpreter)
+  mojo --jit                       Interactive REPL (JIT mode, ARM64)
+  mojo repl                        Interactive REPL (explicit, interpreter)
+  mojo repl --jit                  Interactive REPL (explicit, JIT mode)
   mojo <file.mojo>                 Interpret and execute file
+  mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
@@ -194,8 +248,22 @@ def main():
 
     # Check for repl command
     if sys.argv[1] == 'repl':
-        run_repl()
+        # Check if --jit flag is present for JIT REPL
+        if '--jit' in sys.argv:
+            sys.argv.remove('--jit')
+            run_jit_repl()
+        else:
+            run_repl()
         return
+
+    # Check for JIT flag
+    jit = '--jit' in sys.argv
+    if jit:
+        sys.argv.remove('--jit')
+        # If --jit is the only argument, run JIT REPL
+        if len(sys.argv) < 2:
+            run_jit_repl()
+            return
 
     # Check for build command
     build = False
@@ -241,6 +309,11 @@ def main():
     if 'bootstrap-validate' in input_file:
         result = subprocess.run([sys.executable] + sys.argv[1:])
         sys.exit(result.returncode)
+
+    # If JIT requested, compile and execute
+    if jit:
+        jit_compile_and_execute(input_file, src)
+        return
 
     # If build requested, compile to executable
     if build:
