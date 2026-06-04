@@ -2164,7 +2164,7 @@ class GimpleGen:
         through register temps as required by GIMPLE."""
         is_field = '->' in lhs
         val_is_literal = val.startswith('"') or val.startswith("'") or (
-            val.lstrip('-').replace('.','',1).isdigit() and val not in ('0','1','2','3','4','5','6','7','8','9'))
+            val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
         needs_temp = is_field
 
         def _simple_emit(dest, v, s, d):
@@ -3840,11 +3840,8 @@ class GimpleGen:
             # GIMPLE: global string literals must be loaded into locals before use
             loaded_args = []
             for at, av in arg_pairs:
-                if av.startswith('_slit_') or (av in self._str_pool.values() and av != av):
-                    tmp = self._new_temp(at)
-                    self._emit(f'  {tmp} = {av};')
-                    av = tmp
-                elif av.startswith('_slit_'):
+                # GIMPLE: string pool references must be loaded into locals before use
+                if av.startswith('_slit_') or av in self._str_pool.values():
                     tmp = self._new_temp(at)
                     self._emit(f'  {tmp} = {av};')
                     av = tmp
@@ -4092,8 +4089,6 @@ class GimpleGen:
         # downstream type-mismatch errors when char* results were used in binary ops)
         t = self._new_temp(ret_type)
         # Use _emit_call for proper argument coercion
-        arg_pair_list = [(self._type_of(av) if i < len(arg_pairs) else 'int', av)
-                         for i, (_, av) in enumerate(arg_pairs)]
         self._emit_call(ret_type, t, mangled,
                         ([(ot, ov)] + arg_pairs) if not is_class_ref else arg_pairs)
         return ret_type, t
