@@ -7368,11 +7368,12 @@ class GimpleGen:
                 func_parts.append('')
             elif isinstance(stmt, (ImportStmt, FromImportStmt)):
                 pass  # Imports processed in pre-pass; extern declarations generated in preamble
-            elif isinstance(stmt, AssignStmt):
-                # Collect top-level assignments for _toplevel()
-                toplevel_stmts.append(stmt)
-            elif isinstance(stmt, ExprStmt):
-                # Collect top-level expression statements for _toplevel()
+            elif isinstance(stmt, (AssignStmt, AugAssignStmt, ExprStmt,
+                                   IfStmt, WhileStmt, ForStmt,
+                                   TryStmt, WithStmt, PassStmt,
+                                   BreakStmt, ContinueStmt, ReturnStmt,
+                                   RaiseStmt, AssertStmt)):
+                # Collect all executable statements for _toplevel()
                 toplevel_stmts.append(stmt)
             else:
                 func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
