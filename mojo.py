@@ -61,12 +61,20 @@ def run_jit_repl():
                 break
 
             try:
-                # Wrap the expression in a main() function and print the result
-                wrapped_code = f"""def main():
+                # Wrap the expression in a function and call it
+                # Check if line is a print call - if so, just execute it directly
+                if line.strip().startswith('print('):
+                    wrapped_code = f"""def _repl_expr():
+    {line}
+
+_repl_expr()
+"""
+                else:
+                    wrapped_code = f"""def _repl_expr():
     result = {line}
     print(result)
 
-main()
+_repl_expr()
 """
                 jit.compile_and_execute(wrapped_code)
             except Exception as e:

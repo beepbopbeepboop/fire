@@ -4106,6 +4106,11 @@ class GimpleGen:
 
         fname_raw = node.func.name
 
+        # Redirect calls to user's main() to _gimple_main() (since user main is renamed)
+        # unless we're currently inside the main() function
+        if fname_raw == 'main' and self.current_func_name != 'main':
+            fname_raw = '_gimple_main'
+
         # dir(obj) — Python built-in, stub to return empty list
         if fname_raw == 'dir':
             for a in node.args: self.lower_expr(a)
@@ -5551,7 +5556,11 @@ class GimpleGen:
                     full_arg_pairs = arg_pairs
                 self._emit_call('void', '', fname_c, full_arg_pairs)
                 return
-            fname     = _safe_name(raw_name)
+            # Redirect calls to user's main() to _gimple_main() (since user main is renamed)
+            if raw_name == 'main' and self.current_func_name != 'main':
+                fname = _safe_name('_gimple_main')
+            else:
+                fname = _safe_name(raw_name)
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
 
             # Handle keyword arguments for regular function calls
@@ -6527,12 +6536,34 @@ class GimpleGen:
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Initialize ();")
             lines.append(f"#endif")
+            lines.append(f"  _toplevel ();")
             lines.append(f"  {ret_type} result = {safe} ();")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Finalize ();")
             lines.append(f"#endif")
             lines.append(f"  return result;")
             lines.append(f"}}")
+
+        return '\n'.join(lines)
+
+    def _gen_toplevel(self, toplevel_stmts: list) -> str:
+        """Generate _toplevel() function for top-level expression statements."""
+        self._reset_func()
+        self.current_func_name = '_toplevel'
+        self.func_ret_type = 'void'
+        self.func_return_types['_toplevel'] = 'void'
+
+        # Generate code for each top-level statement
+        for stmt in toplevel_stmts:
+            self.gen_stmt(stmt)
+
+        lines = [
+            "void _toplevel (void)",
+            "{",
+            *self.decls,
+            *self.body_lines,
+            "}",
+        ]
 
         return '\n'.join(lines)
 
@@ -7308,6 +7339,9 @@ class GimpleGen:
             func_parts.append(self._gen_lifted_closure(ci))
             func_parts.append('')
 
+        # Collect top-level statements for _toplevel() function
+        toplevel_stmts = []
+
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
                 for ci in self._all_closures.get(stmt.name, {}).values():
@@ -7345,8 +7379,39 @@ class GimpleGen:
                     func_parts.append(f"/* global set {gname} — declared as MojoSet * */")
                 else:
                     func_parts.append(f"/* TODO: global {gname} */")
+            elif isinstance(stmt, ExprStmt):
+                # Collect top-level expression statements for _toplevel()
+                toplevel_stmts.append(stmt)
             else:
                 func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+
+        # Only generate _toplevel() if there are actual top-level statements
+        has_toplevel_code = len(toplevel_stmts) > 0
+        if has_toplevel_code:
+            toplevel_func = self._gen_toplevel(toplevel_stmts)
+            func_parts.append(toplevel_func)
+            func_parts.append('')
+
+        # Generate default main() if not already defined
+        has_main = any(isinstance(stmt, FunctionDef) and stmt.name == 'main' for stmt in stmts)
+        if not has_main:
+            func_parts.append("int _gimple_main (void)")
+            func_parts.append("{")
+            func_parts.append("  return 0;")
+            func_parts.append("}")
+            func_parts.append("")
+            func_parts.append("int main (int argc, const char **argv) {")
+            func_parts.append("  mojo_set_argv(argc, argv);")
+            func_parts.append("#if USE_PYTHON")
+            func_parts.append("  Py_Initialize ();")
+            func_parts.append("#endif")
+            if has_toplevel_code:
+                func_parts.append("  _toplevel ();")
+            func_parts.append("#if USE_PYTHON")
+            func_parts.append("  Py_Finalize ();")
+            func_parts.append("#endif")
+            func_parts.append("  return 0;")
+            func_parts.append("}")
 
         # ── Phase 2b: assemble final C output ────────────────────────────
 
@@ -7365,13 +7430,18 @@ class GimpleGen:
             '#endif',
             '#include <mojo_runtime.h>',
             'void mojo_print(char *str);',
+        ]
+        # Only add _toplevel forward declaration if we have top-level code
+        if has_toplevel_code:
+            parts.append('void _toplevel(void);')
+        parts.extend([
             'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
             'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
             'int64_t mojo_open_file(char *path);',
             'void *mojo_open(char *filename, char *mode);',
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
-        ]
+        ])
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
