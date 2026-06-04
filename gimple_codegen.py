@@ -7368,17 +7368,9 @@ class GimpleGen:
                 func_parts.append('')
             elif isinstance(stmt, (ImportStmt, FromImportStmt)):
                 pass  # Imports processed in pre-pass; extern declarations generated in preamble
-            elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
-                # Module-level assignment: e.g. _STMT_DISPATCH = {...}
-                gname = stmt.target.name
-                if isinstance(stmt.value, DictExpr):
-                    func_parts.append(f"/* global dict {gname} — declared as MojoDict * */")
-                elif isinstance(stmt.value, (ListExpr, TupleExpr)):
-                    func_parts.append(f"/* global list {gname} — declared as MojoList * */")
-                elif isinstance(stmt.value, SetExpr):
-                    func_parts.append(f"/* global set {gname} — declared as MojoSet * */")
-                else:
-                    func_parts.append(f"/* TODO: global {gname} */")
+            elif isinstance(stmt, AssignStmt):
+                # Collect top-level assignments for _toplevel()
+                toplevel_stmts.append(stmt)
             elif isinstance(stmt, ExprStmt):
                 # Collect top-level expression statements for _toplevel()
                 toplevel_stmts.append(stmt)
