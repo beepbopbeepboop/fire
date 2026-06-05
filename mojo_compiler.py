@@ -1543,6 +1543,32 @@ class Parser:
             return UnaryOp(op="*", operand=self._parse_unary())
         return self._parse_postfix()
 
+    def _parse_subscript_item(self):
+        """Parse one subscript element: a slice (`start:stop:step`, every part
+        optional) or a plain expression. Slices are returned as a SliceExpr with
+        obj=None (the caller attaches the object); plain indices are returned as
+        the bare expression node. Used for both 1-D and multi-dim (`a[0:2, ::]`)
+        indexing."""
+        start = None
+        if self._peek().kind != "COLON":
+            start = self._parse_expr(0)
+            # Function-type annotation in type position: def(...) [quals] -> T
+            self._skip_fn_quals()
+            if self._peek().kind == "ARROW":
+                self._advance(); self._parse_type_ann()
+            if self._peek().kind != "COLON":
+                return start  # plain index, not a slice
+        # At a COLON → this element is a slice.
+        self._advance()
+        stop = (None if self._peek().kind in ("RBRACKET", "COMMA", "COLON")
+                else self._parse_expr(0))
+        step = None
+        if self._peek().kind == "COLON":
+            self._advance()
+            step = (None if self._peek().kind in ("RBRACKET", "COMMA")
+                    else self._parse_expr(0))
+        return SliceExpr(obj=None, start=start, stop=stop, step=step)
+
     def _parse_postfix(self):
         expr = self._parse_primary()
         while True:
@@ -1596,24 +1622,12 @@ class Parser:
                                 # Parse the full expression for the arg (handles dotted names Self.Ts, subscripts, etc.)
                                 arg_expr = self._parse_expr(0)
                                 if self._peek().kind == "ASSIGN":
-                                    # keyword arg: advance = and parse value
+                                    # keyword arg: advance = and parse the value,
+                                    # which may itself be a slice (key = -50::) or
+                                    # a function type. _parse_subscript_item handles
+                                    # all of start:stop:step, fn-types, and exprs.
                                     self._advance()
-                                    # Handle slice-value: key = :end
-                                    if self._peek().kind == "COLON":
-                                        self._advance()  # skip leading colon
-                                        if self._peek().kind not in ("RBRACKET", "COMMA"):
-                                            self._parse_expr(0)  # parse end of slice
-                                    else:
-                                        self._parse_expr(0)  # parse and discard value
-                                        # Handle function type qualifiers and return type: def(...) [qual] -> T
-                                        self._skip_fn_quals()
-                                        if self._peek().kind == "ARROW":
-                                            self._advance(); self._parse_type_ann()
-                                        # Check for trailing colon: key = start:end or key = start:
-                                        elif self._peek().kind == "COLON":
-                                            self._advance()  # skip colon
-                                            if self._peek().kind not in ("RBRACKET", "COMMA"):
-                                                self._parse_expr(0)  # parse end of slice
+                                    self._parse_subscript_item()
                                 # else positional arg: arg_expr already fully parsed
                             # Handle ellipsis (...) as an argument (three DOTs)
                             elif (self._peek().kind == "DOT" and
@@ -1625,74 +1639,41 @@ class Parser:
                         self._expect("RBRACKET")
                         expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
                     else:
-                        # Check for slice with empty start (e.g., [:10], [:-2], [::2], [::-1])
-                        if self._peek().kind == "COLON":
+                        # Parse a comma-separated list of subscript items. Each
+                        # item is a slice (start:stop:step) or a plain expression,
+                        # so this covers 1-D slicing (a[1:2]), generic params
+                        # (List[T, n]), and multi-dim slicing (a[0:2, ::]).
+                        items = [self._parse_subscript_item()]
+                        while self._peek().kind == "COMMA":
                             self._advance()
-                            stop = None if self._peek().kind in ("RBRACKET", "COLON") else self._parse_expr(0)
-                            step = None
-                            if self._peek().kind == "COLON":
+                            if self._peek().kind == "RBRACKET": break
+                            # Unpacking: *expr
+                            if self._peek().kind == "OP" and self._peek().value == "*":
                                 self._advance()
-                                step = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
-                            expr = SliceExpr(obj=expr, start=None, stop=stop, step=step)
-                            self._expect("RBRACKET")
-                        else:
-                            # Parse positional index
-                            idx = self._parse_expr(0)
-                            # Handle function type annotations: def(...) [qualifiers] -> ReturnType in subscripts
-                            self._skip_fn_quals()
-                            if self._peek().kind == "ARROW":
-                                self._advance(); self._parse_type_ann()
-                            # Check for multiple indices or keywords
-                            if self._peek().kind == "COMMA":
-                                indices = [idx]
-                                while self._peek().kind == "COMMA":
-                                    self._advance()
-                                    if self._peek().kind == "RBRACKET": break
-                                    # Check if next element is keyword argument (NAME = ...)
-                                    # Check for unpacking (*expr)
-                                    if self._peek().kind == "OP" and self._peek().value == "*":
-                                        self._advance()
-                                        indices.append(self._parse_expr(0))
-                                    # Check if keyword argument
-                                    elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                                        # Skip remaining keyword arguments (may include positional args and ...)
-                                        while self._peek().kind != "RBRACKET" and self._peek().kind != "EOF":
-                                            # Handle ellipsis (...) as an argument
-                                            if (self._peek().kind == "DOT" and
-                                                self._peek(1).kind == "DOT" and
-                                                self._peek(2).kind == "DOT"):
-                                                self._advance(); self._advance(); self._advance()
-                                            elif self._peek().kind in ("NAME", "KW"):
-                                                # Parse the whole argument expression (handles dotted names, subscripts, etc.)
-                                                self._parse_expr(0)
-                                                # Skip optional ASSIGN and value for keyword args
-                                                if self._peek().kind == "ASSIGN":
-                                                    self._advance(); self._parse_expr(0)
-                                            else:
-                                                break  # unexpected token
-                                            if self._peek().kind == "COMMA": self._advance()
-                                            elif self._peek().kind != "RBRACKET": break
-                                        break
-                                    else:
-                                        e = self._parse_expr(0)
-                                        # Handle function type annotations: def(...) [qualifiers] -> ReturnType
-                                        self._skip_fn_quals()
-                                        if self._peek().kind == "ARROW":
-                                            self._advance(); self._parse_type_ann()
-                                        indices.append(e)
-                                idx = TupleExpr(elements=indices)
-                            # Check for slice notation (start:stop[:step])
-                            if self._peek().kind == "COLON":
-                                self._advance()
-                                stop = None if self._peek().kind in ("RBRACKET", "COLON") else self._parse_expr(0)
-                                step = None
-                                if self._peek().kind == "COLON":
-                                    self._advance()
-                                    step = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
-                                expr = SliceExpr(obj=expr, start=idx, stop=stop, step=step)
+                                items.append(self._parse_expr(0))
+                            # Keyword argument: name = value (generic params)
+                            elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
+                                self._advance()  # name
+                                self._advance()  # =
+                                items.append(self._parse_subscript_item())
+                            # Ellipsis: ...
+                            elif (self._peek().kind == "DOT" and
+                                  self._peek(1).kind == "DOT" and
+                                  self._peek(2).kind == "DOT"):
+                                self._advance(); self._advance(); self._advance()
+                                items.append(EllipsisLiteral())
                             else:
-                                expr = SubscriptExpr(obj=expr, index=idx)
-                            self._expect("RBRACKET")
+                                items.append(self._parse_subscript_item())
+                        self._expect("RBRACKET")
+                        if len(items) == 1:
+                            only = items[0]
+                            if isinstance(only, SliceExpr):
+                                only.obj = expr  # attach object to the bare slice
+                                expr = only
+                            else:
+                                expr = SubscriptExpr(obj=expr, index=only)
+                        else:
+                            expr = SubscriptExpr(obj=expr, index=TupleExpr(elements=items))
             elif t.kind == "LPAREN":
                 self._advance()
                 args = []
@@ -2187,14 +2168,23 @@ def emit(node, indent: int = 0) -> str:
     if isinstance(node,TernaryExpr): return f"({emit(node.then_val, 0)} if {emit(node.condition, 0)} else {emit(node.else_val, 0)})"
     if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value, 0)})"
     if isinstance(node,MemberExpr): return f"{emit(node.obj, 0)}.{node.member}"
-    if isinstance(node,SubscriptExpr): return f"{emit(node.obj, 0)}[{emit(node.index, 0)}]"
+    if isinstance(node,SubscriptExpr):
+        # A tuple index is multi-dimensional indexing (a[i, j], a[0:2, ::]); emit
+        # the elements comma-joined without the tuple's surrounding parentheses.
+        if isinstance(node.index, TupleExpr):
+            inner = ", ".join(emit(e, 0) for e in node.index.elements)
+            return f"{emit(node.obj, 0)}[{inner}]"
+        return f"{emit(node.obj, 0)}[{emit(node.index, 0)}]"
     if isinstance(node,SliceExpr):
         start = emit(node.start, 0) if node.start is not None else ""
         stop  = emit(node.stop, 0)  if node.stop  is not None else ""
         step  = getattr(node, "step", None)
-        if step is not None:
-            return f"{emit(node.obj, 0)}[{start}:{stop}:{emit(step, 0)}]"
-        return f"{emit(node.obj, 0)}[{start}:{stop}]"
+        body  = f"{start}:{stop}:{emit(step, 0)}" if step is not None else f"{start}:{stop}"
+        # A bare slice (obj=None) is one element of a multi-dim index; emit just
+        # the slice. Otherwise emit the indexing expression obj[...].
+        if node.obj is None:
+            return body
+        return f"{emit(node.obj, 0)}[{body}]"
     if isinstance(node,ListExpr): return "[" + ", ".join(emit(e, 0) for e in node.elements) + "]"
     if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k, 0)}: {emit(v, 0)}" for k,v in node.pairs) + "}"
     if isinstance(node,SetExpr): return "{" + ", ".join(emit(e, 0) for e in node.elements) + "}"
