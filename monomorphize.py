@@ -29,6 +29,8 @@ RUNTIME = os.path.join(HERE, 'runtime')
 _OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
 
 _FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
+# Generalized head: a `fn` or `struct` template with `[type params]`.
+_HEAD = re.compile(r'\b(fn|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
 def mangle(name: str, type_args: dict) -> str:
@@ -38,18 +40,18 @@ def mangle(name: str, type_args: dict) -> str:
 
 
 def monomorphize_source(template_src: str, type_args: dict) -> tuple:
-    """Specialize a single-`fn` generic template for concrete type args.
-    Returns (mangled_name, concrete_source). Textual substitution: drop the
-    `[params]` block, rename the function, and replace each type-param identifier
-    with its concrete type as a whole word."""
-    m = _FN_HEAD.search(template_src)
+    """Specialize a single `fn` OR `struct` generic template for concrete type
+    args. Returns (mangled_name, concrete_source). Textual substitution: drop the
+    `[params]` block, rename the definition, and replace each type-param
+    identifier with its concrete type as a whole word."""
+    m = _HEAD.search(template_src)
     if not m:
-        raise ValueError("monomorphize: no generic `fn name[...]` found")
-    name = m.group(1)
+        raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
+    kind, name = m.group(1), m.group(2)
     mangled = mangle(name, type_args)
 
-    # Drop the [type-params] block and rename the function.
-    src = template_src[:m.start()] + f"fn {mangled}" + template_src[m.end():]
+    # Drop the [type-params] block and rename the definition (fn or struct).
+    src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]
     # Substitute each type parameter with its concrete type (whole-word).
     for tp, concrete in type_args.items():
         src = re.sub(rf'\b{re.escape(tp)}\b', str(concrete), src)

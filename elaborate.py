@@ -14,10 +14,12 @@ record the object on the link line.
 import re
 
 import monomorphize as mm
-from mojo_compiler import tokenize, Parser, FunctionDef
+from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
 from gimple_codegen import _mojo_type
 
 _FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
+# Generalized head matching a `fn` or `struct` template with `[type params]`.
+_HEAD = re.compile(r'\b(?:fn|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
 def extract_fn_source(module_src: str, fn_name: str):
@@ -43,12 +45,34 @@ def extract_fn_source(module_src: str, fn_name: str):
 
 
 def type_param_names(template_src: str):
-    """The generic's type-parameter names, e.g. `fn box[T, U]` -> ['T', 'U']."""
-    m = _FN_HEAD.search(template_src)
+    """The generic's type-parameter names — for `fn` or `struct`, e.g.
+    `struct Box[T, U]` -> ['T', 'U']."""
+    m = _HEAD.search(template_src)
     if not m:
         return []
     return [p.strip().split(':')[0].strip()
             for p in m.group(2).split(',') if p.strip()]
+
+
+def extract_struct_source(module_src: str, name: str):
+    """Pull the source text of a `struct name[...]: ...` block, by indentation."""
+    lines = module_src.splitlines(keepends=True)
+    pat = re.compile(rf'^(\s*)struct\s+{re.escape(name)}\s*[\[\(:]')
+    start = None
+    for i, l in enumerate(lines):
+        if pat.match(l):
+            start = i
+            break
+    if start is None:
+        return None
+    base = len(lines[start]) - len(lines[start].lstrip())
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        l = lines[j]
+        if l.strip() and (len(l) - len(l.lstrip())) <= base:
+            end = j
+            break
+    return ''.join(lines[start:end])
 
 
 # Reverse of the ABI type map, for inferring a generic's type args from the C
@@ -90,6 +114,21 @@ def infer_type_args(template_src: str, arg_ctypes):
     return [binding[p] for p in params]
 
 
+def _struct_layout(concrete_src: str, name: str):
+    """(fields, methods) of the monomorphized struct: fields as (name, c_type),
+    methods as (name, ret_ctype, [param_ctypes excluding self])."""
+    for s in Parser(tokenize(concrete_src)).parse_module():
+        if isinstance(s, StructDef) and s.name == name:
+            fields = [(f.name, _mojo_type(f.type_ann)) for f in getattr(s, 'fields', [])]
+            methods = []
+            for m in getattr(s, 'methods', []):
+                ret = _mojo_type(m.return_type) if m.return_type else 'void'
+                ps = [_mojo_type(t) for n, t in m.params if n != 'self']
+                methods.append((m.name, ret, ps))
+            return fields, methods
+    return [], []
+
+
 def _signature(concrete_src: str, name: str):
     """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
     for s in Parser(tokenize(concrete_src)).parse_module():
@@ -123,6 +162,24 @@ class Elaborator:
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _signature(concrete, mangled)
         return {'symbol': mangled, 'object': obj, 'ret': ret, 'params': ptypes}
+
+    def elaborate_generic_struct(self, module_src: str, struct_name: str, type_args):
+        """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
+        the struct + its methods for the type args (CAS-cached), and report the
+        concrete name, field layout, method signatures, and object so the codegen
+        can materialize the type, construct it, and call its methods."""
+        tmpl = extract_struct_source(module_src, struct_name)
+        if tmpl is None:
+            return None
+        params = type_param_names(tmpl)
+        if not params or len(type_args) < len(params):
+            return None
+        targs = dict(zip(params, type_args[:len(params)]))
+
+        mangled, obj, _hit = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        _, concrete = mm.monomorphize_source(tmpl, targs)
+        fields, methods = _struct_layout(concrete, mangled)
+        return {'name': mangled, 'fields': fields, 'methods': methods, 'object': obj}
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
         """Like elaborate_generic_call but infers the type args from the call

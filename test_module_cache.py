@@ -299,6 +299,31 @@ def test_elaboration_inference_and_comptime(wd):
         os.remove(box_mod); os.remove(ct_mod)
 
 
+# ── Elaboration slice 5: generic structs ─────────────────────────────────
+def test_elaboration_generic_struct(wd):
+    import elaborate
+    from gimple_codegen import compile_linked
+    mod = ("struct Box[T]:\n    var value: T\n"
+           "    fn unbox(self) -> T:\n        return self.value\n")
+    info = elaborate.Elaborator().elaborate_generic_struct(mod, 'Box', ['Int64'])
+    check("slice5: generic struct instantiated to a concrete type",
+          bool(info) and info['name'] == 'Box_Int64'
+          and ('value', 'int64_t') in info['fields'])
+    check("slice5: struct methods monomorphized",
+          ('unbox', 'int64_t', []) in info['methods'])
+    bl = os.path.join(RUNTIME, 'el_boxlib.mojo')
+    open(bl, 'w').write(mod)
+    try:
+        code, _d, objs = compile_linked(
+            "from el_boxlib import Box\n"
+            "fn main():\n    var b = Box[Int64](42)\n    var y = b.unbox()\n")
+        check("slice5: client materializes struct + calls method + records object",
+              'typedef struct Box_Int64' in code and 'Box_Int64_unbox' in code
+              and len(objs) == 1)
+    finally:
+        os.remove(bl)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -313,6 +338,7 @@ def main():
         test_resolution_authority(wd)
         test_elaboration_generic_call(wd)
         test_elaboration_inference_and_comptime(wd)
+        test_elaboration_generic_struct(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

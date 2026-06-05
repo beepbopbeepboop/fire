@@ -5,6 +5,8 @@ __GIMPLE-annotated functions for gcc-mp-15 -fgimple.
 """
 from __future__ import annotations
 
+import re
+
 from mojo_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, EllipsisLiteral,
     IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr,
@@ -1901,6 +1903,10 @@ class GimpleGen:
         # Imported function name -> module source path, for comptime evaluation
         # (run the function at compile time via comptime.evaluate; slice 3).
         self._imported_fn_sources: dict = {}
+        # Imported generic struct name -> module source path (slice 5).
+        self._imported_generic_structs: dict = {}
+        # typedefs for elaborated (monomorphized) structs, emitted in the preamble.
+        self._elaborated_typedefs: list = []
         # extern decls for symbols elaboration produced at call sites (generic
         # instantiations); emitted in the preamble like import extern decls.
         self._elaborated_externs: list = []
@@ -2093,9 +2099,17 @@ class GimpleGen:
                             self._imported_fn_sources.setdefault(name, source)
                         if not info:
                             # Not a concrete export — if the module source defines
-                            # it as a generic, record it for on-demand elaboration.
-                            if source and sym not in self._imported_generics:
-                                self._imported_generics[sym] = source
+                            # it as a generic (struct or fn), record it for
+                            # on-demand elaboration at use sites.
+                            if source:
+                                try:
+                                    msrc = open(source).read()
+                                except Exception:
+                                    msrc = ''
+                                if re.search(rf'\bstruct\s+{re.escape(name)}\s*\[', msrc):
+                                    self._imported_generic_structs.setdefault(sym, source)
+                                elif re.search(rf'\bfn\s+{re.escape(name)}\s*\[', msrc):
+                                    self._imported_generics.setdefault(sym, source)
                             continue
                         if sym in seen:
                             continue
@@ -4431,6 +4445,43 @@ class GimpleGen:
             return None
         return self._emit_generic_instantiation(info, arg_pairs)
 
+    def _elaborate_generic_struct_call(self, node: CallExpr):
+        """Elaborate Struct[TypeArgs](args): materialize the concrete monomorphized
+        struct (register its layout + typedef, declare its methods, record its
+        object on the link line), then lower the call as a constructor."""
+        g = node.func.obj.name
+        source = self._imported_generic_structs.get(g)
+        if not source:
+            return None
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+        type_args = [self._type_expr_to_ann(e) for e in elems]
+        try:
+            module_src = open(source).read()
+            import elaborate
+            info = elaborate.Elaborator().elaborate_generic_struct(module_src, g, type_args)
+        except Exception:
+            info = None
+        if not info or not info['fields']:
+            return None
+
+        name = info['name']
+        if name not in self.struct_field_types:
+            # Register the layout; the struct-typedef section emits the typedef.
+            self.struct_field_types[name] = {f: ct for f, ct in info['fields']}
+            for mname, ret, ps in info['methods']:
+                msym = f"{name}_{mname}"
+                self.func_return_types[msym] = ret
+                self.func_param_types[msym] = [f"{name} *"] + ps
+                decl = (f"extern {ret} {msym} "
+                        f"({', '.join([name + ' *'] + ps) or 'void'});")
+                if decl not in self._elaborated_externs:
+                    self._elaborated_externs.append(decl)
+        if info['object'] not in self._link_objects:
+            self._link_objects.append(info['object'])
+
+        return self._lower_struct_constructor(name, node.args, getattr(node, 'kwargs', None))
+
     def _emit_generic_instantiation(self, info, arg_pairs):
         """Record an elaborated instantiation (object on the link line, extern in
         the preamble, signature for calls) and emit the concrete call."""
@@ -4658,6 +4709,13 @@ class GimpleGen:
         mlir_call = self._maybe_lower_mlir_op(node)
         if mlir_call is not None:
             return mlir_call
+        # Generic struct instantiation Struct[TypeArgs](args) → elaborate the
+        # concrete struct (type + methods) and construct it (slice 5).
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
+                and node.func.obj.name in self._imported_generic_structs:
+            res = self._elaborate_generic_struct_call(node)
+            if res is not None:
+                return res
         # Generic call site on an imported generic → elaborate it to a concrete
         # CAS-cached instantiation (ELABORATION.md). Explicit `Generic[Args](x)`
         # or inferred `Generic(x)` (type args from argument types, slice 2).
@@ -8126,10 +8184,9 @@ class GimpleGen:
         # artifact / stdlib dylib, per ABI.md). Collected by the Phase-0 pre-pass.
         for _decl in getattr(self, '_link_import_decl_list', []):
             parts.append(_decl)
-        # extern decls for generic instantiations elaboration produced at call
-        # sites (their objects are recorded on the link line).
-        for _decl in getattr(self, '_elaborated_externs', []):
-            parts.append(_decl)
+        # NOTE: extern decls for elaborated instantiations (incl. struct methods,
+        # which reference monomorphized struct types) are emitted AFTER the struct
+        # typedef section below, so the types they reference are already defined.
 
         # For all modules, declare extern references to known module globals structs
         # Each module can reference globals from other modules via these externs
@@ -8238,6 +8295,12 @@ class GimpleGen:
                     emitted.add(struct_name)
                     self._emitted_structs.add(struct_name)  # track for dedup in Section 2
             parts.append('')
+
+        # extern decls for elaborated instantiations (generic functions + struct
+        # methods). Emitted here, after the struct typedefs above, so struct-method
+        # declarations like `Box_Int64_unbox (Box_Int64 *)` see the type.
+        for _decl in getattr(self, '_elaborated_externs', []):
+            parts.append(_decl)
 
 
         # Include compiled imported modules.

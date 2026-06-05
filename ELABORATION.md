@@ -95,8 +95,11 @@ every build; ours elaborates each unique thing once and shares it. This is the
    comptime assignments. Recursive comptime works (`fib(10)` → 55 at compile time).
 4. **Overload resolution** — pick the concrete `fn` among candidates by argument
    types.
-5. **Traits / conformance** and **generic structs** — bound checking, and
-   instantiating parametric types (`List[T]`), not just functions.
+5. **Generic structs** ✅ — `Struct[TypeArgs]` instantiates the *type*: the
+   struct + its methods are monomorphized into a CAS object; the client
+   materializes the concrete layout (typedef + `struct_field_types`), constructs
+   it, and calls its methods (`Box_Int64_unbox`) from the linked object.
+   `Box[Int64](42).unbox()` → 42. (Traits/conformance bound-checking still ahead.)
 
 ## Decisions
 
