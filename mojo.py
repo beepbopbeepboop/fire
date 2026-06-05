@@ -132,7 +132,7 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file, src):
+def jit_compile_and_execute(input_file: str, src: str):
     """JIT compile and execute Mojo source code for ARM64."""
     try:
         from jit.arm64 import ARM64JIT

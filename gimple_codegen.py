@@ -8089,7 +8089,7 @@ class GimpleGen:
         # (e.g. Parser_parse_module from mojo_compiler, Interpreter from myinterpreter)
         parts.append("MojoList * Parser_parse_module (Parser *);")
         parts.append("void Parser___init__ (Parser *, MojoList *);")
-        parts.append("void Interpreter___init__ (Interpreter *, int);")
+        parts.append("void Interpreter___init__ (Interpreter *, char *);")
         parts.append("int Interpreter_execute (Interpreter *, int);")
         parts.append('')
 
