@@ -52,10 +52,14 @@ ABI_VERSION = "1"
 
 # Codegen sources whose content defines the compiler's output. Hashing these
 # means "the compiler changed" ⇒ new keys ⇒ recompile, with zero manual version
-# bumping. Keep this list complete: anything that changes generated C belongs here.
+# bumping, and (unlike the git SHA) it catches *uncommitted* edits during dev.
+# Keep this list complete: anything that changes generated C / objects belongs
+# here. The version (below) is the safety net if something is missing.
 _COMPILER_SOURCES = [
     'gimple_codegen.py', 'mlir.py', 'module_loader.py',
     'generated_dispatch.py', 'mojo_compiler.py',
+    'elaborate.py', 'monomorphize.py', 'comptime.py',
+    'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).
@@ -94,6 +98,14 @@ def compiler_fingerprint() -> str:
                     h.update(f.read())
             except FileNotFoundError:
                 h.update(b'\0missing:' + name.encode())
+        # Fold in the compiler version as a coarse epoch + safety net: a new
+        # commit (or a dirty tree) bumps it, invalidating across versions even if
+        # a relevant file were missing from the list above.
+        try:
+            import version as _v
+            h.update(b'\0version:' + _v.version().encode())
+        except Exception:
+            pass
         _compiler_fp_cache = h.hexdigest()
     return _compiler_fp_cache
 

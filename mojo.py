@@ -267,6 +267,14 @@ def main():
         return
 
     # Check for help
+    if sys.argv[1] in ('-v', '--version', 'version'):
+        try:
+            from version import version
+            print(f"mojo {version()}")
+        except Exception:
+            print("mojo unknown")
+        return
+
     if sys.argv[1] in ('-h', '--help', 'help'):
         print("""Usage:
   mojo                             Interactive REPL (interpreter)
@@ -279,6 +287,7 @@ def main():
   mojo build -o <output> <file>    Compile to executable with specified output name
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
+  mojo -v, --version               Show the compiler version (git SHA / release)
   mojo -h, --help                  Show this help message
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):

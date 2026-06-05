@@ -62,6 +62,27 @@ def _toolchain_id() -> str:
     return cached
 
 
+def _compiler_id() -> str:
+    """Identity of the *codegen* itself — the content fingerprint of the compiler
+    sources plus the version. The JIT key previously folded in only gcc + runtime,
+    so a change to gimple_codegen.py etc. would not invalidate JIT caches; this
+    closes that gap (and shares one definition with the CAS). Memoized."""
+    cached = getattr(_compiler_id, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        import cas
+        cached = cas.compiler_fingerprint()      # codegen sources + version
+    except Exception:
+        try:
+            import version
+            cached = version.version()
+        except Exception:
+            cached = ""
+    _compiler_id._cached = cached
+    return cached
+
+
 class ARM64JIT:
     """JIT compiler for ARM64 architecture with SHA256-based caching."""
 
@@ -98,6 +119,7 @@ class ARM64JIT:
             f"opt={self.opt_flag}",
             f"debug={self.debug_flag or ''}",
             _toolchain_id(),
+            f"compiler={_compiler_id()}",   # codegen-source fingerprint + version
         ])
         source_hash = hashlib.sha256(key.encode()).hexdigest()
         cache_file = os.path.join(self.cache_dir, f"{source_hash}")
