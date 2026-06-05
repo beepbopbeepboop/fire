@@ -7571,8 +7571,13 @@ class GimpleGen:
 
         # For all modules, declare extern references to known module globals structs
         # Each module can reference globals from other modules via these externs
-        # For non-root modules, always declare root module globals since all code may reference them
+        # Determine which module is being compiled from either module_name or filename
         our_mod = self.module_name or "root"
+        if not self.module_name and self._current_filename:
+            # Infer module name from filename (e.g., "myinterpreter.py" → "myinterpreter")
+            import os
+            our_mod = os.path.splitext(os.path.basename(self._current_filename))[0]
+
         all_modules_to_declare = set()
 
         # If this is not the root module, always declare root's globals (it's special)
@@ -7592,6 +7597,30 @@ class GimpleGen:
             # Forward-declare the struct type AND the extern global instance
             parts.append(f'struct {struct_name};  /* extern module globals struct */')
             parts.append(f'extern struct {struct_name} {global_var};')
+
+        # Emit THIS module's globals struct typedef early (after extern decls for other modules)
+        # so it's available for use in this module's code
+        if our_mod in self._module_globals and self._module_globals[our_mod]:
+            globals_list = self._module_globals[our_mod]
+            safe_name = _safe_name(our_mod) if our_mod else "root"
+            typedef_name = f"_{safe_name}_toplev"
+            parts.append('')
+            parts.append(f"typedef struct {typedef_name} {{")
+            for gname, c_type, _ in globals_list:
+                parts.append(f"  {c_type} {gname};")
+            parts.append(f"}} {typedef_name};")
+            instance_name = f"_{safe_name}_globals"
+            parts.append(f"struct {typedef_name} {instance_name} = {{")
+            inits = self._module_global_inits.get(our_mod, {})
+            for gname, c_type, _ in globals_list:
+                init_val = inits.get(gname)
+                if not init_val or init_val == '0':
+                    if c_type.endswith(' *'):
+                        init_val = f'({c_type})0'
+                    else:
+                        init_val = '0'
+                parts.append(f"  .{gname} = {init_val},")
+            parts.append("};")
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
