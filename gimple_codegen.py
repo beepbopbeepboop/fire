@@ -7537,15 +7537,23 @@ class GimpleGen:
             'int64_t int_parse_module (int);',
         ])
 
-        # For imported modules, forward-declare module globals structs
-        # that may be referenced in code (struct typedefs will be emitted later at line 7800+)
-        if not self.emit_entry_points:
-            for mod_name in list(self._module_globals.keys()):
-                safe_mod = _safe_name(str(mod_name)) if mod_name else "root"
-                struct_name = f"_{safe_mod}_toplev"
-                # Forward-declare the struct type for extern access
-                # Full definition will come from the module's own struct emission
-                parts.append(f'struct {struct_name};  /* extern module globals struct */')
+        # For all modules, declare extern references to known module globals structs
+        # Each module can reference globals from other modules via these externs
+        # Always declare root module globals since all code may reference them
+        all_modules_to_declare = set(['root']) if not self.emit_entry_points else set()
+        all_modules_to_declare.update(self._module_globals.keys())
+
+        for mod_name in list(all_modules_to_declare):
+            # Skip declaring our own module as extern
+            our_mod = self.module_name or "root"
+            if mod_name == our_mod:
+                continue
+            safe_mod = _safe_name(str(mod_name)) if mod_name else "root"
+            struct_name = f"_{safe_mod}_toplev"
+            global_var = f"_{safe_mod}_globals"
+            # Forward-declare the struct type AND the extern global instance
+            parts.append(f'struct {struct_name};  /* extern module globals struct */')
+            parts.append(f'extern struct {struct_name} {global_var};')
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
