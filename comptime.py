@@ -52,7 +52,7 @@ def _signature(src: str, fn_name: str):
 
 def _build_dylib(src: str, fn_name: str, gcc: str) -> str:
     """Compile src to a CAS-cached dylib exporting fn_name. Returns its path."""
-    key = cas.instantiation_key(src, {'__comptime__': fn_name}, None, gcc, _OBJ_FLAGS)
+    key = cas.comptime_key(src, fn_name, gcc, _OBJ_FLAGS)
     ext = '.dylib'
 
     def build():

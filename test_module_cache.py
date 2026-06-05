@@ -208,6 +208,9 @@ def test_stage6_comptime(wd):
 
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
+    # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
+    # we never touch the user's real ~/.gmojo.
+    cas.CAS_DIR = os.path.join(wd, 'gmojo')
     try:
         test_stage1_extern_boundary(wd)
         test_stage2_3_dylib_and_cas(wd)

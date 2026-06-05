@@ -85,6 +85,28 @@ C++'s waste.
    `dlopen` a Mojo dylib and fully interoperate: call functions, read layouts,
    even request new instantiations. Reflection is the one unified interface.
 
+## Where the cache lives
+
+The store's home is **`~/.gmojo`** (override with `$GMOJO_HOME`) — a shared,
+per-user, content-addressed cache, so "instantiate once, ever" holds across every
+project on the machine. It is organized by *shape* so different artifact kinds
+can never be type-mismatched (even on the ~2⁻⁸⁰ hash collision):
+
+```
+~/.gmojo/
+  jit/                 existing JIT cache — standalone executables (a distinct shape)
+  cas/                 this content-addressed store (sibling; different shape ⇒ separate)
+    module/<hash>.o        compiled library modules
+    inst/<hash>.o          generic instantiations
+    comptime/<hash>.dylib  callable comptime artifacts
+```
+
+Rule of thumb ("either cas or inside the other if same shaped"): same-shaped
+artifacts share a directory; different shapes get separate namespaces. The JIT
+cache and the CAS are the same *concept* but different *shape*, so the CAS is a
+sibling of `jit/`, not merged into it. Keys also carry a per-kind hash domain, so
+the separation is belt-and-suspenders.
+
 ## Concurrent build-out (256-core / 3 TB-class machines, full load)
 
 Content-addressing is what makes this sane: artifact name = content hash, so the

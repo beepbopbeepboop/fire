@@ -28,7 +28,24 @@ import platform
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CAS_DIR = os.path.join(HERE, 'build', 'cas')
+
+# The cache's final resting place: a shared, per-user store under ~/.gmojo
+# (override the home with $GMOJO_HOME). Content-addressed, so it is safely shared
+# across every project/client on the machine — instantiate once, ever.
+#
+# ~/.gmojo already hosts the JIT cache (~/.gmojo/jit), which is the *same concept*
+# (content-keyed compiled artifacts) but a *different shape* (standalone
+# executables, not relocatable objects/dylibs). Per "either cas or inside the
+# other if same shaped": different shape ⇒ the CAS gets its own sibling namespace
+# ~/.gmojo/cas, so a JIT executable and a CAS object can never be type-mismatched.
+#
+# Within the CAS, artifacts are further domain-separated by KIND
+# (cas/module, cas/inst, cas/comptime). Keys carry a per-kind hash domain too, so
+# a cross-kind type mismatch needs a true hash collision AND the kind subdirectory
+# rules it out regardless. Same-shaped artifacts share a directory; different
+# shapes never collide. Override CAS_DIR (e.g. in tests) to isolate.
+GMOJO_HOME = os.environ.get('GMOJO_HOME') or os.path.expanduser('~/.gmojo')
+CAS_DIR = os.path.join(GMOJO_HOME, 'cas')
 
 # Bump when ABI.md (the boundary contract) changes incompatibly.
 ABI_VERSION = "1"
@@ -99,10 +116,14 @@ def toolchain_fingerprint(gcc: str, flags: tuple = ()) -> str:
 
 
 def module_key(source: str, imported_sigs, gcc: str, flags: tuple = ()) -> str:
-    """The content key for compiling one module to an object artifact."""
+    """The content key for compiling one module to an object artifact.
+
+    The returned key is `module/<hash>` — the `module/` segment domain-separates
+    this artifact kind on disk so it can never be confused with an instantiation
+    or comptime artifact (no type mismatch), and the hash is also kind-prefixed."""
     sigs = '\n'.join(sorted(imported_sigs or ()))
-    return _hash(
-        'mojo-cas-v1',
+    return 'module/' + _hash(
+        'mojo-cas-v1-module',
         ABI_VERSION,
         compiler_fingerprint(),
         toolchain_fingerprint(gcc, flags),
@@ -111,23 +132,30 @@ def module_key(source: str, imported_sigs, gcc: str, flags: tuple = ()) -> str:
     )
 
 
-def instantiation_key(template_id: str, type_args, comptime_args,
-                      gcc: str, flags: tuple = ()) -> str:
-    """Content key for a generic instantiation.  template_id is the template's
-    canonical identity (its source); type_args / comptime_args are the concrete
-    arguments.  Same key ⇒ same monomorphized output, so an instantiation is
-    compiled once, ever, and shared across clients (MODULE_CACHE_DESIGN.md)."""
+def _inst_hash(domain: str, template_id: str, type_args, comptime_args,
+               gcc: str, flags: tuple) -> str:
     ta = '\x1f'.join(f"{k}={v}" for k, v in sorted((type_args or {}).items()))
     ca = '\x1f'.join(f"{k}={v}" for k, v in sorted((comptime_args or {}).items()))
-    return _hash(
-        'mojo-inst-v1',
-        ABI_VERSION,
-        compiler_fingerprint(),
-        toolchain_fingerprint(gcc, flags),
-        template_id,
-        ta,
-        ca,
-    )
+    return _hash(domain, ABI_VERSION, compiler_fingerprint(),
+                 toolchain_fingerprint(gcc, flags), template_id, ta, ca)
+
+
+def instantiation_key(template_id: str, type_args, comptime_args,
+                      gcc: str, flags: tuple = ()) -> str:
+    """Content key (`inst/<hash>`) for a generic instantiation. template_id is the
+    template's canonical identity (its source); type_args / comptime_args are the
+    concrete arguments. Same key ⇒ same monomorphized output, so an instantiation
+    is compiled once, ever, and shared across clients (MODULE_CACHE_DESIGN.md)."""
+    return 'inst/' + _inst_hash('mojo-inst-v1', template_id, type_args,
+                                comptime_args, gcc, flags)
+
+
+def comptime_key(fn_src: str, fn_name: str, gcc: str, flags: tuple = ()) -> str:
+    """Content key (`comptime/<hash>`) for a comptime function compiled to a
+    callable artifact — separated from runtime modules/instantiations so the two
+    shapes (a callable dylib vs a linkable object) can never be type-mismatched."""
+    return 'comptime/' + _inst_hash('mojo-comptime-v1', fn_src,
+                                    {'fn': fn_name}, None, gcc, flags)
 
 
 def path_for(key: str, ext: str = '.o') -> str:
@@ -143,8 +171,8 @@ def lookup(key: str, ext: str = '.o'):
 def publish(key: str, ext: str, data: bytes) -> str:
     """Atomically install bytes as the artifact for `key`. Hash-named files are
     immutable, so a racing identical write is harmless (`os.replace` is atomic)."""
-    os.makedirs(CAS_DIR, exist_ok=True)
     final = path_for(key, ext)
+    os.makedirs(os.path.dirname(final), exist_ok=True)   # per-kind subdir
     tmp = f"{final}.tmp.{os.getpid()}.{os.urandom(4).hex()}"
     with open(tmp, 'wb') as f:
         f.write(data)
