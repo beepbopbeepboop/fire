@@ -4,15 +4,19 @@ This document records features that are fully implemented and working.
 See `PLAN.md` for future and deferred work, and `STDLIB.md` for the
 current stdlib transpilation status, what fails, and remaining gaps.
 
-**Current Status** (as of 2026-06-04):
+**Current Status** (as of 2026-06-05):
 - **Stdlib transpilation**: 642/643 `.mojo` files across the whole upstream
   stdlib tree (`benchmarks`, `std`, `test`, `tools`) transpile through
   `mojo_compiler.py`. The single failure is nested t-strings — see `STDLIB.md`.
-- **GIMPLE unit suite** (`make check-gimple`): 142/142 passing.
+- **GIMPLE unit suite** (`make check-gimple`): 153/153 passing.
 - **Execution suite** (`make check-runner`): 8/8 passing.
-- `make check` runs both suites plus the bootstrap stages. The self-hosted
-  `mojo` binary still segfaults at stage 2 — a known, pre-existing codegen bug,
-  unrelated to the front end.
+- **Module-cache suite** (`make check-modcache`): 15/15 passing — stages 1-6 of
+  `MODULE_CACHE_DESIGN.md`, exercised end-to-end (link, dylib, CAS, reflection,
+  monomorphization, comptime).
+- `make check` = gimple + runner + module-cache (all green). The self-hosting
+  bootstrap (`make bootstrap`: stage1-3 + `validate-all`) is a **separate**,
+  aspirational target — stage 2 has a known pre-existing codegen segfault — and
+  is intentionally not gated into `check` so `check` stays a meaningful signal.
 
 ---
 

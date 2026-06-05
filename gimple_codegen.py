@@ -8629,19 +8629,30 @@ def compile_to_c(mojo_src: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "",
-                      link_imports: bool = False) -> str:
+def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
     """Parse Mojo source and return a C string with __GIMPLE annotations.
 
     If do_imports=True, recursively compile imported modules and inline their code.
-    If link_imports=True, emit `extern` declarations for imported symbols instead
-      of inlining (bodies come from a linked artifact / stdlib dylib; see
-      MODULE_CACHE_DESIGN.md and ABI.md). Implies do_imports=False.
-    If neither, imports are recorded as metadata only.
+    If do_imports=False, imports are recorded as metadata only.
     If filename is provided, emit #line directives with the filename.
+
+    (Kept at this exact 3-arg signature: the self-hosting bootstrap emits a
+    matching forward declaration for it. Link mode is a separate entry point —
+    compile_to_gimple_linked — to avoid changing this ABI.)
     """
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
-    gen = GimpleGen(do_imports=do_imports and not link_imports, link_imports=link_imports)
+    gen = GimpleGen(do_imports=do_imports)
+    gen._current_filename = filename
+    return gen.gen_module(stmts)
+
+
+def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:
+    """Like compile_to_gimple, but in *link mode*: imported symbols become
+    `extern` declarations (bodies come from a linked artifact / stdlib dylib;
+    see MODULE_CACHE_DESIGN.md and ABI.md) rather than being inlined."""
+    tokens = tokenize(mojo_src)
+    stmts  = Parser(tokens).parse_module()
+    gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
     return gen.gen_module(stmts)
