@@ -7537,14 +7537,15 @@ class GimpleGen:
             'int64_t int_parse_module (int);',
         ])
 
-        # For imported modules, forward-declare the root module's globals struct
-        # This allows imported modules to access globals from the root module
-        # (Must be done here in preamble, before module globals scanning below)
+        # For imported modules, forward-declare module globals structs
+        # that may be referenced in code (struct typedefs will be emitted later at line 7800+)
         if not self.emit_entry_points:
-            # Imported modules always need access to root module's globals
-            # Forward-declare the struct type first, then the extern variable
-            parts.append('struct _root_toplev;')  # incomplete type forward decl
-            parts.append('extern struct _root_toplev _root_globals;')
+            for mod_name in self._module_globals:
+                safe_mod = _safe_name(mod_name) if mod_name else "root"
+                struct_name = f"_{safe_mod}_toplev"
+                # Forward-declare the struct type for extern access
+                # Full definition will come from the module's own struct emission
+                parts.append(f'struct {struct_name};  /* extern module globals struct */')
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
@@ -7596,31 +7597,6 @@ class GimpleGen:
                     self._emitted_structs.add(struct_name)  # track for dedup in Section 2
             parts.append('')
 
-        # For root module ONLY, do an early scan to emit the globals struct typedef
-        # so imported modules can reference it (imported modules should NOT emit this)
-        if self.emit_entry_points and (self.module_name == "" or self.module_name == "root"):
-            # Early scan for root module's global assignments
-            _root_globals_early = []
-            for stmt in stmts:  # Only scan root module statements, not imports yet
-                if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
-                    gname = stmt.target.name
-                    gtype = 'int64_t'  # default
-                    if isinstance(stmt.value, DictExpr):
-                        gtype = 'MojoDict *'
-                    elif isinstance(stmt.value, ListExpr):
-                        gtype = 'MojoList *'
-                    elif isinstance(stmt.value, SetExpr):
-                        gtype = 'MojoSet *'
-                    elif isinstance(stmt.value, StringLiteral):
-                        gtype = 'char *'
-                    _root_globals_early.append((gname, gtype))
-            # Emit root globals struct typedef early if there are any globals
-            if _root_globals_early:
-                parts.append('typedef struct _root_toplev {')
-                for gname, gtype in _root_globals_early:
-                    parts.append(f"  {gtype} {gname};")
-                parts.append('} _root_toplev;')
-                parts.append('')
 
         # Include compiled imported modules
         if imported_code:

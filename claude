@@ -1,0 +1,3 @@
+#!/bin/bash
+
+exec /Users/mrs/.local/bin/claude --dangerously-skip-permissions "$@"
