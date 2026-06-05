@@ -58,6 +58,29 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
     return mangled, src
 
 
+def compile_fn(fn_src: str, gcc: str = None) -> tuple:
+    """Compile a concrete (non-generic) single-`fn` source to a CAS-cached object,
+    keyed by its content. Used for overload instances (slice 4). Returns
+    (object_path, hit)."""
+    gcc = gcc or find_gcc()
+    m = re.search(r'\bfn\s+(\w+)', fn_src)
+    name = m.group(1) if m else 'fn'
+    key = cas.instantiation_key(fn_src, {'__fn__': name}, None, gcc, _OBJ_FLAGS)
+
+    def build():
+        gen = GimpleGen(emit_entry_points=False, module_name=name)
+        c = gen.gen_module(Parser(tokenize(fn_src)).parse_module())
+        wd = tempfile.mkdtemp(prefix='mojo_ovl_')
+        cf, of = os.path.join(wd, name + '.c'), os.path.join(wd, name + '.o')
+        with open(cf, 'w') as f:
+            f.write(c)
+        subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', of, cf], check=True)
+        with open(of, 'rb') as f:
+            return f.read()
+
+    return cas.get_or_build(key, '.o', build)
+
+
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.

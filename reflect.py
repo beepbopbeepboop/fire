@@ -44,8 +44,15 @@ def collect_exports_src(src: str) -> list:
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
     from the source text.)"""
     generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
+    # Overloaded names (same name, multiple non-generic defs) aren't a single
+    # concrete symbol either — they're selected + instantiated per call site.
+    counts = {}
+    for n in re.findall(r'\bfn\s+(\w+)\s*\(', src):
+        counts[n] = counts.get(n, 0) + 1
+    overloaded = {n for n, c in counts.items() if c > 1}
+    skip = generic | overloaded
     return [e for e in collect_exports(Parser(tokenize(src)).parse_module())
-            if e['name'] not in generic]
+            if e['name'] not in skip]
 
 
 def _cstr(s: str) -> str:

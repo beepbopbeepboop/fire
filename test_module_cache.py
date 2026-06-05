@@ -324,6 +324,31 @@ def test_elaboration_generic_struct(wd):
         os.remove(bl)
 
 
+# ── Elaboration slice 4: overload resolution ─────────────────────────────
+def test_elaboration_overload(wd):
+    import elaborate
+    from gimple_codegen import compile_linked
+    mod = ("fn pick(x: Int64) -> Int64:\n    return x + 100\n\n"
+           "fn pick(x: Int32) -> Int64:\n    return 7\n")
+    check("slice4: all overloads extracted", len(elaborate.extract_overloads(mod, 'pick')) == 2)
+    el = elaborate.Elaborator()
+    i64 = el.elaborate_overload_call(mod, 'pick', ['int64_t'])
+    i32 = el.elaborate_overload_call(mod, 'pick', ['int32_t'])
+    check("slice4: overload selected by argument type",
+          i64['symbol'] == 'pick__Int64' and i32['symbol'] == 'pick__Int32'
+          and i64['object'] != i32['object'])
+    ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
+    open(ol, 'w').write(mod)
+    try:
+        code, _d, objs = compile_linked(
+            "from el_ovlib import pick\n"
+            "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
+        check("slice4: client calls the signature-mangled overload",
+              'pick__Int64' in code and len(objs) == 1)
+    finally:
+        os.remove(ol)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -339,6 +364,7 @@ def main():
         test_elaboration_generic_call(wd)
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
+        test_elaboration_overload(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

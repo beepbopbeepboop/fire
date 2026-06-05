@@ -44,6 +44,35 @@ def extract_fn_source(module_src: str, fn_name: str):
     return ''.join(lines[start:end])
 
 
+def extract_overloads(module_src: str, fn_name: str):
+    """All non-generic overloads of fn_name: list of (src, [param_mojo_types],
+    ret_mojo_type), one per definition, by indentation."""
+    lines = module_src.splitlines(keepends=True)
+    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*\(')
+    out = []
+    i = 0
+    while i < len(lines):
+        if pat.match(lines[i]):
+            base = len(lines[i]) - len(lines[i].lstrip())
+            j = i + 1
+            while j < len(lines) and not (
+                    lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip())) <= base):
+                j += 1
+            src = ''.join(lines[i:j])
+            fn = None
+            for s in Parser(tokenize(src)).parse_module():
+                if isinstance(s, FunctionDef):
+                    fn = s
+                    break
+            if fn is not None:
+                ptypes = [t for n, t in fn.params if n != 'self']
+                out.append((src, ptypes, fn.return_type))
+            i = j
+        else:
+            i += 1
+    return out
+
+
 def type_param_names(template_src: str):
     """The generic's type-parameter names — for `fn` or `struct`, e.g.
     `struct Box[T, U]` -> ['T', 'U']."""
@@ -180,6 +209,30 @@ class Elaborator:
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods = _struct_layout(concrete, mangled)
         return {'name': mangled, 'fields': fields, 'methods': methods, 'object': obj}
+
+    def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes):
+        """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose
+        parameter types match the argument C types, mangle it by signature, and
+        compile that one concrete function (CAS-cached). Returns
+        {symbol, object, ret, params} or None."""
+        overloads = extract_overloads(module_src, fn_name)
+        if not overloads:
+            return None
+        arg_mojo = [c_to_mojo(ct) for ct in arg_ctypes]
+        chosen = None
+        for src, ptypes, ret in overloads:
+            if ptypes == arg_mojo:
+                chosen = (src, ptypes, ret)
+                break
+        if chosen is None:
+            chosen = overloads[0]   # best effort: first candidate
+        src, ptypes, ret = chosen
+        mangled = fn_name + '__' + ('_'.join(ptypes) if ptypes else 'void')
+        renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
+        obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
+        return {'symbol': mangled, 'object': obj,
+                'ret': _mojo_type(ret) if ret else 'void',
+                'params': [_mojo_type(p) for p in ptypes]}
 
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
         """Like elaborate_generic_call but infers the type args from the call

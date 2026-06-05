@@ -1905,6 +1905,8 @@ class GimpleGen:
         self._imported_fn_sources: dict = {}
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
+        # Imported overloaded function name -> module source path (slice 4).
+        self._imported_overloads: dict = {}
         # typedefs for elaborated (monomorphized) structs, emitted in the preamble.
         self._elaborated_typedefs: list = []
         # extern decls for symbols elaboration produced at call sites (generic
@@ -2110,6 +2112,8 @@ class GimpleGen:
                                     self._imported_generic_structs.setdefault(sym, source)
                                 elif re.search(rf'\bfn\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generics.setdefault(sym, source)
+                                elif len(re.findall(rf'\bfn\s+{re.escape(name)}\s*\(', msrc)) > 1:
+                                    self._imported_overloads.setdefault(sym, source)
                             continue
                         if sym in seen:
                             continue
@@ -4482,6 +4486,26 @@ class GimpleGen:
 
         return self._lower_struct_constructor(name, node.args, getattr(node, 'kwargs', None))
 
+    def _elaborate_overload_call(self, node: CallExpr):
+        """Resolve and elaborate an overloaded imported call (slice 4): lower the
+        args, pick the matching overload by their C types, and emit the call to the
+        signature-mangled concrete symbol."""
+        g = node.func.name
+        source = self._imported_overloads.get(g)
+        if not source:
+            return None
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        try:
+            module_src = open(source).read()
+            import elaborate
+            info = elaborate.Elaborator().elaborate_overload_call(
+                module_src, g, [ct for ct, _ in arg_pairs])
+        except Exception:
+            info = None
+        if not info:
+            return None
+        return self._emit_generic_instantiation(info, arg_pairs)
+
     def _emit_generic_instantiation(self, info, arg_pairs):
         """Record an elaborated instantiation (object on the link line, extern in
         the preamble, signature for calls) and emit the concrete call."""
@@ -4714,6 +4738,12 @@ class GimpleGen:
         if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
                 and node.func.obj.name in self._imported_generic_structs:
             res = self._elaborate_generic_struct_call(node)
+            if res is not None:
+                return res
+        # Overloaded imported call `name(args)` → resolve the overload by argument
+        # types and elaborate the selected one (slice 4).
+        if isinstance(node.func, IdentExpr) and node.func.name in self._imported_overloads:
+            res = self._elaborate_overload_call(node)
             if res is not None:
                 return res
         # Generic call site on an imported generic → elaborate it to a concrete
@@ -7325,6 +7355,19 @@ class GimpleGen:
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
+        # Overloaded top-level functions (same name, multiple defs) can't be
+        # emitted as distinct C symbols. Drop them here — the elaborator selects
+        # and instantiates the right overload per call site (slice 4). One filter
+        # at the top keeps every downstream loop collision-free. No-op otherwise.
+        _fn_counts = {}
+        for _s in stmts:
+            if isinstance(_s, FunctionDef):
+                _fn_counts[_s.name] = _fn_counts.get(_s.name, 0) + 1
+        _overloaded = {n for n, c in _fn_counts.items() if c > 1}
+        if _overloaded:
+            stmts = [s for s in stmts
+                     if not (isinstance(s, FunctionDef) and s.name in _overloaded)]
+
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
         for _s in stmts:

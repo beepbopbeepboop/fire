@@ -93,8 +93,11 @@ every build; ours elaborates each unique thing once and shares it. This is the
    constant args is run at compile time via `comptime.evaluate` (cached machine
    code), wired into `_eval_const_int` so it drives `comptime if`/`for` and
    comptime assignments. Recursive comptime works (`fib(10)` → 55 at compile time).
-4. **Overload resolution** — pick the concrete `fn` among candidates by argument
-   types.
+4. **Overload resolution** ✅ — same-named `fn`s are dropped from the module's
+   concrete compilation (they can't be one C symbol); a call picks the overload
+   whose parameter types match the argument types, mangles it by signature
+   (`pick__Int64`), and compiles that one (CAS-cached). `pick(Int64)` vs
+   `pick(Int32)` select distinct instances.
 5. **Generic structs** ✅ — `Struct[TypeArgs]` instantiates the *type*: the
    struct + its methods are monomorphized into a CAS object; the client
    materializes the concrete layout (typedef + `struct_field_types`), constructs
