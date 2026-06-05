@@ -18,6 +18,33 @@ current stdlib transpilation status, what fails, and remaining gaps.
 
 ## Recent Work (2026-06)
 
+- **Module cache, stages 1–2** (see `MODULE_CACHE_DESIGN.md`, `ABI.md`) — moving
+  the import boundary from inline-transpile toward a cached-dylib/CAS model.
+  - **MLIR floor** (`mlir.py`): the stdlib's scalar newtypes (`Int` = a newtype
+    over `__mlir_type.index` = `int64_t`) and their `__mlir_op`/`__mlir_attr`/
+    `__mlir_type` operations lower to plain C. Table-driven; ~130 stdlib opcodes
+    classified (≈59 lowered, the rest deferred-with-reason: GPU/coro/atomics/…).
+    Includes `external_call` → direct C syscalls (e.g. `write`), `index`/`pop`/
+    `arith` arithmetic+compares, casts, memory ops (`pop.load/store/offset`),
+    struct GEP (`kgen.struct.extract/gep`, `pop.array.get`), and a `Span`
+    `{_data,_len}` model — enough that the real `FileDescriptor.write_bytes`
+    lowers natively to `write(fd, Span_unsafe_ptr(b), b->_len)`.
+  - **Stage 1 — extern-decl import boundary** (`link_imports` in
+    `gimple_codegen.py`): imports emit `extern` decls (signatures from
+    `module_loader`, contract in `ABI.md`) instead of inlining bodies; the
+    transitive-closure compile remains the artifact builder. Off by default.
+  - **Stage 2 — stdlib dylib** (`build_stdlib_dylib.py`, `make stdlib-dylib`):
+    bundle library modules + runtime into `build/libmojostdlib.dylib`; a client
+    compiled in link mode produces a ~1.5 KB object and links `-lmojostdlib`,
+    with bodies demand-paged from the dylib. Verified end-to-end (link + run).
+  - **Stage 3 (tier 1) — content-addressed store** (`cas.py`): module objects are
+    keyed by a content hash of *all* compile inputs (ABI version + compiler-source
+    fingerprint + toolchain/target + module source + imported signatures), so a
+    hit is provably the same output. Dup-tolerant: temp-write + atomic
+    `os.replace` publish, hash-named immutable artifacts, no coordination.
+    Integrated into the dylib build: warm = load (no codegen/gcc), cold = compile,
+    source/compiler/ABI change = miss. Tier 2 (sharded single-flight + TTL leases,
+    the shm `cas.c`) is deferred-by-design until concurrent load justifies it.
 - **`make check` repair** — the generated `main()` wrapper unconditionally
   called `_toplevel()`, but that function is only emitted when a module has
   top-level statements. Programs with a `main` and no top-level code (every
@@ -347,15 +374,37 @@ Parser support for Mojo special syntax forms:
 - Parsed as statement-level construct with type name and method block
 - Emitted as Python code within class body
 
-### MLIR Operations
+### MLIR Operations — lowered to C/GIMPLE via `mlir.py`
 
-- `__mlir_region name(...): body` — Multi-Level Intermediate Representation region syntax
-- `__mlir_op("operation_name") result_type = ...` — Inline MLIR operation
-- `__mlir_attr("attribute")` — MLIR attribute specification
-- All `__mlir_*` prefixed statements recognized as special syntax
-- Parser tracks MLIR constructs for later lowering or annotation
+The stdlib's builtin scalars are newtypes over MLIR builtin types
+(`struct Int: var _mlir_value: __mlir_type.index`), and their methods are thin
+wrappers over MLIR ops (`__mlir_op.\`index.add\``). We strip-mine those semantics
+and replay them as plain C primitives so the *real* library compiles. The whole
+MLIR surface used across the stdlib (~130 distinct opcodes) is classified, in one
+pass, in **`mlir.py`** — table-driven, dialects-as-data.
 
-Source: `mojo-manual-mlir.md` (inferred from stdlib usage)
+- **`__mlir_type.<t>`** → C type via `mlir.type_to_c` (`index`/`iN`/`uiN`/`fN` →
+  C scalars; `!kgen.string` → `char *`; `!llvm.ptr*`/`!kgen.pointer<…>` → C
+  pointers). Hooked in `_mojo_type`.
+- **`__mlir_attr.\`…\``** → `mlir.parse_attr`: typed int (`0 : index` → `0`),
+  scalar-simd constant (`#kgen.simd<7>` → `7`), or comparison predicate
+  (`#index<cmp_predicate slt>` / `#kgen<cmp_pred ne>`). Constants lower in
+  `_lower_MemberExpr`; predicates are read at the op call site.
+- **`__mlir_op.\`dialect.op\`[attrs](args)`** → `mlir.lower_op` /
+  `_maybe_lower_mlir_op`. Lowered now: `index`/`pop`/`arith` arithmetic,
+  min/max, unary math, `fma`/`select`, all compares (predicate from `[…]` attrs),
+  the cast/bitcast family, ownership/ref no-ops, and the memory/lvalue ops
+  (`pop.load` → `*p`, `pop.store` → `*p = v`, `pop.offset`/`pop.array.gep` →
+  `_mojo_at_` helper). The `[name=value]` op params survive parsing via
+  `SubscriptExpr.attrs`.
+- **Deferred (explicit, with a reason via `mlir.deferral_reason`)**: GPU
+  (`nvvm.*`/`rocdl.*` — see `METAL.md`), coroutines (`co.*`), atomics, true
+  vector SIMD, allocation/symbols, and compiler-internal `kgen`/`variant`/struct
+  GEP. The codegen emits an honest `/* mlir …: deferred: <reason> */` stub.
+- **Parser**: a bare `__mlir_op` statement is a real side-effecting op (e.g.
+  `pop.store`) and parses as an expression statement so the backend lowers it.
+  `__mlir_region` (region decl) and `__mlir_attr`/`__mlir_type` bare statements
+  remain opaque no-ops.
 
 ---
 

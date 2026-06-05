@@ -1399,6 +1399,112 @@ def mat_sum(n: Int) -> Int:
     return s
 """)
 
+    # ── external_call: the primitive the stdlib bottoms out on ────────────
+
+    # 143. external_call["name", Ret](args) → direct C call (e.g. write syscall)
+    test("external_call_write", """\
+def foo():
+    var msg: String = "hi\\n"
+    var n = external_call["write", Int64](1, msg, 3)
+""")
+
+    # 144. external_call with a void (NoneType) return type emits a bare call
+    test("external_call_void", """\
+def foo(p: Int):
+    external_call["mojo_sink_value", NoneType](p)
+""")
+
+    # ── mlir.py: strip-mined MLIR primitives the stdlib's scalars sit on ──
+
+    # 145. __mlir_op.`index.add` (and friends) → native C arithmetic
+    test("mlir_index_add", """\
+def add_idx(a: Int, b: Int) -> Int:
+    return __mlir_op.`index.add`(a, b)
+""")
+
+    # 146. __mlir_attr.`N : index` integer attribute → constant
+    test("mlir_attr_int", """\
+def zero() -> Int:
+    return __mlir_attr.`0 : index`
+""")
+
+    # 147. __mlir_type.index field → int64_t; pop.cast_to_builtin → cast
+    test("mlir_type_and_cast", """\
+def cast_it(a: Int) -> Int:
+    return __mlir_op.`pop.cast_to_builtin`(a)
+""")
+
+    # 148. __mlir_op.`index.cmp`[pred=...] → comparison (predicate from op attrs)
+    test("mlir_index_cmp", """\
+def lt(a: Int, b: Int) -> Bool:
+    return __mlir_op.`index.cmp`[pred=__mlir_attr.`#index<cmp_predicate slt>`](a, b)
+""")
+
+    # 149. min/max (no C operator) → ternary; unary neg; fma 3-arg
+    test("mlir_minmax_unary_fma", """\
+def mn(a: Int, b: Int) -> Int:
+    return __mlir_op.`index.mins`(a, b)
+
+def neg(a: Int) -> Int:
+    return __mlir_op.`pop.neg`(a)
+
+def fma3(a: Int, b: Int, c: Int) -> Int:
+    return __mlir_op.`pop.fma`(a, b, c)
+""")
+
+    # 150. pop.cmp predicate via kgen spelling; ownership marker is a no-op
+    test("mlir_popcmp_and_noop", """\
+def ne(a: Int, b: Int) -> Bool:
+    return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen<cmp_pred ne>`](a, b)
+
+def keep(a: Int) -> Int:
+    return __mlir_op.`lit.ownership.mark_initialized`(a)
+""")
+
+    # 151. memory/lvalue ops: pop.offset → _mojo_at_ helper, pop.load → deref,
+    #      pop.store (bare statement) → *addr = val
+    test("mlir_mem_load_store_offset", """\
+def load_at(p: UnsafePointer[Int64], i: Int) -> Int64:
+    var addr = __mlir_op.`pop.offset`(p, i)
+    return __mlir_op.`pop.load`(addr)
+
+def store_at(p: UnsafePointer[Int64], i: Int, v: Int64):
+    var addr = __mlir_op.`pop.offset`(p, i)
+    __mlir_op.`pop.store`(v, addr)
+""")
+
+    # 152. struct GEP: kgen.struct.extract → v->fieldN; kgen.struct.gep → &v->fieldN;
+    #      pop.array.get → element via _mojo_at_ helper (index from index= op attr)
+    test("mlir_struct_gep", """\
+struct Pair:
+    var first: Int64
+    var second: Int64
+
+def get_second(p: Pair) -> Int64:
+    return __mlir_op.`kgen.struct.extract`[index=__mlir_attr.`1:index`](p)
+
+def addr_first(p: Pair) -> UnsafePointer[Int64]:
+    return __mlir_op.`kgen.struct.gep`[index=__mlir_attr.`0:index`](p)
+
+def elem(a: UnsafePointer[Int64]) -> Int64:
+    return __mlir_op.`pop.array.get`[index=__mlir_attr.`2:index`](a)
+""")
+
+    # 153. print's bottom layer: a Span fat-pointer {_data,_len} written to a fd
+    #      via external_call["write"] — the chain the real FileDescriptor.write_bytes
+    #      lowers to (Span field reads + write syscall, no dynamic dispatch).
+    test("mlir_write_bytes_bottom", """\
+struct Span:
+    var _data: UnsafePointer[Int8]
+    var _len: Int
+
+    def unsafe_ptr(self) -> UnsafePointer[Int8]:
+        return self._data
+
+def write_bytes(s: Span) -> Int:
+    return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

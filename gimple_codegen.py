@@ -21,6 +21,7 @@ from mojo_compiler import (
     tokenize, Parser,
 )
 from module_loader import load_module, get_symbol_type
+import mlir
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
     _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
@@ -1470,6 +1471,11 @@ def _mojo_type(ann: str | type | None) -> str:
         return 'int64_t'  # Default to 64-bit signed integer
     if isinstance(ann, type):
         ann = ann.__name__
+    # MLIR builtin types underlying the stdlib's scalar newtypes: __mlir_type.index, etc.
+    if isinstance(ann, str) and ann.startswith('__mlir_type.'):
+        c = mlir.type_to_c(ann[len('__mlir_type.'):])
+        if c is not None:
+            return c
     # Handle Union types: X | Y | ... → resolve to first non-None type
     if ' | ' in ann:
         parts = [p.strip() for p in ann.split(' | ')]
@@ -1490,6 +1496,10 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'MojoDict *'
         if base in ('Set', 'set'):
             return 'MojoSet *'
+        # Span / StringSlice are fat pointers {_data, _len}; model as a struct ptr
+        # so .unsafe_ptr()/.__len__()/len() lower to field reads (see _seed_span).
+        if base in ('Span', 'StringSlice'):
+            return 'Span *'
         if base == 'Optional':
             return _mojo_type(inner)  # simplified: treat as the inner type
         # Unknown parameterized type — fall through to plain lookup
@@ -1791,7 +1801,7 @@ class GimpleGen:
     }
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
-                 emit_entry_points: bool = True, module_name: str = ""):
+                 emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False):
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
@@ -1829,6 +1839,15 @@ class GimpleGen:
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
         self._current_filename: str = ""  # filename for #line directives
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
+        # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
+        # Shared across imported modules so the root preamble can emit one extern proto each.
+        self._external_protos: dict[str, tuple[str, list[str]]] = {}
+        # Link mode (MODULE_CACHE_DESIGN.md stage 1): emit `extern` decls for
+        # imported symbols instead of inlining their bodies; the bodies come from a
+        # separately-built artifact (object / stdlib dylib). Off by default so the
+        # existing inline `do_imports` path and all suites are unaffected.
+        self.link_imports: bool = link_imports
+        self._link_import_decl_list: list = []
         self._reset_func()
 
     def _reset_func(self):
@@ -1888,6 +1907,18 @@ class GimpleGen:
                 f"../{module_name}{ext}",
             ]
 
+        # Cross the import/module boundary into the real stdlib: resolve std.* modules
+        # to their .mojo source under STDLIB_PATH so we walk into (and compile) the
+        # actual library implementation rather than relying on a runtime/*.c stub.
+        if module_name.startswith('std.') or module_name == 'std':
+            try:
+                from module_loader import ModuleLoader
+                stdlib_file = ModuleLoader().resolve_module_path(module_name)
+                if stdlib_file and os.path.exists(stdlib_file):
+                    mojo_paths.append(stdlib_file)
+            except Exception:
+                pass
+
         for path in mojo_paths:
             if os.path.exists(path):
                 modules_before = set(self._compiled_modules)
@@ -1914,6 +1945,7 @@ class GimpleGen:
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
                     temp_gen._emitted_ptr_helpers = self._emitted_ptr_helpers
+                    temp_gen._external_protos = self._external_protos  # share: bubble extern protos up to root preamble
                     temp_gen._global_inline_defs = self._global_inline_defs
                     temp_gen._emitted_allocs = self._emitted_allocs
                     temp_gen._module_stmts = self._module_stmts  # share: track all transitive stmts
@@ -1940,6 +1972,57 @@ class GimpleGen:
 
         # Module not found (e.g. stdlib module like sys, os)
         return (None, [])
+
+    def _register_link_imports(self, stmts) -> list:
+        """Link mode (MODULE_CACHE_DESIGN.md stage 1): for each imported symbol,
+        register its return/param C types (so call sites lower correctly) and
+        return the `extern` C declaration for it.  Signatures come from
+        module_loader and the ABI.md contract.  Bodies are NOT inlined — they live
+        in the linked artifact / stdlib dylib.  Scans top-level and nested imports.
+        """
+        decls: list[str] = []
+        seen: set[str] = set()
+
+        def _param_ctypes(c_parameters):
+            # c_parameters are like ["int64_t a", "char * s"]; keep the type only.
+            out = []
+            for cp in c_parameters or []:
+                toks = cp.split()
+                out.append(' '.join(toks[:-1]) if len(toks) > 1 else cp)
+            return out
+
+        def scan(stmt_list):
+            for stmt in stmt_list:
+                if isinstance(stmt, FromImportStmt):
+                    try:
+                        exports = load_module(stmt.module)
+                    except Exception:
+                        exports = {}
+                    for name, alias in stmt.names:
+                        info = exports.get(name)
+                        sym = alias if alias else name
+                        if not info or sym in seen:
+                            continue
+                        seen.add(sym)
+                        ret = info.get('c_return_type', 'int')
+                        self.func_return_types[sym] = ret
+                        self.func_param_types[sym] = _param_ctypes(info.get('c_parameters'))
+                        sig = info.get('signature')
+                        if sig:
+                            decls.append(f'extern {sig};')
+                elif isinstance(stmt, FunctionDef):
+                    scan(stmt.body)
+                elif isinstance(stmt, IfStmt):
+                    scan(stmt.then_body)
+                    for _, eb in stmt.elifs:
+                        scan(eb)
+                    if stmt.else_body:
+                        scan(stmt.else_body)
+                elif isinstance(stmt, (WhileStmt, ForStmt, TryStmt)):
+                    scan(stmt.body)
+
+        scan(stmts)
+        return decls
 
     def _new_bb(self) -> str:
         self.bb_counter += 1
@@ -2883,6 +2966,21 @@ class GimpleGen:
         # Check if obj is a simple identifier (module access)
         if isinstance(node.obj, IdentExpr):
             module_name = node.obj.name
+
+            # __mlir_attr.`literal` — a typed MLIR attribute used as a value
+            # (integer constants like `0 : index`).  Lower to the constant.
+            if module_name == '__mlir_attr':
+                kind, val = mlir.parse_attr(node.member)
+                if kind in ('int', 'simd'):   # typed int / scalar-simd constant
+                    t = self._new_temp('int64_t')
+                    self._emit(f"  {t} = {val};")
+                    return 'int64_t', t
+                # Predicate / unmodeled attrs only matter as op subscript params,
+                # which are read directly at the op call site; yield a placeholder.
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;  /* __mlir_attr {mlir.unwrap(node.member)} */")
+                return 'int', t
+
             # Module attribute access: sys.argv, tokenizer.X, etc.
             if module_name == 'sys' and node.member == 'argv':
                 # Return the argv list wired from C main(argc, argv)
@@ -3506,6 +3604,15 @@ class GimpleGen:
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
+
+        # Int/scalar MLIR accessors are identity on our scalar representation:
+        # `x._int_mlir_index()` / `x.__mlir_index__()` just yield the machine word.
+        # (For a real `Int *` receiver, the walked-in Int method handles it.)
+        if func.member in ('_int_mlir_index', '__mlir_index__') and not node.args:
+            rt, rv = self.lower_expr(func.obj)
+            if rt in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                      'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
+                return rt, rv
 
         # Handle chained attribute calls: os.path.basename(arg) → int64_t_basename(arg)
         if isinstance(func.obj, MemberExpr):
@@ -4176,7 +4283,221 @@ class GimpleGen:
 
     # ── Call expression lowering ──────────────────────────────────────────
 
+    # libc functions already prototyped by our standard includes; re-declaring them
+    # (often as variadic, e.g. printf) would clash, so we never emit our own extern.
+    _LIBC_DECLARED = {
+        'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
+        'malloc', 'calloc', 'realloc', 'free', 'memcpy', 'memmove', 'memset',
+        'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'abort',
+        'exit', 'atoi', 'atoll', 'atof',
+    }
+
+    def _lower_external_call(self, node: CallExpr) -> tuple[str, str]:
+        """Lower external_call["name", Ret](args) / _external_call_const[...] to a
+        direct C call.  This is the irreducible primitive the stdlib bottoms out on
+        (e.g. FileDescriptor.write_bytes → external_call["write", c_ssize_t](...)).
+
+        The subscript index is `"name"` or `("name", RetType, *ParamTypes)`.  We take
+        the name and return type from the index and the argument C types from the
+        lowered call arguments, then register one extern prototype per name (first use
+        wins) for emission in the preamble.
+        """
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+
+        cname = elems[0].value if elems and isinstance(elems[0], StringLiteral) else None
+        if not cname:
+            t = self._new_temp('int')
+            self._emit(f"  {t} = 0;  /* external_call with non-literal name */")
+            return 'int', t
+
+        ret_ct = 'void'
+        if len(elems) >= 2 and isinstance(elems[1], IdentExpr):
+            if elems[1].name == 'NoneType':
+                ret_ct = 'void'
+            else:
+                ret_ct = _mojo_type(elems[1].name)
+
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        # First use wins: pin the prototype's parameter types and coerce later calls to match.
+        if cname not in self._external_protos:
+            self._external_protos[cname] = (ret_ct, [at for (at, _) in arg_pairs])
+        self.func_param_types[cname] = self._external_protos[cname][1]
+
+        if ret_ct == 'void':
+            self._emit_call('', '', cname, arg_pairs)
+            t = self._new_temp('int')
+            self._emit(f"  {t} = 0;  /* void external_call result */")
+            return 'int', t
+        t = self._new_temp(ret_ct)
+        self._emit_call(ret_ct, t, cname, arg_pairs)
+        return ret_ct, t
+
+    def _maybe_lower_mlir_op(self, node: CallExpr):
+        """Lower a ``__mlir_op.\\`dialect.op\\`[attrs](args)`` call via mlir.py.
+
+        The callee is either a ``MemberExpr`` on ``__mlir_op`` (no attr params) or
+        a ``SubscriptExpr`` wrapping that member (the ``[...]`` attribute params).
+        Returns ``(ctype, val)`` if handled, else ``None`` so normal dispatch runs.
+        """
+        func = node.func
+        attr_members: list[str] = []
+        named_attrs: dict[str, object] = {}   # param name → literal value (when an __mlir_attr)
+        if isinstance(func, SubscriptExpr):
+            # Collect the op's [name=value] params. __mlir_attr literals feed both
+            # index.cmp's predicate (flat list) and struct GEP's index= (by name).
+            for _name, _val in (getattr(func, 'attrs', None) or []):
+                if isinstance(_val, MemberExpr) and isinstance(_val.obj, IdentExpr) \
+                        and _val.obj.name == '__mlir_attr':
+                    attr_members.append(_val.member)
+                    if _name:
+                        kind, v = mlir.parse_attr(_val.member)
+                        if kind in ('int', 'simd'):
+                            named_attrs[_name] = v
+            func = func.obj
+        if not (isinstance(func, MemberExpr) and isinstance(func.obj, IdentExpr)
+                and func.obj.name == '__mlir_op'):
+            return None
+
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+
+        # Memory / lvalue ops (load / store / offset) need typed, statement-aware
+        # emission; mlir.py classifies, we emit with operand types + ptr helpers.
+        mem = mlir.mem_op_kind(func.member)
+        if mem is not None:
+            return self._lower_mlir_mem(mem, arg_pairs)
+
+        # Struct / aggregate GEP (extract / gep / aget): read the index= field of a
+        # known struct. Falls through to the deferred stub when the layout or index
+        # isn't statically resolvable.
+        sk = mlir.struct_op_kind(func.member)
+        if sk is not None:
+            res = self._lower_mlir_struct(sk, named_attrs.get('index'), arg_pairs)
+            if res is not None:
+                return res
+            op = mlir.unwrap(func.member)
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = 0;  /* mlir __mlir_op.{op}: deferred: unresolved struct index/layout */")
+            return 'int64_t', t
+
+        arg_vals = [v for (_, v) in arg_pairs]
+        res = mlir.lower_op(func.member, arg_vals, attr_members)
+        if res is None:
+            # Operands already evaluated; yield 0 so surrounding code still compiles.
+            # Distinguish "deferred by design" (GPU/coro/atomics/…) from "not met yet".
+            op = mlir.unwrap(func.member)
+            reason = mlir.deferral_reason(func.member)
+            note = f"deferred: {reason}" if reason else "not modeled"
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = 0;  /* mlir __mlir_op.{op}: {note} */")
+            return 'int64_t', t
+        ctype, expr = res
+        t = self._new_temp(ctype)
+        self._emit(f"  {t} = {expr};")
+        return ctype, t
+
+    def _as_ptr(self, ctype: str, val: str) -> tuple[str, str]:
+        """Ensure (ctype, val) is a C pointer; if type inference lost it, cast to
+        a generic pointer.  Returns (pointer_ctype, pointer_val)."""
+        if ctype.endswith(' *'):
+            return ctype, val
+        pv = self._new_temp('int64_t *')
+        v64 = self._ensure_local(ctype, val)
+        self._emit(f"  {pv} = (int64_t *) {v64};")
+        return 'int64_t *', pv
+
+    def _lower_mlir_mem(self, kind: str, arg_pairs: list) -> tuple[str, str]:
+        """Emit a memory/lvalue MLIR op classified by mlir.mem_op_kind().
+
+        load   (addr)        -> *addr
+        store  (val, addr)   -> *addr = val          (statement; yields 0)
+        offset (ptr, idx)    -> _mojo_at_T(ptr, idx)  (GIMPLE-legal pointer add)
+        """
+        if kind == 'load':
+            at, av = arg_pairs[0]
+            pt, pv = self._as_ptr(at, av)
+            et = _elem_type(pt)
+            t = self._new_temp(et)
+            self._emit(f"  {t} = *{pv};")
+            return et, t
+
+        if kind == 'store':
+            (vt, vv), (at, av) = arg_pairs[0], arg_pairs[1]
+            pt, pv = self._as_ptr(at, av)
+            et = _elem_type(pt)
+            sv = vv
+            if vt != et:
+                sv = self._new_temp(et)
+                self._emit(f"  {sv} = ({et}) {vv};")
+            self._emit(f"  *{pv} = {sv};")
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = 0;  /* pop.store (no value) */")
+            return 'int64_t', t
+
+        # offset / array.gep: ptr + idx via the _mojo_at_ helper (pointer
+        # arithmetic is illegal inside __GIMPLE).
+        (pt0, pv0), (it, iv) = arg_pairs[0], arg_pairs[1]
+        pt, pv = self._as_ptr(pt0, pv0)
+        et = _elem_type(pt)
+        cn = _c_id(et)
+        self._ptr_helpers_needed.add(et)
+        idx64 = self._new_temp('int64_t')
+        self._emit(f"  {idx64} = (int64_t) {iv};")
+        addr = self._new_temp(pt)
+        self._emit(f"  {addr} = _mojo_at_{cn} ({pv}, {idx64});")
+        return pt, addr
+
+    def _lower_mlir_struct(self, kind: str, index, arg_pairs: list):
+        """Emit a struct/aggregate GEP op (extract / gep / aget) classified by
+        mlir.struct_op_kind().  Returns (ctype, val) when the struct layout and
+        a literal field index are resolvable, else None (caller → deferred stub).
+
+        extract (struct_val) -> struct_val.fieldN     (N-th field value)
+        gep     (struct_ptr) -> &struct_ptr->fieldN   (pointer to N-th field)
+        aget    (array_val)  -> array_val[N]           (N-th element, via helper)
+        """
+        if not isinstance(index, int):
+            return None
+        ct, v = arg_pairs[0]
+
+        # aget: index into an array/pointer value → offset + deref (GIMPLE-legal).
+        if kind == 'aget':
+            pt, pv = self._as_ptr(ct, v)
+            et = _elem_type(pt)
+            cn = _c_id(et)
+            self._ptr_helpers_needed.add(et)
+            addr = self._new_temp(pt)
+            self._emit(f"  {addr} = _mojo_at_{cn} ({pv}, {index});")
+            t = self._new_temp(et)
+            self._emit(f"  {t} = *{addr};")
+            return et, t
+
+        # extract / gep: resolve the struct's N-th field by declaration order.
+        base = ct[:-2] if ct.endswith(' *') else ct
+        op = '->' if ct.endswith(' *') else '.'
+        fields = self.struct_field_types.get(base)
+        if not fields or index >= len(fields):
+            return None
+        fname = list(fields.keys())[index]
+        ftype = fields[fname]
+
+        if kind == 'extract':
+            t = self._new_temp(ftype)
+            self._emit(f"  {t} = {v}{op}{fname};")
+            return ftype, t
+
+        # gep → address of the field
+        t = self._new_temp(f"{ftype} *")
+        self._emit(f"  {t} = &{v}{op}{fname};")
+        return f"{ftype} *", t
+
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
+                and node.func.obj.name in ('external_call', '_external_call_const'):
+            return self._lower_external_call(node)
+        mlir_call = self._maybe_lower_mlir_op(node)
+        if mlir_call is not None:
+            return mlir_call
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
         if not isinstance(node.func, IdentExpr):
@@ -4329,6 +4650,12 @@ class GimpleGen:
             if at == 'MojoSet *':
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = mojo_set_len ({av});")
+                return 'int64_t', t
+            # Span / StringSlice: len is the _len field of the fat pointer.
+            if at.endswith(' *') and at[:-2] in self.struct_field_types \
+                    and '_len' in self.struct_field_types[at[:-2]]:
+                t = self._new_temp('int64_t')
+                self._emit(f"  {t} = {av}->_len;")
                 return 'int64_t', t
             if at in ('int', 'int64_t'):
                 ip = self._new_temp('int64_t')
@@ -6765,6 +7092,13 @@ class GimpleGen:
                     self._global_inline_defs.add(_m.name)
                     self._global_inline_defs.add(f"{_s.name}_{_m.name}")
 
+        # Link mode: register imported symbol signatures (return/param types) from
+        # module_loader so call sites lower correctly; decls emitted in preamble.
+        # No body inlining — bodies come from the linked artifact (ABI.md).
+        self._link_import_decl_list = []
+        if self.link_imports:
+            self._link_import_decl_list = self._register_link_imports(stmts)
+
         # ── Phase 0: Compile imported modules and extract their type info ────
         # Do this FIRST so imported function types are available for everything
         imported_code = []
@@ -6832,6 +7166,12 @@ class GimpleGen:
         # lose structs from transitive imports (ModuleLoader, Layout, etc.)
         # that were added to the shared dict by nested temp_gens.
 
+        # Span / StringSlice — fat pointer {data, len}. Seeded so .unsafe_ptr()
+        # and .__len__()/len() lower to field reads even without walking span.mojo.
+        self.struct_field_types['Span'] = {
+            '_data': 'char *',
+            '_len': 'int64_t',
+        }
         # Pre-populate known interpreter structs with their field types
         # This handles cases where field type inference from method bodies fails
         self.struct_field_types['Scope'] = {
@@ -7588,6 +7928,20 @@ class GimpleGen:
             'int64_t int_parse_module (int);',
         ])
 
+        # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
+        # Skip libc names already declared by our standard includes to avoid clashes.
+        for _ecname in sorted(self._external_protos):
+            if _ecname in self._LIBC_DECLARED:
+                continue
+            _eret, _eargs = self._external_protos[_ecname]
+            _argstr = ', '.join(_eargs) if _eargs else 'void'
+            parts.append(f'extern {_eret} {_ecname} ({_argstr});')
+
+        # Link mode: extern decls for imported symbols (bodies live in the linked
+        # artifact / stdlib dylib, per ABI.md). Collected by the Phase-0 pre-pass.
+        for _decl in getattr(self, '_link_import_decl_list', []):
+            parts.append(_decl)
+
         # For all modules, declare extern references to known module globals structs
         # Each module can reference globals from other modules via these externs
         # Determine which module is being compiled from either module_name or filename
@@ -8275,15 +8629,19 @@ def compile_to_c(mojo_src: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
+def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "",
+                      link_imports: bool = False) -> str:
     """Parse Mojo source and return a C string with __GIMPLE annotations.
 
     If do_imports=True, recursively compile imported modules and inline their code.
-    If do_imports=False, generate extern declarations for imports.
+    If link_imports=True, emit `extern` declarations for imported symbols instead
+      of inlining (bodies come from a linked artifact / stdlib dylib; see
+      MODULE_CACHE_DESIGN.md and ABI.md). Implies do_imports=False.
+    If neither, imports are recorded as metadata only.
     If filename is provided, emit #line directives with the filename.
     """
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
-    gen = GimpleGen(do_imports=do_imports)
+    gen = GimpleGen(do_imports=do_imports and not link_imports, link_imports=link_imports)
     gen._current_filename = filename
     return gen.gen_module(stmts)

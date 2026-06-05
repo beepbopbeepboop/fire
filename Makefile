@@ -1,11 +1,13 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner \
-        clean clean-bootstrap stdlib bootstrap preflight \
+        clean clean-bootstrap stdlib stdlib-dylib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 RUNTIME_SRC  = runtime/mojo_runtime.c
 RUNTIME_HDR  = runtime/mojo_runtime.h
 DYLIB        = build/libmojo.dylib
+STDLIB_DYLIB = build/libmojostdlib.dylib
+STDLIB_MODULES ?=          # library .mojo modules to bundle (set by caller)
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
 MOJO_MAIN    = mojo.mojo
@@ -24,9 +26,10 @@ PY_FILES   := mojo.py mojo_compiler.py myinterpreter.py \
               module_loader.py mojo_main.py generated_dispatch.py
 
 # ── Dev targets ──────────────────────────────────────────────────────────────
-# old, do not use
+# DEAD: we no longer generate mojo_compiler.py from .md specs via run.py /
+# compiler_gen.py. The compiler is hand-edited directly now. Do not use.
 #run:
-#	python3 run.py
+#	python3 run.py   # DEAD — would clobber the hand-written mojo_compiler.py
 
 demo:
 	echo "3 + 42 + 0xFF" | python3 mojo_compiler.py
@@ -47,6 +50,13 @@ check-gimple-runner: $(MOJO_CLI)
 $(DYLIB): $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p build
 	cc -dynamiclib -I runtime -o $@ $(RUNTIME_SRC)
+
+# Build the stdlib dylib (MODULE_CACHE_DESIGN.md stage 2): bundle library
+# modules + runtime into one shared lib that clients link with -lmojostdlib.
+#   make stdlib-dylib STDLIB_MODULES="path/to/mod.mojo ..."
+stdlib-dylib:
+	@mkdir -p build
+	python3 build_stdlib_dylib.py $(STDLIB_MODULES) -o $(STDLIB_DYLIB)
 
 # Parse and validate entire stdlib (all .mojo files)
 stdlib:

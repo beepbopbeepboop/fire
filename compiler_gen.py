@@ -171,6 +171,16 @@ class PythonCompilerGen:
         self._expr_kinds = {e.kind for e in spec.expressions}
 
     def generate(self) -> str:
+        # ── DEAD CODE PATH ───────────────────────────────────────────────────
+        # We no longer generate mojo_compiler.py from .md specs. The compiler is
+        # now hand-maintained directly (edit mojo_compiler.py). This generator is
+        # retained only for historical reference; running it would clobber the
+        # hand-written compiler, so it hard-fails.
+        import sys
+        sys.stderr.write(
+            "compiler_gen.py is DEAD: mojo_compiler.py is now hand-edited directly; "
+            "do not regenerate. Aborting.\n")
+        raise SystemExit(1)
         parts = [
             self._header(),
             self._ast_nodes(),
