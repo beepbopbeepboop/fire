@@ -3840,6 +3840,12 @@ class GimpleGen:
         if ot == 'MojoSet *':
             if method == 'update' and node.args:
                 other_type, other_val = self.lower_expr(node.args[0])
+                # Ensure other_val is MojoSet* for set.update
+                if other_type != 'MojoSet *':
+                    cast_other = self._new_temp('MojoSet *')
+                    self._emit(f"  {cast_other} = (MojoSet *){other_val};")
+                    other_val = cast_other
+                    other_type = 'MojoSet *'
                 self._emit_call('void', '', 'mojo_set_update',
                                 [('MojoSet *', ov), ('MojoSet *', other_val)])
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
@@ -8091,6 +8097,7 @@ class GimpleGen:
         parts.append("void Parser___init__ (Parser *, MojoList *);")
         parts.append("void Interpreter___init__ (Interpreter *, char *);")
         parts.append("int Interpreter_execute (Interpreter *, int);")
+        parts.append("void jit_compile_and_execute (char *, char *);  /* from mojo.py */")
         parts.append('')
 
         # Forward declarations for lifted closures + env allocator helpers
