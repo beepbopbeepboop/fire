@@ -122,9 +122,14 @@ class Resolver:
 
     def _dylib(self, source: str):
         src = open(source).read()
+        # Fold in the module's imported signatures (review finding #2): they are
+        # baked into the generated C as extern decls, so a dependency's signature
+        # change must invalidate this dylib even when its own source is unchanged
+        # — mirroring cas.module_key.
+        sigs = '\n'.join(sorted(bsd._imported_sigs(src)))
         key = 'dylib/' + cas._hash(
             'mojo-dylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-            cas.toolchain_fingerprint(self.gcc, self.flags), src)
+            cas.toolchain_fingerprint(self.gcc, self.flags), src, sigs)
         dylib = cas.path_for(key, '.dylib')
         if not os.path.exists(dylib):
             os.makedirs(os.path.dirname(dylib), exist_ok=True)

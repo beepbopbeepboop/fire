@@ -434,6 +434,21 @@ def test_review_fixes_monomorphize_overload(wd):
            "fn pick(x: Float64) -> Int64:\n    return 7\n")
     check("review#4: no-match overload returns None (no silent first-pick)",
           elaborate.Elaborator().elaborate_overload_call(mod, 'pick', ['char *']) is None)
+    # #6: a comptime fn with an unmarshalable (container) param raises a clear
+    # ValueError (so the caller falls back to the constant-folder), not KeyError.
+    import comptime
+    raised6 = False
+    try:
+        comptime.evaluate("fn f(xs: List) -> Int64:\n    return 0\n", 'f', [0])
+    except ValueError:
+        raised6 = True
+    except Exception:
+        pass
+    check("review#6: unmarshalable comptime param raises ValueError", raised6)
+    # #7: the no-annotation default is consistent (int64_t) across both type paths.
+    from gimple_codegen import _mojo_type, _TYPE_MAP
+    check("review#7: None default consistent (int64_t)",
+          _mojo_type(None) == 'int64_t' and _TYPE_MAP[None] == 'int64_t')
 
 
 def main():

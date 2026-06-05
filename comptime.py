@@ -83,8 +83,19 @@ def evaluate(src: str, fn_name: str, args, gcc: str = None):
     ret, params = _signature(src, fn_name)
     dylib = _build_dylib(src, fn_name, gcc)
 
+    # Only scalar param types can be marshaled across the dlopen call. Raise a
+    # clear error (caught by the caller, which falls back to the constant-folder)
+    # rather than KeyError-crashing on a container/pointer param (review finding #6).
+    argtypes = []
+    for p in params:
+        ct = _CTYPES.get(p)
+        if ct is None:
+            raise ValueError(f"comptime: unmarshalable parameter type {p!r} "
+                             f"for {fn_name!r}; not a compile-time-callable signature")
+        argtypes.append(ct)
+
     lib = ctypes.CDLL(dylib)
     fn = getattr(lib, fn_name)
-    fn.argtypes = [_CTYPES[p] for p in params]
+    fn.argtypes = argtypes
     fn.restype = _CTYPES.get(ret, ctypes.c_int64)
     return fn(*args)

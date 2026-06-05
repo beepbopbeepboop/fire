@@ -1367,6 +1367,13 @@ class TypePromotionSolver:
 # Type system helpers
 # ---------------------------------------------------------------------------
 
+# NOTE (review finding #7): `Int` and `Bool` map to C `int`, while the MLIR index
+# type the stdlib's Int is a newtype over is `int64_t` and the ABI bool is `_Bool`
+# (see ABI.md, mlir.py). This is a *deliberate, known divergence* held for
+# backward compatibility with the existing codegen/runtime; migrating Int→int64_t
+# and Bool→_Bool is a separate, broad change (runtime signatures + every test).
+# The no-annotation default below is `int64_t` to match `_mojo_type(None)`; an
+# *unknown* annotation still falls back to `int` (see _mojo_type).
 _TYPE_MAP: dict[str | None, str] = {
     'Int':    'int',
     'Int8':   'int8_t',
@@ -1392,7 +1399,7 @@ _TYPE_MAP: dict[str | None, str] = {
     'set':    'MojoSet *',
     'Str':    'MojoStr *',
     'None':   'void',
-    None:     'int',
+    None:     'int64_t',   # consistent with _mojo_type(None); was 'int' (#7)
 }
 
 # Return types of well-known runtime functions (seeds func_return_types)
@@ -2394,6 +2401,13 @@ class GimpleGen:
                 pp = self._new_temp('ModuleLoader *')
                 self._emit(f'  {ip} = (int64_t){aval};')
                 self._emit(f'  {pp} = (ModuleLoader *){ip};')
+                coerced_args.append(pp)
+            elif ptype.endswith(' *') and atype.endswith(' *') and ptype != atype:
+                # Two different pointer types (e.g. MojoList * where MojoDict * is
+                # declared, or a struct ptr vs Span *): cast via a temp rather than
+                # forwarding an un-typed mismatched pointer (review finding #5).
+                pp = self._new_temp(ptype)
+                self._emit(f'  {pp} = ({ptype}){aval};')
                 coerced_args.append(pp)
             else:
                 coerced_args.append(aval)
