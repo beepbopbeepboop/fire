@@ -1830,11 +1830,7 @@ class GimpleGen:
         self.temp_counter = 0
         self.decls:       list[str]         = []
         self.body_lines:  list[str]         = []
-        # Pre-register known module-level global dicts to avoid opaque-int coercion
-        self.var_types:   dict[str, str]    = {
-            '_BIN_OPS': 'MojoDict *',
-            '_GD_BIN_OPS': 'MojoDict *',
-        }
+        self.var_types:   dict[str, str]    = {}
         self.loop_stack:  list[tuple[str,str]] = []
         self.exc_depth    = 0
         self.func_ret_type: str             = ''
