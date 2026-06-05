@@ -6601,17 +6601,20 @@ class GimpleGen:
             self._closure_envs[node.name] = ''
 
     def _gen_stmt_ImportStmt(self, node):
-        # import module_name [as alias] - record for extern declarations
-        local_name = node.alias if node.alias else node.module
-        self.imported_symbols[local_name] = {
-            'module': node.module,
-            'return_type': 'unknown',
-        }
-        # Declare the module as an int marker for attribute access
-        # This allows code like os.path.basename() to work
-        if local_name not in self.var_types:
-            self._declare_var(local_name, 'int')
-            self._emit(f"  {local_name} = 0;  /* module marker */")
+        # import module [as alias][, module2 [as alias2], ...] — handle every
+        # target in a comma-separated list (node.extra), not just the first.
+        targets = [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
+        for module, alias in targets:
+            local_name = alias if alias else module
+            self.imported_symbols[local_name] = {
+                'module': module,
+                'return_type': 'unknown',
+            }
+            # Declare the module as an int marker for attribute access
+            # This allows code like os.path.basename() to work
+            if local_name not in self.var_types:
+                self._declare_var(local_name, 'int')
+                self._emit(f"  {local_name} = 0;  /* module marker */")
 
 
     def _gen_stmt_FromImportStmt(self, node):
@@ -7506,7 +7509,9 @@ class GimpleGen:
                     if isinstance(stmt, FromImportStmt):
                         modules_to_compile.add(stmt.module)
                     elif isinstance(stmt, ImportStmt):
-                        modules_to_compile.add(stmt.module)
+                        for _m, _a in ([(stmt.module, stmt.alias)]
+                                       + list(getattr(stmt, 'extra', None) or [])):
+                            modules_to_compile.add(_m)
                     elif isinstance(stmt, FunctionDef):
                         find_imports(stmt.body)
                     elif isinstance(stmt, IfStmt):

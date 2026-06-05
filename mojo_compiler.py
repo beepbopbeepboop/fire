@@ -305,6 +305,7 @@ class MultiAssignStmt:
 class ImportStmt:
     module: str
     alias: object  # str|None
+    extra: object = None  # list[(module, alias|None)] for `import a, b, c`
     line: int = 0
     col: int = 0
 
@@ -883,19 +884,33 @@ class Parser:
     def _parse_import(self):
         t = self._peek()
         self._expect("KW", "import")
+        module, alias = self._parse_import_target()
+        # `import a, b, c` — comma-separated module list
+        extra = None
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if extra is None:
+                extra = []
+            extra.append(self._parse_import_target())
+        return ImportStmt(module=module, alias=alias, extra=extra,
+                          line=t.line, col=t.col)
+
+    def _parse_import_target(self):
         # Handle relative imports: import .warp, import ..sibling
         module = ""
         while self._peek().kind == "DOT":
             self._advance()
             module += "."
-        module += self._expect("NAME").value
+        # Module names may collide with keywords (e.g. a module named `comptime`),
+        # so accept NAME or KW via _ident().
+        module += self._ident()
         while self._peek().kind == "DOT":
             self._advance()
-            module += "." + self._expect("NAME").value
+            module += "." + self._ident()
         alias = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
-        return ImportStmt(module=module, alias=alias, line=t.line, col=t.col)
+        return (module, alias)
 
     def _parse_from_import(self):
         t = self._peek()
@@ -2226,8 +2241,12 @@ def emit(node, indent: int = 0) -> str:
     if isinstance(node,MultiAssignStmt):
         return f"{pad}" + " = ".join(emit(t) for t in node.targets) + " = " + emit(node.value, 0)
     if isinstance(node,ImportStmt):
-        alias = f" as {node.alias}" if node.alias else ""
-        return f"{pad}import {node.module}{alias}"
+        def _seg(m, a):
+            return m + (f" as {a}" if a else "")
+        parts = [_seg(node.module, node.alias)]
+        for m, a in (node.extra or []):
+            parts.append(_seg(m, a))
+        return f"{pad}import " + ", ".join(parts)
     if isinstance(node,FromImportStmt):
         if node.wildcard: return f"{pad}from {node.module} import *"
         names = ", ".join(n + (f" as {a}" if a else "") for n,a in node.names)
