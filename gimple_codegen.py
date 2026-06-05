@@ -1542,6 +1542,14 @@ _C_KEYWORDS = frozenset({
 def _safe_name(name: str) -> str:
     return f"mojo_{name}" if name in _C_KEYWORDS else name
 
+def _module_toplevel_name(module_name: str) -> str:
+    """Generate a unique C function name for a module's initializer."""
+    import re
+    safe = re.sub(r'[^A-Za-z0-9_]', '_', module_name)
+    if safe and safe[0].isdigit():
+        safe = '_' + safe
+    return f"_{safe}_toplevel"
+
 # ---------------------------------------------------------------------------
 # Free-variable helpers (module level, used by closure pre-pass)
 # ---------------------------------------------------------------------------
@@ -1749,10 +1757,13 @@ class GimpleGen:
         'eval':         'mojo_eval',
     }
 
-    def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True):
+    def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
+                 emit_entry_points: bool = True, module_name: str = ""):
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
+        self.emit_entry_points = emit_entry_points  # False for imported modules; suppress main/_gimple_main
+        self.module_name = module_name  # used to name _{module_name}_toplevel
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
@@ -1769,6 +1780,7 @@ class GimpleGen:
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
+        self._sub_toplevels: list[str] = []  # ordered list of sub-module toplevel fn names (shared)
         self._global_var_types: dict[str, str] = {}  # module-level global name -> C type (persists across functions)
         self._global_c_decl_types: dict[str, str] = {}  # global name -> actual C declaration type (int64_t or pointer)
         # Phase C: Dispatch solver for static dispatch table planning
@@ -1856,8 +1868,10 @@ class GimpleGen:
                     # Create a temporary codegen to extract types
                     # Use do_imports=True for transitive closure; share dedup sets and type information
                     # emit_str_pool=False so only main module emits the shared string pool
-                    # emit_struct_defs=True but share _emitted_structs to dedup struct definitions
-                    temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False)
+                    # emit_struct_defs=False so only main module emits struct typedefs
+                    # emit_entry_points=False so imported module doesn't emit main/_gimple_main
+                    temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False,
+                                         emit_entry_points=False, module_name=module_name)
                     temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
@@ -1870,6 +1884,7 @@ class GimpleGen:
                     temp_gen._emitted_allocs = self._emitted_allocs
                     temp_gen._module_stmts = self._module_stmts  # share: track all transitive stmts
                     temp_gen.func_return_types = self.func_return_types  # share across gens
+                    temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
                     code = temp_gen.gen_module(stmts)
 
                     # Store parsed stmts for this module so parent gens can access them
@@ -6516,9 +6531,14 @@ class GimpleGen:
             if not (self.body_lines and self.body_lines[-1].strip().startswith('return')):
                 self._emit('  return 0;')
 
-        # For main function, rename to _gimple_main and create wrapper
+        # For main function in root module, rename to _gimple_main and create wrapper
+        # For main function in library module, rename to _{module}_main to avoid collision
         if node.name == 'main':
-            safe = '_gimple_main'
+            if self.emit_entry_points:
+                safe = '_gimple_main'
+            else:
+                # Sub-module's main: rename to avoid collision with root main()
+                safe = f"_{self.module_name}_main" if self.module_name else '_lib_main'
 
         lines = [
             f"{ret_type} {safe} ({params_str})",
@@ -6528,14 +6548,19 @@ class GimpleGen:
             "}",
         ]
 
-        # Generate C wrapper for main that optionally initializes Python
-        if node.name == 'main':
+        # Generate C wrapper for main that optionally initializes Python (root module only)
+        if node.name == 'main' and self.emit_entry_points:
             lines.append("")
             lines.append(f"int main (int argc, const char **argv) {{")
             lines.append(f"  mojo_set_argv(argc, argv);")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Initialize ();")
             lines.append(f"#endif")
+            # Call sub-module toplevels first, then root's own _toplevel (if present)
+            for sub_fn in self._sub_toplevels:
+                lines.append(f"  {sub_fn} ();")
+            # Only call root's _toplevel if root has top-level statements
+            # (detected via has_toplevel_code which is not available here, so we check conservatively)
             lines.append(f"  _toplevel ();")
             lines.append(f"  {ret_type} result = {safe} ();")
             lines.append(f"#if USE_PYTHON")
@@ -6547,18 +6572,23 @@ class GimpleGen:
         return '\n'.join(lines)
 
     def _gen_toplevel(self, toplevel_stmts: list) -> str:
-        """Generate _toplevel() function for top-level expression statements."""
+        """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
         self._reset_func()
-        self.current_func_name = '_toplevel'
+        # Choose function name based on whether this is the root module or a library module
+        if self.emit_entry_points:
+            fn_name = '_toplevel'
+        else:
+            fn_name = _module_toplevel_name(self.module_name)
+        self.current_func_name = fn_name
         self.func_ret_type = 'void'
-        self.func_return_types['_toplevel'] = 'void'
+        self.func_return_types[fn_name] = 'void'
 
         # Generate code for each top-level statement
         for stmt in toplevel_stmts:
             self.gen_stmt(stmt)
 
         lines = [
-            "void _toplevel (void)",
+            f"void {fn_name} (void)",
             "{",
             *self.decls,
             *self.body_lines,
@@ -7384,27 +7414,37 @@ class GimpleGen:
             toplevel_func = self._gen_toplevel(toplevel_stmts)
             func_parts.append(toplevel_func)
             func_parts.append('')
+            # In library mode, register the sub-module toplevel for the root to call
+            if not self.emit_entry_points:
+                sub_fn = _module_toplevel_name(self.module_name)
+                if sub_fn not in self._sub_toplevels:
+                    self._sub_toplevels.append(sub_fn)
 
-        # Generate default main() if not already defined
-        has_main = any(isinstance(stmt, FunctionDef) and stmt.name == 'main' for stmt in stmts)
-        if not has_main:
-            func_parts.append("int _gimple_main (void)")
-            func_parts.append("{")
-            func_parts.append("  return 0;")
-            func_parts.append("}")
-            func_parts.append("")
-            func_parts.append("int main (int argc, const char **argv) {")
-            func_parts.append("  mojo_set_argv(argc, argv);")
-            func_parts.append("#if USE_PYTHON")
-            func_parts.append("  Py_Initialize ();")
-            func_parts.append("#endif")
-            if has_toplevel_code:
-                func_parts.append("  _toplevel ();")
-            func_parts.append("#if USE_PYTHON")
-            func_parts.append("  Py_Finalize ();")
-            func_parts.append("#endif")
-            func_parts.append("  return 0;")
-            func_parts.append("}")
+        # Only generate entry points (main/_gimple_main) for the root module
+        if self.emit_entry_points:
+            has_main = any(isinstance(stmt, FunctionDef) and stmt.name == 'main' for stmt in stmts)
+            if not has_main:
+                func_parts.append("int _gimple_main (void)")
+                func_parts.append("{")
+                func_parts.append("  return 0;")
+                func_parts.append("}")
+                func_parts.append("")
+                func_parts.append("int main (int argc, const char **argv) {")
+                func_parts.append("  mojo_set_argv(argc, argv);")
+                func_parts.append("#if USE_PYTHON")
+                func_parts.append("  Py_Initialize ();")
+                func_parts.append("#endif")
+                # Call sub-module toplevels first
+                for sub_fn in self._sub_toplevels:
+                    func_parts.append(f"  {sub_fn} ();")
+                # Then call root's own _toplevel if it has top-level code
+                if has_toplevel_code:
+                    func_parts.append("  _toplevel ();")
+                func_parts.append("#if USE_PYTHON")
+                func_parts.append("  Py_Finalize ();")
+                func_parts.append("#endif")
+                func_parts.append("  return 0;")
+                func_parts.append("}")
 
         # ── Phase 2b: assemble final C output ────────────────────────────
 
@@ -7424,9 +7464,19 @@ class GimpleGen:
             '#include <mojo_runtime.h>',
             'void mojo_print(char *str);',
         ]
-        # Only add _toplevel forward declaration if we have top-level code
-        if has_toplevel_code:
-            parts.append('void _toplevel(void);')
+        # Forward declarations for sub-module toplevels and root toplevel
+        if self.emit_entry_points:
+            # Root module: forward-declare all sub-module toplevels
+            for sub_fn in self._sub_toplevels:
+                parts.append(f'void {sub_fn}(void);')
+            # Forward-declare root's own _toplevel if it has top-level code
+            if has_toplevel_code:
+                parts.append('void _toplevel(void);')
+        else:
+            # Library module: forward-declare this module's own toplevel if it has one
+            if has_toplevel_code:
+                fn_name = _module_toplevel_name(self.module_name)
+                parts.append(f'void {fn_name}(void);')
         parts.extend([
             'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
             'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
