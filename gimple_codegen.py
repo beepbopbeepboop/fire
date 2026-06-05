@@ -1542,6 +1542,34 @@ _C_KEYWORDS = frozenset({
 def _safe_name(name: str) -> str:
     return f"mojo_{name}" if name in _C_KEYWORDS else name
 
+def _extract_init_expr(stmt_value) -> str:
+    """Generate C initialization code for a module-level assignment RHS."""
+    if stmt_value is None:
+        return '0'
+    if isinstance(stmt_value, DictExpr):
+        if not stmt_value.pairs:
+            return 'mojo_dict_new()'
+        return '0'  # Non-empty: needs runtime init in _toplevel
+    elif isinstance(stmt_value, ListExpr):
+        if not stmt_value.elements:
+            return 'mojo_list_new()'
+        return '0'
+    elif isinstance(stmt_value, SetExpr):
+        if not stmt_value.elements:
+            return 'mojo_set_new()'
+        return '0'
+    elif isinstance(stmt_value, IntLiteral):
+        return str(stmt_value.value)
+    elif isinstance(stmt_value, BoolLiteral):
+        return '1' if stmt_value.value else '0'
+    elif isinstance(stmt_value, StringLiteral):
+        escaped = stmt_value.value.replace('\\', '\\\\').replace('"', '\\"')
+        return f'"{escaped}"'
+    elif isinstance(stmt_value, (CallExpr, IdentExpr)):
+        return '0'  # Can't static-initialize; needs runtime init
+    else:
+        return '0'
+
 def _module_toplevel_name(module_name: str) -> str:
     """Generate a unique C function name for a module's initializer."""
     import re
@@ -1781,6 +1809,10 @@ class GimpleGen:
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
         self._sub_toplevels: list[str] = []  # ordered list of sub-module toplevel fn names (shared)
+        self._module_globals: dict[str, list[tuple[str, str, str]]] = {}  # module_name -> [(name, c_type, mojo_type), ...] (shared)
+        self._module_global_inits: dict[str, dict[str, str]] = {}  # module_name -> {name -> init_code} (shared)
+        self._global_to_module: dict[str, str] = {}  # global_name -> module_name (shared)
+        self._current_module_ctx: str = ""  # current module name for global field access
         self._global_var_types: dict[str, str] = {}  # module-level global name -> C type (persists across functions)
         self._global_c_decl_types: dict[str, str] = {}  # global name -> actual C declaration type (int64_t or pointer)
         # Phase C: Dispatch solver for static dispatch table planning
@@ -1885,6 +1917,10 @@ class GimpleGen:
                     temp_gen._module_stmts = self._module_stmts  # share: track all transitive stmts
                     temp_gen.func_return_types = self.func_return_types  # share across gens
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
+                    temp_gen._module_globals = self._module_globals  # share module globals tracking
+                    temp_gen._module_global_inits = self._module_global_inits  # share global inits
+                    if hasattr(self, '_global_to_module'):
+                        temp_gen._global_to_module = self._global_to_module  # share global -> module mapping
                     code = temp_gen.gen_module(stmts)
 
                     # Store parsed stmts for this module so parent gens can access them
@@ -2725,17 +2761,21 @@ class GimpleGen:
             if gtype == 'MojoDict *' and name in self._dict_val_types:
                 self._dict_val_types[t] = self._dict_val_types[name]
             c_decl_type = self._global_c_decl_types.get(name, ctype)
+            # Access global from module struct (use which module the global belongs to)
+            global_module = getattr(self, '_global_to_module', {}).get(name, self._current_module_ctx or "root")
+            safe_module = _safe_name(global_module) if global_module else "root"
+            field_ref = f"_{safe_module}_globals.{name}"
             if ctype == 'int64_t' and c_decl_type.endswith(' *'):
                 # Global is declared as a pointer type at C level but we box it as int64_t.
                 # GIMPLE: must load pointer into matching-type local, then cast via void* → int64_t.
                 raw_ptr = self._new_temp(c_decl_type)
-                self._emit(f'  {raw_ptr} = {name};')
+                self._emit(f'  {raw_ptr} = {field_ref};')
                 vp = self._new_temp('void *')
                 self._emit(f'  {vp} = (void *){raw_ptr};')
                 self._emit(f'  {t} = (int64_t){vp};')
             else:
                 # Global is int64_t or same type as ctype — direct assignment is valid.
-                self._emit(f'  {t} = {name};')
+                self._emit(f'  {t} = {field_ref};')
             return ctype, t
         return self._type_of(name), self._c_names.get(name, name)
 
@@ -5229,16 +5269,39 @@ class GimpleGen:
         vtype, v = self.lower_expr(node.value)
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
-            if tname not in self.var_types:
-                self._declare_var(tname, vtype)
-            dst = self.var_types[tname]
-            if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
-                self._elem_types[tname] = self._elem_types[v]
-            if dst == 'MojoDict *':
-                if v in self._elem_types:
+            # Check if target is a module-level global
+            if tname in self._global_var_types and tname not in self.var_types:
+                # Assign to module globals struct field
+                global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
+                safe_module = _safe_name(global_module) if global_module else "root"
+                field_ref = f"_{safe_module}_globals.{tname}"
+                # Coerce the RHS value to the global's type
+                dst = self._global_var_types[tname]
+                if dst in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    # These are boxed as int64_t, so coerce accordingly
+                    target_ctype = 'int64_t'
+                else:
+                    target_ctype = dst
+                # Emit assignment to struct field
+                if vtype == target_ctype:
+                    self._emit(f"  {field_ref} = {v};")
+                else:
+                    # Need type conversion
+                    temp = self._new_temp(target_ctype)
+                    self._safe_coerce_emit(vtype, target_ctype, v, temp)
+                    self._emit(f"  {field_ref} = {temp};")
+            else:
+                # Regular local variable assignment
+                if tname not in self.var_types:
+                    self._declare_var(tname, vtype)
+                dst = self.var_types[tname]
+                if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                     self._elem_types[tname] = self._elem_types[v]
-                if v in self._dict_val_types:
-                    self._dict_val_types[tname] = self._dict_val_types[v]
+                if dst == 'MojoDict *':
+                    if v in self._elem_types:
+                        self._elem_types[tname] = self._elem_types[v]
+                    if v in self._dict_val_types:
+                        self._dict_val_types[tname] = self._dict_val_types[v]
             # Track actual type if storing a pointer as int64_t
             if dst == 'int64_t':
                 # If source has tracked actual type, copy it
@@ -6484,6 +6547,8 @@ class GimpleGen:
 
     def gen_func(self, node: FunctionDef) -> str:
         self._reset_func()
+        # Set module context for global field access
+        self._current_module_ctx = self.module_name or "root"
         self.current_func_name = node.name
 
         # Seed param types into var_types BEFORE return-type inference so
@@ -6574,6 +6639,8 @@ class GimpleGen:
     def _gen_toplevel(self, toplevel_stmts: list) -> str:
         """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
         self._reset_func()
+        # Set module context for global field access
+        self._current_module_ctx = self.module_name or "root"
         # Choose function name based on whether this is the root module or a library module
         if self.emit_entry_points:
             fn_name = '_toplevel'
@@ -7553,7 +7620,12 @@ class GimpleGen:
             parts.append('')
 
         # Module-level globals (imported modules, dicts, lists, sets, values at module scope)
-        global_decls = []
+        global_decls = []  # kept for compatibility, but won't be emitted
+        # Initialize module globals tracking for this module
+        current_mod_name = self.module_name or "root"
+        if current_mod_name not in self._module_globals:
+            self._module_globals[current_mod_name] = []
+            self._module_global_inits[current_mod_name] = {}
         # Dispatch table globals already forward-declared near top of file
         # Also declare imported dispatch tables as MojoDict/MojoSet globals
         _dispatch_dict_names = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS',
@@ -7673,9 +7745,54 @@ class GimpleGen:
                 global_decls.append(f"{ctype} {stmt.name};")
                 self._global_var_types[stmt.name] = ctype
                 self._global_c_decl_types[stmt.name] = ctype
-        if global_decls:
-            parts.extend(global_decls)
-            parts.append('')
+        # Skip emitting standalone global declarations — they'll be in module globals structs instead
+        # if global_decls:
+        #     parts.extend(global_decls)
+        #     parts.append('')
+
+        # Populate _module_globals tracking from collected globals
+        # Build a map of global name -> module name for later lookup
+        self._global_to_module: dict[str, str] = {}
+        for gname in _declared_globals:
+            if gname in self._global_var_types:
+                c_type = self._global_c_decl_types.get(gname, 'int64_t')
+                mojo_type = self._global_var_types[gname]
+                # Find the initialization expression from stmts
+                init_code = '0'
+                for stmt in _collect_global_stmts(all_global_scan):
+                    if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr) and stmt.target.name == gname:
+                        init_code = _extract_init_expr(stmt.value)
+                        break
+                    elif isinstance(stmt, ImportStmt) and (stmt.alias if stmt.alias else stmt.module) == gname:
+                        init_code = '0'
+                        break
+                if (gname, c_type, mojo_type) not in self._module_globals[current_mod_name]:
+                    self._module_globals[current_mod_name].append((gname, c_type, mojo_type))
+                    self._module_global_inits[current_mod_name][gname] = init_code
+                    self._global_to_module[gname] = current_mod_name
+
+        # Generate per-module struct typedefs and instances for globals
+        if self._module_globals.get(current_mod_name):
+            globals_list = self._module_globals[current_mod_name]
+            safe_name = _safe_name(current_mod_name) if current_mod_name else "root"
+            typedef_name = f"_{safe_name}_toplev"
+
+            # Emit struct typedef
+            parts.append(f"typedef struct {typedef_name} {{")
+            for gname, c_type, _ in globals_list:
+                parts.append(f"  {c_type} {gname};")
+            parts.append(f"}} {typedef_name};")
+            parts.append("")
+
+            # Emit struct instance with initializers
+            instance_name = f"_{safe_name}_globals"
+            parts.append(f"struct {typedef_name} {instance_name} = {{")
+            inits = self._module_global_inits.get(current_mod_name, {})
+            for gname, _, _ in globals_list:
+                init_val = inits.get(gname, '0')
+                parts.append(f"  .{gname} = {init_val},")
+            parts.append("};")
+            parts.append("")
 
         # Class-level attribute globals (class body AssignStmt not in __init__)
         class_attr_decls = []
