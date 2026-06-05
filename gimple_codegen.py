@@ -5271,37 +5271,20 @@ class GimpleGen:
             tname = node.target.name
             # Check if target is a module-level global
             if tname in self._global_var_types and tname not in self.var_types:
-                # Assign to module globals struct field
-                global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
-                safe_module = _safe_name(global_module) if global_module else "root"
-                field_ref = f"_{safe_module}_globals.{tname}"
-                # Coerce the RHS value to the global's type
-                dst = self._global_var_types[tname]
-                if dst in ('MojoDict *', 'MojoList *', 'MojoSet *'):
-                    # These are boxed as int64_t, so coerce accordingly
-                    target_ctype = 'int64_t'
-                else:
-                    target_ctype = dst
-                # Emit assignment to struct field
-                if vtype == target_ctype:
-                    self._emit(f"  {field_ref} = {v};")
-                else:
-                    # Need type conversion
-                    temp = self._new_temp(target_ctype)
-                    self._safe_coerce_emit(vtype, target_ctype, v, temp)
-                    self._emit(f"  {field_ref} = {temp};")
-            else:
-                # Regular local variable assignment
-                if tname not in self.var_types:
-                    self._declare_var(tname, vtype)
-                dst = self.var_types[tname]
-                if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
+                # Skip: module globals are initialized in struct definition, not in _toplevel
+                # Complex initialization will need runtime support in future
+                return
+            # Regular local variable assignment
+            if tname not in self.var_types:
+                self._declare_var(tname, vtype)
+            dst = self.var_types[tname]
+            if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
+                self._elem_types[tname] = self._elem_types[v]
+            if dst == 'MojoDict *':
+                if v in self._elem_types:
                     self._elem_types[tname] = self._elem_types[v]
-                if dst == 'MojoDict *':
-                    if v in self._elem_types:
-                        self._elem_types[tname] = self._elem_types[v]
-                    if v in self._dict_val_types:
-                        self._dict_val_types[tname] = self._dict_val_types[v]
+                if v in self._dict_val_types:
+                    self._dict_val_types[tname] = self._dict_val_types[v]
             # Track actual type if storing a pointer as int64_t
             if dst == 'int64_t':
                 # If source has tracked actual type, copy it
@@ -7788,8 +7771,14 @@ class GimpleGen:
             instance_name = f"_{safe_name}_globals"
             parts.append(f"struct {typedef_name} {instance_name} = {{")
             inits = self._module_global_inits.get(current_mod_name, {})
-            for gname, _, _ in globals_list:
-                init_val = inits.get(gname, '0')
+            for gname, c_type, _ in globals_list:
+                init_val = inits.get(gname)
+                # If no init value or it's '0', use appropriately typed null for pointer types
+                if not init_val or init_val == '0':
+                    if c_type.endswith(' *'):
+                        init_val = f'({c_type})0'
+                    else:
+                        init_val = '0'
                 parts.append(f"  .{gname} = {init_val},")
             parts.append("};")
             parts.append("")
