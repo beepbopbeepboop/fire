@@ -1537,6 +1537,17 @@ def dbg(label: String, n: Int64):
     else:
         print("FAIL  c_escape_roundtrip"); _FAIL += 1
 
+    # 157. MojoList + pointer-typed local → mojo_list_concat (polymorphic local
+    #      typed char* in one branch, used as a list at a concat site). Previously
+    #      emitted `MojoList * + char *`, which gcc rejects.
+    test("list_concat_polymorphic", """\
+def f():
+    var body = [1, 2]
+    var s = "x"
+    body = body + s
+    return body
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

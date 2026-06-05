@@ -3326,6 +3326,24 @@ class GimpleGen:
         if node.op == '+' and lt == 'MojoList *' and rt in ('int', 'int64_t'):
             return 'MojoList *', lv
 
+        # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
+        # MojoList *. Covers polymorphic locals: a name (e.g. `body`) that is a
+        # list in one branch but declared `char *` because another branch assigns
+        # it a string. At a list-concat site the runtime value *is* a list, so
+        # concat is the correct lowering; without this we emit `MojoList * + char *`,
+        # which gcc rejects. (Salvaged from the bootstrap bug-hunt; it advances the
+        # self-host build past mojo_compiler.py's emit().)
+        if node.op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
+            rcast = rv
+            if rt != 'MojoList *':
+                rcast = self._new_temp('MojoList *')
+                self._emit(f"  {rcast} = (MojoList *){rv};")
+            t = self._new_temp('MojoList *')
+            self._emit(f"  {t} = mojo_list_concat ({lv}, {rcast});")
+            if lv in self._elem_types:
+                self._elem_types[t] = self._elem_types[lv]
+            return 'MojoList *', t
+
         # MojoStr + MojoStr → mojo_str_concat
         if node.op == '+' and lt == 'MojoStr *' and rt == 'MojoStr *':
             t = self._new_temp('MojoStr *')
