@@ -111,6 +111,25 @@ def module_key(source: str, imported_sigs, gcc: str, flags: tuple = ()) -> str:
     )
 
 
+def instantiation_key(template_id: str, type_args, comptime_args,
+                      gcc: str, flags: tuple = ()) -> str:
+    """Content key for a generic instantiation.  template_id is the template's
+    canonical identity (its source); type_args / comptime_args are the concrete
+    arguments.  Same key ⇒ same monomorphized output, so an instantiation is
+    compiled once, ever, and shared across clients (MODULE_CACHE_DESIGN.md)."""
+    ta = '\x1f'.join(f"{k}={v}" for k, v in sorted((type_args or {}).items()))
+    ca = '\x1f'.join(f"{k}={v}" for k, v in sorted((comptime_args or {}).items()))
+    return _hash(
+        'mojo-inst-v1',
+        ABI_VERSION,
+        compiler_fingerprint(),
+        toolchain_fingerprint(gcc, flags),
+        template_id,
+        ta,
+        ca,
+    )
+
+
 def path_for(key: str, ext: str = '.o') -> str:
     return os.path.join(CAS_DIR, key + ext)
 

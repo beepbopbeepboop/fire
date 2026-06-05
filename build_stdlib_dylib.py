@@ -20,6 +20,7 @@ import tempfile
 import subprocess
 
 import cas
+import reflect
 from build_config import find_gcc
 from gimple_codegen import GimpleGen, FromImportStmt
 from mojo_compiler import tokenize, Parser
@@ -74,9 +75,11 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
         with open(ofile, 'rb') as f:
             return f.read()
 
+    all_exports = []
     for path in modules:
         name = os.path.splitext(os.path.basename(path))[0]
         src = open(path).read()
+        all_exports.extend(reflect.collect_exports_src(src))
         if use_cache:
             key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
             ofile, hit = cas.get_or_build(
@@ -86,6 +89,15 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
             with open(ofile, 'wb') as f:
                 f.write(compile_one_object(src, path, name))
         objs.append(ofile)
+
+    # Reflection table (reflect.h / reflect.py): one merged __mojo_reflect over
+    # all bundled modules, so the dylib is self-describing for any C-ABI consumer.
+    reflect_c = os.path.join(workdir, '_mojo_reflect.c')
+    reflect_o = os.path.join(workdir, '_mojo_reflect.o')
+    with open(reflect_c, 'w') as f:
+        f.write(reflect.emit_table_c(all_exports))
+    subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
+    objs.append(reflect_o)
 
     # Bundle the runtime so the dylib is self-contained.
     rt_o = os.path.join(workdir, 'mojo_runtime.o')

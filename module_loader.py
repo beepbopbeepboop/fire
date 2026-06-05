@@ -243,6 +243,40 @@ class ModuleLoader:
         return exports.get(symbol_name, 'unknown')
 
 
+def read_reflection(dylib_path: str) -> dict:
+    """Read a dylib's `__mojo_reflect` table (reflect.h) — the compiler's import
+    path consuming the *same* C-ABI reflection interface any other language uses.
+    Returns {name: {'signature': str, 'kind': int, 'addr': int}}.
+
+    This is the structured, ABI-accurate replacement for the line-regex
+    signature extraction above: when a prebuilt dylib exists, its self-describing
+    table is authoritative.
+    """
+    import ctypes
+
+    class _Sym(ctypes.Structure):
+        _fields_ = [('name', ctypes.c_char_p), ('signature', ctypes.c_char_p),
+                    ('addr', ctypes.c_void_p), ('kind', ctypes.c_int32)]
+
+    class _Table(ctypes.Structure):
+        _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
+                    ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
+                    ('syms', ctypes.POINTER(_Sym))]
+
+    lib = ctypes.CDLL(dylib_path)
+    tbl = _Table.in_dll(lib, '__mojo_reflect')
+    if tbl.magic != 0x4D4F4A4F:   # 'MOJO'
+        raise ValueError(f"{dylib_path}: not a Mojo reflection table")
+    out = {}
+    for i in range(tbl.n_syms):
+        s = tbl.syms[i]
+        name = s.name.decode() if s.name else ''
+        if name:
+            out[name] = {'signature': s.signature.decode() if s.signature else '',
+                         'kind': s.kind, 'addr': s.addr}
+    return out
+
+
 # Global module loader instance
 _module_loader = ModuleLoader()
 

@@ -45,6 +45,26 @@ current stdlib transpilation status, what fails, and remaining gaps.
     Integrated into the dylib build: warm = load (no codegen/gcc), cold = compile,
     source/compiler/ABI change = miss. Tier 2 (sharded single-flight + TTL leases,
     the shm `cas.c`) is deferred-by-design until concurrent load justifies it.
+  - **Stage 4 — reflection layer** (`reflect.h`, `reflect.py`): each dylib exports
+    a plain-C-ABI `__mojo_reflect` table (symbol name + C signature + address).
+    The compiler's own import path reads it (`module_loader.read_reflection`, via
+    ctypes), and so can any C-ABI consumer — verified by a pure-C program that
+    `dlopen`s the dylib, walks the table, and calls functions by address. One
+    unified import interface; full polyglot interop.
+  - **Stage 5 — monomorphization engine** (`monomorphize.py`,
+    `cas.instantiation_key`): a generic instantiation is keyed by (template
+    identity + concrete type args + comptime params) and published into the
+    shared CAS — instantiate once, ever. Verified: `box_id[Int64]` and
+    `box_id[Float64]` cache as distinct objects, re-instantiating `box_id[Int64]`
+    is a hit, and the cached object links + runs. (Substitution is textual/demo;
+    the production path is AST-driven via `DispatchSolver`.)
+  - **Stage 6 — comptime as cached machine code** (`comptime.py`): a comptime
+    function is compiled to a CAS-cached dylib *once*, then the compiler
+    `dlopen`s it and **calls** it with the comptime args — real machine code at
+    compile time, not tree interpretation. Verified with loop (`fact`) and
+    recursion (`fib`) matching interpreted references; the dylib is compiled once
+    and reused across calls (2 misses / 4 hits). `_eval_const_*` remains the
+    fallback (foundation-first).
 - **`make check` repair** — the generated `main()` wrapper unconditionally
   called `_toplevel()`, but that function is only emitted when a module has
   top-level statements. Programs with a `main` and no top-level code (every
