@@ -22,23 +22,84 @@ from build_config import find_gcc
 _IS_DARWIN = platform.system() == 'Darwin'
 _GCC_BIN = find_gcc()
 
+# Default codegen flags for the JIT compile path. -Og optimizes while keeping
+# the result debuggable, which is the right default for JIT iteration.
+_DEFAULT_OPT_FLAG = "-Og"
+_DEFAULT_DEBUG_FLAG = None
+
+
+def _toolchain_id() -> str:
+    """A stable identity for the compilation toolchain and runtime, mixed into
+    the cache key so that a different compiler, runtime, or target produces a
+    distinct cache entry. Memoized on the function object."""
+    cached = getattr(_toolchain_id, "_cached", None)
+    if cached is not None:
+        return cached
+    parts = [
+        f"gcc_bin={_GCC_BIN}",
+        f"arch={platform.machine()}",
+        f"system={platform.system()}",
+    ]
+    # gcc version string
+    try:
+        ver = subprocess.run([_GCC_BIN, "--version"],
+                             capture_output=True, text=True, timeout=10)
+        parts.append("gcc_ver=" + ver.stdout.strip().splitlines()[0])
+    except Exception:
+        parts.append("gcc_ver=?")
+    # Runtime source/header contents — a runtime change must invalidate caches.
+    runtime_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime")
+    for name in ("mojo_runtime.c", "mojo_runtime.h"):
+        path = os.path.join(runtime_dir, name)
+        try:
+            with open(path, "rb") as f:
+                parts.append(f"{name}=" + hashlib.sha256(f.read()).hexdigest())
+        except Exception:
+            parts.append(f"{name}=?")
+    cached = "\0".join(parts)
+    _toolchain_id._cached = cached
+    return cached
+
 
 class ARM64JIT:
     """JIT compiler for ARM64 architecture with SHA256-based caching."""
 
-    def __init__(self):
+    def __init__(self, opt_flag: str = _DEFAULT_OPT_FLAG,
+                 debug_flag: str | None = _DEFAULT_DEBUG_FLAG):
         self.temp_dir = None
         self.loaded_libs = []
+        # Codegen flags forwarded to gcc and mixed into the cache key.
+        self.opt_flag = opt_flag or _DEFAULT_OPT_FLAG
+        self.debug_flag = debug_flag
         # Initialize cache directory
         self.cache_dir = os.path.expanduser("~/.gmojo/jit")
         os.makedirs(self.cache_dir, exist_ok=True)
 
+    def _codegen_flags(self) -> list[str]:
+        """Optimization/debug flags passed to every gcc invocation."""
+        flags = [self.opt_flag]
+        if self.debug_flag:
+            flags.append(self.debug_flag)
+        return flags
+
     def _get_cache_filename(self, source_code: str) -> tuple[str, str]:
         """Get cache filename and hash for source code.
 
+        The cache key (the index into ~/.gmojo/jit) folds in everything that can
+        change the produced binary: the source, the optimization (-O*) and debug
+        (-g*) flags, and the toolchain/runtime identity. This guarantees that
+        e.g. an -O0 build and an -O2 build, or a -g vs -g2 build, never collide.
+
         Returns (hash, filepath)
         """
-        source_hash = hashlib.sha256(source_code.encode()).hexdigest()
+        key = "\0".join([
+            source_code,
+            f"opt={self.opt_flag}",
+            f"debug={self.debug_flag or ''}",
+            _toolchain_id(),
+        ])
+        source_hash = hashlib.sha256(key.encode()).hexdigest()
         cache_file = os.path.join(self.cache_dir, f"{source_hash}")
         return source_hash, cache_file
 
@@ -150,11 +211,12 @@ int main() {{
             runtime_dir = os.path.join(script_dir, 'runtime')
             runtime_src = os.path.join(runtime_dir, 'mojo_runtime.c')
 
-            # Compile to object file with -fgimple (use -O2 for optimization)
+            # Compile to object file with -fgimple, honoring the requested
+            # optimization/debug flags (these are also folded into the cache key).
             o_file = os.path.join(self.temp_dir, f"{source_hash}.o")
             compile_cmd = [
                 _GCC_BIN,
-                "-O2",
+                *self._codegen_flags(),
                 "-fgimple",
                 f"-I{runtime_dir}",
                 "-c",
@@ -175,7 +237,7 @@ int main() {{
             runtime_o = os.path.join(self.temp_dir, f"{source_hash}_runtime.o")
             runtime_cmd = [
                 _GCC_BIN,
-                "-O2",
+                *self._codegen_flags(),
                 f"-I{runtime_dir}",
                 "-c",
                 "-o", runtime_o,

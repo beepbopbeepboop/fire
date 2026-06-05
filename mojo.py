@@ -16,6 +16,7 @@ Modes:
 
 import sys
 import os
+import re
 import subprocess
 import shutil
 import sysconfig
@@ -28,6 +29,27 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 _IS_DARWIN = platform.system() == 'Darwin'
 from build_config import find_gcc
 _GCC_BIN = find_gcc()
+
+def _extract_codegen_flags(args):
+    """Pull optimization (-O0/-O1/-O2/-O3/-Os/-Oz/-Og) and debug (-g/-g0../-g3)
+    flags out of an argument list.
+
+    Returns (opt_flag, debug_flag, remaining_args). Last occurrence wins, so
+    `-O0 -O2` yields -O2. The literal flag strings are preserved and passed
+    straight to gcc; they are also mixed into the JIT cache key, so -O0 vs -O2
+    and -g vs -g2 never share a cache entry."""
+    opt_flag = None
+    debug_flag = None
+    remaining = []
+    for a in args:
+        if re.fullmatch(r'-O[0-3sgz]?', a):
+            opt_flag = a
+        elif re.fullmatch(r'-g[0-3]?', a):
+            debug_flag = a
+        else:
+            remaining.append(a)
+    return opt_flag, debug_flag, remaining
+
 
 def interpret_and_execute(src_code, filename=None):
     try:
@@ -43,11 +65,11 @@ def interpret_and_execute(src_code, filename=None):
         import traceback
         traceback.print_exc(file=sys.stderr)
 
-def run_jit_repl():
+def run_jit_repl(opt_flag=None, debug_flag=None):
     """Interactive REPL for Mojo code using JIT compilation."""
     from jit.arm64 import ARM64JIT
 
-    jit = ARM64JIT()
+    jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
     print("Mojo JIT REPL - type 'exit' or 'quit' to exit")
     print("(Note: Each expression is independently compiled)")
     print()
@@ -132,11 +154,11 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src):
+def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None):
     """JIT compile and execute Mojo source code for ARM64."""
     try:
         from jit.arm64 import ARM64JIT
-        jit = ARM64JIT()
+        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
         jit.compile_and_execute(src)
         jit.cleanup()
     except Exception as e:
@@ -144,9 +166,11 @@ def jit_compile_and_execute(input_file: str, src):
         import traceback
         traceback.print_exc(file=sys.stderr)
 
-def build_executable(input_file, src, output=None):
+def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None):
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0]
+    # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
+    cg_flags = [opt_flag or "-O0", debug_flag or "-g3"]
     try:
         import gimple_codegen
 
@@ -170,7 +194,7 @@ def build_executable(input_file, src, output=None):
 
         # Compile to object file with -fgimple for GIMPLE code generation
         o_file = f"{basename}.o"
-        compile_cmd = [_GCC_BIN, "-O0", "-g3", "-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
+        compile_cmd = [_GCC_BIN] + cg_flags + ["-fgimple", "-I", runtime_dir] + py_cflags + ["-c", "-o", o_file, "-x", "c", ci_file]
         result = subprocess.run(compile_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Compilation failed: {result.stderr}", file=sys.stderr)
@@ -178,7 +202,7 @@ def build_executable(input_file, src, output=None):
 
         # Compile runtime
         runtime_o = f"{basename}_runtime.o"
-        runtime_cmd = [_GCC_BIN, "-O0", "-g3", "-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
+        runtime_cmd = [_GCC_BIN] + cg_flags + ["-I", runtime_dir] + py_cflags + ["-c", "-o", runtime_o, runtime_src]
         result = subprocess.run(runtime_cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
@@ -233,6 +257,10 @@ def build_executable(input_file, src, output=None):
         return False
 
 def main():
+    # Pull -O*/-g* codegen flags out of argv first so they may appear anywhere.
+    opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
+    sys.argv = [sys.argv[0]] + rest
+
     # No arguments: run REPL
     if len(sys.argv) < 2:
         run_repl()
@@ -251,7 +279,11 @@ def main():
   mojo build -o <output> <file>    Compile to executable with specified output name
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
-  mojo -h, --help                  Show this help message""")
+  mojo -h, --help                  Show this help message
+
+Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
+  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0)
+  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)""")
         return
 
     # Check for repl command
@@ -259,7 +291,7 @@ def main():
         # Check if --jit flag is present for JIT REPL
         if '--jit' in sys.argv:
             sys.argv.remove('--jit')
-            run_jit_repl()
+            run_jit_repl(opt_flag, debug_flag)
         else:
             run_repl()
         return
@@ -270,7 +302,7 @@ def main():
         sys.argv.remove('--jit')
         # If --jit is the only argument, run JIT REPL
         if len(sys.argv) < 2:
-            run_jit_repl()
+            run_jit_repl(opt_flag, debug_flag)
             return
 
     # Check for build command
@@ -320,12 +352,13 @@ def main():
 
     # If JIT requested, compile and execute
     if jit:
-        jit_compile_and_execute(input_file, src)
+        jit_compile_and_execute(input_file, src, opt_flag, debug_flag)
         return
 
     # If build requested, compile to executable
     if build:
-        success = build_executable(input_file, src, output=build_output)
+        success = build_executable(input_file, src, output=build_output,
+                                   opt_flag=opt_flag, debug_flag=debug_flag)
         sys.exit(0 if success else 1)
 
     # If --dump-full requested, generate single .ci with transitive closure (for bootstrap)
