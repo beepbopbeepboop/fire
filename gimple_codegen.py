@@ -1892,6 +1892,15 @@ class GimpleGen:
         # Dylibs the program must link, recorded by `import` as it resolves each
         # module to its dylib (the loader binds the symbols at load). Deduped.
         self._link_dylibs: list = []
+        # Object files the program must link, recorded by elaboration as it
+        # instantiates generics on demand (ELABORATION.md). Deduped.
+        self._link_objects: list = []
+        # Imported names that are generic templates (not concrete exports):
+        # name -> the module source path, used to instantiate at call sites.
+        self._imported_generics: dict = {}
+        # extern decls for symbols elaboration produced at call sites (generic
+        # instantiations); emitted in the preamble like import extern decls.
+        self._elaborated_externs: list = []
         self._reset_func()
 
     def _reset_func(self):
@@ -2057,25 +2066,31 @@ class GimpleGen:
             try:
                 import imports as _imp
                 entry = _imp.resolve(module)   # the one authoritative module per name
-                if entry.dylib and entry.exports:
-                    if entry.dylib not in self._link_dylibs:
+                if entry.dylib:
+                    if entry.exports and entry.dylib not in self._link_dylibs:
                         self._link_dylibs.append(entry.dylib)
-                    return entry.exports, True
+                    return entry.exports, True, entry.source
             except Exception:
                 pass
             try:
-                return load_module(module), False
+                return load_module(module), False, None
             except Exception:
-                return {}, False
+                return {}, False, None
 
         def scan(stmt_list):
             for stmt in stmt_list:
                 if isinstance(stmt, FromImportStmt):
-                    exports, from_reflection = _exports(stmt.module)
+                    exports, from_reflection, source = _exports(stmt.module)
                     for name, alias in stmt.names:
                         info = exports.get(name)
                         sym = alias if alias else name
-                        if not info or sym in seen:
+                        if not info:
+                            # Not a concrete export — if the module source defines
+                            # it as a generic, record it for on-demand elaboration.
+                            if source and sym not in self._imported_generics:
+                                self._imported_generics[sym] = source
+                            continue
+                        if sym in seen:
                             continue
                         sig = info.get('signature')
                         if not sig:
@@ -4379,6 +4394,46 @@ class GimpleGen:
             return f"{self._type_expr_to_ann(node.obj)}.{node.member}"
         return ''
 
+    def _elaborate_generic_call(self, node: CallExpr):
+        """Elaborate Generic[TypeArgs](args) on an imported generic: instantiate the
+        template for those type args (CAS-cached), record the instantiation object
+        on the link line, and lower the call to the concrete symbol. Returns
+        (ctype, val) if elaborated, else None."""
+        g = node.func.obj.name
+        source = self._imported_generics.get(g)
+        if not source:
+            return None
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+        type_args = [self._type_expr_to_ann(e) for e in elems]
+        try:
+            module_src = open(source).read()
+            import elaborate
+            info = elaborate.Elaborator().elaborate_generic_call(module_src, g, type_args)
+        except Exception:
+            info = None
+        if not info:
+            return None
+
+        sym = info['symbol']
+        if info['object'] not in self._link_objects:
+            self._link_objects.append(info['object'])
+        self.func_return_types[sym] = info['ret']
+        self.func_param_types[sym] = info['params']
+        _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
+        if _decl not in self._elaborated_externs:
+            self._elaborated_externs.append(_decl)
+
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        if info['ret'] == 'void':
+            self._emit_call('', '', sym, arg_pairs)
+            t = self._new_temp('int')
+            self._emit(f"  {t} = 0;  /* void generic call */")
+            return 'int', t
+        t = self._new_temp(info['ret'])
+        self._emit_call(info['ret'], t, sym, arg_pairs)
+        return info['ret'], t
+
     def _lower_external_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower external_call["name", Ret](args) / _external_call_const[...] to a
         direct C call.  This is the irreducible primitive the stdlib bottoms out on
@@ -4586,6 +4641,13 @@ class GimpleGen:
         mlir_call = self._maybe_lower_mlir_op(node)
         if mlir_call is not None:
             return mlir_call
+        # Generic call site Generic[TypeArgs](args) on an imported generic →
+        # elaborate it to a concrete CAS-cached instantiation (ELABORATION.md).
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
+                and node.func.obj.name in self._imported_generics:
+            res = self._elaborate_generic_call(node)
+            if res is not None:
+                return res
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
         if not isinstance(node.func, IdentExpr):
@@ -8029,6 +8091,10 @@ class GimpleGen:
         # artifact / stdlib dylib, per ABI.md). Collected by the Phase-0 pre-pass.
         for _decl in getattr(self, '_link_import_decl_list', []):
             parts.append(_decl)
+        # extern decls for generic instantiations elaboration produced at call
+        # sites (their objects are recorded on the link line).
+        for _decl in getattr(self, '_elaborated_externs', []):
+            parts.append(_decl)
 
         # For all modules, declare extern references to known module globals structs
         # Each module can reference globals from other modules via these externs
@@ -8743,11 +8809,14 @@ def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:
 
 
 def compile_linked(mojo_src: str, filename: str = "") -> tuple:
-    """Link-mode compile that also returns the dylibs `import` recorded, so the
-    driver can hand them to the linker. Returns (c_code, [dylib_path, ...])."""
+    """Link-mode compile that also returns what the driver must link: the dylibs
+    `import` recorded and the object files elaboration produced (generic
+    instantiations). Returns (c_code, [dylib, ...], [object, ...])."""
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
     code = gen.gen_module(stmts)
-    return code, list(dict.fromkeys(gen._link_dylibs))
+    return (code,
+            list(dict.fromkeys(gen._link_dylibs)),
+            list(dict.fromkeys(gen._link_objects)))

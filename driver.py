@@ -40,9 +40,10 @@ def _prog_key(c_code, dylibs, gcc, flags):
         '\0'.join(sorted(os.path.basename(d) for d in dylibs)))
 
 
-def _build(c_code, dylibs, target, gcc, objflags):
+def _build(c_code, dylibs, objects, target, gcc, objflags):
     """Compile the client object (cached) and link it against the runtime dylib +
-    the import dylibs `import` recorded. Returns True on success."""
+    the import dylibs `import` recorded + the objects elaboration produced
+    (generic instantiations). Returns True on success."""
     import tempfile
     wd = tempfile.mkdtemp(prefix='mojo_drv_')
 
@@ -62,7 +63,7 @@ def _build(c_code, dylibs, target, gcc, objflags):
     link_dylibs = list(dict.fromkeys([rt] + list(dylibs)))
     rpaths = sorted({os.path.dirname(d) for d in link_dylibs})
 
-    link = [gcc, '-o', target, client_o] + link_dylibs
+    link = [gcc, '-o', target, client_o] + list(objects) + link_dylibs
     for rp in rpaths:
         link += [f'-Wl,-rpath,{rp}']
     if platform.system() != 'Darwin':
@@ -85,18 +86,19 @@ def compile_program(input_file, src, output=None, run=True,
     flags = (opt_flag or '-O0', debug_flag or '-g3')
     objflags = ('-fgimple', '-fPIC', f'-I{RUNTIME}') + flags
 
-    # `import` resolves dylibs and records them as a side effect of compiling.
-    c_code, dylibs = compile_linked(src, filename=input_file)
+    # `import` resolves dylibs and elaboration produces instantiation objects,
+    # both recorded as a side effect of compiling.
+    c_code, dylibs, objects = compile_linked(src, filename=input_file)
     target = os.path.abspath(output or os.path.splitext(os.path.basename(input_file))[0])
 
     # Warm path: the whole program is content-addressed — a cache hit is a copy.
-    pkey = _prog_key(c_code, dylibs, gcc, objflags)
+    pkey = _prog_key(c_code, list(dylibs) + list(objects), gcc, objflags)
     hit = cas.lookup(pkey, '')
     if hit:
         shutil.copy(hit, target)
         os.chmod(target, 0o755)
     else:
-        if not _build(c_code, dylibs, target, gcc, objflags):
+        if not _build(c_code, dylibs, objects, target, gcc, objflags):
             return None
         cas.publish(pkey, '', open(target, 'rb').read())
 

@@ -237,6 +237,35 @@ def test_resolution_authority(wd):
         os.environ.clear(); os.environ.update(old)
 
 
+# ── Elaboration slice 1: generic call → CAS-cached instantiation ──────────
+def test_elaboration_generic_call(wd):
+    import elaborate
+    from gimple_codegen import compile_linked
+    tmpl_mod = "fn box[T](x: T) -> T:\n    return x\n"
+    el = elaborate.Elaborator()
+    i64 = el.elaborate_generic_call(tmpl_mod, 'box', ['Int64'])
+    i32 = el.elaborate_generic_call(tmpl_mod, 'box', ['Int32'])
+    again = el.elaborate_generic_call(tmpl_mod, 'box', ['Int64'])
+    check("elaborate: generic instantiated to a concrete symbol",
+          bool(i64) and i64['symbol'] == 'box_Int64' and i64['ret'] == 'int64_t')
+    check("elaborate: distinct type args → distinct instantiations",
+          i64['object'] != i32['object'] and i32['symbol'] == 'box_Int32')
+    check("elaborate: re-instantiation is a CAS hit (same object)",
+          again['object'] == i64['object'])
+    # codegen wiring: a generic call site emits an extern + concrete call and
+    # records the instantiation object on the link line.
+    gl = os.path.join(RUNTIME, 'el_genlib.mojo')
+    open(gl, 'w').write("fn box[T](x: T) -> T:\n    return x\n")
+    try:
+        client = "from el_genlib import box\nfn main():\n    var y = box[Int64](42)\n"
+        code, dylibs, objects = compile_linked(client)
+        check("elaborate: client emits extern + concrete call + records object",
+              'extern int64_t box_Int64' in code and 'box_Int64 (' in code
+              and len(objects) == 1)
+    finally:
+        os.remove(gl)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -249,6 +278,7 @@ def main():
         test_stage5_monomorphization(wd)
         test_stage6_comptime(wd)
         test_resolution_authority(wd)
+        test_elaboration_generic_call(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

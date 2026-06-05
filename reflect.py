@@ -10,6 +10,8 @@ This replaces `module_loader.py`'s line-regex signature extraction with an
 AST-driven, ABI-accurate one: signatures come from the same type mapping the
 codegen uses, so the declared signature matches the emitted symbol exactly.
 """
+import re
+
 from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
 from gimple_codegen import _mojo_type
 
@@ -36,7 +38,14 @@ def collect_exports(stmts) -> list:
 
 
 def collect_exports_src(src: str) -> list:
-    return collect_exports(Parser(tokenize(src)).parse_module())
+    """Exports of a module's source — minus generic templates. A `fn name[...]`
+    is parametric: it has no single concrete symbol to put in the dylib, so it is
+    NOT a reflection export. Instead, importers see it as a generic and elaborate
+    it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
+    from the source text.)"""
+    generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
+    return [e for e in collect_exports(Parser(tokenize(src)).parse_module())
+            if e['name'] not in generic]
 
 
 def _cstr(s: str) -> str:
