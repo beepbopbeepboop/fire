@@ -118,7 +118,7 @@ class MojoClass:
 class Interpreter:
     """Executes Mojo AST nodes."""
 
-    def __init__(self, filename=None):
+    def __init__(self, filename: str = None):
         # Increase recursion limit for meta-programming (interpreter on itself)
         import sys
         old_limit = sys.getrecursionlimit()
@@ -219,7 +219,7 @@ class Interpreter:
         except ImportError:
             pass
 
-    def execute(self, node):
+    def execute(self, node: object) -> object:
         """Execute an AST node."""
         if node is None:
             return None
