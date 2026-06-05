@@ -3409,6 +3409,12 @@ class GimpleGen:
             xv_cast = self._cast_for_list(xt, xv, suf)
             self._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
         elif rt == 'MojoDict *':
+            # Ensure key is char * for dict operations (all dict keys are strings in runtime)
+            if xt != 'char *':
+                xv_cast = self._new_temp('char *')
+                self._emit(f"  {xv_cast} = (char *){xv};")
+                xv = xv_cast
+                xt = 'char *'
             self._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
         elif rt == 'MojoSet *':
             if xt == 'char *':
@@ -3739,6 +3745,12 @@ class GimpleGen:
                 default_val = '0'
                 if len(node.args) > 1:
                     _, default_val = self.lower_expr(node.args[1])
+                # Ensure key is char * for dict operations (all dict keys are strings in runtime)
+                if key_type != 'char *':
+                    cast_key = self._new_temp('char *')
+                    self._emit(f"  {cast_key} = (char *){key_val};")
+                    key_val = cast_key
+                    key_type = 'char *'
                 val_type = self._dict_val_of(ov)
                 if val_type == 'char *':
                     t = self._new_temp('char *')
@@ -3758,6 +3770,12 @@ class GimpleGen:
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop' and node.args:
                 key_type, key_val = self.lower_expr(node.args[0])
+                # Ensure key is char * for dict operations (all dict keys are strings in runtime)
+                if key_type != 'char *':
+                    cast_key = self._new_temp('char *')
+                    self._emit(f"  {cast_key} = (char *){key_val};")
+                    key_val = cast_key
+                    key_type = 'char *'
                 t = self._new_temp('int64_t')
                 self._emit_call('int64_t', t, 'mojo_dict_pop_int', [('MojoDict *', ov), (key_type, key_val)])
                 return 'int64_t', t
