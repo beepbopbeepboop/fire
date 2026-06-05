@@ -8103,7 +8103,7 @@ class GimpleGen:
         parts.append("void Parser___init__ (Parser *, MojoList *);")
         parts.append("void Interpreter___init__ (Interpreter *, char *);")
         parts.append("int Interpreter_execute (Interpreter *, int);")
-        parts.append("void jit_compile_and_execute (char *, char *);  /* from mojo.py */")
+        parts.append("void jit_compile_and_execute (char *, int64_t);  /* from mojo.py */")
         parts.append('')
 
         # Forward declarations for lifted closures + env allocator helpers
