@@ -14,16 +14,22 @@ import argparse
 from pathlib import Path
 from module_loader import STDLIB_PATH
 
+# Subtrees of the stdlib to attempt, in the order we want maximal coverage:
+# benchmarks first (smallest, exercises real client code), then the library
+# proper, then the test corpus, then tools.
+DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools']
+
 def get_stdlib_path():
-    """Return the path to the stdlib std directory."""
-    stdlib_std_path = Path(STDLIB_PATH) / "std"
-    return stdlib_std_path.resolve()
+    """Return the path to the stdlib root directory (parent of std/, test/, ...)."""
+    return Path(STDLIB_PATH).resolve()
 
-def find_mojo_files(base_path, module=None):
+def find_mojo_files(base_path, roots=None, module=None):
     """
-    Find all .mojo files in stdlib.
+    Find all .mojo files in the stdlib subtrees named in `roots`.
 
-    If module is specified, only search that module's subdirectory.
+    If `module` is specified, only search that module's subdirectory under std/.
+    Paths are yielded relative to the stdlib root so display shows e.g.
+    "benchmarks/...", "std/...", "test/...".
     Yields (relative_path, absolute_path) tuples.
     """
     base = Path(base_path)
@@ -32,17 +38,20 @@ def find_mojo_files(base_path, module=None):
         return
 
     if module:
-        module_path = base / module
+        module_path = base / "std" / module
         if not module_path.exists():
             print(f"Error: module path not found: {module_path}", file=sys.stderr)
             return
-        search_root = module_path
-    else:
-        search_root = base
+        for mojo_file in sorted(module_path.rglob("*.mojo")):
+            yield (mojo_file.relative_to(base), mojo_file)
+        return
 
-    for mojo_file in sorted(search_root.rglob("*.mojo")):
-        rel_path = mojo_file.relative_to(base)
-        yield (rel_path, mojo_file)
+    for root in (roots or DEFAULT_ROOTS):
+        search_root = base / root
+        if not search_root.exists():
+            continue
+        for mojo_file in sorted(search_root.rglob("*.mojo")):
+            yield (mojo_file.relative_to(base), mojo_file)
 
 def transpile_file(mojo_file):
     """
@@ -97,19 +106,25 @@ def transpile_file(mojo_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Attempt to transpile Mojo stdlib")
-    parser.add_argument('--module', default=None, help='Restrict to a specific module (e.g., time)')
+    parser.add_argument('--module', default=None, help='Restrict to a specific module under std/ (e.g., time)')
+    parser.add_argument('--roots', default=None,
+                        help='Comma-separated subtrees to scan (default: %s)' % ','.join(DEFAULT_ROOTS))
     args = parser.parse_args()
 
-    stdlib_std_path = get_stdlib_path()
-    print(f"Stdlib path: {stdlib_std_path}")
+    roots = [r.strip() for r in args.roots.split(',')] if args.roots else DEFAULT_ROOTS
 
-    if not stdlib_std_path.exists():
+    stdlib_root = get_stdlib_path()
+    print(f"Stdlib path: {stdlib_root}")
+    if not args.module:
+        print(f"Scanning roots: {', '.join(roots)}")
+
+    if not stdlib_root.exists():
         print(f"ERROR: stdlib path does not exist", file=sys.stderr)
-        print(f"Expected: {stdlib_std_path}", file=sys.stderr)
+        print(f"Expected: {stdlib_root}", file=sys.stderr)
         sys.exit(1)
 
     # Find .mojo files
-    mojo_files = list(find_mojo_files(stdlib_std_path, args.module))
+    mojo_files = list(find_mojo_files(stdlib_root, roots=roots, module=args.module))
     if not mojo_files:
         print(f"No .mojo files found")
         if args.module:

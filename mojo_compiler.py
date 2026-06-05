@@ -654,6 +654,16 @@ class Parser:
             raise SyntaxError(f"Expected {value!r} got {t.value!r}")
         return self._advance()
 
+    def _ident(self) -> str:
+        """Consume an identifier, allowing keywords (e.g. `out`, `mut`) and
+        backtick-quoted names to be used as plain identifiers."""
+        t = self._peek()
+        if t.kind in ("NAME", "KW"):
+            return self._advance().value
+        if t.kind == "STRING" and t.value.startswith("`"):
+            return self._advance().value
+        raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+
     def _skip_newlines(self):
         while self._peek().kind == "NEWLINE": self._advance()
 
@@ -874,7 +884,7 @@ class Parser:
             module += "." + self._expect("NAME").value
         alias = None
         if self._is_kw("as"):
-            self._advance(); alias = self._expect("NAME").value
+            self._advance(); alias = self._ident()
         return ImportStmt(module=module, alias=alias, line=t.line, col=t.col)
 
     def _parse_from_import(self):
@@ -914,7 +924,7 @@ class Parser:
         name = self._expect("NAME").value
         alias = None
         if self._is_kw("as"):
-            self._advance(); alias = self._expect("NAME").value
+            self._advance(); alias = self._ident()
         names.append((name, alias))
         # Parse remaining names
         while True:
@@ -934,7 +944,7 @@ class Parser:
             name = self._expect("NAME").value
             alias = None
             if self._is_kw("as"):
-                self._advance(); alias = self._expect("NAME").value
+                self._advance(); alias = self._ident()
             names.append((name, alias))
         return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
 
@@ -1184,7 +1194,8 @@ class Parser:
                     break
         # Skip function qualifiers (unified, register_passable, capturing, raises,
         # calling-convention markers thin/abi("C"), etc.)
-        while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises", "thin", "abi"):
+        # ('raises' lexes as a keyword, the rest as names.)
+        while self._peek().kind in ("NAME", "KW") and self._peek().value in ("unified", "register_passable", "capturing", "raises", "thin", "abi"):
             self._advance()
             # abi may take a parenthesized convention string: abi("C")
             if self._peek().kind == "LPAREN":
@@ -1323,12 +1334,12 @@ class Parser:
         expr = self._parse_expr(0)
         alias = None
         if self._is_kw("as"):
-            self._advance(); alias = self._expect("NAME").value
+            self._advance(); alias = self._ident()
         items.append(WithItem(expr=expr, alias=alias))
         while self._peek().kind == "COMMA":
             self._advance(); expr = self._parse_expr(0); alias = None
             if self._is_kw("as"):
-                self._advance(); alias = self._expect("NAME").value
+                self._advance(); alias = self._ident()
             items.append(WithItem(expr=expr, alias=alias))
         self._expect("COLON")
         return WithStmt(items=items, body=self._parse_block())
@@ -1407,7 +1418,19 @@ class Parser:
         return ComptimeIfStmt(condition=cond,then_body=body,elifs=elifs,else_body=else_body)
 
     def _parse_comptime_for(self):
-        self._expect("KW","for"); target=self._expect("NAME").value
+        self._expect("KW","for")
+        # Optional convention keyword (var, ref, ...) before the target
+        if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+            self._advance()
+        # Support tuple targets: comptime for i, j in product(...)
+        target = self._ident()
+        if self._peek().kind == "COMMA":
+            names = [target]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._is_kw("in"): break
+                names.append(self._ident())
+            target = "(" + ", ".join(names) + ")"
         self._expect("KW","in"); iterable=self._parse_expr(0)
         self._expect("COLON")
         return ComptimeForStmt(target=target,iterable=iterable,body=self._parse_block())
@@ -1602,11 +1625,15 @@ class Parser:
                         self._expect("RBRACKET")
                         expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
                     else:
-                        # Check for slice with empty start (e.g., [:10] or [:-2])
+                        # Check for slice with empty start (e.g., [:10], [:-2], [::2], [::-1])
                         if self._peek().kind == "COLON":
                             self._advance()
-                            stop = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
-                            expr = SliceExpr(obj=expr, start=None, stop=stop)
+                            stop = None if self._peek().kind in ("RBRACKET", "COLON") else self._parse_expr(0)
+                            step = None
+                            if self._peek().kind == "COLON":
+                                self._advance()
+                                step = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
+                            expr = SliceExpr(obj=expr, start=None, stop=stop, step=step)
                             self._expect("RBRACKET")
                         else:
                             # Parse positional index
@@ -1654,11 +1681,15 @@ class Parser:
                                             self._advance(); self._parse_type_ann()
                                         indices.append(e)
                                 idx = TupleExpr(elements=indices)
-                            # Check for slice notation
+                            # Check for slice notation (start:stop[:step])
                             if self._peek().kind == "COLON":
                                 self._advance()
-                                stop = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
-                                expr = SliceExpr(obj=expr, start=idx, stop=stop)
+                                stop = None if self._peek().kind in ("RBRACKET", "COLON") else self._parse_expr(0)
+                                step = None
+                                if self._peek().kind == "COLON":
+                                    self._advance()
+                                    step = None if self._peek().kind == "RBRACKET" else self._parse_expr(0)
+                                expr = SliceExpr(obj=expr, start=idx, stop=stop, step=step)
                             else:
                                 expr = SubscriptExpr(obj=expr, index=idx)
                             self._expect("RBRACKET")
@@ -1738,6 +1769,11 @@ class Parser:
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
             self._advance()
+            # Allow an ownership/convention prefix inside a parenthesized binding
+            # target, e.g. tuple unpacking `(var x), (ref y) = ...`.
+            if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                    and self._peek(1).kind in ("NAME", "KW")):
+                self._advance()
             if self._peek().kind == "RPAREN":
                 self._advance(); return TupleExpr(elements=[], line=line, col=col)
             first = self._parse_expr(0)
@@ -1799,9 +1835,9 @@ class Parser:
             self._advance(); return ListExpr(elements=[])
         first = self._parse_expr(0)
         if self._is_kw("for"):
-            gen = self._parse_generator()
+            gens = self._parse_generators()
             self._expect("RBRACKET")
-            return Comprehension(kind="list", element=first, generators=[gen])
+            return Comprehension(kind="list", element=first, generators=gens)
         elems = [first]
         while self._peek().kind == "COMMA":
             self._advance()
@@ -1833,9 +1869,9 @@ class Parser:
         if self._peek().kind == "COLON":
             self._advance(); val = self._parse_expr(0)
             if self._is_kw("for"):
-                gen = self._parse_generator()
+                gens = self._parse_generators()
                 self._expect("RBRACE")
-                return Comprehension(kind="dict", element=first, key=val, generators=[gen])
+                return Comprehension(kind="dict", element=first, key=val, generators=gens)
             pairs = [(first, val)]
             while self._peek().kind == "COMMA":
                 self._advance()
@@ -1845,9 +1881,9 @@ class Parser:
             self._expect("RBRACE")
             return DictExpr(pairs=pairs)
         if self._is_kw("for"):
-            gen = self._parse_generator()
+            gens = self._parse_generators()
             self._expect("RBRACE")
-            return Comprehension(kind="set", element=first, generators=[gen])
+            return Comprehension(kind="set", element=first, generators=gens)
         # Handle named field if first element is followed by =
         if self._peek().kind == "ASSIGN":
             self._advance(); self._parse_expr(0)
@@ -1913,6 +1949,14 @@ class Parser:
             self._advance(); conditions.append(self._parse_expr(1))
         return Generator(target=target, iterable=iterable, conditions=conditions)
 
+    def _parse_generators(self):
+        """Parse one or more chained `for ... in ... [if ...]` clauses, as in
+        nested comprehensions: {a*b for a in xs for b in ys}."""
+        gens = [self._parse_generator()]
+        while self._is_kw("for"):
+            gens.append(self._parse_generator())
+        return gens
+
     def _skip_bracketed(self):
         """Consume a balanced [...] block."""
         self._expect("LBRACKET")
@@ -1928,8 +1972,9 @@ class Parser:
     def _skip_fn_quals(self):
         """Skip function-type qualifiers between a parameter list and `->`:
         capturing, raises, unified, register_passable, and calling-convention
-        markers thin / abi("C")."""
-        while self._peek().kind == "NAME" and self._peek().value in (
+        markers thin / abi("C"). Note `raises` lexes as a keyword, the rest as
+        plain names, so accept both token kinds."""
+        while self._peek().kind in ("NAME", "KW") and self._peek().value in (
             "capturing", "raises", "unified", "register_passable", "thin", "abi"):
             self._advance()
             # abi may take a parenthesized convention string: abi("C")
@@ -2003,7 +2048,8 @@ class Parser:
                         elif t.kind == "EOF": break
                 # Skip optional qualifiers like 'capturing', 'raises', 'unified',
                 # calling-convention markers 'thin'/'abi("C")', etc.
-                while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable", "thin", "abi"):
+                # ('raises' lexes as a keyword, the rest as names.)
+                while self._peek().kind in ("NAME", "KW") and self._peek().value in ("capturing", "raises", "unified", "register_passable", "thin", "abi"):
                     self._advance()
                     # abi may take a parenthesized convention string: abi("C")
                     if self._peek().kind == "LPAREN":
@@ -2145,6 +2191,9 @@ def emit(node, indent: int = 0) -> str:
     if isinstance(node,SliceExpr):
         start = emit(node.start, 0) if node.start is not None else ""
         stop  = emit(node.stop, 0)  if node.stop  is not None else ""
+        step  = getattr(node, "step", None)
+        if step is not None:
+            return f"{emit(node.obj, 0)}[{start}:{stop}:{emit(step, 0)}]"
         return f"{emit(node.obj, 0)}[{start}:{stop}]"
     if isinstance(node,ListExpr): return "[" + ", ".join(emit(e, 0) for e in node.elements) + "]"
     if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k, 0)}: {emit(v, 0)}" for k,v in node.pairs) + "}"
