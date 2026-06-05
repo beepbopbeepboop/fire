@@ -7571,13 +7571,19 @@ class GimpleGen:
 
         # For all modules, declare extern references to known module globals structs
         # Each module can reference globals from other modules via these externs
-        # Always declare root module globals since all code may reference them
-        all_modules_to_declare = set(['root']) if not self.emit_entry_points else set()
+        # For non-root modules, always declare root module globals since all code may reference them
+        our_mod = self.module_name or "root"
+        all_modules_to_declare = set()
+
+        # If this is not the root module, always declare root's globals (it's special)
+        if our_mod != "root":
+            all_modules_to_declare.add("root")
+
+        # Also add all modules we know about
         all_modules_to_declare.update(self._module_globals.keys())
 
         for mod_name in list(all_modules_to_declare):
             # Skip declaring our own module as extern
-            our_mod = self.module_name or "root"
             if mod_name == our_mod:
                 continue
             safe_mod = _safe_name(str(mod_name)) if mod_name else "root"
