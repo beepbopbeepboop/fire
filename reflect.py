@@ -16,6 +16,13 @@ from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
 from gimple_codegen import _mojo_type
 
 
+# Symbol kinds — must match reflect.h.
+SYM_FUNCTION = 0
+SYM_METHOD = 1
+SYM_GLOBAL = 2
+SYM_TYPE = 3
+
+
 def _c_signature(name: str, return_type, params) -> str:
     """Build the C signature string for an exported function, per ABI.md."""
     cret = _mojo_type(return_type) if return_type else 'void'
@@ -23,17 +30,62 @@ def _c_signature(name: str, return_type, params) -> str:
     return f"{cret} {name} ({cparams})"
 
 
+def _struct_layout_sig(s, struct_names) -> str:
+    """Encode a concrete struct's field layout as a C-ABI descriptor string:
+    `struct Name { ctype field; ... }`. The importer parses this back into a
+    typedef so it can materialize the type without re-reading source — the real
+    import boundary is the reflection table, not the .mojo file (ABI.md)."""
+    fields = []
+    for f in getattr(s, 'fields', []):
+        fields.append(f"{_mt(f.type_ann, struct_names)} {f.name};")
+    return f"struct {s.name} {{ {' '.join(fields)} }}"
+
+
+def _mt(ann, struct_names) -> str:
+    """C type of a field/method param/return, resolving a local struct type to a
+    pointer (the codegen passes/returns aggregates by pointer, per ABI.md)."""
+    if ann in struct_names:
+        return f"{ann} *"
+    return _mojo_type(ann)
+
+
 def collect_exports(stmts) -> list:
-    """Exported symbols of a module: top-level, non-underscore functions (and,
-    later, methods/types). Returns dicts {name, signature, kind}."""
+    """Exported symbols of a module: top-level non-underscore functions, plus
+    concrete (non-generic) struct types and their methods. Returns dicts
+    {name, signature, kind}.
+
+    A concrete struct becomes a TYPE entry (its field layout) plus one METHOD
+    entry per public method (`Struct.method`, signature with a leading `self`
+    pointer). This is what lets the real-stdlib distribution path work: the
+    importer reads the layout + method symbols from the table and links the
+    method bodies from the dylib — it never re-reads the type's source."""
+    struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
     exports = []
     for s in stmts:
         if isinstance(s, FunctionDef) and not s.name.startswith('_'):
             exports.append({
                 'name': s.name,
                 'signature': _c_signature(s.name, s.return_type, s.params),
-                'kind': 0,  # MOJO_SYM_FUNCTION
+                'kind': SYM_FUNCTION,
             })
+        elif isinstance(s, StructDef) and not s.name.startswith('_'):
+            exports.append({
+                'name': s.name,
+                'signature': _struct_layout_sig(s, struct_names),
+                'kind': SYM_TYPE,
+            })
+            for m in getattr(s, 'methods', []):
+                # Mangled C symbol is Struct_method (matches gimple_codegen);
+                # self is the first param, passed by pointer.
+                msym = f"{s.name}_{m.name}"
+                cret = _mt(m.return_type, struct_names) if m.return_type else 'void'
+                cparams = [f"{s.name} *"] + [
+                    _mt(t, struct_names) for n, t in m.params if n != 'self']
+                exports.append({
+                    'name': f"{s.name}.{m.name}",   # lookup key (method)
+                    'signature': f"{cret} {msym} ({', '.join(cparams)})",
+                    'kind': SYM_METHOD,
+                })
     return exports
 
 
@@ -44,6 +96,10 @@ def collect_exports_src(src: str) -> list:
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
     from the source text.)"""
     generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
+    # Generic struct templates (`struct Name[T]`) aren't a concrete type either —
+    # they're instantiated per type-args at use sites (ELABORATION.md slice 5),
+    # not a single layout in the dylib. Only concrete structs become TYPE entries.
+    generic |= set(re.findall(r'\bstruct\s+(\w+)\s*\[', src))
     # Overloaded names (same name, multiple non-generic defs) aren't a single
     # concrete symbol either — they're selected + instantiated per call site.
     counts = {}
@@ -51,8 +107,12 @@ def collect_exports_src(src: str) -> list:
         counts[n] = counts.get(n, 0) + 1
     overloaded = {n for n, c in counts.items() if c > 1}
     skip = generic | overloaded
+    # An export's base name is the symbol before any `.` (a method export is
+    # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
+    # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
+    # parametric on its own.
     return [e for e in collect_exports(Parser(tokenize(src)).parse_module())
-            if e['name'] not in skip]
+            if e['name'].split('.', 1)[0] not in skip]
 
 
 def _cstr(s: str) -> str:
@@ -64,17 +124,36 @@ def emit_table_c(exports: list) -> str:
     Compiled into the dylib alongside the module objects."""
     L = ['/* Generated reflection table — reflect.py (see reflect.h) */',
          '#include "reflect.h"', '']
-    # Forward-declare each function so `&name` resolves at dylib link time.
+    # Emit a typedef for each exported concrete struct type so the method
+    # forward-declarations below (which take `Name *`) type-check.
+    for e in exports:
+        if e['kind'] == SYM_TYPE:
+            body = e['signature'].split('{', 1)[1].rsplit('}', 1)[0].strip()
+            L.append(f"typedef struct {{ {body} }} {e['name']};")
+    L.append('')
+    # Forward-declare each callable so `&symbol` resolves at dylib link time.
+    # TYPE entries (kind 3) are layout descriptors with no runtime symbol — they
+    # carry a NULL address and are never forward-declared. The C symbol of a
+    # METHOD entry is the name inside its signature, not the lookup key
+    # (`Struct.method`), so we extract it.
     seen = set()
     for e in exports:
-        if e['name'] not in seen:
-            seen.add(e['name'])
+        if e['kind'] == SYM_TYPE:
+            continue
+        sym = e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+        if sym not in seen:
+            seen.add(sym)
             L.append(f"extern {e['signature']};")
     L.append('')
     L.append('static const MojoReflectSym _mojo_syms[] = {')
     for e in exports:
+        if e['kind'] == SYM_TYPE:
+            addr = '0'
+        else:
+            sym = e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+            addr = '(void *)' + sym
         L.append(f"  {{ {_cstr(e['name'])}, {_cstr(e['signature'])}, "
-                 f"(void *){e['name']}, {e['kind']} }},")
+                 f"{addr}, {e['kind']} }},")
     if not exports:
         L.append('  { 0, 0, 0, 0 }')  # avoid a zero-length array
     L.append('};')

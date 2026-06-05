@@ -1872,6 +1872,7 @@ class GimpleGen:
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
+        self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
         self._sub_toplevels: list[str] = []  # ordered list of sub-module toplevel fn names (shared)
         self._has_toplevel_code: bool = False  # set per-module; whether root has top-level statements
@@ -2124,6 +2125,17 @@ class GimpleGen:
                             continue
                         if sym in seen:
                             continue
+                        # A concrete struct TYPE import (kind 3, MOJO_SYM_TYPE):
+                        # materialize its layout from the reflection table and
+                        # register its methods (kind 1) as externs. This is the
+                        # real-stdlib distribution path — the type + method bodies
+                        # live in the compiled dylib; the client sees only the
+                        # layout + extern method symbols (not inlined source).
+                        if from_reflection and info.get('kind') == 3:
+                            seen.add(sym)
+                            self._register_reflected_struct(
+                                sym, info, exports, _parse_c_sig)
+                            continue
                         sig = info.get('signature')
                         if not sig:
                             continue
@@ -2149,6 +2161,53 @@ class GimpleGen:
 
         scan(stmts)
         return decls
+
+    def _register_reflected_struct(self, name, type_info, exports, parse_c_sig):
+        """Materialize a concrete struct imported from a dylib's reflection table.
+
+        `type_info` is the MOJO_SYM_TYPE entry (signature = a layout descriptor
+        `struct Name { ctype field; ... }`); `exports` is the full reflection
+        dict, from which we pick the struct's MOJO_SYM_METHOD entries
+        (`Name.method`). We register the layout (so the typedef is emitted),
+        declare each method extern, and record their return/param C types so call
+        sites lower to the dylib's symbols. This is the import path a real,
+        already-compiled stdlib type takes: only layout + externs cross the
+        boundary — the bodies are linked from the dylib (see ABI.md, ELABORATION.md
+        which complements this with the from-source generic-struct path)."""
+        # Parse the layout descriptor into {field: ctype}, preserving order.
+        sig = type_info.get('signature', '')
+        fields: dict[str, str] = {}
+        inner = sig.split('{', 1)[1].rsplit('}', 1)[0] if '{' in sig else ''
+        for decl in inner.split(';'):
+            decl = decl.strip()
+            if not decl:
+                continue
+            parts = decl.rsplit(' ', 1)
+            if len(parts) == 2:
+                ctype, fname = parts[0].strip(), parts[1].strip()
+                fields[fname] = ctype
+        if not self.struct_field_types.get(name):
+            self.struct_field_types[name] = fields
+        # Register each method (kind 1) belonging to this struct.
+        for ename, einfo in exports.items():
+            if einfo.get('kind') != 1 or not ename.startswith(name + '.'):
+                continue
+            msig = einfo.get('signature', '')
+            if not msig:
+                continue
+            mret, mptypes = parse_c_sig(msig)
+            # The C symbol is the function name inside the signature.
+            msym = msig.split('(', 1)[0].strip().split()[-1].lstrip('*')
+            self.func_return_types[msym] = mret
+            self.func_param_types[msym] = mptypes
+            if msym == f"{name}___init__":
+                self._struct_has_init.add(name)
+                # The C signature gives no param names; record positional
+                # placeholders so a kwarg ctor binds by source order (below).
+                self._struct_init_params.setdefault(name, [])
+            decl = f'extern {msig};'
+            if decl not in self._elaborated_externs:
+                self._elaborated_externs.append(decl)
 
     def _new_bb(self) -> str:
         self.bb_counter += 1
@@ -5175,9 +5234,27 @@ class GimpleGen:
             arg_pairs = [(f"{struct_name} *", t)]  # self parameter
             for arg in args:
                 arg_pairs.append(self.lower_expr(arg))
-            # Pad missing args with 0 when the __init__ has more params than provided
             full_params = self.func_param_types.get(init_fname, [])
             expected = len(full_params) - 1  # -1 for self
+            # Bind keyword args to the __init__ parameters. For a struct whose
+            # source we have, init_pnames gives the parameter names, so a kwarg
+            # binds at the position of its named parameter. For a reflected
+            # struct (no param names from the C signature), bind kwargs in source
+            # order after the positional args.
+            init_pnames = self._struct_init_params.get(struct_name, [])
+            if kwargs and init_pnames:
+                kw = dict(kwargs)
+                for idx, pname in enumerate(init_pnames):
+                    if pname not in kw:
+                        continue
+                    pos = idx + 1  # +1 for self slot
+                    while len(arg_pairs) <= pos:
+                        arg_pairs.append(('int', '0'))
+                    arg_pairs[pos] = self.lower_expr(kw[pname])
+            elif kwargs:
+                for _kn, kexpr in kwargs:
+                    arg_pairs.append(self.lower_expr(kexpr))
+            # Pad any still-missing args with 0.
             while len(arg_pairs) - 1 < expected:
                 arg_pairs.append(('int', '0'))
             self._emit_call('void', '', init_fname, arg_pairs)
@@ -7706,6 +7783,11 @@ class GimpleGen:
                     exports = load_module(s.module)
                     for name, alias in s.names:
                         sym_name = alias if alias else name
+                        # A name already materialized as a concrete type from the
+                        # reflection table (link mode, kind 3) is a struct, not a
+                        # callable — don't also emit an `extern int Name ();`.
+                        if sym_name in self.struct_field_types:
+                            continue
                         sym_info = exports.get(name, {})
 
                         # Handle both old format (string) and new format (dict)
@@ -7785,6 +7867,11 @@ class GimpleGen:
                     for m in s.methods:
                         if m.name == '__init__':
                             self._struct_has_init.add(s.name)
+                            # Record __init__ param names (excl self) so a
+                            # keyword-arg constructor call (Counter(start=...))
+                            # binds kwargs to the right __init__ parameters.
+                            self._struct_init_params[s.name] = [
+                                pn for pn, _pt in m.params if pn != 'self']
                         if m.return_type is None:
                             for i, (pname, ptype) in enumerate(m.params):
                                 if i == 0 and pname == 'self':

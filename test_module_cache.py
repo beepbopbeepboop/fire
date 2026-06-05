@@ -409,6 +409,79 @@ def test_elaboration_trait_conformance(wd):
     check("slice6: unbounded type parameter is not blocked", bool(nb))
 
 
+# ── Reflected concrete struct type import (the real-stdlib distribution path) ─
+def test_reflected_struct_import(wd):
+    """A client imports a *concrete, already-compiled* struct type from a module
+    dylib. The type's layout + methods cross the boundary via the reflection
+    table (MOJO_SYM_TYPE kind 3 + MOJO_SYM_METHOD kind 1) — NOT inlined source.
+    The client materializes the layout from reflection, constructs the type, and
+    calls its methods linked from the dylib. This is the real-stdlib path (type +
+    method bodies live in the dylib); it complements slice 5, which materializes a
+    *generic* struct from source at the call site."""
+    import imports
+    from gimple_codegen import compile_linked
+    mod = ("struct Counter:\n"
+           "    var n: Int64\n"
+           "    fn __init__(out self, start: Int64):\n"
+           "        self.n = start\n"
+           "    fn increment(self) -> Int64:\n"
+           "        return self.n + 1\n"
+           "    fn value(self) -> Int64:\n"
+           "        return self.n\n")
+    # Reflection emitter: a concrete struct → one TYPE entry (layout) + one
+    # METHOD entry per method, with the `Struct_method` C symbol.
+    exps = {e['name']: e for e in reflect.collect_exports_src(mod)}
+    check("reflect: concrete struct emits a TYPE (kind 3) layout entry",
+          exps.get('Counter', {}).get('kind') == reflect.SYM_TYPE
+          and 'int64_t n;' in exps['Counter']['signature'])
+    check("reflect: each method emits a METHOD (kind 1) entry with self pointer",
+          exps.get('Counter.increment', {}).get('kind') == reflect.SYM_METHOD
+          and exps['Counter.increment']['signature']
+              == 'int64_t Counter_increment (Counter *)')
+
+    libpath = os.path.join(RUNTIME, 'rs_cnt.mojo')
+    open(libpath, 'w').write(mod)
+    try:
+        imports.reset_resolver()
+        # The resolver builds the dylib and reads its reflection table. The struct
+        # type is materialized from kind 3 — never from inlined source.
+        entry = imports.resolve('rs_cnt')
+        check("reflect: importer reads the struct type from the dylib reflection",
+              bool(entry.dylib) and entry.exports.get('Counter', {}).get('kind') == 3)
+
+        client = ("from rs_cnt import Counter\n"
+                  "fn main():\n"
+                  "    var c = Counter(41)\n"
+                  "    var v = c.increment()\n"
+                  "    var w = c.value()\n"
+                  "    if v == 42:\n"
+                  "        if w == 41:\n"
+                  "            var ok = \"rs\\n\"\n"
+                  "            var n = external_call[\"write\", Int64](1, ok, 3)\n")
+        code, dylibs, _objs = compile_linked(client)
+        check("reflect: client materializes the layout + method externs (no body)",
+              'typedef struct Counter' in code
+              and 'extern int64_t Counter_increment (Counter *);' in code
+              and 'Counter_increment (Counter *self)' not in code
+              and len(dylibs) == 1)
+
+        cc = os.path.join(wd, 'rs.c'); open(cc, 'w').write(code)
+        co = os.path.join(wd, 'rs.o')
+        subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
+        rt = bsd.runtime_dylib()
+        exe = os.path.join(wd, 'rs')
+        subprocess.run([GCC, '-o', exe, co, rt, *dylibs,
+                        f'-Wl,-rpath,{os.path.dirname(rt)}',
+                        *[f'-Wl,-rpath,{os.path.dirname(d)}' for d in dylibs]], check=True)
+        check("reflect: client links the dylib's struct methods and runs",
+              _run(exe).stdout.startswith('rs'))
+        sz = os.path.getsize(co)
+        check("reflect: client object is tiny — bodies live in the dylib",
+              sz < 8192, f"{sz} bytes")
+    finally:
+        os.remove(libpath)
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -468,6 +541,7 @@ def main():
         test_elaboration_generic_struct(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
+        test_reflected_struct_import(wd)
         test_review_fixes_monomorphize_overload(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
