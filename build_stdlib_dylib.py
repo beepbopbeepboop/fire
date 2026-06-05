@@ -99,19 +99,46 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # Bundle the runtime so the dylib is self-contained.
-    rt_o = os.path.join(workdir, 'mojo_runtime.o')
-    subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', rt_o,
-                    os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
-    objs.append(rt_o)
-
-    if platform.system() == 'Darwin':
-        link = [gcc, '-dynamiclib',
-                '-install_name', '@rpath/' + os.path.basename(out),
-                '-o', out] + objs
-    else:
-        link = [gcc, '-shared', '-fPIC', '-o', out] + objs
+    # Runtime is a FIRST-CLASS dylib (see runtime_dylib), not bundled here. The
+    # module dylib leaves mojo_* runtime symbols undefined; the loader resolves
+    # them from the runtime dylib that the program also links. We don't reinvent
+    # dyld — it already does cross-dylib symbol resolution at scale.
+    link = _dylink(gcc, out, objs, undefined=True)
     subprocess.run(link, check=True)
+    return out
+
+
+def _dylink(gcc, out, objs, undefined=False):
+    """Platform dylib link command. undefined=True allows unresolved symbols
+    (resolved at load from other dylibs, via dyld dynamic lookup)."""
+    if platform.system() == 'Darwin':
+        cmd = [gcc, '-dynamiclib',
+               '-install_name', '@rpath/' + os.path.basename(out), '-o', out]
+        if undefined:
+            cmd += ['-undefined', 'dynamic_lookup']
+    else:
+        cmd = [gcc, '-shared', '-fPIC', '-o', out]
+        if undefined:
+            cmd += ['-Wl,--allow-shlib-undefined']
+    return cmd + objs
+
+
+def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
+    """Build (or find in the CAS) the first-class runtime dylib that exports the
+    mojo_* runtime symbols. Every program links it; module dylibs depend on it."""
+    gcc = gcc or find_gcc()
+    src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
+    key = 'rtdylib/' + cas._hash(
+        'mojo-rtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, flags), src)
+    out = cas.path_for(key, '.dylib')
+    if not os.path.exists(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        wd = tempfile.mkdtemp(prefix='mojo_rt_')
+        o = os.path.join(wd, 'mojo_runtime.o')
+        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
+                        os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+        subprocess.run(_dylink(gcc, out, [o], undefined=False), check=True)
     return out
 
 

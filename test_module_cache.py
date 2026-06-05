@@ -118,7 +118,13 @@ def test_stage2_3_dylib_and_cas(wd):
         co = os.path.join(wd, 'c2.o')
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
         exe = os.path.join(wd, 'c2')
-        subprocess.run([GCC, '-o', exe, co, dylib], check=True)
+        # Programs link the first-class runtime dylib (mojo_* live there now) plus
+        # the module dylib — module dylibs no longer bundle the runtime. rpaths so
+        # dyld finds the @rpath-named dylibs at load.
+        rt = bsd.runtime_dylib()
+        subprocess.run([GCC, '-o', exe, co, rt, dylib,
+                        f'-Wl,-rpath,{os.path.dirname(rt)}',
+                        f'-Wl,-rpath,{os.path.dirname(dylib)}'], check=True)
         check("stage2: client links the stdlib dylib and runs", _run(exe).stdout.startswith('s2'))
         sz = os.path.getsize(co)
         check("stage2: client object is tiny (<8KB)", sz < 8192, f"{sz} bytes")

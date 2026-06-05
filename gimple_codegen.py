@@ -1889,6 +1889,9 @@ class GimpleGen:
         # existing inline `do_imports` path and all suites are unaffected.
         self.link_imports: bool = link_imports
         self._link_import_decl_list: list = []
+        # Dylibs the program must link, recorded by `import` as it resolves each
+        # module to its dylib (the loader binds the symbols at load). Deduped.
+        self._link_dylibs: list = []
         self._reset_func()
 
     def _reset_func(self):
@@ -2015,11 +2018,13 @@ class GimpleGen:
         return (None, [])
 
     def _register_link_imports(self, stmts) -> list:
-        """Link mode (MODULE_CACHE_DESIGN.md stage 1): for each imported symbol,
-        register its return/param C types (so call sites lower correctly) and
-        return the `extern` C declaration for it.  Signatures come from
-        module_loader and the ABI.md contract.  Bodies are NOT inlined — they live
-        in the linked artifact / stdlib dylib.  Scans top-level and nested imports.
+        """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
+        imported symbol, resolve its signature from the module's dylib
+        `__mojo_reflect` ABI (imports.import_exports → read_reflection), register
+        its return/param C types (so call sites lower correctly), and emit the
+        `extern` declaration. Bodies are NOT inlined — they live in the linked
+        dylib. Falls back to module_loader's source-level extraction when no dylib
+        is available. Scans top-level and nested imports.
         """
         decls: list[str] = []
         seen: set[str] = set()
@@ -2032,25 +2037,58 @@ class GimpleGen:
                 out.append(' '.join(toks[:-1]) if len(toks) > 1 else cp)
             return out
 
+        def _parse_c_sig(sig):
+            # "int64_t name (int64_t, char *)" -> ('int64_t', ['int64_t', 'char *'])
+            head, _, rest = sig.partition('(')
+            params = rest.rstrip(') ').strip()
+            toks = head.strip().rsplit(None, 1)        # split off the function name
+            ret = toks[0] if len(toks) == 2 else 'int'
+            if not params or params == 'void':
+                ptypes = []
+            else:
+                ptypes = [p.strip() for p in params.split(',')]
+            return ret, ptypes
+
+        def _exports(module):
+            # `import` resolves the module's dylib, records it on the program's
+            # link line (so the program links every dylib its imports resolved
+            # through — the loader binds the symbols), and returns the reflection
+            # ABI. Falls back to source-level extraction if no dylib is available.
+            try:
+                import imports as _imp
+                dylib, refl = _imp.resolve(module)
+                if dylib and refl:
+                    if dylib not in self._link_dylibs:
+                        self._link_dylibs.append(dylib)
+                    return refl, True
+            except Exception:
+                pass
+            try:
+                return load_module(module), False
+            except Exception:
+                return {}, False
+
         def scan(stmt_list):
             for stmt in stmt_list:
                 if isinstance(stmt, FromImportStmt):
-                    try:
-                        exports = load_module(stmt.module)
-                    except Exception:
-                        exports = {}
+                    exports, from_reflection = _exports(stmt.module)
                     for name, alias in stmt.names:
                         info = exports.get(name)
                         sym = alias if alias else name
                         if not info or sym in seen:
                             continue
-                        seen.add(sym)
-                        ret = info.get('c_return_type', 'int')
-                        self.func_return_types[sym] = ret
-                        self.func_param_types[sym] = _param_ctypes(info.get('c_parameters'))
                         sig = info.get('signature')
-                        if sig:
-                            decls.append(f'extern {sig};')
+                        if not sig:
+                            continue
+                        seen.add(sym)
+                        if from_reflection:
+                            ret, ptypes = _parse_c_sig(sig)
+                        else:
+                            ret = info.get('c_return_type', 'int')
+                            ptypes = _param_ctypes(info.get('c_parameters'))
+                        self.func_return_types[sym] = ret
+                        self.func_param_types[sym] = ptypes
+                        decls.append(f'extern {sig};')
                 elif isinstance(stmt, FunctionDef):
                     scan(stmt.body)
                 elif isinstance(stmt, IfStmt):
@@ -8701,8 +8739,15 @@ def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:
     """Like compile_to_gimple, but in *link mode*: imported symbols become
     `extern` declarations (bodies come from a linked artifact / stdlib dylib;
     see MODULE_CACHE_DESIGN.md and ABI.md) rather than being inlined."""
+    return compile_linked(mojo_src, filename)[0]
+
+
+def compile_linked(mojo_src: str, filename: str = "") -> tuple:
+    """Link-mode compile that also returns the dylibs `import` recorded, so the
+    driver can hand them to the linker. Returns (c_code, [dylib_path, ...])."""
     tokens = tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
-    return gen.gen_module(stmts)
+    code = gen.gen_module(stmts)
+    return code, list(dict.fromkeys(gen._link_dylibs))

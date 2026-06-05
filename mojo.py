@@ -355,11 +355,22 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         jit_compile_and_execute(input_file, src, opt_flag, debug_flag)
         return
 
-    # If build requested, compile to executable
+    # If build requested, compile to executable through the module-cache system
+    # (link mode + per-import dylibs + CAS + reflection); fall back to the inline
+    # builder if that path can't produce a binary.
     if build:
-        success = build_executable(input_file, src, output=build_output,
-                                   opt_flag=opt_flag, debug_flag=debug_flag)
-        sys.exit(0 if success else 1)
+        try:
+            import driver
+            rc = driver.compile_program(input_file, src, output=build_output,
+                                        run=False, opt_flag=opt_flag, debug_flag=debug_flag)
+        except Exception as e:
+            print(f"driver error, falling back to inline build: {e}", file=sys.stderr)
+            rc = None
+        if rc is None:
+            success = build_executable(input_file, src, output=build_output,
+                                       opt_flag=opt_flag, debug_flag=debug_flag)
+            rc = 0 if success else 1
+        sys.exit(rc)
 
     # If --dump-full requested, generate single .ci with transitive closure (for bootstrap)
     if dump_full:
@@ -421,6 +432,20 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             import traceback
             traceback.print_exc(file=sys.stderr)
         return
+
+    # Default for a .mojo program: compile and run it through the module-cache
+    # system (link mode + per-import dylibs + CAS + reflection). Fall back to the
+    # interpreter if it can't produce a binary.
+    if input_file.endswith('.mojo'):
+        try:
+            import driver
+            rc = driver.compile_program(input_file, src, run=True,
+                                        opt_flag=opt_flag, debug_flag=debug_flag)
+        except Exception as e:
+            print(f"driver error, interpreting instead: {e}", file=sys.stderr)
+            rc = None
+        if rc is not None:
+            sys.exit(rc)
 
     # Otherwise interpret as Mojo
     interpret_and_execute(src, filename=input_file)

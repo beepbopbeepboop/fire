@@ -69,6 +69,19 @@ current stdlib transpilation status, what fails, and remaining gaps.
     recursion (`fib`) matching interpreted references; the dylib is compiled once
     and reused across calls (2 misses / 4 hits). `_eval_const_*` remains the
     fallback (foundation-first).
+  - **Wired into the CLI** (`imports.py`, `driver.py`, `mojo.py`): `mojo build`/
+    `run` now go through the module-cache system. `import` is the seam — it
+    resolves each module to its CAS dylib, wires the `__mojo_reflect` ABI, and
+    **records the dylib on the program's link line** (`gen._link_dylibs`;
+    `compile_linked` returns them). The **runtime is a first-class dylib**
+    (`build_stdlib_dylib.runtime_dylib`); module dylibs no longer bundle it
+    (`-undefined dynamic_lookup`) and depend on it. The driver is thin: compile
+    the client (link mode) + link the runtime dylib + every recorded import dylib;
+    the OS loader binds the symbols (we don't reinvent dyld). The whole program is
+    content-addressed (warm run = instant copy), with a fallback to the inline
+    builder. Verified end-to-end: `mojo t.mojo` with 0, 1, and 2 imports runs and
+    links exactly the recorded dylibs. Symbol clashes across modules are resolved
+    by `<module>_name` (convention today; systematic mangling is the next step).
 - **`make check` repair** — the generated `main()` wrapper unconditionally
   called `_toplevel()`, but that function is only emitted when a module has
   top-level statements. Programs with a `main` and no top-level code (every
