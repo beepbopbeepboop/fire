@@ -7542,6 +7542,8 @@ class GimpleGen:
         # (Must be done here in preamble, before module globals scanning below)
         if not self.emit_entry_points:
             # Imported modules always need access to root module's globals
+            # Forward-declare the struct type first, then the extern variable
+            parts.append('struct _root_toplev;')  # incomplete type forward decl
             parts.append('extern struct _root_toplev _root_globals;')
 
         # Emit initial #line directive at the start if we have a filename
@@ -7593,6 +7595,32 @@ class GimpleGen:
                     emitted.add(struct_name)
                     self._emitted_structs.add(struct_name)  # track for dedup in Section 2
             parts.append('')
+
+        # For root module ONLY, do an early scan to emit the globals struct typedef
+        # so imported modules can reference it (imported modules should NOT emit this)
+        if self.emit_entry_points and (self.module_name == "" or self.module_name == "root"):
+            # Early scan for root module's global assignments
+            _root_globals_early = []
+            for stmt in stmts:  # Only scan root module statements, not imports yet
+                if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+                    gname = stmt.target.name
+                    gtype = 'int64_t'  # default
+                    if isinstance(stmt.value, DictExpr):
+                        gtype = 'MojoDict *'
+                    elif isinstance(stmt.value, ListExpr):
+                        gtype = 'MojoList *'
+                    elif isinstance(stmt.value, SetExpr):
+                        gtype = 'MojoSet *'
+                    elif isinstance(stmt.value, StringLiteral):
+                        gtype = 'char *'
+                    _root_globals_early.append((gname, gtype))
+            # Emit root globals struct typedef early if there are any globals
+            if _root_globals_early:
+                parts.append('typedef struct _root_toplev {')
+                for gname, gtype in _root_globals_early:
+                    parts.append(f"  {gtype} {gname};")
+                parts.append('} _root_toplev;')
+                parts.append('')
 
         # Include compiled imported modules
         if imported_code:
