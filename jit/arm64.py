@@ -132,8 +132,8 @@ int main() {{
                     return None
                 return None
 
-            # Generate GIMPLE code
-            gimple_code = compile_to_gimple(mojo_src, do_imports=True)
+            # Generate GIMPLE code (do_imports=False: imports become extern declarations)
+            gimple_code = compile_to_gimple(mojo_src, do_imports=False)
 
             # Setup temporary compilation directory
             if self.temp_dir is None:

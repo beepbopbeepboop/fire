@@ -1,5 +1,3 @@
-def main():
-    x = 1 + 2
-    print(x)
-
-main()
+print("Hello from JIT!")
+x = 42
+print(x)
