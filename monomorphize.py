@@ -33,10 +33,34 @@ _FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
 _HEAD = re.compile(r'\b(fn|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
+def safe_suffix(s: str) -> str:
+    """Encode a type-arg string into a valid C identifier fragment: parametric
+    args like `List[Int]` contain `[`/`]`/`,`/spaces, which are illegal in a C
+    symbol, so map every non-[A-Za-z0-9_] char to `_` (review finding #4)."""
+    return re.sub(r'[^A-Za-z0-9_]', '_', s)
+
+
 def mangle(name: str, type_args: dict) -> str:
-    """Stable monomorphized symbol name, e.g. box_id + {T:Int64} -> box_id_Int64."""
-    suffix = '_'.join(str(type_args[k]) for k in sorted(type_args))
+    """Stable monomorphized symbol name, e.g. box_id + {T:Int64} -> box_id_Int64.
+    Suffixes are sanitized to valid C identifiers."""
+    suffix = '_'.join(safe_suffix(str(type_args[k])) for k in sorted(type_args))
     return f"{name}_{suffix}" if suffix else name
+
+
+def _check_no_value_shadow(src: str, type_params) -> None:
+    """Raise if a type parameter is also used as a *binding name* (a `var`/`for`
+    target or an assignment target). Textual substitution would then rewrite that
+    value identifier to a type name — a silent miscompile (review finding #3). A
+    type used as a constructor (`T()`) or in a type position is fine; only bindings
+    are unsafe, and bindings shadowing a type parameter are pathological, so we
+    fail loudly rather than emit wrong code."""
+    for tp in type_params:
+        e = re.escape(tp)
+        if re.search(rf'\b(?:var|for)\s+{e}\b', src) or \
+           re.search(rf'(?m)^\s*{e}\s*=(?!=)', src):
+            raise ValueError(
+                f"monomorphize: type parameter {tp!r} is used as a value/binding "
+                f"name; cannot textually instantiate this template")
 
 
 def monomorphize_source(template_src: str, type_args: dict) -> tuple:
@@ -49,6 +73,10 @@ def monomorphize_source(template_src: str, type_args: dict) -> tuple:
         raise ValueError("monomorphize: no generic `fn`/`struct name[...]` found")
     kind, name = m.group(1), m.group(2)
     mangled = mangle(name, type_args)
+
+    # Guard against substituting a type param that's also used as a binding name
+    # (silent miscompile otherwise — review finding #3).
+    _check_no_value_shadow(template_src, list(type_args.keys()))
 
     # Drop the [type-params] block and rename the definition (fn or struct).
     src = template_src[:m.start()] + f"{kind} {mangled}" + template_src[m.end():]

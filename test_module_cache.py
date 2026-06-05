@@ -409,6 +409,33 @@ def test_elaboration_trait_conformance(wd):
     check("slice6: unbounded type parameter is not blocked", bool(nb))
 
 
+# ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
+def test_review_fixes_monomorphize_overload(wd):
+    import monomorphize as mm
+    import elaborate
+    # #3: a type parameter used as a binding name raises instead of silently
+    # rewriting that value identifier to a type (was a silent miscompile).
+    raised = False
+    try:
+        mm.monomorphize_source(
+            "fn bad[T](y: Int) -> Int:\n    var T = y\n    return T\n", {'T': 'Int64'})
+    except ValueError:
+        raised = True
+    check("review#3: type-param-as-binding raises (no silent miscompile)", raised)
+    check("review#3: a normal generic still instantiates",
+          mm.monomorphize_source("fn box[T](x: T) -> T:\n    return x\n",
+                                 {'T': 'Int64'})[0] == 'box_Int64')
+    # #4.2: parametric type args mangle to a valid C identifier (no []/, etc.)
+    check("review#4: parametric mangle is a valid C identifier",
+          mm.mangle('box', {'T': 'List[Int]'}) == 'box_List_Int_'
+          and '[' not in mm.safe_suffix('List[Int]'))
+    # #4.1: no matching overload returns None rather than silently picking the first
+    mod = ("fn pick(x: Int64) -> Int64:\n    return x\n"
+           "fn pick(x: Float64) -> Int64:\n    return 7\n")
+    check("review#4: no-match overload returns None (no silent first-pick)",
+          elaborate.Elaborator().elaborate_overload_call(mod, 'pick', ['char *']) is None)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -426,6 +453,7 @@ def main():
         test_elaboration_generic_struct(wd)
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
+        test_review_fixes_monomorphize_overload(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

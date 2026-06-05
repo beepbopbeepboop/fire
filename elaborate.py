@@ -340,9 +340,13 @@ class Elaborator:
                 chosen = (src, ptypes, ret)
                 break
         if chosen is None:
-            chosen = overloads[0]   # best effort: first candidate
+            # No overload matches the argument types — do NOT silently pick the
+            # first (review finding #4); let the caller fall through / error.
+            return None
         src, ptypes, ret = chosen
-        mangled = fn_name + '__' + ('_'.join(ptypes) if ptypes else 'void')
+        # Sanitize the signature suffix to a valid C identifier (parametric param
+        # types like List[Int] contain []/, which are illegal in a C symbol).
+        mangled = fn_name + '__' + (mm.safe_suffix('_'.join(ptypes)) if ptypes else 'void')
         renamed = re.sub(rf'\bfn\s+{re.escape(fn_name)}\b', f'fn {mangled}', src, count=1)
         obj, _hit = mm.compile_fn(renamed, gcc=self.gcc)
         return {'symbol': mangled, 'object': obj,
