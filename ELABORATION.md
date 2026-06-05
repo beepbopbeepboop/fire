@@ -83,14 +83,16 @@ every build; ours elaborates each unique thing once and shares it. This is the
 
 ## Staged slices (each independently verifiable)
 
-1. **Generic call elaboration** (the spine, built first). A call to an imported
-   generic `Generic[TypeArgs](args)` → infer the type args, instantiate via the
-   CAS, record the dylib, emit the concrete call. Exercises resolution +
-   monomorphize + CAS + link line + codegen end to end.
-2. **Type-inferred generics** — `Generic(args)` with no explicit `[…]`: infer the
-   type args from argument types.
-3. **Comptime params/exprs** — drive `comptime.evaluate` for comptime arguments
-   and values; substitute the computed results.
+1. **Generic call elaboration** ✅ (the spine). `Generic[TypeArgs](args)` from an
+   imported generic → instantiate via the CAS, record the object on the link
+   line, emit the concrete call. Resolution + monomorphize + CAS + link line +
+   codegen, end to end.
+2. **Type-inferred generics** ✅ — `Generic(args)` with no explicit `[…]`: infer
+   the type args from the argument C types (`elaborate.infer_type_args`).
+3. **Comptime params/exprs** ✅ — a comptime call to an imported function with
+   constant args is run at compile time via `comptime.evaluate` (cached machine
+   code), wired into `_eval_const_int` so it drives `comptime if`/`for` and
+   comptime assignments. Recursive comptime works (`fib(10)` → 55 at compile time).
 4. **Overload resolution** — pick the concrete `fn` among candidates by argument
    types.
 5. **Traits / conformance** and **generic structs** — bound checking, and

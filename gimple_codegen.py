@@ -1898,6 +1898,9 @@ class GimpleGen:
         # Imported names that are generic templates (not concrete exports):
         # name -> the module source path, used to instantiate at call sites.
         self._imported_generics: dict = {}
+        # Imported function name -> module source path, for comptime evaluation
+        # (run the function at compile time via comptime.evaluate; slice 3).
+        self._imported_fn_sources: dict = {}
         # extern decls for symbols elaboration produced at call sites (generic
         # instantiations); emitted in the preamble like import extern decls.
         self._elaborated_externs: list = []
@@ -2084,6 +2087,10 @@ class GimpleGen:
                     for name, alias in stmt.names:
                         info = exports.get(name)
                         sym = alias if alias else name
+                        # Record the module source for any imported name, so a
+                        # comptime call to it can be evaluated at compile time.
+                        if source:
+                            self._imported_fn_sources.setdefault(name, source)
                         if not info:
                             # Not a concrete export — if the module source defines
                             # it as a generic, record it for on-demand elaboration.
@@ -4395,26 +4402,38 @@ class GimpleGen:
         return ''
 
     def _elaborate_generic_call(self, node: CallExpr):
-        """Elaborate Generic[TypeArgs](args) on an imported generic: instantiate the
-        template for those type args (CAS-cached), record the instantiation object
-        on the link line, and lower the call to the concrete symbol. Returns
-        (ctype, val) if elaborated, else None."""
-        g = node.func.obj.name
+        """Elaborate a call to an imported generic into a concrete CAS-cached
+        instantiation. Handles both the explicit form `Generic[TypeArgs](args)`
+        and the inferred form `Generic(args)` (type args inferred from argument
+        types — slice 2). Returns (ctype, val) if elaborated, else None."""
+        explicit = isinstance(node.func, SubscriptExpr)
+        g = node.func.obj.name if explicit else node.func.name
         source = self._imported_generics.get(g)
         if not source:
             return None
-        idx = node.func.index
-        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
-        type_args = [self._type_expr_to_ann(e) for e in elems]
+        # Lower args once; their C types drive inference (and the emitted call).
+        arg_pairs = [self.lower_expr(a) for a in node.args]
         try:
             module_src = open(source).read()
             import elaborate
-            info = elaborate.Elaborator().elaborate_generic_call(module_src, g, type_args)
+            el = elaborate.Elaborator()
+            if explicit:
+                idx = node.func.index
+                elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+                type_args = [self._type_expr_to_ann(e) for e in elems]
+                info = el.elaborate_generic_call(module_src, g, type_args)
+            else:
+                info = el.elaborate_generic_call_inferred(
+                    module_src, g, [ct for ct, _ in arg_pairs])
         except Exception:
             info = None
         if not info:
             return None
+        return self._emit_generic_instantiation(info, arg_pairs)
 
+    def _emit_generic_instantiation(self, info, arg_pairs):
+        """Record an elaborated instantiation (object on the link line, extern in
+        the preamble, signature for calls) and emit the concrete call."""
         sym = info['symbol']
         if info['object'] not in self._link_objects:
             self._link_objects.append(info['object'])
@@ -4423,8 +4442,6 @@ class GimpleGen:
         _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
         if _decl not in self._elaborated_externs:
             self._elaborated_externs.append(_decl)
-
-        arg_pairs = [self.lower_expr(a) for a in node.args]
         if info['ret'] == 'void':
             self._emit_call('', '', sym, arg_pairs)
             t = self._new_temp('int')
@@ -4641,10 +4658,13 @@ class GimpleGen:
         mlir_call = self._maybe_lower_mlir_op(node)
         if mlir_call is not None:
             return mlir_call
-        # Generic call site Generic[TypeArgs](args) on an imported generic →
-        # elaborate it to a concrete CAS-cached instantiation (ELABORATION.md).
-        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
-                and node.func.obj.name in self._imported_generics:
+        # Generic call site on an imported generic → elaborate it to a concrete
+        # CAS-cached instantiation (ELABORATION.md). Explicit `Generic[Args](x)`
+        # or inferred `Generic(x)` (type args from argument types, slice 2).
+        _gen = (isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr)
+                and node.func.obj.name in self._imported_generics) or \
+               (isinstance(node.func, IdentExpr) and node.func.name in self._imported_generics)
+        if _gen:
             res = self._elaborate_generic_call(node)
             if res is not None:
                 return res
@@ -5663,6 +5683,21 @@ class GimpleGen:
             ops = {'+': l+r, '-': l-r, '*': l*r, '//': l//r if r else None,
                    '%': l%r if r else None, '**': l**r}
             return ops.get(node.op)
+        # comptime call to an imported function with constant args (slice 3):
+        # run it at compile time as cached machine code via comptime.evaluate.
+        if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+            src_path = self._imported_fn_sources.get(node.func.name)
+            if src_path:
+                argvals = [self._eval_const_int(a) for a in node.args]
+                if argvals and all(v is not None for v in argvals):
+                    try:
+                        import elaborate, comptime
+                        module_src = open(src_path).read()
+                        fn_src = elaborate.extract_fn_source(module_src, node.func.name)
+                        if fn_src:
+                            return int(comptime.evaluate(fn_src, node.func.name, argvals))
+                    except Exception:
+                        pass
         return None
 
     def _eval_const_bool(self, node) -> bool | None:

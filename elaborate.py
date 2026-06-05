@@ -51,6 +51,45 @@ def type_param_names(template_src: str):
             for p in m.group(2).split(',') if p.strip()]
 
 
+# Reverse of the ABI type map, for inferring a generic's type args from the C
+# types of its call arguments (slice 2). We substitute the Mojo name into the
+# template source, so we need the Mojo spelling, not the C type.
+_C_TO_MOJO = {
+    'int64_t': 'Int64', 'int32_t': 'Int32', 'int16_t': 'Int16', 'int8_t': 'Int8',
+    'int': 'Int', 'uint64_t': 'UInt64', 'uint32_t': 'UInt32', 'uint16_t': 'UInt16',
+    'uint8_t': 'UInt8', 'unsigned int': 'UInt', '_Bool': 'Bool',
+    'double': 'Float64', 'float': 'Float32', '__fp16': 'Float16', 'char *': 'String',
+}
+
+
+def c_to_mojo(ctype: str) -> str:
+    return _C_TO_MOJO.get(ctype, 'Int')
+
+
+def infer_type_args(template_src: str, arg_ctypes):
+    """Infer a generic's type args from the C types of its call arguments. For
+    each type parameter that appears directly as a parameter annotation
+    (`x: T`), bind it to the Mojo type of the matching argument. Returns the
+    ordered list of Mojo type names, or None if any parameter is unbound."""
+    params = type_param_names(template_src)
+    if not params:
+        return None
+    fn = None
+    for s in Parser(tokenize(template_src)).parse_module():
+        if isinstance(s, FunctionDef):
+            fn = s
+            break
+    if fn is None:
+        return None
+    binding = {}
+    for i, (_pname, ann) in enumerate(fn.params):
+        if ann in params and ann not in binding and i < len(arg_ctypes):
+            binding[ann] = c_to_mojo(arg_ctypes[i])
+    if any(p not in binding for p in params):
+        return None
+    return [binding[p] for p in params]
+
+
 def _signature(concrete_src: str, name: str):
     """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
     for s in Parser(tokenize(concrete_src)).parse_module():
@@ -84,3 +123,14 @@ class Elaborator:
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _signature(concrete, mangled)
         return {'symbol': mangled, 'object': obj, 'ret': ret, 'params': ptypes}
+
+    def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
+        """Like elaborate_generic_call but infers the type args from the call
+        argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
+        tmpl = extract_fn_source(module_src, fn_name)
+        if tmpl is None:
+            return None
+        type_args = infer_type_args(tmpl, arg_ctypes)
+        if type_args is None:
+            return None
+        return self.elaborate_generic_call(module_src, fn_name, type_args)

@@ -266,6 +266,39 @@ def test_elaboration_generic_call(wd):
         os.remove(gl)
 
 
+# ── Elaboration slices 2 & 3: inferred generics + comptime evaluation ─────
+def test_elaboration_inference_and_comptime(wd):
+    import elaborate
+    from gimple_codegen import compile_linked
+    # slice 2: infer type args from argument C types
+    tmpl = "fn box[T](x: T) -> T:\n    return x\n"
+    check("slice2: infer arg C type -> Mojo type arg",
+          elaborate.infer_type_args(tmpl, ['int64_t']) == ['Int64'])
+    box_mod = os.path.join(RUNTIME, 'el_box.mojo')
+    ct_mod = os.path.join(RUNTIME, 'el_ct.mojo')
+    open(box_mod, 'w').write(tmpl)
+    open(ct_mod, 'w').write("fn fib(n: Int64) -> Int64:\n    if n < 2:\n"
+                            "        return n\n    return fib(n - 1) + fib(n - 2)\n")
+    try:
+        # slice 2 wiring: box(42) with no explicit [..] elaborates
+        code, _d, objs = compile_linked("from el_box import box\n"
+                                        "fn main():\n    var y = box(42)\n")
+        check("slice2: inferred generic call elaborates (no explicit [..])",
+              ('box_Int64' in code or 'box_Int' in code) and len(objs) == 1)
+        # slice 3: comptime call to an imported fn resolved at compile time
+        src = ("from el_ct import fib\n"
+               "fn main():\n"
+               "    comptime if fib(10) == 55:\n"
+               "        external_call[\"exit\", NoneType](55)\n"
+               "    else:\n"
+               "        external_call[\"exit\", NoneType](1)\n")
+        code2, _d2, _o2 = compile_linked(src)
+        check("slice3: comptime call evaluated as machine code; live branch only",
+              ('exit (55)' in code2 or '= 55;' in code2) and 'exit (1)' not in code2)
+    finally:
+        os.remove(box_mod); os.remove(ct_mod)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -279,6 +312,7 @@ def main():
         test_stage6_comptime(wd)
         test_resolution_authority(wd)
         test_elaboration_generic_call(wd)
+        test_elaboration_inference_and_comptime(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()
