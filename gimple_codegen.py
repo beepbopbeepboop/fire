@@ -4606,6 +4606,12 @@ class GimpleGen:
             return 'char', t
 
         if ot == 'MojoDict *':
+            # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
+            if idx_type != 'char *':
+                idx_cast = self._new_temp('char *')
+                self._emit(f"  {idx_cast} = (char *){iv};")
+                iv = idx_cast
+                idx_type = 'char *'
             val_ctype = self._dict_val_of(ov)
             if val_ctype == 'double':
                 t = self._new_temp('double')
@@ -4635,17 +4641,25 @@ class GimpleGen:
                 self._emit(f"  {dp} = (MojoDict *){ip};")
                 idx64 = self._new_temp('int64_t')
                 self._emit(f"  {idx64} = (int64_t){iv};")
+                # Ensure index is char * for dict access (all dict keys are strings in runtime)
+                idx_for_dict = iv
+                idx_type_for_dict = idx_type
+                if idx_type != 'char *':
+                    idx_cast = self._new_temp('char *')
+                    self._emit(f"  {idx_cast} = (char *){iv};")
+                    idx_for_dict = idx_cast
+                    idx_type_for_dict = 'char *'
                 val_ctype = self._dict_val_of(dp)
                 if val_ctype == 'double':
                     t = self._new_temp('double')
-                    self._emit_call('double', t, 'mojo_dict_get_double', [('MojoDict *', dp), (idx_type, iv)])
+                    self._emit_call('double', t, 'mojo_dict_get_double', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
                     return 'double', t
                 if val_ctype == 'char *':
                     t = self._new_temp('char *')
-                    self._emit_call('char *', t, 'mojo_dict_get_str', [('MojoDict *', dp), (idx_type, iv)])
+                    self._emit_call('char *', t, 'mojo_dict_get_str', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
                     return 'char *', t
                 t = self._new_temp('int64_t')
-                self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type, iv)])
+                self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
                 return 'int64_t', t
             # Otherwise treat as MojoList* stored as int; cast and subscript
             lp = self._new_temp('MojoList *')
