@@ -7540,8 +7540,8 @@ class GimpleGen:
         # For imported modules, forward-declare module globals structs
         # that may be referenced in code (struct typedefs will be emitted later at line 7800+)
         if not self.emit_entry_points:
-            for mod_name in self._module_globals:
-                safe_mod = _safe_name(mod_name) if mod_name else "root"
+            for mod_name in list(self._module_globals.keys()):
+                safe_mod = _safe_name(str(mod_name)) if mod_name else "root"
                 struct_name = f"_{safe_mod}_toplev"
                 # Forward-declare the struct type for extern access
                 # Full definition will come from the module's own struct emission
