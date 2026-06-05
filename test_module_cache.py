@@ -212,6 +212,31 @@ def test_stage6_comptime(wd):
           cas.stats['misses'] == 2 and cas.stats['hits'] >= 1, str(cas.stats))
 
 
+# ── Module-resolution authority: one module per name (our sys.modules) ────
+def test_resolution_authority(wd):
+    import imports
+    a, b = os.path.join(wd, 'pa'), os.path.join(wd, 'pb')
+    os.makedirs(a, exist_ok=True); os.makedirs(b, exist_ok=True)
+    open(os.path.join(a, 'ridmod.mojo'), 'w').write("fn ridmod_v() -> Int64:\n    return 1\n")
+    open(os.path.join(b, 'ridmod.mojo'), 'w').write("fn ridmod_v() -> Int64:\n    return 2\n")
+    r = imports.Resolver(path=[a, b])
+    e1 = r.resolve('ridmod')
+    e2 = r.resolve('ridmod')
+    check("authority: one module per name (cached identity)", e1 is e2)
+    check("authority: first on path wins (shadow ignored)",
+          e1.source == os.path.join(a, 'ridmod.mojo'))
+    check("authority: fully-qualified-name symbol prefix",
+          imports.ModuleEntry('std.io', None, None, {}).symbol_prefix == 'std_io')
+    old = dict(os.environ)
+    try:
+        os.environ['MOJO_PATH'] = '/_m'; os.environ['PYTHONPATH'] = '/_p'
+        p = imports.default_mojo_path()
+        check("authority: MOJO_PATH preferred over PYTHONPATH",
+              '/_m' in p and '/_p' in p and p.index('/_m') < p.index('/_p'))
+    finally:
+        os.environ.clear(); os.environ.update(old)
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -223,6 +248,7 @@ def main():
         test_stage4_reflection(wd)
         test_stage5_monomorphization(wd)
         test_stage6_comptime(wd)
+        test_resolution_authority(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

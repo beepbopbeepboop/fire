@@ -2056,11 +2056,11 @@ class GimpleGen:
             # ABI. Falls back to source-level extraction if no dylib is available.
             try:
                 import imports as _imp
-                dylib, refl = _imp.resolve(module)
-                if dylib and refl:
-                    if dylib not in self._link_dylibs:
-                        self._link_dylibs.append(dylib)
-                    return refl, True
+                entry = _imp.resolve(module)   # the one authoritative module per name
+                if entry.dylib and entry.exports:
+                    if entry.dylib not in self._link_dylibs:
+                        self._link_dylibs.append(entry.dylib)
+                    return entry.exports, True
             except Exception:
                 pass
             try:

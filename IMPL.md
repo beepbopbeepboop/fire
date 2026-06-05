@@ -82,6 +82,14 @@ current stdlib transpilation status, what fails, and remaining gaps.
     builder. Verified end-to-end: `mojo t.mojo` with 0, 1, and 2 imports runs and
     links exactly the recorded dylibs. Symbol clashes across modules are resolved
     by `<module>_name` (convention today; systematic mangling is the next step).
+  - **Module-resolution authority** (`imports.Resolver`): our `sys.modules`. One
+    ordered search path — `$MOJO_PATH` first (ours), then `$PYTHONPATH` (superset
+    of Python), then project/runtime/stdlib — and **exactly one module per
+    fully-qualified name**: first match wins, is cached, and is shared by every
+    importer, so `import io` denotes one `io` everywhere (no two `io`s coexisting).
+    Shadowed candidates are reported, first-wins (Python semantics). Identity (the
+    FQ name) drives link-line dedup and the `<module>_` symbol prefix; codegen and
+    driver share the one authority.
 - **`make check` repair** — the generated `main()` wrapper unconditionally
   called `_toplevel()`, but that function is only emitted when a module has
   top-level statements. Programs with a `main` and no top-level code (every
