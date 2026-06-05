@@ -59,7 +59,7 @@ def transpile_file(mojo_file):
         # Run mojo_compiler.py with timeout
         try:
             proc = subprocess.run(
-                ['python', 'mojo_compiler.py'],
+                [sys.executable, 'mojo_compiler.py'],
                 input=source_code,
                 capture_output=True,
                 cwd=repo_root,

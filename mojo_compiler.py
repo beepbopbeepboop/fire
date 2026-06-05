@@ -457,7 +457,7 @@ class ComptimeForStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global'}
 
-_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuU]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 _SEP_CHAR       = ';'
 _CMT_CHAR       = '#'
@@ -482,7 +482,7 @@ def _strip_inline_comment(s: str) -> str:
             if c == in_str: in_str = None
         elif c in ('"', "'", '`'):
             in_str = c
-        elif i > 0 and c in ('"', "'") and s[i-1] in 'fFrRbBuU':
+        elif i > 0 and c in ('"', "'") and s[i-1] in 'fFrRbBuUtT':
             # f"..." prefix: already entered via the quote char above
             in_str = c
         elif c == _CMT_CHAR:
@@ -1182,9 +1182,21 @@ class Parser:
                     self._skip_bracketed()  # Skip subscripted exception types like ExcType[Param]
                 else:
                     break
-        # Skip function qualifiers (unified, register_passable, capturing, raises, etc.)
-        while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises"):
+        # Skip function qualifiers (unified, register_passable, capturing, raises,
+        # calling-convention markers thin/abi("C"), etc.)
+        while self._peek().kind == "NAME" and self._peek().value in ("unified", "register_passable", "capturing", "raises", "thin", "abi"):
             self._advance()
+            # abi may take a parenthesized convention string: abi("C")
+            if self._peek().kind == "LPAREN":
+                self._advance()  # consume LPAREN
+                depth = 1
+                while depth > 0:
+                    t = self._advance()
+                    if t.kind == "LPAREN":
+                        depth += 1
+                    elif t.kind == "RPAREN":
+                        depth -= 1
+                    elif t.kind == "EOF": break
         ret = None
         if self._peek().kind == "ARROW":
             self._advance()
@@ -1571,8 +1583,7 @@ class Parser:
                                     else:
                                         self._parse_expr(0)  # parse and discard value
                                         # Handle function type qualifiers and return type: def(...) [qual] -> T
-                                        while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
-                                            self._advance()
+                                        self._skip_fn_quals()
                                         if self._peek().kind == "ARROW":
                                             self._advance(); self._parse_type_ann()
                                         # Check for trailing colon: key = start:end or key = start:
@@ -1601,8 +1612,7 @@ class Parser:
                             # Parse positional index
                             idx = self._parse_expr(0)
                             # Handle function type annotations: def(...) [qualifiers] -> ReturnType in subscripts
-                            while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
-                                self._advance()
+                            self._skip_fn_quals()
                             if self._peek().kind == "ARROW":
                                 self._advance(); self._parse_type_ann()
                             # Check for multiple indices or keywords
@@ -1639,8 +1649,7 @@ class Parser:
                                     else:
                                         e = self._parse_expr(0)
                                         # Handle function type annotations: def(...) [qualifiers] -> ReturnType
-                                        while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
-                                            self._advance()
+                                        self._skip_fn_quals()
                                         if self._peek().kind == "ARROW":
                                             self._advance(); self._parse_type_ann()
                                         indices.append(e)
@@ -1916,6 +1925,25 @@ class Parser:
                 depth -= 1
             elif t.kind == "EOF": break
 
+    def _skip_fn_quals(self):
+        """Skip function-type qualifiers between a parameter list and `->`:
+        capturing, raises, unified, register_passable, and calling-convention
+        markers thin / abi("C")."""
+        while self._peek().kind == "NAME" and self._peek().value in (
+            "capturing", "raises", "unified", "register_passable", "thin", "abi"):
+            self._advance()
+            # abi may take a parenthesized convention string: abi("C")
+            if self._peek().kind == "LPAREN":
+                self._advance()  # consume LPAREN
+                depth = 1
+                while depth > 0:
+                    t = self._advance()
+                    if t.kind == "LPAREN":
+                        depth += 1
+                    elif t.kind == "RPAREN":
+                        depth -= 1
+                    elif t.kind == "EOF": break
+
     def _parse_type_ann(self) -> str:
         """Parse a type annotation: Name or Name[TypeArgs] or Name.Member.Type[Args] or `backtick_type`."""
         # Handle * prefix for variadic/unpacking types (*Ts)
@@ -1973,9 +2001,21 @@ class Parser:
                         elif t.kind == "RPAREN":
                             depth -= 1
                         elif t.kind == "EOF": break
-                # Skip optional qualifiers like 'capturing', 'raises', 'unified'
-                while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable"):
+                # Skip optional qualifiers like 'capturing', 'raises', 'unified',
+                # calling-convention markers 'thin'/'abi("C")', etc.
+                while self._peek().kind == "NAME" and self._peek().value in ("capturing", "raises", "unified", "register_passable", "thin", "abi"):
                     self._advance()
+                    # abi may take a parenthesized convention string: abi("C")
+                    if self._peek().kind == "LPAREN":
+                        self._advance()  # consume LPAREN
+                        depth = 1
+                        while depth > 0:
+                            t = self._advance()
+                            if t.kind == "LPAREN":
+                                depth += 1
+                            elif t.kind == "RPAREN":
+                                depth -= 1
+                            elif t.kind == "EOF": break
                 # Skip return type if present
                 if self._peek().kind == "ARROW":
                     self._advance()  # skip ->
@@ -2030,9 +2070,10 @@ class Parser:
                 rhs = self._parse_type_ann()
                 name = name + " | " + rhs
             return name
-        # Consume [TypeArgs] and any chained subscripts or .member accesses
+        # Consume [TypeArgs] and any chained subscripts, .member accesses, or
+        # comptime-call applications, e.g. `_field_types_of[Self.T]()[idx]`.
         parts = [name]
-        while self._peek().kind == "LBRACKET" or self._peek().kind == "DOT":
+        while self._peek().kind in ("LBRACKET", "DOT", "LPAREN"):
             if self._peek().kind == "DOT":
                 self._advance()  # consume dot
                 if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
@@ -2041,6 +2082,21 @@ class Parser:
                     parts.append("." + self._advance().value)
                 else:
                     break
+            elif self._peek().kind == "LPAREN":
+                self._advance()  # (
+                parts.append("(")
+                depth = 1
+                while depth > 0:
+                    t = self._advance()
+                    if t.kind == "LPAREN":
+                        depth += 1
+                        parts.append("(")
+                    elif t.kind == "RPAREN":
+                        depth -= 1
+                        if depth > 0: parts.append(")")
+                    elif t.kind == "EOF": break
+                    else: parts.append(t.value)
+                parts.append(")")
             else:
                 self._advance()  # [
                 parts.append("[")
