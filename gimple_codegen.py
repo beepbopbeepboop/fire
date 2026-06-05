@@ -1549,8 +1549,55 @@ _C_KEYWORDS = frozenset({
     '_Generic', '_Noreturn', '_Static_assert', '_Thread_local',
 })
 
+# libc/system symbols a Mojo *function definition* must not shadow: the library
+# itself defines e.g. `fn exit(...)` whose body calls libc `exit` via
+# external_call. Emitting that as C `exit` would self-recurse and clash with the
+# stdlib.h prototype. So a Mojo function with one of these names is mangled to
+# `mojo_<name>` (definition AND call sites, via this chokepoint), while
+# external_call keeps emitting the raw libc symbol.
+_C_RESERVED_FUNCS = frozenset({
+    'exit', 'abort', 'write', 'read', 'close',
+    'malloc', 'calloc', 'realloc', 'free',
+    'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar',
+    'memcpy', 'memmove', 'memset', 'strlen', 'strcmp', 'strncmp', 'strcpy',
+    'strncpy', 'strcat', 'atoi', 'atoll', 'atof',
+})
+
 def _safe_name(name: str) -> str:
-    return f"mojo_{name}" if name in _C_KEYWORDS else name
+    if name in _C_KEYWORDS or name in _C_RESERVED_FUNCS:
+        return f"mojo_{name}"
+    return name
+
+
+def _c_escape(s: str) -> str:
+    """Escape a Mojo string-literal's content for the body of a C string literal.
+
+    The source already uses C-style escapes (`\\n`, `\\t`, `\\\\`, ...), so those are
+    passed through unchanged rather than having their backslash doubled — the old
+    code did `replace('\\\\','\\\\\\\\')` first, turning `\\n` into a literal
+    backslash-n in the output. Lone backslashes, quotes, and raw control chars are
+    escaped. Non-ASCII bytes pass through untouched."""
+    known = set('ntr"\\\'0abfv')
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == '\\' and i + 1 < n and (s[i + 1] in known or s[i + 1] == 'x'):
+            out.append(ch); out.append(s[i + 1]); i += 2; continue
+        if ch == '\\':
+            out.append('\\\\'); i += 1; continue
+        if ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ch == '\r':
+            out.append('\\r')
+        else:
+            out.append(ch)
+        i += 1
+    return ''.join(out)
 
 def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
@@ -1573,13 +1620,7 @@ def _extract_init_expr(stmt_value) -> str:
     elif isinstance(stmt_value, BoolLiteral):
         return '1' if stmt_value.value else '0'
     elif isinstance(stmt_value, StringLiteral):
-        escaped = (stmt_value.value
-                   .replace('\\', '\\\\')  # escape backslashes first
-                   .replace('"', '\\"')     # escape quotes
-                   .replace('\n', '\\n')    # escape newlines
-                   .replace('\r', '\\r')    # escape carriage returns
-                   .replace('\t', '\\t'))   # escape tabs
-        return f'"{escaped}"'
+        return f'"{_c_escape(stmt_value.value)}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):
         return '0'  # Can't static-initialize; needs runtime init
     else:
@@ -2678,11 +2719,7 @@ class GimpleGen:
         elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
             val = val[1:-1]
         if not is_fstring:
-            escaped = (val.replace('\\', '\\\\')
-                           .replace('"', '\\"')
-                           .replace('\n', '\\n')
-                           .replace('\r', '\\r')
-                           .replace('\t', '\\t'))
+            escaped = _c_escape(val)
             # GIMPLE: char[] literal can't directly assign to char* in __GIMPLE functions.
             # Register in the module-level string pool (emitted as C global char arrays).
             if escaped not in self._str_pool:
@@ -2696,7 +2733,7 @@ class GimpleGen:
         parts = self._parse_fstring_parts(val)
         if not parts or all(k == 'lit' for k, _ in parts):
             plain = ''.join(v for _, v in parts)
-            escaped = plain.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+            escaped = _c_escape(plain)
             # Must go through string pool — inline char[] literals cause GIMPLE errors
             if escaped not in self._str_pool:
                 slit_num = 10000 + len(self._str_pool)
@@ -2710,7 +2747,7 @@ class GimpleGen:
             if kind == 'lit':
                 if not text:
                     continue
-                esc = text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+                esc = _c_escape(text)
                 if esc not in self._str_pool:
                     self._str_pool[esc] = f'_slit_{10000 + len(self._str_pool)}'
                 part_t = self._new_temp('char *')
@@ -2763,12 +2800,8 @@ class GimpleGen:
             val = str_literal
         
         # Escape the string content
-        escaped = (val.replace('\\', '\\\\')
-                       .replace('"', '\\"')
-                       .replace('\n', '\\n')
-                       .replace('\r', '\\r')
-                       .replace('\t', '\\t'))
-        
+        escaped = _c_escape(val)
+
         # Register in the module-level string pool if not already present
         if escaped not in self._str_pool:
             slit_num = 10000 + len(self._str_pool)
@@ -4194,7 +4227,7 @@ class GimpleGen:
         # Opaque Python object (int-typed): use mojo_obj_call1 for generic method dispatch
         if ot in ('int', 'int64_t') and not (isinstance(func.obj, IdentExpr)
                                                and func.obj.name in self.struct_field_types):
-            escaped = method.replace('\\', '\\\\').replace('"', '\\"')
+            escaped = _c_escape(method)
             if escaped not in self._str_pool:
                 self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
             method_slit = self._str_pool[escaped]
@@ -4292,6 +4325,22 @@ class GimpleGen:
         'exit', 'atoi', 'atoll', 'atof',
     }
 
+    def _type_expr_to_ann(self, node) -> str:
+        """Reconstruct a type-annotation string from a type expression node, so
+        parametric types in external_call/MLIR positions resolve via _mojo_type.
+        e.g. UnsafePointer[Int8] -> 'UnsafePointer[Int8]', c_ssize_t -> 'c_ssize_t'."""
+        if isinstance(node, IdentExpr):
+            return node.name
+        if isinstance(node, SubscriptExpr):
+            base = self._type_expr_to_ann(node.obj)
+            idx = node.index
+            parts = idx.elements if isinstance(idx, TupleExpr) else [idx]
+            inner = ', '.join(self._type_expr_to_ann(p) for p in parts)
+            return f"{base}[{inner}]"
+        if isinstance(node, MemberExpr):
+            return f"{self._type_expr_to_ann(node.obj)}.{node.member}"
+        return ''
+
     def _lower_external_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower external_call["name", Ret](args) / _external_call_const[...] to a
         direct C call.  This is the irreducible primitive the stdlib bottoms out on
@@ -4312,11 +4361,12 @@ class GimpleGen:
             return 'int', t
 
         ret_ct = 'void'
-        if len(elems) >= 2 and isinstance(elems[1], IdentExpr):
-            if elems[1].name == 'NoneType':
+        if len(elems) >= 2:
+            ann = self._type_expr_to_ann(elems[1])
+            if ann == 'NoneType':
                 ret_ct = 'void'
-            else:
-                ret_ct = _mojo_type(elems[1].name)
+            elif ann:
+                ret_ct = _mojo_type(ann)
 
         arg_pairs = [self.lower_expr(a) for a in node.args]
         # First use wins: pin the prototype's parameter types and coerce later calls to match.
@@ -5682,7 +5732,7 @@ class GimpleGen:
             if ot in ('int', 'int64_t'):
                 # Opaque Python object: use mojo_setattr for attribute assignment
                 member_str = node.target.member
-                escaped = member_str.replace('\\', '\\\\').replace('"', '\\"')
+                escaped = _c_escape(member_str)
                 if escaped not in self._str_pool:
                     self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
                 key_slit = self._str_pool[escaped]

@@ -1505,6 +1505,38 @@ def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
 """)
 
+    # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
+    #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
+    test("libc_name_mangle_exit", """\
+fn exit(code: Int64):
+    external_call["exit", NoneType](code)
+
+def main():
+    exit(7)
+""")
+
+    # 155. external_call with a parametric return type resolves (UnsafePointer[Int8]
+    #      → int8_t *), so the result is a usable pointer (printf-style debug path).
+    test("external_call_parametric_ret", """\
+def dbg(label: String, n: Int64):
+    var buf = external_call["malloc", UnsafePointer[Int8]](256)
+    var ln = external_call["snprintf", Int64](buf, 256, "%s%lld\\n", label, n)
+    var w = external_call["write", Int64](1, buf, ln)
+    external_call["free", NoneType](buf)
+""")
+
+    # 156. _c_escape: source escapes pass through (\\n stays one backslash, not two)
+    from gimple_codegen import _c_escape
+    _esc_ok = (_c_escape('%s%lld\\n') == '%s%lld\\n'      # \\n preserved, not doubled
+               and _c_escape('a\\\\b') == 'a\\\\b'          # literal backslash round-trips
+               and _c_escape('say "hi"') == 'say \\"hi\\"' # quotes escaped
+               and _c_escape('real\nnewline') == 'real\\nnewline')  # raw NL → \\n
+    global _PASS, _FAIL
+    if _esc_ok:
+        print("PASS  c_escape_roundtrip"); _PASS += 1
+    else:
+        print("FAIL  c_escape_roundtrip"); _FAIL += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
