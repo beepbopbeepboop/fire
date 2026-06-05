@@ -7597,7 +7597,9 @@ class GimpleGen:
             # Skip declaring our own module as extern
             if mod_name == our_mod:
                 continue
-            safe_mod = _safe_name(str(mod_name)) if mod_name else "root"
+            # Ensure proper type for _safe_name argument
+            mod_str = str(mod_name) if mod_name else "root"
+            safe_mod = _safe_name(mod_str) if mod_str else "root"
             struct_name = f"_{safe_mod}_toplev"
             global_var = f"_{safe_mod}_globals"
             # Forward-declare the struct type AND the extern global instance
@@ -7608,7 +7610,9 @@ class GimpleGen:
         # so it's available for use in this module's code
         if our_mod in self._module_globals and self._module_globals[our_mod]:
             globals_list = self._module_globals[our_mod]
-            safe_name = _safe_name(our_mod) if our_mod else "root"
+            # Ensure proper type for _safe_name argument
+            our_mod_str = str(our_mod) if our_mod else "root"
+            safe_name = _safe_name(our_mod_str) if our_mod_str else "root"
             typedef_name = f"_{safe_name}_toplev"
             parts.append('')
             parts.append(f"typedef struct {typedef_name} {{")
@@ -7850,7 +7854,9 @@ class GimpleGen:
         # Generate per-module struct typedefs and instances for globals
         if self._module_globals.get(current_mod_name):
             globals_list = self._module_globals[current_mod_name]
-            safe_name = _safe_name(current_mod_name) if current_mod_name else "root"
+            # Ensure proper type for _safe_name argument
+            current_mod_str = str(current_mod_name) if current_mod_name else "root"
+            safe_name = _safe_name(current_mod_str) if current_mod_str else "root"
             typedef_name = f"_{safe_name}_toplev"
 
             # Emit struct typedef
