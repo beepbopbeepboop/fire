@@ -4,9 +4,25 @@ Resolves and loads .mojo module files from the official stdlib.
 Parses imported modules and makes symbols available to the codegen.
 """
 import os
+import ctypes
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+# Reflection table layout (mirrors reflect.h). Defined at module scope — NOT
+# nested inside read_reflection — so the self-host codegen emits their struct
+# typedefs at top level (a class nested in a function is referenced but never
+# declared in the generated C).
+class _ReflectSym(ctypes.Structure):
+    _fields_ = [('name', ctypes.c_char_p), ('signature', ctypes.c_char_p),
+                ('addr', ctypes.c_void_p), ('kind', ctypes.c_int32)]
+
+
+class _ReflectTable(ctypes.Structure):
+    _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
+                ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
+                ('syms', ctypes.POINTER(_ReflectSym))]
 
 def _find_stdlib_path():
     """Find stdlib path using multiple strategies.
@@ -252,19 +268,8 @@ def read_reflection(dylib_path: str) -> dict:
     signature extraction above: when a prebuilt dylib exists, its self-describing
     table is authoritative.
     """
-    import ctypes
-
-    class _Sym(ctypes.Structure):
-        _fields_ = [('name', ctypes.c_char_p), ('signature', ctypes.c_char_p),
-                    ('addr', ctypes.c_void_p), ('kind', ctypes.c_int32)]
-
-    class _Table(ctypes.Structure):
-        _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
-                    ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
-                    ('syms', ctypes.POINTER(_Sym))]
-
     lib = ctypes.CDLL(dylib_path)
-    tbl = _Table.in_dll(lib, '__mojo_reflect')
+    tbl = _ReflectTable.in_dll(lib, '__mojo_reflect')
     if tbl.magic != 0x4D4F4A4F:   # 'MOJO'
         raise ValueError(f"{dylib_path}: not a Mojo reflection table")
     out = {}

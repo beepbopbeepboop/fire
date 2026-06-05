@@ -1548,6 +1548,17 @@ def f():
     return body
 """)
 
+    # 158. Heterogeneous list/tuple — string + non-string elements must append
+    #      each by its OWN type (append_str for the string, append_int for the
+    #      int). Previously a single list-wide suffix emitted append_str on the
+    #      int (pointer-from-integer). Numeric-promotion lists are unaffected.
+    test("heterogeneous_collection_append", """\
+def main():
+    var t = ("int", 5)
+    var l = ["tag", 7]
+    return 0
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

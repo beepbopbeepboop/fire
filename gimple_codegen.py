@@ -5451,19 +5451,35 @@ class GimpleGen:
         t    = self._new_temp('MojoList *')
         self._elem_types[t] = elem
         self._emit(f"  {t} = mojo_list_new ();")
-        for el in node.elements:
-            et, ev = self.lower_expr(el)
+        # Lower elements first so we can see all their types before choosing how
+        # to append. A single list-wide suffix mis-types a genuinely heterogeneous
+        # collection — e.g. a tuple ('int', 5) would append the int via
+        # mojo_list_append_str. Detect a string/non-string mix and, only then,
+        # append each element by its OWN type. Numeric-only lists (incl. promoted
+        # [1, 2.0]) keep the promoted list-wide suffix, so this never regresses
+        # homogeneous lists.
+        lowered = [(el, *self.lower_expr(el)) for el in node.elements]
+
+        def _is_spread(el, et):
+            return et in ('MojoList *', 'MojoSet *') or (isinstance(el, UnaryOp) and el.op == '*')
+
+        scalar_sufs = {TypeLattice.list_suffix(et)
+                       for el, et, _ev in lowered if not _is_spread(el, et)}
+        per_element = 'str' in scalar_sufs and scalar_sufs != {'str'}
+
+        for el, et, ev in lowered:
             # Spread element (*seq): extend the list instead of appending
-            if et in ('MojoList *', 'MojoSet *') or (isinstance(el, UnaryOp) and el.op == '*'):
+            if _is_spread(el, et):
                 self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
                 continue
-            ev_cast = self._cast_for_list(et, ev, suf)
+            use = TypeLattice.list_suffix(et) if per_element else suf
+            ev_cast = self._cast_for_list(et, ev, use)
             # GIMPLE: load global string literals into temp before function call
-            if suf == 'str' and ev_cast.startswith('_slit_'):
+            if use == 'str' and ev_cast.startswith('_slit_'):
                 temp = self._new_temp('char *')
                 self._emit(f'  {temp} = {ev_cast};')
                 ev_cast = temp
-            self._emit(f"  mojo_list_append_{suf} ({t}, {ev_cast});")
+            self._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
         return 'MojoList *', t
 
     def _lower_dict_literal(self, node: DictExpr) -> tuple[str, str]:
@@ -5512,21 +5528,29 @@ class GimpleGen:
         return 'MojoSet *', t
 
     def _lower_tuple_literal(self, node: TupleExpr) -> tuple[str, str]:
-        # Tuples lowered as MojoList (immutable semantics not enforced at C level)
+        # Tuples lowered as MojoList (immutable semantics not enforced at C level).
+        # Tuples are heterogeneous by nature — e.g. ('int', 5) — so a single
+        # list-wide append suffix would mis-type elements (append_str on an int).
+        # Append each element by its own type when the tuple mixes string and
+        # non-string elements; otherwise keep the list-wide suffix (same logic as
+        # _lower_list_literal).
         elem = self._infer_list_elem_type(node.elements)
         suf  = TypeLattice.list_suffix(elem)
         t    = self._new_temp('MojoList *')
         self._elem_types[t] = elem
         self._emit(f"  {t} = mojo_list_new ();")
-        for el in node.elements:
-            et, ev = self.lower_expr(el)
-            ev_cast = self._cast_for_list(et, ev, suf)
+        lowered = [(el, *self.lower_expr(el)) for el in node.elements]
+        scalar_sufs = {TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
+        per_element = 'str' in scalar_sufs and scalar_sufs != {'str'}
+        for _el, et, ev in lowered:
+            use = TypeLattice.list_suffix(et) if per_element else suf
+            ev_cast = self._cast_for_list(et, ev, use)
             # GIMPLE: load global string literals into temp before function call
-            if suf == 'str' and ev_cast.startswith('_slit_'):
+            if use == 'str' and ev_cast.startswith('_slit_'):
                 temp = self._new_temp('char *')
                 self._emit(f'  {temp} = {ev_cast};')
                 ev_cast = temp
-            self._emit(f"  mojo_list_append_{suf} ({t}, {ev_cast});")
+            self._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
         return 'MojoList *', t
 
     # ── Comprehension lowering ────────────────────────────────────────────
