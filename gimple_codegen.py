@@ -1563,7 +1563,12 @@ def _extract_init_expr(stmt_value) -> str:
     elif isinstance(stmt_value, BoolLiteral):
         return '1' if stmt_value.value else '0'
     elif isinstance(stmt_value, StringLiteral):
-        escaped = stmt_value.value.replace('\\', '\\\\').replace('"', '\\"')
+        escaped = (stmt_value.value
+                   .replace('\\', '\\\\')  # escape backslashes first
+                   .replace('"', '\\"')     # escape quotes
+                   .replace('\n', '\\n')    # escape newlines
+                   .replace('\r', '\\r')    # escape carriage returns
+                   .replace('\t', '\\t'))   # escape tabs
         return f'"{escaped}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):
         return '0'  # Can't static-initialize; needs runtime init
@@ -7531,6 +7536,13 @@ class GimpleGen:
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
         ])
+
+        # For imported modules, forward-declare the root module's globals struct
+        # This allows imported modules to access globals from the root module
+        # (Must be done here in preamble, before module globals scanning below)
+        if not self.emit_entry_points:
+            # Imported modules always need access to root module's globals
+            parts.append('extern struct _root_toplev _root_globals;')
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
