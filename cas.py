@@ -60,6 +60,15 @@ _COMPILER_SOURCES = [
     'generated_dispatch.py', 'mojo_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
+    'version.py', 'build_config.py',
+]
+
+# Runtime ABI: every cached object is compiled against this header (and links the
+# runtime). A change to either MUST invalidate the cache, or stale objects link
+# against a mismatched ABI. These live under runtime/, not next to the .py files.
+_RUNTIME_SOURCES = [
+    os.path.join('runtime', 'mojo_runtime.h'),
+    os.path.join('runtime', 'mojo_runtime.c'),
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).
@@ -90,7 +99,7 @@ def compiler_fingerprint() -> str:
     global _compiler_fp_cache
     if _compiler_fp_cache is None:
         h = hashlib.blake2b(digest_size=20)
-        for name in sorted(_COMPILER_SOURCES):
+        for name in sorted(_COMPILER_SOURCES) + sorted(_RUNTIME_SOURCES):
             path = os.path.join(HERE, name)
             try:
                 with open(path, 'rb') as f:
