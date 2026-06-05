@@ -7602,8 +7602,9 @@ class GimpleGen:
             safe_mod = _safe_name(mod_str) if mod_str else "root"
             struct_name = f"_{safe_mod}_toplev"
             global_var = f"_{safe_mod}_globals"
-            # Forward-declare the struct type AND the extern global instance
-            parts.append(f'struct {struct_name};  /* extern module globals struct */')
+            # Forward-declare the struct type with gcc attribute to allow incomplete use
+            # AND the extern global instance
+            parts.append(f'struct {struct_name} __attribute__((incomplete));  /* extern module globals struct */')
             parts.append(f'extern struct {struct_name} {global_var};')
 
         # Emit THIS module's globals struct typedef early (after extern decls for other modules)
