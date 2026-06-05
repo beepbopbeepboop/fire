@@ -14,8 +14,17 @@ record the object on the link line.
 import re
 
 import monomorphize as mm
-from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
+from mojo_compiler import tokenize, Parser, FunctionDef, StructDef, TraitDef
 from gimple_codegen import _mojo_type
+
+
+class ConformanceError(Exception):
+    """A concrete type does not satisfy a generic's trait bound (slice 6).
+
+    Raised when elaborating `f[T]`/`Struct[T]` whose type parameter carries a
+    trait bound that the concrete type does not meet (it is missing a required
+    method, or its signature differs). The message is the compile error a user
+    sees."""
 
 _FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
 # Generalized head matching a `fn` or `struct` template with `[type params]`.
@@ -81,6 +90,108 @@ def type_param_names(template_src: str):
         return []
     return [p.strip().split(':')[0].strip()
             for p in m.group(2).split(',') if p.strip()]
+
+
+# ── Trait / conformance bound-checking (slice 6) ─────────────────────────
+#
+# A generic's type parameter may carry a *trait bound*: `fn f[T: Stringable]`
+# or `struct Box[T: Stringable]`. The bound names a trait — an abstract set of
+# required method signatures. Before instantiating the generic for a concrete
+# type, elaboration verifies the type *conforms* (defines every required
+# method, with matching parameter/return types). A non-conforming type yields
+# a `ConformanceError` rather than a broken instantiation downstream.
+
+# `[T: Trait, U: Other, count: Int]` — capture the bound that follows each
+# type-param name. A param with no `: Bound` (or a value param like `count:
+# Int`, which we treat as unbounded for our purposes) maps to None.
+def parse_bounds(template_src: str):
+    """Map each type-parameter name to its trait bound name (or None) from a
+    generic's `[...]` head: `fn f[T: Stringable]` -> {'T': 'Stringable'}."""
+    m = _HEAD.search(template_src)
+    if not m:
+        return {}
+    bounds = {}
+    for p in m.group(2).split(','):
+        p = p.strip()
+        if not p:
+            continue
+        if ':' in p:
+            name, bound = p.split(':', 1)
+            bounds[name.strip()] = bound.strip() or None
+        else:
+            bounds[p] = None
+    return bounds
+
+
+def _method_sig(fn: FunctionDef):
+    """(name, [param_mojo_types excluding self], ret_mojo_type) of a method."""
+    ptypes = [t for n, t in fn.params if n != 'self']
+    return (fn.name, ptypes, fn.return_type)
+
+
+def extract_trait(module_src: str, trait_name: str):
+    """The required method signatures of `trait trait_name`, as a list of
+    (name, [param_types], ret_type). None if the trait is not defined here."""
+    for s in Parser(tokenize(module_src)).parse_module():
+        if isinstance(s, TraitDef) and s.name == trait_name:
+            return [_method_sig(m) for m in s.methods]
+    return None
+
+
+def type_methods(module_src: str, type_name: str):
+    """The method signatures a concrete `struct type_name` defines, as a list
+    of (name, [param_types], ret_type). None if the type is not a struct here."""
+    for s in Parser(tokenize(module_src)).parse_module():
+        if isinstance(s, StructDef) and s.name == type_name:
+            return [_method_sig(m) for m in s.methods]
+    return None
+
+
+def check_conformance(module_src: str, type_name: str, trait_name: str):
+    """Does concrete `type_name` satisfy `trait_name`? Returns (ok, missing),
+    where `missing` lists human-readable descriptions of unmet requirements.
+
+    A requirement is met when the type defines a method of the same name whose
+    (param types, return type) match. If the trait is unknown we cannot check
+    it, so we conservatively accept (ok=True) — bounds we don't understand do
+    not block instantiation, matching the demand-driven, best-effort style."""
+    required = extract_trait(module_src, trait_name)
+    if required is None:
+        return True, []
+    have = type_methods(module_src, type_name)
+    if have is None:
+        # No struct source to inspect (e.g. a builtin like Int). We cannot
+        # verify, so we do not block — keep behaviour additive.
+        return True, []
+    by_name = {}
+    for name, ptypes, ret in have:
+        by_name.setdefault(name, []).append((ptypes, ret))
+    missing = []
+    for name, ptypes, ret in required:
+        cands = by_name.get(name)
+        if cands is None:
+            missing.append(f"missing method '{name}'")
+            continue
+        if not any(cp == ptypes and cr == ret for cp, cr in cands):
+            want = f"({', '.join(ptypes)}) -> {ret}"
+            missing.append(f"method '{name}' signature mismatch (want {want})")
+    return (not missing), missing
+
+
+def check_bounds(module_src: str, template_src: str, targs: dict):
+    """Verify each concrete type arg satisfies its parameter's trait bound.
+    Raises ConformanceError (a clear compile error) on the first violation."""
+    bounds = parse_bounds(template_src)
+    for pname, conc in targs.items():
+        bound = bounds.get(pname)
+        if not bound:
+            continue
+        ok, missing = check_conformance(module_src, conc, bound)
+        if not ok:
+            why = '; '.join(missing)
+            raise ConformanceError(
+                f"type '{conc}' does not conform to trait '{bound}' "
+                f"(required by parameter '{pname}'): {why}")
 
 
 def extract_struct_source(module_src: str, name: str):
@@ -186,6 +297,8 @@ class Elaborator:
         if not params or len(type_args) < len(params):
             return None
         targs = dict(zip(params, type_args[:len(params)]))
+        # Slice 6: a bounded type parameter must conform before we instantiate.
+        check_bounds(module_src, tmpl, targs)
 
         mangled, obj, _hit = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
@@ -204,6 +317,8 @@ class Elaborator:
         if not params or len(type_args) < len(params):
             return None
         targs = dict(zip(params, type_args[:len(params)]))
+        # Slice 6: a bounded type parameter must conform before we instantiate.
+        check_bounds(module_src, tmpl, targs)
 
         mangled, obj, _hit = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)

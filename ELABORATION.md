@@ -102,7 +102,20 @@ every build; ours elaborates each unique thing once and shares it. This is the
    struct + its methods are monomorphized into a CAS object; the client
    materializes the concrete layout (typedef + `struct_field_types`), constructs
    it, and calls its methods (`Box_Int64_unbox`) from the linked object.
-   `Box[Int64](42).unbox()` → 42. (Traits/conformance bound-checking still ahead.)
+   `Box[Int64](42).unbox()` → 42.
+6. **Traits / conformance bound-checking** ✅ — a generic's type parameter may
+   carry a *trait bound* (`fn f[T: Doubler]`, `struct Box[T: Doubler]`). A trait
+   is an abstract set of required method signatures (`trait Doubler: fn
+   double(self) -> Int64: ...`). Before instantiating for a concrete type,
+   elaboration resolves the bound (`elaborate.parse_bounds`), extracts the
+   trait's requirements (`extract_trait`), reads the concrete type's methods
+   (`type_methods`), and verifies conformance — same-named methods with matching
+   `(param types, return type)` (`check_conformance`/`check_bounds`). A
+   conforming type instantiates via the CAS as before; a non-conforming type
+   raises a clear `ConformanceError` naming the type, the trait, the bounding
+   parameter, and the unmet requirement (e.g. `missing method 'double'`).
+   Unbounded or unknown bounds never block (additive, best-effort). Wired into
+   both `elaborate_generic_call` and `elaborate_generic_struct`.
 
 ## Decisions
 
@@ -116,4 +129,8 @@ every build; ours elaborates each unique thing once and shares it. This is the
 - `box[Int64](42)` from an imported generic module: first build instantiates
   (CAS miss), a second build / different client is a hit; the program links the
   instantiation dylib and runs; output matches a from-source build.
+- A `trait Doubler` with one required method, a conforming `struct Num` and a
+  non-conforming `struct Bad`, and generics bounded by it (`fn run[T: Doubler]`,
+  `struct Box[T: Doubler]`): `run[Num]`/`Box[Num]` instantiate; `run[Bad]`/
+  `Box[Bad]` raise `ConformanceError`. (`test_elaboration_trait_conformance`.)
 - Existing suites stay green: `make check` (gimple + runner + module-cache).

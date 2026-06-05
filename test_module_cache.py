@@ -349,6 +349,66 @@ def test_elaboration_overload(wd):
         os.remove(ol)
 
 
+# ── Elaboration slice 6: traits / conformance bound-checking ─────────────
+def test_elaboration_trait_conformance(wd):
+    import elaborate
+    # A trait with one required method, a conforming type, a non-conforming
+    # type, and generics (fn + struct) bounded by the trait.
+    mod = (
+        "trait Doubler:\n"
+        "    fn double(self) -> Int64:\n"
+        "        ...\n\n"
+        "struct Num:\n"
+        "    var v: Int64\n"
+        "    fn double(self) -> Int64:\n"
+        "        return self.v + self.v\n\n"
+        "struct Bad:\n"
+        "    var v: Int64\n"
+        "    fn nope(self) -> Int64:\n"
+        "        return self.v\n\n"
+        "fn run[T: Doubler](x: T) -> Int64:\n"
+        "    return x.double()\n\n"
+        "struct Box[T: Doubler]:\n"
+        "    var item: T\n"
+        "    fn run(self) -> Int64:\n"
+        "        return self.item.double()\n")
+    # Primitives: bound parsing, trait extraction, conformance verdicts.
+    check("slice6: trait bound parsed from generic head",
+          elaborate.parse_bounds("fn run[T: Doubler](x: T) -> Int64:") == {'T': 'Doubler'})
+    check("slice6: trait required methods extracted",
+          elaborate.extract_trait(mod, 'Doubler') == [('double', [], 'Int64')])
+    ok_num, miss_num = elaborate.check_conformance(mod, 'Num', 'Doubler')
+    ok_bad, miss_bad = elaborate.check_conformance(mod, 'Bad', 'Doubler')
+    check("slice6: conforming type satisfies the trait", ok_num and not miss_num)
+    check("slice6: non-conforming type is rejected with a reason",
+          (not ok_bad) and any('double' in m for m in miss_bad))
+
+    el = elaborate.Elaborator()
+    # Conforming: bounded generic fn + struct instantiate end-to-end (CAS).
+    fi = el.elaborate_generic_call(mod, 'run', ['Num'])
+    si = el.elaborate_generic_struct(mod, 'Box', ['Num'])
+    check("slice6: bounded generic fn instantiates for a conforming type",
+          bool(fi) and fi['symbol'] == 'run_Num')
+    check("slice6: bounded generic struct instantiates for a conforming type",
+          bool(si) and si['name'] == 'Box_Num'
+          and ('run', 'int64_t', []) in si['methods'])
+    # Non-conforming: a clear ConformanceError, for both fn and struct.
+    raised_fn = raised_struct = False
+    try:
+        el.elaborate_generic_call(mod, 'run', ['Bad'])
+    except elaborate.ConformanceError:
+        raised_fn = True
+    try:
+        el.elaborate_generic_struct(mod, 'Box', ['Bad'])
+    except elaborate.ConformanceError:
+        raised_struct = True
+    check("slice6: bounded generic fn rejects a non-conforming type", raised_fn)
+    check("slice6: bounded generic struct rejects a non-conforming type", raised_struct)
+    # Unknown/unbounded bounds never block (additive, best-effort).
+    nb = el.elaborate_generic_call("fn id[T](x: T) -> T:\n    return x\n", 'id', ['Bad'])
+    check("slice6: unbounded type parameter is not blocked", bool(nb))
+
+
 def main():
     wd = tempfile.mkdtemp(prefix='mojo_modcache_test_')
     # Isolate the CAS so cold/warm/invalidation assertions are deterministic and
@@ -365,6 +425,7 @@ def main():
         test_elaboration_inference_and_comptime(wd)
         test_elaboration_generic_struct(wd)
         test_elaboration_overload(wd)
+        test_elaboration_trait_conformance(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()
