@@ -46,13 +46,18 @@ check: check-gimple check-runner check-modcache
 check-gimple: gimple_codegen.py $(DYLIB)
 	python3 test_gimple.py
 
-check-runner: $(MOJO_CLI)
+# No $(MOJO_CLI) prerequisite: test_runner.py compiles via gcc directly and only
+# existence-checks the prebuilt `build/mojo`. Depending on $(MOJO_CLI) would force
+# a rebuild-if-stale of the self-host bootstrap — pre-existing-broken (a
+# `MojoList * + char *` codegen bug, mojo_compiler.py emit path) and intentionally
+# decoupled from `check`. `make bootstrap` is the place that exercises it.
+check-runner:
 	python3 test_runner.py
 
 check-modcache:
 	python3 test_module_cache.py
 
-check-gimple-runner: $(MOJO_CLI)
+check-gimple-runner:
 	python3 test_gimple_runner.py
 
 # Build runtime dylib (macOS) / shared lib (Linux)
