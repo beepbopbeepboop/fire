@@ -3964,13 +3964,15 @@ class GimpleGen:
                 xt = 'char *'
             self._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
         elif rt == 'MojoSet *':
+            # Route through _emit_call so global/_slit_ args are loaded into locals
+            # first (GIMPLE: a call argument must be a local, not a global decl).
             if xt == 'char *':
-                self._emit(f"  {ti} = mojo_set_contains_str ({rv}, {xv});")
+                self._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
             else:
                 xv64 = self._to_int64(xt, xv)
-                self._emit(f"  {ti} = mojo_set_contains_int ({rv}, {xv64});")
+                self._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
         elif rt == 'MojoStr *':
-            self._emit(f"  {ti} = mojo_str_contains ({rv}, {xv});")
+            self._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
         else:
             self._emit(f"  /* TODO: 'in' for {rt} */")
             self._emit(f"  {ti} = 0;")
