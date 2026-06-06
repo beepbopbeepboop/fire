@@ -2844,7 +2844,10 @@ class GimpleGen:
                 self._collect_return_types(node.body, acc)
 
     def _string_type_to_type_obj(self, type_str: str, origin=None):
-        """Convert string type representation to Type object for type checking."""
+        """Convert string type representation to Type object for type checking.
+
+        Supports all integer widths: int8_t, int16_t, int32_t, int64_t and unsigned variants.
+        """
         try:
             from type_system import (
                 Type, TypeOrigin,
@@ -2852,17 +2855,34 @@ class GimpleGen:
             )
             origin = origin or TypeOrigin.DEFAULT
 
+            # Signed integer types with proper bit width tracking
             if type_str == 'int64_t':
                 return make_int64_type(origin)
+            elif type_str == 'int32_t' or type_str == 'int':
+                return Type(base=type_str, bit_width=32, is_signed=True, origin=origin)
+            elif type_str == 'int16_t':
+                return Type(base='int16_t', bit_width=16, is_signed=True, origin=origin)
+            elif type_str == 'int8_t':
+                return Type(base='int8_t', bit_width=8, is_signed=True, origin=origin)
+            # Unsigned integer types
+            elif type_str == 'uint64_t':
+                return Type(base='uint64_t', bit_width=64, is_signed=False, origin=origin)
+            elif type_str == 'uint32_t':
+                return Type(base='uint32_t', bit_width=32, is_signed=False, origin=origin)
+            elif type_str == 'uint16_t':
+                return Type(base='uint16_t', bit_width=16, is_signed=False, origin=origin)
+            elif type_str == 'uint8_t':
+                return Type(base='uint8_t', bit_width=8, is_signed=False, origin=origin)
+            # Floating point
             elif type_str == 'double':
                 return make_double_type(origin)
+            elif type_str == 'float':
+                return Type(base='float', bit_width=32, origin=origin)
+            # Container types
             elif type_str.startswith('MojoList'):
-                # Extract element type if present
                 return make_mojolist_type(make_int64_type(), origin)
-            elif type_str == 'int':
-                return Type(base='int', bit_width=32, origin=origin)
             else:
-                # Generic type
+                # Generic type - preserve as-is
                 return Type(base=type_str, origin=origin)
         except ImportError:
             return None
