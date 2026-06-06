@@ -1887,12 +1887,6 @@ class GimpleGen:
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
         self._current_filename: str = ""  # filename for #line directives
-        # Type system (new)
-        try:
-            from type_system import InvariantChecker
-            self.type_checker = InvariantChecker(verbose=False)
-        except ImportError:
-            self.type_checker = None  # Type system not available
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
@@ -2373,19 +2367,6 @@ class GimpleGen:
                 elif aval in self._global_var_types:
                     actual_atype = self._global_var_types[aval]
 
-            # Type system: Check OPAQUE_POINTER_TRACKING for parameter passing
-            if self.type_checker and atype == 'int64_t' and actual_atype != atype and ptype != atype:
-                try:
-                    from type_system import Type, TypeOrigin, make_opaque_pointer_type
-                    actual_type_obj = make_opaque_pointer_type(actual_atype, TypeOrigin.INFERRED)
-                    ptype_obj = self._string_type_to_type_obj(ptype, TypeOrigin.INFERRED)
-                    if actual_type_obj and ptype_obj:
-                        self.type_checker.check_opaque_pointer_tracking(
-                            actual_type_obj, ptype_obj, i, fname,
-                            (self._current_filename, getattr(self, '_current_line', 0))
-                        )
-                except (ImportError, TypeError, Exception):
-                    pass  # Type checking failed, continue
             # GIMPLE: extern globals must be loaded into locals before function calls
             # This includes string literals (_slit_*) and dict globals (_BIN_OPS, etc.)
             if aval.startswith('_slit_') or aval in ('_BIN_OPS', '_GD_BIN_OPS'):
@@ -2528,24 +2509,6 @@ class GimpleGen:
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
         """Emit `lhs = val` coercing src→dst; routes struct-field LHS and literal RHS
         through register temps as required by GIMPLE."""
-
-        # Type system: Check BIT_WIDTH_PRESERVATION on coercion
-        if self.type_checker:
-            try:
-                from type_system import TypeOrigin
-                src_type_obj = self._string_type_to_type_obj(src, TypeOrigin.INFERRED)
-                dst_type_obj = self._string_type_to_type_obj(dst, TypeOrigin.INFERRED)
-                if src_type_obj and dst_type_obj:
-                    # Check if coercion violates bit width preservation
-                    if src_type_obj.is_numeric() and dst_type_obj.is_numeric():
-                        if src_type_obj.is_64bit() and dst_type_obj.is_32bit():
-                            # 64-bit to 32-bit truncation - needs explicit cast
-                            pass  # Continue (cast is intentional here)
-                        elif src_type_obj.is_32bit() and dst_type_obj.is_64bit():
-                            # 32-bit to 64-bit widening - OK
-                            pass
-            except (ImportError, TypeError, Exception):
-                pass  # Type checking failed, continue
 
         is_field = '->' in lhs
         val_is_literal = val.startswith('"') or val.startswith("'") or (
@@ -2859,50 +2822,6 @@ class GimpleGen:
         result = self._new_temp(dst_type)
         self._safe_coerce_emit(src_type, dst_type, value, result)
         return result
-
-    def _string_type_to_type_obj(self, type_str: str, origin=None):
-        """Convert string type representation to Type object for type checking.
-
-        Supports all integer widths: int8_t, int16_t, int32_t, int64_t and unsigned variants.
-        """
-        try:
-            from type_system import (
-                Type, TypeOrigin,
-                make_int64_type, make_double_type, make_mojolist_type
-            )
-            origin = origin or TypeOrigin.DEFAULT
-
-            # Signed integer types with proper bit width tracking
-            if type_str == 'int64_t':
-                return make_int64_type(origin)
-            elif type_str == 'int32_t' or type_str == 'int':
-                return Type(base=type_str, bit_width=32, is_signed=True, origin=origin)
-            elif type_str == 'int16_t':
-                return Type(base='int16_t', bit_width=16, is_signed=True, origin=origin)
-            elif type_str == 'int8_t':
-                return Type(base='int8_t', bit_width=8, is_signed=True, origin=origin)
-            # Unsigned integer types
-            elif type_str == 'uint64_t':
-                return Type(base='uint64_t', bit_width=64, is_signed=False, origin=origin)
-            elif type_str == 'uint32_t':
-                return Type(base='uint32_t', bit_width=32, is_signed=False, origin=origin)
-            elif type_str == 'uint16_t':
-                return Type(base='uint16_t', bit_width=16, is_signed=False, origin=origin)
-            elif type_str == 'uint8_t':
-                return Type(base='uint8_t', bit_width=8, is_signed=False, origin=origin)
-            # Floating point
-            elif type_str == 'double':
-                return make_double_type(origin)
-            elif type_str == 'float':
-                return Type(base='float', bit_width=32, origin=origin)
-            # Container types
-            elif type_str.startswith('MojoList'):
-                return make_mojolist_type(make_int64_type(), origin)
-            else:
-                # Generic type - preserve as-is
-                return Type(base=type_str, origin=origin)
-        except ImportError:
-            return None
 
     def _infer_return_type(self, body: list) -> str:
         """Infer return type by scanning body for ReturnStmt nodes."""
@@ -3294,20 +3213,6 @@ class GimpleGen:
         ct, cv = self.lower_expr(node.condition)
         tt, tv = self.lower_expr(node.then_val)
         et, ev = self.lower_expr(node.else_val)
-
-        # Type system: Check branch type compatibility
-        if self.type_checker:
-            try:
-                from type_system import TypeOrigin
-                then_type_obj = self._string_type_to_type_obj(tt, TypeOrigin.INFERRED)
-                else_type_obj = self._string_type_to_type_obj(et, TypeOrigin.INFERRED)
-                if then_type_obj and else_type_obj:
-                    # Branches should have compatible types
-                    if tt != et and then_type_obj.base != else_type_obj.base:
-                        # Log type mismatch but continue (coercion will handle it)
-                        pass
-            except (ImportError, TypeError, Exception):
-                pass
 
         # GIMPLE: condition must be _Bool, branches must have identical types
         if ct != '_Bool':
@@ -3770,18 +3675,6 @@ class GimpleGen:
         res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
 
         # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
-        if self.type_checker and node.op in ('+', '-', '*', '/', '%'):
-            try:
-                from type_system import Type, TypeOrigin
-                left_type_obj = self._string_type_to_type_obj(lt, TypeOrigin.INFERRED)
-                right_type_obj = self._string_type_to_type_obj(rt, TypeOrigin.INFERRED)
-                if left_type_obj and right_type_obj:
-                    result_type = self.type_checker.check_bit_width_preservation(
-                        left_type_obj, node.op, right_type_obj,
-                        (self._current_filename, getattr(node, 'line', 0))
-                    )
-            except (ImportError, TypeError, Exception):
-                pass  # Type checking failed, continue with regular compilation
         # For | on set/list/dict pointer types, use runtime union, not C bitwise |
         if node.op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
             t = self._new_temp('MojoSet *')
@@ -5422,19 +5315,6 @@ class GimpleGen:
                 # Direct numeric conversion: cast int to double
                 t = self._new_temp('double')
                 self._emit(f"  {t} = (double){arg_val};")
-
-                # Type system: Verify numeric conversion is correct
-                if self.type_checker:
-                    try:
-                        from type_system import TypeOrigin
-                        src_type = self._string_type_to_type_obj(arg_type, TypeOrigin.INFERRED)
-                        dst_type = self._string_type_to_type_obj('double', TypeOrigin.INFERRED)
-                        if src_type and dst_type:
-                            # Numeric conversion is OK, widening is always safe
-                            pass
-                    except (ImportError, TypeError, Exception):
-                        pass
-
                 return 'double', t
             elif arg_type == 'double':
                 # Already double, just return it
@@ -5540,19 +5420,6 @@ class GimpleGen:
     def _lower_subscript(self, node: SubscriptExpr) -> tuple[str, str]:
         ot, ov = self.lower_expr(node.obj)
         idx_type, iv  = self.lower_expr(node.index)
-
-        # Type system: Check ELEMENT_TYPE_PRESERVATION for subscript operations
-        if self.type_checker and ot in ('MojoList *', 'MojoDict *', 'MojoStr *'):
-            try:
-                from type_system import Type, TypeOrigin
-                container_type = self._string_type_to_type_obj(ot, TypeOrigin.INFERRED)
-                if container_type:
-                    elem_type = self.type_checker.check_element_type_preservation(
-                        container_type,
-                        (self._current_filename, getattr(node, 'line', 0))
-                    )
-            except (ImportError, TypeError, Exception):
-                pass  # Type checking failed, continue
 
         if ot == 'MojoList *':
             elem = self._elem_of(ov)
@@ -6391,20 +6258,6 @@ class GimpleGen:
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
 
-            # Type system: Check TEMPORAL_MONOTONICITY
-            if self.type_checker:
-                try:
-                    from type_system import Type, TypeOrigin
-                    dst_type_obj = self._string_type_to_type_obj(dst, TypeOrigin.INFERRED)
-                    vtype_obj = self._string_type_to_type_obj(vtype, TypeOrigin.INFERRED)
-                    if dst_type_obj and vtype_obj:
-                        self.type_checker.check_temporal_monotonicity(
-                            tname, vtype_obj,
-                            (self._current_filename, getattr(node, 'line', 0))
-                        )
-                except (ImportError, TypeError, Exception):
-                    pass  # Type checking failed, continue
-
             if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[tname] = self._elem_types[v]
                 # Also propagate nested element types (for lists of lists)
@@ -7124,18 +6977,6 @@ class GimpleGen:
         else:
             # Skip emitting comment to avoid GIMPLE global-passing issues
             return
-
-        # Type system: Verify loop variable is int64_t
-        if self.type_checker:
-            try:
-                from type_system import Type, TypeOrigin, make_int64_type
-                loop_var_type = make_int64_type(TypeOrigin.INFERRED, (self._current_filename, getattr(node, 'line', 0)))
-                self.type_checker.check_temporal_monotonicity(
-                    var, loop_var_type,
-                    (self._current_filename, getattr(node, 'line', 0))
-                )
-            except (ImportError, TypeError, Exception):
-                pass
 
         self._declare_var(var, 'int64_t')
         _, start_v = self.lower_expr(start_expr)
@@ -8274,20 +8115,6 @@ class GimpleGen:
                 if s.name == 'main' and inferred == 'void':
                     inferred = 'int'
                 self.func_return_types[s.name] = inferred
-
-                # Type system: Lock return type with INFERENCE_IDEMPOTENCE check
-                if self.type_checker:
-                    try:
-                        from type_system import Type, TypeOrigin
-                        ret_type_obj = self._string_type_to_type_obj(inferred, TypeOrigin.INFERRED)
-                        if ret_type_obj:
-                            self.type_checker.lock_inferred_type(
-                                f"{s.name}.return", ret_type_obj, "2",
-                                (self._current_filename, getattr(s, 'line', 0))
-                            )
-                    except (ImportError, TypeError, Exception):
-                        pass
-
                 self.var_types.clear()
 
         #   Pass 2b: infer return types for unannotated struct methods
@@ -8327,19 +8154,6 @@ class GimpleGen:
         for s in all_functions:
             if isinstance(s, FunctionDef):
                 self._inferred_param_types[s.name] = self._infer_param_types(s)
-                # Type system: Lock parameter types with INFERENCE_IDEMPOTENCE check
-                if self.type_checker:
-                    for pname, ptype in self._inferred_param_types[s.name].items():
-                        try:
-                            from type_system import Type, TypeOrigin
-                            # Convert string type to Type object
-                            type_obj = self._string_type_to_type_obj(ptype, TypeOrigin.INFERRED)
-                            self.type_checker.lock_inferred_type(
-                                f"{s.name}.{pname}", type_obj, "1.3",
-                                (self._current_filename, s.line if hasattr(s, 'line') else 0)
-                            )
-                        except (ImportError, TypeError):
-                            pass  # Type system not available or type conversion failed
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
@@ -8777,17 +8591,6 @@ class GimpleGen:
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fn))
             self.func_param_types[fn.name] = param_ctypes
-
-        # Type system: Report any invariant violations found during pre-passes
-        if self.type_checker and self.type_checker.has_errors():
-            error_report = self.type_checker.format_errors()
-            if not self.emit_entry_points or getattr(self, '_strict_type_checking', False):
-                # In strict mode or non-entry mode, stop compilation on type errors
-                raise ValueError(f"Type system violations found:\n{error_report}")
-            else:
-                # In relaxed mode, just warn
-                import sys
-                print(error_report, file=sys.stderr)
 
         # Only generate _toplevel() if there are actual top-level statements
         has_toplevel_code = len(toplevel_stmts) > 0
