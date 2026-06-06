@@ -2378,8 +2378,17 @@ class GimpleGen:
                 temp = self._new_temp('char *')
                 self._emit(f'  {temp} = {slit_name};')
                 aval = temp
-            if ptype == atype or ptype == actual_atype or ptype == '...':
+            if ptype == atype or ptype == '...':
+                # Skip coercion only if C types match exactly
                 coerced_args.append(aval)
+            elif ptype == actual_atype and atype != ptype:
+                # Semantic types match but C types differ (e.g., int64_t → MojoList *)
+                # Still need to cast the underlying C type
+                ip3 = self._new_temp('int64_t')
+                pp = self._new_temp(ptype)
+                self._emit(f'  {ip3} = (int64_t){aval};')
+                self._emit(f'  {pp} = ({ptype}){ip3};')
+                coerced_args.append(pp)
             elif ptype == 'void *' and actual_atype in ('int', 'int64_t', '_Bool'):
                 ip = self._new_temp('int64_t')
                 vp = self._new_temp('void *')
