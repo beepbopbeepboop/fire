@@ -9453,17 +9453,19 @@ class GimpleGen:
 
         # Register commonly-called generated functions as external protos for GIMPLE
         # These need proper GIMPLE declarations before they can be called
+        # Use variadic parameter lists to handle different call signatures
         common_functions = {
             '_gimple_main': ('int', []),
-            'compile_linked': ('int', ['char *', 'char *']),
+            'compile_linked': ('int', ['int64_t']),  # Called with single argument, not char*
             '_mojo_type': ('char *', ['int64_t']),
-            '_ReflectTable_in_dll': ('int', []),
+            '_ReflectTable_in_dll': ('int', ['int64_t', 'int64_t', 'int64_t']),  # Called with 3 args
             '_Bool_items': ('int', ['int64_t']),
             'GimpleGen': ('int', []),
+            '_hash': ('int64_t', ['int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),  # Variadic, called with up to 7 args
         }
         for func_name, (ret_type, param_types) in common_functions.items():
-            if func_name not in self._external_protos:
-                self._external_protos[func_name] = (ret_type, param_types)
+            # Always register, overwriting if necessary to ensure correct signature
+            self._external_protos[func_name] = (ret_type, param_types)
         parts.append("")
 
         # Forward declarations: free functions (skip main — handled specially)
