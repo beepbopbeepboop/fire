@@ -2797,6 +2797,58 @@ class GimpleGen:
         types = [self._quick_type(e) for e in elements]
         return TypeLattice.join_all(types) if types else 'int64_t'
 
+    def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
+        """Infer local variable types from all assignments in function body.
+
+        Scans all assignments to determine the variable's actual type needs.
+        Returns dict mapping var_name → inferred_ctype.
+        """
+        inferred = {}
+
+        def collect_assigned_types(nodes: list):
+            """Recursively scan statements and collect types assigned to variables."""
+            for node in nodes:
+                if isinstance(node, AssignStmt):
+                    vtype, _ = self.lower_expr(node.value)
+                    # Handle both single and tuple targets
+                    targets = [node.target] if not isinstance(node.target, TupleExpr) else node.target.elements
+                    for target in targets:
+                        if isinstance(target, IdentExpr):
+                            vname = target.name
+                            if vname not in inferred:
+                                inferred[vname] = []
+                            inferred[vname].append(vtype)
+                elif isinstance(node, IfStmt):
+                    collect_assigned_types(node.then_body)
+                    if node.else_body:
+                        collect_assigned_types(node.else_body)
+                    for _, elif_body in node.elifs:
+                        collect_assigned_types(elif_body)
+                elif isinstance(node, (WhileStmt, ForStmt)):
+                    collect_assigned_types(node.body)
+                    if node.else_body:
+                        collect_assigned_types(node.else_body)
+                elif isinstance(node, TryStmt):
+                    collect_assigned_types(node.body)
+                    for h in node.handlers:
+                        collect_assigned_types(h.body)
+                    if node.else_body:
+                        collect_assigned_types(node.else_body)
+                    if node.finally_body:
+                        collect_assigned_types(node.finally_body)
+                elif isinstance(node, WithStmt):
+                    collect_assigned_types(node.body)
+
+        collect_assigned_types(func.body)
+
+        # Join all types for each variable using TypeLattice
+        result = {}
+        for vname, types in inferred.items():
+            if types:
+                result[vname] = TypeLattice.join_all(types)
+
+        return result
+
     # ── Expression lowering ───────────────────────────────────────────────
 
     def lower_expr(self, node) -> tuple[str, str]:
@@ -6026,7 +6078,16 @@ class GimpleGen:
                     if isinstance(tgt, IdentExpr):
                         et, ev = self.lower_expr(rhs_expr)
                         if tgt.name not in self.var_types:
-                            self._declare_var(tgt.name, et)
+                            # Check for inferred variable type
+                            func_key = self.current_func_name
+                            if func_key and hasattr(self, '_inferred_var_types'):
+                                if func_key in self._inferred_var_types and tgt.name in self._inferred_var_types[func_key]:
+                                    ctype = self._inferred_var_types[func_key][tgt.name]
+                                else:
+                                    ctype = et
+                            else:
+                                ctype = et
+                            self._declare_var(tgt.name, ctype)
                         dst = self.var_types[tgt.name]
                         self._safe_coerce_emit(et, dst, ev, self._cname(tgt.name))
             else:
@@ -6049,7 +6110,16 @@ class GimpleGen:
                             self._emit(f"  {ip} = (int64_t){v};")
                             self._emit(f"  {ev} = {ip};")
                         if tgt.name not in self.var_types:
-                            self._declare_var(tgt.name, et)
+                            # Check for inferred variable type
+                            func_key = self.current_func_name
+                            if func_key and hasattr(self, '_inferred_var_types'):
+                                if func_key in self._inferred_var_types and tgt.name in self._inferred_var_types[func_key]:
+                                    ctype = self._inferred_var_types[func_key][tgt.name]
+                                else:
+                                    ctype = et
+                            else:
+                                ctype = et
+                            self._declare_var(tgt.name, ctype)
                         dst = self.var_types[tgt.name]
                         self._safe_coerce_emit(et, dst, ev, self._cname(tgt.name))
             return
@@ -6063,7 +6133,16 @@ class GimpleGen:
                 return
             # Regular local variable assignment
             if tname not in self.var_types:
-                self._declare_var(tname, vtype)
+                # Check for inferred variable type (from analysis of all assignments)
+                func_key = self.current_func_name
+                if func_key and hasattr(self, '_inferred_var_types'):
+                    if func_key in self._inferred_var_types and tname in self._inferred_var_types[func_key]:
+                        ctype = self._inferred_var_types[func_key][tname]
+                    else:
+                        ctype = vtype
+                else:
+                    ctype = vtype
+                self._declare_var(tname, ctype)
             dst = self.var_types[tname]
             if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[tname] = self._elem_types[v]
@@ -7935,6 +8014,19 @@ class GimpleGen:
                 for m in s.methods:
                     key = f"{s.name}_{m.name}"
                     self._inferred_param_types[key] = self._infer_param_types(m)
+
+        # ── Pass 1.3b: Infer local variable types from assignments ──────────
+        # Scan all assignments to determine variable types; use int64_t for
+        # variables that receive 64-bit values (list elements, arithmetic results)
+        self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
+        for s in all_functions:
+            if isinstance(s, FunctionDef):
+                self._inferred_var_types[s.name] = self._infer_local_var_types(s)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                for m in s.methods:
+                    key = f"{s.name}_{m.name}"
+                    self._inferred_var_types[key] = self._infer_local_var_types(m)
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
