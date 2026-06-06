@@ -4177,13 +4177,21 @@ class GimpleGen:
                 at, av = self.lower_expr(node.args[0])
                 if at == 'char *':
                     self._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
+                    self._elem_types[ov] = 'char *'
                 else:
                     # Pass actual type so _emit_call converts pointers via void* → int64_t
                     self._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+                    # Track element type: if appending a pointer type, update container's elem type
+                    if at.endswith(' *') or (at == 'int64_t' and av in self._actual_types and self._actual_types[av].endswith(' *')):
+                        actual_elem = self._actual_types.get(av, at)
+                        self._elem_types[ov] = actual_elem
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'extend' and node.args:
                 at, av = self.lower_expr(node.args[0])
                 self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
+                # When extending with a list, update container's element type
+                if at == 'MojoList *' and av in self._elem_types:
+                    self._elem_types[ov] = self._elem_types[av]
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop':
                 t = self._new_temp('int64_t')
@@ -5364,6 +5372,15 @@ class GimpleGen:
                 return 'char *', t
             t = self._new_temp('int64_t')
             self._emit(f"  {t} = mojo_list_get_int ({ov}, {idx64});")
+            # Track element type if the list contains pointers (lists, dicts, etc.)
+            # This is critical for nested subscripts: arr[0][1] needs to know what
+            # element type the result of arr[0] contains.
+            if elem and elem.endswith(' *'):
+                self._actual_types[t] = elem
+                # For MojoList*, track element type of the nested list
+                # (element type is unknown for dynamically-created lists, default to int64_t)
+                if elem == 'MojoList *':
+                    self._elem_types[t] = 'int64_t'
             return 'int64_t', t
 
         if ot == 'MojoStr *':
