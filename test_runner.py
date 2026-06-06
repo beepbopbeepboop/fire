@@ -189,6 +189,24 @@ def main() -> Int:
     return len(r)
 """, expected_return=3)
 
+    # 11. Nested list of floats: append inner double-lists, then read grid[i][j].
+    #     Regression for lost nested element type on append -> inner read used the
+    #     int getter on a double list and returned 0 (silent). The append must carry
+    #     the inner list's element type as the container's nested element type so
+    #     grid[i][j] reads with mojo_list_get_double.
+    test_execution("nested_float_list", """\
+def main() -> Int:
+    grid = []
+    grid.append([10.0, 20.0, 30.0])
+    grid.append([40.0, 50.0, 60.0])
+    a = grid[0][0]
+    b = grid[1][2]
+    if a == 10.0:
+        if b == 60.0:
+            return 42
+    return 1
+""", expected_return=42)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):

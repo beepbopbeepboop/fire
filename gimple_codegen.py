@@ -4273,6 +4273,13 @@ class GimpleGen:
                     if at.endswith(' *') or (at == 'int64_t' and av in self._actual_types and self._actual_types[av].endswith(' *')):
                         actual_elem = self._actual_types.get(av, at)
                         self._elem_types[ov] = actual_elem
+                        # Appending a list into a list: carry the inner list's element
+                        # type as this container's nested element type, so a later
+                        # ov[i][j] reads the inner element with the right getter
+                        # (mirrors the extend case below). Without this, nested float
+                        # lists silently read as int -> garbage.
+                        if actual_elem == 'MojoList *' and av in self._elem_types:
+                            self._nested_elem_types[ov] = self._elem_types[av]
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'extend' and node.args:
                 at, av = self.lower_expr(node.args[0])
