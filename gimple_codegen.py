@@ -2554,10 +2554,14 @@ class GimpleGen:
                 else:
                     self._emit(f'  {dest} = (int){ip};')
             elif d.endswith(' *') and s in ('int', 'int64_t'):
+                v = self._ensure_local(s, v)
                 ip = self._new_temp('int64_t')
                 self._emit(f'  {ip} = (int64_t){v};')
                 self._emit(f'  {dest} = ({d}){ip};')
             else:
+                # GIMPLE: a cast operand must be a local, never a global decl
+                # (e.g. a _slit_ string literal). Load it first.
+                v = self._ensure_local(s, v)
                 self._emit(f'  {dest} = ({d}){v};')
 
         if needs_temp:
@@ -4655,8 +4659,7 @@ class GimpleGen:
             method_slit = self._str_pool[escaped]
             method_key = self._new_temp('char *')
             self._emit(f"  {method_key} = {method_slit};")
-            obj64 = self._new_temp('int64_t')
-            self._emit(f"  {obj64} = (int64_t){ov};")
+            obj64 = self._to_int64(ot, ov)
             # Lower the first argument (if any), or pass 0
             if node.args:
                 arg_type, arg_val = self.lower_expr(node.args[0])
@@ -5622,8 +5625,6 @@ class GimpleGen:
                 else:
                     self._emit(f"  {ip} = (int64_t){ov_local};")
                 self._emit(f"  {dp} = (MojoDict *){ip};")
-                idx64 = self._new_temp('int64_t')
-                self._emit(f"  {idx64} = (int64_t){iv};")
                 # Ensure index is char * for dict access (all dict keys are strings in runtime)
                 idx_for_dict = iv
                 idx_type_for_dict = idx_type
@@ -5647,14 +5648,13 @@ class GimpleGen:
             # Otherwise treat as MojoList* stored as int; cast and subscript
             lp = self._new_temp('MojoList *')
             ip = self._new_temp('int64_t')
-            idx64 = self._new_temp('int64_t')
             ov_local = self._ensure_local(ot, ov)
             if ot == 'int64_t':
                 self._emit(f"  {ip} = {ov_local};")  # same type, no cast
             else:
                 self._emit(f"  {ip} = (int64_t){ov_local};")
             self._emit(f"  {lp} = (MojoList *){ip};")
-            self._emit(f"  {idx64} = (int64_t){iv};")
+            idx64 = self._to_int64(idx_type, iv)
             # Copy element type tracking from the int64_t temp to the MojoList * temp
             # This is critical for nested list access: when lp came from arr[i], we need to know
             # what elements lp contains so subsequent accesses like lp[j] use the right function
@@ -6445,9 +6445,8 @@ class GimpleGen:
                 self._emit(f"  {key_tmp} = {key_slit};")
                 v64 = self._new_temp('int64_t')
                 self._safe_coerce_emit(vtype, 'int64_t', v, v64)
-                obj64 = self._new_temp('int64_t')
+                obj64 = self._to_int64(ot, ov)
                 vp_tmp = self._new_temp('void *')
-                self._emit(f"  {obj64} = (int64_t){ov};")
                 self._emit(f"  {vp_tmp} = (void *){obj64};")
                 self._emit_call('void', '', 'mojo_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
