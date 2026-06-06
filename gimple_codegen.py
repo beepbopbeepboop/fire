@@ -1932,6 +1932,7 @@ class GimpleGen:
         self._last_was_terminal: bool       = False
         # Container / layout state
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
+        self._nested_elem_types: dict[str, str] = {}  # container var → element type of lists within lists
         # Pre-seed known global dicts with their value types so .get() uses the right function.
         self._dict_val_types:  dict[str, str]   = {
             '_BIN_OPS': 'char *', '_GD_BIN_OPS': 'char *',
@@ -4189,9 +4190,12 @@ class GimpleGen:
             if method == 'extend' and node.args:
                 at, av = self.lower_expr(node.args[0])
                 self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
-                # When extending with a list, update container's element type
+                # When extending with a list, update container's element type and nested element type
                 if at == 'MojoList *' and av in self._elem_types:
                     self._elem_types[ov] = self._elem_types[av]
+                    # If the nested list contains lists, propagate that information
+                    if av in self._nested_elem_types:
+                        self._nested_elem_types[ov] = self._nested_elem_types[av]
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop':
                 t = self._new_temp('int64_t')
@@ -5378,9 +5382,13 @@ class GimpleGen:
             if elem and elem.endswith(' *'):
                 self._actual_types[t] = elem
                 # For MojoList*, track element type of the nested list
-                # (element type is unknown for dynamically-created lists, default to int64_t)
                 if elem == 'MojoList *':
-                    self._elem_types[t] = 'int64_t'
+                    # Check if the container (ov) has tracked nested element type
+                    if ov in self._nested_elem_types:
+                        self._elem_types[t] = self._nested_elem_types[ov]
+                    else:
+                        # Unknown nested element type, default to int64_t
+                        self._elem_types[t] = 'int64_t'
             return 'int64_t', t
 
         if ot == 'MojoStr *':
@@ -5457,11 +5465,29 @@ class GimpleGen:
                 self._emit(f"  {ip} = (int64_t){ov_local};")
             self._emit(f"  {lp} = (MojoList *){ip};")
             self._emit(f"  {idx64} = (int64_t){iv};")
+            # Copy element type tracking from the int64_t temp to the MojoList * temp
+            # This is critical for nested list access: when lp came from arr[i], we need to know
+            # what elements lp contains so subsequent accesses like lp[j] use the right function
+            if ov in self._elem_types:
+                self._elem_types[lp] = self._elem_types[ov]
+            if ov in self._nested_elem_types:
+                self._nested_elem_types[lp] = self._nested_elem_types[ov]
+            # Get element type: check _elem_types (if ov is a tracked temp), else check _nested_elem_types
             elem = self._elem_of(ov)
+            if not elem or elem == 'int64_t':
+                # Check if ov came from a subscript that returned a list with tracked nested elements
+                if ov in self._elem_types:
+                    elem = self._elem_types[ov]
+                elif ov in self._nested_elem_types:
+                    elem = self._nested_elem_types[ov]
             if elem == 'char *':
                 t = self._new_temp('char *')
                 self._emit(f"  {t} = mojo_list_get_str ({lp}, {idx64});")
                 return 'char *', t
+            if elem == 'double':
+                t = self._new_temp('double')
+                self._emit(f"  {t} = mojo_list_get_double ({lp}, {idx64});")
+                return 'double', t
             t = self._new_temp('int64_t')
             self._emit(f"  {t} = mojo_list_get_int ({lp}, {idx64});")
             return 'int64_t', t
@@ -5555,6 +5581,13 @@ class GimpleGen:
             # Spread element (*seq): extend the list instead of appending
             if _is_spread(el, et):
                 self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
+                # Track nested element type if extending with a list that has tracked elements
+                # IMPORTANT: Keep _elem_types[t] as 'MojoList *' (what t contains),
+                # and set _nested_elem_types[t] to what those lists contain
+                if et == 'MojoList *' and ev in self._elem_types:
+                    # Don't overwrite _elem_types[t] - it correctly says t contains MojoList*
+                    # Instead, track what those lists contain in _nested_elem_types
+                    self._nested_elem_types[t] = self._elem_types[ev]
                 continue
             use = TypeLattice.list_suffix(et) if per_element else suf
             ev_cast = self._cast_for_list(et, ev, use)
@@ -6164,6 +6197,9 @@ class GimpleGen:
             dst = self.var_types[tname]
             if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[tname] = self._elem_types[v]
+                # Also propagate nested element types (for lists of lists)
+                if v in self._nested_elem_types:
+                    self._nested_elem_types[tname] = self._nested_elem_types[v]
             if dst == 'MojoDict *':
                 if v in self._elem_types:
                     self._elem_types[tname] = self._elem_types[v]
@@ -6188,6 +6224,9 @@ class GimpleGen:
                     actual_type = self._actual_types[tname]
                     if actual_type == 'MojoList *' and v in self._elem_types:
                         self._elem_types[tname] = self._elem_types[v]
+                        # Also propagate nested element types
+                        if v in self._nested_elem_types:
+                            self._nested_elem_types[tname] = self._nested_elem_types[v]
                     elif actual_type == 'MojoDict *':
                         if v in self._elem_types:
                             self._elem_types[tname] = self._elem_types[v]
