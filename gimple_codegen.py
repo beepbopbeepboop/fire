@@ -9223,13 +9223,29 @@ class GimpleGen:
                     globals_struct_lines.append(f"  {actual_type} {gname};")
                 globals_struct_lines.append(f"}} {typedef_name};")
                 globals_struct_lines.append("")
+                # Re-add struct instance initialization opening
+                globals_struct_lines.append(f"struct {typedef_name} {instance_name} = {{")
 
             for gname, c_type, _ in globals_list:
                 init_val = inits.get(gname)
                 # Use fixed type if available
                 c_type = fixed_types.get(gname, c_type)
-                # If no init value or it's '0', use appropriately typed null for pointer types
-                if not init_val or init_val == '0':
+                # C struct initializers must be compile-time constants
+                # Only use simple values; function calls must be deferred to runtime
+                if not init_val or init_val == '0' or 'mojo_' in str(init_val) or 'new' in str(init_val):
+                    # Use compile-time constant: NULL for pointers, 0 for integers
+                    if c_type.endswith(' *'):
+                        init_val = f'({c_type})0'
+                    else:
+                        init_val = '0'
+                elif init_val.startswith('"') or init_val.startswith("'"):
+                    # String literals are OK
+                    pass
+                elif init_val.lstrip('-').isdigit():
+                    # Numeric literals are OK
+                    pass
+                else:
+                    # Non-constant expression - use default null
                     if c_type.endswith(' *'):
                         init_val = f'({c_type})0'
                     else:
