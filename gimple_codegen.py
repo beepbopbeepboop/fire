@@ -5571,7 +5571,9 @@ class GimpleGen:
         lowered = [(el, *self.lower_expr(el)) for el in node.elements]
 
         def _is_spread(el, et):
-            return et in ('MojoList *', 'MojoSet *') or (isinstance(el, UnaryOp) and el.op == '*')
+            # Only treat as spread if it's an explicit spread operator (*seq)
+            # Don't treat nested list literals [[...]] as spreads - those should append the list pointer
+            return isinstance(el, UnaryOp) and el.op == '*'
 
         scalar_sufs = {TypeLattice.list_suffix(et)
                        for el, et, _ev in lowered if not _is_spread(el, et)}
