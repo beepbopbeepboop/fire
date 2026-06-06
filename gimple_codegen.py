@@ -5218,6 +5218,9 @@ class GimpleGen:
             # Generic coercion: ensure args match expected types
             fn_val = self._coerce_to_type(fn_type, 'char *', fn_val)
             mode_val = self._coerce_to_type(mode_type, 'char *', mode_val)
+            # GIMPLE: globals (_slit_*) must be loaded into locals before calls
+            fn_val = self._ensure_local('char *', fn_val)
+            mode_val = self._ensure_local('char *', mode_val)
             tmp = self._new_temp('void *')
             self._emit(f"  {tmp} = mojo_open ({fn_val}, {mode_val});")
             t = self._new_temp('int64_t')
@@ -7132,7 +7135,7 @@ class GimpleGen:
         idx_t = self._new_temp('int64_t')
         self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
         self._emit(f"  {len_t} = {len64};")
-        self._emit(f"  {idx_t} = 0;")
+        self._emit(f"  {idx_t} = (int64_t)0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
@@ -7193,8 +7196,10 @@ class GimpleGen:
 
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
+        one = self._new_temp('int64_t')
+        self._emit(f"  {one} = (int64_t)1;")
         st = self._new_temp('int64_t')
-        self._emit(f"  {st} = {idx_t} + 1;")
+        self._emit(f"  {st} = {idx_t} + {one};")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
@@ -7221,7 +7226,7 @@ class GimpleGen:
             self._emit(f"  {list_ptr} = (MojoList *){it_val};")
         self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
         self._emit(f"  {len_t} = {len64};")
-        self._emit(f"  {idx_t} = 0;")
+        self._emit(f"  {idx_t} = (int64_t)0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
@@ -7277,8 +7282,10 @@ class GimpleGen:
         self._loop_depth -= 1
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
+        one = self._new_temp('int64_t')
+        self._emit(f"  {one} = (int64_t)1;")
         st = self._new_temp('int64_t')
-        self._emit(f"  {st} = {idx_t} + 1;")
+        self._emit(f"  {st} = {idx_t} + {one};")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
@@ -7290,7 +7297,7 @@ class GimpleGen:
         idx_t = self._new_temp('int64_t')
         self._emit(f"  {len64} = mojo_str_len ({it_val});")
         self._emit(f"  {len_t} = {len64};")
-        self._emit(f"  {idx_t} = 0;")
+        self._emit(f"  {idx_t} = (int64_t)0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
@@ -7310,8 +7317,10 @@ class GimpleGen:
         self._loop_depth -= 1
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
+        one = self._new_temp('int64_t')
+        self._emit(f"  {one} = (int64_t)1;")
         st = self._new_temp('int64_t')
-        self._emit(f"  {st} = {idx_t} + 1;")
+        self._emit(f"  {st} = {idx_t} + {one};")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
