@@ -2848,44 +2848,16 @@ class GimpleGen:
         Generic type coercion routine: converts value from src_type to dst_type.
         Returns the properly cast value (may emit temp assignments as needed).
 
-        This handles ANY type pair without function-name awareness.
-        Works for 1M functions - ONE routine, not 1M special cases.
+        Uses existing _safe_coerce_emit logic via temp variable assignment.
+        Works for ANY type pair without function-name awareness.
+        Scales to 1M functions - ONE routine, not 1M special cases.
         """
-        # Same type - no coercion needed
         if src_type == dst_type:
             return value
 
-        # Pointer → int64_t (opaque pointer storage)
-        if src_type.endswith(' *') and dst_type in ('int', 'int64_t'):
-            value = self._ensure_local(src_type, value)
-            if src_type != 'void *':
-                vp = self._new_temp('void *')
-                self._emit(f'  {vp} = (void *){value};')
-                value = vp
-            result = self._new_temp('int64_t')
-            self._emit(f'  {result} = (int64_t){value};')
-            if dst_type == 'int':
-                final = self._new_temp('int')
-                self._emit(f'  {final} = (int){result};')
-                return final
-            return result
-
-        # int64_t → pointer
-        if src_type in ('int', 'int64_t') and dst_type.endswith(' *'):
-            value = self._ensure_local(src_type, value)
-            result = self._new_temp(dst_type)
-            self._emit(f'  {result} = ({dst_type}){value};')
-            return result
-
-        # Numeric → numeric (int ↔ int64_t, int ↔ double, etc.)
-        if src_type in ('int', 'int64_t', 'double', 'float') and dst_type in ('int', 'int64_t', 'double', 'float'):
-            result = self._new_temp(dst_type)
-            self._emit(f'  {result} = ({dst_type}){value};')
-            return result
-
-        # Default: direct cast
+        # Use _safe_coerce_emit to handle the coercion via a temp
         result = self._new_temp(dst_type)
-        self._emit(f'  {result} = ({dst_type}){value};')
+        self._safe_coerce_emit(src_type, dst_type, value, result)
         return result
 
     def _string_type_to_type_obj(self, type_str: str, origin=None):
