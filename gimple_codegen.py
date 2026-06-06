@@ -8172,6 +8172,20 @@ class GimpleGen:
                 if s.name == 'main' and inferred == 'void':
                     inferred = 'int'
                 self.func_return_types[s.name] = inferred
+
+                # Type system: Lock return type with INFERENCE_IDEMPOTENCE check
+                if self.type_checker:
+                    try:
+                        from type_system import Type, TypeOrigin
+                        ret_type_obj = self._string_type_to_type_obj(inferred, TypeOrigin.INFERRED)
+                        if ret_type_obj:
+                            self.type_checker.lock_inferred_type(
+                                f"{s.name}.return", ret_type_obj, "2",
+                                (self._current_filename, getattr(s, 'line', 0))
+                            )
+                    except (ImportError, TypeError, Exception):
+                        pass
+
                 self.var_types.clear()
 
         #   Pass 2b: infer return types for unannotated struct methods
@@ -8634,6 +8648,17 @@ class GimpleGen:
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fn))
             self.func_param_types[fn.name] = param_ctypes
+
+        # Type system: Report any invariant violations found during pre-passes
+        if self.type_checker and self.type_checker.has_errors():
+            error_report = self.type_checker.format_errors()
+            if not self.emit_entry_points or getattr(self, '_strict_type_checking', False):
+                # In strict mode or non-entry mode, stop compilation on type errors
+                raise ValueError(f"Type system violations found:\n{error_report}")
+            else:
+                # In relaxed mode, just warn
+                import sys
+                print(error_report, file=sys.stderr)
 
         # Only generate _toplevel() if there are actual top-level statements
         has_toplevel_code = len(toplevel_stmts) > 0
