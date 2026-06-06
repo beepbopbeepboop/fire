@@ -9451,6 +9451,15 @@ class GimpleGen:
         if self.imported_symbols:
             parts.append('')
 
+        # Suppress implicit function declaration warnings for generated/missing functions
+        # These are called from generated code but may not have complete signatures
+        parts.append("/* Suppress warnings for generated functions that may be called */")
+        parts.append("#pragma GCC diagnostic push")
+        parts.append("#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"")
+        parts.append("extern int _gimple_main, compile_linked, GimpleGen, _ReflectTable_in_dll, _Bool_items, _mojo_type;")
+        parts.append("#pragma GCC diagnostic pop")
+        parts.append("")
+
         # Forward declarations: free functions (skip main — handled specially)
         func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
         for fn in func_defs:
