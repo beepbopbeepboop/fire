@@ -2557,10 +2557,21 @@ class GimpleGen:
             """Analyze how a parameter is used in a list of statements."""
             accessed_fields = set()
             function_calls = []  # List of (function_name, arg_index)
+            is_subscripted = False  # Track if parameter is used with [...]
 
             def scan_expr(expr):
                 """Recursively scan an expression."""
-                if isinstance(expr, MemberExpr):
+                nonlocal is_subscripted
+                if isinstance(expr, SubscriptExpr):
+                    # Check if the base (after unwrapping nested subscripts) is the parameter
+                    base = expr.obj
+                    while isinstance(base, SubscriptExpr):
+                        base = base.obj
+                    if isinstance(base, IdentExpr) and base.name == param_name:
+                        is_subscripted = True
+                    scan_expr(expr.obj)
+                    scan_expr(expr.index)
+                elif isinstance(expr, MemberExpr):
                     if isinstance(expr.obj, IdentExpr) and expr.obj.name == param_name:
                         accessed_fields.add(expr.member)
                     scan_expr(expr.obj)
@@ -2623,12 +2634,12 @@ class GimpleGen:
                             scan_nodes(node.finally_body)
 
             scan_nodes(nodes)
-            return accessed_fields, function_calls
+            return accessed_fields, function_calls, is_subscripted
 
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                fields_accessed, function_calls = analyze_param_usage(func.body, pname)
+                fields_accessed, function_calls, is_subscripted = analyze_param_usage(func.body, pname)
 
                 # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
                 is_polymorphic = any(
@@ -2638,8 +2649,13 @@ class GimpleGen:
                 if is_polymorphic:
                     continue  # leave as int64_t (default for unannotated)
 
-                # First, try to infer from function calls
-                if function_calls:
+                # If parameter is subscripted, it's indexable (list/dict/etc.)
+                # Check this FIRST to override generic function-call inference like len()
+                if is_subscripted:
+                    inferred[pname] = 'MojoList *'
+
+                # If not subscripted, try to infer from function calls
+                elif function_calls:
                     for func_name, arg_index in function_calls:
                         # re.sub src argument (index 2) is always char*
                         if func_name == '__re_sub_src':
