@@ -6281,17 +6281,41 @@ class GimpleGen:
                     self._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             else:
-                # Opaque int-typed dict: cast to MojoDict* and set
+                # Opaque int-typed container: check if it's a list or dict
                 if ot in ('int', 'int64_t'):
-                    ip = self._new_temp('int64_t')
-                    dp = self._new_temp('MojoDict *')
-                    self._emit(f"  {ip} = (int64_t){obj_v};")
-                    self._emit(f"  {dp} = (MojoDict *){ip};")
-                    key_tmp2 = self._new_temp('char *')
-                    self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
-                    # Pass actual vtype so _emit_call can coerce pointers to int64_t
-                    self._emit_call('void', '', 'mojo_dict_set_int',
-                                    [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                    # Check if this is actually a list (from nested access) or dict
+                    actual_type = self._get_actual_type(ot, obj_v)
+                    if actual_type == 'MojoList *':
+                        # It's a list - cast to MojoList* and set element
+                        ip = self._new_temp('int64_t')
+                        lp = self._new_temp('MojoList *')
+                        self._emit(f"  {ip} = (int64_t){obj_v};")
+                        self._emit(f"  {lp} = (MojoList *){ip};")
+                        idx64 = self._new_temp('int64_t')
+                        self._emit(f"  {idx64} = (int64_t){idx_v};")
+                        # Get element type from the nested list
+                        # First try _elem_of, then check _nested_elem_types, then default to int64_t
+                        elem = self._elem_of(obj_v)
+                        if not elem or elem == 'int64_t':
+                            if obj_v in self._elem_types:
+                                elem = self._elem_types[obj_v]
+                            elif obj_v in self._nested_elem_types:
+                                elem = self._nested_elem_types[obj_v]
+                        elem = elem or 'int64_t'
+                        suf = TypeLattice.list_suffix(elem)
+                        ev_cast = self._cast_for_list(vtype, v, suf)
+                        self._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {ev_cast});")
+                    else:
+                        # Default to dict (original behavior)
+                        ip = self._new_temp('int64_t')
+                        dp = self._new_temp('MojoDict *')
+                        self._emit(f"  {ip} = (int64_t){obj_v};")
+                        self._emit(f"  {dp} = (MojoDict *){ip};")
+                        key_tmp2 = self._new_temp('char *')
+                        self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                        # Pass actual vtype so _emit_call can coerce pointers to int64_t
+                        self._emit_call('void', '', 'mojo_dict_set_int',
+                                        [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
                 else:
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
