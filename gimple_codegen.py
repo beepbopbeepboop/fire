@@ -9295,6 +9295,9 @@ class GimpleGen:
             # Skip symbols that are defined inline (when do_imports=True)
             if sym_name in inline_defined or sym_name in self._global_inline_defs:
                 continue
+            # Skip struct names — they're declared as typedefs, not extern functions
+            if sym_name in self.struct_field_types:
+                continue
 
             module = sym_info.get('module', '')
             if module in _stub_only_modules:
