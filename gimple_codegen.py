@@ -2901,10 +2901,23 @@ class GimpleGen:
             for node in nodes:
                 if isinstance(node, AssignStmt):
                     # Use _quick_type instead of lower_expr to avoid incomplete var_types
-                    vtype = self._quick_type(node.value)
-                    # Handle both single and tuple targets
-                    targets = [node.target] if not isinstance(node.target, TupleExpr) else node.target.elements
-                    for target in targets:
+                    if isinstance(node.target, TupleExpr):
+                        targets = node.target.elements
+                        # Type each unpack target by its own value, never by the
+                        # whole RHS: _quick_type(a_tuple) is 'MojoList *', which would
+                        # wrongly poison scalar unpack targets (e.g. start, stop, step
+                        # = ivals[0], ivals[1], ivals[2]).
+                        if (isinstance(node.value, TupleExpr)
+                                and len(node.value.elements) == len(targets)):
+                            elem_types = [self._quick_type(e) for e in node.value.elements]
+                        else:
+                            # Unpacking a single iterable: per-element type is unknown
+                            # here; use the int64_t storage default, not the container.
+                            elem_types = ['int64_t'] * len(targets)
+                    else:
+                        targets = [node.target]
+                        elem_types = [self._quick_type(node.value)]
+                    for target, vtype in zip(targets, elem_types):
                         if isinstance(target, IdentExpr):
                             vname = target.name
                             if vname not in inferred:
