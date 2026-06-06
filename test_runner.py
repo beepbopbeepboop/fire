@@ -256,6 +256,19 @@ def main() -> Int:
     return f(p)
 """, expected_return=40)
 
+    # 15. Dict-of-dicts: a dict whose values are dicts. The value type must be
+    #     recorded on assignment and recovered on read so the inner .get() reads
+    #     as a dict, not as garbage. Before the fix this silently crashed.
+    test_execution("dict_of_dicts", """\
+def main() -> Int:
+    outer = {}
+    inner = {}
+    inner["x"] = 5
+    outer["k"] = inner
+    got = outer["k"]
+    return got.get("x", 0)
+""", expected_return=5)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):

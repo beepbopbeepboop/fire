@@ -5620,6 +5620,14 @@ class GimpleGen:
                 t = self._new_temp('char *')
                 self._emit_call('char *', t, 'mojo_dict_get_str', [('MojoDict *', ov), (idx_type, iv)])
                 return 'char *', t
+            if val_ctype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                # Pointer value stored boxed as int64_t; recover the real type so a
+                # later v[k2] / v.get(...) dispatches on the right container.
+                raw = self._new_temp('int64_t')
+                self._emit_call('int64_t', raw, 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
+                t = self._new_temp(val_ctype)
+                self._emit(f"  {t} = ({val_ctype}){raw};")
+                return val_ctype, t
             t = self._new_temp('int64_t')
             self._emit_call('int64_t', t, 'mojo_dict_get_int', [('MojoDict *', ov), (idx_type, iv)])
             return 'int64_t', t
@@ -6403,6 +6411,12 @@ class GimpleGen:
                 # double value is a double — don't silently truncate it.
                 if ctype in ('int', 'int64_t') and vtype == 'double':
                     ctype = 'double'
+                # 'int' (bare) is the hallucination marker — no real answer. If the
+                # value is actually a container pointer (e.g. a dict read whose value
+                # type is a dict/list/set), trust ground truth so a later
+                # .get()/subscript dispatches on the right container.
+                if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    ctype = vtype
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
 
@@ -6478,6 +6492,11 @@ class GimpleGen:
                 ev_cast = self._cast_for_list(vtype, v, suf)
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
+                # Record the dict's value type so later reads recover it (esp.
+                # pointer values: dict-of-dicts/lists/sets). Homogeneous assumption,
+                # matching list element-type tracking.
+                if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *'):
+                    self._dict_val_types[obj_v] = vtype
                 # dict[key] = val → mojo_dict_set_str_*
                 key_tmp = self._new_temp('char *')
                 self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
