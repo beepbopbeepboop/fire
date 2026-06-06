@@ -2843,6 +2843,51 @@ class GimpleGen:
             elif isinstance(node, WithStmt):
                 self._collect_return_types(node.body, acc)
 
+    def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
+        """
+        Generic type coercion routine: converts value from src_type to dst_type.
+        Returns the properly cast value (may emit temp assignments as needed).
+
+        This handles ANY type pair without function-name awareness.
+        Works for 1M functions - ONE routine, not 1M special cases.
+        """
+        # Same type - no coercion needed
+        if src_type == dst_type:
+            return value
+
+        # Pointer → int64_t (opaque pointer storage)
+        if src_type.endswith(' *') and dst_type in ('int', 'int64_t'):
+            value = self._ensure_local(src_type, value)
+            if src_type != 'void *':
+                vp = self._new_temp('void *')
+                self._emit(f'  {vp} = (void *){value};')
+                value = vp
+            result = self._new_temp('int64_t')
+            self._emit(f'  {result} = (int64_t){value};')
+            if dst_type == 'int':
+                final = self._new_temp('int')
+                self._emit(f'  {final} = (int){result};')
+                return final
+            return result
+
+        # int64_t → pointer
+        if src_type in ('int', 'int64_t') and dst_type.endswith(' *'):
+            value = self._ensure_local(src_type, value)
+            result = self._new_temp(dst_type)
+            self._emit(f'  {result} = ({dst_type}){value};')
+            return result
+
+        # Numeric → numeric (int ↔ int64_t, int ↔ double, etc.)
+        if src_type in ('int', 'int64_t', 'double', 'float') and dst_type in ('int', 'int64_t', 'double', 'float'):
+            result = self._new_temp(dst_type)
+            self._emit(f'  {result} = ({dst_type}){value};')
+            return result
+
+        # Default: direct cast
+        result = self._new_temp(dst_type)
+        self._emit(f'  {result} = ({dst_type}){value};')
+        return result
+
     def _string_type_to_type_obj(self, type_str: str, origin=None):
         """Convert string type representation to Type object for type checking.
 
@@ -4275,15 +4320,9 @@ class GimpleGen:
                     return 'int64_t', t
             if method == 'update' and node.args:
                 other_type, other_val = self.lower_expr(node.args[0])
-                # Ensure both args are MojoDict* for mojo_dict_update
-                ov_cast = ov
-                if not ot.endswith(' *'):
-                    ov_cast = self._new_temp('MojoDict *')
-                    self._emit(f"  {ov_cast} = (MojoDict *){ov};")
-                other_val_cast = other_val
-                if not other_type.endswith(' *'):
-                    other_val_cast = self._new_temp('MojoDict *')
-                    self._emit(f"  {other_val_cast} = (MojoDict *){other_val};")
+                # Generic coercion: ensure both args are MojoDict*
+                ov_cast = self._coerce_to_type(ot, 'MojoDict *', ov)
+                other_val_cast = self._coerce_to_type(other_type, 'MojoDict *', other_val)
                 self._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop' and node.args:
@@ -4552,15 +4591,9 @@ class GimpleGen:
                 return 'char *', t
             if method == 'write' and node.args:
                 data_type, data_val = self.lower_expr(node.args[0])
-                # Ensure ov is int64_t and data_val is char* for int_write
-                ov_cast = ov
-                if ot != 'int64_t':
-                    ov_cast = self._new_temp('int64_t')
-                    self._emit(f"  {ov_cast} = (int64_t){ov};")
-                data_val_cast = data_val
-                if data_type != 'char *':
-                    data_val_cast = self._new_temp('char *')
-                    self._emit(f"  {data_val_cast} = (char *){data_val};")
+                # Generic coercion: int_write expects (int64_t, char*)
+                ov_cast = self._coerce_to_type(ot, 'int64_t', ov)
+                data_val_cast = self._coerce_to_type(data_type, 'char *', data_val)
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = int_write ({ov_cast}, {data_val_cast});")
                 return 'int64_t', t
@@ -5300,18 +5333,9 @@ class GimpleGen:
         if fname_raw == 'open' and len(node.args) == 2:
             fn_type, fn_val = self.lower_expr(node.args[0])
             mode_type, mode_val = self.lower_expr(node.args[1])
-            # Ensure args are char* (GIMPLE forbids combining call + cast in one statement)
-            fn_val = self._ensure_local(fn_type, fn_val)
-            mode_val = self._ensure_local(mode_type, mode_val)
-            # Cast to char* if needed for mojo_open
-            if fn_type != 'char *':
-                fn_cast = self._new_temp('char *')
-                self._emit(f"  {fn_cast} = (char *){fn_val};")
-                fn_val = fn_cast
-            if mode_type != 'char *':
-                mode_cast = self._new_temp('char *')
-                self._emit(f"  {mode_cast} = (char *){mode_val};")
-                mode_val = mode_cast
+            # Generic coercion: ensure args match expected types
+            fn_val = self._coerce_to_type(fn_type, 'char *', fn_val)
+            mode_val = self._coerce_to_type(mode_type, 'char *', mode_val)
             tmp = self._new_temp('void *')
             self._emit(f"  {tmp} = mojo_open ({fn_val}, {mode_val});")
             t = self._new_temp('int64_t')
