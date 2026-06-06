@@ -6324,60 +6324,59 @@ class GimpleGen:
             self._declare_var(node.name, ctype)
         self._layout_hint = LayoutSolver.HEAP
 
+    def _assign_target(self, tgt, et, ev):
+        """Assign a lowered value (et, ev) to one unpack target, which may be a
+        plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
+        nested tuples by indexing the inner iterable."""
+        if isinstance(tgt, IdentExpr):
+            if tgt.name not in self.var_types:
+                hint = self._inferred_var_types.get(self.current_func_name, {}).get(tgt.name) \
+                    if hasattr(self, '_inferred_var_types') else None
+                self._declare_var(tgt.name, hint or et)
+            self._safe_coerce_emit(et, self.var_types[tgt.name], ev, self._cname(tgt.name))
+        elif isinstance(tgt, TupleExpr):
+            # ev is itself an iterable; view it as a MojoList* and unpack by index.
+            lp = ev if et == 'MojoList *' else self._new_temp('MojoList *')
+            if et != 'MojoList *':
+                self._emit(f"  {lp} = (MojoList *){ev};")
+            for i, sub in enumerate(tgt.elements):
+                idx64 = self._new_temp('int64_t')
+                self._emit(f"  {idx64} = (int64_t){i};")
+                elem_type = self._elem_of(lp)
+                suf = TypeLattice.list_suffix(elem_type)
+                set_et = elem_type if elem_type != 'unknown' else 'int64_t'
+                sev = self._new_temp(set_et)
+                self._emit(f"  {sev} = mojo_list_get_{suf} ({lp}, {idx64});")
+                self._assign_target(sub, set_et, sev)
+
     def _gen_stmt_AssignStmt(self, node):
-        # Tuple unpacking: a, b, c = x, y, z
+        # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
         if isinstance(node.target, TupleExpr):
             targets = node.target.elements
-            if isinstance(node.value, TupleExpr):
-                # RHS is a tuple literal — lower each element individually
+            if isinstance(node.value, TupleExpr) and len(node.value.elements) == len(targets):
+                # RHS is a tuple literal — lower and assign each element individually
                 for tgt, rhs_expr in zip(targets, node.value.elements):
-                    if isinstance(tgt, IdentExpr):
-                        et, ev = self.lower_expr(rhs_expr)
-                        if tgt.name not in self.var_types:
-                            # Check for inferred variable type
-                            func_key = self.current_func_name
-                            if func_key and hasattr(self, '_inferred_var_types'):
-                                if func_key in self._inferred_var_types and tgt.name in self._inferred_var_types[func_key]:
-                                    ctype = self._inferred_var_types[func_key][tgt.name]
-                                else:
-                                    ctype = et
-                            else:
-                                ctype = et
-                            self._declare_var(tgt.name, ctype)
-                        dst = self.var_types[tgt.name]
-                        self._safe_coerce_emit(et, dst, ev, self._cname(tgt.name))
+                    et, ev = self.lower_expr(rhs_expr)
+                    self._assign_target(tgt, et, ev)
             else:
                 # RHS is a single iterable — lower it, then index each element
                 vtype, v = self.lower_expr(node.value)
                 for i, tgt in enumerate(targets):
-                    if isinstance(tgt, IdentExpr):
-                        idx64 = self._new_temp('int64_t')
-                        self._emit(f"  {idx64} = (int64_t){i};")
-                        if vtype == 'MojoList *':
-                            elem_type = self._elem_of(v)
-                            suf = TypeLattice.list_suffix(elem_type)
-                            et = elem_type if elem_type != 'unknown' else 'int64_t'
-                            ev = self._new_temp(et)
-                            self._emit(f"  {ev} = mojo_list_get_{suf} ({v}, {idx64});")
-                        else:
-                            et = 'int64_t'
-                            ev = self._new_temp(et)
-                            ip = self._new_temp('int64_t')
-                            self._emit(f"  {ip} = (int64_t){v};")
-                            self._emit(f"  {ev} = {ip};")
-                        if tgt.name not in self.var_types:
-                            # Check for inferred variable type
-                            func_key = self.current_func_name
-                            if func_key and hasattr(self, '_inferred_var_types'):
-                                if func_key in self._inferred_var_types and tgt.name in self._inferred_var_types[func_key]:
-                                    ctype = self._inferred_var_types[func_key][tgt.name]
-                                else:
-                                    ctype = et
-                            else:
-                                ctype = et
-                            self._declare_var(tgt.name, ctype)
-                        dst = self.var_types[tgt.name]
-                        self._safe_coerce_emit(et, dst, ev, self._cname(tgt.name))
+                    idx64 = self._new_temp('int64_t')
+                    self._emit(f"  {idx64} = (int64_t){i};")
+                    if vtype == 'MojoList *':
+                        elem_type = self._elem_of(v)
+                        suf = TypeLattice.list_suffix(elem_type)
+                        et = elem_type if elem_type != 'unknown' else 'int64_t'
+                        ev = self._new_temp(et)
+                        self._emit(f"  {ev} = mojo_list_get_{suf} ({v}, {idx64});")
+                    else:
+                        et = 'int64_t'
+                        ev = self._new_temp(et)
+                        ip = self._new_temp('int64_t')
+                        self._emit(f"  {ip} = (int64_t){v};")
+                        self._emit(f"  {ev} = {ip};")
+                    self._assign_target(tgt, et, ev)
             return
         vtype, v = self.lower_expr(node.value)
         if isinstance(node.target, IdentExpr):

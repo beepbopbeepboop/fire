@@ -241,6 +241,21 @@ def main() -> Int:
     return 1
 """, expected_return=42)
 
+    # 14. Nested tuple unpacking: (a, b), (c, d) = pairs[0], pairs[1]. The unpack
+    #     targets are themselves tuples; before the fix the inner names were never
+    #     declared ('a'/'c' undeclared). 10 + 30 == 40.
+    test_execution("nested_tuple_unpack", """\
+def f(pairs):
+    (a, b), (c, d) = pairs[0], pairs[1]
+    return a + c
+
+def main() -> Int:
+    p = []
+    p.append([10, 20])
+    p.append([30, 40])
+    return f(p)
+""", expected_return=40)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):
