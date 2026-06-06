@@ -5261,6 +5261,19 @@ class GimpleGen:
         if fname_raw == 'int' and len(arg_pairs) > 1:
             arg_pairs = arg_pairs[:1]
 
+        # float(x) — convert from number or string
+        if fname_raw == 'float' and len(arg_pairs) >= 1:
+            arg_type, arg_val = arg_pairs[0]
+            if arg_type in ('int64_t', 'int', '_Bool'):
+                # Direct numeric conversion: cast int to double
+                t = self._new_temp('double')
+                self._emit(f"  {t} = (double){arg_val};")
+                return 'double', t
+            elif arg_type == 'double':
+                # Already double, just return it
+                return 'double', arg_val
+            # Otherwise use mojo_make_float for string parsing (original behavior)
+
         if ret_type == 'void':
             self._emit_call('void', '', fname, arg_pairs)
             t = self._new_temp('int')
