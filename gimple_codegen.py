@@ -5451,6 +5451,19 @@ class GimpleGen:
         ot, ov = self.lower_expr(node.obj)
         idx_type, iv  = self.lower_expr(node.index)
 
+        # Type system: Check ELEMENT_TYPE_PRESERVATION for subscript operations
+        if self.type_checker and ot in ('MojoList *', 'MojoDict *', 'MojoStr *'):
+            try:
+                from type_system import Type, TypeOrigin
+                container_type = self._string_type_to_type_obj(ot, TypeOrigin.INFERRED)
+                if container_type:
+                    elem_type = self.type_checker.check_element_type_preservation(
+                        container_type,
+                        (self._current_filename, getattr(node, 'line', 0))
+                    )
+            except (ImportError, TypeError, Exception):
+                pass  # Type checking failed, continue
+
         if ot == 'MojoList *':
             elem = self._elem_of(ov)
             suf  = TypeLattice.list_suffix(elem)
