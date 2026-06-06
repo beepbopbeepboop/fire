@@ -225,6 +225,22 @@ def main() -> Int:
     return 1
 """, expected_return=42)
 
+    # 13. Cross-call scalar contract: an unannotated scalar param defaults to the
+    #     int64_t machine word, so a double argument truncated (bnbody's dt=0.01
+    #     -> 0 froze the sim). The param type must follow the (unanimous) call-site
+    #     argument type: scale(double, double) -> double. 4.0 * 0.5 == 2.0.
+    test_execution("xcall_scalar_double", """\
+def scale(x, factor):
+    return x * factor
+
+def main() -> Int:
+    f = 0.5
+    r = scale(4.0, f)
+    if r == 2.0:
+        return 42
+    return 1
+""", expected_return=42)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):

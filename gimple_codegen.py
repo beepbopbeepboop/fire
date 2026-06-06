@@ -6385,6 +6385,12 @@ class GimpleGen:
                         ctype = vtype
                 else:
                     ctype = vtype
+                # The pre-pass cannot always see a nested subscript's element type
+                # (it runs before the cross-call element contract), so it can hint
+                # an integer for what is really a double read. A local assigned a
+                # double value is a double — don't silently truncate it.
+                if ctype in ('int', 'int64_t') and vtype == 'double':
+                    ctype = 'double'
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
 
@@ -7679,10 +7685,18 @@ class GimpleGen:
         self.current_func_name = node.name
 
         # Seed param types into var_types BEFORE return-type inference so
-        # _quick_type can resolve param names during the pre-pass.
+        # _quick_type can resolve param names during the pre-pass. Unannotated
+        # params use the inferred type (incl. cross-call scalar contract, e.g. a
+        # double param), not the int64_t default, so return inference is right.
         for pname, ptype in node.params:
             bare = pname.lstrip('*')
-            ctype = 'MojoList *' if pname.startswith('*') else self._resolve_type(ptype)
+            if pname.startswith('*'):
+                ctype = 'MojoList *'
+            elif ptype is None:
+                ctype = (self._inferred_param_types.get(node.name, {}).get(pname)
+                         or self._resolve_type(ptype))
+            else:
+                ctype = self._resolve_type(ptype)
             self.var_types[bare] = ctype
 
         # Seed the cross-call element-type contract for container params, so
@@ -8454,26 +8468,70 @@ class GimpleGen:
                     if isinstance(hb, list):
                         _calls_in_stmts(hb, out)
 
+        # Cross-call scalar contract: an unannotated scalar param defaults to the
+        # int64_t machine word, so passing a double silently truncates (bnbody's
+        # dt=0.01 -> 0 froze the sim). Observe each call argument's scalar type and
+        # propagate a unanimous concrete one (double) onto the callee's param. A
+        # function name -> def map lets us skip annotated params.
+        _fn_by_name = {s.name: s for s in all_functions if isinstance(s, FunctionDef)}
+        _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
+
+        def _arg_scalar_type(caller_name, a):
+            if isinstance(a, FloatLiteral):
+                return 'double'
+            if isinstance(a, IdentExpr):
+                t = (self._inferred_var_types.get(caller_name, {}).get(a.name)
+                     or self._inferred_param_types.get(caller_name, {}).get(a.name))
+                return t
+            return None
+
         for s in all_functions:
             if not isinstance(s, FunctionDef):
                 continue
             elem, nested = self._scan_container_elems(s.body)
-            if not elem:
-                continue
             calls = []
             _calls_in_stmts(s.body, calls)
             for call in calls:
                 if not isinstance(call.func, IdentExpr):
                     continue
-                pnames = _free_params.get(call.func.name)
+                callee = call.func.name
+                pnames = _free_params.get(callee)
                 if not pnames:
                     continue
                 for i, a in enumerate(call.args):
                     if i >= len(pnames):
                         break
                     if isinstance(a, IdentExpr) and a.name in elem:
-                        _record_param_elem(call.func.name, pnames[i],
+                        _record_param_elem(callee, pnames[i],
                                             elem[a.name], nested.get(a.name))
+                    st = _arg_scalar_type(s.name, a)
+                    if st:
+                        _scalar_obs.setdefault(callee, {}).setdefault(pnames[i], set()).add(st)
+
+        # Apply: a unanimous concrete double observed across all call sites of an
+        # unannotated, weakly-defaulted param becomes that param's type.
+        for callee, pmap in _scalar_obs.items():
+            fn = _fn_by_name.get(callee)
+            if not fn:
+                continue
+            ann = {pn: pt for pn, pt in (fn.params or [])}
+            for pname, types in pmap.items():
+                if types != {'double'}:
+                    continue                         # not unanimous double
+                if ann.get(pname) is not None:
+                    continue                         # respect explicit annotation
+                cur = self._inferred_param_types.get(callee, {}).get(pname)
+                if cur in (None, 'int', 'int64_t'):
+                    self._inferred_param_types.setdefault(callee, {})[pname] = 'double'
+
+        # Rebuild free-function param-type signatures so call-site coercion sees
+        # the propagated scalar types (this must follow the propagation above).
+        for s in all_functions:
+            if isinstance(s, FunctionDef):
+                if s.params and any(pn.startswith('*') and not pn.startswith('**') for pn, _ in s.params):
+                    self.func_param_types[s.name] = ['...']
+                else:
+                    self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
