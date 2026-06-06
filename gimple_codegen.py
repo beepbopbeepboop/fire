@@ -9451,22 +9451,10 @@ class GimpleGen:
         if self.imported_symbols:
             parts.append('')
 
-        # Register commonly-called generated functions as external protos for GIMPLE
-        # These need proper GIMPLE declarations before they can be called
-        # Use variadic parameter lists to handle different call signatures
-        common_functions = {
-            '_gimple_main': ('int', []),
-            'compile_linked': ('int', ['int64_t']),  # Called with single argument, not char*
-            '_mojo_type': ('char *', ['int64_t']),
-            '_ReflectTable_in_dll': ('int', ['int64_t', 'int64_t', 'int64_t']),  # Called with 3 args
-            '_Bool_items': ('int', ['int64_t']),
-            'GimpleGen': ('int', []),
-            '_hash': ('int64_t', ['int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),  # Variadic, called with up to 7 args
-        }
-        for func_name, (ret_type, param_types) in common_functions.items():
-            # Always register, overwriting if necessary to ensure correct signature
-            self._external_protos[func_name] = (ret_type, param_types)
-        parts.append("")
+        # Note: user-defined functions (_hash, jit_compile_and_execute, etc.) must NOT
+        # be pre-registered here with guessed signatures — they get forward declarations
+        # generated from their actual definitions below, and pre-registering creates
+        # conflicting type errors.
 
         # Forward declarations: free functions (skip main — handled specially)
         func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
