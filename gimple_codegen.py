@@ -4275,7 +4275,16 @@ class GimpleGen:
                     return 'int64_t', t
             if method == 'update' and node.args:
                 other_type, other_val = self.lower_expr(node.args[0])
-                self._emit(f"  mojo_dict_update ({ov}, {other_val});")
+                # Ensure both args are MojoDict* for mojo_dict_update
+                ov_cast = ov
+                if not ot.endswith(' *'):
+                    ov_cast = self._new_temp('MojoDict *')
+                    self._emit(f"  {ov_cast} = (MojoDict *){ov};")
+                other_val_cast = other_val
+                if not other_type.endswith(' *'):
+                    other_val_cast = self._new_temp('MojoDict *')
+                    self._emit(f"  {other_val_cast} = (MojoDict *){other_val};")
+                self._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
                 t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop' and node.args:
                 key_type, key_val = self.lower_expr(node.args[0])
@@ -4543,8 +4552,17 @@ class GimpleGen:
                 return 'char *', t
             if method == 'write' and node.args:
                 data_type, data_val = self.lower_expr(node.args[0])
+                # Ensure ov is int64_t and data_val is char* for int_write
+                ov_cast = ov
+                if ot != 'int64_t':
+                    ov_cast = self._new_temp('int64_t')
+                    self._emit(f"  {ov_cast} = (int64_t){ov};")
+                data_val_cast = data_val
+                if data_type != 'char *':
+                    data_val_cast = self._new_temp('char *')
+                    self._emit(f"  {data_val_cast} = (char *){data_val};")
                 t = self._new_temp('int64_t')
-                self._emit(f"  {t} = int_write ({ov}, {data_val});")
+                self._emit(f"  {t} = int_write ({ov_cast}, {data_val_cast});")
                 return 'int64_t', t
             if method == 'close':
                 self._emit(f"  mojo_close ((void *){ov});")
@@ -5285,6 +5303,15 @@ class GimpleGen:
             # Ensure args are char* (GIMPLE forbids combining call + cast in one statement)
             fn_val = self._ensure_local(fn_type, fn_val)
             mode_val = self._ensure_local(mode_type, mode_val)
+            # Cast to char* if needed for mojo_open
+            if fn_type != 'char *':
+                fn_cast = self._new_temp('char *')
+                self._emit(f"  {fn_cast} = (char *){fn_val};")
+                fn_val = fn_cast
+            if mode_type != 'char *':
+                mode_cast = self._new_temp('char *')
+                self._emit(f"  {mode_cast} = (char *){mode_val};")
+                mode_val = mode_cast
             tmp = self._new_temp('void *')
             self._emit(f"  {tmp} = mojo_open ({fn_val}, {mode_val});")
             t = self._new_temp('int64_t')
