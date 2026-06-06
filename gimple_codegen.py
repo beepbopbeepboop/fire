@@ -8028,6 +8028,27 @@ class GimpleGen:
                     key = f"{s.name}_{m.name}"
                     self._inferred_var_types[key] = self._infer_local_var_types(m)
 
+        # ── Pass 1.3c: Populate func_param_types for all user functions ────────
+        # CRITICAL: Must happen before Phase 2a (code generation) so that call-site
+        # argument coercion has the correct expected parameter types. Otherwise,
+        # _emit_call defaults to converting pointers to int64_t, losing type info.
+        for s in all_functions:
+            if isinstance(s, FunctionDef):
+                param_ctypes = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+                self.func_param_types[s.name] = param_ctypes
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                for m in s.methods:
+                    method_full_name = f"{s.name}_{m.name}"
+                    # Build parameter types, with self being the first param
+                    param_ctypes = []
+                    for i, (pname, ptype) in enumerate(m.params):
+                        if i == 0 and pname == 'self':
+                            param_ctypes.append(f"{s.name} *")
+                        else:
+                            param_ctypes.append(self._param_ctype(pname, ptype, m))
+                    self.func_param_types[method_full_name] = param_ctypes
+
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
         # virtual method tables before generating code. This enables static
