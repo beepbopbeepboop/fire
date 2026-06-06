@@ -8734,6 +8734,9 @@ class GimpleGen:
             'void *mojo_open(char *filename, char *mode);',
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
+            # Compiler-generated dispatch helpers that may appear in module self-compilation
+            'int _ReflectTable_in_dll (int64_t, int64_t, char *);',
+            'MojoList * _Bool_items (int64_t);',
         ])
 
         # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
