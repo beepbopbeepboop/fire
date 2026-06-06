@@ -997,12 +997,12 @@ class DispatchSolver:
         # Map common Python types to C
         type_map = {
             'int': 'int',
-            'Int': 'int',
+            'Int': 'int64_t',
             'float': 'double',
             'Float': 'double',
             'Float64': 'double',
             'bool': 'int',
-            'Bool': 'int',
+            'Bool': '_Bool',
             'str': 'char *',
             'String': 'char *',
             'object': 'void *',
@@ -6738,11 +6738,11 @@ class GimpleGen:
             # Skip emitting comment to avoid GIMPLE global-passing issues
             return
 
-        self._declare_var(var, 'int')
+        self._declare_var(var, 'int64_t')
         _, start_v = self.lower_expr(start_expr)
         _, stop_v  = self.lower_expr(stop_expr)
         _, step_v  = self.lower_expr(step_expr)
-        self._emit(f"  {var} = {self._coerce('int', 'int', start_v)};")
+        self._emit(f"  {var} = {self._coerce('int64_t', 'int64_t', start_v)};")
 
         bb_cond  = self._new_bb()
         bb_body  = self._new_bb()
@@ -6775,7 +6775,7 @@ class GimpleGen:
         self._emit(f"  goto {bb_post};")
 
         self._emit_label(bb_post)
-        step_t = self._new_temp('int')
+        step_t = self._new_temp('int64_t')
         self._emit(f"  {step_t} = {var} + {step_v};")
         self._emit(f"  {var} = {step_t};")
         self._emit(f"  goto {bb_cond};")
@@ -6871,10 +6871,10 @@ class GimpleGen:
             self._declare_var(val_var, elem if elem else 'int64_t')
 
         len64 = self._new_temp('int64_t')
-        len_t = self._new_temp('int')
-        idx_t = self._new_temp('int')
+        len_t = self._new_temp('int64_t')
+        idx_t = self._new_temp('int64_t')
         self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
-        self._emit(f"  {len_t} = (int) {len64};")
+        self._emit(f"  {len_t} = {len64};")
         self._emit(f"  {idx_t} = 0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -6889,15 +6889,13 @@ class GimpleGen:
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         self.loop_stack.append((bb_post, bb_after))
 
-        idx64 = self._new_temp('int64_t')
-        self._emit(f"  {idx64} = (int64_t) {idx_t};")
-        self._emit(f"  {idx_var} = {idx64};")
+        self._emit(f"  {idx_var} = {idx_t};")
 
         suf = TypeLattice.list_suffix(elem) if elem else 'int'
         if val_is_tuple:
             # Get element as opaque int64_t for tuple unpacking below
             elem64 = self._new_temp('int64_t')
-            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx_t});")
             self._emit(f"  {val_var} = {elem64};")
             # Emit tuple unpacking: (a, b, c) = val_var
             inner = raw_val[1:-1].strip()
@@ -6912,10 +6910,10 @@ class GimpleGen:
                 self._emit(f"  {ti} = mojo_list_get_int ({tuple_ptr}, {vi});")
                 self._emit(f"  {vname} = {ti};")
         elif suf == 'double':
-            self._emit(f"  {val_var} = mojo_list_get_double ({list_ptr}, {idx64});")
+            self._emit(f"  {val_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
         elif suf == 'str':
             temp_str = self._new_temp('char *')
-            self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx64});")
+            self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx_t});")
             if self._type_of(val_var) == 'char *':
                 self._emit(f"  {val_var} = {temp_str};")
             else:
@@ -6924,7 +6922,7 @@ class GimpleGen:
                 self._emit(f"  {val_var} = {int_ptr};")
         else:
             elem64 = self._new_temp('int64_t')
-            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx_t});")
             vt = self._type_of(val_var)
             if vt and vt != 'int64_t':
                 self._safe_coerce_emit('int64_t', vt, elem64, val_var)
@@ -6938,7 +6936,7 @@ class GimpleGen:
 
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
-        st = self._new_temp('int')
+        st = self._new_temp('int64_t')
         self._emit(f"  {st} = {idx_t} + 1;")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
@@ -6957,15 +6955,15 @@ class GimpleGen:
             var_names = None
             self._declare_var(var, elem)
         len64 = self._new_temp('int64_t')
-        len_t = self._new_temp('int')
-        idx_t = self._new_temp('int')
+        len_t = self._new_temp('int64_t')
+        idx_t = self._new_temp('int64_t')
         # Cast it_val back to MojoList* if it's stored as int64_t (from method call)
         list_ptr = it_val
         if it_val in self.var_types and self.var_types[it_val] == 'int64_t':
             list_ptr = self._new_temp('MojoList *')
             self._emit(f"  {list_ptr} = (MojoList *){it_val};")
         self._emit(f"  {len64} = mojo_list_len ({list_ptr});")
-        self._emit(f"  {len_t} = (int) {len64};")
+        self._emit(f"  {len_t} = {len64};")
         self._emit(f"  {idx_t} = 0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -6978,11 +6976,9 @@ class GimpleGen:
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-        idx64  = self._new_temp('int64_t')
-        self._emit(f"  {idx64} = (int64_t) {idx_t};")
         if is_tuple:
             elem64 = self._new_temp('int64_t')
-            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+            self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx_t});")
             tuple_ptr = self._new_temp('MojoList *')
             self._emit(f"  {tuple_ptr} = (MojoList *){elem64};")
             for i, vn in enumerate(var_names):
@@ -6995,12 +6991,12 @@ class GimpleGen:
         else:
             suf = TypeLattice.list_suffix(elem)
             if suf == 'double':
-                self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx64});")
+                self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx_t});")
             elif suf == 'str':
                 # mojo_list_get_str returns char*, but var might be int64_t
                 # Use a temp to handle the conversion
                 temp_str = self._new_temp('char *')
-                self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx64});")
+                self._emit(f"  {temp_str} = mojo_list_get_str ({list_ptr}, {idx_t});")
                 # If var is int64_t, cast the char* to it; otherwise assign directly
                 if self._type_of(var) == 'char *':
                     self._emit(f"  {var} = {temp_str};")
@@ -7011,7 +7007,7 @@ class GimpleGen:
                     self._emit(f"  {var} = {int_ptr};")
             else:
                 elem64 = self._new_temp('int64_t')
-                self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx64});")
+                self._emit(f"  {elem64} = mojo_list_get_int ({list_ptr}, {idx_t});")
                 var_type = self._type_of(var)
                 if var_type != 'int64_t':
                     self._safe_coerce_emit('int64_t', var_type, elem64, var)
@@ -7024,7 +7020,7 @@ class GimpleGen:
         self._loop_depth -= 1
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
-        st = self._new_temp('int')
+        st = self._new_temp('int64_t')
         self._emit(f"  {st} = {idx_t} + 1;")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
@@ -7033,11 +7029,10 @@ class GimpleGen:
     def _gen_for_str(self, var: str, it_val: str, body: list):
         self._declare_var(var, 'char')
         len64 = self._new_temp('int64_t')
-        len_t = self._new_temp('int')
-        idx64 = self._new_temp('int64_t')
-        idx_t = self._new_temp('int')
+        len_t = self._new_temp('int64_t')
+        idx_t = self._new_temp('int64_t')
         self._emit(f"  {len64} = mojo_str_len ({it_val});")
-        self._emit(f"  {len_t} = (int) {len64};")
+        self._emit(f"  {len_t} = {len64};")
         self._emit(f"  {idx_t} = 0;")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -7050,8 +7045,7 @@ class GimpleGen:
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-        self._emit(f"  {idx64} = (int64_t) {idx_t};")
-        self._emit(f"  {var} = mojo_str_char_at ({it_val}, {idx64});")
+        self._emit(f"  {var} = mojo_str_char_at ({it_val}, {idx_t});")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -7059,7 +7053,7 @@ class GimpleGen:
         self._loop_depth -= 1
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
-        st = self._new_temp('int')
+        st = self._new_temp('int64_t')
         self._emit(f"  {st} = {idx_t} + 1;")
         self._emit(f"  {idx_t} = {st};")
         self._emit(f"  goto {bb_cond};")
