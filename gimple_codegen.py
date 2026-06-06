@@ -2775,6 +2775,14 @@ class GimpleGen:
             _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *'}
             if fname in _BUILTIN_CTORS:
                 return _BUILTIN_CTORS[fname]
+            # Scalar builtins, matching the lowering (float()->double, etc.). Without
+            # these, [float(i), ...] infers an int element type and nested float
+            # lists silently read/return as int.
+            _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
+                                'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
+                                'bool': '_Bool'}
+            if fname in _BUILTIN_SCALARS:
+                return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:
                 return f'{fname} *'
             return self.func_return_types.get(fname, 'int')
@@ -2807,6 +2815,19 @@ class GimpleGen:
         # A slice's type is the type of the object being sliced (mirrors _lower_slice:
         # list slice -> list, str slice -> str, plain pointer -> same pointer).
         if isinstance(node, SliceExpr): return self._quick_type(node.obj)
+        if isinstance(node, SubscriptExpr):
+            # container[idx]: result is the container's element type, read from the
+            # same side-tables the subscript lowering uses. Covers nested reads
+            # (outer[i][j]) via the container's nested element type.
+            obj = node.obj
+            if isinstance(obj, IdentExpr):
+                e = self._elem_types.get(obj.name)
+                if e:
+                    return e
+            elif isinstance(obj, SubscriptExpr) and isinstance(obj.obj, IdentExpr):
+                ne = self._nested_elem_types.get(obj.obj.name)
+                if ne:
+                    return ne
         return 'int'
 
     def _collect_return_types(self, stmts: list, acc: list):
@@ -2915,6 +2936,62 @@ class GimpleGen:
                 result[vname] = TypeLattice.join_all(types)
 
         return result
+
+    def _scan_container_elems(self, body: list) -> tuple[dict, dict]:
+        """Best-effort static element-type map for local containers in a body.
+
+        Returns (elem, nested): var name -> element C type, and (when the element
+        is itself a list) var name -> the inner list's element C type. Derived by
+        replaying list-literal assignments and `.append(...)` calls. Used to build
+        the cross-call element-type contract: a caller knows `bodies` is a list of
+        double-lists; the callee param must inherit that so `bodies[i][j]` reads
+        with the right getter instead of silently defaulting to int.
+        """
+        elem: dict[str, str] = {}
+        nested: dict[str, str] = {}
+
+        def note_list_literal(v: str, lit: ListExpr):
+            elem[v] = self._infer_list_elem_type(lit.elements)
+            if lit.elements and isinstance(lit.elements[0], ListExpr):
+                elem[v] = 'MojoList *'
+                nested[v] = self._infer_list_elem_type(lit.elements[0].elements)
+
+        def walk(stmts):
+            for n in stmts:
+                if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
+                    v, val = n.target.name, n.value
+                    if isinstance(val, ListExpr):
+                        note_list_literal(v, val)
+                    elif isinstance(val, IdentExpr) and val.name in elem:
+                        elem[v] = elem[val.name]
+                        if val.name in nested:
+                            nested[v] = nested[val.name]
+                elif isinstance(n, ExprStmt) and isinstance(n.value, CallExpr):
+                    c = n.value
+                    if (isinstance(c.func, MemberExpr) and c.func.member == 'append'
+                            and isinstance(c.func.obj, IdentExpr) and c.args):
+                        v, a = c.func.obj.name, c.args[0]
+                        if isinstance(a, ListExpr):
+                            elem[v] = 'MojoList *'
+                            nested[v] = self._infer_list_elem_type(a.elements)
+                        elif isinstance(a, IdentExpr) and elem.get(a.name) == 'MojoList *':
+                            elem[v] = 'MojoList *'
+                            if a.name in nested:
+                                nested[v] = nested[a.name]
+                # recurse into compound statements
+                for attr in ('body', 'then_body', 'else_body', 'finally_body'):
+                    sub = getattr(n, attr, None)
+                    if isinstance(sub, list):
+                        walk(sub)
+                for _cond, eb in (getattr(n, 'elifs', None) or []):
+                    walk(eb)
+                for h in (getattr(n, 'handlers', None) or []):
+                    hb = getattr(h, 'body', None)
+                    if isinstance(hb, list):
+                        walk(hb)
+
+        walk(body)
+        return elem, nested
 
     # ── Expression lowering ───────────────────────────────────────────────
 
@@ -7608,6 +7685,23 @@ class GimpleGen:
             ctype = 'MojoList *' if pname.startswith('*') else self._resolve_type(ptype)
             self.var_types[bare] = ctype
 
+        # Seed the cross-call element-type contract for container params, so
+        # param[i][j] reads the inner element with the right getter and return
+        # inference sees the real scalar (must precede return-type inference).
+        for bare, (e, ne) in getattr(self, '_param_elem_types', {}).get(node.name, {}).items():
+            if e:
+                self._elem_types[bare] = e
+                if ne:
+                    self._nested_elem_types[bare] = ne
+        # Seed local container element types too, so return inference can see
+        # through nested subscripts on locals (e.g. `return bodies[0][0]` where
+        # bodies is a local list-of-double-lists). Lowering re-derives the same.
+        _loc_elem, _loc_nested = self._scan_container_elems(node.body)
+        for v, e in _loc_elem.items():
+            self._elem_types.setdefault(v, e)
+        for v, ne in _loc_nested.items():
+            self._nested_elem_types.setdefault(v, ne)
+
         # Determine return type: annotation takes priority; infer if absent.
         if node.return_type is not None:
             ret_type = self._resolve_type(node.return_type)
@@ -8295,6 +8389,91 @@ class GimpleGen:
                             else:
                                 param_ctypes.append(self._param_ctype(pname, ptype, m))
                         self.func_param_types[method_full_name] = param_ctypes
+
+        # ── Pass 1.3d: cross-call element-type contract ────────────────────
+        # A container's element type lives in side-tables keyed by SSA name and
+        # does not survive a call boundary, so a callee that indexes a passed-in
+        # container falls back to int getters and silently corrupts non-int
+        # payloads. Propagate it: where a caller passes a container whose element
+        # types we can derive, record them onto the callee's parameter. Free
+        # functions only for now (methods carry a `self` and are handled via
+        # struct fields). Conflicting call sites collapse to unknown.
+        self._param_elem_types: dict[str, dict[str, tuple]] = {}
+        _free_params = {s.name: [pn for pn, _ in (s.params or []) if not pn.startswith('*')]
+                        for s in all_functions if isinstance(s, FunctionDef)}
+
+        def _record_param_elem(callee, pname, e, ne):
+            d = self._param_elem_types.setdefault(callee, {})
+            if pname in d and d[pname] != (e, ne):
+                d[pname] = (None, None)   # conflicting call sites → unknown
+            else:
+                d[pname] = (e, ne)
+
+        def _collect_calls(expr, out):
+            if expr is None:
+                return
+            if isinstance(expr, CallExpr):
+                out.append(expr)
+                _collect_calls(expr.func, out)
+                for a in expr.args:
+                    _collect_calls(a, out)
+                for _k, v in (getattr(expr, 'kwargs', None) or []):
+                    _collect_calls(v, out)
+            elif isinstance(expr, BinaryOp):
+                _collect_calls(expr.left, out); _collect_calls(expr.right, out)
+            elif isinstance(expr, UnaryOp):
+                _collect_calls(expr.operand, out)
+            elif isinstance(expr, SubscriptExpr):
+                _collect_calls(expr.obj, out); _collect_calls(expr.index, out)
+            elif isinstance(expr, SliceExpr):
+                _collect_calls(expr.obj, out); _collect_calls(expr.start, out); _collect_calls(expr.stop, out)
+            elif isinstance(expr, MemberExpr):
+                _collect_calls(expr.obj, out)
+            elif isinstance(expr, TernaryExpr):
+                _collect_calls(expr.condition, out); _collect_calls(expr.then_val, out); _collect_calls(expr.else_val, out)
+            elif isinstance(expr, (ListExpr, SetExpr, TupleExpr)):
+                for x in expr.elements:
+                    _collect_calls(x, out)
+            elif isinstance(expr, DictExpr):
+                for k, v in expr.pairs:
+                    _collect_calls(k, out); _collect_calls(v, out)
+
+        def _calls_in_stmts(stmts, out):
+            for n in stmts:
+                for attr in ('value', 'condition', 'iterable'):
+                    if hasattr(n, attr):
+                        _collect_calls(getattr(n, attr), out)
+                for attr in ('body', 'then_body', 'else_body', 'finally_body'):
+                    sub = getattr(n, attr, None)
+                    if isinstance(sub, list):
+                        _calls_in_stmts(sub, out)
+                for _cond, eb in (getattr(n, 'elifs', None) or []):
+                    _calls_in_stmts(eb, out)
+                for h in (getattr(n, 'handlers', None) or []):
+                    hb = getattr(h, 'body', None)
+                    if isinstance(hb, list):
+                        _calls_in_stmts(hb, out)
+
+        for s in all_functions:
+            if not isinstance(s, FunctionDef):
+                continue
+            elem, nested = self._scan_container_elems(s.body)
+            if not elem:
+                continue
+            calls = []
+            _calls_in_stmts(s.body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                pnames = _free_params.get(call.func.name)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    if isinstance(a, IdentExpr) and a.name in elem:
+                        _record_param_elem(call.func.name, pnames[i],
+                                            elem[a.name], nested.get(a.name))
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan

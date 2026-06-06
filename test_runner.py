@@ -207,6 +207,24 @@ def main() -> Int:
     return 1
 """, expected_return=42)
 
+    # 12. Cross-call element-type contract: a function receives a list-of-float-
+    #     lists and reads grid[0][0]. The element type must cross the call
+    #     boundary (caller knows it; the param does not, on its own), so the
+    #     callee reads with mojo_list_get_double and its return infers as double.
+    #     Before the contract this returned/printed 0 (silent).
+    test_execution("xcall_nested_elem", """\
+def head_x(grid):
+    return grid[0][0]
+
+def main() -> Int:
+    g = []
+    g.append([7.0, 8.0])
+    g.append([9.0, 10.0])
+    if head_x(g) == 7.0:
+        return 42
+    return 1
+""", expected_return=42)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):
