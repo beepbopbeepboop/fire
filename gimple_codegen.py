@@ -2610,6 +2610,13 @@ class GimpleGen:
                         is_subscripted = True
                     scan_expr(expr.obj)
                     scan_expr(expr.index)
+                elif isinstance(expr, SliceExpr):
+                    # Slicing a param means it is an indexable sequence, same as subscript.
+                    if isinstance(expr.obj, IdentExpr) and expr.obj.name == param_name:
+                        is_subscripted = True
+                    scan_expr(expr.obj)
+                    if expr.start is not None: scan_expr(expr.start)
+                    if expr.stop is not None: scan_expr(expr.stop)
                 elif isinstance(expr, MemberExpr):
                     if isinstance(expr.obj, IdentExpr) and expr.obj.name == param_name:
                         accessed_fields.add(expr.member)
@@ -2797,6 +2804,9 @@ class GimpleGen:
         if isinstance(node, DictExpr):  return 'MojoDict *'
         if isinstance(node, SetExpr):   return 'MojoSet *'
         if isinstance(node, TupleExpr): return 'MojoList *'
+        # A slice's type is the type of the object being sliced (mirrors _lower_slice:
+        # list slice -> list, str slice -> str, plain pointer -> same pointer).
+        if isinstance(node, SliceExpr): return self._quick_type(node.obj)
         return 'int'
 
     def _collect_return_types(self, stmts: list, acc: list):
@@ -3510,6 +3520,22 @@ class GimpleGen:
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
+
+        # A list local may be boxed as int64_t (the slice pre-pass hint is the
+        # machine word when the sliced object's type isn't yet known); _actual_types
+        # records the real MojoList*. Resolve through it so list+list still concats.
+        alt = self._actual_types.get(lv, self.var_types.get(lv, lt))
+        art = self._actual_types.get(rv, self.var_types.get(rv, rt))
+        if node.op == '+' and alt == 'MojoList *' and art == 'MojoList *':
+            lcast = lv if lt == 'MojoList *' else self._new_temp('MojoList *')
+            if lt != 'MojoList *': self._emit(f"  {lcast} = (MojoList *){lv};")
+            rcast = rv if rt == 'MojoList *' else self._new_temp('MojoList *')
+            if rt != 'MojoList *': self._emit(f"  {rcast} = (MojoList *){rv};")
+            t = self._new_temp('MojoList *')
+            self._emit(f"  {t} = mojo_list_concat ({lcast}, {rcast});")
+            if lcast in self._elem_types:
+                self._elem_types[t] = self._elem_types[lcast]
+            return 'MojoList *', t
 
         # MojoList + MojoList → mojo_list_concat
         if node.op == '+' and lt == 'MojoList *' and rt == 'MojoList *':

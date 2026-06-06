@@ -173,6 +173,22 @@ def main() -> Int:
     return 1
 """, expected_return=42)
 
+    # 10. Slice of an unannotated list param, then concat. Regression for the
+    #     slice->'int' hallucination: the param `items` must infer as a list (it
+    #     is sliced), the slice must carry the list type, and list+list must be
+    #     concat. Before the fix this compiled to pointer-arithmetic garbage and
+    #     crashed at runtime. [1,2] + [99] -> len 3.
+    test_execution("slice_then_concat", """\
+def take(items):
+    head = items[:2]
+    return head + [99]
+
+def main() -> Int:
+    xs = [1, 2, 3, 4]
+    r = take(xs)
+    return len(r)
+""", expected_return=3)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):
