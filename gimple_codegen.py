@@ -9451,13 +9451,19 @@ class GimpleGen:
         if self.imported_symbols:
             parts.append('')
 
-        # Suppress implicit function declaration warnings for generated/missing functions
-        # These are called from generated code but may not have complete signatures
-        parts.append("/* Suppress warnings for generated functions that may be called */")
-        parts.append("#pragma GCC diagnostic push")
-        parts.append("#pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"")
-        parts.append("extern int _gimple_main, compile_linked, GimpleGen, _ReflectTable_in_dll, _Bool_items, _mojo_type;")
-        parts.append("#pragma GCC diagnostic pop")
+        # Register commonly-called generated functions as external protos for GIMPLE
+        # These need proper GIMPLE declarations before they can be called
+        common_functions = {
+            '_gimple_main': ('int', []),
+            'compile_linked': ('int', ['char *', 'char *']),
+            '_mojo_type': ('char *', ['int64_t']),
+            '_ReflectTable_in_dll': ('int', []),
+            '_Bool_items': ('int', ['int64_t']),
+            'GimpleGen': ('int', []),
+        }
+        for func_name, (ret_type, param_types) in common_functions.items():
+            if func_name not in self._external_protos:
+                self._external_protos[func_name] = (ret_type, param_types)
         parts.append("")
 
         # Forward declarations: free functions (skip main — handled specially)
