@@ -8598,7 +8598,34 @@ class GimpleGen:
                     self._global_var_types[_gname] = 'int64_t'
             elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
                 _pre_declared_globals.add(_scan_stmt.name)
-                self._global_var_types[_scan_stmt.name] = self._resolve_type(_scan_stmt.type_ann) if _scan_stmt.type_ann else 'int64_t'
+                if _scan_stmt.type_ann:
+                    self._global_var_types[_scan_stmt.name] = self._resolve_type(_scan_stmt.type_ann)
+                else:
+                    # Infer type from value if present
+                    if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
+                        if isinstance(_scan_stmt.value, DictExpr):
+                            self._global_var_types[_scan_stmt.name] = 'MojoDict *'
+                        elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
+                            self._global_var_types[_scan_stmt.name] = 'MojoList *'
+                        elif isinstance(_scan_stmt.value, SetExpr):
+                            self._global_var_types[_scan_stmt.name] = 'MojoSet *'
+                        elif isinstance(_scan_stmt.value, StringLiteral):
+                            self._global_var_types[_scan_stmt.name] = 'char *'
+                        elif isinstance(_scan_stmt.value, CallExpr):
+                            if isinstance(_scan_stmt.value.func, IdentExpr):
+                                ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
+                                if ret and ret.endswith(' *'):
+                                    self._global_var_types[_scan_stmt.name] = ret
+                                elif ret == 'char *':
+                                    self._global_var_types[_scan_stmt.name] = 'char *'
+                                else:
+                                    self._global_var_types[_scan_stmt.name] = 'int64_t'
+                            else:
+                                self._global_var_types[_scan_stmt.name] = 'int64_t'
+                        else:
+                            self._global_var_types[_scan_stmt.name] = 'int64_t'
+                    else:
+                        self._global_var_types[_scan_stmt.name] = 'int64_t'
 
         # Also scan ImportStmts inside TryStmt/IfStmt blocks (e.g., try: import mojo_compiler)
         # These are missed by the flat scan above.
@@ -9107,8 +9134,15 @@ class GimpleGen:
         self._global_to_module: dict[str, str] = {}
         for gname in _declared_globals:
             if gname in self._global_var_types:
-                c_type = self._global_c_decl_types.get(gname, 'int64_t')
                 mojo_type = self._global_var_types[gname]
+                # Use the mojo_type as C type; if it ends with *, it's a pointer type
+                # Otherwise default to int64_t for numeric types
+                if gname in self._global_c_decl_types:
+                    c_type = self._global_c_decl_types[gname]
+                elif mojo_type and mojo_type.endswith(' *'):
+                    c_type = mojo_type
+                else:
+                    c_type = mojo_type if mojo_type and mojo_type in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t'
                 # Find the initialization expression from stmts
                 init_code = '0'
                 for stmt in _collect_global_stmts(all_global_scan):
