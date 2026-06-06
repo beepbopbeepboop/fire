@@ -1367,20 +1367,18 @@ class TypePromotionSolver:
 # Type system helpers
 # ---------------------------------------------------------------------------
 
-# NOTE (review finding #7): `Int` and `Bool` map to C `int`, while the MLIR index
-# type the stdlib's Int is a newtype over is `int64_t` and the ABI bool is `_Bool`
-# (see ABI.md, mlir.py). This is a *deliberate, known divergence* held for
-# backward compatibility with the existing codegen/runtime; migrating Int→int64_t
-# and Bool→_Bool is a separate, broad change (runtime signatures + every test).
-# The no-annotation default below is `int64_t` to match `_mojo_type(None)`; an
+# `Int`/`UInt` are the machine word — a newtype over `__mlir_type.index`, which is
+# 64-bit (mlir.py) — and `Bool` is the ABI's `_Bool` (ABI.md). They therefore map
+# to int64_t/uint64_t/_Bool, matching the reflected stdlib layouts exactly (review
+# finding #7's migration). The no-annotation default is likewise int64_t; an
 # *unknown* annotation still falls back to `int` (see _mojo_type).
 _TYPE_MAP: dict[str | None, str] = {
-    'Int':    'int',
+    'Int':    'int64_t',
     'Int8':   'int8_t',
     'Int16':  'int16_t',
     'Int32':  'int32_t',
     'Int64':  'int64_t',
-    'UInt':   'unsigned int',
+    'UInt':   'uint64_t',
     'UInt8':  'uint8_t',
     'UInt16': 'uint16_t',
     'UInt32': 'uint32_t',
@@ -1388,7 +1386,7 @@ _TYPE_MAP: dict[str | None, str] = {
     'Float16': '__fp16',
     'Float32': 'float',
     'Float64': 'double',
-    'Bool':   'int',
+    'Bool':   '_Bool',
     'String': 'char *',
     'str':    'char *',
     'List':   'MojoList *',

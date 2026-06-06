@@ -162,6 +162,17 @@ def main():
     print(42)
 """, expected_return=0)
 
+    # 9. Int is the 64-bit machine word (ABI: Int = int64_t). 3e9 overflows a
+    #    32-bit int, so this returns 42 only if Int arithmetic is genuinely 64-bit.
+    test_execution("int_is_64bit", """\
+def main() -> Int:
+    var x: Int = 3000000000
+    var y: Int = x + x
+    if y == 6000000000:
+        return 42
+    return 1
+""", expected_return=42)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):
