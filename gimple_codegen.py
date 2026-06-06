@@ -6632,8 +6632,9 @@ class GimpleGen:
                 ret_type = self._KNOWN_SIGS[fname][0]
                 self._emit_call(ret_type, '', fname, arg_pairs)
             else:
-                arg_vals = [v for _, v in arg_pairs]
-                self._emit(f"  {fname} ({', '.join(arg_vals)});")
+                # For user-defined functions, still use _emit_call to handle type coercion
+                ret_type = self.func_return_types.get(raw_name, 'void')
+                self._emit_call(ret_type, '', fname, arg_pairs)
         else:
             self.lower_expr(node.value)
 
@@ -8510,6 +8511,21 @@ class GimpleGen:
                 toplevel_stmts.append(stmt)
             else:
                 func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
+
+        # Populate func_param_types BEFORE _gen_toplevel so call-site coercion works
+        # This must happen before _gen_toplevel since it needs param types for _emit_call
+        func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
+        for fn in func_defs:
+            if fn.name == 'main':
+                continue
+            inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
+            param_ctypes = []
+            for pn, pt in (fn.params or []):
+                if pn in inferred_params:
+                    param_ctypes.append(inferred_params[pn])
+                else:
+                    param_ctypes.append(self._param_ctype(pn, pt, fn))
+            self.func_param_types[fn.name] = param_ctypes
 
         # Only generate _toplevel() if there are actual top-level statements
         has_toplevel_code = len(toplevel_stmts) > 0
