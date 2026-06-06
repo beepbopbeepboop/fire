@@ -8735,7 +8735,7 @@ class GimpleGen:
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
             # Compiler-generated dispatch helpers that may appear in module self-compilation
-            'int _ReflectTable_in_dll (int64_t, int64_t, char *);',
+            'char * _ReflectTable_in_dll (int64_t, int64_t, char *);',
             'MojoList * _Bool_items (int64_t);',
         ])
 
@@ -9076,32 +9076,8 @@ class GimpleGen:
             globals_struct_lines.append(f"struct {typedef_name} {instance_name} = {{")
             inits = self._module_global_inits.get(current_mod_name, {})
 
-            # First pass: fix struct field types if initialization suggests different type
-            fixed_types = {}
-            for gname, c_type, _ in globals_list:
-                init_val = inits.get(gname, '0')
-                # Check if init value suggests a different C type
-                if 'mojo_dict_new' in str(init_val):
-                    fixed_types[gname] = 'MojoDict *'
-                elif 'mojo_list_new' in str(init_val) or 'mojo_set_new' in str(init_val):
-                    fixed_types[gname] = 'MojoList *'  # or MojoSet *
-
-            # Rewrite globals typedef with corrected types
-            if fixed_types:
-                globals_struct_lines = []
-                globals_struct_lines.append(f"typedef struct {typedef_name} {{")
-                for gname, c_type, mojo_type in globals_list:
-                    actual_type = fixed_types.get(gname, c_type)
-                    globals_struct_lines.append(f"  {actual_type} {gname};")
-                globals_struct_lines.append(f"}} {typedef_name};")
-                globals_struct_lines.append("")
-                # Re-add struct instance initialization opening
-                globals_struct_lines.append(f"struct {typedef_name} {instance_name} = {{")
-
             for gname, c_type, _ in globals_list:
                 init_val = inits.get(gname)
-                # Use fixed type if available
-                c_type = fixed_types.get(gname, c_type)
                 # C struct initializers must be compile-time constants
                 # Only use simple values; function calls must be deferred to runtime
                 if not init_val or init_val == '0' or 'mojo_' in str(init_val) or 'new' in str(init_val):
