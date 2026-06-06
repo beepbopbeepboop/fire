@@ -2358,6 +2358,14 @@ class GimpleGen:
         coerced_args = []
         for i, (atype, aval) in enumerate(arg_pairs):
             ptype = param_types[i] if i < len(param_types) else atype
+            # Check if int64_t actually contains a pointer (stored in _actual_types or _global_var_types)
+            actual_atype = atype
+            if atype == 'int64_t':
+                if aval in self._actual_types:
+                    actual_atype = self._actual_types[aval]
+                # Also check if it's a global variable that should be cast
+                elif aval in self._global_var_types:
+                    actual_atype = self._global_var_types[aval]
             # GIMPLE: extern globals must be loaded into locals before function calls
             # This includes string literals (_slit_*) and dict globals (_BIN_OPS, etc.)
             if aval.startswith('_slit_') or aval in ('_BIN_OPS', '_GD_BIN_OPS'):
@@ -2370,19 +2378,19 @@ class GimpleGen:
                 temp = self._new_temp('char *')
                 self._emit(f'  {temp} = {slit_name};')
                 aval = temp
-            if ptype == atype or ptype == '...':
+            if ptype == atype or ptype == actual_atype or ptype == '...':
                 coerced_args.append(aval)
-            elif ptype == 'void *' and atype in ('int', 'int64_t', '_Bool'):
+            elif ptype == 'void *' and actual_atype in ('int', 'int64_t', '_Bool'):
                 ip = self._new_temp('int64_t')
                 vp = self._new_temp('void *')
                 self._emit(f'  {ip} = (int64_t){aval};')
                 self._emit(f'  {vp} = (void *){ip};')
                 coerced_args.append(vp)
-            elif ptype == 'void *' and atype.endswith(' *'):
+            elif ptype == 'void *' and actual_atype.endswith(' *'):
                 vp = self._new_temp('void *')
                 self._emit(f'  {vp} = (void *){aval};')
                 coerced_args.append(vp)
-            elif ptype == 'int64_t' and (atype in ('int', '_Bool', 'char *', 'void *') or atype.endswith(' *')):
+            elif ptype == 'int64_t' and (actual_atype in ('int', '_Bool', 'char *', 'void *') or actual_atype.endswith(' *')):
                 ct = self._new_temp('int64_t')
                 if atype == 'char *':
                     aval_local = self._ensure_local('char *', aval)
@@ -2412,7 +2420,9 @@ class GimpleGen:
                     self._emit(f'  {vp} = (void *){aval};')
                 self._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
-            elif ptype.endswith(' *') and atype in ('int', 'int64_t'):
+            elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
+                # If parameter expects pointer and we have int/int64_t, cast through void*
+                # This handles cases where int64_t is an opaque pointer (e.g., from globals)
                 ip3 = self._new_temp('int64_t')
                 pp = self._new_temp(ptype)
                 self._emit(f'  {ip3} = (int64_t){aval};')
@@ -9123,7 +9133,14 @@ class GimpleGen:
             if fn.name == 'main':
                 continue
             ret    = self.func_return_types.get(fn.name, 'int')
-            param_ctypes = [self._param_ctype(pn, pt, fn) for pn, pt in fn.params] if fn.params else []
+            param_ctypes = []
+            # Check inferred parameter types first, then fall back to annotations
+            inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
+            for pn, pt in (fn.params or []):
+                if pn in inferred_params:
+                    param_ctypes.append(inferred_params[pn])
+                else:
+                    param_ctypes.append(self._param_ctype(pn, pt, fn))
             ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
             parts.append(f"{ret} {_safe_name(fn.name)} ({ptypes});")
             # Record parameter types for call-site coercion
