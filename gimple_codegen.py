@@ -2355,6 +2355,17 @@ class GimpleGen:
         """
         sig = self._KNOWN_SIGS.get(fname)
         param_types = sig[1] if sig else self.func_param_types.get(fname, [])
+
+        # If function takes *args (param_types == ['...']), pack all args into a MojoList*
+        if param_types == ['...']:
+            lst = self._new_temp('MojoList *')
+            self._emit(f"  {lst} = mojo_list_new ();")
+            for atype, aval in arg_pairs:
+                aval = self._coerce_to_type(atype, 'int64_t', aval)
+                self._emit(f"  mojo_list_append_int ({lst}, {aval});")
+            arg_pairs = [('MojoList *', lst)]
+            param_types = ['MojoList *']
+
         coerced_args = []
         for i, (atype, aval) in enumerate(arg_pairs):
             ptype = param_types[i] if i < len(param_types) else atype
@@ -7545,7 +7556,9 @@ class GimpleGen:
         # Seed param types into var_types BEFORE return-type inference so
         # _quick_type can resolve param names during the pre-pass.
         for pname, ptype in node.params:
-            self.var_types[pname] = self._resolve_type(ptype)
+            bare = pname.lstrip('*')
+            ctype = 'MojoList *' if pname.startswith('*') else self._resolve_type(ptype)
+            self.var_types[bare] = ctype
 
         # Determine return type: annotation takes priority; infer if absent.
         if node.return_type is not None:
@@ -7565,12 +7578,21 @@ class GimpleGen:
         self._struct_layout = solver.solve(node.params, node.body)
 
         param_strs = []
+        has_varargs = any(pname.startswith('*') for pname, _ in (node.params or []))
         for pname, ptype in node.params:
-            ctype = self._param_ctype(pname, ptype, node)
-            self.var_types[pname] = ctype  # re-register with qualified type
-            param_strs.append(f"{ctype} {pname}")
+            bare = pname.lstrip('*')
+            if pname.startswith('*'):
+                # *args: use MojoList* inside the function body (callers pack into list)
+                ctype = 'MojoList *'
+            else:
+                ctype = self._param_ctype(pname, ptype, node)
+            self.var_types[bare] = ctype
+            param_strs.append(f"{ctype} {bare}")
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
+        # Record that this function takes varargs so call sites can pack args
+        if has_varargs:
+            self.func_param_types[node.name] = ['...']
         safe = _safe_name(node.name)
 
         # For main (in main module only), call class-attr initializer first
@@ -7664,10 +7686,13 @@ class GimpleGen:
 
         # Seed param types for pre-pass inference
         for i, (pname, ptype) in enumerate(node.params):
+            bare = pname.lstrip('*')
             if i == 0 and pname == 'self':
-                self.var_types[pname] = f"{struct_name} *"
+                self.var_types['self'] = f"{struct_name} *"
+            elif pname.startswith('*'):
+                self.var_types[bare] = 'MojoList *'
             else:
-                self.var_types[pname] = self._resolve_type(ptype)
+                self.var_types[bare] = self._resolve_type(ptype)
 
         if node.return_type is not None:
             ret_type = self._resolve_type(node.return_type)
@@ -7684,25 +7709,29 @@ class GimpleGen:
         self._struct_layout = solver.solve(node.params, node.body)
 
         method_full_name = f"{struct_name}_{node.name}"
+        has_varargs = any(pn.startswith('*') for pn, _ in (node.params or []))
         param_strs = []
-        # If we have hardcoded param types for this method, use them (indexed by position)
+        if has_varargs:
+            self.func_param_types[method_full_name] = ['...']
         hardcoded_params = self.func_param_types.get(method_full_name, [])
         for i, (pname, ptype) in enumerate(node.params):
+            bare = pname.lstrip('*')
             if i == 0 and pname == 'self':
                 ctype = f"{struct_name} *"
-            elif hardcoded_params and i < len(hardcoded_params):
+            elif pname.startswith('*'):
+                ctype = 'MojoList *'
+            elif hardcoded_params and hardcoded_params != ['...'] and i < len(hardcoded_params):
                 ctype = hardcoded_params[i]
             else:
-                # Check inferred parameter types first (for unannotated parameters)
                 if ptype is None and hasattr(self, '_inferred_param_types'):
-                    if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
-                        ctype = self._inferred_param_types[method_full_name][pname]
+                    if method_full_name in self._inferred_param_types and bare in self._inferred_param_types[method_full_name]:
+                        ctype = self._inferred_param_types[method_full_name][bare]
                     else:
                         ctype = self._resolve_type(ptype)
                 else:
                     ctype = self._param_ctype(pname, ptype, node)
-            self.var_types[pname] = ctype
-            param_strs.append(f"{ctype} {pname}")
+            self.var_types[bare] = ctype
+            param_strs.append(f"{ctype} {bare}")
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
         mangled    = f"{struct_name}_{_safe_name(node.name)}"
@@ -8082,7 +8111,10 @@ class GimpleGen:
                 self.func_return_types[s.name] = self._resolve_type(s.return_type)
             # Register parameter types (for call-site coercion via _emit_call)
             if isinstance(s, FunctionDef) and s.params:
-                self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+                if any(pn.startswith('*') for pn, _ in s.params):
+                    self.func_param_types[s.name] = ['...']
+                else:
+                    self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
         all_structs_for_methods = stmts + (imported_stmts if self.do_imports else [])
         for s in all_structs_for_methods:
@@ -8179,20 +8211,24 @@ class GimpleGen:
         # _emit_call defaults to converting pointers to int64_t, losing type info.
         for s in all_functions:
             if isinstance(s, FunctionDef):
-                param_ctypes = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
-                self.func_param_types[s.name] = param_ctypes
+                if s.params and any(pn.startswith('*') for pn, _ in s.params):
+                    self.func_param_types[s.name] = ['...']
+                else:
+                    self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
                     method_full_name = f"{s.name}_{m.name}"
-                    # Build parameter types, with self being the first param
-                    param_ctypes = []
-                    for i, (pname, ptype) in enumerate(m.params):
-                        if i == 0 and pname == 'self':
-                            param_ctypes.append(f"{s.name} *")
-                        else:
-                            param_ctypes.append(self._param_ctype(pname, ptype, m))
-                    self.func_param_types[method_full_name] = param_ctypes
+                    if m.params and any(pn.startswith('*') for pn, _ in m.params):
+                        self.func_param_types[method_full_name] = ['...']
+                    else:
+                        param_ctypes = []
+                        for i, (pname, ptype) in enumerate(m.params):
+                            if i == 0 and pname == 'self':
+                                param_ctypes.append(f"{s.name} *")
+                            else:
+                                param_ctypes.append(self._param_ctype(pname, ptype, m))
+                        self.func_param_types[method_full_name] = param_ctypes
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
@@ -8583,14 +8619,17 @@ class GimpleGen:
         for fn in func_defs:
             if fn.name == 'main':
                 continue
-            inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
-            param_ctypes = []
-            for pn, pt in (fn.params or []):
-                if pn in inferred_params:
-                    param_ctypes.append(inferred_params[pn])
-                else:
-                    param_ctypes.append(self._param_ctype(pn, pt, fn))
-            self.func_param_types[fn.name] = param_ctypes
+            if fn.params and any(pn.startswith('*') for pn, _ in fn.params):
+                self.func_param_types[fn.name] = ['...']
+            else:
+                inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
+                param_ctypes = []
+                for pn, pt in (fn.params or []):
+                    if pn in inferred_params:
+                        param_ctypes.append(inferred_params[pn])
+                    else:
+                        param_ctypes.append(self._param_ctype(pn, pt, fn))
+                self.func_param_types[fn.name] = param_ctypes
 
         # Only generate _toplevel() if there are actual top-level statements
         has_toplevel_code = len(toplevel_stmts) > 0
@@ -9265,18 +9304,22 @@ class GimpleGen:
             if fn.name == 'main':
                 continue
             ret    = self.func_return_types.get(fn.name, 'int')
-            param_ctypes = []
-            # Check inferred parameter types first, then fall back to annotations
-            inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
-            for pn, pt in (fn.params or []):
-                if pn in inferred_params:
-                    param_ctypes.append(inferred_params[pn])
-                else:
-                    param_ctypes.append(self._param_ctype(pn, pt, fn))
+            # If any param is *args, the call convention uses a packed MojoList*
+            has_varargs = any(pn.startswith('*') for pn, _ in (fn.params or []))
+            if has_varargs:
+                param_ctypes = ['MojoList *']
+                self.func_param_types[fn.name] = ['...']  # signal to _emit_call to pack args
+            else:
+                param_ctypes = []
+                inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
+                for pn, pt in (fn.params or []):
+                    if pn in inferred_params:
+                        param_ctypes.append(inferred_params[pn])
+                    else:
+                        param_ctypes.append(self._param_ctype(pn, pt, fn))
+                self.func_param_types[fn.name] = param_ctypes
             ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
             parts.append(f"{ret} {_safe_name(fn.name)} ({ptypes});")
-            # Record parameter types for call-site coercion
-            self.func_param_types[fn.name] = param_ctypes
 
         # Forward declarations: struct methods
         # When do_imports=True, imported code is inlined and already contains its own
@@ -9288,25 +9331,28 @@ class GimpleGen:
             for m in sd.methods:
                 ret = self.func_return_types.get(f"{sd.name}_{m.name}",
                                                   self._resolve_type(m.return_type))
-                param_ctypes = []
-                # Use the full func name for parameter type inference
                 method_full_name = f"{sd.name}_{m.name}"
-                hardcoded = self.func_param_types.get(method_full_name, [])
-                for i, (pname, ptype) in enumerate(m.params):
-                    if i == 0 and pname == 'self':
-                        ct = f"{sd.name} *"
-                    elif hardcoded and i < len(hardcoded):
-                        ct = hardcoded[i]
-                    else:
-                        # Check inferred parameter types first (for unannotated parameters)
-                        if ptype is None and hasattr(self, '_inferred_param_types'):
-                            if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
-                                ct = self._inferred_param_types[method_full_name][pname]
+                if any(pn.startswith('*') for pn, _ in (m.params or [])):
+                    # *args method: self + MojoList*
+                    param_ctypes = [f"{sd.name} *", 'MojoList *']
+                    self.func_param_types[method_full_name] = ['...']
+                else:
+                    param_ctypes = []
+                    hardcoded = self.func_param_types.get(method_full_name, [])
+                    for i, (pname, ptype) in enumerate(m.params):
+                        if i == 0 and pname == 'self':
+                            ct = f"{sd.name} *"
+                        elif hardcoded and i < len(hardcoded):
+                            ct = hardcoded[i]
+                        else:
+                            if ptype is None and hasattr(self, '_inferred_param_types'):
+                                if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
+                                    ct = self._inferred_param_types[method_full_name][pname]
+                                else:
+                                    ct = self._resolve_type(ptype)
                             else:
                                 ct = self._resolve_type(ptype)
-                        else:
-                            ct = self._resolve_type(ptype)
-                    param_ctypes.append(ct)
+                        param_ctypes.append(ct)
                 ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
                 parts.append(f"{ret} {sd.name}_{_safe_name(m.name)} ({ptypes});")
 

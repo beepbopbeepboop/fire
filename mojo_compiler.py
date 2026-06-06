@@ -1172,7 +1172,7 @@ class Parser:
                         self._advance(); ptype = self._parse_type_ann()
                     if self._peek().kind == "ASSIGN":
                         self._advance(); self._parse_expr(0)
-                    params.append((pname, ptype))
+                    params.append(("*" + pname, ptype))
                     if conv is not None: param_convs[pname] = conv
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
