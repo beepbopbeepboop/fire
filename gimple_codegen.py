@@ -2809,7 +2809,8 @@ class GimpleGen:
             """Recursively scan statements and collect types assigned to variables."""
             for node in nodes:
                 if isinstance(node, AssignStmt):
-                    vtype, _ = self.lower_expr(node.value)
+                    # Use _quick_type instead of lower_expr to avoid incomplete var_types
+                    vtype = self._quick_type(node.value)
                     # Handle both single and tuple targets
                     targets = [node.target] if not isinstance(node.target, TupleExpr) else node.target.elements
                     for target in targets:
