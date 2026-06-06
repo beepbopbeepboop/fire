@@ -2372,6 +2372,20 @@ class GimpleGen:
                 # Also check if it's a global variable that should be cast
                 elif aval in self._global_var_types:
                     actual_atype = self._global_var_types[aval]
+
+            # Type system: Check OPAQUE_POINTER_TRACKING for parameter passing
+            if self.type_checker and atype == 'int64_t' and actual_atype != atype and ptype != atype:
+                try:
+                    from type_system import Type, TypeOrigin, make_opaque_pointer_type
+                    actual_type_obj = make_opaque_pointer_type(actual_atype, TypeOrigin.INFERRED)
+                    ptype_obj = self._string_type_to_type_obj(ptype, TypeOrigin.INFERRED)
+                    if actual_type_obj and ptype_obj:
+                        self.type_checker.check_opaque_pointer_tracking(
+                            actual_type_obj, ptype_obj, i, fname,
+                            (self._current_filename, getattr(self, '_current_line', 0))
+                        )
+                except (ImportError, TypeError, Exception):
+                    pass  # Type checking failed, continue
             # GIMPLE: extern globals must be loaded into locals before function calls
             # This includes string literals (_slit_*) and dict globals (_BIN_OPS, etc.)
             if aval.startswith('_slit_') or aval in ('_BIN_OPS', '_GD_BIN_OPS'):
@@ -6273,6 +6287,21 @@ class GimpleGen:
                     ctype = vtype
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
+
+            # Type system: Check TEMPORAL_MONOTONICITY
+            if self.type_checker:
+                try:
+                    from type_system import Type, TypeOrigin
+                    dst_type_obj = self._string_type_to_type_obj(dst, TypeOrigin.INFERRED)
+                    vtype_obj = self._string_type_to_type_obj(vtype, TypeOrigin.INFERRED)
+                    if dst_type_obj and vtype_obj:
+                        self.type_checker.check_temporal_monotonicity(
+                            tname, vtype_obj,
+                            (self._current_filename, getattr(node, 'line', 0))
+                        )
+                except (ImportError, TypeError, Exception):
+                    pass  # Type checking failed, continue
+
             if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[tname] = self._elem_types[v]
                 # Also propagate nested element types (for lists of lists)
