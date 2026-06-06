@@ -9180,8 +9180,31 @@ class GimpleGen:
             instance_name = f"_{safe_name}_globals"
             globals_struct_lines.append(f"struct {typedef_name} {instance_name} = {{")
             inits = self._module_global_inits.get(current_mod_name, {})
+
+            # First pass: fix struct field types if initialization suggests different type
+            fixed_types = {}
+            for gname, c_type, _ in globals_list:
+                init_val = inits.get(gname, '0')
+                # Check if init value suggests a different C type
+                if 'mojo_dict_new' in str(init_val):
+                    fixed_types[gname] = 'MojoDict *'
+                elif 'mojo_list_new' in str(init_val) or 'mojo_set_new' in str(init_val):
+                    fixed_types[gname] = 'MojoList *'  # or MojoSet *
+
+            # Rewrite globals typedef with corrected types
+            if fixed_types:
+                globals_struct_lines = []
+                globals_struct_lines.append(f"typedef struct {typedef_name} {{")
+                for gname, c_type, mojo_type in globals_list:
+                    actual_type = fixed_types.get(gname, c_type)
+                    globals_struct_lines.append(f"  {actual_type} {gname};")
+                globals_struct_lines.append(f"}} {typedef_name};")
+                globals_struct_lines.append("")
+
             for gname, c_type, _ in globals_list:
                 init_val = inits.get(gname)
+                # Use fixed type if available
+                c_type = fixed_types.get(gname, c_type)
                 # If no init value or it's '0', use appropriately typed null for pointer types
                 if not init_val or init_val == '0':
                     if c_type.endswith(' *'):
