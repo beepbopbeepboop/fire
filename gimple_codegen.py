@@ -1887,6 +1887,12 @@ class GimpleGen:
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
         self._current_filename: str = ""  # filename for #line directives
+        # Type system (new)
+        try:
+            from type_system import InvariantChecker
+            self.type_checker = InvariantChecker(verbose=False)
+        except ImportError:
+            self.type_checker = None  # Type system not available
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
         # Shared across imported modules so the root preamble can emit one extern proto each.
@@ -2804,6 +2810,30 @@ class GimpleGen:
             elif isinstance(node, WithStmt):
                 self._collect_return_types(node.body, acc)
 
+    def _string_type_to_type_obj(self, type_str: str, origin=None):
+        """Convert string type representation to Type object for type checking."""
+        try:
+            from type_system import (
+                Type, TypeOrigin,
+                make_int64_type, make_double_type, make_mojolist_type
+            )
+            origin = origin or TypeOrigin.DEFAULT
+
+            if type_str == 'int64_t':
+                return make_int64_type(origin)
+            elif type_str == 'double':
+                return make_double_type(origin)
+            elif type_str.startswith('MojoList'):
+                # Extract element type if present
+                return make_mojolist_type(make_int64_type(), origin)
+            elif type_str == 'int':
+                return Type(base='int', bit_width=32, origin=origin)
+            else:
+                # Generic type
+                return Type(base=type_str, origin=origin)
+        except ImportError:
+            return None
+
     def _infer_return_type(self, body: list) -> str:
         """Infer return type by scanning body for ReturnStmt nodes."""
         acc: list[str] = []
@@ -3653,6 +3683,20 @@ class GimpleGen:
 
         c_op      = _BIN_OPS.get(node.op, node.op)
         res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
+
+        # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
+        if self.type_checker and node.op in ('+', '-', '*', '/', '%'):
+            try:
+                from type_system import Type, TypeOrigin
+                left_type_obj = self._string_type_to_type_obj(lt, TypeOrigin.INFERRED)
+                right_type_obj = self._string_type_to_type_obj(rt, TypeOrigin.INFERRED)
+                if left_type_obj and right_type_obj:
+                    result_type = self.type_checker.check_bit_width_preservation(
+                        left_type_obj, node.op, right_type_obj,
+                        (self._current_filename, getattr(node, 'line', 0))
+                    )
+            except (ImportError, TypeError, Exception):
+                pass  # Type checking failed, continue with regular compilation
         # For | on set/list/dict pointer types, use runtime union, not C bitwise |
         if node.op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
             t = self._new_temp('MojoSet *')
@@ -8125,6 +8169,19 @@ class GimpleGen:
         for s in all_functions:
             if isinstance(s, FunctionDef):
                 self._inferred_param_types[s.name] = self._infer_param_types(s)
+                # Type system: Lock parameter types with INFERENCE_IDEMPOTENCE check
+                if self.type_checker:
+                    for pname, ptype in self._inferred_param_types[s.name].items():
+                        try:
+                            from type_system import Type, TypeOrigin
+                            # Convert string type to Type object
+                            type_obj = self._string_type_to_type_obj(ptype, TypeOrigin.INFERRED)
+                            self.type_checker.lock_inferred_type(
+                                f"{s.name}.{pname}", type_obj, "1.3",
+                                (self._current_filename, s.line if hasattr(s, 'line') else 0)
+                            )
+                        except (ImportError, TypeError):
+                            pass  # Type system not available or type conversion failed
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
