@@ -6179,11 +6179,17 @@ class GimpleGen:
                 ev64 = self._to_int64(et, ev)
                 self._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])
         elif node.kind == 'dict':
-            _, kv  = self.lower_expr(node.element)   # element = key expression in dict compr
+            kt, kv = self.lower_expr(node.element)   # element = key expression in dict compr
             vt, vv = self.lower_expr(node.key)        # key field holds the value expression
             # parser stores dict comprehension as: element=key_expr, key=val_expr
-            # Load global string literals into temps before passing to dict functions
-            if kv.startswith('_slit_'):
+            # Dict keys are char* in the runtime: coerce the key to a char* local
+            # (handles a non-char* key, e.g. one boxed as int64_t, and loads
+            # global string literals into locals first).
+            if kt != 'char *':
+                kv_tmp = self._new_temp('char *')
+                self._safe_coerce_emit(kt, 'char *', kv, kv_tmp)
+                kv = kv_tmp
+            elif kv.startswith('_slit_'):
                 kv_tmp = self._new_temp('char *')
                 self._emit(f"  {kv_tmp} = {kv};")
                 kv = kv_tmp

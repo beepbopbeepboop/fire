@@ -269,6 +269,14 @@ def main() -> Int:
     return got.get("x", 0)
 """, expected_return=5)
 
+    # 16. Dict comprehension + lookup. Exercises the dict-comprehension lowering
+    #     (key coercion to char*, value store) end-to-end. out["b"] == 1.
+    test_execution("dict_comprehension", """\
+def main() -> Int:
+    out = {k: 1 for k in ["a", "b", "c"]}
+    return out.get("b", 0)
+""", expected_return=1)
+
 
 def main():
     if not os.path.exists(MOJO_CLI):
