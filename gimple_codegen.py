@@ -5189,10 +5189,15 @@ class GimpleGen:
 
         fname_raw = node.func.name
 
-        # Redirect calls to user's main() to _gimple_main() (since user main is renamed)
-        # unless we're currently inside the main() function
+        # Redirect calls to user's main() to its renamed symbol (see gen_func):
+        # root module -> _gimple_main; sub-module -> _{module}_main. Must match the
+        # definition rename, or a sub-module's `main()` call references _gimple_main
+        # (undeclared in that unit).
         if fname_raw == 'main' and self.current_func_name != 'main':
-            fname_raw = '_gimple_main'
+            if self.emit_entry_points:
+                fname_raw = '_gimple_main'
+            else:
+                fname_raw = f"_{self.module_name}_main" if self.module_name else '_lib_main'
 
         # dir(obj) — Python built-in, stub to return empty list
         if fname_raw == 'dir':
@@ -6862,9 +6867,13 @@ class GimpleGen:
                     full_arg_pairs = arg_pairs
                 self._emit_call('void', '', fname_c, full_arg_pairs)
                 return
-            # Redirect calls to user's main() to _gimple_main() (since user main is renamed)
+            # Redirect calls to user's main() to its renamed symbol (root ->
+            # _gimple_main; sub-module -> _{module}_main), matching gen_func.
             if raw_name == 'main' and self.current_func_name != 'main':
-                fname = _safe_name('_gimple_main')
+                if self.emit_entry_points:
+                    fname = _safe_name('_gimple_main')
+                else:
+                    fname = _safe_name(f"_{self.module_name}_main" if self.module_name else '_lib_main')
             else:
                 fname = _safe_name(raw_name)
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
