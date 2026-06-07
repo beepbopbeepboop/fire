@@ -39,9 +39,9 @@ demo:
 # validate-all) is a separate, aspirational target — `make bootstrap` — because
 # stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is not
 # gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache
+check: check-gimple check-runner check-modcache check-selfhost
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
 
 check-gimple: gimple_codegen.py $(DYLIB)
 	python3 test_gimple.py
@@ -56,6 +56,13 @@ check-runner:
 
 check-modcache:
 	python3 test_module_cache.py
+
+# Self-host compile guard: mojo.py must compile itself to a linked binary with
+# zero GCC errors / ICEs / undefined symbols (the --jit mojo.py path, minus
+# execution — the runtime still SIGSEGVs, a separate frontier). Locks compile+
+# link cleanliness so it can't silently regress.
+check-selfhost: gimple_codegen.py mojo_compiler.py
+	python3 test_selfhost.py
 
 check-gimple-runner:
 	python3 test_gimple_runner.py
