@@ -792,6 +792,10 @@ class Parser:
             while self._peek().kind == "OP" and self._peek().value == "@":
                 self._advance()
                 dec_name = self._expect("NAME").value
+                # Dotted decorator name: @functools.lru_cache, @a.b.c
+                while self._peek().kind == "DOT":
+                    self._advance()  # consume '.'
+                    dec_name += "." + self._expect("NAME").value
                 # Handle decorator with arguments: @decorator(args)
                 if self._peek().kind == "LPAREN":
                     self._advance()  # skip LPAREN

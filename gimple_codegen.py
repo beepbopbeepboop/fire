@@ -7669,7 +7669,26 @@ class GimpleGen:
         if ci.env_struct:
             param_strs.append(f"{ci.env_struct} * _env")
         ci.inferred_params = {}
+        seen_varargs = False
         for i, (pname, ptype) in enumerate(node.params):
+            bare = pname.lstrip('*')
+            if pname.startswith('**'):
+                # **kwargs -> a real MojoDict* param (forwarding pattern)
+                ctype = 'MojoDict *'
+                self.var_types[bare] = ctype
+                ci.inferred_params[pname] = ctype
+                param_strs.append(f"{ctype} {bare}")
+                continue
+            if pname.startswith('*'):
+                # *args -> one MojoList* param; callers pack the loose args into it
+                if seen_varargs:
+                    continue
+                seen_varargs = True
+                ctype = 'MojoList *'
+                self.var_types[bare] = ctype
+                ci.inferred_params[pname] = ctype
+                param_strs.append(f"{ctype} {bare}")
+                continue
             if ci.is_re_sub_callback and i == 0:
                 # First (match) param is always char * for re.sub callbacks
                 ctype = 'char *'
@@ -7683,12 +7702,23 @@ class GimpleGen:
         ci.inferred_ret = ret_type               # cache for forward decl in Phase 2b
         # Update func_return_types so callers generated after this closure see the right type
         self.func_return_types[ci.lifted_name] = ret_type
-        # Register param types so _emit_call can coerce arguments at closure call sites
+        # Register param types so _emit_call can coerce/pack arguments at closure call
+        # sites. Keep the usage-inferred type for normal params; for *args use the '...'
+        # packing sentinel (or a concrete MojoList* when **kwargs is also present), and
+        # **kwargs -> MojoDict*, matching the emitted params above.
         closure_param_ctypes = []
         if ci.env_struct:
             closure_param_ctypes.append(f"{ci.env_struct} *")
+        _has_kw = any(pn.startswith('**') for pn, _ in node.params)
         for pname, _ in node.params:
-            closure_param_ctypes.append(ci.inferred_params.get(pname, 'int'))
+            if pname.startswith('**'):
+                closure_param_ctypes.append('MojoDict *')
+            elif pname.startswith('*'):
+                closure_param_ctypes.append('MojoList *' if _has_kw else '...')
+                if not _has_kw:
+                    break
+            else:
+                closure_param_ctypes.append(ci.inferred_params.get(pname, 'int'))
         self.func_param_types[ci.lifted_name] = closure_param_ctypes
         params_str = ', '.join(param_strs) if param_strs else 'void'
 
