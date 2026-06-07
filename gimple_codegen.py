@@ -1933,6 +1933,11 @@ class GimpleGen:
         # Container / layout state
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
         self._nested_elem_types: dict[str, str] = {}  # container var → element type of lists within lists
+        # Actual type of int64_t-boxed pointers, keyed by temp/var name. MUST reset
+        # per function: temp names (_tN) recycle, so a stale entry from one function
+        # would mis-type a same-named temp in the next (e.g. an open() file handle
+        # read as a leftover MojoSet*, emitting MojoSet_read).
+        self._actual_types:    dict[str, str]   = {}
         # Pre-seed known global dicts with their value types so .get() uses the right function.
         self._dict_val_types:  dict[str, str]   = {
             '_BIN_OPS': 'char *', '_GD_BIN_OPS': 'char *',
