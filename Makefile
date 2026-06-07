@@ -10,7 +10,7 @@ STDLIB_DYLIB = build/libmojostdlib.dylib
 STDLIB_MODULES ?=          # library .mojo modules to bundle (set by caller)
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
-MOJO_MAIN    = mojo.mojo
+MOJO_MAIN    = mojo.py
 
 GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
@@ -80,12 +80,12 @@ stdlib:
 #
 # Three-stage self-hosting verification with transitive-closure compilation:
 #
-#  Stage 1  Python mojo.py --dump-full mojo.mojo (single pass, all imports inline)
+#  Stage 1  Python mojo.py --dump-full mojo.py (single pass, all imports inline)
 #             → stage1/mojo.ci  (clean, no deduplication needed)
 #  stage2/mojo  GCC -fgimple compiles stage1/mojo.ci + runtime → compiled binary
-#  Stage 2  stage2/mojo --dump mojo.mojo (single-file for individual validation)
+#  Stage 2  stage2/mojo --dump mojo.py (single-file for individual validation)
 #             → stage2/mojo.ci  (+ .tok .ast .pyi for all source files)
-#  Stage 3  stage2/mojo --dump mojo.mojo  (idempotency: same binary, same output)
+#  Stage 3  stage2/mojo --dump mojo.py  (idempotency: same binary, same output)
 #             → stage3/mojo.ci  (+ .tok .ast .pyi for all source files)
 #  verify   stage1 == stage2 == stage3  for all generated files
 
@@ -183,8 +183,8 @@ preflight:
 	    { echo "FAIL preflight: mojo_compiler.py missing"; exit 1; }
 	@test -f gimple_codegen.py || \
 	    { echo "FAIL preflight: gimple_codegen.py missing"; exit 1; }
-	@test -f mojo.mojo || \
-	    { echo "FAIL preflight: mojo.mojo missing"; exit 1; }
+	@test -f $(MOJO_MAIN) || \
+	    { echo "FAIL preflight: $(MOJO_MAIN) missing"; exit 1; }
 	@python3 -c "from mojo_compiler import tokenize, Parser; print('parser OK')"
 	@python3 -c "import gimple_codegen; print('codegen OK')"
 	@echo "✓ Preflight passed"
