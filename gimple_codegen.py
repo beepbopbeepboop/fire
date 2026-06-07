@@ -9129,9 +9129,19 @@ class GimpleGen:
             'void *mojo_open(char *filename, char *mode);',
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
-            # Compiler-generated dispatch helpers that may appear in module self-compilation
-            'char * _ReflectTable_in_dll (int64_t, int64_t, char *);',
-            'MojoList * _Bool_items (int64_t);',
+            # Genuinely-unimplemented dispatch helpers (ctypes Structure.in_dll
+            # interop; a mis-dispatched .items()). Define as abort() stubs so the
+            # program links, but any real call detonates loudly rather than
+            # silently returning garbage. Include-guarded: the preamble is emitted
+            # once per module, but these must be defined exactly once.
+            # `static` so separately-compiled units (module cache: c1.o + l1.o)
+            # don't collide at link; the include guard prevents same-file dup
+            # (the preamble repeats per module).
+            '#ifndef _MOJO_UNIMPL_STUBS',
+            '#define _MOJO_UNIMPL_STUBS',
+            'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { abort(); return 0; }',
+            'static MojoList * _Bool_items (int64_t a) { abort(); return 0; }',
+            '#endif',
         ])
 
         # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
