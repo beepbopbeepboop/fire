@@ -11,6 +11,7 @@ Eventually will be transpiled to .mojo for full bootstrap.
 
 import sys
 import re
+import importlib
 from dataclasses import dataclass
 import ast_nodes as N
 try:
@@ -281,13 +282,47 @@ class Interpreter:
         return cls
 
     def execute_ImportStmt(self, node: N.ImportStmt):
-        """Execute import statement."""
-        # For now, just skip imports - modules are pre-loaded
+        """Execute `import mod` / `import mod as alias`.
+
+        The interpreter runs the AST as Python, so we resolve through Python's
+        real import machinery and bind the resulting module object into scope.
+        Failing loudly (rather than the old silent skip) is the point: a skipped
+        import surfaces later as a baffling "name '...' is not defined".
+        """
+        try:
+            mod = importlib.import_module(node.module)
+        except ModuleNotFoundError:
+            # Not a Python module — assume a sibling .mojo module the interpreter
+            # treats as pre-loaded; skip (the historical behavior).
+            return None
+        if node.alias:
+            self.scope.define(node.alias, mod)
+        else:
+            # `import a.b` binds the top-level package name `a`.
+            top = node.module.split('.')[0]
+            self.scope.define(top, importlib.import_module(top))
         return None
 
     def execute_FromImportStmt(self, node: N.FromImportStmt):
-        """Execute from-import statement."""
-        # For now, just skip imports - modules are pre-loaded
+        """Execute `from mod import a, b as c` / `from mod import *`."""
+        try:
+            mod = importlib.import_module(node.module)
+        except ModuleNotFoundError:
+            # Not a Python module — sibling .mojo module, treated as pre-loaded; skip.
+            return None
+        if node.wildcard:
+            names = getattr(mod, '__all__', None)
+            if names is None:
+                names = [n for n in dir(mod) if not n.startswith('_')]
+            for name in names:
+                self.scope.define(name, getattr(mod, name))
+            return None
+        for name, alias in node.names:
+            try:
+                value = getattr(mod, name)
+            except AttributeError:
+                raise NameError(f"cannot import name '{name}' from '{node.module}'")
+            self.scope.define(alias or name, value)
         return None
 
     def execute_AssignStmt(self, node: N.AssignStmt):
