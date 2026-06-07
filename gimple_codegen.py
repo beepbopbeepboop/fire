@@ -7755,6 +7755,24 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
+    def _fixed_param_ctypes(self, params, node, self_struct=None) -> list:
+        """C types of the parameters that precede the first *-param, for a
+        function with *args. The varargs are packed into a single trailing
+        MojoList* by the caller; **kwargs is not a positional parameter. Callers
+        append the '...' sentinel (func_param_types) or 'MojoList *' (signatures).
+        Including these fixed params is essential: e.g. __call__(self, interpreter,
+        *args) must keep `interpreter`, or the forward decl and definition disagree
+        on arity."""
+        out = []
+        for i, (pn, pt) in enumerate(params or []):
+            if pn.startswith('*'):
+                break
+            if i == 0 and pn == 'self' and self_struct:
+                out.append(f"{self_struct} *")
+            else:
+                out.append(self._param_ctype(pn, pt, node))
+        return out
+
     def _param_ctype(self, pname: str, ptype, node: FunctionDef,
                      is_self: bool = False) -> str:
         """Resolve parameter C type, applying argument convention qualifiers."""
@@ -7854,7 +7872,7 @@ class GimpleGen:
         params_str = ', '.join(param_strs) if param_strs else 'void'
         # Record that this function takes varargs so call sites can pack args
         if has_varargs:
-            self.func_param_types[node.name] = ['...']
+            self.func_param_types[node.name] = self._fixed_param_ctypes(node.params, node) + ['...']
         safe = _safe_name(node.name)
 
         # For main (in main module only), call class-attr initializer first
@@ -7974,8 +7992,9 @@ class GimpleGen:
         has_varargs = any(pn.startswith('*') and not pn.startswith('**') for pn, _ in (node.params or []))
         param_strs = []
         if has_varargs:
-            # ['StructName *', '...'] signals method varargs: keep self, pack rest
-            self.func_param_types[method_full_name] = [f"{struct_name} *", '...']
+            # Keep self + any fixed params before *args, then pack the rest; e.g.
+            # __call__(self, interpreter, *args) must keep `interpreter`.
+            self.func_param_types[method_full_name] = self._fixed_param_ctypes(node.params, node, struct_name) + ['...']
         hardcoded_params = self.func_param_types.get(method_full_name, [])
         seen_varargs = False
         for i, (pname, ptype) in enumerate(node.params):
@@ -8383,7 +8402,7 @@ class GimpleGen:
             # Register parameter types (for call-site coercion via _emit_call)
             if isinstance(s, FunctionDef) and s.params:
                 if any(pn.startswith('*') and not pn.startswith('**') for pn, _ in s.params):
-                    self.func_param_types[s.name] = ['...']
+                    self.func_param_types[s.name] = self._fixed_param_ctypes(s.params, s) + ['...']
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
@@ -8483,7 +8502,7 @@ class GimpleGen:
         for s in all_functions:
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') and not pn.startswith('**') for pn, _ in s.params):
-                    self.func_param_types[s.name] = ['...']
+                    self.func_param_types[s.name] = self._fixed_param_ctypes(s.params, s) + ['...']
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
         for s in all_structs_for_methods:
@@ -8491,7 +8510,7 @@ class GimpleGen:
                 for m in s.methods:
                     method_full_name = f"{s.name}_{m.name}"
                     if m.params and any(pn.startswith('*') and not pn.startswith('**') for pn, _ in m.params):
-                        self.func_param_types[method_full_name] = [f"{s.name} *", '...']
+                        self.func_param_types[method_full_name] = self._fixed_param_ctypes(m.params, m, s.name) + ['...']
                     else:
                         param_ctypes = []
                         for i, (pname, ptype) in enumerate(m.params):
@@ -8583,7 +8602,7 @@ class GimpleGen:
         for s in all_functions:
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') and not pn.startswith('**') for pn, _ in s.params):
-                    self.func_param_types[s.name] = ['...']
+                    self.func_param_types[s.name] = self._fixed_param_ctypes(s.params, s) + ['...']
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
@@ -8980,7 +8999,7 @@ class GimpleGen:
             if fn.name == 'main':
                 continue
             if fn.params and any(pn.startswith('*') and not pn.startswith('**') for pn, _ in fn.params):
-                self.func_param_types[fn.name] = ['...']
+                self.func_param_types[fn.name] = self._fixed_param_ctypes(fn.params, fn) + ['...']
             else:
                 inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
                 param_ctypes = []
@@ -9649,8 +9668,9 @@ class GimpleGen:
             # If any param is *args, the call convention uses a packed MojoList*
             has_varargs = any(pn.startswith('*') and not pn.startswith('**') for pn, _ in (fn.params or []))
             if has_varargs:
-                param_ctypes = ['MojoList *']
-                self.func_param_types[fn.name] = ['...']  # signal to _emit_call to pack args
+                fixed = self._fixed_param_ctypes(fn.params, fn)
+                param_ctypes = fixed + ['MojoList *']
+                self.func_param_types[fn.name] = fixed + ['...']  # signal to _emit_call to pack args
             else:
                 param_ctypes = []
                 inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
@@ -9675,9 +9695,10 @@ class GimpleGen:
                                                   self._resolve_type(m.return_type))
                 method_full_name = f"{sd.name}_{m.name}"
                 if any(pn.startswith('*') and not pn.startswith('**') for pn, _ in (m.params or [])):
-                    # *args method: self + MojoList*
-                    param_ctypes = [f"{sd.name} *", 'MojoList *']
-                    self.func_param_types[method_full_name] = [f"{sd.name} *", '...']
+                    # *args method: fixed params (incl self and any before *args) + MojoList*
+                    fixed = self._fixed_param_ctypes(m.params, m, sd.name)
+                    param_ctypes = fixed + ['MojoList *']
+                    self.func_param_types[method_full_name] = fixed + ['...']
                 else:
                     param_ctypes = []
                     hardcoded = self.func_param_types.get(method_full_name, [])
