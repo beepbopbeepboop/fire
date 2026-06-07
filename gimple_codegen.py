@@ -9179,8 +9179,9 @@ class GimpleGen:
         # Also add all modules we know about
         all_modules_to_declare.update(self._module_globals.keys())
 
-        for mod_name in list(all_modules_to_declare):
-            # Skip declaring our own module as extern
+        for mod_name in sorted(all_modules_to_declare):
+            # Skip declaring our own module as extern (sorted: deterministic .ci
+            # output, required for the bootstrap stage1==stage2==stage3 check)
             if mod_name == our_mod:
                 continue
             # Ensure proper type for _safe_name argument
@@ -9432,7 +9433,7 @@ class GimpleGen:
         # Populate _module_globals tracking from collected globals
         # Build a map of global name -> module name for later lookup
         self._global_to_module: dict[str, str] = {}
-        for gname in _declared_globals:
+        for gname in sorted(_declared_globals):   # sorted: deterministic field order for bootstrap
             if gname in self._global_var_types:
                 mojo_type = self._global_var_types[gname]
                 # Use the mojo_type as C type; if it ends with *, it's a pointer type
