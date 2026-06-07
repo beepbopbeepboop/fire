@@ -1750,7 +1750,15 @@ def _declared_vars_body(stmts) -> set:
             result.add(node.name)
         elif isinstance(node, ForStmt):
             tgt = node.target
-            result.add(tgt if isinstance(tgt, str) else tgt.name)
+            name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
+            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
+                # tuple target `for a, b in ...`: each unpacked name is declared
+                for part in name[1:-1].split(','):
+                    p = part.strip()
+                    if p:
+                        result.add(p)
+            elif name:
+                result.add(name)
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)
@@ -2958,6 +2966,54 @@ class GimpleGen:
                 result[vname] = TypeLattice.join_all(types)
 
         return result
+
+    def _collect_calls(self, expr, out):
+        """Append every CallExpr in an expression tree to out. A method (not a
+        nested function) so it never goes through the closure-lift machinery."""
+        if expr is None:
+            return
+        if isinstance(expr, CallExpr):
+            out.append(expr)
+            self._collect_calls(expr.func, out)
+            for a in expr.args:
+                self._collect_calls(a, out)
+            for _k, kv in (getattr(expr, 'kwargs', None) or []):
+                self._collect_calls(kv, out)
+        elif isinstance(expr, BinaryOp):
+            self._collect_calls(expr.left, out); self._collect_calls(expr.right, out)
+        elif isinstance(expr, UnaryOp):
+            self._collect_calls(expr.operand, out)
+        elif isinstance(expr, SubscriptExpr):
+            self._collect_calls(expr.obj, out); self._collect_calls(expr.index, out)
+        elif isinstance(expr, SliceExpr):
+            self._collect_calls(expr.obj, out); self._collect_calls(expr.start, out); self._collect_calls(expr.stop, out)
+        elif isinstance(expr, MemberExpr):
+            self._collect_calls(expr.obj, out)
+        elif isinstance(expr, TernaryExpr):
+            self._collect_calls(expr.condition, out); self._collect_calls(expr.then_val, out); self._collect_calls(expr.else_val, out)
+        elif isinstance(expr, (ListExpr, SetExpr, TupleExpr)):
+            for x in expr.elements:
+                self._collect_calls(x, out)
+        elif isinstance(expr, DictExpr):
+            for dk, dv in expr.pairs:
+                self._collect_calls(dk, out); self._collect_calls(dv, out)
+
+    def _calls_in_stmts(self, stmts, out):
+        """Collect every CallExpr reachable from a statement list."""
+        for n in stmts:
+            for attr in ('value', 'condition', 'iterable'):
+                if hasattr(n, attr):
+                    self._collect_calls(getattr(n, attr), out)
+            for attr in ('body', 'then_body', 'else_body', 'finally_body'):
+                sub = getattr(n, attr, None)
+                if isinstance(sub, list):
+                    self._calls_in_stmts(sub, out)
+            for _cond, eb in (getattr(n, 'elifs', None) or []):
+                self._calls_in_stmts(eb, out)
+            for h in (getattr(n, 'handlers', None) or []):
+                hb = getattr(h, 'body', None)
+                if isinstance(hb, list):
+                    self._calls_in_stmts(hb, out)
 
     def _scan_container_elems(self, body: list) -> tuple[dict, dict]:
         """Best-effort static element-type map for local containers in a body.
@@ -8466,51 +8522,6 @@ class GimpleGen:
             else:
                 d[pname] = (e, ne)
 
-        def _collect_calls(expr, out):
-            if expr is None:
-                return
-            if isinstance(expr, CallExpr):
-                out.append(expr)
-                _collect_calls(expr.func, out)
-                for a in expr.args:
-                    _collect_calls(a, out)
-                for _k, v in (getattr(expr, 'kwargs', None) or []):
-                    _collect_calls(v, out)
-            elif isinstance(expr, BinaryOp):
-                _collect_calls(expr.left, out); _collect_calls(expr.right, out)
-            elif isinstance(expr, UnaryOp):
-                _collect_calls(expr.operand, out)
-            elif isinstance(expr, SubscriptExpr):
-                _collect_calls(expr.obj, out); _collect_calls(expr.index, out)
-            elif isinstance(expr, SliceExpr):
-                _collect_calls(expr.obj, out); _collect_calls(expr.start, out); _collect_calls(expr.stop, out)
-            elif isinstance(expr, MemberExpr):
-                _collect_calls(expr.obj, out)
-            elif isinstance(expr, TernaryExpr):
-                _collect_calls(expr.condition, out); _collect_calls(expr.then_val, out); _collect_calls(expr.else_val, out)
-            elif isinstance(expr, (ListExpr, SetExpr, TupleExpr)):
-                for x in expr.elements:
-                    _collect_calls(x, out)
-            elif isinstance(expr, DictExpr):
-                for k, v in expr.pairs:
-                    _collect_calls(k, out); _collect_calls(v, out)
-
-        def _calls_in_stmts(stmts, out):
-            for n in stmts:
-                for attr in ('value', 'condition', 'iterable'):
-                    if hasattr(n, attr):
-                        _collect_calls(getattr(n, attr), out)
-                for attr in ('body', 'then_body', 'else_body', 'finally_body'):
-                    sub = getattr(n, attr, None)
-                    if isinstance(sub, list):
-                        _calls_in_stmts(sub, out)
-                for _cond, eb in (getattr(n, 'elifs', None) or []):
-                    _calls_in_stmts(eb, out)
-                for h in (getattr(n, 'handlers', None) or []):
-                    hb = getattr(h, 'body', None)
-                    if isinstance(hb, list):
-                        _calls_in_stmts(hb, out)
-
         # Cross-call scalar contract: an unannotated scalar param defaults to the
         # int64_t machine word, so passing a double silently truncates (bnbody's
         # dt=0.01 -> 0 froze the sim). Observe each call argument's scalar type and
@@ -8533,7 +8544,7 @@ class GimpleGen:
                 continue
             elem, nested = self._scan_container_elems(s.body)
             calls = []
-            _calls_in_stmts(s.body, calls)
+            self._calls_in_stmts(s.body, calls)
             for call in calls:
                 if not isinstance(call.func, IdentExpr):
                     continue
