@@ -7828,7 +7828,11 @@ class GimpleGen:
         # Seed the cross-call element-type contract for container params, so
         # param[i][j] reads the inner element with the right getter and return
         # inference sees the real scalar (must precede return-type inference).
-        for bare, (e, ne) in getattr(self, '_param_elem_types', {}).get(node.name, {}).items():
+        # (Iterate keys + index, not `for k, (e, ne) in .items()`: a nested tuple
+        # for-target over .items() isn't lowered correctly when self-compiled.)
+        _pe = getattr(self, '_param_elem_types', {}).get(node.name, {})
+        for bare in _pe:
+            e, ne = _pe[bare]
             if e:
                 self._elem_types[bare] = e
                 if ne:
