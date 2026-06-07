@@ -137,20 +137,22 @@ def main():
     passed = []
     failed = []
 
-    for rel_path, abs_path in mojo_files:
-        print(f"  {rel_path}...", end=" ", flush=True)
+    for i, (rel_path, abs_path) in enumerate(mojo_files):
         success, error = transpile_file(abs_path)
 
         if success:
-            print("OK")
             passed.append(rel_path)
         else:
-            print("FAIL")
+            print(f"  {rel_path}...FAIL")
             failed.append((rel_path, error))
+
+        if (i + 1) % 50 == 0 or (i + 1) == len(mojo_files):
+            print(f"\r  Progress: {len(passed)} passed, {len(failed)} failed", end="", flush=True)
 
     # Print summary
     print("\n" + "="*70)
-    print(f"Results: {len(passed)} passed, {len(failed)} failed")
+    print(f"PASSED: {len(passed)}")
+    print(f"FAILED: {len(failed)}")
     print("="*70)
 
     if failed and len(failed) <= 20:

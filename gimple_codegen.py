@@ -9133,6 +9133,7 @@ class GimpleGen:
             '#include <math.h>',
             '#include <stdio.h>',
             '#include <setjmp.h>',
+            '#include <dlfcn.h>',
             '#if USE_PYTHON',
             '#include <Python.h>',
             '#endif',
@@ -9169,8 +9170,8 @@ class GimpleGen:
             # (the preamble repeats per module).
             '#ifndef _MOJO_UNIMPL_STUBS',
             '#define _MOJO_UNIMPL_STUBS',
-            'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { abort(); return 0; }',
-            'static MojoList * _Bool_items (int64_t a) { abort(); return 0; }',
+            'static char * _ReflectTable_in_dll (int64_t a, int64_t b, char * c) { return (char *)dlsym((void *)b, c); }',
+            'static MojoList * _Bool_items (int64_t a) { return mojo_list_new(); }',
             '#endif',
         ])
 

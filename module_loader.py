@@ -259,7 +259,7 @@ class ModuleLoader:
         return exports.get(symbol_name, 'unknown')
 
 
-def read_reflection(dylib_path: str) -> dict:
+def read_reflection(dylib_path: str, runtime_dylib: str = None) -> dict:
     """Read a dylib's `__mojo_reflect` table (reflect.h) — the compiler's import
     path consuming the *same* C-ABI reflection interface any other language uses.
     Returns {name: {'signature': str, 'kind': int, 'addr': int}}.
@@ -267,7 +267,18 @@ def read_reflection(dylib_path: str) -> dict:
     This is the structured, ABI-accurate replacement for the line-regex
     signature extraction above: when a prebuilt dylib exists, its self-describing
     table is authoritative.
+
+    Args:
+        dylib_path: Path to the module dylib to read
+        runtime_dylib: Optional path to the runtime dylib (pre-loaded to resolve symbols)
     """
+    # Pre-load runtime dylib if provided, so its symbols are available for the module dylib
+    if runtime_dylib and os.path.exists(runtime_dylib):
+        try:
+            ctypes.CDLL(runtime_dylib)
+        except Exception:
+            pass  # If runtime dylib can't be loaded, module dylib might still work
+
     lib = ctypes.CDLL(dylib_path)
     tbl = _ReflectTable.in_dll(lib, '__mojo_reflect')
     if tbl.magic != 0x4D4F4A4F:   # 'MOJO'

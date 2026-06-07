@@ -99,27 +99,33 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # Runtime is a FIRST-CLASS dylib (see runtime_dylib), not bundled here. The
-    # module dylib leaves mojo_* runtime symbols undefined; the loader resolves
-    # them from the runtime dylib that the program also links. We don't reinvent
-    # dyld — it already does cross-dylib symbol resolution at scale.
-    link = _dylink(gcc, out, objs, undefined=True)
+    # Runtime is a FIRST-CLASS dylib (see runtime_dylib). Link it explicitly
+    # so the module dylib's runtime symbol dependencies are resolved.
+    rt = runtime_dylib(gcc)
+    rt_dir = os.path.dirname(rt)
+    link = _dylink(gcc, out, objs, undefined=False, rpath=rt_dir)
+    # Link with the runtime dylib explicitly
+    link.insert(len(link) - len(objs), rt)
     subprocess.run(link, check=True)
     return out
 
 
-def _dylink(gcc, out, objs, undefined=False):
+def _dylink(gcc, out, objs, undefined=False, rpath=None):
     """Platform dylib link command. undefined=True allows unresolved symbols
     (resolved at load from other dylibs, via dyld dynamic lookup)."""
     if platform.system() == 'Darwin':
         cmd = [gcc, '-dynamiclib',
                '-install_name', '@rpath/' + os.path.basename(out), '-o', out]
+        if rpath:
+            cmd += ['-Wl,-rpath,' + rpath]
         if undefined:
             cmd += ['-undefined', 'dynamic_lookup']
     else:
         cmd = [gcc, '-shared', '-fPIC', '-o', out]
         if undefined:
             cmd += ['-Wl,--allow-shlib-undefined']
+        if rpath:
+            cmd += ['-Wl,-rpath,' + rpath]
     return cmd + objs
 
 

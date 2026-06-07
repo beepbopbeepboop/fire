@@ -139,9 +139,11 @@ def test_stage4_reflection(wd):
     open(libpath, 'w').write(libsrc)
     dylib = os.path.join(wd, 'libs4.dylib')
     bsd.build([libpath], dylib)
+    # Get the runtime dylib path for resolving symbols
+    rt = bsd.runtime_dylib()
     # our own import path reads the table
     from module_loader import read_reflection
-    exports = read_reflection(dylib)
+    exports = read_reflection(dylib, runtime_dylib=rt)
     check("stage4: __mojo_reflect readable; signature present",
           's4_id' in exports and 'int64_t s4_id (int64_t)' == exports['s4_id']['signature'],
           str(exports.get('s4_id')))

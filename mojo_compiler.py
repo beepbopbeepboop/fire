@@ -465,6 +465,81 @@ _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struc
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
+
+# ── T-string helpers: handle nested braces/interpolations ────────────────────────
+# The regex-based tokenizer can't handle nested t-strings like:
+#   t"L1: {t'L2: {t"L3: {val}"}'}"}
+# So we replace them with placeholders before tokenization.
+
+def _find_tstring_closing_quote(source: str, quote_pos: int, quote_ch: str) -> int:
+    """Find closing quote of a t-string, handling nested braces with interpolations.
+
+    Args:
+        source: Full source string
+        quote_pos: Position of opening quote
+        quote_ch: Quote character (' or ")
+
+    Returns:
+        Index of closing quote, or -1 if not found.
+    """
+    i = quote_pos + 1
+    while i < len(source):
+        ch = source[i]
+        if ch == '\\' and i + 1 < len(source):
+            i += 2
+            continue
+        if ch == quote_ch:
+            return i
+        if ch == '{':
+            i += 1
+            depth = 1
+            while i < len(source) and depth > 0:
+                ch = source[i]
+                if ch == '\\' and i + 1 < len(source):
+                    i += 2
+                    continue
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                i += 1
+            continue
+        i += 1
+    return -1
+
+
+def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
+    """Replace t-strings with nested braces with __MOJO_STR_N__ placeholders.
+
+    Args:
+        stmt: Statement to process
+        cache: String cache dict (modified in-place)
+        idx_list: Single-element list [counter] (modified in-place)
+
+    Returns:
+        Statement with t-strings replaced.
+    """
+    result = []
+    i = 0
+    while i < len(stmt):
+        m = re.match(r'[rRfFbBuU]*[tT]{1}[rRfFbBuU]*', stmt[i:])
+        if m:
+            prefix_end = i + len(m.group())
+            is_prefix = i == 0 or stmt[i-1] not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
+
+            if is_prefix and prefix_end < len(stmt) and stmt[prefix_end] in ('"', "'"):
+                close = _find_tstring_closing_quote(stmt, prefix_end, stmt[prefix_end])
+                if close != -1:
+                    ts = stmt[i:close + 1]
+                    ph = f"__MOJO_STR_{idx_list[0]}__"
+                    cache[ph] = ts
+                    idx_list[0] += 1
+                    result.append(ph)
+                    i = close + 1
+                    continue
+        result.append(stmt[i])
+        i += 1
+    return ''.join(result)
 _SEP_CHAR       = ';'
 _CMT_CHAR       = '#'
 _HAS_INDENT     = True
@@ -539,6 +614,7 @@ def tokenize(src: str) -> list[Token]:
         src = re.sub(r'[fFrRbBuU]{0,2}' + _dq + r'[\s\S]*?' + _dq, repl, src)
         src = re.sub(r'[fFrRbBuU]{0,2}' + _sq + r'[\s\S]*?' + _sq, repl, src)
         return src
+
     src = replace_multiline_strings(src)
     raw_lines = src.splitlines()
     # Join backslash-continued lines: "expr = \\\n    continuation" → one logical line
@@ -583,7 +659,10 @@ def tokenize(src: str) -> list[Token]:
                     while indent < stack[-1]:
                         stack.pop()
                         out.append(Token("DEDENT", "", line=physical_line))
-            for m in _TOKEN_RE.finditer(stmt):
+            # Handle t-strings with nested braces before tokenization
+            stmt_final = _process_nested_tstrings(stmt, string_cache, string_idx)
+
+            for m in _TOKEN_RE.finditer(stmt_final):
                 kind = m.lastgroup or "INT"
                 val  = m.group()
                 col  = m.start()
