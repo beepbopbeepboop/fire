@@ -104,7 +104,7 @@ class ARM64JIT:
             flags.append(self.debug_flag)
         return flags
 
-    def _get_cache_filename(self, source_code: str) -> tuple[str, str]:
+    def _get_cache_filename(self, source_code: str, filename: str = "") -> tuple[str, str]:
         """Get cache filename and hash for source code.
 
         The cache key (the index into ~/.gmojo/jit) folds in everything that can
@@ -116,6 +116,7 @@ class ARM64JIT:
         """
         key = "\0".join([
             source_code,
+            f"filename={filename}",          # feeds module-name derivation + #line
             f"opt={self.opt_flag}",
             f"debug={self.debug_flag or ''}",
             _toolchain_id(),
@@ -196,14 +197,18 @@ int main() {{
 
         return so_file
 
-    def compile_and_execute(self, mojo_src: str) -> any:
+    def compile_and_execute(self, mojo_src: str, filename: str = "") -> any:
         """Compile Mojo code to ARM64 and execute it.
 
         Uses SHA256-based caching to avoid recompilation of identical source.
+
+        `filename` is threaded into compile_to_gimple so the --jit path produces
+        byte-identical GIMPLE to the --dump-full/build path (filename feeds the
+        module-name derivation and #line directives).
         """
         try:
             # Check cache first
-            source_hash, cache_file = self._get_cache_filename(mojo_src)
+            source_hash, cache_file = self._get_cache_filename(mojo_src, filename)
 
             if os.path.exists(cache_file):
                 if os.environ.get('DEBUG_JIT'):
@@ -216,7 +221,7 @@ int main() {{
                 return None
 
             # Generate GIMPLE code with transitive closure (do_imports=True)
-            gimple_code = compile_to_gimple(mojo_src, do_imports=True)
+            gimple_code = compile_to_gimple(mojo_src, do_imports=True, filename=filename)
 
             # Setup temporary compilation directory
             if self.temp_dir is None:

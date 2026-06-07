@@ -159,7 +159,7 @@ def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None
     try:
         from jit.arm64 import ARM64JIT
         jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
-        jit.compile_and_execute(src)
+        jit.compile_and_execute(src, filename=input_file)
         jit.cleanup()
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
