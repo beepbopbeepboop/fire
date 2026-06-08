@@ -1687,6 +1687,30 @@ char *int64_t_splitext(char *path) {
     return (char *)path;
 }
 
+int64_t _char_replace_impl(int64_t s_i, int64_t old_i, int64_t new_i) {
+    char *s = (char *)s_i, *old_s = (char *)old_i, *new_s = (char *)new_i;
+    if (!s || !old_s || !new_s) return s_i;
+    size_t old_len = strlen(old_s), new_len = strlen(new_s);
+    if (old_len == 0) return s_i;
+    int count = 0;
+    const char *p = s;
+    while ((p = strstr(p, old_s)) != NULL) { count++; p += old_len; }
+    if (count == 0) return s_i;
+    size_t slen = strlen(s);
+    size_t result_len = slen + (size_t)count * new_len
+                        - (size_t)count * old_len + 1;
+    char *result = (char *)malloc(result_len);
+    if (!result) return s_i;
+    char *r = result; const char *q = s;
+    while (*q) {
+        if (strncmp(q, old_s, old_len) == 0) {
+            memcpy(r, new_s, new_len); r += new_len; q += old_len;
+        } else { *r++ = *q++; }
+    }
+    *r = '\0';
+    return (int64_t)result;
+}
+
 /* Forward declare ModuleLoader (defined in generated code) */
 typedef struct ModuleLoader ModuleLoader;
 

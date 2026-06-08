@@ -236,7 +236,9 @@ def main():
     ap.add_argument('-o', '--output', default=DEFAULT_OUT, help='output dylib path')
     ap.add_argument('--no-cache', action='store_true', help='bypass the CAS')
     args = ap.parse_args()
-    modules = args.modules or stdlib_modules()
+    modules = stdlib_modules()
+    if args.modules:
+        modules = list(args.modules)
     cas.reset_stats()
     out = build(modules, args.output, use_cache=not args.no_cache)
     msg = f"built {out} from {len(modules)} module(s) + runtime"

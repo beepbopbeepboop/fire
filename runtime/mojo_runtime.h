@@ -339,6 +339,9 @@ int int___exit__(int obj, int exc_type, int exc_val, int exc_tb);  /* __exit__ *
 /* String utility functions for method access */
 char *int64_t_basename(char *path);    /* basename() from os.path */
 char *int64_t_splitext(char *path);    /* splitext() from os.path */
+int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
+/* str.replace() — macro to suppress implicit int/pointer conversion warnings */
+#define char_replace(s, old, new) _char_replace_impl((int64_t)(s), (int64_t)(old), (int64_t)(new))
 
 /* eval() stub — Python's eval() cannot run in C bootstrap; returns first arg unchanged */
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);

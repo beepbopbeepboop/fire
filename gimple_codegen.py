@@ -9924,9 +9924,12 @@ class GimpleGen:
                 for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
                     parts.append(f'static char * {sname} = "{escaped}";')
             else:
-                # Imported module: emit extern declarations only
+                # Imported module: emit tentative static declarations.
+                # C allows multiple `static T foo;` tentative definitions in one TU;
+                # the main module's full `static T foo = "..."` definition wins.
+                # Using `extern` here conflicts with the main module's `static` definition.
                 for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
-                    parts.append(f'extern char * {sname};')
+                    parts.append(f'static char * {sname};')
             parts.append('')
         # Also collect from func_parts generators (they share self._str_pool via gen_func)
         parts.extend(func_parts)
