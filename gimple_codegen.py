@@ -69,8 +69,8 @@ class TypeLattice:
         if t1 == t2:
             return t1
         # _Bool promotes to int before further analysis
-        if t1 == '_Bool': t1 = 'int32_t'
-        if t2 == '_Bool': t2 = 'int32_t'
+        if t1 == '_Bool': t1 = 'int'
+        if t2 == '_Bool': t2 = 'int'
         if t1 == t2:
             return t1
         # Pointer: when two different pointer types meet, use int64_t (opaque handle)
@@ -125,13 +125,13 @@ class TypeLattice:
         if src == dst:
             return val
         # No-op casts between compatible int types
-        if src in ('int32_t', 'int64_t', '_Bool') and dst in ('int32_t', 'int64_t', '_Bool'):
+        if src in ('int', 'int64_t', '_Bool') and dst in ('int', 'int64_t', '_Bool'):
             if src == dst:
                 return val
             return f"({dst}){val}"
         # _Bool → int: single cast is fine
         if src == '_Bool':
-            if dst == 'int32_t':
+            if dst == 'int':
                 return f"(int){val}"
             return f"({dst}){val}"
         # int → _Bool
@@ -160,7 +160,7 @@ class TypeLattice:
 
     @classmethod
     def list_suffix(cls, elem: str) -> str:
-        """Select 'int32_t'/'double'/'str' API suffix based on element C type."""
+        """Select 'int'/'double'/'str' API suffix based on element C type."""
         if elem in cls._FLOAT: return 'double'
         if elem == 'char *':   return 'str'
         return 'int'
@@ -996,12 +996,12 @@ class DispatchSolver:
 
         # Map common Python types to C
         type_map = {
-            'int': 'int32_t',
+            'int': 'int',
             'Int': 'int64_t',
             'float': 'double',
             'Float': 'double',
             'Float64': 'double',
-            'bool': 'int32_t',
+            'bool': 'int',
             'Bool': '_Bool',
             'str': 'char *',
             'String': 'char *',
@@ -1342,7 +1342,7 @@ class TypePromotionSolver:
         # Promote to common forms
         if int_types:
             # Promote all ints to int64_t for closure consistency
-            promoted_int = 'int64_t' if any('64' in t for t in int_types) else 'int32_t'
+            promoted_int = 'int64_t' if any('64' in t for t in int_types) else 'int'
             for var_name in list(self.promoted_types.keys()):
                 if 'int' in self.promoted_types[var_name].lower():
                     self.promoted_types[var_name] = promoted_int
@@ -1390,7 +1390,7 @@ _TYPE_MAP: dict[str | None, str] = {
     # Python-style `bool` flags cross the C ABI as `int` (e.g. compile_to_gimple's
     # do_imports — runtime header declares `int do_imports`). A flag is never a
     # boxed handle, so it must not hit the int64_t boxed-object default.
-    'bool':   'int32_t',
+    'bool':   'int',
     'String': 'char *',
     'str':    'char *',
     'List':   'MojoList *',
@@ -1404,13 +1404,13 @@ _TYPE_MAP: dict[str | None, str] = {
     # A boxed object reference (AST node child, dynamic value) is a 64-bit tagged
     # handle in this runtime, accessed via mojo_obj_getattr — never a 32-bit int.
     'object': 'int64_t',
-    None:     'int64_t',   # consistent with _mojo_type(None); was 'int32_t' (#7)
+    None:     'int64_t',   # consistent with _mojo_type(None); was 'int' (#7)
 }
 
 # Return types of well-known runtime functions (seeds func_return_types)
 _RUNTIME_FUNCS: dict[str, str] = {
     # exceptions
-    'mojo_try_push':              'int32_t',
+    'mojo_try_push':              'int',
     'mojo_exc_pop':               'void',
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',
@@ -1421,9 +1421,9 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_list_get_int':          'int64_t',
     'mojo_list_get_double':       'double',
     'mojo_list_get_str':          'char *',
-    'mojo_list_contains_int':     'int32_t',
-    'mojo_list_contains_double':  'int32_t',
-    'mojo_list_contains_str':     'int32_t',
+    'mojo_list_contains_int':     'int',
+    'mojo_list_contains_double':  'int',
+    'mojo_list_contains_str':     'int',
     'mojo_list_set_int':          'void',
     'mojo_list_set_double':       'void',
     'mojo_list_set_str':          'void',
@@ -1434,10 +1434,10 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_get_int':          'int64_t',
     'mojo_dict_get_double':       'double',
     'mojo_dict_get_str':          'char *',
-    'mojo_dict_contains':         'int32_t',
+    'mojo_dict_contains':         'int',
     'mojo_dict_len':              'int64_t',
     'mojo_dict_iter_new':         'MojoDictIter *',
-    'mojo_dict_iter_next':        'int32_t',
+    'mojo_dict_iter_next':        'int',
     'mojo_dict_iter_key':         'char *',
     'mojo_dict_iter_val_int':     'int64_t',
     'mojo_dict_iter_val_double':  'double',
@@ -1445,11 +1445,11 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_iter_free':        'void',
     # set
     'mojo_set_new':               'MojoSet *',
-    'mojo_set_contains_int':      'int32_t',
-    'mojo_set_contains_str':      'int32_t',
+    'mojo_set_contains_int':      'int',
+    'mojo_set_contains_str':      'int',
     'mojo_set_len':               'int64_t',
     'mojo_set_iter_new':          'MojoSetIter *',
-    'mojo_set_iter_next':         'int32_t',
+    'mojo_set_iter_next':         'int',
     'mojo_set_iter_val_int':      'int64_t',
     'mojo_set_iter_val_str':      'char *',
     'mojo_set_iter_free':         'void',
@@ -1459,8 +1459,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_len':               'int64_t',
     'mojo_str_data':              'char *',
     'mojo_str_char_at':           'char',
-    'mojo_str_eq':                'int32_t',
-    'mojo_str_contains':          'int32_t',
+    'mojo_str_eq':                'int',
+    'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_str_from_char':         'MojoStr *',
     'mojo_str_repeat':            'MojoStr *',
@@ -2089,7 +2089,7 @@ class GimpleGen:
             head, _, rest = sig.partition('(')
             params = rest.rstrip(') ').strip()
             toks = head.strip().rsplit(None, 1)        # split off the function name
-            ret = toks[0] if len(toks) == 2 else 'int32_t'
+            ret = toks[0] if len(toks) == 2 else 'int'
             if not params or params == 'void':
                 ptypes = []
             else:
@@ -2272,7 +2272,7 @@ class GimpleGen:
     # Used by _emit_call to ensure GIMPLE-valid argument types.
     _KNOWN_SIGS: dict = {
         'mojo_str':              ('char *',    ['void *']),
-        'mojo_repr':             ('char *',    ['int32_t']),  # expects int, not void*
+        'mojo_repr':             ('char *',    ['int']),  # expects int, not void*
         'mojo_print':            ('void',      ['char *']),
         'mojo_open_file':        ('int64_t',   ['char *']),  # Added: returns handle, takes path
         'mojo_close':            ('void',      ['void *']),
@@ -2282,7 +2282,7 @@ class GimpleGen:
         'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
-        'mojo_make_bool':        ('int32_t',        ['int32_t']),   # runtime: int mojo_make_bool(int)
+        'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)
         'mojo_list_new':         ('MojoList *', []),
         'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
         'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
@@ -2295,13 +2295,13 @@ class GimpleGen:
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
-        'mojo_dict_contains':    ('int32_t',       ['MojoDict *', 'char *']),
+        'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
         'mojo_set_new':          ('MojoSet *', []),
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
-        'mojo_set_contains_str': ('int32_t',       ['MojoSet *', 'char *']),
-        'mojo_set_contains_int': ('int32_t',       ['MojoSet *', 'int64_t']),
-        'mojo_hasattr':          ('int32_t',        ['int32_t', 'char *']),
+        'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
+        'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
+        'mojo_hasattr':          ('int',        ['int', 'char *']),
         'mojo_obj_getattr':      ('int64_t',   ['void *', 'char *']),
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
@@ -2309,27 +2309,27 @@ class GimpleGen:
         'mojo_set_union':        ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_difference':   ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_discard':      ('void',      ['MojoSet *', 'int64_t']),
-        'mojo_str_startswith':   ('int32_t',       ['char *', 'char *']),
-        'mojo_str_endswith':     ('int32_t',       ['char *', 'char *']),
-        'mojo_str_startswith_char': ('int32_t',    ['char *', 'char']),
-        'mojo_str_endswith_char':   ('int32_t',    ['char *', 'char']),
-        'strcmp':                ('int32_t',       ['char *', 'char *']),
-        'snprintf':              ('int32_t',       ['char *', 'int64_t', 'char *']),
+        'mojo_str_startswith':   ('int',       ['char *', 'char *']),
+        'mojo_str_endswith':     ('int',       ['char *', 'char *']),
+        'mojo_str_startswith_char': ('int',    ['char *', 'char']),
+        'mojo_str_endswith_char':   ('int',    ['char *', 'char']),
+        'strcmp':                ('int',       ['char *', 'char *']),
+        'snprintf':              ('int',       ['char *', 'int64_t', 'char *']),
         'strlen':                ('int64_t',   ['char *']),
         'strcat':                ('char *',    ['char *', 'char *']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str_format':       ('char *',    ['char *']),
-        'int_load_module':       ('int32_t',       ['ModuleLoader *', 'char *']),
+        'int_load_module':       ('int',       ['ModuleLoader *', 'char *']),
         'int_get_symbol_type':   ('char *',    ['ModuleLoader *', 'char *', 'char *']),
-        'int_import_module':     ('int32_t',       ['int32_t', 'char *']),
-        'int_group':             ('char *',    ['char *', 'int32_t']),
+        'int_import_module':     ('int',       ['int', 'char *']),
+        'int_group':             ('char *',    ['char *', 'int']),
         '_scan_for_escaping':    ('void',      ['MojoList *', 'MojoSet *', 'MojoSet *']),
-        'int_analyze':           ('int32_t',       ['int32_t', 'int32_t', 'MojoDict *']),
+        'int_analyze':           ('int',       ['int', 'int', 'MojoDict *']),
         'int_abspath':           ('int64_t',   ['int64_t', 'int64_t']),
         'int_dirname':           ('int64_t',   ['int64_t', 'int64_t']),
         'int_join':              ('int64_t',   ['int64_t', 'int64_t', 'int64_t']),
         'int_join_list':         ('int64_t',   ['int64_t', 'int64_t']),
-        'int_exists':            ('int32_t',       ['int64_t', 'int64_t']),
+        'int_exists':            ('int',       ['int64_t', 'int64_t']),
         'mojo_set_intersection': ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_update':       ('void',      ['MojoSet *', 'MojoSet *']),
         'mojo_dict_copy':        ('MojoDict *', ['MojoDict *']),
@@ -2343,8 +2343,8 @@ class GimpleGen:
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_enumerate':        ('MojoList *', ['void *']),
         'mojo_zip':              ('void *',     ['void *', 'void *']),
-        'mojo_list_all':         ('int32_t',        ['MojoList *']),
-        'mojo_list_any':         ('int32_t',        ['MojoList *']),
+        'mojo_list_all':         ('int',        ['MojoList *']),
+        'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),
         'mojo_list_pop':         ('int64_t',    ['MojoList *']),
@@ -2355,16 +2355,16 @@ class GimpleGen:
         'mojo_list_remove_int':  ('void',       ['MojoList *', 'int64_t']),
         'mojo_list_index_str':   ('int64_t',    ['MojoList *', 'char *']),
         'mojo_list_index_int':   ('int64_t',    ['MojoList *', 'int64_t']),
-        'MojoList_index':        ('int64_t',    ['MojoList *', 'int32_t']),
+        'MojoList_index':        ('int64_t',    ['MojoList *', 'int']),
         # Scope methods — name is always char*, value is boxed int
-        'Scope_define':          ('void',       ['Scope *', 'char *', 'int32_t']),
-        'Scope_get':             ('int32_t',        ['Scope *', 'char *']),
-        'Scope_set':             ('void',       ['Scope *', 'char *', 'int32_t']),
+        'Scope_define':          ('void',       ['Scope *', 'char *', 'int']),
+        'Scope_get':             ('int',        ['Scope *', 'char *']),
+        'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
         'tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
-        'mojo_eval':             ('int32_t',         ['int32_t', 'MojoDict *', 'MojoDict *']),
-        'interpret_and_execute': ('void',        ['char *', 'int32_t']),
+        'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
+        'interpret_and_execute': ('void',        ['char *', 'int']),
     }
 
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
@@ -2428,7 +2428,7 @@ class GimpleGen:
                 self._emit(f'  {ip3} = (int64_t){aval};')
                 self._emit(f'  {pp} = ({ptype}){ip3};')
                 coerced_args.append(pp)
-            elif ptype == 'void *' and actual_atype in ('int32_t', 'int64_t', '_Bool'):
+            elif ptype == 'void *' and actual_atype in ('int', 'int64_t', '_Bool'):
                 ip = self._new_temp('int64_t')
                 vp = self._new_temp('void *')
                 self._emit(f'  {ip} = (int64_t){aval};')
@@ -2438,7 +2438,7 @@ class GimpleGen:
                 vp = self._new_temp('void *')
                 self._emit(f'  {vp} = (void *){aval};')
                 coerced_args.append(vp)
-            elif ptype == 'int64_t' and (actual_atype in ('int32_t', '_Bool', 'char *', 'void *') or actual_atype.endswith(' *')):
+            elif ptype == 'int64_t' and (actual_atype in ('int', '_Bool', 'char *', 'void *') or actual_atype.endswith(' *')):
                 ct = self._new_temp('int64_t')
                 if atype == 'char *':
                     aval_local = self._ensure_local('char *', aval)
@@ -2457,10 +2457,10 @@ class GimpleGen:
                 else:
                     self._emit(f'  {ct} = (int64_t){aval};')
                 coerced_args.append(ct)
-            elif ptype == 'char *' and atype in ('int32_t', 'int64_t', 'char'):
+            elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
                 vp = self._new_temp('void *')
                 cp = self._new_temp('char *')
-                if atype in ('int32_t', 'char'):
+                if atype in ('int', 'char'):
                     ip = self._new_temp('int64_t')
                     self._emit(f'  {ip} = (int64_t){aval};')
                     self._emit(f'  {vp} = (void *){ip};')
@@ -2468,7 +2468,7 @@ class GimpleGen:
                     self._emit(f'  {vp} = (void *){aval};')
                 self._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
-            elif ptype.endswith(' *') and (actual_atype in ('int32_t', 'int64_t') or atype == 'int64_t'):
+            elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
                 # If parameter expects pointer and we have int/int64_t, cast through void*
                 # This handles cases where int64_t is an opaque pointer (e.g., from globals)
                 ip3 = self._new_temp('int64_t')
@@ -2476,18 +2476,18 @@ class GimpleGen:
                 self._emit(f'  {ip3} = (int64_t){aval};')
                 self._emit(f'  {pp} = ({ptype}){ip3};')
                 coerced_args.append(pp)
-            elif ptype == 'int32_t' and atype in ('int64_t', '_Bool'):
-                ct = self._new_temp('int32_t')
+            elif ptype == 'int' and atype in ('int64_t', '_Bool'):
+                ct = self._new_temp('int')
                 self._emit(f'  {ct} = (int){aval};')
                 coerced_args.append(ct)
-            elif ptype == 'int32_t' and atype.endswith(' *'):
+            elif ptype == 'int' and atype.endswith(' *'):
                 # char*/pointer passed where int expected — convert via int64_t
                 ip = self._new_temp('int64_t')
-                it = self._new_temp('int32_t')
+                it = self._new_temp('int')
                 self._emit(f'  {ip} = (int64_t){aval};')
                 self._emit(f'  {it} = (int){ip};')
                 coerced_args.append(it)
-            elif ptype.endswith(' *') and atype == 'int32_t':
+            elif ptype.endswith(' *') and atype == 'int':
                 # int passed where pointer expected — convert via int64_t
                 ip = self._new_temp('int64_t')
                 pp = self._new_temp(ptype)
@@ -2511,7 +2511,7 @@ class GimpleGen:
                 self._emit(f'  {ip} = (int64_t){aval};')
                 self._emit(f'  {pp} = ({ptype}){ip};')
                 coerced_args.append(pp)
-            elif ptype == 'ModuleLoader *' and atype in ('int32_t', 'int64_t'):
+            elif ptype == 'ModuleLoader *' and atype in ('int', 'int64_t'):
                 # Handle ModuleLoader* type coercions
                 ip = self._new_temp('int64_t')
                 pp = self._new_temp('ModuleLoader *')
@@ -2560,7 +2560,7 @@ class GimpleGen:
                     self._emit(f'  {dest} = (int64_t){v};')
                 else:
                     self._emit(f'  {dest} = {v};')
-            elif s.endswith(' *') and d in ('int32_t', 'int64_t'):
+            elif s.endswith(' *') and d in ('int', 'int64_t'):
                 # Load global into local before casting (GIMPLE restriction)
                 v = self._ensure_local(s, v)
                 # GIMPLE: non-void pointer → int64_t requires void * intermediate
@@ -2574,7 +2574,7 @@ class GimpleGen:
                     self._emit(f'  {dest} = {ip};')
                 else:
                     self._emit(f'  {dest} = (int){ip};')
-            elif d.endswith(' *') and s in ('int32_t', 'int64_t'):
+            elif d.endswith(' *') and s in ('int', 'int64_t'):
                 v = self._ensure_local(s, v)
                 ip = self._new_temp('int64_t')
                 self._emit(f'  {ip} = (int64_t){v};')
@@ -2612,9 +2612,9 @@ class GimpleGen:
         BUILTIN_PARAM_TYPES = {
             'open': 'char *',
             'mojo_open_file': 'char *',
-            'len': 'int32_t',
+            'len': 'int',
             'print': 'char *',
-            'str': 'int32_t',
+            'str': 'int',
         }
 
         def analyze_param_usage(nodes: list, param_name: str):
@@ -2820,10 +2820,10 @@ class GimpleGen:
                 meth: str
                 meth = node.func.member
                 if mod == 're' and meth == 'sub':    return 'char *'
-                if mod == 're' and meth == 'match':  return 'int32_t'
-                if mod == 're' and meth == 'search': return 'int32_t'
+                if mod == 're' and meth == 'match':  return 'int'
+                if mod == 're' and meth == 'search': return 'int'
                 if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
-                if mod == 'sys': return 'int32_t'
+                if mod == 'sys': return 'int'
                 # Try as struct instance method call: resolve receiver type then look up mangled name
                 ot = self.var_types.get(mod, '')
                 if ot and ot.endswith(' *'):
@@ -3092,14 +3092,14 @@ class GimpleGen:
         if handler_name:
             return getattr(self, handler_name)(node)
         self._emit(f"  /* TODO: unknown expr {type(node).__name__} */")
-        t = self._new_temp('int32_t')
+        t = self._new_temp('int')
         self._emit(f"  {t} = 0;")
-        return 'int32_t', t
+        return 'int', t
 
     # ── Expression handlers (one per AST node type) ───────────────────────
 
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
-        return 'int32_t', str(node.value)
+        return 'int', str(node.value)
 
     def _lower_FloatLiteral(self, node) -> tuple[str, str]:
         s = repr(node.value)
@@ -3108,12 +3108,12 @@ class GimpleGen:
         return 'double', s
 
     def _lower_BoolLiteral(self, node) -> tuple[str, str]:
-        return 'int32_t', ('1' if node.value else '0')
+        return 'int', ('1' if node.value else '0')
 
     def _lower_EllipsisLiteral(self, node) -> tuple[str, str]:
-        t = self._new_temp('int32_t')
+        t = self._new_temp('int')
         self._emit(f"  {t} = 0;  /* ... */")
-        return 'int32_t', t
+        return 'int', t
 
     def _parse_fstring_parts(self, inner):
         """Parse f-string body into [('lit',text) | ('expr',code)] parts."""
@@ -3263,9 +3263,9 @@ class GimpleGen:
 
     def _lower_IdentExpr(self, node) -> tuple[str, str]:
         name = node.name
-        if name == 'None':  return 'int32_t', '0'
-        if name == 'True':  return 'int32_t', '1'
-        if name == 'False': return 'int32_t', '0'
+        if name == 'None':  return 'int', '0'
+        if name == 'True':  return 'int', '1'
+        if name == 'False': return 'int', '0'
         if name == '__file__':
             escaped = '<bootstrap>'
             if escaped not in self._str_pool:
@@ -3287,9 +3287,9 @@ class GimpleGen:
             return ctype, t
         # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
         if name in self.struct_field_types and name not in self.var_types:
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f'  {t} = 0;  /* class ref {name} as value */')
-            return 'int32_t', t
+            return 'int', t
         # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
         if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
             c_name = self.BUILTIN_VALUE_MAP[name]
@@ -3374,7 +3374,7 @@ class GimpleGen:
             elif ot == '_Bool':
                 # GIMPLE: both operands of comparison must have same type
                 # Cast _Bool to int before comparing with integer 0
-                int_t = self._new_temp('int32_t')
+                int_t = self._new_temp('int')
                 self._emit(f"  {int_t} = (int){ov};")
                 self._emit(f"  {t} = {int_t} == 0;")
             else:
@@ -3385,12 +3385,12 @@ class GimpleGen:
             return ot, ov
         # Spread/unpack operators (* and **) — just pass the value through;
         # the list/call context handles iteration
-        if node.op in ('*', '**') and ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'int32_t'):
+        if node.op in ('*', '**') and ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'int'):
             return ot, ov
         # Pointer dereference * on a known pointer type
         if node.op == '*':
             if ot.endswith(' *'):
-                elem_type = ot[:-2].strip() or 'int32_t'
+                elem_type = ot[:-2].strip() or 'int'
                 t = self._new_temp(elem_type)
                 self._emit(f"  {t} = *{ov};")
                 return elem_type, t
@@ -3463,9 +3463,9 @@ class GimpleGen:
                     return 'int64_t', t
                 # Predicate / unmodeled attrs only matter as op subscript params,
                 # which are read directly at the op call site; yield a placeholder.
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 self._emit(f"  {t} = 0;  /* __mlir_attr {mlir.unwrap(node.member)} */")
-                return 'int32_t', t
+                return 'int', t
 
             # Module attribute access: sys.argv, tokenizer.X, etc.
             if module_name == 'sys' and node.member == 'argv':
@@ -3480,24 +3480,24 @@ class GimpleGen:
             if module_name == 'os' and node.member == 'path':
                 # os.path is a marker - return a special value indicating path module
                 # The actual function call will be handled at the call site
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 self._emit(f"  {t} = 0;  /* os.path module marker */")
-                return 'int32_t', t
+                return 'int', t
 
             # Class attribute access: ClassName.ATTR
             # Check if module_name is a known struct/class (not an instance variable)
             if module_name in self.struct_field_types and module_name not in self.var_types:
                 # This is a class-level access like TypeLattice._FLOAT
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} */")
-                return 'int32_t', t
+                return 'int', t
 
         ot, ov = self.lower_expr(node.obj)
 
         # If the object lowered to a C type name (class used as cls argument),
         # treat it as NULL — the method shouldn't use cls for value access
-        if ov in self.struct_field_types and ot == 'int32_t':
-            null_tmp = self._new_temp('int32_t')
+        if ov in self.struct_field_types and ot == 'int':
+            null_tmp = self._new_temp('int')
             self._emit(f"  {null_tmp} = 0;  /* class ref {ov} as NULL */")
             ov = null_tmp
 
@@ -3514,10 +3514,10 @@ class GimpleGen:
                 return 'char *', t
 
         # Special handling for .__dict__ on int objects (node variable)
-        if node.member == '__dict__' and ot == 'int32_t':
-            t = self._new_temp('int32_t')
+        if node.member == '__dict__' and ot == 'int':
+            t = self._new_temp('int')
             self._emit(f'  {t} = 0;  /* __dict__ stub */')
-            return 'int32_t', t
+            return 'int', t
 
         op = '->' if '*' in ot else '.'
         struct_name = ot.replace(' *', '').strip()
@@ -3555,7 +3555,7 @@ class GimpleGen:
                 t = self._new_temp(field_type)
                 self._emit(f'  {t} = {ov}{op}{node.member};')
             return field_type, t
-        elif ot in ('int32_t', 'int64_t'):
+        elif ot in ('int', 'int64_t'):
             # Opaque Python object typed as int — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
             t = self._new_temp('int64_t')
@@ -3587,7 +3587,7 @@ class GimpleGen:
                 dst = self.var_types[nm]
                 self._safe_coerce_emit(vtype, dst, vv, nm)
                 # Update actual type tracking for string types
-                if dst == 'int32_t' and vtype == 'char *':
+                if dst == 'int' and vtype == 'char *':
                     self._actual_types[nm] = 'char *'
                 return dst, nm
             if isinstance(node.left, MemberExpr):
@@ -3714,7 +3714,7 @@ class GimpleGen:
             return 'MojoList *', t
 
         # MojoList * + int/int64_t → identity (DynamicVector not supported; treat as no-op)
-        if node.op == '+' and lt == 'MojoList *' and rt in ('int32_t', 'int64_t'):
+        if node.op == '+' and lt == 'MojoList *' and rt in ('int', 'int64_t'):
             return 'MojoList *', lv
 
         # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
@@ -3755,7 +3755,7 @@ class GimpleGen:
                 self._emit(f"  {cp} = (char *){ip};")
                 return 'char *', cp
             # If one operand is definitely a string literal, treat int as potential string
-            if is_string_literal and typ in ('int32_t', 'int64_t') and val.startswith('_slit_'):
+            if is_string_literal and typ in ('int', 'int64_t') and val.startswith('_slit_'):
                 cp = self._new_temp('char *')
                 ip = self._new_temp('int64_t')
                 self._emit(f"  {ip} = (int64_t){val};")
@@ -3774,7 +3774,7 @@ class GimpleGen:
                 return 'char *', t
             # int/int64_t + char* or char* + int/int64_t when one side is a string literal
             # → this is Python string concatenation where one operand is a string stored as int
-            if right_is_lit and rt == 'char *' and lt in ('int32_t', 'int64_t'):
+            if right_is_lit and rt == 'char *' and lt in ('int', 'int64_t'):
                 ip = self._new_temp('int64_t')
                 cp = self._new_temp('char *')
                 self._emit(f'  {ip} = (int64_t){lv};')
@@ -3782,7 +3782,7 @@ class GimpleGen:
                 t = self._new_temp('char *')
                 self._emit_call('char *', t, 'mojo_str_cat', [('char *', cp), ('char *', rv)])
                 return 'char *', t
-            if left_is_lit and lt == 'char *' and rt in ('int32_t', 'int64_t'):
+            if left_is_lit and lt == 'char *' and rt in ('int', 'int64_t'):
                 ip = self._new_temp('int64_t')
                 cp = self._new_temp('char *')
                 self._emit(f'  {ip} = (int64_t){rv};')
@@ -3792,21 +3792,21 @@ class GimpleGen:
                 return 'char *', t
 
         # char * * int → string repetition (e.g., "  " * 3)
-        if node.op == '*' and lt == 'char *' and rt in ('int32_t', 'int64_t', 'uint64_t'):
+        if node.op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
             t = self._new_temp('char *')
             lv_local = self._ensure_local(lt, lv)
             self._emit(f"  {t} = mojo_cstr_repeat ({lv_local}, {rv});")
             return 'char *', t
 
         # int * char * → string repetition (flipped order)
-        if node.op == '*' and lt in ('int32_t', 'int64_t', 'uint64_t') and rt == 'char *':
+        if node.op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char *':
             t = self._new_temp('char *')
             rv_local = self._ensure_local(rt, rv)
             self._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv});")
             return 'char *', t
 
         # MojoList * * int → list repetition (e.g., [0] * n)
-        if node.op == '*' and lt == 'MojoList *' and rt in ('int32_t', 'int64_t', 'uint64_t'):
+        if node.op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
             cnt = self._new_temp('int64_t')
             self._emit(f"  {cnt} = (int64_t){rv};")
             t = self._new_temp('MojoList *')
@@ -3815,7 +3815,7 @@ class GimpleGen:
 
         # MojoStr == / != → mojo_str_eq
         if node.op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
-            eq_t = self._new_temp('int32_t')
+            eq_t = self._new_temp('int')
             self._emit(f"  {eq_t} = mojo_str_eq ({lv}, {rv});")
             t = self._new_temp('_Bool')
             cmp = '!= 0' if node.op == '==' else '== 0'
@@ -3839,8 +3839,8 @@ class GimpleGen:
                     return cp
                 ls = _to_char_star(lt, lv)
                 rs = _to_char_star(rt, rv)
-                eq_t = self._new_temp('int32_t')
-                self._emit_call('int32_t', eq_t, 'strcmp', [('char *', ls), ('char *', rs)])
+                eq_t = self._new_temp('int')
+                self._emit_call('int', eq_t, 'strcmp', [('char *', ls), ('char *', rs)])
                 t = self._new_temp('_Bool')
                 cmp = '== 0' if node.op == '==' else '!= 0'
                 self._emit(f'  {t} = {eq_t} {cmp};')
@@ -3936,9 +3936,9 @@ class GimpleGen:
             t2 = self._new_temp(td)
             self._emit(f"  {t2} = __builtin_floor ({t1});")
             return td, t2
-        t = self._new_temp('int32_t')
+        t = self._new_temp('int')
         self._emit(f"  {t} = __mojo_floordiv ({lv}, {rv});")
-        return 'int32_t', t
+        return 'int', t
 
     def _lower_pow(self, node: BinaryOp) -> tuple[str, str]:
         lt, lv = self.lower_expr(node.left)
@@ -3954,9 +3954,9 @@ class GimpleGen:
         self._emit(f"  {t2} = (double) {rv};")
         t3 = self._new_temp('double')
         self._emit(f"  {t3} = pow ({t1}, {t2});")
-        t4 = self._new_temp('int32_t')
+        t4 = self._new_temp('int')
         self._emit(f"  {t4} = (int) {t3};")
-        return 'int32_t', t4
+        return 'int', t4
 
     def _lower_matmul(self, node: BinaryOp) -> tuple[str, str]:
         """Lower matrix multiply: a @ b → a.__matmul__(b)
@@ -4003,7 +4003,7 @@ class GimpleGen:
             t3 = self._new_temp('_Bool')
             self._emit(f"  {t3} = 0;")
         if negate:
-            ti = self._new_temp('int32_t')
+            ti = self._new_temp('int')
             tn = self._new_temp('_Bool')
             self._emit(f"  {ti} = (int) {t3};")
             self._emit(f"  {tn} = {ti} == 0;")
@@ -4018,7 +4018,7 @@ class GimpleGen:
             return self._lower_in_range(xv, node.right.args, negate=negate)
 
         rt, rv = self.lower_expr(node.right)
-        ti = self._new_temp('int32_t')
+        ti = self._new_temp('int')
 
         if rt == 'MojoList *':
             # Determine list element type: prefer actual list elem type over left operand
@@ -4036,17 +4036,17 @@ class GimpleGen:
                 self._emit(f"  {xv_cast} = (char *){xv};")
                 xv = xv_cast
                 xt = 'char *'
-            self._emit_call('int32_t', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
+            self._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
         elif rt == 'MojoSet *':
             # Route through _emit_call so global/_slit_ args are loaded into locals
             # first (GIMPLE: a call argument must be a local, not a global decl).
             if xt == 'char *':
-                self._emit_call('int32_t', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
+                self._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
             else:
                 xv64 = self._to_int64(xt, xv)
-                self._emit_call('int32_t', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
+                self._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
         elif rt == 'MojoStr *':
-            self._emit_call('int32_t', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
+            self._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
         else:
             self._emit(f"  /* TODO: 'in' for {rt} */")
             self._emit(f"  {ti} = 0;")
@@ -4055,7 +4055,7 @@ class GimpleGen:
         self._emit(f"  {t} = {ti} != 0;")
 
         if negate:
-            ti2 = self._new_temp('int32_t')
+            ti2 = self._new_temp('int')
             tn  = self._new_temp('_Bool')
             self._emit(f"  {ti2} = (int) {t};")
             self._emit(f"  {tn} = {ti2} == 0;")
@@ -4073,7 +4073,7 @@ class GimpleGen:
             self._emit(f"  {t} = (double){val};")
             return t
         # str: cast int-cast strings to char*
-        if suf == 'str' and elem_type in ('int32_t', 'int64_t', 'char'):
+        if suf == 'str' and elem_type in ('int', 'int64_t', 'char'):
             cp = self._new_temp('char *')
             ip = self._new_temp('int64_t')
             self._emit(f"  {ip} = (int64_t){val};")
@@ -4135,7 +4135,7 @@ class GimpleGen:
         # (For a real `Int *` receiver, the walked-in Int method handles it.)
         if func.member in ('_int_mlir_index', '__mlir_index__') and not node.args:
             rt, rv = self.lower_expr(func.obj)
-            if rt in ('int32_t', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+            if rt in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                       'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
                 return rt, rv
 
@@ -4187,9 +4187,9 @@ class GimpleGen:
                     return 'int64_t', t
                 elif outer_member == 'exists' and len(node.args) == 1:
                     arg_type, arg_val = self.lower_expr(node.args[0])
-                    t = self._new_temp('int32_t')
-                    self._emit_call('int32_t', t, 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
-                    return 'int32_t', t
+                    t = self._new_temp('int')
+                    self._emit_call('int', t, 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
+                    return 'int', t
 
         # Handle module method calls: module_name.function(args)
         if isinstance(func.obj, IdentExpr):
@@ -4288,7 +4288,7 @@ class GimpleGen:
             ov = np_cast
 
         # For member expressions like self.parent, try to resolve the actual struct type
-        if ot in ('int32_t', 'int64_t') and isinstance(func.obj, MemberExpr):
+        if ot in ('int', 'int64_t') and isinstance(func.obj, MemberExpr):
             resolved_type = self._resolve_member_expr_type(func.obj)
             if resolved_type:
                 ot = resolved_type
@@ -4310,7 +4310,7 @@ class GimpleGen:
         # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
         # Must intercept BEFORE the opaque-int coerce below, which would misidentify
         # 'join' as a string method and corrupt the class ref.
-        if ot == 'int32_t' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
+        if ot == 'int' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
             struct_name = func.obj.name
             mangled = _safe_name(f"{struct_name}_{method}")
             ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
@@ -4318,14 +4318,14 @@ class GimpleGen:
             arg_pairs = [(ot, ov)] + [self.lower_expr(a) for a in node.args]
             if ret_type == 'void':
                 self._emit_call('void', '', mangled, arg_pairs)
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             t = self._new_temp(ret_type)
             self._emit_call(ret_type, t, mangled, arg_pairs)
             return ret_type, t
 
         # ── Opaque int → coerce to appropriate container type FIRST ──────────
         # Must happen before container-type checks so the casted type is seen below.
-        if ot in ('int32_t', 'int64_t') and method in (
+        if ot in ('int', 'int64_t') and method in (
             'keys', 'values', 'items', 'get', 'update', 'pop', 'copy',
             'append', 'extend', 'sort', 'reverse', 'clear',
             'add', 'discard', 'remove',
@@ -4403,7 +4403,7 @@ class GimpleGen:
                 ov_cast = self._coerce_to_type(ot, 'MojoDict *', ov)
                 other_val_cast = self._coerce_to_type(other_type, 'MojoDict *', other_val)
                 self._emit(f"  mojo_dict_update ({ov_cast}, {other_val_cast});")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop' and node.args:
                 key_type, key_val = self.lower_expr(node.args[0])
                 # Ensure key is char * for dict operations (all dict keys are strings in runtime)
@@ -4422,7 +4422,7 @@ class GimpleGen:
             if method == 'clear':
                 # Clear dict in-place by freeing and reinitializing
                 self._emit(f"  mojo_dict_free ({ov});")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'setdefault' and node.args:
                 # dict.setdefault(key, default) — use existing get/set
                 key_type, key_val = self.lower_expr(node.args[0])
@@ -4451,7 +4451,7 @@ class GimpleGen:
                         # lists silently read as int -> garbage.
                         if actual_elem == 'MojoList *' and av in self._elem_types:
                             self._nested_elem_types[ov] = self._elem_types[av]
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'extend' and node.args:
                 at, av = self.lower_expr(node.args[0])
                 self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
@@ -4461,14 +4461,14 @@ class GimpleGen:
                     # If the nested list contains lists, propagate that information
                     if av in self._nested_elem_types:
                         self._nested_elem_types[ov] = self._nested_elem_types[av]
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'pop':
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = mojo_list_pop ({ov});")
                 return 'int64_t', t
             if method in ('sort', 'reverse', 'clear'):
                 self._emit(f"  mojo_list_{method} ({ov});")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'copy':
                 t = self._new_temp('MojoList *')
                 self._emit(f"  {t} = mojo_list_copy ({ov});")
@@ -4479,7 +4479,7 @@ class GimpleGen:
                     self._emit_call('void', '', 'mojo_list_remove_str', [('MojoList *', ov), ('char *', av)])
                 else:
                     self._emit_call('void', '', 'mojo_list_remove_int', [('MojoList *', ov), (at, av)])
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
             if method == 'index' and node.args:
                 at, av = self.lower_expr(node.args[0])
@@ -4502,18 +4502,18 @@ class GimpleGen:
                     other_type = 'MojoSet *'
                 self._emit_call('void', '', 'mojo_set_update',
                                 [('MojoSet *', ov), ('MojoSet *', other_val)])
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'add' and node.args:
                 at, av = self.lower_expr(node.args[0])
                 if at == 'char *':
                     self._emit_call('void', '', 'mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
                 else:
                     self._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av)])
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'discard' and node.args:
                 at, av = self.lower_expr(node.args[0])
                 self._emit_call('void', '', 'mojo_set_discard', [('MojoSet *', ov), (at, av)])
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
 
         if ot.endswith(' *') and ot not in self._RUNTIME_PTRS:
@@ -4525,7 +4525,7 @@ class GimpleGen:
             if method == 'store' and node.args:
                 _, av = self.lower_expr(node.args[0])
                 self._emit(f"  *{ov} = {self._coerce(self._quick_type(node.args[0]), elem, av)};")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method == 'offset' and node.args:
                 _, nv = self.lower_expr(node.args[0])
                 elem = _elem_type(ot)
@@ -4538,7 +4538,7 @@ class GimpleGen:
                 return ot, t
             if method == 'free':
                 self._emit(f"  free ({ov});")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method in ('bitcast', 'address_of'):
                 t = self._new_temp(ot)
                 self._emit(f"  {t} = {ov};  /* TODO: {method} */")
@@ -4547,11 +4547,11 @@ class GimpleGen:
                 if node.args and method == 'initialize_pointee':
                     _, av = self.lower_expr(node.args[0])
                     self._emit(f"  *{ov} = {av};")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
             if method in ('strided_load', 'gather'):
                 t = self._new_temp(elem); self._emit(f"  {t} = *{ov};  /* TODO: {method} */"); return elem, t
             if method in ('strided_store', 'scatter'):
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;  /* TODO: {method} */"); return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* TODO: {method} */"); return 'int', t
 
         # File handle operations (void * from mojo_open)
         if ot == 'void *':
@@ -4564,9 +4564,9 @@ class GimpleGen:
                     return 'int64_t', t
             if method == 'close':
                 self._emit(f"  mojo_close ({ov});")
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 self._emit(f"  {t} = 0;")
-                return 'int32_t', t
+                return 'int', t
 
         # char* string method calls — dispatch to C string utility functions
         if ot == 'char *':
@@ -4626,23 +4626,23 @@ class GimpleGen:
                 self._emit(f"  {t} = {cstr_ov};  /* join: no iterable */")
                 return 'char *', t
             if method == 'startswith' and arg_vals:
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
                 arg0_val  = arg_vals[0]
                 if arg0_type == 'char':
-                    self._emit_call('int32_t', t, 'mojo_str_startswith_char', [('char *', cstr_ov), ('char', arg0_val)])
+                    self._emit_call('int', t, 'mojo_str_startswith_char', [('char *', cstr_ov), ('char', arg0_val)])
                 else:
-                    self._emit_call('int32_t', t, 'mojo_str_startswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
-                return 'int32_t', t
+                    self._emit_call('int', t, 'mojo_str_startswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
+                return 'int', t
             if method == 'endswith' and arg_vals:
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
                 arg0_val  = arg_vals[0]
                 if arg0_type == 'char':
-                    self._emit_call('int32_t', t, 'mojo_str_endswith_char', [('char *', cstr_ov), ('char', arg0_val)])
+                    self._emit_call('int', t, 'mojo_str_endswith_char', [('char *', cstr_ov), ('char', arg0_val)])
                 else:
-                    self._emit_call('int32_t', t, 'mojo_str_endswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
-                return 'int32_t', t
+                    self._emit_call('int', t, 'mojo_str_endswith', [('char *', cstr_ov), (arg0_type, arg0_val)])
+                return 'int', t
             if method == 'find' and arg_vals:
                 t = self._new_temp('int64_t')
                 self._emit_call('int64_t', t, 'mojo_str_find', [('char *', cstr_ov), ('char *', arg_vals[0])])
@@ -4665,12 +4665,12 @@ class GimpleGen:
                 self._emit(f"  {t} = {cstr_ov};  /* TODO: {method} */")
                 return 'char *', t
             # Unknown method on char* — return 0 (stub)
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* TODO: char*.{method} */")
-            return 'int32_t', t
+            return 'int', t
 
         # File handle operations (int64_t handles from mojo_open_file)
-        if ot in ('int32_t', 'int64_t'):
+        if ot in ('int', 'int64_t'):
             if method == 'read' and not node.args:
                 t = self._new_temp('char *')
                 self._emit(f"  {t} = int_read ({ov});")
@@ -4685,27 +4685,27 @@ class GimpleGen:
                 return 'int64_t', t
             if method == 'close':
                 self._emit(f"  mojo_close ((void *){ov});")
-                t = self._new_temp('int32_t')
+                t = self._new_temp('int')
                 self._emit(f"  {t} = 0;")
-                return 'int32_t', t
+                return 'int', t
 
         # Stub string-type methods when called on wrong receiver types
         if method == 'isdigit':
-            t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;  /* {ot}.isdigit() stubbed */"); return 'int32_t', t
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.isdigit() stubbed */"); return 'int', t
         if method == 'endswith' and ot not in ('char *', 'void *') and (not ot.endswith(' *') or ot in ('MojoSet *', 'MojoList *', 'MojoDict *')):
-            t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;  /* {ot}.endswith() stubbed */"); return 'int32_t', t
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.endswith() stubbed */"); return 'int', t
         if method in ('strip', 'lstrip', 'rstrip') and ot not in ('char *', 'void *') and not ot.startswith('Mojo'):
             # strip/lstrip/rstrip on non-string: these already have TODO stubs,
             # but catch cases where they'd generate an invalid method name
-            if ot in ('int32_t', 'int64_t', '_Bool', 'double'):
+            if ot in ('int', 'int64_t', '_Bool', 'double'):
                 _es = self._str_pool.setdefault('', f'_slit_{10000 + len(self._str_pool)}')
                 t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
-        if method == 'get' and ot in ('_Bool', 'int32_t', 'int64_t', 'double'):
+        if method == 'get' and ot in ('_Bool', 'int', 'int64_t', 'double'):
             for a in node.args: self.lower_expr(a)
             t = self._new_temp('int64_t'); self._emit(f"  {t} = (int64_t)0;  /* {ot}.get() stubbed */"); return 'int64_t', t
         if method in ('strip', 'lstrip', 'rstrip') and ot in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             for a in node.args: self.lower_expr(a)
-            t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;  /* {ot}.{method}() stubbed */"); return 'int32_t', t
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.{method}() stubbed */"); return 'int', t
         # Stub string methods called on Mojo container types (would generate invalid struct method)
         if method in ('replace', 'find', 'lower', 'upper', 'join', 'split', 'format',
                       'startswith', 'encode', 'decode') and ot in ('MojoSet *', 'MojoList *', 'MojoDict *'):
@@ -4720,7 +4720,7 @@ class GimpleGen:
             return 'MojoSet *', t
 
         # .values()/.items() called on wrong receiver: unbox int64_t to MojoDict * first
-        if method in ('values', 'items') and ot in ('MojoList *', 'int64_t', 'int32_t'):
+        if method in ('values', 'items') and ot in ('MojoList *', 'int64_t', 'int'):
             vp = self._new_temp('void *'); self._emit(f"  {vp} = (void *){ov};")
             dp = self._new_temp('MojoDict *'); self._emit(f"  {dp} = (MojoDict *){vp};")
             rt = 'MojoList *'
@@ -4731,7 +4731,7 @@ class GimpleGen:
 
         # Method calls on boxed int64_t values (dict/list elements stored as pointers-as-int64_t)
         # Unbox to the actual struct type and call the real method.
-        if ot in ('int64_t', 'int32_t') and method in ('emit_typedef', 'emit_table_init', 'emit_dispatch_call'):
+        if ot in ('int64_t', 'int') and method in ('emit_typedef', 'emit_table_init', 'emit_dispatch_call'):
             for a in node.args: self.lower_expr(a)
             vp = self._new_temp('void *'); self._emit(f"  {vp} = (void *){ov};")
             dt = self._new_temp('DispatchTable *'); self._emit(f"  {dt} = (DispatchTable *){vp};")
@@ -4741,7 +4741,7 @@ class GimpleGen:
             return ret, t
 
         # Opaque Python object (int-typed): use mojo_obj_call1 for generic method dispatch
-        if ot in ('int32_t', 'int64_t') and not (isinstance(func.obj, IdentExpr)
+        if ot in ('int', 'int64_t') and not (isinstance(func.obj, IdentExpr)
                                                and func.obj.name in self.struct_field_types):
             escaped = _c_escape(method)
             if escaped not in self._str_pool:
@@ -4777,7 +4777,7 @@ class GimpleGen:
             struct_name = ot.replace(' *', '').strip()
             # If we couldn't determine struct name but this is a known method call on a known struct,
             # try to infer from the method name (e.g. 'set' is typically called on Scope)
-            if struct_name == 'int32_t' and method in ('set', '__call__'):
+            if struct_name == 'int' and method in ('set', '__call__'):
                 # Try to infer struct from method being called
                 if isinstance(func.obj, MemberExpr) and isinstance(func.obj.obj, IdentExpr):
                     if func.obj.obj.name == 'self':
@@ -4808,7 +4808,7 @@ class GimpleGen:
         expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
         if full_param_list and len(arg_pairs) < expected_non_self:
             while len(arg_pairs) < expected_non_self:
-                arg_pairs.append(('int32_t', '0'))
+                arg_pairs.append(('int', '0'))
         # For class method calls (ClassName.method()), don't prepend the fake cls=0 arg
         if is_class_ref:
             all_args = ', '.join(av for _, av in arg_pairs)
@@ -4818,7 +4818,7 @@ class GimpleGen:
         if ret_type == 'void':
             all_arg_pairs = arg_pairs if is_class_ref else [(ot, ov)] + arg_pairs
             self._emit_call('void', '', mangled, all_arg_pairs)
-            t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
         # Return the actual type directly — no int64_t storage pattern
         # (GIMPLE can handle pointer-typed locals fine; the int64_t pattern caused
@@ -4956,9 +4956,9 @@ class GimpleGen:
             self._elaborated_externs.append(_decl)
         if info['ret'] == 'void':
             self._emit_call('', '', sym, arg_pairs)
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* void generic call */")
-            return 'int32_t', t
+            return 'int', t
         t = self._new_temp(info['ret'])
         self._emit_call(info['ret'], t, sym, arg_pairs)
         return info['ret'], t
@@ -4978,9 +4978,9 @@ class GimpleGen:
 
         cname = elems[0].value if elems and isinstance(elems[0], StringLiteral) else None
         if not cname:
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* external_call with non-literal name */")
-            return 'int32_t', t
+            return 'int', t
 
         ret_ct = 'void'
         if len(elems) >= 2:
@@ -4998,9 +4998,9 @@ class GimpleGen:
 
         if ret_ct == 'void':
             self._emit_call('', '', cname, arg_pairs)
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* void external_call result */")
-            return 'int32_t', t
+            return 'int', t
         t = self._new_temp(ret_ct)
         self._emit_call(ret_ct, t, cname, arg_pairs)
         return ret_ct, t
@@ -5197,9 +5197,9 @@ class GimpleGen:
             return self._lower_method_call(node)
         if not isinstance(node.func, IdentExpr):
             # Skip emitting comment to avoid GIMPLE global-passing issues
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;")
-            return 'int32_t', t
+            return 'int', t
 
         fname_raw = node.func.name
 
@@ -5232,24 +5232,24 @@ class GimpleGen:
         if fname_raw == '__import__':
             for a in node.args:
                 self.lower_expr(a)  # evaluate for side effects
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* __import__ stubbed */")
-            return 'int32_t', t
+            return 'int', t
 
         # all(iterable) — Python builtin
         if fname_raw in ('all', 'any') and len(node.args) == 1:
             runtime_fn = 'mojo_list_all' if fname_raw == 'all' else 'mojo_list_any'
             stub_val = '1' if fname_raw == 'all' else '0'
             at, av = self.lower_expr(node.args[0])
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             if at in ('MojoList *',) or (at.endswith(' *') and at != 'char *'):
                 lv = self._new_temp('MojoList *') if at != 'MojoList *' else av
                 if at != 'MojoList *':
                     self._emit(f"  {lv} = (MojoList *){av};")
-                self._emit_call('int32_t', t, runtime_fn, [('MojoList *', lv)])
+                self._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
             else:
                 self._emit(f"  {t} = {stub_val};  /* {fname_raw}() stubbed */")
-            return 'int32_t', t
+            return 'int', t
 
         # isinstance() built-in
         if fname_raw == 'isinstance' and len(node.args) == 2:
@@ -5257,7 +5257,7 @@ class GimpleGen:
             # Handle type argument - could be a type name or a tuple of types
             type_arg = node.args[1]
 
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             if isinstance(type_arg, IdentExpr):
                 type_name = type_arg.name
                 # isinstance(x, type) — Python runtime type check, always false in C
@@ -5270,7 +5270,7 @@ class GimpleGen:
                     if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
                         iv = self._new_temp('int64_t')
                         self._emit(f"  {iv} = (int64_t){obj_val};")
-                        iv2 = self._new_temp('int32_t')
+                        iv2 = self._new_temp('int')
                         self._emit(f"  {iv2} = (int){iv};")
                         self._emit(f"  {t} = mojo_isinstance ({iv2}, {type_id});")
                     else:
@@ -5279,7 +5279,7 @@ class GimpleGen:
                 self._emit(f"  {t} = 0;  /* TODO: isinstance with tuple of types */")
             else:
                 self._emit(f"  {t} = 0;  /* TODO: isinstance with complex type arg */")
-            return 'int32_t', t
+            return 'int', t
 
         # str() built-in
         if fname_raw == 'str' and len(node.args) == 1:
@@ -5299,9 +5299,9 @@ class GimpleGen:
         # type() built-in
         if fname_raw == 'type' and len(node.args) == 1:
             arg_type, arg_val = self.lower_expr(node.args[0])
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = mojo_type ({arg_val});")
-            return 'int32_t', t
+            return 'int', t
 
         # enumerate() built-in
         if fname_raw == 'enumerate' and len(node.args) >= 1:
@@ -5324,15 +5324,15 @@ class GimpleGen:
             attr_type, attr_val = self.lower_expr(node.args[1])
             val_type, val_val = self.lower_expr(node.args[2])
             self._emit_call('void', '', 'mojo_setattr', [(obj_type, obj_val), (attr_type, attr_val), (val_type, val_val)])
-            t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;"); return 'int32_t', t
+            t = self._new_temp('int'); self._emit(f"  {t} = 0;"); return 'int', t
 
         # hasattr() built-in
         if fname_raw == 'hasattr' and len(node.args) == 2:
             obj_type, obj_val = self.lower_expr(node.args[0])
             attr_type, attr_val = self.lower_expr(node.args[1])
-            t = self._new_temp('int32_t')
-            self._emit_call('int32_t', t, 'mojo_hasattr', [(obj_type, obj_val), (attr_type, attr_val)])
-            return 'int32_t', t
+            t = self._new_temp('int')
+            self._emit_call('int', t, 'mojo_hasattr', [(obj_type, obj_val), (attr_type, attr_val)])
+            return 'int', t
 
         # len() built-in dispatch
         if fname_raw == 'len' and len(node.args) == 1:
@@ -5359,7 +5359,7 @@ class GimpleGen:
                 t = self._new_temp('int64_t')
                 self._emit(f"  {t} = {av}->_len;")
                 return 'int64_t', t
-            if at in ('int32_t', 'int64_t'):
+            if at in ('int', 'int64_t'):
                 ip = self._new_temp('int64_t')
                 lp = self._new_temp('MojoList *')
                 t  = self._new_temp('int64_t')
@@ -5399,7 +5399,7 @@ class GimpleGen:
             if at == 'MojoList *':
                 # dict(list_of_pairs) → mojo_dict_from_pairs
                 self._emit_call('MojoDict *', t, 'mojo_dict_from_pairs', [('MojoList *', av)])
-            elif at in ('int64_t', 'int32_t') or not at.endswith(' *') or at == 'void *':
+            elif at in ('int64_t', 'int') or not at.endswith(' *') or at == 'void *':
                 raw = self._new_temp('MojoDict *')
                 self._emit(f"  {raw} = (MojoDict *){av};")
                 self._emit_call('MojoDict *', t, 'mojo_dict_copy', [('MojoDict *', raw)])
@@ -5448,8 +5448,8 @@ class GimpleGen:
             fname_c  = _safe_name(lifted)
             if ret_type == 'void':
                 self._emit(f"  {fname_c} ({all_args});")
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;")
-                return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;")
+                return 'int', t
             t = self._new_temp(ret_type)
             self._emit(f"  {t} = {fname_c} ({all_args});")
             return ret_type, t
@@ -5469,8 +5469,8 @@ class GimpleGen:
                 full_arg_pairs = arg_pairs
             if ret_type == 'void':
                 self._emit_call('void', '', fname_c, full_arg_pairs)
-                t = self._new_temp('int32_t'); self._emit(f"  {t} = 0;")
-                return 'int32_t', t
+                t = self._new_temp('int'); self._emit(f"  {t} = 0;")
+                return 'int', t
             t = self._new_temp(ret_type)
             self._emit_call(ret_type, t, fname_c, full_arg_pairs)
             return ret_type, t
@@ -5479,11 +5479,11 @@ class GimpleGen:
         # calling it directly in GIMPLE is invalid (can't call int/int64_t as function).
         # Evaluate args for side effects and stub the call out to 0.
         _fname_var_ctype = self.var_types.get(fname_raw, '')
-        if _fname_var_ctype in ('int32_t', 'int64_t', 'void *', '_Bool'):
+        if _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
             for a in node.args: self.lower_expr(a)
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* TODO: indirect call via {fname_raw} ({_fname_var_ctype}) */")
-            return 'int32_t', t
+            return 'int', t
 
         # Use builtin mapping first (int→mojo_make_int, float→mojo_make_float, etc.)
         # _safe_name would wrongly rename 'int' to 'mojo_int' (a typedef, not a function)
@@ -5503,7 +5503,7 @@ class GimpleGen:
             if 'do_imports' in kwarg_dict:
                 arg_pairs.append(kwarg_dict['do_imports'])
             elif len(arg_pairs) < 2:
-                arg_pairs.append(('int32_t', '0'))
+                arg_pairs.append(('int', '0'))
             if 'filename' in kwarg_dict:
                 arg_pairs.append(kwarg_dict['filename'])
             elif len(arg_pairs) < 3:
@@ -5514,13 +5514,13 @@ class GimpleGen:
             if 'filename' in kwarg_dict:
                 arg_pairs.append(kwarg_dict['filename'])
             elif len(arg_pairs) < 2:
-                arg_pairs.append(('int32_t', '0'))
+                arg_pairs.append(('int', '0'))
 
         # Special handling for functions with default parameters
         if fname_raw == 'format_ast' and len(arg_pairs) == 1:
-            arg_pairs.append(('int32_t', '0'))
+            arg_pairs.append(('int', '0'))
         if fname_raw == 'emit_module' and len(arg_pairs) == 1:
-            arg_pairs.append(('int32_t', '0'))
+            arg_pairs.append(('int', '0'))
 
         # General: pad missing args with kwargs or 0 when expected param count is known
         expected_params = self.func_param_types.get(fname_raw, [])
@@ -5533,7 +5533,7 @@ class GimpleGen:
                     arg_pairs.append(kwarg_values.pop(0))
                 else:
                     # Pad with 0
-                    arg_pairs.append(('int32_t', '0'))
+                    arg_pairs.append(('int', '0'))
         # int(s, base) — mojo_make_int only takes one arg; always drop the base arg
         if fname_raw == 'int' and len(arg_pairs) > 1:
             arg_pairs = arg_pairs[:1]
@@ -5541,7 +5541,7 @@ class GimpleGen:
         # float(x) — convert from number or string
         if fname_raw == 'float' and len(arg_pairs) >= 1:
             arg_type, arg_val = arg_pairs[0]
-            if arg_type in ('int64_t', 'int32_t', '_Bool'):
+            if arg_type in ('int64_t', 'int', '_Bool'):
                 # Direct numeric conversion: cast int to double
                 t = self._new_temp('double')
                 self._emit(f"  {t} = (double){arg_val};")
@@ -5553,9 +5553,9 @@ class GimpleGen:
 
         if ret_type == 'void':
             self._emit_call('void', '', fname, arg_pairs)
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  {t} = 0;")
-            return 'int32_t', t
+            return 'int', t
 
         # String utility functions — store char* result directly
         _DIRECT_CHARPTR = frozenset({
@@ -5618,14 +5618,14 @@ class GimpleGen:
                         continue
                     pos = idx + 1  # +1 for self slot
                     while len(arg_pairs) <= pos:
-                        arg_pairs.append(('int32_t', '0'))
+                        arg_pairs.append(('int', '0'))
                     arg_pairs[pos] = self.lower_expr(kw[pname])
             elif kwargs:
                 for _kn, kexpr in kwargs:
                     arg_pairs.append(self.lower_expr(kexpr))
             # Pad any still-missing args with 0.
             while len(arg_pairs) - 1 < expected:
-                arg_pairs.append(('int32_t', '0'))
+                arg_pairs.append(('int', '0'))
             self._emit_call('void', '', init_fname, arg_pairs)
         elif kwargs or args:
             # Positional args + keyword args — assign fields by position then by name
@@ -5717,7 +5717,7 @@ class GimpleGen:
             return 'int64_t', t
 
         # Opaque Python object (typed as int) — treat as MojoList via cast
-        if ot in ('int32_t', 'int64_t'):
+        if ot in ('int', 'int64_t'):
             # Check actual type for globals loaded as int64_t
             actual_type = self._get_actual_type(ot, ov)
             if actual_type == 'MojoDict *':
@@ -5971,10 +5971,10 @@ class GimpleGen:
 
     def _lower_comprehension(self, node: Comprehension) -> tuple[str, str]:
         if not node.generators:
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             # Skip emitting comment to avoid GIMPLE global-passing issues
             self._emit(f"  {t} = 0;")
-            return 'int32_t', t
+            return 'int', t
 
         gen0 = node.generators[0]
 
@@ -5989,10 +5989,10 @@ class GimpleGen:
             # (In a full implementation, these would be lazily evaluated)
             res_type, res_new = 'MojoList *', 'mojo_list_new'
         else:
-            t = self._new_temp('int32_t')
+            t = self._new_temp('int')
             self._emit(f"  /* TODO: comprehension kind {node.kind!r} */")
             self._emit(f"  {t} = 0;")
-            return 'int32_t', t
+            return 'int', t
 
         res = self._new_temp(res_type)
         self._emit(f"  {res} = {res_new} ();")
@@ -6067,7 +6067,7 @@ class GimpleGen:
         self._gen_compr_append(node, gen0, res, res_type, bb_after)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
-        st = self._new_temp('int32_t')
+        st = self._new_temp('int')
         self._emit(f"  {st} = {gen0.target} + {step_v};")
         self._emit(f"  {gen0.target} = {st};")
         self._emit(f"  goto {bb_cond};")
@@ -6187,7 +6187,7 @@ class GimpleGen:
     def _compr_dict_loop(self, node, gen0, res, res_type, it_val):
         self._declare_var(gen0.target, 'char *')
         iter_t = self._new_temp('MojoDictIter *')
-        more_t = self._new_temp('int32_t')
+        more_t = self._new_temp('int')
         self._emit(f"  {iter_t} = mojo_dict_iter_new ({it_val});")
         bb_cond = self._new_bb(); bb_body = self._new_bb()
         bb_post = self._new_bb(); bb_after = self._new_bb()
@@ -6211,7 +6211,7 @@ class GimpleGen:
     def _compr_set_loop(self, node, gen0, res, res_type, it_val):
         self._declare_var(gen0.target, 'int64_t')
         iter_t = self._new_temp('MojoSetIter *')
-        more_t = self._new_temp('int32_t')
+        more_t = self._new_temp('int')
         self._emit(f"  {iter_t} = mojo_set_iter_new ({it_val});")
         bb_cond = self._new_bb(); bb_body = self._new_bb()
         bb_post = self._new_bb(); bb_after = self._new_bb()
@@ -6499,13 +6499,13 @@ class GimpleGen:
                 # (it runs before the cross-call element contract), so it can hint
                 # an integer for what is really a double read. A local assigned a
                 # double value is a double — don't silently truncate it.
-                if ctype in ('int32_t', 'int64_t') and vtype == 'double':
+                if ctype in ('int', 'int64_t') and vtype == 'double':
                     ctype = 'double'
                 # 'int' (bare) is the hallucination marker — no real answer. If the
                 # value is actually a container pointer (e.g. a dict read whose value
                 # type is a dict/list/set), trust ground truth so a later
                 # .get()/subscript dispatches on the right container.
-                if ctype == 'int32_t' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     ctype = vtype
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
@@ -6550,7 +6550,7 @@ class GimpleGen:
             self._safe_coerce_emit(vtype, dst, v, self._cname(tname))
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
-            if ot in ('int32_t', 'int64_t'):
+            if ot in ('int', 'int64_t'):
                 # Opaque Python object: use mojo_setattr for attribute assignment
                 member_str = node.target.member
                 escaped = _c_escape(member_str)
@@ -6599,7 +6599,7 @@ class GimpleGen:
                                     [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             else:
                 # Opaque int-typed container: check if it's a list or dict
-                if ot in ('int32_t', 'int64_t'):
+                if ot in ('int', 'int64_t'):
                     # Check if this is actually a list (from nested access) or dict
                     actual_type = self._get_actual_type(ot, obj_v)
                     if actual_type == 'MojoList *':
@@ -6874,7 +6874,7 @@ class GimpleGen:
                         if kwarg_values:
                             arg_pairs.append(kwarg_values.pop(0))
                         else:
-                            arg_pairs.append(('int32_t', '0'))
+                            arg_pairs.append(('int', '0'))
                 fname_c  = _safe_name(lifted)
                 if env_var:
                     env_type = self.func_param_types.get(lifted, ['void *'])[0]
@@ -6903,7 +6903,7 @@ class GimpleGen:
                 if 'do_imports' in kwarg_dict:
                     arg_pairs.append(kwarg_dict['do_imports'])
                 elif len(arg_pairs) < 2:
-                    arg_pairs.append(('int32_t', '0'))
+                    arg_pairs.append(('int', '0'))
                 if 'filename' in kwarg_dict:
                     arg_pairs.append(kwarg_dict['filename'])
                 elif len(arg_pairs) < 3:
@@ -6914,7 +6914,7 @@ class GimpleGen:
                 if 'filename' in kwarg_dict:
                     arg_pairs.append(kwarg_dict['filename'])
                 elif len(arg_pairs) < 2:
-                    arg_pairs.append(('int32_t', '0'))
+                    arg_pairs.append(('int', '0'))
 
             # General: pad missing args with kwargs when expected param count is known
             expected_params = self.func_param_types.get(raw_name, [])
@@ -6924,7 +6924,7 @@ class GimpleGen:
                     if kwarg_values:
                         arg_pairs.append(kwarg_values.pop(0))
                     else:
-                        arg_pairs.append(('int32_t', '0'))
+                        arg_pairs.append(('int', '0'))
 
             if fname in self._KNOWN_SIGS:
                 ret_type = self._KNOWN_SIGS[fname][0]
@@ -6960,7 +6960,7 @@ class GimpleGen:
         self._emit("  mojo_raise ();")
 
     def _gen_stmt_TryStmt(self, node):
-        sj_ret = self._new_temp('int32_t')
+        sj_ret = self._new_temp('int')
         cond_t = self._new_temp('_Bool')
         bb_try   = self._new_bb()
         bb_exc   = self._new_bb()
@@ -7062,7 +7062,7 @@ class GimpleGen:
                        for _, sn in aliases)
 
         if has_exit:
-            sj_ret = self._new_temp('int32_t')
+            sj_ret = self._new_temp('int')
             cond_t = self._new_temp('_Bool')
             bb_try   = self._new_bb()
             bb_exc   = self._new_bb()
@@ -7147,7 +7147,7 @@ class GimpleGen:
             symbol_name = alias if alias else name
             # Use known signature if available
             sig = self._KNOWN_SIGS.get(symbol_name)
-            ret = sig[0] if sig else 'int32_t'
+            ret = sig[0] if sig else 'int'
             self.imported_symbols[symbol_name] = {
                 'module': node.module,
                 'return_type': ret,
@@ -7584,7 +7584,7 @@ class GimpleGen:
             self._emit(f"  {dict_ptr} = (MojoDict *){it_val};")
             it_val = dict_ptr
         iter_t = self._new_temp('MojoDictIter *')
-        more_t = self._new_temp('int32_t')
+        more_t = self._new_temp('int')
         self._emit(f"  {iter_t} = mojo_dict_iter_new ({it_val});")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -7627,7 +7627,7 @@ class GimpleGen:
             self._emit(f"  {set_ptr} = (MojoSet *){it_val};")
             it_val = set_ptr
         iter_t = self._new_temp('MojoSetIter *')
-        more_t = self._new_temp('int32_t')
+        more_t = self._new_temp('int')
         self._emit(f"  {iter_t} = mojo_set_iter_new ({it_val});")
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -7790,7 +7790,7 @@ class GimpleGen:
 
         self._emit_label(bb_cond)
         if has_next_fn in self.func_return_types:
-            hn_t   = self._new_temp('int32_t')
+            hn_t   = self._new_temp('int')
             cond_t = self._new_temp('_Bool')
             self._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
             self._emit(f"  {cond_t} = {hn_t} != 0;")
@@ -7980,7 +7980,7 @@ class GimpleGen:
             self.gen_stmt(stmt)
 
         # Add implicit return 0 for main if it returns int but has no explicit return
-        if node.name == 'main' and ret_type == 'int32_t' and not self.body_lines[-1:] == ['  return 0;']:
+        if node.name == 'main' and ret_type == 'int' and not self.body_lines[-1:] == ['  return 0;']:
             # Check if last statement is a return
             if not (self.body_lines and self.body_lines[-1].strip().startswith('return')):
                 self._emit('  return 0;')
@@ -8287,9 +8287,9 @@ class GimpleGen:
         }
 
         # Hardcode Scope method param types so 'name' is char* not int
-        self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int32_t']
+        self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int']
         self.func_param_types['Scope_get']    = ['Scope *', 'char *']
-        self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int32_t']
+        self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
         self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
 
         # Pre-populate AST node struct fields
@@ -8370,7 +8370,7 @@ class GimpleGen:
                         if field.name not in self.struct_field_types[s.name]:
                             ft = _mojo_type(field.type_ann)
                             if field.name == 'value' and s.name == 'Generator':
-                                ft = 'int32_t'  # boxed object field
+                                ft = 'int'  # boxed object field
                             self.struct_field_types[s.name][field.name] = ft
 
                 # Always scan ALL methods for self.x = ... to build complete field list
@@ -8412,9 +8412,9 @@ class GimpleGen:
                                         elif cn in self.struct_field_types:
                                             ft = cn + ' *'
                                         else:
-                                            ft = 'int32_t'
+                                            ft = 'int'
                                     else:
-                                        ft = 'int32_t'
+                                        ft = 'int'
                                     found[fn] = ft
                         for attr in ('then_body', 'body', 'else_body'):
                             sub = getattr(stmt, attr, None)
@@ -8426,7 +8426,7 @@ class GimpleGen:
                     pm = {}
                     for pname, ptype in method.params:
                         if pname != 'self':
-                            pm[pname] = self._resolve_type(ptype) if ptype else 'int32_t'
+                            pm[pname] = self._resolve_type(ptype) if ptype else 'int'
                     new_fields = {}
                     _collect_self_assigns(method.body, pm, new_fields)
                     for fn, ft in new_fields.items():
@@ -8435,10 +8435,10 @@ class GimpleGen:
                         # However, allow overriding 'int' (from = None / = 0) with a more
                         # specific pointer type discovered in a later method assignment.
                         existing_ft = self.struct_field_types[s.name].get(fn)
-                        can_override = (existing_ft == 'int32_t' and ft.endswith(' *'))
+                        can_override = (existing_ft == 'int' and ft.endswith(' *'))
                         if fn not in self.struct_field_types[s.name] or can_override:
                             if ft == 'char *':
-                                ft = 'int32_t'  # struct fields use boxed runtime representation
+                                ft = 'int'  # struct fields use boxed runtime representation
                             self.struct_field_types[s.name][fn] = ft
                             if fn not in already:
                                 s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
@@ -8691,7 +8691,7 @@ class GimpleGen:
                 if ann.get(pname) is not None:
                     continue                         # respect explicit annotation
                 cur = self._inferred_param_types.get(callee, {}).get(pname)
-                if cur in (None, 'int32_t', 'int64_t'):
+                if cur in (None, 'int', 'int64_t'):
                     self._inferred_param_types.setdefault(callee, {})[pname] = 'double'
 
         # Rebuild free-function param-type signatures so call-site coercion sees
@@ -8923,7 +8923,7 @@ class GimpleGen:
                 elif isinstance(_scan_stmt.value, SetExpr):
                     self._global_var_types[_gname] = 'MojoSet *'
                 elif isinstance(_scan_stmt.value, (IntLiteral, BoolLiteral)):
-                    self._global_var_types[_gname] = 'int32_t'
+                    self._global_var_types[_gname] = 'int'
                 elif isinstance(_scan_stmt.value, StringLiteral):
                     self._global_var_types[_gname] = 'char *'
                 elif isinstance(_scan_stmt.value, CallExpr):
@@ -9441,8 +9441,8 @@ class GimpleGen:
                     self._global_var_types[gname] = 'MojoSet *'
                 elif isinstance(stmt.value, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")
-                    self._global_var_types[gname] = 'int32_t'
-                    self._global_c_decl_types[gname] = 'int32_t'
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
                 elif isinstance(stmt.value, StringLiteral):
                     global_decls.append(f"char * {gname};")
                     self._global_var_types[gname] = 'char *'
@@ -9633,7 +9633,7 @@ class GimpleGen:
                             if sd.name in self.struct_field_types and field.name in self.struct_field_types[sd.name]:
                                 ft = self.struct_field_types[sd.name][field.name]
                             else:
-                                ft = self._resolve_type(field.type_ann) if field.type_ann else 'int32_t'
+                                ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
                             parts.append(f"  {ft} {field.name};")
                             emitted_fields.add(field.name)
                     # Also emit any fields that are in struct_field_types but not in AST fields
@@ -9742,7 +9742,7 @@ class GimpleGen:
                 # Provide a defined-but-unusable stub (plain C, like the _mojo_at_ helpers)
                 # so the symbol resolves at link time.
                 ret_type = sym_info.get('return_type', 'int64_t')
-                ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int32_t'
+                ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
                 cname = _safe_name(sym_name)
                 if ret_type == 'void':
                     body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
@@ -9758,7 +9758,7 @@ class GimpleGen:
             else:
                 # Legacy format fallback - use empty parens for flexible signature
                 ret_type = sym_info.get('return_type', 'int64_t')
-                ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int32_t'
+                ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
                 parts.append(f"extern {ret_type} {_safe_name(sym_name)} ();  /* from {module} */")
 
         if self.imported_symbols:
