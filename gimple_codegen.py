@@ -927,7 +927,7 @@ class DispatchSolver:
                     method_name = self._extract_method_name(callee)
 
                     # Infer C signature from function return type and parameter types
-                    return_type = self.func_return_types.get(callee, 'int')
+                    return_type = self.func_return_types.get(callee, 'int64_t')
 
                     # Get parameter types for this function
                     params = self.func_param_types.get(callee, [])
@@ -1387,6 +1387,10 @@ _TYPE_MAP: dict[str | None, str] = {
     'Float32': 'float',
     'Float64': 'double',
     'Bool':   '_Bool',
+    # Python-style `bool` flags cross the C ABI as `int` (e.g. compile_to_gimple's
+    # do_imports — runtime header declares `int do_imports`). A flag is never a
+    # boxed handle, so it must not hit the int64_t boxed-object default.
+    'bool':   'int',
     'String': 'char *',
     'str':    'char *',
     'List':   'MojoList *',
@@ -1397,6 +1401,9 @@ _TYPE_MAP: dict[str | None, str] = {
     'set':    'MojoSet *',
     'Str':    'MojoStr *',
     'None':   'void',
+    # A boxed object reference (AST node child, dynamic value) is a 64-bit tagged
+    # handle in this runtime, accessed via mojo_obj_getattr — never a 32-bit int.
+    'object': 'int64_t',
     None:     'int64_t',   # consistent with _mojo_type(None); was 'int' (#7)
 }
 
@@ -1489,7 +1496,7 @@ def _mojo_type(ann: str | type | None) -> str:
         non_none = [p for p in parts if p != 'None']
         if non_none:
             return _mojo_type(non_none[0])
-        return 'int'
+        return 'int64_t'
     # Handle parameterized types: UnsafePointer[Int], List[Float64], etc.
     if '[' in ann:
         base, rest = ann.split('[', 1)
@@ -1512,7 +1519,7 @@ def _mojo_type(ann: str | type | None) -> str:
         # Unknown parameterized type — fall through to plain lookup
         ann = base
     t = _TYPE_MAP.get(ann)
-    return t if t is not None else 'int'
+    return t if t is not None else 'int64_t'
 
 # Keep legacy helper name for backward compat inside this file
 def _result_type(t1: str, t2: str) -> str:
@@ -1524,7 +1531,7 @@ def _elem_type(ptr_type: str) -> str:
         return ptr_type[:-2]
     if '*' in ptr_type:
         return ptr_type.replace('*', '').strip()
-    return 'int'
+    return 'int64_t'
 
 _C_ID_MAP = {'char *': 'charptr', 'void *': 'voidptr', '_Bool': 'bool'}
 
@@ -2155,7 +2162,7 @@ class GimpleGen:
                         if from_reflection:
                             ret, ptypes = _parse_c_sig(sig)
                         else:
-                            ret = info.get('c_return_type', 'int')
+                            ret = info.get('c_return_type', 'int64_t')
                             ptypes = _param_ctypes(info.get('c_parameters'))
                         self.func_return_types[sym] = ret
                         self.func_param_types[sym] = ptypes
@@ -2247,7 +2254,7 @@ class GimpleGen:
         self._last_was_terminal = False
 
     def _type_of(self, name: str) -> str:
-        return self.var_types.get(name, 'int')
+        return self.var_types.get(name, 'int64_t')
 
     def _elem_of(self, name: str) -> str:
         """Element type for a container variable."""
@@ -2275,6 +2282,7 @@ class GimpleGen:
         'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
+        'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)
         'mojo_list_new':         ('MojoList *', []),
         'mojo_list_append_int':  ('void',      ['MojoList *', 'int64_t']),
         'mojo_list_append_str':  ('void',      ['MojoList *', 'char *']),
@@ -2788,6 +2796,7 @@ class GimpleGen:
             return TypeLattice.join(self._quick_type(node.then_val),
                                     self._quick_type(node.else_val))
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
+            fname: str
             fname = node.func.name
             _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *'}
             if fname in _BUILTIN_CTORS:
@@ -2802,11 +2811,13 @@ class GimpleGen:
                 return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:
                 return f'{fname} *'
-            return self.func_return_types.get(fname, 'int')
+            return self.func_return_types.get(fname, 'int64_t')
         if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr):
             # Module method calls: re.sub → char *, str.join → char *, etc.
             if isinstance(node.func.obj, IdentExpr):
+                mod: str
                 mod = node.func.obj.name
+                meth: str
                 meth = node.func.member
                 if mod == 're' and meth == 'sub':    return 'char *'
                 if mod == 're' and meth == 'match':  return 'int'
@@ -2822,9 +2833,11 @@ class GimpleGen:
                     if rt:
                         return rt
         if isinstance(node, MemberExpr):
+            ot: str
             ot = self._quick_type(node.obj)
+            sn: str
             sn = ot.replace(' *', '').strip()
-            return self.struct_field_types.get(sn, {}).get(node.member, 'int')
+            return self.struct_field_types.get(sn, {}).get(node.member, 'int64_t')
         if isinstance(node, ListExpr):  return 'MojoList *'
         if isinstance(node, DictExpr):  return 'MojoDict *'
         if isinstance(node, SetExpr):   return 'MojoSet *'
@@ -2845,7 +2858,7 @@ class GimpleGen:
                 ne = self._nested_elem_types.get(obj.obj.name)
                 if ne:
                     return ne
-        return 'int'
+        return 'int64_t'
 
     def _collect_return_types(self, stmts: list, acc: list):
         """Collect return-expression C types from all ReturnStmt nodes."""
@@ -3555,7 +3568,7 @@ class GimpleGen:
             if '*' in ot:
                 field_type = struct_name + ' *'
             else:
-                field_type = 'int'
+                field_type = 'int64_t'
             t = self._new_temp(field_type)
             self._emit(f'  {t} = {ov}{op}{node.member};')
             return field_type, t
@@ -3961,7 +3974,7 @@ class GimpleGen:
 
         # Call __matmul__(self, other) method
         mangled = f"{struct_name}___matmul__"
-        result_type = self.func_return_types.get(mangled, 'int')  # Default: assume int result
+        result_type = self.func_return_types.get(mangled, 'int64_t')  # Default: assume int result
         t = self._new_temp(result_type)
         self._emit(f"  {t} = {mangled} ({lv}, {rv});")
         return result_type, t
@@ -4104,6 +4117,7 @@ class GimpleGen:
             obj_type = self._resolve_member_expr_type(node.obj)
             if obj_type:
                 # Strip pointer if present
+                base_type: str
                 base_type = obj_type.replace(' *', '').strip()
                 if base_type in self.struct_field_types:
                     field_map = self.struct_field_types[base_type]
@@ -4282,7 +4296,7 @@ class GimpleGen:
         # Recover struct type from self parameter in method context
         # If we're in a method and calling a method on self (or self.field), resolve the struct type
         if 'self' in self.var_types and ot == 'int64_t':
-            self_type = self.var_types.get('self', 'int')
+            self_type = self.var_types.get('self', 'int64_t')
             if self_type.endswith(' *'):
                 # We're in a method with typed self — try to use that context
                 base_self_type = self_type.replace(' *', '').strip()
@@ -4782,7 +4796,7 @@ class GimpleGen:
             elif method in ('load',):
                 ret_type = 'int64_t'
             else:
-                ret_type = 'int'  # default fallback
+                ret_type = 'int64_t'  # default fallback
         arg_pairs = [self.lower_expr(a) for a in node.args]
         # Pad missing args with 0 when we know the expected param count from the signature
         # (handles default-argument methods like _peek(offset=0), _expect(kind, value=None))
@@ -5223,16 +5237,18 @@ class GimpleGen:
             return 'int', t
 
         # all(iterable) — Python builtin
-        if fname_raw == 'all' and len(node.args) == 1:
+        if fname_raw in ('all', 'any') and len(node.args) == 1:
+            runtime_fn = 'mojo_list_all' if fname_raw == 'all' else 'mojo_list_any'
+            stub_val = '1' if fname_raw == 'all' else '0'
             at, av = self.lower_expr(node.args[0])
             t = self._new_temp('int')
             if at in ('MojoList *',) or (at.endswith(' *') and at != 'char *'):
                 lv = self._new_temp('MojoList *') if at != 'MojoList *' else av
                 if at != 'MojoList *':
                     self._emit(f"  {lv} = (MojoList *){av};")
-                self._emit_call('int', t, 'mojo_list_all', [('MojoList *', lv)])
+                self._emit_call('int', t, runtime_fn, [('MojoList *', lv)])
             else:
-                self._emit(f"  {t} = 1;  /* all() stubbed */")
+                self._emit(f"  {t} = {stub_val};  /* {fname_raw}() stubbed */")
             return 'int', t
 
         # isinstance() built-in
@@ -5426,7 +5442,7 @@ class GimpleGen:
         if inner_name and fname_raw == inner_name and self._env_param:
             lifted   = self.current_func_name
             env_var  = self._env_param
-            ret_type = self.func_ret_type or self.func_return_types.get(lifted, 'int')
+            ret_type = self.func_ret_type or self.func_return_types.get(lifted, 'int64_t')
             arg_vals = [self.lower_expr(a)[1] for a in node.args]
             all_args = ', '.join([env_var] + arg_vals)
             fname_c  = _safe_name(lifted)
@@ -5442,7 +5458,7 @@ class GimpleGen:
         if fname_raw in self._closure_envs:
             lifted   = f"{self.current_func_name}_{fname_raw}"
             env_var  = self._closure_envs[fname_raw]
-            ret_type = self.func_return_types.get(lifted, 'int')
+            ret_type = self.func_return_types.get(lifted, 'int64_t')
             arg_pairs = [self.lower_expr(a) for a in node.args]
             fname_c  = _safe_name(lifted)
             # Build full arg list with env pointer prepended
@@ -5472,7 +5488,7 @@ class GimpleGen:
         # Use builtin mapping first (int→mojo_make_int, float→mojo_make_float, etc.)
         # _safe_name would wrongly rename 'int' to 'mojo_int' (a typedef, not a function)
         fname    = self.BUILTIN_VALUE_MAP.get(fname_raw, _safe_name(fname_raw))
-        ret_type = self.func_return_types.get(fname_raw, 'int')
+        ret_type = self.func_return_types.get(fname_raw, 'int64_t')
         # If the mapped C function has a known return type, use it (not the Python inferred type)
         if fname in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[fname][0]
@@ -6005,7 +6021,7 @@ class GimpleGen:
         return res_type, res
 
     def _compr_range_loop(self, node, gen0, res, res_type):
-        self._declare_var(gen0.target, 'int')
+        self._declare_var(gen0.target, 'int64_t')
         args = gen0.iterable.args
         dynamic_step = False
         if len(args) == 1:
@@ -7119,8 +7135,10 @@ class GimpleGen:
             # Declare the module as an int marker for attribute access
             # This allows code like os.path.basename() to work
             if local_name not in self.var_types:
-                self._declare_var(local_name, 'int')
-                self._emit(f"  {local_name} = 0;  /* module marker */")
+                self._declare_var(local_name, 'int64_t')
+                # GIMPLE: an int64_t lvalue needs an int64_t-typed constant, not a
+                # bare `0` (which is `int`) — that is a non-trivial integer_cst.
+                self._emit(f"  {local_name} = (int64_t)0;  /* module marker */")
 
 
     def _gen_stmt_FromImportStmt(self, node):
@@ -7182,7 +7200,7 @@ class GimpleGen:
                 unrolled = True
             if unrolled and step != 0:
                 if node.target not in self.var_types:
-                    self._declare_var(node.target, 'int')
+                    self._declare_var(node.target, 'int64_t')
                 i = start
                 while (step > 0 and i < stop) or (step < 0 and i > stop):
                     self._emit(f"  {node.target} = {i};")
@@ -7603,6 +7621,11 @@ class GimpleGen:
     def _gen_for_set(self, var: str, it_val: str, body: list):
         """for x in set — iterates over int64_t values (int set assumed)."""
         self._declare_var(var, 'int64_t')
+        # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
+        if it_val in self.var_types and self.var_types[it_val] == 'int64_t':
+            set_ptr = self._new_temp('MojoSet *')
+            self._emit(f"  {set_ptr} = (MojoSet *){it_val};")
+            it_val = set_ptr
         iter_t = self._new_temp('MojoSetIter *')
         more_t = self._new_temp('int')
         self._emit(f"  {iter_t} = mojo_set_iter_new ({it_val});")
@@ -7718,7 +7741,7 @@ class GimpleGen:
                 if not _has_kw:
                     break
             else:
-                closure_param_ctypes.append(ci.inferred_params.get(pname, 'int'))
+                closure_param_ctypes.append(ci.inferred_params.get(pname, 'int64_t'))
         self.func_param_types[ci.lifted_name] = closure_param_ctypes
         params_str = ', '.join(param_strs) if param_strs else 'void'
 
@@ -7758,7 +7781,7 @@ class GimpleGen:
 
         has_next_fn = f"{iter_base}___has_next__"
         next_fn     = f"{iter_base}___next__"
-        elem_type   = self.func_return_types.get(next_fn, 'int')
+        elem_type   = self.func_return_types.get(next_fn, 'int64_t')
         self._declare_var(var, elem_type)
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
@@ -7846,6 +7869,7 @@ class GimpleGen:
             return f"{node.name} *"
         # Check inferred parameter types first (for unannotated parameters)
         if ptype is None and hasattr(self, '_inferred_param_types'):
+            func_key: str
             func_key = node.name
             if func_key in self._inferred_param_types and pname in self._inferred_param_types[func_key]:
                 ctype = self._inferred_param_types[func_key][pname]
@@ -7910,7 +7934,7 @@ class GimpleGen:
             ret_type = self._infer_return_type(node.body)
             # Special case: main() should return int, not void
             if node.name == 'main' and ret_type == 'void':
-                ret_type = 'int'
+                ret_type = 'int64_t'
 
         self.func_ret_type = ret_type
         # Sync so forward declarations (Phase 2b) match Phase 2a inference
@@ -8233,24 +8257,24 @@ class GimpleGen:
             'col':   'int64_t',
         }
         self.struct_field_types['ReturnValue'] = {
-            'value': 'int',
+            'value': 'int64_t',
         }
         self.struct_field_types['BreakException'] = {}
         self.struct_field_types['ContinueException'] = {}
         self.struct_field_types['MojoFunction'] = {
-            'name': 'int',
+            'name': 'char *',
             'params': 'MojoList *',
             'body': 'MojoList *',
             'closure_scope': 'Scope *',
         }
         self.struct_field_types['MojoClass'] = {
-            'name': 'int',
+            'name': 'char *',
             'body': 'MojoList *',
             'methods': 'MojoDict *',
         }
         self.struct_field_types['Interpreter'] = {
             'scope': 'Scope *',
-            'filename': 'int',
+            'filename': 'char *',
         }
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
@@ -8270,30 +8294,30 @@ class GimpleGen:
 
         # Pre-populate AST node struct fields
         self.struct_field_types['CallExpr'] = {
-            'func': 'int',
+            'func': 'int64_t',
             'args': 'MojoList *',
         }
         self.struct_field_types['BinaryOp'] = {
             'op': 'char *',
-            'left': 'int',
-            'right': 'int',
+            'left': 'int64_t',
+            'right': 'int64_t',
         }
         self.struct_field_types['UnaryOp'] = {
             'op': 'char *',
-            'operand': 'int',
+            'operand': 'int64_t',
         }
         self.struct_field_types['TernaryExpr'] = {
-            'condition': 'int',
-            'then_val': 'int',
-            'else_val': 'int',
+            'condition': 'int64_t',
+            'then_val': 'int64_t',
+            'else_val': 'int64_t',
         }
         self.struct_field_types['MemberExpr'] = {
-            'obj': 'int',
+            'obj': 'int64_t',
             'member': 'char *',
         }
         self.struct_field_types['SubscriptExpr'] = {
-            'obj': 'int',
-            'index': 'int',
+            'obj': 'int64_t',
+            'index': 'int64_t',
         }
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
@@ -8359,7 +8383,7 @@ class GimpleGen:
                                 if fn not in found:
                                     v = stmt.value
                                     if isinstance(v, IdentExpr):
-                                        ft = param_types.get(v.name, 'int')
+                                        ft = param_types.get(v.name, 'int64_t')
                                     elif isinstance(v, IntLiteral):
                                         ft = 'int64_t'
                                     elif isinstance(v, StringLiteral):
@@ -8508,7 +8532,7 @@ class GimpleGen:
                 inferred = self._infer_return_type(s.body)
                 # Special case: main() should return int, not void
                 if s.name == 'main' and inferred == 'void':
-                    inferred = 'int'
+                    inferred = 'int64_t'
                 self.func_return_types[s.name] = inferred
                 self.var_types.clear()
 
@@ -9288,6 +9312,7 @@ class GimpleGen:
                     parts.append(f"typedef struct {struct_name} {{")
                     if fields:
                         for field_name, field_type in sorted(fields.items()):
+                            field_type: str
                             # For self-references in typedef, use 'struct Name *' syntax
                             if field_type == f"{struct_name} *":
                                 # Change Scope * to struct Scope * for self-references
@@ -9716,7 +9741,7 @@ class GimpleGen:
             if module in _stub_only_modules:
                 # Provide a defined-but-unusable stub (plain C, like the _mojo_at_ helpers)
                 # so the symbol resolves at link time.
-                ret_type = sym_info.get('return_type', 'int')
+                ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
                 cname = _safe_name(sym_name)
                 if ret_type == 'void':
@@ -9732,7 +9757,7 @@ class GimpleGen:
                 parts.append(f"extern {signature};  /* from {module} */")
             else:
                 # Legacy format fallback - use empty parens for flexible signature
-                ret_type = sym_info.get('return_type', 'int')
+                ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
                 parts.append(f"extern {ret_type} {_safe_name(sym_name)} ();  /* from {module} */")
 
@@ -9749,7 +9774,7 @@ class GimpleGen:
         for fn in func_defs:
             if fn.name == 'main':
                 continue
-            ret    = self.func_return_types.get(fn.name, 'int')
+            ret    = self.func_return_types.get(fn.name, 'int64_t')
             # If any param is *args, the call convention uses a packed MojoList*
             has_varargs = any(pn.startswith('*') for pn, _ in (fn.params or []))
             if has_varargs:
@@ -9812,7 +9837,7 @@ class GimpleGen:
         parts.append("MojoList * Parser_parse_module (Parser *);")
         parts.append("void Parser___init__ (Parser *, MojoList *);")
         parts.append("void Interpreter___init__ (Interpreter *, char *);")
-        parts.append("int Interpreter_execute (Interpreter *, int);")
+        parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
         parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
         parts.append('')
 
@@ -9835,7 +9860,7 @@ class GimpleGen:
                     alloc_fn = f"_alloc_{ci.env_struct}"
                     parts.append(f"{ci.env_struct} * {alloc_fn} (void);")
                 # Use cached types from Phase 2a if available (more accurate)
-                ret  = ci.inferred_ret if ci.inferred_ret else self.func_return_types.get(ci.lifted_name, 'int')
+                ret  = ci.inferred_ret if ci.inferred_ret else self.func_return_types.get(ci.lifted_name, 'int64_t')
                 if ci.is_re_sub_callback:
                     ret = 'char *'
                 node = ci.inner_def

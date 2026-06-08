@@ -137,6 +137,7 @@ MojoDict   *mojo_dict_copy(MojoDict *d);
 MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
 MojoList   *mojo_list_copy(MojoList *l);
 int         mojo_list_all(MojoList *l);
+int         mojo_list_any(MojoList *l);
 int64_t     mojo_list_pop(MojoList *l);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
 void        mojo_list_sort(MojoList *l);

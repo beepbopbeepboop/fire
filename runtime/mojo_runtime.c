@@ -1493,6 +1493,13 @@ int mojo_list_all(MojoList *l) {
     return 1;
 }
 
+int mojo_list_any(MojoList *l) {
+    if (!l) return 0;
+    for (int64_t i = 0; i < l->len; i++)
+        if (l->data[i]) return 1;
+    return 0;
+}
+
 int64_t mojo_list_pop(MojoList *l) {
     if (!l || l->len == 0) return 0;
     l->len--;
