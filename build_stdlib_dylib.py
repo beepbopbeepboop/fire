@@ -77,7 +77,8 @@ def _imported_sigs(src: str) -> list:
     return sigs
 
 
-def build(modules: list, out: str, use_cache: bool = True) -> str:
+def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
+          extra_exports: list = None) -> str:
     gcc = find_gcc()
     os.makedirs(os.path.dirname(out), exist_ok=True)
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
@@ -98,8 +99,14 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     for path in modules:
         # Use path-relative module name so __init__.mojo files from different
         # packages get unique symbol prefixes (std_os___init__ vs std___init__).
+        # Fall back to basename for modules outside STDLIB_PATH (e.g. test modules)
+        # — os.path.relpath would produce '../../../...' paths with dots that are
+        # invalid in C identifiers and cause GCC to reject the generated .c file.
         rel = os.path.relpath(path, STDLIB_PATH)
-        name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+        if rel.startswith('..'):
+            name = os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+        else:
+            name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
         src = open(path).read()
         try:
             exports = reflect.collect_exports_src(src)
@@ -123,24 +130,31 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     if skipped:
         print(f"  ({skipped} modules skipped)", file=sys.stderr)
 
-    # Runtime: compile mojo_runtime.c directly into an object and fold it into
-    # the stdlib dylib — no separate runtime dylib needed.  Programs link only
-    # the stdlib dylib; all mojo_* symbols are provided here.
+    # Runtime handling:
+    # - For production (link_runtime=False): compile mojo_runtime.c into an object
+    #   and fold it into the dylib (no separate runtime dylib needed)
+    # - For testing (link_runtime=True): build separate runtime dylib and link against it
     rt_src = os.path.join(RUNTIME, 'mojo_runtime.c')
     rt_key = 'rtobj/' + cas._hash(
         'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
         cas.toolchain_fingerprint(gcc, ()), open(rt_src).read())
-    def _build_rt_obj():
-        o = os.path.join(workdir, 'mojo_runtime.o')
-        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o, rt_src], check=True)
-        return open(o, 'rb').read()
-    rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
-    objs.append(rt_o)
 
-    # Runtime symbols in the reflection table — parsed from the header, not
-    # re-compiled from Mojo (they're plain C).
-    rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
-    all_exports.extend(reflect.collect_runtime_exports_h(rt_header))
+    if link_runtime:
+        # For test modules: link against standalone runtime dylib
+        rt_dylib = runtime_dylib(gcc)
+        rt_path = rt_dylib
+    else:
+        # For production: include runtime object directly
+        def _build_rt_obj():
+            o = os.path.join(workdir, 'mojo_runtime.o')
+            subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o, rt_src], check=True)
+            return open(o, 'rb').read()
+        rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
+        objs.append(rt_o)
+        rt_path = None
+
+    if extra_exports:
+        all_exports.extend(extra_exports)
 
     # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
     reflect_c = os.path.join(workdir, '_mojo_reflect.c')
@@ -150,13 +164,19 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # undefined=True: cross-module references within the stdlib resolve at load.
-    link = _dylink(gcc, out, objs, undefined=True)
+    # Linking depends on whether runtime is included or linked separately
+    if link_runtime:
+        # For test modules: link against runtime dylib, all symbols must resolve
+        link = _dylink(gcc, out, objs, undefined=False, extra_libs=[rt_path],
+                      rpath=os.path.dirname(rt_path))
+    else:
+        # For production: cross-module references resolve at load time
+        link = _dylink(gcc, out, objs, undefined=True)
     subprocess.run(link, check=True)
     return out
 
 
-def _dylink(gcc, out, objs, undefined=False, rpath=None):
+def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None):
     """Platform dylib link command. undefined=True allows unresolved symbols
     (resolved at load from other dylibs, via dyld dynamic lookup)."""
     if platform.system() == 'Darwin':
@@ -172,13 +192,42 @@ def _dylink(gcc, out, objs, undefined=False, rpath=None):
             cmd += ['-Wl,--allow-shlib-undefined']
         if rpath:
             cmd += ['-Wl,-rpath,' + rpath]
-    return cmd + objs
+    # Objects first, then extra libs (dependencies must come after the objects that use them)
+    result = cmd + objs
+    if extra_libs:
+        result.extend(extra_libs)
+    return result
 
+
+
+def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
+    """Build (or find in the CAS) the runtime dylib that exports mojo_* symbols.
+
+    The stdlib dylib now includes the runtime, but test modules and external
+    clients need a separate runtime dylib to link against and resolve symbols.
+    Built with all symbols resolved (undefined=False).
+    """
+    gcc = gcc or find_gcc()
+    src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
+    key = 'rtdylib/' + cas._hash(
+        'mojo-rtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, flags), src)
+    out = cas.path_for(key, '.dylib')
+    if not os.path.exists(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        wd = tempfile.mkdtemp(prefix='mojo_rt_')
+        o = os.path.join(wd, 'mojo_runtime.o')
+        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
+                        os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
+        subprocess.run(_dylink(gcc, out, [o], undefined=False), check=True)
+    return out
 
 
 def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True) -> str:
     """Build the monolithic stdlib dylib from all auto-discovered library modules."""
-    return build(stdlib_modules(), out, use_cache=use_cache)
+    rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
+    rt_exports = reflect.collect_runtime_exports_h(rt_header)
+    return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports)
 
 
 def main():

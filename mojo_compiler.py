@@ -459,6 +459,14 @@ class ComptimeForStmt:
     line: int = 0
     col: int = 0
 
+@dataclass
+class ComptimeVarStmt:
+    """Compile-time variable assignment: comptime NAME = expr"""
+    target: str
+    value: object
+    line: int = 0
+    col: int = 0
+
 
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global'}
@@ -1465,7 +1473,7 @@ class Parser:
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
-            lhs = IdentExpr(self._advance().value)
+            name = self._advance().value
             # Skip optional type parameters: comptime Alias[T, U]: Type = ...
             if self._peek().kind == "LBRACKET": self._skip_bracketed()
             # Skip optional type annotation: comptime MIN: Bool = False
@@ -1474,47 +1482,61 @@ class Parser:
                 self._parse_type_ann()  # parse and discard type annotation
             if self._peek().kind == "ASSIGN":
                 self._advance()
-                # Skip RHS expression, handling complex function types
-                # Try to parse normally, but fall back to skipping if it fails
+                # Parse/skip RHS expression, handling complex function types
                 rhs = self._skip_comptime_rhs()
-                return AssignStmt(target=lhs, value=rhs)
-            return ExprStmt(lhs)
+                return ComptimeVarStmt(target=name, value=rhs)
+            return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"Unexpected token after comptime: {t.value!r}")
 
     def _skip_comptime_rhs(self):
-        """Skip RHS of comptime assignment, handling function types and complex expressions."""
-        # Try normal expression parsing first
-        try:
-            depth = 0  # depth of nested brackets/parens
-            saved_pos = self._pos
-            expr = None
+        """Parse RHS of comptime assignment, with fallback for complex types.
 
-            # Skip tokens with bracket/paren depth tracking
+        Comptime variables are compile-time only and shouldn't generate runtime code.
+        Try to parse simple literals/calls; for complex types (def[...] -> ...), skip them.
+        """
+        t = self._peek()
+
+        # Check for function type definitions — skip to newline
+        if (t.kind == "KW" and t.value == "def") or self._will_see_arrow():
+            depth = 0
             while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
                 t = self._peek()
-                if t.kind == "LBRACKET":
+                if t.kind in ("LBRACKET", "LPAREN"):
                     depth += 1
-                elif t.kind == "RBRACKET":
-                    if depth == 0: break
+                elif t.kind in ("RBRACKET", "RPAREN"):
                     depth -= 1
-                elif t.kind == "LPAREN":
-                    depth += 1
-                elif t.kind == "RPAREN":
-                    if depth == 0: break
-                    depth -= 1
-                elif depth == 0 and t.kind in ("ARROW", ","):
-                    # Top-level ARROW or COMMA - part of the expression
-                    pass
-
+                    if depth < 0: break
                 self._advance()
-
-            # Return a dummy expression
             return IdentExpr("_comptime_expr")
+
+        # Try to parse simple expressions (literals, identifiers, simple calls)
+        saved_pos = self._pos
+        try:
+            expr = self._parse_expr(0)
+            return expr
         except:
-            # If parsing fails, just skip to newline
+            # Fallback: skip to newline
+            self._pos = saved_pos
             while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
                 self._advance()
             return IdentExpr("_comptime_expr")
+
+    def _will_see_arrow(self):
+        """Lookahead to check if we'll see a -> at bracket depth 0 before NEWLINE."""
+        saved = self._pos
+        depth = 0
+        while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+            t = self._peek()
+            if t.kind == "ARROW" and depth == 0:
+                self._pos = saved
+                return True
+            if t.kind in ("LBRACKET", "LPAREN"):
+                depth += 1
+            elif t.kind in ("RBRACKET", "RPAREN"):
+                depth -= 1
+            self._advance()
+        self._pos = saved
+        return False
 
     def _parse_comptime_if(self):
         self._expect("KW","if"); cond=self._parse_expr(0)

@@ -11,8 +11,14 @@ import os
 import sys
 import subprocess
 import argparse
+import tempfile
 from pathlib import Path
 from module_loader import STDLIB_PATH
+from build_config import find_gcc
+from build_stdlib_dylib import compile_module_to_c
+
+_GCC = find_gcc()
+_RUNTIME_INC = str(Path(__file__).parent / 'runtime')
 
 # Subtrees of the stdlib to attempt, in the order we want maximal coverage:
 # benchmarks first (smallest, exercises real client code), then the library
@@ -54,52 +60,47 @@ def find_mojo_files(base_path, roots=None, module=None):
             yield (mojo_file.relative_to(base), mojo_file)
 
 def transpile_file(mojo_file):
-    """
-    Transpile a single .mojo file through mojo_compiler.py.
+    """Compile a .mojo file through codegen → GCC -fgimple -fsyntax-only.
 
-    Returns (success: bool, error_msg: str or None)
+    Uses compile_module_to_c (emit_entry_points=False, path-relative name) — the
+    same codegen path as build_stdlib_dylib — so results agree with the dylib build.
+    Returns (success, msg).
     """
     try:
-        with open(mojo_file, 'r') as f:
-            source_code = f.read()
+        src = open(mojo_file).read()
+        rel = os.path.relpath(mojo_file, STDLIB_PATH)
+        name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
 
-        repo_root = Path(__file__).parent
-
-        # Run mojo_compiler.py with timeout
+        # Stage 1: Python codegen
         try:
-            proc = subprocess.run(
-                [sys.executable, 'mojo_compiler.py'],
-                input=source_code,
-                capture_output=True,
-                cwd=repo_root,
-                text=True,
-                timeout=3
+            c_src = compile_module_to_c(src, str(mojo_file), name)
+        except Exception as e:
+            return False, f"codegen: {str(e)[:120]}"
+
+        if not c_src.strip():
+            return True, None  # nothing to compile (empty/comment-only file)
+
+        # Stage 2: GCC syntax check
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as tf:
+            tf.write(c_src)
+            cpath = tf.name
+        try:
+            r = subprocess.run(
+                [_GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-fsyntax-only',
+                 '-x', 'c', cpath],
+                capture_output=True, text=True, timeout=10,
             )
-            if proc.returncode != 0:
-                # Find the actual error message (usually last line before traceback or the line with "Error:")
-                lines = proc.stderr.split('\n')
-                error_line = ""
-                for line in reversed(lines):
-                    if line.strip() and not line.startswith('  '):
-                        error_line = line.strip()
-                        break
-                if not error_line:
-                    error_line = lines[-2] if len(lines) > 1 else "unknown error"
-                return False, f"{error_line[:120]}"
-
-            # Check that compilation produced output (empty files are OK)
-            if not proc.stdout.strip():
-                # A file with no Mojo declarations (e.g. license-only __init__)
-                # correctly produces no GIMPLE output — treat as success.
-                import re
-                stripped = re.sub(r'#[^\n]*', '', source_code).strip()
-                if stripped:
-                    return False, "mojo_compiler produced no output"
-
-            return True, None
-
         except subprocess.TimeoutExpired:
-            return False, "timeout (>3s)"
+            return False, "timeout in gcc (>10s)"
+        finally:
+            os.unlink(cpath)
+
+        if r.returncode != 0:
+            first_err = next((l for l in r.stderr.splitlines()
+                              if ': error:' in l), r.stderr.splitlines()[0] if r.stderr else '')
+            return False, f"gcc: {first_err[:120]}"
+
+        return True, None
 
     except Exception as e:
         return False, f"{type(e).__name__}: {str(e)[:100]}"

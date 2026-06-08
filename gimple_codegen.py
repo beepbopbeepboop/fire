@@ -18,7 +18,7 @@ from mojo_compiler import (
     ImportStmt, FromImportStmt,
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
-    ComptimeIfStmt, ComptimeForStmt,
+    ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
     StructDef, TraitDef,
     tokenize, Parser,
 )
@@ -7181,6 +7181,10 @@ class GimpleGen:
                     self.gen_stmt(s)
                 self._emit(f"  goto {bb_merge};")
             self._emit_label(bb_merge)
+
+    def _gen_stmt_ComptimeVarStmt(self, node):
+        # Comptime variables are compile-time only and don't generate runtime code
+        return
 
     def _gen_stmt_ComptimeForStmt(self, node):
         unrolled = False

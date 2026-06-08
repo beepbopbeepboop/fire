@@ -92,10 +92,10 @@ def test_stage2_3_dylib_and_cas(wd):
     dylib = os.path.join(wd, 'libs2.dylib')
     try:
         cas.reset_stats()
-        bsd.build([libpath], dylib)                      # cold
+        bsd.build([libpath], dylib, link_runtime=True)                      # cold
         cold = dict(cas.stats)
         cas.reset_stats()
-        bsd.build([libpath], dylib)                      # warm
+        bsd.build([libpath], dylib, link_runtime=True)                      # warm
         warm = dict(cas.stats)
         check("stage3: cold build is a miss", cold['misses'] == 1 and cold['hits'] == 0,
               str(cold))
@@ -104,7 +104,7 @@ def test_stage2_3_dylib_and_cas(wd):
         # edit source → must miss again
         cas.reset_stats()
         open(libpath, 'w').write(libsrc + "\nfn s2_extra() -> Int64:\n    return 0\n")
-        bsd.build([libpath], dylib)
+        bsd.build([libpath], dylib, link_runtime=True)
         check("stage3: source edit invalidates (miss)", cas.stats['misses'] == 1, str(cas.stats))
         # link a client against the dylib and run
         client = ("from s2lib import s2_add, s2_mul\n"
@@ -118,13 +118,14 @@ def test_stage2_3_dylib_and_cas(wd):
         co = os.path.join(wd, 'c2.o')
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
         exe = os.path.join(wd, 'c2')
-        # Programs link the first-class runtime dylib (mojo_* live there now) plus
-        # the module dylib — module dylibs no longer bundle the runtime. rpaths so
-        # dyld finds the @rpath-named dylibs at load.
+        # The stdlib dylib now includes the runtime (folded in during build).
+        # Programs link only the module dylib, with rpath so dyld finds it at load.
         rt = bsd.runtime_dylib()
-        subprocess.run([GCC, '-o', exe, co, rt, dylib,
-                        f'-Wl,-rpath,{os.path.dirname(rt)}',
-                        f'-Wl,-rpath,{os.path.dirname(dylib)}'], check=True)
+        link_cmd = [GCC, '-o', exe, co]
+        if rt:  # If there's a separate runtime dylib, link it
+            link_cmd.extend([rt, f'-Wl,-rpath,{os.path.dirname(rt)}'])
+        link_cmd.extend([dylib, f'-Wl,-rpath,{os.path.dirname(dylib)}'])
+        subprocess.run(link_cmd, check=True)
         check("stage2: client links the stdlib dylib and runs", _run(exe).stdout.startswith('s2'))
         sz = os.path.getsize(co)
         check("stage2: client object is tiny (<8KB)", sz < 8192, f"{sz} bytes")
@@ -138,10 +139,9 @@ def test_stage4_reflection(wd):
     libpath = os.path.join(wd, 's4lib.mojo')
     open(libpath, 'w').write(libsrc)
     dylib = os.path.join(wd, 'libs4.dylib')
-    bsd.build([libpath], dylib)
-    # Get the runtime dylib path for resolving symbols
+    bsd.build([libpath], dylib, link_runtime=True)
+    # For testing: the test dylib is now linked against the runtime dylib
     rt = bsd.runtime_dylib()
-    # our own import path reads the table
     from module_loader import read_reflection
     exports = read_reflection(dylib, runtime_dylib=rt)
     check("stage4: __mojo_reflect readable; signature present",
@@ -470,11 +470,15 @@ def test_reflected_struct_import(wd):
         cc = os.path.join(wd, 'rs.c'); open(cc, 'w').write(code)
         co = os.path.join(wd, 'rs.o')
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
-        rt = bsd.runtime_dylib()
         exe = os.path.join(wd, 'rs')
-        subprocess.run([GCC, '-o', exe, co, rt, *dylibs,
-                        f'-Wl,-rpath,{os.path.dirname(rt)}',
-                        *[f'-Wl,-rpath,{os.path.dirname(d)}' for d in dylibs]], check=True)
+        # The stdlib dylib includes the runtime, so only link the module dylibs
+        rt = bsd.runtime_dylib()
+        link_cmd = [GCC, '-o', exe, co]
+        if rt:  # If there's a separate runtime dylib, link it
+            link_cmd.extend([rt, f'-Wl,-rpath,{os.path.dirname(rt)}'])
+        link_cmd.extend(dylibs)
+        link_cmd.extend([f'-Wl,-rpath,{os.path.dirname(d)}' for d in dylibs])
+        subprocess.run(link_cmd, check=True)
         check("reflect: client links the dylib's struct methods and runs",
               _run(exe).stdout.startswith('rs'))
         sz = os.path.getsize(co)
