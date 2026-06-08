@@ -1,13 +1,11 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
-        clean clean-bootstrap stdlib stdlib-dylib bootstrap preflight \
+        clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 RUNTIME_SRC  = runtime/mojo_runtime.c
 RUNTIME_HDR  = runtime/mojo_runtime.h
-DYLIB        = build/libmojo.dylib
 STDLIB_DYLIB = build/libmojostdlib.dylib
-STDLIB_MODULES ?=          # library .mojo modules to bundle (set by caller)
 MOJO_CLI     = build/mojo
 # The canonical source that all three stages compile
 MOJO_MAIN    = mojo.py
@@ -43,7 +41,7 @@ check: check-gimple check-runner check-modcache check-selfhost
 	@echo ""
 	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
 
-check-gimple: gimple_codegen.py $(DYLIB)
+check-gimple: gimple_codegen.py
 	python3 test_gimple.py
 
 # test_runner.py only existence-checks the prebuilt `build/mojo`, doesn't require it
@@ -63,18 +61,6 @@ check-selfhost: gimple_codegen.py mojo_compiler.py
 
 check-gimple-runner:
 	python3 test_gimple_runner.py
-
-# Build runtime dylib (macOS) / shared lib (Linux)
-$(DYLIB): $(RUNTIME_SRC) $(RUNTIME_HDR)
-	@mkdir -p build
-	cc -dynamiclib -I runtime -o $@ $(RUNTIME_SRC)
-
-# Build the stdlib dylib (MODULE_CACHE_DESIGN.md stage 2): bundle library
-# modules + runtime into one shared lib that clients link with -lmojostdlib.
-#   make stdlib-dylib STDLIB_MODULES="path/to/mod.mojo ..."
-stdlib-dylib:
-	@mkdir -p build
-	python3 build_stdlib_dylib.py $(STDLIB_MODULES) -o $(STDLIB_DYLIB)
 
 # Parse and validate entire stdlib (all .mojo files)
 stdlib:

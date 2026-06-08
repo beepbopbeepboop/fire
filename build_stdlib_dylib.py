@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Build a stdlib dylib — MODULE_CACHE_DESIGN.md stage 2.
 
-Compiles library `.mojo` modules (with NO entry points — they are libraries, not
-programs) plus the runtime into one self-contained shared library
-(`build/libmojostdlib.dylib`). Clients compile in *link mode* (extern decls only,
-see `ABI.md`) and link `-lmojostdlib`; the bodies are demand-paged from the dylib.
+Compiles all stdlib library `.mojo` modules (files with no entry point) into one
+self-contained shared library (`build/libmojostdlib.dylib`).  Clients compile in
+*link mode* (extern decls only, see `ABI.md`) and link `-lmojostdlib`; the bodies
+are demand-paged from the dylib.
 
-This is the prebuilt "warm bundle" form of the content-addressed cache: present →
-dlopen/mmap and fault in; absent → recompile the transitive closure.
+The dylib is monolithic — every importable stdlib symbol is present — so the
+runtime reflection table (`__mojo_reflect`) is authoritative for symbol resolution.
+Build is driven on-demand by the driver, never by `make`.
 
-Usage:
-  python build_stdlib_dylib.py MOD.mojo [MOD2.mojo ...] [-o build/libmojostdlib.dylib]
+Usage (manual):
+  python build_stdlib_dylib.py [-o build/libmojostdlib.dylib]
 """
 import os
 import sys
@@ -24,11 +25,25 @@ import reflect
 from build_config import find_gcc
 from gimple_codegen import GimpleGen, FromImportStmt
 from mojo_compiler import tokenize, Parser
-from module_loader import load_module
+from module_loader import load_module, STDLIB_PATH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 DEFAULT_OUT = os.path.join(HERE, 'build', 'libmojostdlib.dylib')
+
+
+def stdlib_modules() -> list:
+    """All library .mojo files under STDLIB_PATH (no tests, no programs)."""
+    modules = []
+    std_root = os.path.join(STDLIB_PATH, 'std') if os.path.isdir(
+        os.path.join(STDLIB_PATH, 'std')) else STDLIB_PATH
+    for dirpath, dirnames, filenames in os.walk(std_root):
+        # prune test subtrees in-place
+        dirnames[:] = [d for d in dirnames if d not in ('test', 'tests', 'benchmarks')]
+        for fname in filenames:
+            if fname.endswith('.mojo'):
+                modules.append(os.path.join(dirpath, fname))
+    return sorted(modules)
 
 # gcc flags that affect the object output — folded into the CAS key.
 _OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
@@ -51,7 +66,10 @@ def _imported_sigs(src: str) -> list:
         return sigs
     for s in stmts:
         if isinstance(s, FromImportStmt):
-            exports = load_module(s.module)
+            try:
+                exports = load_module(s.module)
+            except Exception:
+                continue
             for name, _alias in s.names:
                 info = exports.get(name)
                 if info and info.get('signature'):
@@ -76,22 +94,55 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
             return f.read()
 
     all_exports = []
+    skipped = 0
     for path in modules:
-        name = os.path.splitext(os.path.basename(path))[0]
+        # Use path-relative module name so __init__.mojo files from different
+        # packages get unique symbol prefixes (std_os___init__ vs std___init__).
+        rel = os.path.relpath(path, STDLIB_PATH)
+        name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
         src = open(path).read()
-        all_exports.extend(reflect.collect_exports_src(src))
-        if use_cache:
-            key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
-            ofile, hit = cas.get_or_build(
-                key, '.o', lambda s=src, p=path, n=name: compile_one_object(s, p, n))
-        else:
-            ofile = os.path.join(workdir, name + '.o')
-            with open(ofile, 'wb') as f:
-                f.write(compile_one_object(src, path, name))
+        try:
+            exports = reflect.collect_exports_src(src)
+        except Exception:
+            exports = []
+        try:
+            if use_cache:
+                key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
+                ofile, hit = cas.get_or_build(
+                    key, '.o', lambda s=src, p=path, n=name: compile_one_object(s, p, n))
+            else:
+                ofile = os.path.join(workdir, name + '.o')
+                with open(ofile, 'wb') as f:
+                    f.write(compile_one_object(src, path, name))
+        except Exception as e:
+            print(f"  skip {os.path.relpath(path)}: {e}", file=sys.stderr)
+            skipped += 1
+            continue
+        all_exports.extend(exports)
         objs.append(ofile)
+    if skipped:
+        print(f"  ({skipped} modules skipped)", file=sys.stderr)
 
-    # Reflection table (reflect.h / reflect.py): one merged __mojo_reflect over
-    # all bundled modules, so the dylib is self-describing for any C-ABI consumer.
+    # Runtime: compile mojo_runtime.c directly into an object and fold it into
+    # the stdlib dylib — no separate runtime dylib needed.  Programs link only
+    # the stdlib dylib; all mojo_* symbols are provided here.
+    rt_src = os.path.join(RUNTIME, 'mojo_runtime.c')
+    rt_key = 'rtobj/' + cas._hash(
+        'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, ()), open(rt_src).read())
+    def _build_rt_obj():
+        o = os.path.join(workdir, 'mojo_runtime.o')
+        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o, rt_src], check=True)
+        return open(o, 'rb').read()
+    rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
+    objs.append(rt_o)
+
+    # Runtime symbols in the reflection table — parsed from the header, not
+    # re-compiled from Mojo (they're plain C).
+    rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
+    all_exports.extend(reflect.collect_runtime_exports_h(rt_header))
+
+    # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
     reflect_c = os.path.join(workdir, '_mojo_reflect.c')
     reflect_o = os.path.join(workdir, '_mojo_reflect.o')
     with open(reflect_c, 'w') as f:
@@ -99,13 +150,8 @@ def build(modules: list, out: str, use_cache: bool = True) -> str:
     subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # Runtime is a FIRST-CLASS dylib (see runtime_dylib). Link it explicitly
-    # so the module dylib's runtime symbol dependencies are resolved.
-    rt = runtime_dylib(gcc)
-    rt_dir = os.path.dirname(rt)
-    link = _dylink(gcc, out, objs, undefined=False, rpath=rt_dir)
-    # Link with the runtime dylib explicitly
-    link.insert(len(link) - len(objs), rt)
+    # undefined=True: cross-module references within the stdlib resolve at load.
+    link = _dylink(gcc, out, objs, undefined=True)
     subprocess.run(link, check=True)
     return out
 
@@ -129,34 +175,22 @@ def _dylink(gcc, out, objs, undefined=False, rpath=None):
     return cmd + objs
 
 
-def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
-    """Build (or find in the CAS) the first-class runtime dylib that exports the
-    mojo_* runtime symbols. Every program links it; module dylibs depend on it."""
-    gcc = gcc or find_gcc()
-    src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
-    key = 'rtdylib/' + cas._hash(
-        'mojo-rtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, flags), src)
-    out = cas.path_for(key, '.dylib')
-    if not os.path.exists(out):
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        wd = tempfile.mkdtemp(prefix='mojo_rt_')
-        o = os.path.join(wd, 'mojo_runtime.o')
-        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
-                        os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
-        subprocess.run(_dylink(gcc, out, [o], undefined=False), check=True)
-    return out
+
+def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True) -> str:
+    """Build the monolithic stdlib dylib from all auto-discovered library modules."""
+    return build(stdlib_modules(), out, use_cache=use_cache)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('modules', nargs='+', help='library .mojo modules to bundle')
+    ap.add_argument('modules', nargs='*', help='library .mojo modules to bundle (default: all stdlib)')
     ap.add_argument('-o', '--output', default=DEFAULT_OUT, help='output dylib path')
     ap.add_argument('--no-cache', action='store_true', help='bypass the CAS')
     args = ap.parse_args()
+    modules = args.modules or stdlib_modules()
     cas.reset_stats()
-    out = build(args.modules, args.output, use_cache=not args.no_cache)
-    msg = f"built {out} from {len(args.modules)} module(s) + runtime"
+    out = build(modules, args.output, use_cache=not args.no_cache)
+    msg = f"built {out} from {len(modules)} module(s) + runtime"
     if not args.no_cache:
         msg += f"  [cas hits={cas.stats['hits']} misses={cas.stats['misses']}]"
     print(msg)

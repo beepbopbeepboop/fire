@@ -6,8 +6,9 @@ dylib (CAS), wires its `__mojo_reflect` ABI, and *records the dylib on the link
 line*. The driver just:
   * compiles the client in link mode (extern decls), getting back the recorded
     dylib list;
-  * links the client against the first-class runtime dylib + those import dylibs
-    (the OS loader binds the symbols — we don't reinvent dyld);
+  * links the client against the stdlib dylib (runtime folded in) + any per-import
+    dylibs recorded by `import` (the OS loader binds the symbols — we don't
+    reinvent dyld);
   * content-addresses the whole program in ~/.gmojo/cas (warm = an instant copy);
   * runs it.
 
@@ -28,7 +29,6 @@ from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
-RUNTIME_SRC = os.path.join(RUNTIME, 'mojo_runtime.c')
 
 
 def _prog_key(c_code, dylibs, gcc, flags):
@@ -58,10 +58,10 @@ def _build(c_code, dylibs, objects, target, gcc, objflags):
 
     client_o = cas.get_or_build(ckey, '.o', _client)[0]
 
-    # Runtime is a first-class dylib, linked into every program; module dylibs
-    # depend on it (their mojo_* symbols resolve from it at load).
-    rt = bsd.runtime_dylib(gcc)
-    link_dylibs = list(dict.fromkeys([rt] + list(dylibs)))
+    # Stdlib dylib: monolithic, CAS-built on first use; runtime folded in,
+    # so programs need only one dylib on the link line.
+    stdlib = bsd.build_stdlib()
+    link_dylibs = list(dict.fromkeys([stdlib] + list(dylibs)))
     rpaths = sorted({os.path.dirname(d) for d in link_dylibs})
 
     link = [gcc, '-o', target, client_o] + list(objects) + link_dylibs

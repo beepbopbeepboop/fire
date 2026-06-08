@@ -37,7 +37,10 @@ def _struct_layout_sig(s, struct_names) -> str:
     import boundary is the reflection table, not the .mojo file (ABI.md)."""
     fields = []
     for f in getattr(s, 'fields', []):
-        fields.append(f"{_mt(f.type_ann, struct_names)} {f.name};")
+        ann = getattr(f, 'type_ann', None)
+        if ann is None:
+            continue
+        fields.append(f"{_mt(ann, struct_names)} {f.name};")
     return f"struct {s.name} {{ {' '.join(fields)} }}"
 
 
@@ -89,6 +92,18 @@ def collect_exports(stmts) -> list:
     return exports
 
 
+# C stdlib symbols that may appear in Mojo modules but are already available
+# via dlsym from the system dylibs — no need to advertise them.
+_CLIB_SYMS = frozenset({
+    'exit', 'abort', 'puts', 'printf', 'fprintf', 'sprintf', 'snprintf',
+    'malloc', 'free', 'calloc', 'realloc', 'memcpy', 'memset', 'memmove',
+    'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat',
+    'strdup', 'strtol', 'strtod', 'atoi', 'atof', 'rand', 'srand', 'time',
+    'open', 'close', 'read', 'write', 'fopen', 'fclose', 'fread', 'fwrite',
+    'fgets', 'fputs', 'getline', 'setjmp', 'longjmp', 'signal',
+})
+
+
 def collect_exports_src(src: str) -> list:
     """Exports of a module's source — minus generic templates. A `fn name[...]`
     is parametric: it has no single concrete symbol to put in the dylib, so it is
@@ -112,7 +127,8 @@ def collect_exports_src(src: str) -> list:
     # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
     # parametric on its own.
     return [e for e in collect_exports(Parser(tokenize(src)).parse_module())
-            if e['name'].split('.', 1)[0] not in skip]
+            if e['name'].split('.', 1)[0] not in skip
+            and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
 
 
 def _cstr(s: str) -> str:
@@ -143,7 +159,9 @@ def emit_table_c(exports: list) -> str:
         sym = e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
         if sym not in seen:
             seen.add(sym)
-            L.append(f"extern {e['signature']};")
+            # Unprototyped extern avoids referencing struct types that may not
+            # be declared in this TU — we only need the symbol's address.
+            L.append(f"extern void {sym}();")
     L.append('')
     L.append('static const MojoReflectSym _mojo_syms[] = {')
     for e in exports:
@@ -162,3 +180,28 @@ def emit_table_c(exports: list) -> str:
     L.append(f'  MOJO_REFLECT_MAGIC, MOJO_REFLECT_VERSION, {len(exports)}, 0, _mojo_syms')
     L.append('};')
     return '\n'.join(L) + '\n'
+
+
+# ── Runtime header reflection ─────────────────────────────────────────────────
+
+_PROTO_RE = re.compile(
+    r'^\s*([\w][\w\s\*]*?)\s+(\w+)\s*\(([^)]*)\)\s*;', re.MULTILINE)
+
+def collect_runtime_exports_h(header_path: str) -> list:
+    """Parse a C header for public function prototypes → reflection export entries.
+    Used to include mojo_runtime.h symbols in the stdlib dylib's reflection table
+    without re-compiling the runtime (it's already linked as a first-class dylib)."""
+    exports = []
+    seen = set()
+    with open(header_path) as f:
+        content = f.read()
+    for m in _PROTO_RE.finditer(content):
+        ret, name, params = m.group(1).strip(), m.group(2), m.group(3).strip()
+        if any(kw in ret for kw in ('typedef', 'struct', 'static', '#', 'extern')):
+            continue
+        if name.startswith('_') or name in seen or name in _CLIB_SYMS:
+            continue
+        seen.add(name)
+        sig = f"{ret} {name} ({params or 'void'})"
+        exports.append({'name': name, 'signature': sig, 'kind': SYM_FUNCTION})
+    return exports

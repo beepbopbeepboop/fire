@@ -9915,9 +9915,10 @@ class GimpleGen:
         if hasattr(self, '_str_pool') and self._str_pool:
             parts.append("/* String literal globals (char * to avoid char[]→char* conversion) */")
             if self.emit_str_pool:
-                # Main module: emit full definitions
+                # String pool symbols are TU-local; static avoids duplicate-symbol
+                # errors when multiple modules are compiled into the same dylib.
                 for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
-                    parts.append(f'char * {sname} = "{escaped}";')
+                    parts.append(f'static char * {sname} = "{escaped}";')
             else:
                 # Imported module: emit extern declarations only
                 for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
