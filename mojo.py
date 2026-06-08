@@ -372,8 +372,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             import driver
             rc = driver.compile_program(input_file, src, output=build_output,
                                         run=False, opt_flag=opt_flag, debug_flag=debug_flag)
-        except Exception as e:
-            print(f"driver error, falling back to inline build: {e}", file=sys.stderr)
+        except Exception:
             rc = None
         if rc is None:
             success = build_executable(input_file, src, output=build_output,

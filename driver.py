@@ -52,7 +52,8 @@ def _build(c_code, dylibs, objects, target, gcc, objflags):
     def _client():
         cf, of = os.path.join(wd, 'client.c'), os.path.join(wd, 'client.o')
         open(cf, 'w').write(c_code)
-        subprocess.run([gcc, *objflags, '-c', '-o', of, cf], check=True)
+        subprocess.run([gcc, *objflags, '-c', '-o', of, cf], check=True,
+                       capture_output=True)
         return open(of, 'rb').read()
 
     client_o = cas.get_or_build(ckey, '.o', _client)[0]

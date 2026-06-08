@@ -100,6 +100,12 @@ stage1:
 	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 	@echo "✓ Stage 1 complete"
 
+# ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
+mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
+	@echo "=== Building mojoc from mojo.py ==="
+	python3 mojo.py build mojo.py -o mojoc
+	@echo "✓ mojoc ready"
+
 # ── stage2/mojo: compile stage1 output into a real binary ────────────────────
 stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@mkdir -p stage2

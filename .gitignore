@@ -22,3 +22,7 @@ stage2/
 *.ast
 *.pyi
 *.o
+mojoc
+bfib
+bnbody
+bnqueens
