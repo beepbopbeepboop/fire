@@ -10,6 +10,24 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _mkfn(sig):
+    before_paren = sig.split('(')[0].strip()
+    parts = before_paren.rsplit(None, 1)  # split on last whitespace token
+    ret = parts[0].strip() if len(parts) > 1 else 'void'
+    return {'c_return_type': ret, 'c_parameters': [], 'signature': sig,
+            'return_type': ret, 'parameters': []}
+
+
+_TESTING_EXPORTS = {
+    'assert_equal':        _mkfn('void assert_equal (...)'),
+    'assert_true':         _mkfn('void assert_true (...)'),
+    'assert_false':        _mkfn('void assert_false (...)'),
+    'assert_almost_equal': _mkfn('void assert_almost_equal (...)'),
+    'assert_raises':       _mkfn('void assert_raises (...)'),
+    'assert_not_equal':    _mkfn('void assert_not_equal (...)'),
+}
+
+
 # Reflection table layout (mirrors reflect.h). Defined at module scope — NOT
 # nested inside read_reflection — so the self-host codegen emits their struct
 # typedefs at top level (a class nested in a function is referenced but never
@@ -118,6 +136,16 @@ class ModuleLoader:
         if module_name in self.loaded_modules:
             return self.loaded_modules[module_name]
 
+        # Hardcoded exports for modules whose signatures the simple parser cannot parse
+        _HARDCODED = {
+            'std.testing': _TESTING_EXPORTS,
+            'std.testing.testing': _TESTING_EXPORTS,
+            'testing': _TESTING_EXPORTS,
+        }
+        if module_name in _HARDCODED:
+            self.loaded_modules[module_name] = _HARDCODED[module_name]
+            return _HARDCODED[module_name]
+
         path = self.resolve_module_path(module_name)
 
         if not os.path.exists(path):
@@ -180,6 +208,15 @@ class ModuleLoader:
                     for pname, ptype in parameters:
                         c_type = self._mojo_type_to_c(ptype)
                         c_params.append(f"{c_type} {pname}")
+
+                    if name in exports:
+                        # Overloaded function: use variadic so all arities work
+                        existing = exports[name]
+                        first_param = existing['c_parameters'][0] if existing.get('c_parameters') else ''
+                        variadic_sig = f"{existing['c_return_type']} {name} ({first_param + ', ...' if first_param else '...'})"
+                        existing['signature'] = variadic_sig
+                        existing['variadic'] = True
+                        continue
 
                     c_param_str = ', '.join(c_params) if c_params else 'void'
                     c_signature = f"{c_return_type} {name} ({c_param_str})"

@@ -1925,6 +1925,18 @@ void *mojo_range(int64_t start, int64_t stop) {
     return l;
 }
 
+void *mojo_range3(int64_t start, int64_t stop, int64_t step) {
+    MojoList *l = mojo_list_new();
+    if (step > 0) {
+        for (int64_t i = start; i < stop; i += step)
+            mojo_list_append_int(l, i);
+    } else if (step < 0) {
+        for (int64_t i = start; i > stop; i += step)
+            mojo_list_append_int(l, i);
+    }
+    return l;
+}
+
 void *mojo_reversed(void *iterable) {
     MojoList *src = (MojoList *)iterable;
     MojoList *dst = mojo_list_copy(src);

@@ -1,0 +1,1553 @@
+Stdlib path: /Users/mrs/claude/modular/mojo/stdlib
+Scanning roots: benchmarks, std, test, tools
+Found 643 .mojo files
+
+  benchmarks/algorithm/bench_elementwise.mojo...FAIL
+  benchmarks/bit/bench_bit.mojo...FAIL
+  benchmarks/builtin/bench_error.mojo...FAIL
+  benchmarks/builtin/bench_int.mojo...FAIL
+  benchmarks/builtin/bench_sort.mojo...FAIL
+  benchmarks/collections/bench_bitset.mojo...FAIL
+  benchmarks/collections/bench_dict.mojo...FAIL
+  benchmarks/collections/bench_dict_string.mojo...FAIL
+  benchmarks/collections/bench_grapheme.mojo...FAIL
+  benchmarks/collections/bench_grapheme_reverse.mojo...FAIL
+  benchmarks/collections/bench_set.mojo...FAIL
+  benchmarks/collections/bench_string.mojo...FAIL
+  benchmarks/collections/string/bench_atof.mojo...FAIL
+  benchmarks/format/bench_tstring.mojo...FAIL
+  benchmarks/hashlib/bench_hash.mojo...FAIL
+  benchmarks/math/bench_math.mojo...FAIL
+  benchmarks/memory/bench_alloc.mojo...FAIL
+  benchmarks/memory/bench_heap_parallel.mojo...FAIL
+  benchmarks/python/bench_bindings/mojo_module.mojo...FAIL
+  benchmarks/utils/bench_formatter.mojo...FAIL
+  benchmarks/utils/bench_memmem.mojo...FAIL
+  std/algorithm/backend/cpu/elementwise.mojo...FAIL
+  std/algorithm/backend/cpu/map.mojo...FAIL
+  std/algorithm/backend/cpu/parallelize.mojo...FAIL
+  std/algorithm/backend/cpu/reduction.mojo...FAIL
+  std/algorithm/backend/cpu/stencil.mojo...FAIL
+  std/algorithm/backend/gpu/elementwise.mojo...FAIL
+  std/algorithm/backend/gpu/reduction.mojo...FAIL
+  std/algorithm/backend/gpu/stencil.mojo...FAIL
+  std/algorithm/backend/vectorize.mojo...FAIL
+  std/algorithm/functional.mojo...FAIL
+  std/algorithm/reduction.mojo...FAIL
+  std/atomic/atomic.mojo...FAIL
+  std/base64/_b64encode.mojo...FAIL
+  std/base64/base64.mojo...FAIL
+  std/benchmark/_progress.mojo...FAIL
+  Progress: 14 passed, 36 failed  std/benchmark/bencher.mojo...FAIL
+  std/benchmark/benchmark.mojo...FAIL
+  std/benchmark/compiler.mojo...FAIL
+  std/benchmark/quick_bench.mojo...FAIL
+  std/bit/bit.mojo...FAIL
+  std/builtin/_format_float.mojo...FAIL
+  std/builtin/_startup.mojo...FAIL
+  std/builtin/bool.mojo...FAIL
+  std/builtin/builtin_slice.mojo...FAIL
+  std/builtin/constrained.mojo...FAIL
+  std/builtin/coroutine.mojo...FAIL
+  std/builtin/debug_assert.mojo...FAIL
+  std/builtin/dtype.mojo...FAIL
+  std/builtin/error.mojo...FAIL
+  std/builtin/float_literal.mojo...FAIL
+  std/builtin/format_int.mojo...FAIL
+  std/builtin/int.mojo...FAIL
+  std/builtin/int_literal.mojo...FAIL
+  std/builtin/none.mojo...FAIL
+  std/builtin/range.mojo...FAIL
+  std/builtin/rebind.mojo...FAIL
+  std/builtin/simd.mojo...FAIL
+  std/builtin/sort.mojo...FAIL
+  std/builtin/string_literal.mojo...FAIL
+  std/builtin/tuple.mojo...FAIL
+  std/builtin/type_aliases.mojo...FAIL
+  std/builtin/value.mojo...FAIL
+  std/builtin/variadics.mojo...FAIL
+  std/collections/_asan_annotations.mojo...FAIL
+  std/collections/_conditional.mojo...FAIL
+  std/collections/_swisstable.mojo...FAIL
+  std/collections/binary_heap.mojo...FAIL
+  std/collections/bitset.mojo...FAIL
+  Progress: 31 passed, 69 failed  std/collections/counter.mojo...FAIL
+  std/collections/deque.mojo...FAIL
+  std/collections/dict.mojo...FAIL
+  std/collections/inline_array.mojo...FAIL
+  std/collections/interval.mojo...FAIL
+  std/collections/linked_list.mojo...FAIL
+  std/collections/list.mojo...FAIL
+  std/collections/optional.mojo...FAIL
+  std/collections/set.mojo...FAIL
+  std/collections/string/_grapheme_break.mojo...FAIL
+  std/collections/string/_parsing_numbers/parsing_floats.mojo...FAIL
+  std/collections/string/_parsing_numbers/parsing_integers.mojo...FAIL
+  std/collections/string/_unicode.mojo...FAIL
+  std/collections/string/_utf8.mojo...FAIL
+  std/collections/string/codepoint.mojo...FAIL
+  std/collections/string/format.mojo...FAIL
+  std/collections/string/iterators.mojo...FAIL
+  std/collections/string/string.mojo...FAIL
+  std/collections/string/string_slice.mojo...FAIL
+  std/compile/compile.mojo...FAIL
+  std/complex/complex.mojo...FAIL
+  std/ffi/__init__.mojo...FAIL
+  std/ffi/cstring.mojo...FAIL
+  std/ffi/unsafe_union.mojo...FAIL
+  std/format/__init__.mojo...FAIL
+  std/format/_utils.mojo...FAIL
+  std/format/tstring.mojo...FAIL
+  std/gpu/_utils.mojo...FAIL
+  std/gpu/compute/arch/mma_amd.mojo...FAIL
+  std/gpu/compute/arch/mma_amd_rdna.mojo...FAIL
+  std/gpu/compute/arch/mma_apple.mojo...FAIL
+  std/gpu/compute/arch/mma_nvidia.mojo...FAIL
+  std/gpu/compute/arch/mma_nvidia_sm100.mojo...FAIL
+  std/gpu/compute/arch/tcgen05.mojo...FAIL
+  std/gpu/compute/mma.mojo...FAIL
+  Progress: 46 passed, 104 failed  std/gpu/compute/mma_util.mojo...FAIL
+  std/gpu/compute/tensor_ops.mojo...FAIL
+  std/gpu/globals.mojo...FAIL
+  std/gpu/host/_amdgpu_hip.mojo...FAIL
+  std/gpu/host/_device_context_hal.mojo...FAIL
+  std/gpu/host/_device_context_metal.mojo...FAIL
+  std/gpu/host/_metal.mojo...FAIL
+  std/gpu/host/_nvidia_cuda.mojo...FAIL
+  std/gpu/host/_tensormap.mojo...FAIL
+  std/gpu/host/_tracing.mojo...FAIL
+  std/gpu/host/compile.mojo...FAIL
+  std/gpu/host/device_context.mojo...FAIL
+  std/gpu/host/dim.mojo...FAIL
+  std/gpu/host/func_attribute.mojo...FAIL
+  std/gpu/host/info.mojo...FAIL
+  std/gpu/host/launch_attribute.mojo...FAIL
+  std/gpu/host/nvidia/tma.mojo...FAIL
+  std/gpu/intrinsics.mojo...FAIL
+  std/gpu/memory/memory.mojo...FAIL
+  std/gpu/primitives/block.mojo...FAIL
+  std/gpu/primitives/cluster.mojo...FAIL
+  std/gpu/primitives/grid_controls.mojo...FAIL
+  std/gpu/primitives/id.mojo...FAIL
+  std/gpu/primitives/warp.mojo...FAIL
+  std/gpu/profiler.mojo...FAIL
+  std/gpu/sync/semaphore.mojo...FAIL
+  std/gpu/sync/sync.mojo...FAIL
+  std/hashlib/_ahash.mojo...FAIL
+  std/hashlib/_fnv1a.mojo...FAIL
+  std/io/file.mojo...FAIL
+  std/io/file_descriptor.mojo...FAIL
+  std/io/io.mojo...FAIL
+  std/iter/__init__.mojo...FAIL
+  std/itertools/itertools.mojo...FAIL
+  std/logger/logger.mojo...FAIL
+  std/math/__init__.mojo...FAIL
+  Progress: 60 passed, 140 failed  std/math/math.mojo...FAIL
+  std/math/polynomial.mojo...FAIL
+  std/math/uutils.mojo...FAIL
+  std/memory/_poison.mojo...FAIL
+  std/memory/alloc.mojo...FAIL
+  std/memory/arc_pointer.mojo...FAIL
+  std/memory/memory.mojo...FAIL
+  std/memory/owned_pointer.mojo...FAIL
+  std/memory/pointer.mojo...FAIL
+  std/memory/span.mojo...FAIL
+  std/memory/unsafe.mojo...FAIL
+  std/memory/unsafe_maybe_uninit.mojo...FAIL
+  std/memory/unsafe_nullable_pointer.mojo...FAIL
+  std/memory/unsafe_pointer.mojo...FAIL
+  std/os/_linux_aarch64.mojo...FAIL
+  std/os/_linux_x86.mojo...FAIL
+  std/os/_macos.mojo...FAIL
+  std/os/env.mojo...FAIL
+  std/os/fstat.mojo...FAIL
+  std/os/os.mojo...FAIL
+  std/os/path/path.mojo...FAIL
+  std/os/process.mojo...FAIL
+  std/pathlib/path.mojo...FAIL
+  std/prelude/__init__.mojo...FAIL
+  std/pwd/_linux.mojo...FAIL
+  std/pwd/_macos.mojo...FAIL
+  std/pwd/pwd.mojo...FAIL
+  std/python/_cpython.mojo...FAIL
+  std/python/_python_func.mojo...FAIL
+  std/python/bindings.mojo...FAIL
+  std/python/python.mojo...FAIL
+  std/python/python_object.mojo...FAIL
+  std/random/_rng.mojo...FAIL
+  std/random/philox.mojo...FAIL
+  std/random/random.mojo...FAIL
+  std/reflection/function.mojo...FAIL
+  std/reflection/location.mojo...FAIL
+  Progress: 73 passed, 177 failed  std/reflection/reflect.mojo...FAIL
+  std/reflection/type_info.mojo...FAIL
+  std/runtime/asyncrt.mojo...FAIL
+  std/runtime/tracing.mojo...FAIL
+  std/stat/stat.mojo...FAIL
+  std/subprocess/subprocess.mojo...FAIL
+  std/sys/_amdgpu.mojo...FAIL
+  std/sys/_assembly.mojo...FAIL
+  std/sys/_hal/context.mojo...FAIL
+  std/sys/_hal/device.mojo...FAIL
+  std/sys/_hal/driver.mojo...FAIL
+  std/sys/_hal/event.mojo...FAIL
+  std/sys/_hal/plugin.mojo...FAIL
+  std/sys/_hal/queue.mojo...FAIL
+  std/sys/_hal/status.mojo...FAIL
+  std/sys/_hal/stream.mojo...FAIL
+  std/sys/_libc.mojo...FAIL
+  std/sys/_libc_errno.mojo...FAIL
+  std/sys/_metal_print.mojo...FAIL
+  std/sys/arg.mojo...FAIL
+  std/sys/compile.mojo...FAIL
+  std/sys/defines.mojo...FAIL
+  std/sys/info.mojo...FAIL
+  std/sys/intrinsics.mojo...FAIL
+  std/tempfile/tempfile.mojo...FAIL
+  std/testing/prop/random.mojo...FAIL
+  std/testing/prop/runner.mojo...FAIL
+  std/testing/prop/strategy/list_strategy.mojo...FAIL
+  std/testing/prop/strategy/string_strategy.mojo...FAIL
+  std/testing/suite.mojo...FAIL
+  std/testing/testing.mojo...FAIL
+  std/time/time.mojo...FAIL
+  std/utils/_ansi.mojo...FAIL
+  Progress: 90 passed, 210 failed  std/utils/_nicheable.mojo...FAIL
+  std/utils/_select.mojo...FAIL
+  std/utils/_serialize.mojo...FAIL
+  std/utils/coord.mojo...FAIL
+  std/utils/fast_div.mojo...FAIL
+  std/utils/index.mojo...FAIL
+  std/utils/lock.mojo...FAIL
+  std/utils/numerics.mojo...FAIL
+  std/utils/static_tuple.mojo...FAIL
+  std/utils/variant.mojo...FAIL
+  test/algorithm/gpu/test_binary_apply.mojo...FAIL
+  test/algorithm/gpu/test_elementwise.mojo...FAIL
+  test/algorithm/gpu/test_reduce.mojo...FAIL
+  test/algorithm/gpu/test_reduce_atomic.mojo...FAIL
+  test/algorithm/test_elementwise.mojo...FAIL
+  test/algorithm/test_elementwise_1d.mojo...FAIL
+  test/algorithm/test_map.mojo...FAIL
+  test/algorithm/test_parallelize.mojo...FAIL
+  test/algorithm/test_reductions.mojo...FAIL
+  test/algorithm/test_stencil.mojo...FAIL
+  test/algorithm/test_tile.mojo...FAIL
+  test/algorithm/test_vectorize.mojo...FAIL
+  test/asyncrt/asyncrt_test_utils.mojo...FAIL
+  test/asyncrt/test_buffer.mojo...FAIL
+  test/asyncrt/test_capture.mojo...FAIL
+  test/asyncrt/test_copies.mojo...FAIL
+  test/asyncrt/test_cuda.mojo...FAIL
+  test/asyncrt/test_device_pointer.mojo...FAIL
+  test/asyncrt/test_device_pointer_kernel.mojo...FAIL
+  test/asyncrt/test_elementwise.mojo...FAIL
+  test/asyncrt/test_function.mojo...FAIL
+  test/asyncrt/test_function_regress.mojo...FAIL
+  test/asyncrt/test_hip.mojo...FAIL
+  test/asyncrt/test_host_func.mojo...FAIL
+  test/asyncrt/test_host_mapped.mojo...FAIL
+  test/asyncrt/test_memset.mojo...FAIL
+  test/asyncrt/test_multi_context.mojo...FAIL
+  test/asyncrt/test_multi_stream.mojo...FAIL
+  test/asyncrt/test_multicast_memory.mojo...FAIL
+  test/asyncrt/test_smoke.mojo...FAIL
+  test/asyncrt/test_timing.mojo...FAIL
+  test/atomic/test_atomic.mojo...FAIL
+  test/atomic/test_compile_atomic.mojo...FAIL
+  test/base64/test_base64.mojo...FAIL
+  test/benchmark/test_bencher_device_context_iter_custom.mojo...FAIL
+  test/benchmark/test_benchmark.mojo...FAIL
+  test/benchmark/test_benchmark_compiler.mojo...FAIL
+  test/benchmark/test_mojobench.mojo...FAIL
+  Progress: 92 passed, 258 failed  test/benchmark/test_quick_bench.mojo...FAIL
+  test/bit/test_bit.mojo...FAIL
+  test/builtin/test_any_all.mojo...FAIL
+  test/builtin/test_bfloat16.mojo...FAIL
+  test/builtin/test_bool.mojo...FAIL
+  test/builtin/test_comparable.mojo...FAIL
+  test/builtin/test_debug_assert.mojo...FAIL
+  test/builtin/test_debug_assert_compile_time.mojo...FAIL
+  test/builtin/test_debug_assert_location.mojo...FAIL
+  test/builtin/test_debug_assert_mode_all.mojo...FAIL
+  test/builtin/test_debug_assert_mode_all_error.mojo...FAIL
+  test/builtin/test_debug_assert_mode_none.mojo...FAIL
+  test/builtin/test_debug_assert_warning.mojo...FAIL
+  test/builtin/test_default_hashable_compile_fail.mojo...FAIL
+  test/builtin/test_dtype.mojo...FAIL
+  test/builtin/test_error.mojo...FAIL
+  test/builtin/test_file.mojo...FAIL
+  test/builtin/test_float_literal.mojo...FAIL
+  test/builtin/test_format_float.mojo...FAIL
+  test/builtin/test_format_float_lut_optimization.mojo...FAIL
+  test/builtin/test_format_int.mojo...FAIL
+  test/builtin/test_int.mojo...FAIL
+  test/builtin/test_int_literal.mojo...FAIL
+  test/builtin/test_issue_1004.mojo...FAIL
+  test/builtin/test_issue_1505.mojo...FAIL
+  test/builtin/test_issue_3908.mojo...FAIL
+  test/builtin/test_list_literal.mojo...FAIL
+  test/builtin/test_math.mojo...FAIL
+  test/builtin/test_none.mojo...FAIL
+  test/builtin/test_print.mojo...FAIL
+  test/builtin/test_print_stderr.mojo...FAIL
+  test/builtin/test_range.mojo...FAIL
+  test/builtin/test_range_out_of_bounds.mojo...FAIL
+  test/builtin/test_rebind.mojo...FAIL
+  test/builtin/test_reversed.mojo...FAIL
+  test/builtin/test_simd.mojo...FAIL
+  test/builtin/test_simd_fastmath.mojo...FAIL
+  test/builtin/test_slice.mojo...FAIL
+  test/builtin/test_some.mojo...FAIL
+  test/builtin/test_sort.mojo...FAIL
+  test/builtin/test_sort_issue_1018.mojo...FAIL
+  test/builtin/test_stdin.mojo...FAIL
+  Progress: 100 passed, 300 failed  test/builtin/test_string_compatibility.mojo...FAIL
+  test/builtin/test_string_literal.mojo...FAIL
+  test/builtin/test_stubs.mojo...FAIL
+  test/builtin/test_swap.mojo...FAIL
+  test/builtin/test_tuple.mojo...FAIL
+  test/builtin/test_uint.mojo...FAIL
+  test/builtin/test_value.mojo...FAIL
+  test/builtin/test_variadic.mojo...FAIL
+  test/collections/string/test_atof.mojo...FAIL
+  test/collections/string/test_grapheme.mojo...FAIL
+  test/collections/string/test_grapheme_conformance.mojo...FAIL
+  test/collections/string/test_iterators.mojo...FAIL
+  test/collections/string/test_mem_functions.mojo...FAIL
+  test/collections/string/test_number_parsing_lut_optimization.mojo...FAIL
+  test/collections/string/test_string.mojo...FAIL
+  test/collections/string/test_string_slice.mojo...FAIL
+  test/collections/string/test_string_unicode_panic.mojo...FAIL
+  test/collections/string/test_unicode.mojo...FAIL
+  test/collections/string/test_utf8.mojo...FAIL
+  test/collections/test_asan_annotations_list.mojo...FAIL
+  test/collections/test_binary_heap.mojo...FAIL
+  test/collections/test_bitset.mojo...FAIL
+  test/collections/test_check_bounds_assert_error.mojo...FAIL
+  test/collections/test_codepoint.mojo...FAIL
+  test/collections/test_conditional.mojo...FAIL
+  test/collections/test_counter.mojo...FAIL
+  test/collections/test_deque.mojo...FAIL
+  test/collections/test_dict.mojo...FAIL
+  test/collections/test_inline_array.mojo...FAIL
+  test/collections/test_interval.mojo...FAIL
+  test/collections/test_linked_list.mojo...FAIL
+  test/collections/test_list.mojo...FAIL
+  test/collections/test_list_getitem_invalid_index_uint.mojo...FAIL
+  test/collections/test_negative_index_deque.mojo...FAIL
+  test/collections/test_negative_index_deque_insert.mojo...FAIL
+  test/collections/test_optional.mojo...FAIL
+  test/collections/test_set.mojo...FAIL
+  test/compile/test_compile.mojo...FAIL
+  test/complex/test_complex.mojo...FAIL
+  Progress: 111 passed, 339 failed  test/complex/test_mandelbrot.mojo...FAIL
+  test/ffi/test_external_call.mojo...FAIL
+  test/ffi/test_unsafe_union.mojo...FAIL
+  test/format/compile_fail/test_writable_error.mojo...FAIL
+  test/format/test_format.mojo...FAIL
+  test/format/test_tstring.mojo...FAIL
+  test/format/test_utils.mojo...FAIL
+  test/gpu/primitives/test_block_nd.mojo...FAIL
+  test/gpu/test_apple_mma_invalid_types.mojo...FAIL
+  test/hashlib/test_ahash.mojo...FAIL
+  test/hashlib/test_fnv1a.mojo...FAIL
+  test/hashlib/test_hash.mojo...FAIL
+  test/hashlib/test_hasher.mojo...FAIL
+  test/io/test_file_descriptor.mojo...FAIL
+  test/io/test_write.mojo...FAIL
+  test/io/test_write_to_stdout.mojo...FAIL
+  test/iter/test_chain.mojo...FAIL
+  test/iter/test_empty.mojo...FAIL
+  test/iter/test_enumerate.mojo...FAIL
+  test/iter/test_iter.mojo...FAIL
+  test/iter/test_map.mojo...FAIL
+  test/iter/test_next.mojo...FAIL
+  test/iter/test_nth.mojo...FAIL
+  test/iter/test_peek.mojo...FAIL
+  test/iter/test_ref_iteration.mojo...FAIL
+  test/iter/test_zip.mojo...FAIL
+  test/itertools/test_count.mojo...FAIL
+  test/itertools/test_cycle.mojo...FAIL
+  test/itertools/test_drop.mojo...FAIL
+  test/itertools/test_drop_negative_count.mojo...FAIL
+  test/itertools/test_drop_while.mojo...FAIL
+  test/itertools/test_product.mojo...FAIL
+  test/itertools/test_repeat.mojo...FAIL
+  test/itertools/test_take.mojo...FAIL
+  test/itertools/test_take_negative_count.mojo...FAIL
+  test/itertools/test_take_while.mojo...FAIL
+  test/logger/test_logger.mojo...FAIL
+  test/logger/test_logger_alias.mojo...FAIL
+  test/math/gpu/test_abs.mojo...FAIL
+  test/math/gpu/test_arithmetic_sm100.mojo...FAIL
+  test/math/gpu/test_exp.mojo...FAIL
+  test/math/gpu/test_exp_approx_f32.mojo...FAIL
+  test/math/gpu/test_log.mojo...FAIL
+  test/math/gpu/test_math.mojo...FAIL
+  test/math/gpu/test_math_accuracy.mojo...FAIL
+  test/math/gpu/test_pow_bf16.mojo...FAIL
+  test/math/gpu/test_powf_bf16.mojo...FAIL
+  test/math/gpu/test_recip.mojo...FAIL
+  Progress: 113 passed, 387 failed  test/math/gpu/test_rsqrt.mojo...FAIL
+  test/math/gpu/test_sin_cos_f64.mojo...FAIL
+  test/math/gpu/test_sqrt_f64.mojo...FAIL
+  test/math/gpu/test_trig.mojo...FAIL
+  test/math/test_erf.mojo...FAIL
+  test/math/test_exp.mojo...FAIL
+  test/math/test_ldexp.mojo...FAIL
+  test/math/test_math.mojo...FAIL
+  test/math/test_max.mojo...FAIL
+  test/math/test_min.mojo...FAIL
+  test/math/test_modf.mojo...FAIL
+  test/math/test_polynomial.mojo...FAIL
+  test/math/test_tanh.mojo...FAIL
+  test/math/test_ulp_distance.mojo...FAIL
+  test/memory/test_alloc.mojo...FAIL
+  test/memory/test_arc.mojo...FAIL
+  test/memory/test_bitcast.mojo...FAIL
+  test/memory/test_is_trivially.mojo...FAIL
+  test/memory/test_memory.mojo...FAIL
+  test/memory/test_negative_index_span.mojo...FAIL
+  test/memory/test_owned_pointer.mojo...FAIL
+  test/memory/test_pointer.mojo...FAIL
+  test/memory/test_span.mojo...FAIL
+  test/memory/test_unsafe_maybe_uninit.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_gather_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_no_false_positives.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/comparison_address_space.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_1.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_4.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_5.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_6.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_8.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/mut_cast.mojo...FAIL
+  test/memory/unsafe_pointer/test_unsafe_nullable_pointer.mojo...FAIL
+  test/memory/unsafe_pointer/test_unsafe_pointer.mojo...FAIL
+  test/os/path/test_basename.mojo...FAIL
+  test/os/path/test_dirname.mojo...FAIL
+  test/os/path/test_exists.mojo...FAIL
+  Progress: 123 passed, 427 failed  test/os/path/test_expanduser.mojo...FAIL
+  test/os/path/test_expandvars.mojo...FAIL
+  test/os/path/test_getsize.mojo...FAIL
+  test/os/path/test_is_absolute.mojo...FAIL
+  test/os/path/test_isdir.mojo...FAIL
+  test/os/path/test_isfile.mojo...FAIL
+  test/os/path/test_islink.mojo...FAIL
+  test/os/path/test_join.mojo...FAIL
+  test/os/path/test_realpath.mojo...FAIL
+  test/os/path/test_split.mojo...FAIL
+  test/os/path/test_split_extension.mojo...FAIL
+  test/os/path/test_splitroot.mojo...FAIL
+  test/os/test_env.mojo...FAIL
+  test/os/test_isatty.mojo...FAIL
+  test/os/test_link.mojo...FAIL
+  test/os/test_listdir.mojo...FAIL
+  test/os/test_mkdir_and_rmdir.mojo...FAIL
+  test/os/test_process.mojo...FAIL
+  test/os/test_remove.mojo...FAIL
+  test/os/test_stat.mojo...FAIL
+  test/os/test_symlink.mojo...FAIL
+  test/os/test_trap.mojo...FAIL
+  test/os/test_trap_gpu.mojo...FAIL
+  test/pathlib/test_pathlib.mojo...FAIL
+  test/pwd/test_pwd.mojo...FAIL
+  test/python/test_ownership.mojo...FAIL
+  test/python/test_python_cpython.mojo...FAIL
+  test/python/test_python_error_handling.mojo...FAIL
+  test/python/test_python_info.mojo...FAIL
+  test/python/test_python_interop.mojo...FAIL
+  test/python/test_python_module_create.mojo...FAIL
+  test/python/test_python_object.mojo...FAIL
+  test/python/test_python_to_mojo.mojo...FAIL
+  test/random/test_philox.mojo...FAIL
+  test/random/test_random.mojo...FAIL
+  test/random/test_random_internals.mojo...FAIL
+  test/reflection/test_function.mojo...FAIL
+  test/reflection/test_location.mojo...FAIL
+  test/reflection/test_reflect.mojo...FAIL
+  test/reflection/test_traits.mojo...FAIL
+  test/reflection/test_type_info.mojo...FAIL
+  test/runtime/test_asyncrt.mojo...FAIL
+  test/runtime/test_locks.mojo...FAIL
+  test/runtime/test_raising_asyncrt.mojo...FAIL
+  test/runtime/test_spin_waiter.mojo...FAIL
+  test/runtime/test_tracing.mojo...FAIL
+  test/subprocess/test_run.mojo...FAIL
+  test/sys/test_aarch64_target.mojo...FAIL
+  Progress: 125 passed, 475 failed  test/sys/test_build_info_debug.mojo...FAIL
+  test/sys/test_c_types.mojo...FAIL
+  test/sys/test_compile.mojo...FAIL
+  test/sys/test_compile_debug.mojo...FAIL
+  test/sys/test_cstring.mojo...FAIL
+  test/sys/test_dlhandle.mojo...FAIL
+  test/sys/test_exit_0.mojo...FAIL
+  test/sys/test_exit_1.mojo...FAIL
+  test/sys/test_ffi.mojo...FAIL
+  test/sys/test_intrinsics.mojo...FAIL
+  test/sys/test_linux_target.mojo...FAIL
+  test/sys/test_macos_target.mojo...FAIL
+  test/sys/test_sizeof.mojo...FAIL
+  test/sys/test_targetinfo.mojo...FAIL
+  test/tempfile/test_tempfile.mojo...FAIL
+  test/test_utils/compare_helpers.mojo...FAIL
+  test/test_utils/hash.mojo...FAIL
+  test/test_utils/math_helpers.mojo...FAIL
+  test/test_utils/test_utils.mojo...FAIL
+  test/test_utils/types.mojo...FAIL
+  test/test_utils/words.mojo...FAIL
+  test/testing/prop/test_random.mojo...FAIL
+  test/testing/prop/test_runner.mojo...FAIL
+  test/testing/prop/test_strategy.mojo...FAIL
+  test/testing/test_assert_raises.mojo...FAIL
+  test/testing/test_assertion.mojo...FAIL
+  test/testing/test_suite.mojo...FAIL
+  test/testing/test_suite_cli.mojo...FAIL
+  test/time/test_time.mojo...FAIL
+  test/utils/issue_13632.mojo...FAIL
+  test/utils/test_coord.mojo...FAIL
+  test/utils/test_index.mojo...FAIL
+  test/utils/test_numerics.mojo...FAIL
+  test/utils/test_select.mojo...FAIL
+  test/utils/test_static_tuple.mojo...FAIL
+  test/utils/test_tuple.mojo...FAIL
+  test/utils/test_type_functions.mojo...FAIL
+  test/utils/test_variant.mojo...FAIL
+  tools/gpu_info.mojo...FAIL
+  Progress: 129 passed, 514 failed
+======================================================================
+PASSED: 129
+FAILED: 514
+======================================================================
+
+Failed files:
+  benchmarks/algorithm/bench_elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/algorithm/bench_elementwise.mojo:46:19: error: 'vector' undeclared (fir
+  benchmarks/bit/bench_bit.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/bit/bench_bit.mojo:40:10: error: too many arguments to function 'bit_wi
+  benchmarks/builtin/bench_error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/builtin/bench_error.mojo:63:3: error: implicit declaration of function 
+  benchmarks/builtin/bench_int.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/builtin/bench_int.mojo:37:1: error: non-trivial conversion in 'integer_
+  benchmarks/builtin/bench_sort.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/builtin/bench_sort.mojo:216:25: error: 'dt' undeclared (first use in th
+  benchmarks/collections/bench_bitset.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_bitset.mojo:133:13: error: 'INIT_LOOP_SIZE' undeclare
+  benchmarks/collections/bench_dict.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_dict.mojo:31:14: error: passing argument 1 of 'Int' m
+  benchmarks/collections/bench_dict_string.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_dict_string.mojo:122:16: error: '__stderrp' redeclare
+  benchmarks/collections/bench_grapheme.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_grapheme.mojo:82:16: error: '__stderrp' redeclared as
+  benchmarks/collections/bench_grapheme_reverse.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_grapheme_reverse.mojo:82:16: error: '__stderrp' redec
+  benchmarks/collections/bench_set.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_set.mojo:36:7: error: assignment to 'int64_t' {aka 'l
+  benchmarks/collections/bench_string.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/bench_string.mojo:100:16: error: '__stderrp' redeclared as 
+  benchmarks/collections/string/bench_atof.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/collections/string/bench_atof.mojo:136:9: error: implicit declaration o
+  benchmarks/format/bench_tstring.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/format/bench_tstring.mojo:114:16: error: '__stderrp' redeclared as diff
+  benchmarks/hashlib/bench_hash.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/hashlib/bench_hash.mojo:152:9: error: 'words' undeclared (first use in 
+  benchmarks/math/bench_math.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/math/bench_math.mojo:138:18: error: 'int_inputs' undeclared (first use 
+  benchmarks/memory/bench_alloc.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/memory/bench_alloc.mojo:37:1: error: non-trivial conversion in 'integer
+  benchmarks/memory/bench_heap_parallel.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/memory/bench_heap_parallel.mojo:171:15: error: 'per_task' undeclared (f
+  benchmarks/python/bench_bindings/mojo_module.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/python/bench_bindings/mojo_module.mojo:158:9: error: too many arguments
+  benchmarks/utils/bench_formatter.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/utils/bench_formatter.mojo:32:9: error: 'n' undeclared (first use in th
+  benchmarks/utils/bench_memmem.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/benchmarks/utils/bench_memmem.mojo:86:16: error: conflicting types for 'memcmp'; h
+  std/algorithm/backend/cpu/elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/cpu/elementwise.mojo:63:9: error: 'start_offset' undeclared 
+  std/algorithm/backend/cpu/map.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/cpu/map.mojo:27:3: error: implicit declaration of function '
+  std/algorithm/backend/cpu/parallelize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/cpu/parallelize.mojo:133:22: error: 'chunk_size' undeclared 
+  std/algorithm/backend/cpu/reduction.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/cpu/reduction.mojo:67:17: error: 'reduce_dim_normalized' und
+  std/algorithm/backend/cpu/stencil.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/cpu/stencil.mojo:115:18: error: 'indices' undeclared (first 
+  std/algorithm/backend/gpu/elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/gpu/elementwise.mojo:93:6: error: subscripted value is neith
+  std/algorithm/backend/gpu/reduction.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/gpu/reduction.mojo:338:10: error: too many arguments to func
+  std/algorithm/backend/gpu/stencil.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/gpu/stencil.mojo:172:16: error: expected ';' before ',' toke
+  std/algorithm/backend/vectorize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/backend/vectorize.mojo:73:14: error: expected ':', ',', ';', '}' or 
+  std/algorithm/functional.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/functional.mojo:73:9: error: 'subvolume_rank' undeclared (first use 
+  std/algorithm/reduction.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/algorithm/reduction.mojo:58:10: error: 'return' with a value, in function retu
+  std/atomic/atomic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/atomic/atomic.mojo:96:1: error: invalid operand in unary operation
+  std/base64/_b64encode.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/base64/_b64encode.mojo:33:25: error: 'mask' undeclared (first use in this func
+  std/base64/base64.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/base64/base64.mojo:107:34: error: two or more data types in declaration specif
+  std/benchmark/_progress.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/benchmark/_progress.mojo:80:16: error: conflicting types for 'getenv'; have 'i
+  std/benchmark/bencher.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/benchmark/bencher.mojo:127:14: error: expected ':', ',', ';', '}' or '__attrib
+  std/benchmark/benchmark.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/benchmark/benchmark.mojo:39:9: error: implicit declaration of function 'Float6
+  std/benchmark/compiler.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/benchmark/compiler.mojo:24:9: error: implicit declaration of function 'UnsafeP
+  std/benchmark/quick_bench.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/benchmark/quick_bench.mojo:108:6: error: conflicting types for 'QuickBench_run
+  std/bit/bit.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/bit/bit.mojo:145:25: error: 'dtype' undeclared (first use in this function)
+  std/builtin/_format_float.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/_format_float.mojo:111:16: error: expected identifier or '(' before 's
+  std/builtin/_startup.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/_startup.mojo:67:3: error: implicit declaration of function 'main_func
+  std/builtin/bool.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/bool.mojo:9:3: error: 'Bool' redeclared as different kind of symbol
+  std/builtin/builtin_slice.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/builtin_slice.mojo:101:6: error: conflicting types for 'Slice___init__
+  std/builtin/constrained.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/constrained.mojo:100:7: error: 'cond' undeclared (first use in this fu
+  std/builtin/coroutine.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/coroutine.mojo:100:13: error: request for member 'address' in somethin
+  std/builtin/debug_assert.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/debug_assert.mojo:64:18: error: 'ASSERT_MODE' undeclared (first use in
+  std/builtin/dtype.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/dtype.mojo:322:1: error: invalid argument to gimple call
+  std/builtin/error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/error.mojo:131:34: error: expected ')' before ',' token
+  std/builtin/float_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/float_literal.mojo:78:9: error: conflicting types for 'FloatLiteral___
+  std/builtin/format_int.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/format_int.mojo:128:9: error: too few arguments to function 'String'; 
+  std/builtin/int.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/int.mojo:19:3: error: 'Int' redeclared as different kind of symbol
+  std/builtin/int_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/int_literal.mojo: In function 'IntLiteral___neg__':
+  std/builtin/none.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/none.mojo:78:6: error: conflicting types for 'NoneType___init__'; have
+  std/builtin/range.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/range.mojo:34:9: error: too many arguments to function 'select'; expec
+  std/builtin/rebind.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/rebind.mojo:46:9: error: implicit declaration of function 'UnsafePoint
+  std/builtin/simd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/simd.mojo:79:14: error: expected ':', ',', ';', '}' or '__attribute__'
+  std/builtin/sort.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/sort.mojo:88:16: error: conflicting types for 'ceil'; have 'int64_t(vo
+  std/builtin/string_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/string_literal.mojo:135:9: error: conflicting types for 'StringLiteral
+  std/builtin/tuple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/tuple.mojo:99:6: error: conflicting types for 'Tuple___init__'; have '
+  std/builtin/type_aliases.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/type_aliases.mojo:118:15: error: conflicting types for 'Origin___init_
+  std/builtin/value.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/value.mojo:53:9: error: implicit declaration of function '__get_mvalue
+  std/builtin/variadics.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/builtin/variadics.mojo:128:6: error: conflicting types for 'TypeList___init__'
+  std/collections/_asan_annotations.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/_asan_annotations.mojo:99:9: error: '__is_run_in_comptime_interpre
+  std/collections/_conditional.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/_conditional.mojo:86:6: error: conflicting types for '_ComptimeCon
+  std/collections/_swisstable.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/_swisstable.mojo:127:6: error: conflicting types for 'SwissTable__
+  std/collections/binary_heap.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/binary_heap.mojo:79:6: error: conflicting types for 'BinaryHeap___
+  std/collections/bitset.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/bitset.mojo:90:6: error: conflicting types for 'BitSet___init__'; 
+  std/collections/counter.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/counter.mojo:120:6: error: conflicting types for 'Counter___init__
+  std/collections/deque.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/deque.mojo:128:34: error: expected ')' before ',' token
+  std/collections/dict.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/dict.mojo:214:6: error: conflicting types for 'Dict___init__'; hav
+  std/collections/inline_array.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/inline_array.mojo:85:14: error: expected ':', ',', ';', '}' or '__
+  std/collections/interval.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/interval.mojo:133:6: error: conflicting types for 'Interval___init
+  std/collections/linked_list.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/linked_list.mojo:156:6: error: conflicting types for 'LinkedList__
+  std/collections/list.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/list.mojo:163:6: error: conflicting types for 'List___init__'; hav
+  std/collections/optional.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/optional.mojo:129:6: error: conflicting types for 'Optional___init
+  std/collections/set.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/set.mojo:90:6: error: conflicting types for 'Set___init__'; have '
+  std/collections/string/_grapheme_break.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/_grapheme_break.mojo:110:3: error: aggregate value used whe
+  std/collections/string/_parsing_numbers/parsing_floats.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/_parsing_numbers/parsing_floats.mojo:77:14: error: expected
+  std/collections/string/_parsing_numbers/parsing_integers.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/_parsing_numbers/parsing_integers.mojo:74:16: error: confli
+  std/collections/string/_unicode.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/_unicode.mojo:58:9: error: implicit declaration of function
+  std/collections/string/_utf8.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/_utf8.mojo:106:14: error: passing argument 1 of 'Int' makes
+  std/collections/string/codepoint.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/codepoint.mojo:52:1: error: invalid argument to gimple call
+  std/collections/string/format.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/format.mojo:85:9: error: implicit declaration of function '
+  std/collections/string/iterators.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/iterators.mojo:61:9: error: implicit declaration of functio
+  std/collections/string/string.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/string.mojo:46:3: error: 'String' redeclared as different k
+  std/collections/string/string_slice.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/collections/string/string_slice.mojo:135:16: error: conflicting types for 'mem
+  std/compile/compile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/compile/compile.mojo:15:11: error: expected identifier or '(' before 'asm'
+  std/complex/complex.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/complex/complex.mojo:77:14: error: expected ':', ',', ';', '}' or '__attribute
+  std/ffi/__init__.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/ffi/__init__.mojo:109:12: error: conflicting types for 'dlclose'; have 'int(in
+  std/ffi/cstring.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/ffi/cstring.mojo:159:9: error: implicit declaration of function 'Span_unsafe_p
+  std/ffi/unsafe_union.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/ffi/unsafe_union.mojo:82:18: error: 'Ts' undeclared (first use in this functio
+  std/format/__init__.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/format/__init__.mojo:87:9: error: 'type_name' undeclared (first use in this fu
+  std/format/_utils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/format/_utils.mojo:151:6: error: conflicting types for 'FormatStruct_fields'; 
+  std/format/tstring.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/format/tstring.mojo:76:9: error: implicit declaration of function 'Span_unsafe
+  std/gpu/_utils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/_utils.mojo:76:12: error: request for member '_mlir_value' in something no
+  std/gpu/compute/arch/mma_amd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/mma_amd.mojo:47:1: error: invalid conversion in gimple call
+  std/gpu/compute/arch/mma_amd_rdna.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/mma_amd_rdna.mojo:188:19: error: 'type_name' undeclared (firs
+  std/gpu/compute/arch/mma_apple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/mma_apple.mojo:41:14: error: passing argument 1 of 'Int' make
+  std/gpu/compute/arch/mma_nvidia.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/mma_nvidia.mojo:300:3: error: implicit declaration of functio
+  std/gpu/compute/arch/mma_nvidia_sm100.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/mma_nvidia_sm100.mojo:95:1: error: invalid operand in unary o
+  std/gpu/compute/arch/tcgen05.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/arch/tcgen05.mojo:73:9: error: 'cta_group' undeclared (first use i
+  std/gpu/compute/mma.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/mma.mojo:53:18: error: 'DType' undeclared (first use in this funct
+  std/gpu/compute/mma_util.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/mma_util.mojo:397:9: error: 'm' undeclared (first use in this func
+  std/gpu/compute/tensor_ops.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/compute/tensor_ops.mojo:25:18: error: 'DType' undeclared (first use in thi
+  std/gpu/globals.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/globals.mojo:79:20: error: request for member 'value' in something not a s
+  std/gpu/host/_amdgpu_hip.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_amdgpu_hip.mojo:118:9: error: implicit declaration of function 'hipM
+  std/gpu/host/_device_context_hal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_device_context_hal.mojo:203:16: error: conflicting types for 'getenv
+  std/gpu/host/_device_context_metal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_device_context_metal.mojo:97:24: error: 'num_captures_static' undecl
+  std/gpu/host/_metal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_metal.mojo:36:9: error: implicit declaration of function 'UnsafePoin
+  std/gpu/host/_nvidia_cuda.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_nvidia_cuda.mojo:124:9: error: implicit declaration of function 'CUm
+  std/gpu/host/_tensormap.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_tensormap.mojo:121:6: error: conflicting types for 'TensorMap___init
+  std/gpu/host/_tracing.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/_tracing.mojo:64:3: error: called object 'name_category' is not a fun
+  std/gpu/host/compile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/compile.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribut
+  std/gpu/host/device_context.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/device_context.mojo:427:6: error: conflicting types for 'HostBuffer__
+  std/gpu/host/dim.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/dim.mojo:82:6: error: conflicting types for 'Dim___init__'; have 'voi
+  std/gpu/host/func_attribute.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/func_attribute.mojo:109:1: error: invalid argument to gimple call
+  std/gpu/host/info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/info.mojo:103:16: error: conflicting types for 'floor'; have 'int64_t
+  std/gpu/host/launch_attribute.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/launch_attribute.mojo:113:6: error: conflicting types for 'LaunchAttr
+  std/gpu/host/nvidia/tma.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/host/nvidia/tma.mojo:125:6: error: conflicting types for 'TMADescriptor___
+  std/gpu/intrinsics.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/intrinsics.mojo:133:6: error: conflicting types for 'AMDBufferResource___i
+  std/gpu/memory/memory.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/memory/memory.mojo:105:19: error: invalid call to non-function before ';' 
+  std/gpu/primitives/block.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/primitives/block.mojo:73:11: error: expected identifier or '(' before '.' 
+  std/gpu/primitives/cluster.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/primitives/cluster.mojo:181:18: error: 'id' undeclared (first use in this 
+  std/gpu/primitives/grid_controls.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/primitives/grid_controls.mojo:87:6: error: conflicting types for 'PDLLevel
+  std/gpu/primitives/id.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/primitives/id.mojo:97:11: error: expected identifier or '(' before '.' tok
+  std/gpu/primitives/warp.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/primitives/warp.mojo:112:9: error: conflicting types for 'max'; have 'int6
+  std/gpu/profiler.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/profiler.mojo:51:1: error: invalid operand in unary operation
+  std/gpu/sync/semaphore.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/sync/semaphore.mojo:55:1: error: invalid argument to gimple call
+  std/gpu/sync/sync.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/gpu/sync/sync.mojo:44:15: error: 'MaxHardwareBarriers' undeclared (first use i
+  std/hashlib/_ahash.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/hashlib/_ahash.mojo:49:9: error: implicit declaration of function 'U128' [-Wim
+  std/hashlib/_fnv1a.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/hashlib/_fnv1a.mojo:47:1: error: non-trivial conversion in 'integer_cst'
+  std/io/file.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/io/file.mojo:90:16: error: expected identifier or '(' before numeric constant
+  std/io/file_descriptor.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/io/file_descriptor.mojo:44:15: error: redefinition of 'FileDescriptor___init__
+  std/io/io.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpry2sh7qb.c:54:16: error: conflicting types for 'getdelim'; have 'int
+  std/iter/__init__.mojo
+    → gcc: /Users/mrs/claude/mojo-reference/runtime/mojo_runtime.h:315:28: error: expected '{' before numeric constant
+  std/itertools/itertools.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/itertools/itertools.mojo:122:6: error: conflicting types for '_Product2___init
+  std/logger/logger.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/logger/logger.mojo:81:14: error: expected ':', ',', ';', '}' or '__attribute__
+  std/math/__init__.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/math/__init__.mojo:75:16: error: expected identifier or '(' before 'sizeof'
+  std/math/math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9joq2dv1.c:54:16: error: conflicting types for 'atan2f'; have 'int64
+  std/math/polynomial.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/math/polynomial.mojo:46:9: error: 'num_coefficients' undeclared (first use in 
+  std/math/uutils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/math/uutils.mojo:19:15: error: passing argument 1 of 'UInt' makes pointer from
+  std/memory/_poison.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/_poison.mojo:41:18: error: 'DType' undeclared (first use in this functi
+  std/memory/alloc.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/alloc.mojo:92:6: error: conflicting types for 'Layout___init__'; have '
+  std/memory/arc_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/arc_pointer.mojo:127:6: error: conflicting types for 'WeakPointer___ini
+  std/memory/memory.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/memory.mojo:103:9: error: conflicting types for 'memcmp'; have 'int64_t
+  std/memory/owned_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/owned_pointer.mojo:42:33: error: '_T' undeclared (first use in this fun
+  std/memory/pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/pointer.mojo:95:1: error: invalid argument to gimple call
+  std/memory/span.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/span.mojo:135:6: error: conflicting types for 'Span___init__'; have 'vo
+  std/memory/unsafe.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/unsafe.mojo:63:19: error: 'DType' undeclared (first use in this functio
+  std/memory/unsafe_maybe_uninit.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/unsafe_maybe_uninit.mojo:88:6: error: conflicting types for 'UnsafeMayb
+  std/memory/unsafe_nullable_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/unsafe_nullable_pointer.mojo:106:6: error: conflicting types for 'Unsaf
+  std/memory/unsafe_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/memory/unsafe_pointer.mojo:134:9: error: conflicting types for 'UnsafePointer_
+  std/os/_linux_aarch64.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/_linux_aarch64.mojo:89:1: error: invalid argument to gimple call
+  std/os/_linux_x86.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/_linux_x86.mojo:86:1: error: invalid argument to gimple call
+  std/os/_macos.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/_macos.mojo:94:1: error: invalid argument to gimple call
+  std/os/env.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptnbyxnu8.c:54:16: error: conflicting types for 'unsetenv'; have 'int
+  std/os/fstat.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/fstat.mojo:141:1: error: invalid argument to gimple call
+  std/os/os.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/os.mojo:122:9: error: conflicting types for 'getuid'; have 'int64_t(void)' 
+  std/os/path/path.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/path/path.mojo:97:8: error: conflicting types for 'realpath'; have 'char *(
+  std/os/process.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/os/process.mojo:126:16: error: conflicting types for 'waitpid'; have 'int64_t(
+  std/pathlib/path.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/pathlib/path.mojo:77:14: error: expected ':', ',', ';', '}' or '__attribute__'
+  std/prelude/__init__.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/prelude/__init__.mojo:80:16: error: conflicting types for 'Bool'; have 'int64_
+  std/pwd/_linux.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/pwd/_linux.mojo:41:9: error: too few arguments to function 'String'; expected 
+  std/pwd/_macos.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/pwd/_macos.mojo:164:9: error: too few arguments to function 'String'; expected
+  std/pwd/pwd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/pwd/pwd.mojo:53:1: error: invalid argument to gimple call
+  std/python/_cpython.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/python/_cpython.mojo:325:16: error: conflicting types for 'getenv'; have 'int6
+  std/python/_python_func.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/python/_python_func.mojo:54:15: error: redefinition of 'PyObjectFunction___ini
+  std/python/bindings.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/python/bindings.mojo:59:25: error: 'MOJO_PYTHON_TYPE_OBJECTS' undeclared (firs
+  std/python/python.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/python/python.mojo:91:6: error: conflicting types for 'Python___init__'; have 
+  std/python/python_object.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/python/python_object.mojo:128:6: error: conflicting types for 'PythonObject___
+  std/random/_rng.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/random/_rng.mojo:107:16: error: conflicting types for 'cos'; have 'int64_t(voi
+  std/random/philox.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/random/philox.mojo:82:16: error: conflicting types for 'cos'; have 'int64_t(vo
+  std/random/random.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/random/random.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribute__
+  std/reflection/function.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/reflection/function.mojo:33:10: error: implicit declaration of function 'Stati
+  std/reflection/location.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/reflection/location.mojo:61:7: error: assignment to 'int64_t' {aka 'long long 
+  std/reflection/reflect.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/reflection/reflect.mojo:88:1: error: invalid operand in unary operation
+  std/reflection/type_info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/reflection/type_info.mojo:31:30: error: 'target' undeclared (first use in this
+  std/runtime/asyncrt.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/runtime/asyncrt.mojo:50:1: error: invalid conversion in gimple call
+  std/runtime/tracing.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/runtime/tracing.mojo:126:16: error: '__stderrp' redeclared as different kind o
+  std/stat/stat.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/stat/stat.mojo:42:14: error: passing argument 1 of 'Int' makes pointer from in
+  std/subprocess/subprocess.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpz14s8h81.c:54:16: error: conflicting types for 'getline'; have 'int6
+  std/sys/_amdgpu.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_amdgpu.mojo:287:14: error: passing argument 1 of 'Int' makes pointer from
+  std/sys/_assembly.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_assembly.mojo:28:9: error: implicit declaration of function 'MojoList_get
+  std/sys/_hal/context.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/context.mojo:76:22: error: invalid call to non-function before ';' to
+  std/sys/_hal/device.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/device.mojo:62:26: error: invalid call to non-function before ';' tok
+  std/sys/_hal/driver.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/driver.mojo:37:25: error: 'RawDriver' undeclared (first use in this f
+  std/sys/_hal/event.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/event.mojo:70:3: error: expected ')' before '>' token
+  std/sys/_hal/plugin.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/plugin.mojo:240:1: error: invalid conversion in gimple call
+  std/sys/_hal/queue.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/queue.mojo:47:23: error: invalid call to non-function before ';' toke
+  std/sys/_hal/status.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/status.mojo:81:6: error: conflicting types for 'HALError___init__'; h
+  std/sys/_hal/stream.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_hal/stream.mojo:41:23: error: invalid call to non-function before ';' tok
+  std/sys/_libc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa4ydjdjv.c:58:16: error: conflicting types for 'fclose'; have 'int64
+  std/sys/_libc_errno.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd8jrp0bx.c:54:18: error: conflicting types for 'strerror'; have 'int
+  std/sys/_metal_print.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/_metal_print.mojo:37:9: error: implicit declaration of function 'Span_unsa
+  std/sys/arg.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/arg.mojo:26:9: error: implicit declaration of function 'Pointer'; did you 
+  std/sys/compile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/compile.mojo:50:1: error: invalid operand in unary operation
+  std/sys/defines.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/defines.mojo:28:18: error: 'val' undeclared (first use in this function)
+  std/sys/info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/info.mojo:48:17: error: 'msg' undeclared (first use in this function)
+  std/sys/intrinsics.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/sys/intrinsics.mojo:90:14: error: expected ':', ',', ';', '}' or '__attribute_
+  std/tempfile/tempfile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/tempfile/tempfile.mojo:82:14: error: expected ':', ',', ';', '}' or '__attribu
+  std/testing/prop/random.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/prop/random.mojo:28:1: error: invalid argument to gimple call
+  std/testing/prop/runner.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/prop/runner.mojo:101:6: error: conflicting types for 'PropTest___init_
+  std/testing/prop/strategy/list_strategy.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/prop/strategy/list_strategy.mojo:57:28: error: 'MAX_LIST_SIZE' undecla
+  std/testing/prop/strategy/string_strategy.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/prop/strategy/string_strategy.mojo:86:28: error: 'MAX_LIST_SIZE' undec
+  std/testing/suite.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/suite.mojo:157:16: error: conflicting types for 'ceil'; have 'int64_t(
+  std/testing/testing.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/testing/testing.mojo:85:16: error: conflicting types for 'memcmp'; have 'int64
+  std/time/time.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/time/time.mojo:93:16: error: conflicting types for 'floor'; have 'int64_t(void
+  std/utils/_ansi.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/_ansi.mojo:83:16: error: '__stdoutp' redeclared as different kind of sym
+  std/utils/_nicheable.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/_nicheable.mojo:53:13: error: duplicate member 'write_niche'
+  std/utils/_select.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/_select.mojo:20:9: error: implicit declaration of function '_Bool___mlir
+  std/utils/_serialize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/_serialize.mojo:26:3: error: implicit declaration of function 'serialize
+  std/utils/coord.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/coord.mojo:128:6: error: conflicting types for 'Coord___init__'; have 'v
+  std/utils/fast_div.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/fast_div.mojo:77:1: error: invalid argument to gimple call
+  std/utils/index.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/index.mojo:105:6: error: conflicting types for 'IndexList___init__'; hav
+  std/utils/lock.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/lock.mojo:79:1: error: invalid operand in unary operation
+  std/utils/numerics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd38que3q.c:54:16: error: conflicting types for 'nextafter'; have 'in
+  std/utils/static_tuple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/static_tuple.mojo:90:9: error: conflicting types for 'StaticTuple___init
+  std/utils/variant.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/utils/variant.mojo:126:6: error: conflicting types for '_NichedOptionalStorage
+  test/algorithm/gpu/test_binary_apply.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/gpu/test_binary_apply.mojo:36:10: error: implicit declaration of fu
+  test/algorithm/gpu/test_elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/gpu/test_elementwise.mojo:64:29: error: 'shape' undeclared (first u
+  test/algorithm/gpu/test_reduce.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/gpu/test_reduce.mojo:47:3: error: too many arguments to function 'a
+  test/algorithm/gpu/test_reduce_atomic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/gpu/test_reduce_atomic.mojo:52:26: error: passing argument 1 of 'mo
+  test/algorithm/test_elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_elementwise.mojo:58:29: error: 'shape' undeclared (first use i
+  test/algorithm/test_elementwise_1d.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_elementwise_1d.mojo:92:16: error: conflicting types for 'erf';
+  test/algorithm/test_map.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_map.mojo:26:9: error: 'vector' undeclared (first use in this f
+  test/algorithm/test_parallelize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_parallelize.mojo:49:9: error: 'start' undeclared (first use in
+  test/algorithm/test_reductions.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_reductions.mojo:93:16: error: conflicting types for 'max'; hav
+  test/algorithm/test_stencil.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_stencil.mojo:49:9: error: implicit declaration of function 'Sp
+  test/algorithm/test_tile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_tile.mojo:32:9: error: too many arguments to function 'Index';
+  test/algorithm/test_vectorize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/algorithm/test_vectorize.mojo:92:16: error: conflicting types for 'memcmp'; h
+  test/asyncrt/asyncrt_test_utils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/asyncrt_test_utils.mojo:31:18: error: passing argument 1 of 'String' 
+  test/asyncrt/test_buffer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_buffer.mojo:26:38: error: 'alloc_size' undeclared (first use in 
+  test/asyncrt/test_capture.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_capture.mojo:37:10: error: implicit declaration of function 'op'
+  test/asyncrt/test_copies.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_copies.mojo:30:9: error: implicit declaration of function 'Float
+  test/asyncrt/test_cuda.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_cuda.mojo:36:3: error: too many arguments to function 'assert_eq
+  test/asyncrt/test_device_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_device_pointer.mojo:48:9: error: implicit declaration of functio
+  test/asyncrt/test_device_pointer_kernel.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_device_pointer_kernel.mojo:39:9: error: implicit declaration of 
+  test/asyncrt/test_elementwise.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_elementwise.mojo:57:25: error: 'out_buffer' undeclared (first us
+  test/asyncrt/test_function.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_function.mojo:91:9: error: implicit declaration of function 'cre
+  test/asyncrt/test_function_regress.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_function_regress.mojo:56:1: error: invalid argument to gimple ca
+  test/asyncrt/test_hip.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_hip.mojo:25:17: error: passing argument 1 of 'String' makes poin
+  test/asyncrt/test_host_func.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_host_func.mojo:24:18: error: 'DType' undeclared (first use in th
+  test/asyncrt/test_host_mapped.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_host_mapped.mojo:130:9: error: implicit declaration of function 
+  test/asyncrt/test_memset.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_memset.mojo:55:10: error: too many arguments to function 'String
+  test/asyncrt/test_multi_context.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_multi_context.mojo:45:9: error: implicit declaration of function
+  test/asyncrt/test_multi_stream.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_multi_stream.mojo:45:9: error: implicit declaration of function 
+  test/asyncrt/test_multicast_memory.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_multicast_memory.mojo:63:9: error: implicit declaration of funct
+  test/asyncrt/test_smoke.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_smoke.mojo:128:3: error: too many arguments to function 'assert_
+  test/asyncrt/test_timing.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/asyncrt/test_timing.mojo:175:13: error: 'length' undeclared (first use in thi
+  test/atomic/test_atomic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/atomic/test_atomic.mojo:28:9: error: too many arguments to function 'Ordering
+  test/atomic/test_compile_atomic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/atomic/test_compile_atomic.mojo:31:7: error: assignment to 'int64_t' {aka 'lo
+  test/base64/test_base64.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/base64/test_base64.mojo:27:9: error: too many arguments to function 'b64encod
+  test/benchmark/test_bencher_device_context_iter_custom.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/benchmark/test_bencher_device_context_iter_custom.mojo:29:9: error: 'count' u
+  test/benchmark/test_benchmark.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/benchmark/test_benchmark.mojo:62:29: error: base variable or SSA name undecla
+  test/benchmark/test_benchmark_compiler.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/benchmark/test_benchmark_compiler.mojo:19:3: error: too many arguments to fun
+  test/benchmark/test_mojobench.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/benchmark/test_mojobench.mojo:35:1: error: invalid argument to gimple call
+  test/benchmark/test_quick_bench.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/benchmark/test_quick_bench.mojo:73:14: error: expected ':', ',', ';', '}' or 
+  test/bit/test_bit.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/bit/test_bit.mojo:80:16: error: conflicting types for 'ceil'; have 'int64_t(v
+  test/builtin/test_any_all.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_any_all.mojo:28:3: error: too many arguments to function 'assert
+  test/builtin/test_bfloat16.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_bfloat16.mojo:21:9: error: implicit declaration of function 'BFl
+  test/builtin/test_bool.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_bool.mojo:19:9: error: too few arguments to function 'Bool'; exp
+  test/builtin/test_comparable.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_comparable.mojo:19:9: error: implicit declaration of function 'S
+  test/builtin/test_debug_assert.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert.mojo:29:3: error: implicit declaration of function 
+  test/builtin/test_debug_assert_compile_time.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_compile_time.mojo:24:24: error: 'res' undeclared (f
+  test/builtin/test_debug_assert_location.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_location.mojo:41:3: error: implicit declaration of 
+  test/builtin/test_debug_assert_mode_all.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_all.mojo:29:3: error: implicit declaration of 
+  test/builtin/test_debug_assert_mode_all_error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_all_error.mojo:26:3: error: implicit declarati
+  test/builtin/test_debug_assert_mode_none.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_mode_none.mojo:39:3: error: implicit declaration of
+  test/builtin/test_debug_assert_warning.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_debug_assert_warning.mojo:24:3: error: implicit declaration of f
+  test/builtin/test_default_hashable_compile_fail.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_default_hashable_compile_fail.mojo:33:9: error: implicit declara
+  test/builtin/test_dtype.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_dtype.mojo:57:18: error: 'DType' undeclared (first use in this f
+  test/builtin/test_error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_error.mojo:26:17: error: 'e' undeclared (first use in this funct
+  test/builtin/test_file.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_file.mojo:82:16: error: conflicting types for 'remove'; have 'in
+  test/builtin/test_float_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_float_literal.mojo:24:9: error: implicit declaration of function
+  test/builtin/test_format_float.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_format_float.mojo:21:9: error: implicit declaration of function 
+  test/builtin/test_format_float_lut_optimization.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_format_float_lut_optimization.mojo:44:9: error: too few argument
+  test/builtin/test_format_int.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_format_int.mojo:21:3: error: too many arguments to function 'ass
+  test/builtin/test_int.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_int.mojo:34:3: error: too many arguments to function 'assert_equ
+  test/builtin/test_int_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_int_literal.mojo:20:25: error: 'IntLiteral' undeclared (first us
+  test/builtin/test_issue_1004.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_issue_1004.mojo:26:17: error: 'e' undeclared (first use in this 
+  test/builtin/test_issue_1505.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_issue_1505.mojo:106:10: error: 'p' undeclared (first use in this
+  test/builtin/test_issue_3908.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_issue_3908.mojo:73:14: error: expected ':', ',', ';', '}' or '__
+  test/builtin/test_list_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_list_literal.mojo:34:3: error: too many arguments to function 'a
+  test/builtin/test_math.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_math.mojo:76:16: error: expected identifier or '(' before 'sizeo
+  test/builtin/test_none.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_none.mojo:19:9: error: implicit declaration of function 'NoneTyp
+  test/builtin/test_print.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_print.mojo:26:9: error: too many arguments to function 'String';
+  test/builtin/test_print_stderr.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_print_stderr.mojo:73:14: error: expected ':', ',', ';', '}' or '
+  test/builtin/test_range.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_range.mojo:45:3: error: too many arguments to function 'assert_e
+  test/builtin/test_range_out_of_bounds.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_range_out_of_bounds.mojo:25:7: error: assignment to 'int64_t' {a
+  test/builtin/test_rebind.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_rebind.mojo:26:17: error: passing argument 1 of 'String' makes p
+  test/builtin/test_reversed.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_reversed.mojo:127:7: error: assignment to 'int64_t' {aka 'long l
+  test/builtin/test_simd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_simd.mojo:98:16: error: expected identifier or '(' before 'sizeo
+  test/builtin/test_simd_fastmath.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_simd_fastmath.mojo:29:7: error: expected identifier or '(' befor
+  test/builtin/test_slice.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_slice.mojo:190:9: error: implicit declaration of function 'slice
+  test/builtin/test_some.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_some.mojo:27:13: error: 'Bar' has no member named 'x'
+  test/builtin/test_sort.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_sort.mojo:118:16: error: conflicting types for 'rand'; have 'int
+  test/builtin/test_sort_issue_1018.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_sort_issue_1018.mojo:75:16: error: conflicting types for 'rand';
+  test/builtin/test_stdin.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_stdin.mojo:73:14: error: expected ':', ',', ';', '}' or '__attri
+  test/builtin/test_string_compatibility.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_string_compatibility.mojo:20:9: error: implicit declaration of f
+  test/builtin/test_string_literal.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_string_literal.mojo:31:25: error: 'StringLiteral' undeclared (fi
+  test/builtin/test_stubs.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_stubs.mojo:115:15: error: passing argument 1 of 'UInt' makes poi
+  test/builtin/test_swap.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_swap.mojo:24:3: error: too many arguments to function 'assert_eq
+  test/builtin/test_tuple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_tuple.mojo:316:9: error: implicit declaration of function 'Stati
+  test/builtin/test_uint.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_uint.mojo:27:15: error: passing argument 1 of 'UInt' makes point
+  test/builtin/test_value.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_value.mojo:44:9: error: implicit declaration of function 'Pointe
+  test/builtin/test_variadic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/builtin/test_variadic.mojo:33:13: error: 'MojoList' has no member named 'elem
+  test/collections/string/test_atof.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_atof.mojo:80:16: error: expected identifier or '(' be
+  test/collections/string/test_grapheme.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_grapheme.mojo:29:9: error: too few arguments to funct
+  test/collections/string/test_grapheme_conformance.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_grapheme_conformance.mojo:24:9: error: too few argume
+  test/collections/string/test_iterators.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_iterators.mojo:374:9: error: implicit declaration of 
+  test/collections/string/test_mem_functions.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_mem_functions.mojo:186:7: error: assignment to 'int64
+  test/collections/string/test_number_parsing_lut_optimization.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_number_parsing_lut_optimization.mojo:42:9: error: too
+  test/collections/string/test_string.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_string.mojo:98:16: error: expected identifier or '(' 
+  test/collections/string/test_string_slice.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_string_slice.mojo:44:3: error: too many arguments to 
+  test/collections/string/test_string_unicode_panic.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_string_unicode_panic.mojo:47:8: error: assignment to 
+  test/collections/string/test_unicode.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_unicode.mojo:23:30: error: 'count1' undeclared (first
+  test/collections/string/test_utf8.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/string/test_utf8.mojo:124:3: error: too many arguments to functio
+  test/collections/test_asan_annotations_list.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_asan_annotations_list.mojo:49:3: error: too many arguments t
+  test/collections/test_binary_heap.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_binary_heap.mojo:40:3: error: too many arguments to function
+  test/collections/test_bitset.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_bitset.mojo:32:3: error: too many arguments to function 'ass
+  test/collections/test_check_bounds_assert_error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_check_bounds_assert_error.mojo:43:3: error: aggregate value 
+  test/collections/test_codepoint.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_codepoint.mojo:183:9: error: implicit declaration of functio
+  test/collections/test_conditional.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_conditional.mojo:28:3: error: implicit declaration of functi
+  test/collections/test_counter.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_counter.mojo:39:3: error: too many arguments to function 'as
+  test/collections/test_deque.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_deque.mojo:36:3: error: too many arguments to function 'asse
+  test/collections/test_dict.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_dict.mojo:45:3: error: too many arguments to function 'asser
+  test/collections/test_inline_array.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_inline_array.mojo:39:9: error: implicit declaration of funct
+  test/collections/test_interval.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_interval.mojo:105:6: error: conflicting types for 'MyType___
+  test/collections/test_linked_list.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_linked_list.mojo:39:3: error: too many arguments to function
+  test/collections/test_list.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_list.mojo:48:9: error: implicit declaration of function 'Flo
+  test/collections/test_list_getitem_invalid_index_uint.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_list_getitem_invalid_index_uint.mojo:22:15: error: passing a
+  test/collections/test_negative_index_deque.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_negative_index_deque.mojo:26:9: error: too many arguments to
+  test/collections/test_negative_index_deque_insert.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_negative_index_deque_insert.mojo:26:9: error: too many argum
+  test/collections/test_optional.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_optional.mojo:176:7: error: expected identifier or '(' befor
+  test/collections/test_set.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/collections/test_set.mojo:33:9: error: too many arguments to function 'Set'; 
+  test/compile/test_compile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/compile/test_compile.mojo:36:3: error: implicit declaration of function 'asse
+  test/complex/test_complex.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/complex/test_complex.mojo:73:14: error: expected ':', ',', ';', '}' or '__att
+  test/complex/test_mandelbrot.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/complex/test_mandelbrot.mojo:150:9: error: implicit declaration of function '
+  test/ffi/test_external_call.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpuaovyhqr.c:53:16: error: conflicting types for 'fopen'; have 'int64_
+  test/ffi/test_unsafe_union.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/ffi/test_unsafe_union.mojo:31:3: error: too many arguments to function 'asser
+  test/format/compile_fail/test_writable_error.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/format/compile_fail/test_writable_error.mojo:101:9: error: too few arguments 
+  test/format/test_format.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/format/test_format.mojo:27:1: error: invalid argument to gimple call
+  test/format/test_tstring.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/format/test_tstring.mojo:25:1: error: invalid argument to gimple call
+  test/format/test_utils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/format/test_utils.mojo:32:1: error: invalid argument to gimple call
+  test/gpu/primitives/test_block_nd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/gpu/primitives/test_block_nd.mojo:48:10: error: 'N' undeclared (first use in 
+  test/gpu/test_apple_mma_invalid_types.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/gpu/test_apple_mma_invalid_types.mojo:60:3: error: too many arguments to func
+  test/hashlib/test_ahash.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/hashlib/test_ahash.mojo:44:3: error: too many arguments to function 'assert_e
+  test/hashlib/test_fnv1a.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/hashlib/test_fnv1a.mojo:35:3: error: too many arguments to function 'assert_e
+  test/hashlib/test_hash.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/hashlib/test_hash.mojo:34:15: error: passing argument 1 of 'Int' makes pointe
+  test/hashlib/test_hasher.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/hashlib/test_hasher.mojo:44:1: error: non-trivial conversion in 'integer_cst'
+  test/io/test_file_descriptor.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/io/test_file_descriptor.mojo:79:16: error: '__stderrp' redeclared as differen
+  test/io/test_write.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/io/test_write.mojo:29:1: error: invalid argument to gimple call
+  test/io/test_write_to_stdout.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/io/test_write_to_stdout.mojo:77:14: error: expected ':', ',', ';', '}' or '__
+  test/iter/test_chain.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_chain.mojo:167:9: error: too many arguments to function 'chain'; ex
+  test/iter/test_empty.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_empty.mojo:35:3: error: too many arguments to function 'assert_equa
+  test/iter/test_enumerate.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_enumerate.mojo:162:15: error: passing argument 1 of 'next' makes in
+  test/iter/test_iter.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_iter.mojo:111:15: error: passing argument 1 of 'iter' makes integer
+  test/iter/test_map.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_map.mojo:32:17: error: passing argument 1 of 'String' makes pointer
+  test/iter/test_next.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_next.mojo:133:15: error: passing argument 1 of 'iter' makes integer
+  test/iter/test_nth.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_nth.mojo:20:15: error: passing argument 1 of 'iter' makes integer f
+  test/iter/test_peek.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_peek.mojo:110:9: error: too many arguments to function 'peekable'; 
+  test/iter/test_ref_iteration.mojo
+    → gcc: /Users/mrs/claude/mojo-reference/runtime/mojo_runtime.h:315:28: error: expected identifier or '(' before numeric constan
+  test/iter/test_zip.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/iter/test_zip.mojo:208:16: error: passing argument 1 of 'next' makes integer 
+  test/itertools/test_count.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_count.mojo:21:3: error: too many arguments to function 'assert
+  test/itertools/test_cycle.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_cycle.mojo:33:9: error: too many arguments to function 'cycle'
+  test/itertools/test_drop.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_drop.mojo:35:9: error: too many arguments to function 'drop'; 
+  test/itertools/test_drop_negative_count.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_drop_negative_count.mojo:24:9: error: too many arguments to fu
+  test/itertools/test_drop_while.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_drop_while.mojo:49:3: error: too many arguments to function 'a
+  test/itertools/test_product.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_product.mojo:319:9: error: too many arguments to function 'pro
+  test/itertools/test_repeat.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_repeat.mojo:25:9: error: too many arguments to function 'repea
+  test/itertools/test_take.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_take.mojo:35:9: error: too many arguments to function 'take'; 
+  test/itertools/test_take_negative_count.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_take_negative_count.mojo:24:9: error: too many arguments to fu
+  test/itertools/test_take_while.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/itertools/test_take_while.mojo:48:3: error: too many arguments to function 'a
+  test/logger/test_logger.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/logger/test_logger.mojo:79:25: error: passing argument 1 of 'mojo_obj_call1' 
+  test/logger/test_logger_alias.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/logger/test_logger_alias.mojo:28:25: error: passing argument 1 of 'mojo_obj_c
+  test/math/gpu/test_abs.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_abs.mojo:28:1: error: invalid conversion in gimple call
+  test/math/gpu/test_arithmetic_sm100.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_arithmetic_sm100.mojo:146:17: error: 'width' undeclared (first 
+  test/math/gpu/test_exp.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_exp.mojo:78:16: error: conflicting types for 'exp'; have 'int64
+  test/math/gpu/test_exp_approx_f32.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_exp_approx_f32.mojo:122:13: error: 'length' undeclared (first u
+  test/math/gpu/test_log.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_log.mojo:81:16: error: conflicting types for 'log'; have 'int64
+  test/math/gpu/test_math.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_math.mojo:30:9: error: implicit declaration of function 'kernel
+  test/math/gpu/test_math_accuracy.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_math_accuracy.mojo:82:16: error: conflicting types for 'cosh'; 
+  test/math/gpu/test_pow_bf16.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_pow_bf16.mojo:152:7: error: 'do_bfloat_exp' undeclared (first u
+  test/math/gpu/test_powf_bf16.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_powf_bf16.mojo:138:13: error: 'length' undeclared (first use in
+  test/math/gpu/test_recip.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_recip.mojo:40:24: error: 'dtype' undeclared (first use in this 
+  test/math/gpu/test_rsqrt.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_rsqrt.mojo:82:16: error: conflicting types for 'sqrt'; have 'in
+  test/math/gpu/test_sin_cos_f64.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_sin_cos_f64.mojo:76:16: error: conflicting types for 'cos'; hav
+  test/math/gpu/test_sqrt_f64.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_sqrt_f64.mojo:76:12: error: conflicting types for 'sqrt'; have 
+  test/math/gpu/test_trig.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/gpu/test_trig.mojo:77:16: error: conflicting types for 'cos'; have 'int6
+  test/math/test_erf.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_erf.mojo:77:16: error: conflicting types for 'erf'; have 'int64_t(v
+  test/math/test_exp.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_exp.mojo:107:16: error: conflicting types for 'exp'; have 'int64_t(
+  test/math/test_ldexp.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx9mc1x22.c:53:16: error: conflicting types for 'ldexpf'; have 'int64
+  test/math/test_math.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_math.mojo:88:16: error: conflicting types for 'acos'; have 'int64_t
+  test/math/test_max.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_max.mojo:22:19: error: passing argument 1 of 'mojo_max' makes point
+  test/math/test_min.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_min.mojo:22:19: error: passing argument 1 of 'mojo_min' makes point
+  test/math/test_modf.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_modf.mojo:77:16: error: conflicting types for 'modf'; have 'int64_t
+  test/math/test_polynomial.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_polynomial.mojo:25:3: error: too many arguments to function 'assert
+  test/math/test_tanh.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_tanh.mojo:91:16: error: conflicting types for 'tanh'; have 'int64_t
+  test/math/test_ulp_distance.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/math/test_ulp_distance.mojo:138:9: error: implicit declaration of function 'u
+  test/memory/test_alloc.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_alloc.mojo:32:3: error: too many arguments to function 'assert_eq
+  test/memory/test_arc.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_arc.mojo:141:9: error: too many arguments to function 'ArcPointer
+  test/memory/test_bitcast.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_bitcast.mojo:22:3: error: too many arguments to function 'assert_
+  test/memory/test_is_trivially.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_is_trivially.mojo:40:15: error: redefinition of 'NoneTrivial___in
+  test/memory/test_memory.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_memory.mojo:141:16: error: conflicting types for 'memcmp'; have '
+  test/memory/test_negative_index_span.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_negative_index_span.mojo:30:3: error: aggregate value used where 
+  test/memory/test_owned_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_owned_pointer.mojo:126:9: error: too many arguments to function '
+  test/memory/test_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_pointer.mojo:174:9: error: implicit declaration of function 'Poin
+  test/memory/test_span.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_span.mojo:27:3: error: too many arguments to function 'assert_equ
+  test/memory/test_unsafe_maybe_uninit.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/test_unsafe_maybe_uninit.mojo:78:16: error: conflicting types for 'mem
+  test/memory/uninit_check/test_uninit_check_gather_poison.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_gather_poison.mojo:27:9: error: implici
+  test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo:28:9: error: im
+  test/memory/uninit_check/test_uninit_check_no_false_positives.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_no_false_positives.mojo:23:9: error: im
+  test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo:28:9: error: im
+  test/memory/unsafe_pointer/compile_fail/comparison_address_space.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/comparison_address_space.mojo:109:9: error
+  test/memory/unsafe_pointer/compile_fail/conversion_1.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/conversion_1.mojo:34:9: error: implicit de
+  test/memory/unsafe_pointer/compile_fail/conversion_4.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/conversion_4.mojo:32:9: error: implicit de
+  test/memory/unsafe_pointer/compile_fail/conversion_5.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/conversion_5.mojo:33:9: error: implicit de
+  test/memory/unsafe_pointer/compile_fail/conversion_6.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/conversion_6.mojo:36:9: error: implicit de
+  test/memory/unsafe_pointer/compile_fail/conversion_8.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/conversion_8.mojo:30:9: error: implicit de
+  test/memory/unsafe_pointer/compile_fail/mut_cast.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/compile_fail/mut_cast.mojo:105:9: error: implicit decla
+  test/memory/unsafe_pointer/test_unsafe_nullable_pointer.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/memory/unsafe_pointer/test_unsafe_nullable_pointer.mojo:221:7: error: expecte
+  test/memory/unsafe_pointer/test_unsafe_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppgmna0co.c:53:16: error: conflicting types for 'strchr'; have 'int64
+  test/os/path/test_basename.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_basename.mojo:24:9: error: too many arguments to function 'basen
+  test/os/path/test_dirname.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_dirname.mojo:22:9: error: too many arguments to function 'dirnam
+  test/os/path/test_exists.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_exists.mojo:26:9: error: too many arguments to function 'exists'
+  test/os/path/test_expanduser.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_expanduser.mojo:73:14: error: expected ':', ',', ';', '}' or '__
+  test/os/path/test_expandvars.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_expandvars.mojo:76:14: error: expected ':', ',', ';', '}' or '__
+  test/os/path/test_getsize.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_getsize.mojo:24:9: error: too many arguments to function 'getsiz
+  test/os/path/test_is_absolute.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_is_absolute.mojo:21:9: error: too many arguments to function 'is
+  test/os/path/test_isdir.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_isdir.mojo:23:9: error: too many arguments to function 'isdir'; 
+  test/os/path/test_isfile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_isfile.mojo:26:9: error: too many arguments to function 'isfile'
+  test/os/path/test_islink.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_islink.mojo:28:15: error: 'TEMP_DIR' undeclared (first use in th
+  test/os/path/test_join.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_join.mojo:25:9: error: too many arguments to function 'join'; ex
+  test/os/path/test_realpath.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_realpath.mojo:82:16: error: conflicting types for 'realpath'; ha
+  test/os/path/test_split.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_split.mojo:73:14: error: expected ':', ',', ';', '}' or '__attri
+  test/os/path/test_split_extension.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_split_extension.mojo:138:9: error: too many arguments to functio
+  test/os/path/test_splitroot.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/path/test_splitroot.mojo:114:9: error: too many arguments to function 'spl
+  test/os/test_env.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_env.mojo:76:16: error: conflicting types for 'getenv'; have 'int64_t(
+  test/os/test_isatty.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_isatty.mojo:78:16: error: '__stderrp' redeclared as different kind of
+  test/os/test_link.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_link.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribute__
+  test/os/test_listdir.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_listdir.mojo:101:9: error: too many arguments to function 'listdir'; 
+  test/os/test_mkdir_and_rmdir.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_mkdir_and_rmdir.mojo:73:14: error: expected ':', ',', ';', '}' or '__
+  test/os/test_process.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_process.mojo:93:16: error: conflicting types for 'setenv'; have 'int6
+  test/os/test_remove.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_remove.mojo:81:16: error: conflicting types for 'remove'; have 'int64
+  test/os/test_stat.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_stat.mojo:114:9: error: too many arguments to function 'stat'; expect
+  test/os/test_symlink.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_symlink.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribut
+  test/os/test_trap.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_trap.mojo:20:3: error: too many arguments to function 'mojo_abort'; e
+  test/os/test_trap_gpu.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/os/test_trap_gpu.mojo:21:3: error: too many arguments to function 'mojo_abort
+  test/pathlib/test_pathlib.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/pathlib/test_pathlib.mojo:73:14: error: expected ':', ',', ';', '}' or '__att
+  test/pwd/test_pwd.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/pwd/test_pwd.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribute__
+  test/python/test_ownership.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_ownership.mojo:145:25: error: passing argument 1 of 'mojo_obj_cal
+  test/python/test_python_cpython.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_cpython.mojo:45:3: error: too many arguments to function '
+  test/python/test_python_error_handling.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_error_handling.mojo:127:25: error: passing argument 1 of '
+  test/python/test_python_info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_info.mojo:113:9: error: too many arguments to function 'Py
+  test/python/test_python_interop.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_interop.mojo:25:25: error: passing argument 1 of 'mojo_obj
+  test/python/test_python_module_create.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_module_create.mojo:104:25: error: passing argument 1 of 'm
+  test/python/test_python_object.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_object.mojo:386:9: error: too many arguments to function '
+  test/python/test_python_to_mojo.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/python/test_python_to_mojo.mojo:146:9: error: too many arguments to function 
+  test/random/test_philox.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/random/test_philox.mojo:80:16: error: conflicting types for 'sqrt'; have 'int
+  test/random/test_random.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/random/test_random.mojo:36:9: error: too many arguments to function 'random_f
+  test/random/test_random_internals.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/random/test_random_internals.mojo:33:3: error: too many arguments to function
+  test/reflection/test_function.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/reflection/test_function.mojo:39:7: error: assignment to 'int64_t' {aka 'long
+  test/reflection/test_location.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/reflection/test_location.mojo:31:3: error: too many arguments to function 'as
+  test/reflection/test_reflect.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/reflection/test_reflect.mojo:210:6: error: conflicting types for 'StructToCap
+  test/reflection/test_traits.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/reflection/test_traits.mojo:35:7: error: assignment to 'int64_t' {aka 'long l
+  test/reflection/test_type_info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/reflection/test_type_info.mojo:36:3: error: too many arguments to function 'a
+  test/runtime/test_asyncrt.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/runtime/test_asyncrt.mojo:30:9: error: 'lhs' undeclared (first use in this fu
+  test/runtime/test_locks.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/runtime/test_locks.mojo:115:29: error: 'lock' undeclared (first use in this f
+  test/runtime/test_raising_asyncrt.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/runtime/test_raising_asyncrt.mojo:55:10: error: 'await' undeclared (first use
+  test/runtime/test_spin_waiter.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/runtime/test_spin_waiter.mojo:107:13: error: 'RUNS' undeclared (first use in 
+  test/runtime/test_tracing.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/runtime/test_tracing.mojo:33:9: error: 'lhs' undeclared (first use in this fu
+  test/subprocess/test_run.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/subprocess/test_run.mojo:21:9: error: too many arguments to function 'run'; e
+  test/sys/test_aarch64_target.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_aarch64_target.mojo:24:25: error: passing argument 1 of 'mojo_obj_ca
+  test/sys/test_build_info_debug.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_build_info_debug.mojo:22:3: error: too many arguments to function 'a
+  test/sys/test_c_types.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_c_types.mojo:143:25: error: passing argument 1 of 'mojo_obj_call1' m
+  test/sys/test_compile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_compile.mojo:21:14: error: passing argument 1 of 'Int' from incompat
+  test/sys/test_compile_debug.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_compile_debug.mojo:21:14: error: passing argument 1 of 'Int' from in
+  test/sys/test_cstring.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_cstring.mojo:28:7: error: assignment to 'int64_t' {aka 'long long in
+  test/sys/test_dlhandle.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_dlhandle.mojo:29:9: error: too many arguments to function 'OwnedDLHa
+  test/sys/test_exit_0.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_exit_0.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribut
+  test/sys/test_exit_1.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_exit_1.mojo:73:14: error: expected ':', ',', ';', '}' or '__attribut
+  test/sys/test_ffi.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_ffi.mojo:81:16: error: conflicting types for 'realpath'; have 'int64
+  test/sys/test_intrinsics.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_intrinsics.mojo:35:9: error: too many arguments to function 'gcd'; e
+  test/sys/test_linux_target.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_linux_target.mojo:27:25: error: passing argument 1 of 'mojo_obj_call
+  test/sys/test_macos_target.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_macos_target.mojo:28:25: error: passing argument 1 of 'mojo_obj_call
+  test/sys/test_sizeof.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_sizeof.mojo:22:3: error: too many arguments to function 'assert_equa
+  test/sys/test_targetinfo.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/sys/test_targetinfo.mojo:29:3: error: too many arguments to function 'assert_
+  test/tempfile/test_tempfile.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/tempfile/test_tempfile.mojo:78:14: error: expected ':', ',', ';', '}' or '__a
+  test/test_utils/compare_helpers.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/compare_helpers.mojo:45:9: error: implicit declaration of function
+  test/test_utils/hash.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/hash.mojo:25:9: error: too many arguments to function 'pop_count';
+  test/test_utils/math_helpers.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/math_helpers.mojo:24:14: error: passing argument 1 of 'Int' makes 
+  test/test_utils/test_utils.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/test_utils.mojo:55:18: error: 'DType' undeclared (first use in thi
+  test/test_utils/types.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/types.mojo:162:6: error: conflicting types for 'ObservableMoveOnly
+  test/test_utils/words.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/test_utils/words.mojo:50:6: error: 'words' undeclared (first use in this func
+  test/testing/prop/test_random.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/prop/test_random.mojo:32:3: error: too many arguments to function 'as
+  test/testing/prop/test_runner.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/prop/test_runner.mojo:73:9: error: implicit declaration of function '
+  test/testing/prop/test_strategy.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/prop/test_strategy.mojo:80:9: error: too many arguments to function '
+  test/testing/test_assert_raises.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/test_assert_raises.mojo:23:1: error: invalid argument to gimple call
+  test/testing/test_assertion.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/test_assertion.mojo:112:16: error: conflicting types for 'nan'; have 
+  test/testing/test_suite.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/test_suite.mojo:75:3: error: too many arguments to function 'assert_e
+  test/testing/test_suite_cli.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/testing/test_suite_cli.mojo:56:3: error: too many arguments to function 'asse
+  test/time/test_time.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/time/test_time.mojo:27:3: error: too many arguments to function 'sleep'; expe
+  test/utils/issue_13632.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/issue_13632.mojo:20:14: error: passing argument 1 of 'Int' makes pointe
+  test/utils/test_coord.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_coord.mojo:202:7: error: assignment to 'int64_t' {aka 'long long i
+  test/utils/test_index.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_index.mojo:23:3: error: too many arguments to function 'assert_equ
+  test/utils/test_numerics.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_numerics.mojo:84:16: error: expected identifier or '(' before 'siz
+  test/utils/test_select.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_select.mojo:20:9: error: too many arguments to function '_select_r
+  test/utils/test_static_tuple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_static_tuple.mojo:28:3: error: too many arguments to function 'ass
+  test/utils/test_tuple.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_tuple.mojo:21:17: error: passing argument 1 of 'String' makes poin
+  test/utils/test_type_functions.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_type_functions.mojo:29:3: error: too many arguments to function 'a
+  test/utils/test_variant.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/test/utils/test_variant.mojo:138:6: error: conflicting types for 'Poison___init__'
+  tools/gpu_info.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/tools/gpu_info.mojo:74:14: error: expected ':', ',', ';', '}' or '__attribute__' b

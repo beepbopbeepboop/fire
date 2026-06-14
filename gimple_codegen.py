@@ -1549,7 +1549,7 @@ def _strip_mojo_param_modifiers(pname: str) -> str:
     These modifiers are not valid in C and must be removed for code generation.
     Examples: 'inout self' → 'self', 'borrowed x' → 'x', 'owned data' → 'data'
     """
-    modifiers = ('inout', 'borrowed', 'owned', 'borrow')
+    modifiers = ('inout', 'borrowed', 'owned', 'borrow', 'out', 'mut', 'ref', 'read', 'copy')
     for mod in modifiers:
         if pname.startswith(mod + ' '):
             return pname[len(mod) + 1:].strip()
@@ -2452,6 +2452,12 @@ class GimpleGen:
     # Known runtime function signatures: fname -> (ret_type, [arg_types])
     # Used by _emit_call to ensure GIMPLE-valid argument types.
     _KNOWN_SIGS: dict = {
+        'conforms_to':           ('_Bool',      ['int64_t', 'int64_t']),
+        'llabs':                 ('int64_t',   ['int64_t']),
+        'labs':                  ('int64_t',   ['int64_t']),
+        'mojo_str_split':        ('MojoList *', ['char *', 'char *']),
+        'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
+        'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
         'mojo_repr':             ('char *',    ['int']),  # expects int, not void*
         'mojo_print':            ('void',      ['char *']),
@@ -3753,7 +3759,9 @@ class GimpleGen:
         # Pointer dereference * on a known pointer type
         if node.op == '*':
             if ot.endswith(' *'):
-                elem_type = ot[:-2].strip() or 'int'
+                elem_type = ot[:-2].strip() or 'int64_t'
+                if elem_type == 'void':
+                    elem_type = 'int64_t'
                 t = self._new_temp(elem_type)
                 self._emit(f"  {t} = *{ov};")
                 return elem_type, t
@@ -5040,11 +5048,13 @@ class GimpleGen:
                 return 'int', t
             if method == 'find' and arg_vals:
                 t = self._new_temp('int64_t')
-                self._emit_call('int64_t', t, 'mojo_str_find', [('char *', cstr_ov), ('char *', arg_vals[0])])
+                sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+                self._emit_call('int64_t', t, 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
                 return 'int64_t', t
             if method == 'split' and arg_vals:
                 t = self._new_temp('MojoList *')
-                self._emit_call('MojoList *', t, 'mojo_str_split', [('char *', cstr_ov), ('char *', arg_vals[0])])
+                sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+                self._emit_call('MojoList *', t, 'mojo_str_split', [('char *', cstr_ov), (sep_type, arg_vals[0])])
                 self._elem_types[t] = 'char *'
                 return 'MojoList *', t
             if method == 'splitlines':
@@ -6061,9 +6071,27 @@ class GimpleGen:
         if fname_raw == 'int' and len(arg_pairs) > 1:
             arg_pairs = arg_pairs[:1]
 
-        # range(stop) → mojo_range(0, stop); mojo_range expects (start, stop)
-        if fname_raw == 'range' and len(arg_pairs) == 1:
-            arg_pairs = [('int64_t', '(int64_t)0'), arg_pairs[0]]
+        # abs(int64_t) → llabs; abs only returns int, so use llabs for int64_t args
+        if fname_raw in ('abs', 'mojo_abs') and len(arg_pairs) == 1:
+            at, av = arg_pairs[0]
+            if at in ('int64_t', 'long long'):
+                arg64 = self._new_temp('int64_t')
+                self._emit(f'  {arg64} = (int64_t){av};')
+                t = self._new_temp('int64_t')
+                self._emit_call('int64_t', t, 'llabs', [('int64_t', arg64)])
+                return 'int64_t', t
+
+        # range(stop) → mojo_range(0, stop)
+        # range(start, stop, step) → mojo_range3(start, stop, step)
+        if fname_raw == 'range':
+            if len(arg_pairs) == 1:
+                arg_pairs = [('int64_t', '(int64_t)0'), arg_pairs[0]]
+            elif len(arg_pairs) == 3:
+                fname = 'mojo_range3'
+            # mojo_range / mojo_range3 return void * (opaque iterator)
+            t = self._new_temp('void *')
+            self._emit_call('void *', t, fname, arg_pairs)
+            return 'void *', t
 
         # min(a, b) / max(a, b) → inline ternary to avoid mojo_min(void*) mismatch
         if fname_raw in ('min', 'max') and len(arg_pairs) == 2:
@@ -7257,7 +7285,9 @@ class GimpleGen:
         else:
             vtype, v = self.lower_expr(node.value)
             ret = self.func_ret_type
-            if ret and ret != 'void' and vtype != ret:
+            if ret == 'void':
+                self._emit(_RETURN)
+            elif ret and ret != 'void' and vtype != ret:
                 tmp = self._new_temp(ret)
                 self._safe_coerce_emit(vtype, ret, v, tmp)
                 self._emit(f"  return {tmp};")
@@ -8538,8 +8568,12 @@ class GimpleGen:
                 ctype = 'MojoList *'
             else:
                 ctype = self._param_ctype(pname, ptype, node)
+            safe_bare = f'_kw_{bare}' if bare in _C_KEYWORDS or bare in _C_PARAM_EXTRA_KEYWORDS else bare
             self.var_types[bare] = ctype
-            param_strs.append(f"{ctype} {bare}")
+            if safe_bare != bare:
+                self.var_types[safe_bare] = ctype
+                self._c_names[bare] = safe_bare
+            param_strs.append(f"{ctype} {safe_bare}")
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
         # Record that this function takes varargs so call sites can pack args
@@ -9045,34 +9079,31 @@ class GimpleGen:
             if isinstance(s, FromImportStmt):
                 try:
                     exports = load_module(s.module)
-                    for name, alias in s.names:
-                        sym_name = alias if alias else name
-                        # A name already materialized as a concrete type from the
-                        # reflection table (link mode, kind 3) is a struct, not a
-                        # callable — don't also emit an `extern int Name ();`.
+                    def _register_sym(sym_name, orig_name, sym_info):
                         if sym_name in self.struct_field_types:
-                            continue
-                        sym_info = exports.get(name, {})
-
-                        # Handle both old format (string) and new format (dict)
+                            return
                         if isinstance(sym_info, str):
-                            # Legacy format: just return type
-                            sym_type = sym_info
                             self.imported_symbols[sym_name] = {
-                                'module': s.module,
-                                'original_name': name,
-                                'return_type': sym_type,
-                                'parameters': [],
-                                'signature': f"{sym_type} {sym_name} (void)"
+                                'module': s.module, 'original_name': orig_name,
+                                'return_type': sym_info, 'parameters': [],
+                                'signature': f"{sym_info} {sym_name} (void)"
                             }
-                            self.func_return_types[sym_name] = sym_type
-                        else:
-                            # New format: full signature info
+                            self.func_return_types[sym_name] = sym_info
+                        elif isinstance(sym_info, dict):
                             sym_info['module'] = s.module
-                            sym_info['original_name'] = name
+                            sym_info['original_name'] = orig_name
                             self.imported_symbols[sym_name] = sym_info
                             if 'c_return_type' in sym_info:
                                 self.func_return_types[sym_name] = sym_info['c_return_type']
+                    if not s.names:
+                        # Wildcard import: register all exported symbols
+                        for _wc_key, _wc_info in exports.items():
+                            _register_sym(_wc_key, _wc_key, _wc_info)
+                    else:
+                        for name, alias in s.names:
+                            sym_name = alias if alias else name
+                            sym_info = exports.get(name, {})
+                            _register_sym(sym_name, name, sym_info)
                 except Exception:
                     # Gracefully ignore module load errors
                     pass
@@ -9858,7 +9889,8 @@ class GimpleGen:
         _imported_names_renamed = {_safe_name(n) for n in _imported_names}
         # Also skip stubs for functions defined in any sub-module (do_imports=True monolithic build)
         _all_defined_funcs = set(self.func_return_types.keys()) | self._global_inline_defs
-        _skip_util = _local_structs | _imported_names | _local_funcs | _all_defined_funcs
+        _skip_util = (_local_structs | _imported_names | _local_funcs | _all_defined_funcs
+                      | _local_funcs_renamed | _imported_names_renamed)
         _util_pairs = [
             ('iter',    'int64_t iter(...);'),
             ('next',    'int64_t next(...);'),
@@ -9881,13 +9913,12 @@ class GimpleGen:
             ('Span_unsafe_ptr',        'int64_t Span_unsafe_ptr(...);'),
             ('Optional',               'int64_t Optional(...);'),
             ('int64_t_init_pointee_move', 'void int64_t_init_pointee_move(...);'),
-            # conforms_to is defined in mojo_compiler.py; stub would conflict with its definition
+            ('conforms_to',            '_Bool conforms_to(int64_t a, int64_t b);'),
             ('Codepoint',              'int64_t Codepoint(...);'),
             ('stat_result',            'int64_t stat_result(...);'),
             ('UInt128',                'int64_t UInt128(...);'),
             ('SIMDSize',               'int64_t SIMDSize(...);'),
             ('List',                   'int64_t List(...);'),
-            # assert_almost_equal is defined in mojo_compiler.py; stub conflicts
             ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
             ('ord',                    'int64_t ord(...);'),
             ('chr',                    'int64_t chr(...);'),
@@ -9905,7 +9936,6 @@ class GimpleGen:
             ('MojoList___contains__',  'int64_t MojoList___contains__(...);'),
             ('MojoList_get_loaded_kgen_pack', 'int64_t MojoList_get_loaded_kgen_pack(...);'),
             ('_stat_linux_x86',        'int64_t _stat_linux_x86(...);'),
-            # assert_equal is defined in mojo_compiler.py; stub conflicts with its definition
             ('func',                   'int64_t func(...);'),
             ('mojo_getenv',            'int64_t mojo_getenv(...);'),
         ]
@@ -10522,6 +10552,10 @@ class GimpleGen:
                 if safe != sym_name:
                     # Replace first occurrence of the bare function name with safe name
                     signature = re.sub(r'\b' + re.escape(sym_name) + r'\b', safe, signature, count=1)
+                # Strip Mojo parameter modifiers (out, inout, mut, etc.) from signature
+                signature = re.sub(
+                    r'\b(inout|borrowed|owned|borrow|out|mut|ref|read|copy)\s+(?=\w)',
+                    '', signature)
                 parts.append(f"extern {signature};  /* from {module} */")
             else:
                 # Legacy format fallback: use pure variadic so callers can pass any args.

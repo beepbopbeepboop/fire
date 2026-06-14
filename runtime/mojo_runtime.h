@@ -231,6 +231,7 @@ char *mojo_cstr_repeat(char *s, int64_t n);
 /* Additional Python builtins */
 int64_t mojo_len(int obj);
 void *mojo_range(int64_t start, int64_t stop);
+void *mojo_range3(int64_t start, int64_t stop, int64_t step);
 void *mojo_enumerate(void *iterable);
 void *mojo_zip(void *a, void *b);
 void *mojo_map(void *func, void *iterable);
@@ -268,7 +269,6 @@ MojoList *mojo_get_argv(void);
 typedef void* MojoFileHandle;
 
 MojoFileHandle mojo_open(char *filename, char *mode);
-void mojo_close(MojoFileHandle fh);
 int64_t mojo_write(MojoFileHandle fh, char *data, int64_t len);
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
 char *mojo_file_read_all(char *filename);

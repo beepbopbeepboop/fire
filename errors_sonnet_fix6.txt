@@ -1,0 +1,1940 @@
+Stdlib path: /Users/mrs/claude/modular/mojo/stdlib
+Scanning roots: benchmarks, std, test, tools
+Found 643 .mojo files
+
+  benchmarks/algorithm/bench_elementwise.mojo...FAIL
+  benchmarks/bit/bench_bit.mojo...FAIL
+  benchmarks/builtin/bench_error.mojo...FAIL
+  benchmarks/builtin/bench_int.mojo...FAIL
+  benchmarks/builtin/bench_sort.mojo...FAIL
+  benchmarks/collections/bench_bitset.mojo...FAIL
+  benchmarks/collections/bench_dict.mojo...FAIL
+  benchmarks/collections/bench_dict_string.mojo...FAIL
+  benchmarks/collections/bench_grapheme.mojo...FAIL
+  benchmarks/collections/bench_grapheme_reverse.mojo...FAIL
+  benchmarks/collections/bench_set.mojo...FAIL
+  benchmarks/collections/bench_string.mojo...FAIL
+  benchmarks/collections/string/bench_atof.mojo...FAIL
+  benchmarks/format/bench_tstring.mojo...FAIL
+  benchmarks/hashlib/bench_hash.mojo...FAIL
+  benchmarks/math/bench_math.mojo...FAIL
+  benchmarks/memory/bench_alloc.mojo...FAIL
+  benchmarks/memory/bench_heap_parallel.mojo...FAIL
+  benchmarks/python/bench_bindings/mojo_module.mojo...FAIL
+  benchmarks/utils/bench_formatter.mojo...FAIL
+  benchmarks/utils/bench_memmem.mojo...FAIL
+  std/__init__.mojo...FAIL
+  std/_plugin/__init__.mojo...FAIL
+  std/_plugin/_impl.mojo...FAIL
+  std/_plugin/_trait.mojo...FAIL
+  std/algorithm/__init__.mojo...FAIL
+  std/algorithm/backend/__init__.mojo...FAIL
+  std/algorithm/backend/cpu/__init__.mojo...FAIL
+  std/algorithm/backend/cpu/elementwise.mojo...FAIL
+  std/algorithm/backend/cpu/map.mojo...FAIL
+  std/algorithm/backend/cpu/parallelize.mojo...FAIL
+  std/algorithm/backend/cpu/reduction.mojo...FAIL
+  std/algorithm/backend/cpu/stencil.mojo...FAIL
+  std/algorithm/backend/gpu/__init__.mojo...FAIL
+  std/algorithm/backend/gpu/elementwise.mojo...FAIL
+  std/algorithm/backend/gpu/reduction.mojo...FAIL
+  std/algorithm/backend/gpu/stencil.mojo...FAIL
+  std/algorithm/backend/tile.mojo...FAIL
+  std/algorithm/backend/unswitch.mojo...FAIL
+  std/algorithm/backend/vectorize.mojo...FAIL
+  std/algorithm/functional.mojo...FAIL
+  std/algorithm/memory.mojo...FAIL
+  std/algorithm/reduction.mojo...FAIL
+  std/atomic/__init__.mojo...FAIL
+  std/atomic/atomic.mojo...FAIL
+  std/base64/__init__.mojo...FAIL
+  std/base64/_b64encode.mojo...FAIL
+  std/base64/base64.mojo...FAIL
+  std/benchmark/__init__.mojo...FAIL
+  std/benchmark/_progress.mojo...FAIL
+  Progress: 0 passed, 50 failed  std/benchmark/bencher.mojo...FAIL
+  std/benchmark/benchmark.mojo...FAIL
+  std/benchmark/compiler.mojo...FAIL
+  std/benchmark/memory.mojo...FAIL
+  std/benchmark/quick_bench.mojo...FAIL
+  std/bit/__init__.mojo...FAIL
+  std/bit/bit.mojo...FAIL
+  std/bit/mask.mojo...FAIL
+  std/builtin/__init__.mojo...FAIL
+  std/builtin/_closure.mojo...FAIL
+  std/builtin/_format_float.mojo...FAIL
+  std/builtin/_startup.mojo...FAIL
+  std/builtin/_stubs.mojo...FAIL
+  std/builtin/anytype.mojo...FAIL
+  std/builtin/bool.mojo...FAIL
+  std/builtin/breakpoint.mojo...FAIL
+  std/builtin/builtin_slice.mojo...FAIL
+  std/builtin/comparable.mojo...FAIL
+  std/builtin/constrained.mojo...FAIL
+  std/builtin/coroutine.mojo...FAIL
+  std/builtin/debug_assert.mojo...FAIL
+  std/builtin/device_passable.mojo...FAIL
+  std/builtin/dtype.mojo...FAIL
+  std/builtin/error.mojo...FAIL
+  std/builtin/float_literal.mojo...FAIL
+  std/builtin/floatable.mojo...FAIL
+  std/builtin/format_int.mojo...FAIL
+  std/builtin/globals.mojo...FAIL
+  std/builtin/identifiable.mojo...FAIL
+  std/builtin/int.mojo...FAIL
+  std/builtin/int_literal.mojo...FAIL
+  std/builtin/len.mojo...FAIL
+  std/builtin/none.mojo...FAIL
+  std/builtin/range.mojo...FAIL
+  std/builtin/rebind.mojo...FAIL
+  std/builtin/reversed.mojo...FAIL
+  std/builtin/simd.mojo...FAIL
+  std/builtin/sort.mojo...FAIL
+  std/builtin/string_literal.mojo...FAIL
+  std/builtin/swap.mojo...FAIL
+  std/builtin/tuple.mojo...FAIL
+  std/builtin/type_aliases.mojo...FAIL
+  std/builtin/value.mojo...FAIL
+  std/builtin/variadics.mojo...FAIL
+  std/collections/__init__.mojo...FAIL
+  std/collections/_asan_annotations.mojo...FAIL
+  std/collections/_conditional.mojo...FAIL
+  std/collections/_swisstable.mojo...FAIL
+  std/collections/binary_heap.mojo...FAIL
+  std/collections/bitset.mojo...FAIL
+  Progress: 0 passed, 100 failed  std/collections/check_bounds.mojo...FAIL
+  std/collections/counter.mojo...FAIL
+  std/collections/deque.mojo...FAIL
+  std/collections/dict.mojo...FAIL
+  std/collections/inline_array.mojo...FAIL
+  std/collections/interval.mojo...FAIL
+  std/collections/linked_list.mojo...FAIL
+  std/collections/list.mojo...FAIL
+  std/collections/optional.mojo...FAIL
+  std/collections/set.mojo...FAIL
+  std/collections/string/__init__.mojo...FAIL
+  std/collections/string/_grapheme_break.mojo...FAIL
+  std/collections/string/_grapheme_break_lookups.mojo...FAIL
+  std/collections/string/_parsing_numbers/__init__.mojo...FAIL
+  std/collections/string/_parsing_numbers/constants.mojo...FAIL
+  std/collections/string/_parsing_numbers/parsing_floats.mojo...FAIL
+  std/collections/string/_parsing_numbers/parsing_integers.mojo...FAIL
+  std/collections/string/_unicode.mojo...FAIL
+  std/collections/string/_unicode_lookups.mojo...FAIL
+  std/collections/string/_utf8.mojo...FAIL
+  std/collections/string/codepoint.mojo...FAIL
+  std/collections/string/format.mojo...FAIL
+  std/collections/string/iterators.mojo...FAIL
+  std/collections/string/string.mojo...FAIL
+  std/collections/string/string_slice.mojo...FAIL
+  std/compile/__init__.mojo...FAIL
+  std/compile/compile.mojo...FAIL
+  std/complex/__init__.mojo...FAIL
+  std/complex/complex.mojo...FAIL
+  std/documentation/__init__.mojo...FAIL
+  std/documentation/documentation.mojo...FAIL
+  std/ffi/__init__.mojo...FAIL
+  std/ffi/cstring.mojo...FAIL
+  std/ffi/unsafe_union.mojo...FAIL
+  std/format/__init__.mojo...FAIL
+  std/format/_utils.mojo...FAIL
+  std/format/repr.mojo...FAIL
+  std/format/tstring.mojo...FAIL
+  std/gpu/__init__.mojo...FAIL
+  std/gpu/_utils.mojo...FAIL
+  std/gpu/compute/__init__.mojo...FAIL
+  std/gpu/compute/arch/__init__.mojo...FAIL
+  std/gpu/compute/arch/mma_amd.mojo...FAIL
+  std/gpu/compute/arch/mma_amd_rdna.mojo...FAIL
+  std/gpu/compute/arch/mma_apple.mojo...FAIL
+  std/gpu/compute/arch/mma_nvidia.mojo...FAIL
+  std/gpu/compute/arch/mma_nvidia_sm100.mojo...FAIL
+  std/gpu/compute/arch/tcgen05.mojo...FAIL
+  std/gpu/compute/mma.mojo...FAIL
+  std/gpu/compute/mma_operand_descriptor.mojo...FAIL
+  Progress: 0 passed, 150 failed  std/gpu/compute/mma_util.mojo...FAIL
+  std/gpu/compute/tensor_ops.mojo...FAIL
+  std/gpu/globals.mojo...FAIL
+  std/gpu/host/__init__.mojo...FAIL
+  std/gpu/host/_amdgpu_hip.mojo...FAIL
+  std/gpu/host/_device_context_hal.mojo...FAIL
+  std/gpu/host/_device_context_metal.mojo...FAIL
+  std/gpu/host/_metal.mojo...FAIL
+  std/gpu/host/_nvidia_cuda.mojo...FAIL
+  std/gpu/host/_tensormap.mojo...FAIL
+  std/gpu/host/_tracing.mojo...FAIL
+  std/gpu/host/compile.mojo...FAIL
+  std/gpu/host/constant_memory_mapping.mojo...FAIL
+  std/gpu/host/device_attribute.mojo...FAIL
+  std/gpu/host/device_context.mojo...FAIL
+  std/gpu/host/dim.mojo...FAIL
+  std/gpu/host/func_attribute.mojo...FAIL
+  std/gpu/host/info.mojo...FAIL
+  std/gpu/host/launch_attribute.mojo...FAIL
+  std/gpu/host/nvidia/__init__.mojo...FAIL
+  std/gpu/host/nvidia/tma.mojo...FAIL
+  std/gpu/intrinsics.mojo...FAIL
+  std/gpu/memory/__init__.mojo...FAIL
+  std/gpu/memory/memory.mojo...FAIL
+  std/gpu/primitives/__init__.mojo...FAIL
+  std/gpu/primitives/block.mojo...FAIL
+  std/gpu/primitives/cluster.mojo...FAIL
+  std/gpu/primitives/grid_controls.mojo...FAIL
+  std/gpu/primitives/id.mojo...FAIL
+  std/gpu/primitives/warp.mojo...FAIL
+  std/gpu/profiler.mojo...FAIL
+  std/gpu/sync/__init__.mojo...FAIL
+  std/gpu/sync/semaphore.mojo...FAIL
+  std/gpu/sync/sync.mojo...FAIL
+  std/hashlib/__init__.mojo...FAIL
+  std/hashlib/_ahash.mojo...FAIL
+  std/hashlib/_fnv1a.mojo...FAIL
+  std/hashlib/hash.mojo...FAIL
+  std/hashlib/hasher.mojo...FAIL
+  std/io/__init__.mojo...FAIL
+  std/io/file.mojo...FAIL
+  std/io/file_descriptor.mojo...FAIL
+  std/io/io.mojo...FAIL
+  std/io/write.mojo...FAIL
+  std/iter/__init__.mojo...FAIL
+  std/itertools/__init__.mojo...FAIL
+  std/itertools/itertools.mojo...FAIL
+  std/logger/__init__.mojo...FAIL
+  std/logger/logger.mojo...FAIL
+  std/math/__init__.mojo...FAIL
+  Progress: 0 passed, 200 failed  std/math/constants.mojo...FAIL
+  std/math/fast.mojo...FAIL
+  std/math/math.mojo...FAIL
+  std/math/polynomial.mojo...FAIL
+  std/math/uutils.mojo...FAIL
+  std/memory/__init__.mojo...FAIL
+  std/memory/_poison.mojo...FAIL
+  std/memory/alloc.mojo...FAIL
+  std/memory/arc_pointer.mojo...FAIL
+  std/memory/memory.mojo...FAIL
+  std/memory/owned_pointer.mojo...FAIL
+  std/memory/pointer.mojo...FAIL
+  std/memory/span.mojo...FAIL
+  std/memory/stack_allocation.mojo...FAIL
+  std/memory/unsafe.mojo...FAIL
+  std/memory/unsafe_maybe_uninit.mojo...FAIL
+  std/memory/unsafe_nullable_pointer.mojo...FAIL
+  std/memory/unsafe_pointer.mojo...FAIL
+  std/os/__init__.mojo...FAIL
+  std/os/_linux_aarch64.mojo...FAIL
+  std/os/_linux_x86.mojo...FAIL
+  std/os/_macos.mojo...FAIL
+  std/os/env.mojo...FAIL
+  std/os/fstat.mojo...FAIL
+  std/os/os.mojo...FAIL
+  std/os/path/__init__.mojo...FAIL
+  std/os/path/path.mojo...FAIL
+  std/os/pathlike.mojo...FAIL
+  std/os/process.mojo...FAIL
+  std/pathlib/__init__.mojo...FAIL
+  std/pathlib/path.mojo...FAIL
+  std/prelude/__init__.mojo...FAIL
+  std/pwd/__init__.mojo...FAIL
+  std/pwd/_linux.mojo...FAIL
+  std/pwd/_macos.mojo...FAIL
+  std/pwd/pwd.mojo...FAIL
+  std/python/__init__.mojo...FAIL
+  std/python/_cpython.mojo...FAIL
+  std/python/_python_func.mojo...FAIL
+  std/python/bindings.mojo...FAIL
+  std/python/conversions.mojo...FAIL
+  std/python/python.mojo...FAIL
+  std/python/python_object.mojo...FAIL
+  std/random/__init__.mojo...FAIL
+  std/random/_rng.mojo...FAIL
+  std/random/philox.mojo...FAIL
+  std/random/random.mojo...FAIL
+  std/reflection/__init__.mojo...FAIL
+  std/reflection/function.mojo...FAIL
+  std/reflection/location.mojo...FAIL
+  Progress: 0 passed, 250 failed  std/reflection/reflect.mojo...FAIL
+  std/reflection/traits.mojo...FAIL
+  std/reflection/type_info.mojo...FAIL
+  std/runtime/__init__.mojo...FAIL
+  std/runtime/asyncrt.mojo...FAIL
+  std/runtime/tracing.mojo...FAIL
+  std/stat/__init__.mojo...FAIL
+  std/stat/stat.mojo...FAIL
+  std/subprocess/__init__.mojo...FAIL
+  std/subprocess/subprocess.mojo...FAIL
+  std/sys/__init__.mojo...FAIL
+  std/sys/_amdgpu.mojo...FAIL
+  std/sys/_assembly.mojo...FAIL
+  std/sys/_build.mojo...FAIL
+  std/sys/_hal/__init__.mojo...FAIL
+  std/sys/_hal/context.mojo...FAIL
+  std/sys/_hal/device.mojo...FAIL
+  std/sys/_hal/driver.mojo...FAIL
+  std/sys/_hal/event.mojo...FAIL
+  std/sys/_hal/plugin.mojo...FAIL
+  std/sys/_hal/queue.mojo...FAIL
+  std/sys/_hal/status.mojo...FAIL
+  std/sys/_hal/stream.mojo...FAIL
+  std/sys/_io.mojo...FAIL
+  std/sys/_libc.mojo...FAIL
+  std/sys/_libc_errno.mojo...FAIL
+  std/sys/_metal_print.mojo...FAIL
+  std/sys/arg.mojo...FAIL
+  std/sys/compile.mojo...FAIL
+  std/sys/debug.mojo...FAIL
+  std/sys/defines.mojo...FAIL
+  std/sys/info.mojo...FAIL
+  std/sys/intrinsics.mojo...FAIL
+  std/sys/terminate.mojo...FAIL
+  std/tempfile/__init__.mojo...FAIL
+  std/tempfile/tempfile.mojo...FAIL
+  std/testing/__init__.mojo...FAIL
+  std/testing/prop/__init__.mojo...FAIL
+  std/testing/prop/random.mojo...FAIL
+  std/testing/prop/runner.mojo...FAIL
+  std/testing/prop/strategy/__init__.mojo...FAIL
+  std/testing/prop/strategy/list_strategy.mojo...FAIL
+  std/testing/prop/strategy/simd_strategy.mojo...FAIL
+  std/testing/prop/strategy/string_strategy.mojo...FAIL
+  std/testing/suite.mojo...FAIL
+  std/testing/testing.mojo...FAIL
+  std/time/__init__.mojo...FAIL
+  std/time/time.mojo...FAIL
+  std/utils/__init__.mojo...FAIL
+  std/utils/_ansi.mojo...FAIL
+  Progress: 0 passed, 300 failed  std/utils/_nicheable.mojo...FAIL
+  std/utils/_select.mojo...FAIL
+  std/utils/_serialize.mojo...FAIL
+  std/utils/_visualizers.mojo...FAIL
+  std/utils/coord.mojo...FAIL
+  std/utils/fast_div.mojo...FAIL
+  std/utils/index.mojo...FAIL
+  std/utils/lock.mojo...FAIL
+  std/utils/numerics.mojo...FAIL
+  std/utils/static_tuple.mojo...FAIL
+  std/utils/type_functions.mojo...FAIL
+  std/utils/variant.mojo...FAIL
+  test/algorithm/gpu/test_binary_apply.mojo...FAIL
+  test/algorithm/gpu/test_elementwise.mojo...FAIL
+  test/algorithm/gpu/test_reduce.mojo...FAIL
+  test/algorithm/gpu/test_reduce_atomic.mojo...FAIL
+  test/algorithm/test_elementwise.mojo...FAIL
+  test/algorithm/test_elementwise_1d.mojo...FAIL
+  test/algorithm/test_map.mojo...FAIL
+  test/algorithm/test_parallelize.mojo...FAIL
+  test/algorithm/test_reductions.mojo...FAIL
+  test/algorithm/test_stencil.mojo...FAIL
+  test/algorithm/test_tile.mojo...FAIL
+  test/algorithm/test_vectorize.mojo...FAIL
+  test/asyncrt/asyncrt_test_utils.mojo...FAIL
+  test/asyncrt/test_buffer.mojo...FAIL
+  test/asyncrt/test_capture.mojo...FAIL
+  test/asyncrt/test_copies.mojo...FAIL
+  test/asyncrt/test_cuda.mojo...FAIL
+  test/asyncrt/test_device_pointer.mojo...FAIL
+  test/asyncrt/test_device_pointer_kernel.mojo...FAIL
+  test/asyncrt/test_elementwise.mojo...FAIL
+  test/asyncrt/test_function.mojo...FAIL
+  test/asyncrt/test_function_regress.mojo...FAIL
+  test/asyncrt/test_hip.mojo...FAIL
+  test/asyncrt/test_host_func.mojo...FAIL
+  test/asyncrt/test_host_mapped.mojo...FAIL
+  test/asyncrt/test_memset.mojo...FAIL
+  test/asyncrt/test_multi_context.mojo...FAIL
+  test/asyncrt/test_multi_stream.mojo...FAIL
+  test/asyncrt/test_multicast_memory.mojo...FAIL
+  test/asyncrt/test_smoke.mojo...FAIL
+  test/asyncrt/test_timing.mojo...FAIL
+  test/atomic/test_atomic.mojo...FAIL
+  test/atomic/test_compile_atomic.mojo...FAIL
+  test/base64/test_base64.mojo...FAIL
+  test/benchmark/test_bencher_device_context_iter_custom.mojo...FAIL
+  test/benchmark/test_benchmark.mojo...FAIL
+  test/benchmark/test_benchmark_compiler.mojo...FAIL
+  test/benchmark/test_mojobench.mojo...FAIL
+  Progress: 0 passed, 350 failed  test/benchmark/test_quick_bench.mojo...FAIL
+  test/bit/test_bit.mojo...FAIL
+  test/bit/test_mask.mojo...FAIL
+  test/builtin/test_any_all.mojo...FAIL
+  test/builtin/test_bfloat16.mojo...FAIL
+  test/builtin/test_bool.mojo...FAIL
+  test/builtin/test_bool_indexer_compile_fail.mojo...FAIL
+  test/builtin/test_comparable.mojo...FAIL
+  test/builtin/test_debug_assert.mojo...FAIL
+  test/builtin/test_debug_assert_compile_time.mojo...FAIL
+  test/builtin/test_debug_assert_default_error.mojo...FAIL
+  test/builtin/test_debug_assert_location.mojo...FAIL
+  test/builtin/test_debug_assert_mode_all.mojo...FAIL
+  test/builtin/test_debug_assert_mode_all_error.mojo...FAIL
+  test/builtin/test_debug_assert_mode_none.mojo...FAIL
+  test/builtin/test_debug_assert_warning.mojo...FAIL
+  test/builtin/test_default_equatable_compile_fail.mojo...FAIL
+  test/builtin/test_default_hashable_compile_fail.mojo...FAIL
+  test/builtin/test_default_writable_compile_fail.mojo...FAIL
+  test/builtin/test_dtype.mojo...FAIL
+  test/builtin/test_error.mojo...FAIL
+  test/builtin/test_file.mojo...FAIL
+  test/builtin/test_float_literal.mojo...FAIL
+  test/builtin/test_format_compile_fail.mojo...FAIL
+  test/builtin/test_format_float.mojo...FAIL
+  test/builtin/test_format_float_lut_optimization.mojo...FAIL
+  test/builtin/test_format_int.mojo...FAIL
+  test/builtin/test_global_constant_compile_fail.mojo...FAIL
+  test/builtin/test_int.mojo...FAIL
+  test/builtin/test_int_literal.mojo...FAIL
+  test/builtin/test_issue_1004.mojo...FAIL
+  test/builtin/test_issue_1505.mojo...FAIL
+  test/builtin/test_issue_3908.mojo...FAIL
+  test/builtin/test_list_literal.mojo...FAIL
+  test/builtin/test_math.mojo...FAIL
+  test/builtin/test_none.mojo...FAIL
+  test/builtin/test_print.mojo...FAIL
+  test/builtin/test_print_long_string.mojo...FAIL
+  test/builtin/test_print_stderr.mojo...FAIL
+  test/builtin/test_range.mojo...FAIL
+  test/builtin/test_range_out_of_bounds.mojo...FAIL
+  test/builtin/test_rebind.mojo...FAIL
+  test/builtin/test_reversed.mojo...FAIL
+  test/builtin/test_simd.mojo...FAIL
+  test/builtin/test_simd_fastmath.mojo...FAIL
+  test/builtin/test_slice.mojo...FAIL
+  test/builtin/test_some.mojo...FAIL
+  test/builtin/test_sort.mojo...FAIL
+  test/builtin/test_sort_issue_1018.mojo...FAIL
+  test/builtin/test_stdin.mojo...FAIL
+  Progress: 0 passed, 400 failed  test/builtin/test_string_compatibility.mojo...FAIL
+  test/builtin/test_string_literal.mojo...FAIL
+  test/builtin/test_stubs.mojo...FAIL
+  test/builtin/test_swap.mojo...FAIL
+  test/builtin/test_tuple.mojo...FAIL
+  test/builtin/test_uint.mojo...FAIL
+  test/builtin/test_value.mojo...FAIL
+  test/builtin/test_variadic.mojo...FAIL
+  test/collections/string/_grapheme_conformance_data.mojo...FAIL
+  test/collections/string/test_atof.mojo...FAIL
+  test/collections/string/test_grapheme.mojo...FAIL
+  test/collections/string/test_grapheme_conformance.mojo...FAIL
+  test/collections/string/test_iterators.mojo...FAIL
+  test/collections/string/test_mem_functions.mojo...FAIL
+  test/collections/string/test_number_parsing_lut_optimization.mojo...FAIL
+  test/collections/string/test_string.mojo...FAIL
+  test/collections/string/test_string_slice.mojo...FAIL
+  test/collections/string/test_string_unicode_panic.mojo...FAIL
+  test/collections/string/test_unicode.mojo...FAIL
+  test/collections/string/test_utf8.mojo...FAIL
+  test/collections/test_asan_annotations_list.mojo...FAIL
+  test/collections/test_binary_heap.mojo...FAIL
+  test/collections/test_binary_heap_assert_empty_peek.mojo...FAIL
+  test/collections/test_binary_heap_assert_empty_pop.mojo...FAIL
+  test/collections/test_bitset.mojo...FAIL
+  test/collections/test_check_bounds_assert_error.mojo...FAIL
+  test/collections/test_codepoint.mojo...FAIL
+  test/collections/test_conditional.mojo...FAIL
+  test/collections/test_counter.mojo...FAIL
+  test/collections/test_deque.mojo...FAIL
+  test/collections/test_dict.mojo...FAIL
+  test/collections/test_inline_array.mojo...FAIL
+  test/collections/test_interval.mojo...FAIL
+  test/collections/test_linked_list.mojo...FAIL
+  test/collections/test_list.mojo...FAIL
+  test/collections/test_list_getitem_invalid_index_int.mojo...FAIL
+  test/collections/test_list_getitem_invalid_index_uint.mojo...FAIL
+  test/collections/test_negative_index_deque.mojo...FAIL
+  test/collections/test_negative_index_deque_insert.mojo...FAIL
+  test/collections/test_negative_index_inline_array.mojo...FAIL
+  test/collections/test_negative_index_linked_list.mojo...FAIL
+  test/collections/test_negative_index_list.mojo...FAIL
+  test/collections/test_negative_index_string.mojo...FAIL
+  test/collections/test_negative_index_string_slice.mojo...FAIL
+  test/collections/test_optional.mojo...FAIL
+  test/collections/test_optional_none_abort.mojo...FAIL
+  test/collections/test_set.mojo...FAIL
+  test/compile/test_compile.mojo...FAIL
+  test/compile/test_functions_in_module.mojo...FAIL
+  test/complex/test_complex.mojo...FAIL
+  Progress: 0 passed, 450 failed  test/complex/test_mandelbrot.mojo...FAIL
+  test/ffi/test_external_call.mojo...FAIL
+  test/ffi/test_unsafe_union.mojo...FAIL
+  test/format/compile_fail/test_writable_error.mojo...FAIL
+  test/format/test_format.mojo...FAIL
+  test/format/test_tstring.mojo...FAIL
+  test/format/test_utils.mojo...FAIL
+  test/gpu/primitives/test_block_nd.mojo...FAIL
+  test/gpu/test_apple_mma_invalid_types.mojo...FAIL
+  test/hashlib/test_ahash.mojo...FAIL
+  test/hashlib/test_fnv1a.mojo...FAIL
+  test/hashlib/test_hash.mojo...FAIL
+  test/hashlib/test_hasher.mojo...FAIL
+  test/io/test_file_descriptor.mojo...FAIL
+  test/io/test_write.mojo...FAIL
+  test/io/test_write_to_stdout.mojo...FAIL
+  test/iter/test_chain.mojo...FAIL
+  test/iter/test_empty.mojo...FAIL
+  test/iter/test_enumerate.mojo...FAIL
+  test/iter/test_iter.mojo...FAIL
+  test/iter/test_map.mojo...FAIL
+  test/iter/test_next.mojo...FAIL
+  test/iter/test_nth.mojo...FAIL
+  test/iter/test_peek.mojo...FAIL
+  test/iter/test_ref_iteration.mojo...FAIL
+  test/iter/test_zip.mojo...FAIL
+  test/itertools/test_count.mojo...FAIL
+  test/itertools/test_cycle.mojo...FAIL
+  test/itertools/test_drop.mojo...FAIL
+  test/itertools/test_drop_negative_count.mojo...FAIL
+  test/itertools/test_drop_while.mojo...FAIL
+  test/itertools/test_product.mojo...FAIL
+  test/itertools/test_repeat.mojo...FAIL
+  test/itertools/test_take.mojo...FAIL
+  test/itertools/test_take_negative_count.mojo...FAIL
+  test/itertools/test_take_while.mojo...FAIL
+  test/logger/test_logger.mojo...FAIL
+  test/logger/test_logger_alias.mojo...FAIL
+  test/logger/test_logger_critical.mojo...FAIL
+  test/logger/test_logger_with_env.mojo...FAIL
+  test/math/gpu/test_abs.mojo...FAIL
+  test/math/gpu/test_arithmetic_sm100.mojo...FAIL
+  test/math/gpu/test_exp.mojo...FAIL
+  test/math/gpu/test_exp_approx_f32.mojo...FAIL
+  test/math/gpu/test_log.mojo...FAIL
+  test/math/gpu/test_math.mojo...FAIL
+  test/math/gpu/test_math_accuracy.mojo...FAIL
+  test/math/gpu/test_pow_bf16.mojo...FAIL
+  test/math/gpu/test_powf_bf16.mojo...FAIL
+  test/math/gpu/test_recip.mojo...FAIL
+  Progress: 0 passed, 500 failed  test/math/gpu/test_rsqrt.mojo...FAIL
+  test/math/gpu/test_sin_cos_f64.mojo...FAIL
+  test/math/gpu/test_sqrt_f64.mojo...FAIL
+  test/math/gpu/test_trig.mojo...FAIL
+  test/math/test_erf.mojo...FAIL
+  test/math/test_exp.mojo...FAIL
+  test/math/test_ldexp.mojo...FAIL
+  test/math/test_math.mojo...FAIL
+  test/math/test_max.mojo...FAIL
+  test/math/test_min.mojo...FAIL
+  test/math/test_modf.mojo...FAIL
+  test/math/test_polynomial.mojo...FAIL
+  test/math/test_tanh.mojo...FAIL
+  test/math/test_ulp_distance.mojo...FAIL
+  test/memory/test_alloc.mojo...FAIL
+  test/memory/test_arc.mojo...FAIL
+  test/memory/test_bitcast.mojo...FAIL
+  test/memory/test_fail/layout_invalid_alignment.mojo...FAIL
+  test/memory/test_fail/layout_invalid_alignment_abort.mojo...FAIL
+  test/memory/test_is_trivially.mojo...FAIL
+  test/memory/test_memory.mojo...FAIL
+  test/memory/test_negative_index_span.mojo...FAIL
+  test/memory/test_owned_pointer.mojo...FAIL
+  test/memory/test_pointer.mojo...FAIL
+  test/memory/test_span.mojo...FAIL
+  test/memory/test_unsafe_maybe_uninit.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_bfloat16_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_disabled.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_float16_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_float32_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_float64_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_gather_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_no_false_positives.mojo...FAIL
+  test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/comparison_address_space.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_1.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_4.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_5.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_6.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_7.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/conversion_8.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/mut_cast.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/unsafe_from_address_0.mojo...FAIL
+  test/memory/unsafe_pointer/compile_fail/unsafe_from_address_neg.mojo...FAIL
+  test/memory/unsafe_pointer/test_unsafe_nullable_pointer.mojo...FAIL
+  test/memory/unsafe_pointer/test_unsafe_pointer.mojo...FAIL
+  test/os/path/test_basename.mojo...FAIL
+  test/os/path/test_dirname.mojo...FAIL
+  test/os/path/test_exists.mojo...FAIL
+  Progress: 0 passed, 550 failed  test/os/path/test_expanduser.mojo...FAIL
+  test/os/path/test_expandvars.mojo...FAIL
+  test/os/path/test_getsize.mojo...FAIL
+  test/os/path/test_is_absolute.mojo...FAIL
+  test/os/path/test_isdir.mojo...FAIL
+  test/os/path/test_isfile.mojo...FAIL
+  test/os/path/test_islink.mojo...FAIL
+  test/os/path/test_join.mojo...FAIL
+  test/os/path/test_realpath.mojo...FAIL
+  test/os/path/test_split.mojo...FAIL
+  test/os/path/test_split_extension.mojo...FAIL
+  test/os/path/test_splitroot.mojo...FAIL
+  test/os/test_env.mojo...FAIL
+  test/os/test_isatty.mojo...FAIL
+  test/os/test_link.mojo...FAIL
+  test/os/test_listdir.mojo...FAIL
+  test/os/test_mkdir_and_rmdir.mojo...FAIL
+  test/os/test_no_trap.mojo...FAIL
+  test/os/test_process.mojo...FAIL
+  test/os/test_remove.mojo...FAIL
+  test/os/test_stat.mojo...FAIL
+  test/os/test_symlink.mojo...FAIL
+  test/os/test_trap.mojo...FAIL
+  test/os/test_trap_gpu.mojo...FAIL
+  test/pathlib/test_pathlib.mojo...FAIL
+  test/pwd/test_pwd.mojo...FAIL
+  test/python/test_ownership.mojo...FAIL
+  test/python/test_python_cpython.mojo...FAIL
+  test/python/test_python_error_handling.mojo...FAIL
+  test/python/test_python_info.mojo...FAIL
+  test/python/test_python_interop.mojo...FAIL
+  test/python/test_python_module_create.mojo...FAIL
+  test/python/test_python_object.mojo...FAIL
+  test/python/test_python_to_mojo.mojo...FAIL
+  test/random/test_philox.mojo...FAIL
+  test/random/test_random.mojo...FAIL
+  test/random/test_random_internals.mojo...FAIL
+  test/reflection/test_function.mojo...FAIL
+  test/reflection/test_location.mojo...FAIL
+  test/reflection/test_reflect.mojo...FAIL
+  test/reflection/test_traits.mojo...FAIL
+  test/reflection/test_type_info.mojo...FAIL
+  test/runtime/test_asyncrt.mojo...FAIL
+  test/runtime/test_locks.mojo...FAIL
+  test/runtime/test_op_logging.mojo...FAIL
+  test/runtime/test_raising_asyncrt.mojo...FAIL
+  test/runtime/test_spin_waiter.mojo...FAIL
+  test/runtime/test_tracing.mojo...FAIL
+  test/subprocess/test_run.mojo...FAIL
+  test/sys/test_aarch64_target.mojo...FAIL
+  Progress: 0 passed, 600 failed  test/sys/test_build_info_debug.mojo...FAIL
+  test/sys/test_c_types.mojo...FAIL
+  test/sys/test_c_types_32bit.mojo...FAIL
+  test/sys/test_compile.mojo...FAIL
+  test/sys/test_compile_debug.mojo...FAIL
+  test/sys/test_compile_sanitize_address.mojo...FAIL
+  test/sys/test_cstring.mojo...FAIL
+  test/sys/test_dlhandle.mojo...FAIL
+  test/sys/test_exit_0.mojo...FAIL
+  test/sys/test_exit_1.mojo...FAIL
+  test/sys/test_ffi.mojo...FAIL
+  test/sys/test_intrinsics.mojo...FAIL
+  test/sys/test_linux_target.mojo...FAIL
+  test/sys/test_macos_target.mojo...FAIL
+  test/sys/test_sizeof.mojo...FAIL
+  test/sys/test_targetinfo.mojo...FAIL
+  test/tempfile/test_tempfile.mojo...FAIL
+  test/test_utils/__init__.mojo...FAIL
+  test/test_utils/compare_helpers.mojo...FAIL
+  test/test_utils/hash.mojo...FAIL
+  test/test_utils/math_helpers.mojo...FAIL
+  test/test_utils/reflection.mojo...FAIL
+  test/test_utils/test_utils.mojo...FAIL
+  test/test_utils/types.mojo...FAIL
+  test/test_utils/words.mojo...FAIL
+  test/testing/prop/test_random.mojo...FAIL
+  test/testing/prop/test_runner.mojo...FAIL
+  test/testing/prop/test_strategy.mojo...FAIL
+  test/testing/test_assert_raises.mojo...FAIL
+  test/testing/test_assertion.mojo...FAIL
+  test/testing/test_suite.mojo...FAIL
+  test/testing/test_suite_cli.mojo...FAIL
+  test/time/test_time.mojo...FAIL
+  test/utils/issue_13632.mojo...FAIL
+  test/utils/test_coord.mojo...FAIL
+  test/utils/test_index.mojo...FAIL
+  test/utils/test_numerics.mojo...FAIL
+  test/utils/test_select.mojo...FAIL
+  test/utils/test_static_tuple.mojo...FAIL
+  test/utils/test_tuple.mojo...FAIL
+  test/utils/test_type_functions.mojo...FAIL
+  test/utils/test_variant.mojo...FAIL
+  tools/gpu_info.mojo...FAIL
+  Progress: 0 passed, 643 failed
+======================================================================
+PASSED: 0
+FAILED: 643
+======================================================================
+
+Failed files:
+  benchmarks/algorithm/bench_elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxhw6h4w8.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/bit/bench_bit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpezbj0cg_.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/builtin/bench_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpggx8y8dw.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/builtin/bench_int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp07c3m5kt.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/builtin/bench_sort.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0mu3ex6h.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_bitset.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpi5iccms5.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_dict.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjda7ghz3.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_dict_string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbch16emn.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_grapheme.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq9khja6b.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_grapheme_reverse.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4yp_6m22.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_set.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpe1rijwn2.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/bench_string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjd5adl33.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/collections/string/bench_atof.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptkhf2n6b.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/format/bench_tstring.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr51k4k86.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/hashlib/bench_hash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpst4ris_e.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/math/bench_math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpst__i08m.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/memory/bench_alloc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwic8ujtg.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/memory/bench_heap_parallel.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcfyj1_km.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/python/bench_bindings/mojo_module.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5w3zpmci.c:18:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/utils/bench_formatter.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjhe7sw8v.c:17:8: error: conflicting types for 'String'; have 'char *
+  benchmarks/utils/bench_memmem.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7r9qi97o.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdghmecle.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/_plugin/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk245v3h8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/_plugin/_impl.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgpg_0hxj.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/_plugin/_trait.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzb62n_19.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr9qwhicx.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3p8ov09d.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpy8jrljof.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp34klutjm.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/map.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpms2glnab.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/parallelize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjknprmqg.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/reduction.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4qklm4qx.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/cpu/stencil.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpntubo8ig.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/gpu/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp10pani8e.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/gpu/elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptjts_w24.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/gpu/reduction.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpresttl0q.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/gpu/stencil.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0830j8wh.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/tile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxc3vcz42.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/unswitch.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo8v79fkl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/backend/vectorize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb74m0lhz.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/functional.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt8cayey9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpon9ja5_d.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/algorithm/reduction.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5r4h8hw2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/atomic/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphvbr44pg.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/atomic/atomic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpnlr1ui1s.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/base64/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyv1rhwex.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/base64/_b64encode.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpztm_ycsi.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/base64/base64.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbx4x0e7u.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3d7x5xom.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/_progress.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmfih2obf.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/bencher.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgwpy8ucv.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/benchmark.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd0cnnbhf.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/compiler.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3fp9sztj.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpayn0apjv.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/benchmark/quick_bench.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8jyarv2b.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/bit/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyynwgec3.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/bit/bit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpe0cyx_7g.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/bit/mask.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpc1e4jp_g.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6wa9uwti.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/_closure.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpubakzj8p.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/_format_float.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmcu8yjkx.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/_startup.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0m_3spk9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/_stubs.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt1obtr9f.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/anytype.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppmnstvhl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/bool.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpnh0lao2f.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/breakpoint.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqnwqpeac.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/builtin_slice.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp79drsn0h.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/comparable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2jzv2a31.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/constrained.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgsaug8zn.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/coroutine.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvde9yvp1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/debug_assert.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcn78g4u5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/device_passable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3czgt0wt.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/dtype.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpctkz8qdl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt1fi8rox.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/float_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd_xbev2g.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/floatable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmy0edvuq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/format_int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5yl_o5d7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/globals.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf1v7vyte.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/identifiable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphssgtv2y.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdl2gl9ho.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/int_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4i51qt_j.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/len.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprqfnbjns.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/none.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptq17ghr8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/range.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjup19gq5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/rebind.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_5xnpj1c.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/reversed.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxtow5vht.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/simd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwujx5yyo.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/sort.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_1_s54hb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/string_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3kgzq2q4.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/swap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprhdg7m5v.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/tuple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpafp0r6q6.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/type_aliases.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_w_es2rb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/value.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpynsrdtzd.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/builtin/variadics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_lsg5u6n.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppz1s6i03.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/_asan_annotations.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpi6hd039v.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/collections/_conditional.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfbdsl2xw.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/_swisstable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjyrla3u5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/binary_heap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpth07pyld.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/bitset.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5vi8s0_8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/check_bounds.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpueayqo3w.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/counter.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4d6kxfp9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/deque.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpah8cm1pb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/dict.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgbf3u0xy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/inline_array.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9ytwj7pl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/interval.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyz5p15kg.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/linked_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpi1yvb7c8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpz7vkcwjg.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/optional.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprqhh6wj6.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/set.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_3x5hfk4.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpu7uusfsj.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_grapheme_break.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcld4dr45.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_grapheme_break_lookups.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpskp_twat.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_parsing_numbers/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp427epwcp.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_parsing_numbers/constants.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpy9697q1t.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_parsing_numbers/parsing_floats.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1qng3xl1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_parsing_numbers/parsing_integers.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp650usb8o.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_unicode.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2wed5hex.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_unicode_lookups.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjp__cs0b.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/_utf8.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsw2uqi3s.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/codepoint.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbltb97mk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/format.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpe4u7qi33.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/iterators.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1si0sd8z.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/collections/string/string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8ivmfpb0.c:18:9: error: conflicting types for 'Int'; have 'int64_t()
+  std/collections/string/string_slice.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptlhicyn_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/compile/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsdgvxuag.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/compile/compile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpujhdqo8i.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/complex/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpeifhq27l.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/complex/complex.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0ddwr7vr.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/documentation/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb6ta89fq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/documentation/documentation.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjfyxsdz4.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/ffi/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwuwxp91a.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/ffi/cstring.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpblw79pjn.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/ffi/unsafe_union.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6b14nlki.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/format/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmuc53bky.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/format/_utils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwmpjdafc.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/format/repr.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpli_nq3yu.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/format/tstring.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_rkh66pe.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgr02sfsy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/_utils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpacn8j9wf.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6bz5pe1a.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0hbibbhk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/mma_amd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpe8r_gwo9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/mma_amd_rdna.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4ov1tlwf.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/mma_apple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2i10emrh.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/mma_nvidia.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpziohgg5p.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/mma_nvidia_sm100.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo9vshuzh.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/arch/tcgen05.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgtc26kq7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/mma.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7_tugc96.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/mma_operand_descriptor.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxaly8haa.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/mma_util.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkypuz9az.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/compute/tensor_ops.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb3em1cos.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/globals.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo7qivij0.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpksqy38k7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_amdgpu_hip.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcoqqtgpe.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_device_context_hal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt70crf8n.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_device_context_metal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpomu4s7h4.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_metal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2p3btjv8.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_nvidia_cuda.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg584rfqu.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_tensormap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfslg_k2i.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/_tracing.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppqu1y8u_.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/compile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8p6n6sb1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/constant_memory_mapping.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqcj2frq9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/device_attribute.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphssxjps2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/device_context.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_vb1dz0_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/dim.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcse5mcqb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/func_attribute.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxc5qcly7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5me59_li.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/launch_attribute.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbl8bmt5s.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/nvidia/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcafozxu7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/host/nvidia/tma.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3sz8duor.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/intrinsics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7snnn9to.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/memory/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpu1kxvepl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/memory/memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfxzmr56a.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwfcnect2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/block.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfp47ntnq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/cluster.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzqbrd2h1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/grid_controls.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp39n1ey06.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/id.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd6n6_a92.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/primitives/warp.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9nfef0h5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/profiler.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0cw1acs3.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/sync/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgtdqf5il.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/sync/semaphore.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp43q1vy8e.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/gpu/sync/sync.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsk2n3qrq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/hashlib/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp92bhddm9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/hashlib/_ahash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm74tof94.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/hashlib/_fnv1a.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvcl3ikgi.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/hashlib/hash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7g05bb_1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/hashlib/hasher.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpirivj2mk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/io/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvidp_0pq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/io/file.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvg40tfyt.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/io/file_descriptor.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk0l4nuf0.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/io/io.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxaguvo08.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/io/write.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpncurh0r6.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/iter/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp975j2nk2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/itertools/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphnfyx38s.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/itertools/itertools.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp713wv218.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/logger/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2fsqki8u.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/logger/logger.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzagu_j57.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpw59eoe5z.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/constants.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdyjewdu9.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/fast.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbpbapa00.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpojlrmafy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/polynomial.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8qceweg6.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/math/uutils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpydd6w_t4.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpl5h400dm.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx78cq804.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/alloc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsz31foea.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/arc_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwb6nw_s_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8ixqjv6d.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/owned_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpw_mead46.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmph91qpmu1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/span.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplrq18w9r.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/stack_allocation.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptmy5s6ru.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/unsafe.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpltv6xdz5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/unsafe_maybe_uninit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpemvh3ufx.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/unsafe_nullable_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8w1fso34.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/memory/unsafe_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxunpbim7.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpeq7u2mdy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/_linux_aarch64.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf8722m1g.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/os/_linux_x86.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp93_nyisv.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/os/_macos.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpn7z5huoj.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/os/env.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa3nst2yo.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/fstat.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppv8x3il_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/os.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjin35udb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/path/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwj2pn_6_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/path/path.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4c7i6ijk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/pathlike.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyghele1s.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/os/process.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqnw99x9k.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/pathlib/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpah8vsp59.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/pathlib/path.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb948h4mn.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/prelude/__init__.mojo
+    → gcc: /Users/mrs/claude/modular/mojo/stdlib/std/prelude/__init__.mojo:80:16: error: conflicting types for 'Bool'; have 'int64_
+  std/pwd/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk8349r4g.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/pwd/_linux.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplzhv88l2.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/pwd/_macos.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxzve6rmt.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/pwd/pwd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf7cqp887.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxfs_d7ej.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/_cpython.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpaccq_1sk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/_python_func.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpedxm7_4a.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/python/bindings.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpiagwjdgv.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/conversions.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxd11n10r.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/python.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp59thowis.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/python/python_object.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpe1hy0fcn.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/random/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphpxw8eyv.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/random/_rng.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvc14ka07.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/random/philox.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0cl1ui6v.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/random/random.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9vulwmuq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfezaluy6.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/function.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmvyx6_3g.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/location.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpezhmwtg2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/reflect.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpru5p7093.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/traits.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb6e18pr5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/reflection/type_info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsouyiapf.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/runtime/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1pbnyn80.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/runtime/asyncrt.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpw62duuom.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/runtime/tracing.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqfjx38p1.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/stat/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppmwfnf14.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/stat/stat.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf5c0cu7l.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/subprocess/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpuvbj3yjz.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/subprocess/subprocess.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdinox5m_.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwsix3iab.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_amdgpu.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg7gijc8k.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_assembly.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpquk3cg7r.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_build.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6hgk9enq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf5dpmpqm.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/context.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqu0el3kq.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/device.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmps1k6kcfb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/driver.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9kanvxod.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/event.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0hthd0lb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/plugin.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptu6um6dc.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/queue.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvaci2a9q.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/status.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0vwdizz8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_hal/stream.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_bz8npk4.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_io.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpueh_1vj8.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_libc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpskkmjfp2.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_libc_errno.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_253216v.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/sys/_metal_print.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpz5e8w0ru.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/arg.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmpgkxaiy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/compile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp91nvbmyx.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/debug.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6xv7sdek.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/defines.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmposifx8yt.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpogj1ibxj.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/intrinsics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4ev50wbk.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/sys/terminate.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5cdn4c11.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/tempfile/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx0t1419j.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/tempfile/tempfile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmqc6jcxb.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpl77ad3vy.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmps3ykoz5c.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/random.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpn8lmbnnf.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/runner.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg3wwq12f.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/strategy/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6l7xm6_o.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/strategy/list_strategy.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3peu5wzo.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/strategy/simd_strategy.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3_rua_60.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/prop/strategy/string_strategy.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpajk6067f.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/suite.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpikmt3q1d.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/testing/testing.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsh666zv5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/time/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt7mis3gi.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/time/time.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbu1o864u.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfa0jqyf4.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/_ansi.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2ybu8nop.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/utils/_nicheable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppul5kq7o.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/_select.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpngl6s1j4.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/utils/_serialize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4byza7zi.c:17:8: error: conflicting types for 'String'; have 'char *
+  std/utils/_visualizers.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpciiqycon.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/coord.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7k5265um.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/fast_div.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwxxs0zl5.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/index.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd8lb5ssp.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/lock.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptcloss_m.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/numerics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxtgzx7cz.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/static_tuple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpj3sf9awl.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/type_functions.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7gc_sgns.c:18:8: error: conflicting types for 'String'; have 'char *
+  std/utils/variant.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcdw1doyd.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/gpu/test_binary_apply.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2kzhzce4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/gpu/test_elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqcu87r93.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/gpu/test_reduce.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd3hy0q87.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/gpu/test_reduce_atomic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8alay3hd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt0slompm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_elementwise_1d.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpciq1626p.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_map.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcgcovzun.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_parallelize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp22oj0otz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_reductions.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd45dknuw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_stencil.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1zem0m_g.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_tile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplcr8ud72.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/algorithm/test_vectorize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm1pcfguh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/asyncrt_test_utils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp08p6qeiq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_buffer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpukakk9vo.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_capture.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkftic0qd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_copies.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppkp30r2m.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_cuda.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4rp6b9wf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_device_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzol3pp8j.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_device_pointer_kernel.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1ihbzfer.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_elementwise.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpelyxzj18.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_function.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfx88cz13.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_function_regress.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpaygg6dy1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_hip.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa96gxhef.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_host_func.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzv8rqgkx.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_host_mapped.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsb72zw_7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_memset.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwhj7k064.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_multi_context.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmbkducee.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_multi_stream.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx4nzz3_9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_multicast_memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbqsck3jh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_smoke.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplihn779d.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/asyncrt/test_timing.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9o7vy9i9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/atomic/test_atomic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbd25pxrp.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/atomic/test_compile_atomic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdx914mw1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/base64/test_base64.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo_gg4ayz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/benchmark/test_bencher_device_context_iter_custom.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1pk285nr.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/benchmark/test_benchmark.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3riqjzu2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/benchmark/test_benchmark_compiler.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp12va9j0p.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/benchmark/test_mojobench.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp05etgvll.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/benchmark/test_quick_bench.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpu99s58fe.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/bit/test_bit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9lvb011v.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/bit/test_mask.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdbhie3ig.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_any_all.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsxh5p0_7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_bfloat16.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxduzrnqf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_bool.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6ha6w0s1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_bool_indexer_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx0ses2fz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_comparable.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpncbe8za1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzz0swxmr.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_compile_time.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmph5dr6cw7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_default_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2x0gathm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_location.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzaah34_3.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_mode_all.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmpjpxkhm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_mode_all_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkj1k639r.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_mode_none.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9v87y7u8.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_debug_assert_warning.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptym93x3i.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_default_equatable_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq_mragtp.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_default_hashable_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzwpaimp_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_default_writable_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpofx8y8xb.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_dtype.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmw55_llv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqreu_bir.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_file.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq09fpobt.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_float_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9j9wddzl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_format_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2sg6afxh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_format_float.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpniuqi05w.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_format_float_lut_optimization.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5oc5ljf6.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_format_int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyl3dbi9j.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_global_constant_compile_fail.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsqvgwxnn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjq2q78q7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_int_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9zbkluq5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_issue_1004.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpuhbduawb.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_issue_1505.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5wqsybpi.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_issue_3908.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6qky0our.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_list_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvvzfzy5i.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa8lbsanp.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_none.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbw017792.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_print.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphiks63b9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_print_long_string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmph2qhe_ja.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_print_stderr.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm_glaiew.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_range.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpii6108dn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_range_out_of_bounds.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqjfq44cz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_rebind.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphw6lcqo9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_reversed.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphnvv1unj.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_simd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyyk70bsd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_simd_fastmath.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpybmy06ym.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_slice.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4w5hpupa.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_some.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0wpi96w_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_sort.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpv5axt4v5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_sort_issue_1018.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpes3uvjeq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_stdin.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyre6jq7f.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_string_compatibility.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpnqjlxm2y.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_string_literal.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpiju2uvzn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_stubs.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4qzkj65b.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_swap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5vykvgxd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_tuple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9ik_58g2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_uint.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7fp7b2ti.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_value.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr49bmgq2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/builtin/test_variadic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpoa4mzwbj.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/_grapheme_conformance_data.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr56ch8dt.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_atof.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp29mxuxwv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_grapheme.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpz3lo8y2r.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_grapheme_conformance.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmeryayg7.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_iterators.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpv1extc42.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_mem_functions.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplpmz96ul.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_number_parsing_lut_optimization.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmvm0pn5n.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppdqvigmt.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_string_slice.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpetnyiz_t.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_string_unicode_panic.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8usfdtqd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_unicode.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphvus1kyn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/string/test_utf8.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8xfmdeud.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_asan_annotations_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyxyiefs7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_binary_heap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8s0ztdp7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_binary_heap_assert_empty_peek.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm8b8q2ny.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_binary_heap_assert_empty_pop.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2b18x2l_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_bitset.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9uazsx3t.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_check_bounds_assert_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8vk6w0ii.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_codepoint.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcqqlnanf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_conditional.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpl0v4wy5f.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_counter.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5af4pu9x.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_deque.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpleyl3xwv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_dict.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0y8k2tfy.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_inline_array.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6an9h3au.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_interval.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqbktfph2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_linked_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq3sqpmpt.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3499pqc4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_list_getitem_invalid_index_int.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg6_z5fgo.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_list_getitem_invalid_index_uint.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpabqclrrl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_deque.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf7yd_o__.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_deque_insert.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjmho6z0q.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_inline_array.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptipue7dz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_linked_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp70dqvpw_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_list.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgrimp0_l.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_string.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsu_r1izw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_negative_index_string_slice.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpw615bxfy.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_optional.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfcvnkoh9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_optional_none_abort.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwikb8u58.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/collections/test_set.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprvwz68bm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/compile/test_compile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpugp6h7c9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/compile/test_functions_in_module.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxrkplzd7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/complex/test_complex.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_ss2a0rw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/complex/test_mandelbrot.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0vebyp4x.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/ffi/test_external_call.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyw4opbtb.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/ffi/test_unsafe_union.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmphyqgds5l.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/format/compile_fail/test_writable_error.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdzepnzsr.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/format/test_format.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf1kr64_c.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/format/test_tstring.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxm_83kib.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/format/test_utils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp25yyw99e.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/gpu/primitives/test_block_nd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp578ygn1_.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/gpu/test_apple_mma_invalid_types.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpccl2ggzs.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/hashlib/test_ahash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkraxyq3k.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/hashlib/test_fnv1a.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf1iquq_z.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/hashlib/test_hash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptaxfu4lo.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/hashlib/test_hasher.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt0b2wlgk.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/io/test_file_descriptor.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfi6k3h0_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/io/test_write.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr2t19g_4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/io/test_write_to_stdout.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3j7w1tni.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_chain.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfek9du0c.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_empty.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8hz8v6i3.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_enumerate.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjy7lidzj.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_iter.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpll97t5dn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_map.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmk1bvf6x.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_next.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1qebvdyh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_nth.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr4jiq37k.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_peek.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp41qbz8ec.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_ref_iteration.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2dhnb0ov.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/iter/test_zip.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo6cscq8h.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_count.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpj_3bytoh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_cycle.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmph22iyvrw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_drop.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpt3sfos4d.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_drop_negative_count.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp65rb0_4w.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_drop_while.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8vl_ca5o.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_product.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkep4zezz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_repeat.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcwae8n7j.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_take.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppodmbvv6.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_take_negative_count.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3n66cqhe.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/itertools/test_take_while.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp09r22f3y.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/logger/test_logger.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp262f4cyh.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/logger/test_logger_alias.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsscrz4vs.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/logger/test_logger_critical.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7m0x5prn.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/logger/test_logger_with_env.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpko4mqd79.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_abs.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvsv12bj5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_arithmetic_sm100.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7dl41gg8.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_exp.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd5tnmht1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_exp_approx_f32.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplpbvut5a.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_log.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp95jvl2pa.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp79z45hfb.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_math_accuracy.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjhgenfhm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_pow_bf16.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4zsnyuyp.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_powf_bf16.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4h1wgdnl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_recip.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf_iqhgmm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_rsqrt.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwjaogs2k.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_sin_cos_f64.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpjptlygu4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_sqrt_f64.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm5gifdid.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/gpu/test_trig.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpcec7ysoi.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_erf.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp713zvna7.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_exp.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvfa90m0e.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_ldexp.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpng83h5c0.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_math.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqcciedcz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_max.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpnc9nl8a6.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_min.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp38wsuocl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_modf.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpr2s72ahq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_polynomial.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9jwak2tz.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_tanh.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmppiua4r0n.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/math/test_ulp_distance.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxl4lzgko.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_alloc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb2oi_0qi.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_arc.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4qdltllf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_bitcast.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpyop0mc0n.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_fail/layout_invalid_alignment.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6q37u4po.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_fail/layout_invalid_alignment_abort.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpskr60xzo.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_is_trivially.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp76utwcqv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_memory.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpl_qyivrm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_negative_index_span.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpya8p0nd_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_owned_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2bzagbr_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpsv7t9w4c.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_span.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpbjh8ejvq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/test_unsafe_maybe_uninit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7dhy7o85.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_bfloat16_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpaf3_onxa.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_disabled.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpc47rchn9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_float16_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa33wkkod.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_float32_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp71qo4vvl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_float64_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpo3yb03n2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_gather_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4dq6tj14.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_masked_load_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxeg8ean1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_no_false_positives.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp55scsqr9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/uninit_check/test_uninit_check_simd_vector_poison.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmpzoi1hd.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/comparison_address_space.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx4tiga7i.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_1.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplovy_leq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_4.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb1tdrp3b.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_5.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdr__uvtm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_6.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq5999_ii.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_7.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmposo5m98r.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/conversion_8.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp49h_fcy3.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/mut_cast.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4xn43hxs.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/unsafe_from_address_0.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvvts9_4h.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/compile_fail/unsafe_from_address_neg.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpnrs1gluf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/test_unsafe_nullable_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpu8hpbxz4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/memory/unsafe_pointer/test_unsafe_pointer.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpqsbexvyt.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_basename.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp15r8fdys.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_dirname.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpi_91oepl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_exists.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3m4w6ft1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_expanduser.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfhy95uu5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_expandvars.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpv7c60d3x.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_getsize.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpc8lg_1bj.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_is_absolute.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk13yqouw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_isdir.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpw4rym67t.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_isfile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpx61ox0ml.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_islink.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprbxix7wx.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_join.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxxuhupt6.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_realpath.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvlswoj1d.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_split.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2ucwrg3y.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_split_extension.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvdjjxp5m.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/path/test_splitroot.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplns_hz29.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_env.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg8_2gaaw.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_isatty.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2w8ezvzu.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_link.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpxy8xq9dk.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_listdir.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9ns2kcsl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_mkdir_and_rmdir.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdett6sti.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_no_trap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6bnisj6q.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_process.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpar12j0dk.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_remove.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq2ztue1h.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_stat.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3uqv40m9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_symlink.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkym1mno2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_trap.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpuv1c62_1.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/os/test_trap_gpu.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk_h8_gxt.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/pathlib/test_pathlib.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzss_5pwe.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/pwd/test_pwd.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp9u58pwql.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_ownership.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkh1e9a7c.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_cpython.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptbyk8wwm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_error_handling.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpb9r9ryt9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzbln3op0.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_interop.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpixgwflkk.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_module_create.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpp6h9p6wx.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_object.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa341tr16.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/python/test_python_to_mojo.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfuwofn1y.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/random/test_philox.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpu6rm0czr.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/random/test_random.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpwkpk_yx3.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/random/test_random_internals.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp7vawdf2h.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/reflection/test_function.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8ohrgkzj.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/reflection/test_location.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpph_3eylx.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/reflection/test_reflect.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpq07fgn8t.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/reflection/test_traits.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp4hee_7kn.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/reflection/test_type_info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpp4lspwzh.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_asyncrt.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpdkyqwio_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_locks.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpi404ua42.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_op_logging.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpp2f1_7qq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_raising_asyncrt.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp2r6ygtaz.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_spin_waiter.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpaccxir0d.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/runtime/test_tracing.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmplj6r52id.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/subprocess/test_run.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6en_95e_.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_aarch64_target.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpuijq9lor.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_build_info_debug.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_0ckw2nv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_c_types.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpa5zfolej.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_c_types_32bit.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpvju8_ktv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_compile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3wctd3vf.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_compile_debug.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpof45q3vm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_compile_sanitize_address.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_urqf0n6.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_cstring.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpywsg4xa9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_dlhandle.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpy0pmxukv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_exit_0.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprvvm2ibm.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_exit_1.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5dw51nrv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_ffi.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmptls568a5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_intrinsics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp984cc3yy.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_linux_target.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpd2oxy2pc.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_macos_target.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpos23xd_j.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_sizeof.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmk2fb1fe.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/sys/test_targetinfo.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpp3gzq3vb.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/tempfile/test_tempfile.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6uzksos2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/__init__.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpf3pvcvsk.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/compare_helpers.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpmwwea1bw.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/hash.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp_imxkl7i.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/math_helpers.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp0jbk0m29.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/reflection.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgc1t5g51.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/test_utils.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5dvnrvah.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/types.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmprn6nxktb.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/test_utils/words.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpp_vkonr_.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/testing/prop/test_random.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpgq30jgm9.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/prop/test_runner.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3n840y8e.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/prop/test_strategy.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp36iiudht.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/test_assert_raises.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpfzwckh4f.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/test_assertion.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpif9g7cf4.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/test_suite.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp1qjvshqu.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/testing/test_suite_cli.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpiezmoxfv.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/time/test_time.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp5qg7dv31.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/issue_13632.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpg1jz4sm5.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_coord.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp6qhhul4t.c:18:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_index.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm2cz2jgl.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_numerics.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp975lptmo.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_select.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpm7nfu6be.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_static_tuple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp3d1g_72c.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_tuple.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpkgib70yq.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_type_functions.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpk1rh93w2.c:17:8: error: conflicting types for 'String'; have 'char *
+  test/utils/test_variant.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmpzod2uqhj.c:17:8: error: conflicting types for 'String'; have 'char *
+  tools/gpu_info.mojo
+    → gcc: /var/folders/bx/k852zmyn0d5352l0lh8wkyjc0000gp/T/tmp8q07x43j.c:17:8: error: conflicting types for 'String'; have 'char *
