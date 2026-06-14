@@ -1030,6 +1030,20 @@ char *mojo_str_cat(char *a, char *b) {
     return result;
 }
 
+char *mojo_path_join(char *base, char *name) {
+    if (!base || base[0] == '\0') return name ? name : "";
+    if (!name || name[0] == '\0') return base;
+    size_t blen = strlen(base);
+    int need_sep = (base[blen - 1] != '/');
+    size_t nlen = strlen(name);
+    char *result = malloc(blen + need_sep + nlen + 1);
+    if (!result) return NULL;
+    strcpy(result, base);
+    if (need_sep) result[blen++] = '/';
+    strcpy(result + blen, name);
+    return result;
+}
+
 char *mojo_cstr_repeat(char *s, int64_t n) {
     /* Repeat a string n times */
     if (!s || n <= 0) {

@@ -225,6 +225,7 @@ int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 char *mojo_str_cat(char *a, char *b);
+char *mojo_path_join(char *base, char *name);
 char *mojo_cstr_repeat(char *s, int64_t n);
 
 /* Additional Python builtins */
@@ -393,3 +394,4 @@ int any(void *iterable);                        /* Python any() builtin */
 /* ── Regex substitution with callback (for re.sub(pattern, fn, src)) ────── */
 /* callback receives (env, matched_substring) and returns replacement string */
 char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src);
+

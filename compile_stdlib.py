@@ -156,7 +156,7 @@ def main():
     print(f"FAILED: {len(failed)}")
     print("="*70)
 
-    if failed and len(failed) <= 20:
+    if failed:
         print("\nFailed files:")
         for rel_path, error in failed:
             print(f"  {rel_path}")
