@@ -1663,6 +1663,10 @@ _C_KEYWORDS = frozenset({
 # (e.g. GCC extension 'asm', C++ keywords that GCC treats as reserved in C mode)
 _C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
 
+# C standard-library macros that expand to numeric constants — using them as identifiers
+# causes the preprocessor to replace them before GCC sees the code (e.g. 'true' → '1').
+_C_MACRO_NAMES = frozenset({'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END'})
+
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords."""
     if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS:
@@ -3101,8 +3105,13 @@ class GimpleGen:
 
     def _declare_var(self, name: str, ctype: str, elem: str | None = None):
         if name not in self.var_types:
-            # Rename C keywords to avoid conflicts (e.g. 'default' → '_default')
-            c_name = f"_{name}" if name in _C_KEYWORDS else name
+            # Rename C keywords and macro names to avoid conflicts
+            if name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES:
+                c_name = f"_kw_{name}"
+            elif name in _C_KEYWORDS:
+                c_name = f"_{name}"
+            else:
+                c_name = name
             if c_name != name:
                 self._c_names[name] = c_name
             self.decls.append(f"  {ctype} {c_name};")
@@ -3694,7 +3703,7 @@ class GimpleGen:
             c_decl_type = self._global_c_decl_types.get(name, ctype)
             # Access global from module struct (use which module the global belongs to)
             global_module = getattr(self, '_global_to_module', {}).get(name, self._current_module_ctx or "root")
-            safe_module = _safe_name(global_module) if global_module else "root"
+            safe_module = _c_field_name(global_module) if global_module else "root"
             field_ref = f"_{safe_module}_globals.{_c_field_name(name)}"
             if ctype == 'int64_t' and c_decl_type.endswith(' *'):
                 # Global is declared as a pointer type at C level but we box it as int64_t.
@@ -5712,7 +5721,8 @@ class GimpleGen:
             if self.emit_entry_points:
                 fname_raw = '_gimple_main'
             else:
-                fname_raw = f"_{self.module_name}_main" if self.module_name else '_lib_main'
+                _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
+                fname_raw = f"_{_mod_id}_main" if _mod_id else '_lib_main'
 
         # dir(obj) — Python built-in, stub to return empty list
         if fname_raw == 'dir':
@@ -6369,6 +6379,9 @@ class GimpleGen:
         self._emit(f"  {idx64} = (int64_t) {iv};")
         addr = self._new_temp(ot)
         self._emit(f"  {addr} = _mojo_at_{cn} ({ov}, {idx64});")
+        # Can't dereference void* (no element type); return the pointer itself
+        if et == 'void':
+            return ot, addr
         t = self._new_temp(et)
         self._emit(f"  {t} = *{addr};")
         return et, t
@@ -7475,7 +7488,8 @@ class GimpleGen:
                 if self.emit_entry_points:
                     fname = _safe_name('_gimple_main')
                 else:
-                    fname = _safe_name(f"_{self.module_name}_main" if self.module_name else '_lib_main')
+                    _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
+                    fname = _safe_name(f"_{_mod_id}_main" if _mod_id else '_lib_main')
             else:
                 fname = _safe_name(raw_name)
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
@@ -8602,7 +8616,9 @@ class GimpleGen:
                 safe = '_gimple_main'
             else:
                 # Sub-module's main: rename to avoid collision with root main()
-                safe = f"_{self.module_name}_main" if self.module_name else '_lib_main'
+                # Module name may contain dots (e.g. "test.builtin.foo") — replace with underscores
+                _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
+                safe = f"_{_mod_id}_main" if _mod_id else '_lib_main'
 
         lines = [
             f"{ret_type} {safe} ({params_str})",
@@ -9528,12 +9544,15 @@ class GimpleGen:
         # ── Phase 1.7: pre-scan global variable declarations ──────────────
         # Must run before Phase 2a so _lower_IdentExpr can find globals.
         _pre_declared_globals = set()
+        _phase17_mod = self.module_name or "root"  # module name for _global_to_module mapping
         for _scan_stmt in stmts + (imported_stmts if self.do_imports else []):
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
+                if _gname not in self._global_to_module:
+                    self._global_to_module[_gname] = _phase17_mod
                 if isinstance(_scan_stmt.value, DictExpr):
                     self._global_var_types[_gname] = 'MojoDict *'
                 elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
@@ -9562,6 +9581,8 @@ class GimpleGen:
                     self._global_var_types[_gname] = 'int64_t'
             elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
                 _pre_declared_globals.add(_scan_stmt.name)
+                if _scan_stmt.name not in self._global_to_module:
+                    self._global_to_module[_scan_stmt.name] = _phase17_mod
                 if _scan_stmt.type_ann:
                     self._global_var_types[_scan_stmt.name] = self._resolve_type(_scan_stmt.type_ann)
                 else:
@@ -9600,6 +9621,8 @@ class GimpleGen:
                     if _local not in self._global_var_types:
                         self._global_var_types[_local] = 'int64_t'
                         self._global_c_decl_types[_local] = 'int64_t'
+                        if _local not in self._global_to_module:
+                            self._global_to_module[_local] = _phase17_mod
                 elif isinstance(_s, TryStmt):
                     _scan_try_imports(_s.body or [])
                     for _h in (_s.handlers or []):
@@ -10020,9 +10043,9 @@ class GimpleGen:
             # output, required for the bootstrap stage1==stage2==stage3 check)
             if mod_name == our_mod:
                 continue
-            # Ensure proper type for _safe_name argument
+            # Ensure module names are valid C identifiers (replace dots → underscores)
             mod_str = str(mod_name) if mod_name else "root"
-            safe_mod = _safe_name(mod_str) if mod_str else "root"
+            safe_mod = _c_field_name(mod_str) if mod_str else "root"
             struct_name = f"_{safe_mod}_toplev"
             global_var = f"_{safe_mod}_globals"
             # Forward-declare the struct type with gcc attribute to allow incomplete use
@@ -10034,9 +10057,9 @@ class GimpleGen:
         # so it's available for use in this module's code
         if our_mod in self._module_globals and self._module_globals[our_mod]:
             globals_list = self._module_globals[our_mod]
-            # Ensure proper type for _safe_name argument
+            # Ensure module names are valid C identifiers (replace dots → underscores)
             our_mod_str = str(our_mod) if our_mod else "root"
-            safe_name = _safe_name(our_mod_str) if our_mod_str else "root"
+            safe_name = _c_field_name(our_mod_str) if our_mod_str else "root"
             typedef_name = f"_{safe_name}_toplev"
             parts.append('')
             parts.append(f"typedef struct {typedef_name} {{")
@@ -10177,6 +10200,8 @@ class GimpleGen:
                     global_decls.append(f"int64_t {local_name};")
                     _declared_globals.add(local_name)
                     self._global_var_types[local_name] = 'int64_t'
+                    if local_name not in self._global_to_module:
+                        self._global_to_module[local_name] = current_mod_name
         # Scan current module + imported stmts for module-level variable declarations.
         # Also recurse into TryStmt/IfStmt/ForStmt bodies at module level since Python
         # allows module-level assignments inside try/except (e.g. mojo_compiler = None).
@@ -10305,9 +10330,9 @@ class GimpleGen:
         # the complete struct type rather than the incomplete forward declaration.
         if self._module_globals.get(current_mod_name):
             globals_list = self._module_globals[current_mod_name]
-            # Ensure proper type for _safe_name argument
+            # Ensure module names are valid C identifiers (replace dots → underscores)
             current_mod_str = str(current_mod_name) if current_mod_name else "root"
-            safe_name = _safe_name(current_mod_str) if current_mod_str else "root"
+            safe_name = _c_field_name(current_mod_str) if current_mod_str else "root"
             typedef_name = f"_{safe_name}_toplev"
 
             globals_struct_lines = []
@@ -10556,14 +10581,16 @@ class GimpleGen:
                 signature = re.sub(
                     r'\b(inout|borrowed|owned|borrow|out|mut|ref|read|copy)\s+(?=\w)',
                     '', signature)
-                parts.append(f"extern {signature};  /* from {module} */")
+                # Guard with #ifndef so C preprocessor macros (SEEK_END etc.) aren't
+                # accidentally redeclared (the macro would expand before gcc sees the decl).
+                parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
             else:
                 # Legacy format fallback: use pure variadic so callers can pass any args.
                 # GIMPLE mode treats () as "no params" (causing "too many args" errors),
                 # so we use (...) instead which accepts any number of arguments.
                 ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
-                parts.append(f"extern {ret_type} {safe} (...);  /* from {module} */")
+                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
         if self.imported_symbols:
             parts.append('')
