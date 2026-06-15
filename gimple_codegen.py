@@ -1673,6 +1673,13 @@ def _safe_field(name: str) -> str:
         return f'_kw_{name}'
     return name
 
+def _struct_name_of(ctype: str) -> str:
+    """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
+    s = ctype
+    if s.startswith('const '):
+        s = s[6:]
+    return s.replace(' *', '').strip()
+
 # libc/system symbols a Mojo *function definition* must not shadow: the library
 # itself defines e.g. `fn exit(...)` whose body calls libc `exit` via
 # external_call. Emitting that as C `exit` would self-recurse and clash with the
@@ -3369,7 +3376,7 @@ class GimpleGen:
                 # Try as struct instance method call: resolve receiver type then look up mangled name
                 ot = self.var_types.get(mod, '')
                 if ot and ot.endswith(' *'):
-                    sn = ot.replace(' *', '').strip()
+                    sn = _struct_name_of(ot)
                     mangled = f"{sn}_{meth}"
                     rt = self.func_return_types.get(mangled)
                     if rt:
@@ -3378,7 +3385,7 @@ class GimpleGen:
             ot: str
             ot = self._quick_type(node.obj)
             sn: str
-            sn = ot.replace(' *', '').strip()
+            sn = _struct_name_of(ot)
             return self.struct_field_types.get(sn, {}).get(node.member, 'int64_t')
         if isinstance(node, ListExpr):  return 'MojoList *'
         if isinstance(node, DictExpr):  return 'MojoDict *'
@@ -4086,6 +4093,17 @@ class GimpleGen:
             ov = null_tmp
 
 
+        # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
+        _sn = _struct_name_of(ot)
+        if _sn == 'MojoList':
+            _mojo_to_c = {'_len': 'len', '_capacity': 'cap', '_size': 'len', 'elems': 'data', '_data': 'data', 'cap': 'cap', 'len': 'len', 'data': 'data'}
+            if node.member in _mojo_to_c:
+                _c_field = _mojo_to_c[node.member]
+                _ftype = 'int64_t' if _c_field in ('len', 'cap') else 'int64_t *'
+                t = self._new_temp(_ftype)
+                self._emit(f"  {t} = {ov}->{_c_field};")
+                return _ftype, t
+
         # .address on any pointer type: UnsafePointer.address → the raw integer address
         if node.member == 'address' and ot.endswith(' *'):
             t = self._new_temp('int64_t')
@@ -4113,7 +4131,7 @@ class GimpleGen:
 
         # Special handling for .__name__ on type objects
         if node.member == '__name__':
-            struct_name_check = ot.replace(' *', '').strip()
+            struct_name_check = _struct_name_of(ot)
             if struct_name_check not in self.struct_field_types:
                 t = self._new_temp('char *')
                 escaped = '<type>'
@@ -4129,7 +4147,7 @@ class GimpleGen:
             return 'int', t
 
         op = '->' if '*' in ot else '.'
-        struct_name = ot.replace(' *', '').strip()
+        struct_name = _struct_name_of(ot)
         field_map = self.struct_field_types.get(struct_name, {})
         if node.member in field_map:
             field_type = field_map[node.member]
@@ -4202,7 +4220,7 @@ class GimpleGen:
             if isinstance(node.left, MemberExpr):
                 ot, ov = self.lower_expr(node.left.obj)
                 op = '->' if '*' in ot else '.'
-                sn = ot.replace(' *', '').strip()
+                sn = _struct_name_of(ot)
                 field_type = self.struct_field_types.get(sn, {}).get(node.left.member, vtype)
                 self._safe_coerce_emit(vtype, field_type, vv, f"{ov}{op}{node.left.member}")
                 return field_type, vv
@@ -4217,7 +4235,8 @@ class GimpleGen:
                     ev_cast = self._cast_for_list(vtype, vv, suf)
                     self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
                 else:
-                    self._emit(f"  {obj_v}[{idx_v}] = {vv};")
+                    if not self._emit_struct_subscript_write(obj_v, ot, idx_v, vv, vtype):
+                        self._emit(f"  {obj_v}[{idx_v}] = {vv};")
                 return vtype, vv
             # Skip emitting comment to avoid GIMPLE global-passing issues
             return vtype, vv
@@ -4629,7 +4648,7 @@ class GimpleGen:
         rt, rv = self.lower_expr(node.right)
 
         # Get struct name from left operand type
-        struct_name = lt.replace(' *', '').strip()
+        struct_name = _struct_name_of(lt)
 
         # Call __matmul__(self, other) method
         mangled = f"{struct_name}___matmul__"
@@ -4780,7 +4799,7 @@ class GimpleGen:
             if obj_type:
                 # Strip pointer if present
                 base_type: str
-                base_type = obj_type.replace(' *', '').strip()
+                base_type = _struct_name_of(obj_type)
                 if base_type in self.struct_field_types:
                     field_map = self.struct_field_types[base_type]
                     if node.member in field_map:
@@ -4961,7 +4980,7 @@ class GimpleGen:
             self_type = self.var_types.get('self', 'int64_t')
             if self_type.endswith(' *'):
                 # We're in a method with typed self — try to use that context
-                base_self_type = self_type.replace(' *', '').strip()
+                base_self_type = _struct_name_of(self_type)
                 if isinstance(func.obj, MemberExpr) and isinstance(func.obj.obj, IdentExpr) and func.obj.obj.name == 'self':
                     # Method call on self.field — try to find field type and resolve
                     self_struct_fields = self.struct_field_types.get(base_self_type, {})
@@ -5490,7 +5509,7 @@ class GimpleGen:
             struct_name = func.obj.name
             is_class_ref = True
         else:
-            struct_name = ot.replace(' *', '').strip()
+            struct_name = _struct_name_of(ot)
             # If we couldn't determine struct name but this is a known method call on a known struct,
             # try to infer from the method name (e.g. 'set' is typically called on Scope)
             if struct_name == 'int' and method in ('set', '__call__'):
@@ -6629,6 +6648,37 @@ class GimpleGen:
 
     # ── Subscript lowering ────────────────────────────────────────────────
 
+    def _struct_data_field(self, ctype: str):
+        """Return (field_name, field_ctype) if ctype is a struct pointer with a pointer _data/data field, else (None, None)."""
+        if not ctype.endswith(' *'):
+            return None, None
+        sn = _struct_name_of(ctype)
+        sft = self.struct_field_types.get(sn, {})
+        for fname in ('_data', 'data'):
+            ft = sft.get(fname, '')
+            if ft.endswith(' *'):
+                return fname, ft
+        return None, None
+
+    def _emit_struct_subscript_write(self, obj_v: str, obj_t: str, idx_v: str, val: str, val_t: str) -> bool:
+        """Emit `obj[idx] = val` for a struct-with-_data pointer. Returns True if handled."""
+        fname, ftype = self._struct_data_field(obj_t)
+        if fname is None:
+            return False
+        dp = self._new_temp(ftype)
+        self._emit(f"  {dp} = {obj_v}->{fname};")
+        i64p = self._new_temp('int64_t *')
+        self._emit(f"  {i64p} = (int64_t *)(void *){dp};")
+        idx64 = self._new_temp('int64_t')
+        self._emit(f"  {idx64} = (int64_t) {idx_v};")
+        self._ptr_helpers_needed.add('int64_t')
+        addr = self._new_temp('int64_t *')
+        self._emit(f"  {addr} = _mojo_at_int64_t ({i64p}, {idx64});")
+        v64 = self._new_temp('int64_t')
+        self._safe_coerce_emit(val_t, 'int64_t', val, v64)
+        self._emit(f"  *{addr} = {v64};")
+        return True
+
     def _lower_subscript(self, node: SubscriptExpr) -> tuple[str, str]:
         ot, ov = self.lower_expr(node.obj)
         idx_type, iv  = self.lower_expr(node.index)
@@ -6767,6 +6817,29 @@ class GimpleGen:
                 return 'double', t
             t = self._new_temp('int64_t')
             self._emit(f"  {t} = mojo_list_get_int ({lp}, {idx64});")
+            return 'int64_t', t
+
+        # Struct pointer subscript: Span[i] → Span->_data[i] etc.
+        if ot.endswith(' *') and _struct_name_of(ot) in self.struct_field_types:
+            fname, ftype = self._struct_data_field(ot)
+            if fname is not None:
+                dp = self._new_temp(ftype)
+                self._emit(f"  {dp} = {ov}->{fname};")
+                et = _elem_type(ftype)
+                cn = _c_id(et)
+                self._ptr_helpers_needed.add(et)
+                idx64 = self._new_temp('int64_t')
+                self._emit(f"  {idx64} = (int64_t) {iv};")
+                addr = self._new_temp(ftype)
+                self._emit(f"  {addr} = _mojo_at_{cn} ({dp}, {idx64});")
+                if et == 'void':
+                    return ftype, addr
+                t = self._new_temp(et)
+                self._emit(f"  {t} = *{addr};")
+                return et, t
+            # Struct without pointer _data: return int64_t opaque handle
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = (int64_t){ov};")
             return 'int64_t', t
 
         # p[i] via _mojo_at_ helper (ptr arithmetic not allowed in __GIMPLE)
@@ -7588,7 +7661,7 @@ class GimpleGen:
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
                 op = '->' if '*' in ot else '.'
-                struct_name = ot.replace(' *', '').strip()
+                struct_name = _struct_name_of(ot)
                 field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
                 self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
         elif isinstance(node.target, SubscriptExpr):
@@ -7654,9 +7727,9 @@ class GimpleGen:
                         self._emit_call('void', '', 'mojo_dict_set_int',
                                         [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
                 else:
-                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
+                    if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                        self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
-            # Skip emitting comment to avoid GIMPLE global-passing issues
             pass
 
     def _gen_stmt_AugAssignStmt(self, node):
@@ -7707,9 +7780,10 @@ class GimpleGen:
                 self._emit(f"  {idx64} = (int64_t) {idx_v};")
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {v});")
             else:
-                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+                if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
-            self._emit("  /* TODO: complex aug-assign target */")
+            pass  # complex aug-assign target: no-op
 
     def _gen_stmt_ReturnStmt(self, node):
         if node.value is None:
@@ -7832,9 +7906,10 @@ class GimpleGen:
             elif isinstance(target, SubscriptExpr):
                 ot, obj_v = self.lower_expr(target.obj)
                 _, idx_v  = self.lower_expr(target.index)
-                self._emit(f"  {obj_v}[{idx_v}] = {v};")
+                if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                    self._emit(f"  {obj_v}[{idx_v}] = {v};")
             else:
-                self._emit("  /* TODO: complex multi-assign target */")
+                pass  # complex multi-assign target: no-op
 
     def _gen_stmt_ForStmt(self, node):
         if (isinstance(node.iterable, CallExpr) and
@@ -8082,7 +8157,7 @@ class GimpleGen:
                 tmp = self._new_temp(et)
                 self._emit(f"  {tmp} = {ev};")
                 alias = tmp
-            struct_name = et.replace(' *', '').strip()
+            struct_name = _struct_name_of(et)
             enter_fn    = f"{struct_name}___enter__"
             if enter_fn in self.func_return_types:
                 self._emit(f"  {enter_fn} ({alias});")
@@ -8365,7 +8440,7 @@ class GimpleGen:
             self._gen_for_set(var, it_val, node.body)
         elif it_type.endswith(' *') or it_type.endswith('*'):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
-            base = it_type.replace(' *', '').strip()
+            base = _struct_name_of(it_type)
             has_next = f"{base}___has_next__"
             nxt      = f"{base}___next__"
             if has_next in self.func_return_types or nxt in self.func_return_types:
@@ -8827,7 +8902,7 @@ class GimpleGen:
     def _gen_for_struct_iter(self, var: str, struct_type: str,
                               obj_val: str, body: list):
         """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
-        base = struct_type.replace(' *', '').strip()
+        base = _struct_name_of(struct_type)
 
         # Determine iterator type (may be the same struct or a separate iter type)
         iter_fn = f"{base}___iter__"
@@ -8835,7 +8910,7 @@ class GimpleGen:
             iter_type = self.func_return_types[iter_fn]
             iter_var  = self._new_temp(iter_type)
             self._emit(f"  {iter_var} = {iter_fn} ({obj_val});")
-            iter_base = iter_type.replace(' *', '').strip()
+            iter_base = _struct_name_of(iter_type)
         else:
             iter_type = struct_type
             iter_var  = obj_val
