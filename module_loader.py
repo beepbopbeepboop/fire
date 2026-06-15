@@ -206,7 +206,12 @@ class ModuleLoader:
                     c_return_type = self._mojo_type_to_c(return_type)
                     c_params = []
                     for pname, ptype in parameters:
-                        c_type = self._mojo_type_to_c(ptype)
+                        # Strip default values (e.g., 'String = ""' becomes 'String')
+                        if '=' in ptype:
+                            bare_type = ptype.split('=')[0].strip()
+                        else:
+                            bare_type = ptype
+                        c_type = self._mojo_type_to_c(bare_type)
                         c_params.append(f"{c_type} {pname}")
 
                     if name in exports:

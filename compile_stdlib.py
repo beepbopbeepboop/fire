@@ -87,7 +87,7 @@ def transpile_file(mojo_file):
         try:
             r = subprocess.run(
                 [_GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-fsyntax-only',
-                 '-x', 'c', cpath],
+                 '-D__MOJO_STDLIB_MODE__', '-x', 'c', cpath],
                 capture_output=True, text=True, timeout=10,
             )
         except subprocess.TimeoutExpired:

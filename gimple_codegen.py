@@ -1707,12 +1707,16 @@ _C_RESERVED_FUNCS = frozenset({
     'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma',
     'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff',
     'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf',
-    'asinh', 'acosh', 'atanh',
+    'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf',
     'nextafter', 'nextafterf', 'copysign', 'copysignf',
     'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder',
+    'expm1', 'expm1f', 'log1p', 'log1pf',
+    'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf',
+    'j0', 'j1', 'y0', 'y1',
     # Environment / system functions
     'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath',
     # File I/O
+    'open',
     'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush',
     'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr',
     'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf',
@@ -1753,6 +1757,14 @@ _C_RESERVED_FUNCS = frozenset({
 _FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv'})
 
 def _safe_name(name: str) -> str:
+    # Handle backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
+    if name.startswith('`') and name.endswith('`') and len(name) > 2:
+        name = name[1:-1]
+        if name and name[0].isdigit():
+            name = '_' + name
+        # Replace any remaining non-C-identifier chars
+        import re as _re
+        name = _re.sub(r'[^a-zA-Z0-9_]', '_', name)
     if name in _C_KEYWORDS or name in _C_RESERVED_FUNCS:
         return f"mojo_{name}"
     return name
@@ -1778,8 +1790,14 @@ def _c_escape(s: str) -> str:
     i, n = 0, len(s)
     while i < n:
         ch = s[i]
-        if ch == '\\' and i + 1 < n and (s[i + 1] in known or s[i + 1] == 'x'):
+        if ch == '\\' and i + 1 < n and s[i + 1] in known:
             out.append(ch); out.append(s[i + 1]); i += 2; continue
+        if ch == '\\' and i + 1 < n and s[i + 1] == 'x':
+            # Only pass \x through if followed by valid hex digit(s)
+            if i + 2 < n and s[i + 2] in '0123456789abcdefABCDEF':
+                out.append(ch); out.append(s[i + 1]); i += 2; continue
+            else:
+                out.append('\\\\x'); i += 2; continue
         if ch == '\\':
             out.append('\\\\'); i += 1; continue
         if ch == '"':
@@ -1983,9 +2001,9 @@ class ClosureInfo:
 # ---------------------------------------------------------------------------
 
 _HELPERS = """\
-static int __mojo_floordiv (int a, int b)
+static int64_t __mojo_floordiv (int64_t a, int64_t b)
 {
-  int q = a / b;
+  int64_t q = a / b;
   return q - (a % b != 0 && (a ^ b) < 0);
 }
 """
@@ -2248,6 +2266,60 @@ class GimpleGen:
 
         # Module not found (e.g. stdlib module like sys, os)
         return (None, [])
+
+    def _emit_stdlib_import_externs(self, stmts) -> None:
+        """Scan from-import stmts and emit extern declarations for concrete
+        functions found via load_module (text-only extraction — no dylib builds,
+        no recursion). Populates _link_import_decl_list and registers types so
+        call sites lower correctly. Safe to call for any module; no-ops if a
+        symbol is already registered."""
+        seen = set(self.func_return_types.keys()) | set(self.imported_symbols.keys())
+
+        # Determine the package prefix for resolving relative imports (e.g.
+        # `._swisstable` → `std.collections._swisstable` when compiling
+        # `std/collections/dict.mojo`).
+        _pkg_prefix = ''
+        if self._current_filename:
+            import os as _os
+            from module_loader import STDLIB_PATH
+            rel = _os.path.relpath(self._current_filename, STDLIB_PATH)
+            if not rel.startswith('..'):
+                parts = rel.replace(_os.sep, '/').split('/')
+                if len(parts) > 1:
+                    _pkg_prefix = '.'.join(parts[:-1]) + '.'
+
+        for stmt in stmts:
+            if not isinstance(stmt, FromImportStmt):
+                continue
+            mod = stmt.module
+            # Resolve relative imports: '._foo' → 'std.pkg._foo'
+            if mod.startswith('.'):
+                mod = _pkg_prefix + mod.lstrip('.')
+            try:
+                exports = load_module(mod)
+            except Exception:
+                continue
+            if not exports:
+                continue
+            for name, alias in stmt.names:
+                sym = alias if alias else name
+                if sym in seen:
+                    continue
+                info = exports.get(name)
+                if not info:
+                    continue
+                sig = info.get('signature')
+                if not sig:
+                    continue
+                ret = info.get('c_return_type', 'int64_t')
+                c_params = info.get('c_parameters') or []
+                ptypes = [' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                          for cp in c_params]
+                self.func_return_types[sym] = ret
+                self.func_param_types[sym] = ptypes
+                decl = f'extern {sig};'
+                self._link_import_decl_list.append(decl)
+                seen.add(sym)
 
     def _register_link_imports(self, stmts) -> list:
         """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
@@ -2579,6 +2651,12 @@ class GimpleGen:
         'scalbf':       ('float',  ['float', 'float']),
         'scalbn':       ('double', ['double', 'int']),
         'scalbnf':      ('float',  ['float', 'int']),
+        'logb':         ('double', ['double']),
+        'logbf':        ('float',  ['float']),
+        'j0':           ('double', ['double']),
+        'j1':           ('double', ['double']),
+        'y0':           ('double', ['double']),
+        'y1':           ('double', ['double']),
         # C math — float variants (f-suffix) return float, not double
         'cosf':         ('float',  ['float']),
         'sinf':         ('float',  ['float']),
@@ -2636,9 +2714,17 @@ class GimpleGen:
         'sinh':         ('double', ['double']),
         'cosh':         ('double', ['double']),
         'tanh':         ('double', ['double']),
+        'tanhf':        ('float',  ['float']),
         'asinh':        ('double', ['double']),
         'acosh':        ('double', ['double']),
         'atanh':        ('double', ['double']),
+        'asinhf':       ('float',  ['float']),
+        'acoshf':       ('float',  ['float']),
+        'atanhf':       ('float',  ['float']),
+        'expm1':        ('double', ['double']),
+        'expm1f':       ('float',  ['float']),
+        'log1p':        ('double', ['double']),
+        'log1pf':       ('float',  ['float']),
         'fmod':         ('double', ['double', 'double']),
         'tgamma':       ('double', ['double']),
         'lgamma':       ('double', ['double']),
@@ -2698,6 +2784,22 @@ class GimpleGen:
         'memcpy':       ('void *', ['void *', 'void *', 'int64_t']),
         'memmove':      ('void *', ['void *', 'void *', 'int64_t']),
         'memchr':       ('void *', ['void *', 'int', 'int64_t']),
+        # getdelim/getline take char**+size_t* — use _mojo_* wrappers that accept void*
+        '_mojo_getdelim': ('int64_t', ['void *', 'void *', 'int', 'void *']),
+        '_mojo_getline':  ('int64_t', ['void *', 'void *', 'void *']),
+        # vprintf takes (char*, va_list) — wrap to avoid va_list in GIMPLE
+        '_mojo_vprintf':  ('int', ['char *', 'void *']),
+        # mojo_memcpy: UnsafePointer params lower to int64_t (byte-based _memcpy_impl)
+        'mojo_memcpy':  ('void', ['int64_t', 'int64_t', 'int64_t']),
+        # mojo_memmove: UnsafePointer params lower to int64_t* (element-based memmove)
+        'mojo_memmove': ('void', ['int64_t *', 'int64_t *', 'int64_t']),
+    }
+
+    # Rename these C stdlib functions to mojo_* wrappers at call sites.
+    _CALL_RENAMES = {
+        'getdelim': '_mojo_getdelim',
+        'getline':  '_mojo_getline',
+        'vprintf':  '_mojo_vprintf',
     }
 
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
@@ -2707,6 +2809,8 @@ class GimpleGen:
         For each argument, if the declared parameter type differs from the
         passed type, emit an intermediate temp with the correct cast.
         """
+        # Rename certain C library functions to mojo_* wrappers with void* params
+        fname = self._CALL_RENAMES.get(fname, fname)
         sig = self._KNOWN_SIGS.get(fname)
         param_types = sig[1] if sig else self.func_param_types.get(fname, [])
 
@@ -2825,6 +2929,11 @@ class GimpleGen:
                     self._emit(f'  {ip3} = (int64_t){aval};')
                 self._emit(f'  {pp} = ({ptype}){ip3};')
                 coerced_args.append(pp)
+            elif ptype == 'int64_t' and atype.endswith(' *'):
+                # pointer passed where int64_t expected — cast via int64_t
+                ip = self._new_temp('int64_t')
+                self._emit(f'  {ip} = (int64_t){aval};')
+                coerced_args.append(ip)
             elif ptype == 'int' and atype in ('int64_t', '_Bool'):
                 ct = self._new_temp('int')
                 self._emit(f'  {ct} = (int){aval};')
@@ -3105,11 +3214,34 @@ class GimpleGen:
 
     def _declare_var(self, name: str, ctype: str, elem: str | None = None):
         if name not in self.var_types:
-            # Rename C keywords and macro names to avoid conflicts
+            # Strip backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
+            if name.startswith('`') and name.endswith('`') and len(name) > 2:
+                inner = name[1:-1]
+                if inner and inner[0].isdigit():
+                    inner = '_' + inner
+                import re as _re
+                c_name = _re.sub(r'[^a-zA-Z0-9_]', '_', inner)
+                self._c_names[name] = c_name
+                self.decls.append(f"  {ctype} {c_name};")
+                self.var_types[name] = ctype
+                if elem is not None:
+                    self._elem_types[name] = elem
+                return
+            # Rename C keywords, macro names, and C library functions to avoid conflicts
             if name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES:
                 c_name = f"_kw_{name}"
             elif name in _C_KEYWORDS:
                 c_name = f"_{name}"
+            elif name in _C_RESERVED_FUNCS:
+                # Local variable shadows a C library function; rename to avoid
+                # "invalid call to non-function" when the function is called later
+                c_name = f"_var_{name}"
+            elif (name in self.imported_symbols
+                  and self.imported_symbols[name].get('return_type', 'int64_t') != 'unknown'):
+                # Local variable shadows an imported *function* (not a module import) —
+                # rename the local so the extern decl and local variable don't conflict.
+                # Module imports have return_type='unknown'; functions default to 'int64_t'.
+                c_name = f"_local_{name}"
             else:
                 c_name = name
             if c_name != name:
@@ -3503,6 +3635,9 @@ class GimpleGen:
 
     def _lower_StringLiteral(self, node):
         val = node.value
+        # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
+        if val.startswith('`') and val.endswith('`') and len(val) > 2:
+            return self._lower_IdentExpr(IdentExpr(name=val))
         # Detect and strip f/r/b/u prefix — only if followed by a quote character
         # Regular strings have their quotes already stripped by the parser; f-strings keep prefix+quotes
         is_fstring = False
@@ -3771,6 +3906,11 @@ class GimpleGen:
                 elem_type = ot[:-2].strip() or 'int64_t'
                 if elem_type == 'void':
                     elem_type = 'int64_t'
+                # Struct types: return int64_t (opaque handle) — can't cast struct to int64_t in GIMPLE
+                if elem_type in self.struct_field_types or elem_type == 'StringSlice':
+                    t = self._new_temp('int64_t')
+                    self._emit(f"  {t} = (int64_t){ov};")
+                    return 'int64_t', t
                 t = self._new_temp(elem_type)
                 self._emit(f"  {t} = *{ov};")
                 return elem_type, t
@@ -3780,9 +3920,17 @@ class GimpleGen:
         if node.op == '+':
             return ot, ov
         c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
-        t = self._new_temp(ot)
-        self._emit(f"  {t} = {c_op}{ov};")
-        return ot, t
+        # Struct pointers can't be negated/inverted — coerce to int64_t first
+        actual_ot = ot
+        actual_ov = ov
+        if ot.endswith(' *') and ot not in ('void *', 'char *') and c_op in ('-', '~'):
+            ip = self._new_temp('int64_t')
+            self._emit(f"  {ip} = (int64_t){ov};")
+            actual_ot = 'int64_t'
+            actual_ov = ip
+        t = self._new_temp(actual_ot)
+        self._emit(f"  {t} = {c_op}{actual_ov};")
+        return actual_ot, t
 
     def _lower_TernaryExpr(self, node) -> tuple[str, str]:
         ct, cv = self.lower_expr(node.condition)
@@ -4323,7 +4471,7 @@ class GimpleGen:
             ct = self._new_temp(arith_type)
             self._safe_coerce_emit(rt, arith_type, rv, ct)
             rv = ct
-        if node.op in ('==', '!=') and lt.endswith(' *') != rt.endswith(' *'):
+        if node.op in ('==', '!=', '<', '>', '<=', '>=') and lt.endswith(' *') != rt.endswith(' *'):
             ip_l = self._new_temp('int64_t')
             ip_r = self._new_temp('int64_t')
             self._emit(f'  {ip_l} = (int64_t){lv};')
@@ -4345,9 +4493,18 @@ class GimpleGen:
             t2 = self._new_temp(td)
             self._emit(f"  {t2} = __builtin_floor ({t1});")
             return td, t2
-        t = self._new_temp('int')
+        # Coerce struct pointers to int64_t before integer floor division
+        if lt.endswith(' *') and lt not in ('void *', 'char *'):
+            ti = self._new_temp('int64_t')
+            self._emit(f"  {ti} = (int64_t){lv};")
+            lv = ti
+        if rt.endswith(' *') and rt not in ('void *', 'char *'):
+            ti = self._new_temp('int64_t')
+            self._emit(f"  {ti} = (int64_t){rv};")
+            rv = ti
+        t = self._new_temp('int64_t')
         self._emit(f"  {t} = __mojo_floordiv ({lv}, {rv});")
-        return 'int', t
+        return 'int64_t', t
 
     def _lower_pow(self, node: BinaryOp) -> tuple[str, str]:
         lt, lv = self.lower_expr(node.left)
@@ -4357,10 +4514,22 @@ class GimpleGen:
             t = self._new_temp(td)
             self._emit(f"  {t} = pow ({lv}, {rv});")
             return td, t
+        # Coerce struct pointers to int64_t before converting to double
+        # (casting struct * to double directly is invalid in GIMPLE)
+        lv_for_double = lv
+        rv_for_double = rv
+        if lt.endswith(' *'):
+            ti = self._new_temp('int64_t')
+            self._emit(f"  {ti} = (int64_t) {lv};")
+            lv_for_double = ti
+        if rt.endswith(' *'):
+            ti = self._new_temp('int64_t')
+            self._emit(f"  {ti} = (int64_t) {rv};")
+            rv_for_double = ti
         t1 = self._new_temp('double')
         t2 = self._new_temp('double')
-        self._emit(f"  {t1} = (double) {lv};")
-        self._emit(f"  {t2} = (double) {rv};")
+        self._emit(f"  {t1} = (double) {lv_for_double};")
+        self._emit(f"  {t2} = (double) {rv_for_double};")
         t3 = self._new_temp('double')
         self._emit(f"  {t3} = pow ({t1}, {t2});")
         t4 = self._new_temp('int')
@@ -4724,7 +4893,7 @@ class GimpleGen:
         # 'join' as a string method and corrupt the class ref.
         if ot == 'int' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
             struct_name = func.obj.name
-            mangled = _safe_name(f"{struct_name}_{method}")
+            mangled = f"{struct_name}_{_safe_name(method)}"
             ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
             # Pass the class ref (ov) as 'cls' first arg, then the actual args
             arg_pairs = [(ot, ov)] + [self.lower_expr(a) for a in node.args]
@@ -5098,9 +5267,9 @@ class GimpleGen:
                 self._emit(f"  {t} = int_write ({ov_cast}, {data_val_cast});")
                 return 'int64_t', t
             if method == 'close':
-                self._emit(f"  mojo_close ((void *){ov});")
+                # Stub: mojo_close is defined by stdlib and may not be visible here
                 t = self._new_temp('int')
-                self._emit(f"  {t} = 0;")
+                self._emit(f"  {t} = 0;  /* {ot}.close() — stubbed */")
                 return 'int', t
 
         # Stub string-type methods when called on wrong receiver types
@@ -5198,11 +5367,19 @@ class GimpleGen:
                         # self.parent.method() → try Scope if method='set'
                         if method == 'set' and func.obj.member == 'parent':
                             struct_name = 'Scope'
-        mangled = _safe_name(f"{struct_name}_{method}")
+        mangled = f"{struct_name}_{_safe_name(method)}"
         ret_type = self.func_return_types.get(f"{struct_name}_{method}", None)
         # Check _KNOWN_SIGS if not found in func_return_types
         if ret_type is None and mangled in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[mangled][0]
+        # For copy() on a struct with no explicit copy method: return the object pointer
+        # as int64_t (TrivialRegisterPassable semantics — no allocation needed).
+        if (ret_type is None and method == 'copy'
+                and f"{struct_name}_copy" not in self.func_return_types
+                and f"{struct_name}_copy" not in self._KNOWN_SIGS):
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = (int64_t){ov};")
+            return 'int64_t', t
         # Infer return type from common patterns if not found
         if ret_type is None:
             if method in ('get', 'get_symbol_type', 'pop', 'keys', 'values', 'items'):
@@ -5268,9 +5445,12 @@ class GimpleGen:
         'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma',
         'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff',
         'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf',
-        'asinh', 'acosh', 'atanh',
+        'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf',
         'nextafter', 'nextafterf', 'copysign', 'copysignf',
         'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder',
+        'expm1', 'expm1f', 'log1p', 'log1pf',
+        'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf',
+        'j0', 'j1', 'y0', 'y1',
         # Environment and system functions
         'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath',
         # Dynamic library functions
@@ -5489,8 +5669,11 @@ class GimpleGen:
                 ret_ct = _mojo_type(ann)
         # _KNOWN_SIGS takes precedence over Mojo type annotation (e.g. Scalar[T] → int64_t)
         # when the C function has a non-int64_t return type (float, double, FILE*, etc.)
+        # Also check _LIBC_SIGS for C stdlib functions like getenv → char*
         if cname in self._KNOWN_SIGS:
             ret_ct = self._KNOWN_SIGS[cname][0]
+        elif cname in self._LIBC_SIGS:
+            ret_ct = self._LIBC_SIGS[cname][0]
 
         arg_pairs = [self.lower_expr(a) for a in node.args]
         # First use wins: pin the prototype's parameter types and coerce later calls to match.
@@ -5887,6 +6070,22 @@ class GimpleGen:
         if fname_raw in self.struct_field_types:
             return self._lower_struct_constructor(fname_raw, node.args, getattr(node, 'kwargs', None))
 
+        # Imported struct constructor: fname_raw has func_return_types entry == "fname_raw *"
+        # (struct imported from another module, layout unknown). Return int64_t opaque handle.
+        if self.func_return_types.get(fname_raw) == f'{fname_raw} *':
+            arg_pairs = [self.lower_expr(a) for a in node.args]
+            t = self._new_temp('int64_t')
+            if arg_pairs:
+                atype, aval = arg_pairs[0]
+                if atype.endswith(' *'):
+                    self._emit(f"  {t} = (int64_t){aval};")
+                else:
+                    aval_local = self._ensure_local(atype, aval)
+                    self._emit(f"  {t} = (int64_t){aval_local};")
+            else:
+                self._emit(f"  {t} = (int64_t)0;")
+            return 'int64_t', t
+
         # set() / frozenset() built-in constructors
         if fname_raw in ('set', 'frozenset'):
             t = self._new_temp('MojoSet *')
@@ -5925,7 +6124,10 @@ class GimpleGen:
             return 'MojoList *', t
 
 
-        if fname_raw == 'open' and len(node.args) == 1:
+        # Only use the runtime open handlers when 'open' is NOT locally defined.
+        # When the stdlib defines its own `open` function, it becomes `mojo_open`
+        # via _C_RESERVED_FUNCS renaming, and calls should go through normal dispatch.
+        if fname_raw == 'open' and 'open' not in self.func_return_types and len(node.args) == 1:
             # open(path) — read mode
             fn_type, fn_val = self.lower_expr(node.args[0])
             t = self._new_temp('int64_t')
@@ -5933,7 +6135,7 @@ class GimpleGen:
             self._emit_call('int64_t', t, 'mojo_open_file', [(fn_type, fn_val)])
             return 'int64_t', t
 
-        if fname_raw == 'open' and len(node.args) == 2:
+        if fname_raw == 'open' and 'open' not in self.func_return_types and len(node.args) == 2:
             fn_type, fn_val = self.lower_expr(node.args[0])
             mode_type, mode_val = self.lower_expr(node.args[1])
             # Generic coercion: ensure args match expected types
@@ -6019,10 +6221,14 @@ class GimpleGen:
         # Use builtin mapping first (int→mojo_make_int, float→mojo_make_float, etc.)
         # _safe_name would wrongly rename 'int' to 'mojo_int' (a typedef, not a function).
         # For _C_RESERVED_FUNCS names, only rename at call sites when there IS a local
-        # Mojo definition (func_return_types key). Otherwise keep the C stdlib name so
-        # that pure C-stdlib calls (e.g. abs() in assert_almost_equal) still link.
+        # Mojo definition (func_return_types key) OR when the function was imported from
+        # another module (imported_symbols) — imported Mojo wrappers are renamed at their
+        # definition site, so calls must use the renamed name (mojo_modf, mojo_frexp, etc.).
+        # Otherwise keep the C stdlib name so that pure C-stdlib calls (e.g. abs() in
+        # assert_almost_equal) still link.
         if (fname_raw in _C_RESERVED_FUNCS and fname_raw not in self.func_return_types
-                and fname_raw not in _FORCE_RENAME_RESERVED):
+                and fname_raw not in _FORCE_RENAME_RESERVED
+                and fname_raw not in self.imported_symbols):
             fname = self.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
         else:
             fname = self.BUILTIN_VALUE_MAP.get(fname_raw, _safe_name(fname_raw))
@@ -6030,6 +6236,30 @@ class GimpleGen:
         # If the mapped C function has a known return type, use it (not the Python inferred type)
         if fname in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[fname][0]
+
+        # Unknown uppercase name not in any symbol table — treat as opaque struct constructor.
+        # This handles struct types imported indirectly (e.g. FileDescriptor in file.mojo),
+        # which are used as constructors but have no registered C declaration.
+        if (ret_type == 'int64_t' and fname == fname_raw and fname_raw[0:1].isupper()
+                and fname_raw not in self.func_param_types
+                and fname_raw not in self.imported_symbols
+                and fname_raw not in self._KNOWN_SIGS
+                and fname_raw not in _C_RESERVED_FUNCS
+                and fname_raw not in self.BUILTIN_VALUE_MAP):
+            _ctor_args = [self.lower_expr(a) for a in node.args]
+            t = self._new_temp('int64_t')
+            if _ctor_args:
+                _at, _av = _ctor_args[0]
+                if _at.endswith(' *'):
+                    self._emit(f"  {t} = (int64_t){_av};")
+                elif _at == 'int64_t':
+                    self._emit(f"  {t} = {_av};")
+                else:
+                    _av_local = self._ensure_local(_at, _av)
+                    self._emit(f"  {t} = (int64_t){_av_local};")
+            else:
+                self._emit(f"  {t} = (int64_t)0;")
+            return 'int64_t', t
         # Track renamed builtins (abs→mojo_abs etc.) so we can emit forward decls in preamble
         if fname != fname_raw and fname_raw in _C_RESERVED_FUNCS:
             self._renamed_builtin_calls = getattr(self, '_renamed_builtin_calls', {})
@@ -6084,7 +6314,12 @@ class GimpleGen:
         # abs(int64_t) → llabs; abs only returns int, so use llabs for int64_t args
         if fname_raw in ('abs', 'mojo_abs') and len(arg_pairs) == 1:
             at, av = arg_pairs[0]
-            if at in ('int64_t', 'long long'):
+            # Coerce any integer or struct-pointer argument to int64_t for llabs
+            if at in ('int64_t', 'long long') or at.endswith(' *'):
+                if at.endswith(' *'):
+                    ip = self._new_temp('int64_t')
+                    self._emit(f'  {ip} = (int64_t){av};')
+                    av = ip
                 arg64 = self._new_temp('int64_t')
                 self._emit(f'  {arg64} = (int64_t){av};')
                 t = self._new_temp('int64_t')
@@ -6095,7 +6330,9 @@ class GimpleGen:
         # range(start, stop, step) → mojo_range3(start, stop, step)
         if fname_raw == 'range':
             if len(arg_pairs) == 1:
-                arg_pairs = [('int64_t', '(int64_t)0'), arg_pairs[0]]
+                _zero = self._new_temp('int64_t')
+                self._emit(f"  {_zero} = (int64_t) 0;")
+                arg_pairs = [('int64_t', _zero), arg_pairs[0]]
             elif len(arg_pairs) == 3:
                 fname = 'mojo_range3'
             # mojo_range / mojo_range3 return void * (opaque iterator)
@@ -6382,6 +6619,11 @@ class GimpleGen:
         # Can't dereference void* (no element type); return the pointer itself
         if et == 'void':
             return ot, addr
+        # Struct types: return int64_t (opaque handle) — can't cast struct→int64_t in GIMPLE
+        if et in self.struct_field_types:
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = (int64_t){addr};")
+            return 'int64_t', t
         t = self._new_temp(et)
         self._emit(f"  {t} = *{addr};")
         return et, t
@@ -6984,6 +7226,24 @@ class GimpleGen:
         return
 
     def _gen_stmt_VarDecl(self, node):
+        # Tuple VarDecl: parser sets name='a,b' for `a, b = expr`. Lower as individual
+        # assignments to avoid GIMPLE's implicit multi-value decl which causes
+        # "redeclaration with no linkage" when the names were already declared.
+        if isinstance(node.name, str) and ',' in node.name and node.value is not None:
+            names = [n.strip() for n in node.name.split(',')]
+            vtype, v = self.lower_expr(node.value)
+            for i, n in enumerate(names):
+                if n == '_':
+                    continue
+                self._declare_var(n, 'int64_t')
+                ip = self._new_temp('int64_t')
+                self._emit(f"  {ip} = (int64_t){i};")
+                ti = self._new_temp('int64_t')
+                iv = self._new_temp('int64_t')
+                self._emit(f"  {iv} = (int64_t){v};")
+                self._emit(f"  {ti} = mojo_list_get_int ((MojoList *){iv}, {ip});")
+                self._emit(f"  {n} = {ti};")
+            return
         if node.type_ann in self.struct_field_types and node.value is not None:
             layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
             self._layout_hint = layout
@@ -7484,6 +7744,13 @@ class GimpleGen:
                 return
             # Redirect calls to user's main() to its renamed symbol (root ->
             # _gimple_main; sub-module -> _{module}_main), matching gen_func.
+            # If raw_name is a local variable holding a function value (e.g., a
+            # Mojo function-type parameter stored as int64_t), calling it directly
+            # in GIMPLE is invalid. Stub it out here — same guard as _lower_CallExpr.
+            _var_ctype = self.var_types.get(raw_name, '')
+            if _var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
+                for a in node.value.args: self.lower_expr(a)
+                return
             if raw_name == 'main' and self.current_func_name != 'main':
                 if self.emit_entry_points:
                     fname = _safe_name('_gimple_main')
@@ -7491,7 +7758,17 @@ class GimpleGen:
                     _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
                     fname = _safe_name(f"_{_mod_id}_main" if _mod_id else '_lib_main')
             else:
-                fname = _safe_name(raw_name)
+                # Mirror the rename logic in _lower_call: only rename _C_RESERVED_FUNCS
+                # names when they are locally defined OR imported — otherwise keep the
+                # C stdlib name (e.g. abort() from a monomorphized template that has no
+                # import statement should stay as abort(), not become mojo_abort()).
+                if (raw_name in _C_RESERVED_FUNCS
+                        and raw_name not in self.func_return_types
+                        and raw_name not in _FORCE_RENAME_RESERVED
+                        and raw_name not in self.imported_symbols):
+                    fname = self.BUILTIN_VALUE_MAP.get(raw_name, raw_name)
+                else:
+                    fname = self.BUILTIN_VALUE_MAP.get(raw_name, _safe_name(raw_name))
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
 
             # Handle keyword arguments for regular function calls
@@ -7873,7 +8150,9 @@ class GimpleGen:
             cond_t = self._new_temp('_Bool')
             self._emit(f"  {t_lt}   = {var} < {stop_v};")
             self._emit(f"  {t_gt}   = {var} > {stop_v};")
-            self._emit(f"  {t_spos} = {step_v} > 0;")
+            t_zero = self._new_temp('int64_t')
+            self._emit(f"  {t_zero} = (int64_t)0;")
+            self._emit(f"  {t_spos} = {step_v} > {t_zero};")
             self._emit(f"  {cond_t} = {t_spos} ? {t_lt} : {t_gt};")
         else:
             cond_t = self._new_temp('_Bool')
@@ -8449,15 +8728,18 @@ class GimpleGen:
         """
         has_kw = any(pn.startswith('**') for pn, _ in (params or []))
         out = []
+        seen_vararg = False
         for i, (pn, pt) in enumerate(params or []):
             if pn.startswith('**'):
                 out.append('MojoDict *')
             elif pn.startswith('*'):
                 if has_kw:
                     out.append('MojoList *')      # pass-through: concrete list param
-                else:
+                elif not seen_vararg:
                     out.append(sentinel)          # packing convention
-                    break
+                    seen_vararg = True
+                # After *args, continue to catch any trailing `out` params that also
+                # appear in the definition and must match the forward declaration.
             elif i == 0 and pn == 'self' and self_struct:
                 out.append(f"{self_struct} *")
             else:
@@ -8751,7 +9033,11 @@ class GimpleGen:
                 else:
                     ctype = self._param_ctype(pname, ptype, node)
             self.var_types[bare] = ctype
-            param_strs.append(f"{ctype} {bare}")
+            safe_bare = f'_kw_{bare}' if bare in _C_KEYWORDS or bare in _C_PARAM_EXTRA_KEYWORDS else bare
+            if safe_bare != bare:
+                self._c_names[bare] = safe_bare
+                self.var_types[safe_bare] = ctype
+            param_strs.append(f"{ctype} {safe_bare}")
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
         mangled    = f"{struct_name}_{_safe_name(node.name)}{overload_id}"
@@ -8805,6 +9091,13 @@ class GimpleGen:
         self._link_import_decl_list = []
         if self.link_imports:
             self._link_import_decl_list = self._register_link_imports(stmts)
+
+        # Lightweight stdlib import extern pass: scan from-imports and emit extern
+        # declarations for concrete functions found via load_module (simple text
+        # parser, no dylib builds). This resolves "implicit declaration" errors for
+        # functions like `is_occupied` imported from other stdlib modules.
+        self._link_import_decl_list = list(self._link_import_decl_list)
+        self._emit_stdlib_import_externs(stmts)
 
         # ── Phase 0: Compile imported modules and extract their type info ────
         # Do this FIRST so imported function types are available for everything
@@ -9008,6 +9301,26 @@ class GimpleGen:
                             ft = _mojo_type(field.type_ann)
                             if field.name == 'value' and s.name == 'Generator':
                                 ft = 'int'  # boxed object field
+                            # If the type resolved to a generic container pointer (MojoList *,
+                            # MojoDict *, MojoSet *, or double-pointer like MojoDict * *)
+                            # but there is a locally-defined struct, prefer the local struct.
+                            # Also handle Pointer[LocalStruct[...]] → LocalStruct *.
+                            if field.type_ann:
+                                _ann_str = str(field.type_ann)
+                                # Extract the outermost base name (e.g. 'Pointer', 'Dict', 'List')
+                                _outer_base = _ann_str.split('[')[0].strip()
+                                _ptr_wrappers = ('UnsafePointer', 'OwnedPointer',
+                                                 'ArcPointer', 'Pointer', 'Reference')
+                                if _outer_base in _ptr_wrappers and '[' in _ann_str:
+                                    # Pointer[InnerType[...], origin] — grab InnerType base
+                                    _inner = _ann_str.split('[', 1)[1]
+                                    _inner_base = _inner.split('[')[0].strip()
+                                    if _inner_base in self.struct_field_types:
+                                        # Pointer[LocalStruct[...]] → LocalStruct *
+                                        ft = f'{_inner_base} *'
+                                elif ft.endswith(' *') and _outer_base in self.struct_field_types:
+                                    # Direct: List[T] → List * (override MojoList *)
+                                    ft = f'{_outer_base} *'
                             self.struct_field_types[s.name][field.name] = ft
 
                 # Always scan ALL methods for self.x = ... to build complete field list
@@ -9404,7 +9717,13 @@ class GimpleGen:
                 inner_declared = ({pn for pn, _ in inner.params}
                                   | _declared_vars_body(inner.body)
                                   | inner_assign_targets)
-                free_globals = set(self.func_return_types.keys())
+                # Exclude known globals/imported functions from capture — but NOT if
+                # the outer function has a PARAMETER with the same name (parameter
+                # shadows the global and must be captured, not treated as a global ref).
+                # We use outer_scope (parameters only) not enriched_scope (which includes
+                # local assignments like module imports that should NOT be captured).
+                outer_params = set(outer_scope.keys())
+                free_globals = set(self.func_return_types.keys()) - outer_params
                 free         = used - inner_declared - free_globals
                 captures     = [(v, enriched_scope[v]) for v in sorted(free)
                                 if v in enriched_scope]
@@ -9656,8 +9975,15 @@ class GimpleGen:
 
         func_parts: list[str] = []
 
+        _emitted_closures: set[str] = set()
+
         def _emit_closure_recursive(ci) -> None:
             """Emit sub-closures first (depth-first), then this closure's allocator + body."""
+            # Deduplicate: overloaded methods share the same closure outer_name, so
+            # the same lifted closure may be emitted multiple times (once per overload).
+            if ci.lifted_name in _emitted_closures:
+                return
+            _emitted_closures.add(ci.lifted_name)
             for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
                 _emit_closure_recursive(sub_ci)
             if ci.env_struct:
@@ -9724,14 +10050,19 @@ class GimpleGen:
                     func_parts.append('')
             elif isinstance(stmt, TraitDef):
                 lines = [f"typedef struct {stmt.name}_vtable {{"]
+                _seen_vtable_members: set = set()
                 for m in stmt.methods:
+                    safe_mname = _safe_name(m.name)
+                    if safe_mname in _seen_vtable_members:
+                        continue
+                    _seen_vtable_members.add(safe_mname)
                     ret    = self._resolve_type(m.return_type)
                     if m.params and any(pn.startswith('*') for pn, _ in m.params):
                         ptypes = 'MojoList *'
                     else:
                         ptypes = (', '.join(self._resolve_type(pt) for _, pt in m.params)
                                   if m.params else 'void')
-                    lines.append(f"  {ret} (*{_safe_name(m.name)}) ({ptypes});")
+                    lines.append(f"  {ret} (*{safe_mname}) ({ptypes});")
                 lines.append(f"}} {stmt.name}_vtable;")
                 func_parts.extend(lines)
                 func_parts.append('')
@@ -9961,6 +10292,18 @@ class GimpleGen:
             ('_stat_linux_x86',        'int64_t _stat_linux_x86(...);'),
             ('func',                   'int64_t func(...);'),
             ('mojo_getenv',            'int64_t mojo_getenv(...);'),
+            ('Span_as_bytes',          'int64_t Span_as_bytes(...);'),
+            ('Span_get_immutable',     'int64_t Span_get_immutable(...);'),
+            ('_Bool___mlir_i1__',      'int64_t _Bool___mlir_i1__(...);'),
+            ('sync_parallelize',       'void sync_parallelize(...);'),
+            ('main_func',              'void main_func(void);'),
+            ('_getpw_linux',           'int64_t _getpw_linux(...);'),
+            ('_lstat_macos',           'int64_t _lstat_macos(...);'),
+            ('_log2_ceil',             'int64_t _log2_ceil(...);'),
+            ('int64_t_unsafe_value',   'int64_t int64_t_unsafe_value(...);'),
+            ('MojoDict_unsafe_ptr',    'int64_t MojoDict_unsafe_ptr(...);'),
+            ('_Empty_copy',            'void _Empty_copy(...);'),
+            ('_get_global_or_null',    'int64_t _get_global_or_null(...);'),
         ]
         def _guarded_stub(name, decl):
             guard = f'_MOJO_STUB_{name.upper()}'
@@ -9984,7 +10327,9 @@ class GimpleGen:
             'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
             'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
             'int64_t mojo_open_file(char *path);',
-            'void *mojo_open(char *filename, char *mode);',
+            # Suppress mojo_open decl when this module defines or imports 'open'
+            # (renamed to mojo_open via _C_RESERVED_FUNCS, causing a conflict)
+            *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
             'int64_t int_write (int64_t, char *);',
             'int64_t int_parse_module (int);',
             # Genuinely-unimplemented dispatch helpers (ctypes Structure.in_dll
@@ -10572,18 +10917,42 @@ class GimpleGen:
 
             safe = _safe_name(sym_name)
             if 'signature' in sym_info:
-                # New format: use full signature with parameters, applying safe name
-                signature = sym_info['signature']
-                if safe != sym_name:
-                    # Replace first occurrence of the bare function name with safe name
-                    signature = re.sub(r'\b' + re.escape(sym_name) + r'\b', safe, signature, count=1)
-                # Strip Mojo parameter modifiers (out, inout, mut, etc.) from signature
-                signature = re.sub(
-                    r'\b(inout|borrowed|owned|borrow|out|mut|ref|read|copy)\s+(?=\w)',
-                    '', signature)
-                # Guard with #ifndef so C preprocessor macros (SEEK_END etc.) aren't
-                # accidentally redeclared (the macro would expand before gcc sees the decl).
-                parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
+                # For _C_RESERVED_FUNCS symbols (renamed to mojo_X), the Mojo wrapper may
+                # have optional/default parameters that aren't passed at all call sites.
+                # Use variadic (...) so any arity is accepted without "too few arguments".
+                if sym_name in _C_RESERVED_FUNCS:
+                    # Prefer c_return_type (already a C type) over return_type (Mojo type)
+                    ret_type = sym_info.get('c_return_type') or sym_info.get('return_type', 'int64_t')
+                    if ret_type and ret_type != 'unknown' and not any(
+                            c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
+                        ret_type = self._resolve_type(ret_type)
+                    elif not ret_type or ret_type == 'unknown':
+                        ret_type = 'int64_t'
+                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                else:
+                    # New format: use full signature with parameters, applying safe name
+                    signature = sym_info['signature']
+                    orig_name = sym_info.get('original_name', sym_name)
+                    if safe != sym_name:
+                        # Replace first occurrence of the bare function name with safe name
+                        signature = re.sub(r'\b' + re.escape(sym_name) + r'\b', safe, signature, count=1)
+                    elif orig_name != sym_name:
+                        # Aliased import: signature has original name, but we expose alias name.
+                        # Replace original name in signature so the extern matches the call site.
+                        signature = re.sub(r'\b' + re.escape(orig_name) + r'\b', safe, signature, count=1)
+                    # Strip Mojo parameter modifiers (out, inout, mut, var, etc.) from signature
+                    signature = re.sub(
+                        r'\b(inout|borrowed|owned|borrow|out|mut|ref|read|copy|var)\s+(?=\w)',
+                        '', signature)
+                    # Rename C control/storage keywords used as Mojo parameter names.
+                    # Only rename non-type keywords: type keywords (void, int, char, etc.)
+                    # legitimately appear as C types in extern signatures and must NOT be renamed.
+                    for _ckw in ('default', 'register', 'auto', 'static', 'extern',
+                                 'volatile', 'inline'):
+                        signature = re.sub(r'\b' + _ckw + r'\b(?=\s*[,)])', f'_kw_{_ckw}', signature)
+                    # Guard with #ifndef so C preprocessor macros (SEEK_END etc.) aren't
+                    # accidentally redeclared (the macro would expand before gcc sees the decl).
+                    parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
             else:
                 # Legacy format fallback: use pure variadic so callers can pass any args.
                 # GIMPLE mode treats () as "no params" (causing "too many args" errors),

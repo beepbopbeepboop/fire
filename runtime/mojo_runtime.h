@@ -72,6 +72,7 @@ MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 
 void mojo_list_print(MojoList *l);
+int64_t MojoList__write_to(MojoList *l, ...);
 
 /* ── String ───────────────────────────────────────────────────────────────*/
 typedef struct {
@@ -268,8 +269,12 @@ MojoList *mojo_get_argv(void);
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
 
-MojoFileHandle mojo_open(char *filename, char *mode);
+/* mojo_open and mojo_close are defined by the Mojo stdlib (renamed from 'open'/'close').
+   Do not declare them here to avoid conflicting types. */
+/* mojo_write: stdlib mode redefines this with all-int64_t params (raw fd/buf/len) */
+#ifndef __MOJO_STDLIB_MODE__
 int64_t mojo_write(MojoFileHandle fh, char *data, int64_t len);
+#endif
 int64_t mojo_read(MojoFileHandle fh, char *buffer, int64_t len);
 char *mojo_file_read_all(char *filename);
 
@@ -279,6 +284,23 @@ MojoList *mojo_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
+
+/* Wrappers for C library functions that take pointer-to-pointer args.
+   Generated GIMPLE code passes int64_t/void* opaque values; these wrappers
+   accept void* and forward to the real typed C functions. */
+#include <sys/types.h>
+static ssize_t _mojo_getdelim(void *lp, void *n, int d, void *f) {
+    return getdelim((char **)lp, (size_t *)n, d, (FILE *)f);
+}
+static ssize_t _mojo_getline(void *lp, void *n, void *f) {
+    return getline((char **)lp, (size_t *)n, (FILE *)f);
+}
+#include <stdarg.h>
+static int _mojo_vprintf(char *fmt, void *ap) {
+    /* va_list is passed as void* from GIMPLE code; cast is implementation-defined
+       but safe on all targets where va_list is a pointer type. */
+    return vprintf(fmt, *(va_list *)ap);
+}
 
 /* Flattened method stubs for generated GIMPLE code */
 char *int_read(int64_t f);
@@ -297,10 +319,16 @@ char *mojo_str_rstrip(char *str);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
 
+/* ── SIMD select helper ──────────────────────────────────────────────────
+ * Lowers SIMD[_Bool,N].select(a, b) → cond ? a : b for scalar path.   */
+static inline int64_t _Bool_select(int64_t cond, int64_t a, int64_t b) {
+    return cond ? a : b;
+}
+
 /* ── Integer arithmetic helpers ──────────────────────────────────────────
  * Lowered floor-division for use in __GIMPLE code.                      */
-static inline int __mojo_floordiv(int a, int b) {
-    int q = a / b;
+static inline int64_t __mojo_floordiv(int64_t a, int64_t b) {
+    int64_t q = a / b;
     return q - (a % b != 0 && (a ^ b) < 0);
 }
 
@@ -385,8 +413,10 @@ int int_analyze(int obj);                       /* Analyze function */
 /* Import function (not used in C, but may be called) */
 int int_import_module(int importlib_obj, char *module_name);  /* _python_import wrapper */
 
-/* Python builtin any() function */
+/* Python builtin any() function — suppressed in stdlib mode */
+#ifndef __MOJO_STDLIB_MODE__
 int any(void *iterable);                        /* Python any() builtin */
+#endif
 
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */
