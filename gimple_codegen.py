@@ -4098,6 +4098,19 @@ class GimpleGen:
             self._emit(f"  {t} = {ov};")
             return 'char *', t
 
+        # .value on void * or function pointer (DType/bracket-param typed as builtin 'type')
+        # → extract the integer value. This handles e.g. `type.value` where `type` is a
+        # bracket param of type `TraceCategory` that got lowered to a function pointer.
+        if node.member == 'value' and ot in ('void *', 'int64_t', 'int'):
+            t = self._new_temp('int64_t')
+            if ot == 'void *':
+                vt = self._new_temp('int64_t')
+                self._emit(f"  {vt} = (int64_t){ov};")
+                self._emit(f"  {t} = {vt};")
+            else:
+                self._emit(f"  {t} = (int64_t){ov};")
+            return 'int64_t', t
+
         # Special handling for .__name__ on type objects
         if node.member == '__name__':
             struct_name_check = ot.replace(' *', '').strip()
@@ -10447,6 +10460,17 @@ class GimpleGen:
             ('_Bool___mlir_i1__',      'int64_t _Bool___mlir_i1__(...);'),
             ('sync_parallelize',       'void sync_parallelize(...);'),
             ('main_func',              'void main_func(void);'),
+            # Mojo SIMD/Scalar type constructors and utilities
+            ('scalar',                 'int64_t scalar(...);'),
+            ('Scalar',                 'int64_t Scalar(...);'),
+            ('type_of',                'int64_t type_of(...);'),
+            ('align_up',               'int64_t align_up(...);'),
+            ('align_down',             'int64_t align_down(...);'),
+            ('clamp',                  'int64_t clamp(...);'),
+            ('isdir',                  'int isdir (char * path);'),
+            ('serialize',              'void serialize(...);'),
+            ('hex',                    'char * hex(...);'),
+            ('slice',                  'int64_t slice(...);'),
             ('_getpw_linux',           'int64_t _getpw_linux(...);'),
             ('_lstat_macos',           'int64_t _lstat_macos(...);'),
             # POSIX functions not declared by our minimal header set (<unistd.h> stubs)
