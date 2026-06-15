@@ -2299,7 +2299,7 @@ class GimpleGen:
             'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf',
             'fabs', 'fabsf', 'fmod', 'fmodf',
             'malloc', 'free', 'realloc', 'calloc',
-            'pclose', 'popen', 'dlclose', 'dlopen', 'dlsym',
+            'pclose', 'popen', 'dlclose', 'dlopen', 'dlsym', 'dlerror',
             'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'sscanf',
             'strlen', 'strcpy', 'strncpy', 'strcmp', 'strncmp',
             'strcat', 'strncat', 'strstr', 'strchr', 'strrchr',
@@ -2309,15 +2309,32 @@ class GimpleGen:
             'fdopen', 'fileno', 'tmpfile', 'tmpnam',
             'getenv', 'setenv', 'unsetenv', 'putenv',
             'isatty', 'getuid', 'getpid', 'getppid',
+            # Linux-specific libc wrappers that collide with GCC declarations
+            'get_errno', 'set_errno', '_getpw_linux', '_lstat_linux_x86_64',
+            '_stat_linux_x86_64', '_fstat_linux_x86_64',
         })
+
+        def _resolve_relative(mod, pkg_prefix):
+            """Resolve relative import: count leading dots, go up that many levels."""
+            if not mod.startswith('.'):
+                return mod
+            dots = len(mod) - len(mod.lstrip('.'))
+            rest = mod.lstrip('.')
+            parts = pkg_prefix.rstrip('.').split('.')
+            # dots=1 → current package (no level up), dots=2 → parent, etc.
+            up = dots - 1
+            if up > 0:
+                parts = parts[:-up] if up < len(parts) else []
+            base = '.'.join(parts)
+            return (base + '.' + rest) if (base and rest) else (base or rest)
 
         for stmt in stmts:
             if not isinstance(stmt, FromImportStmt):
                 continue
             mod = stmt.module
-            # Resolve relative imports: '._foo' → 'std.pkg._foo'
+            # Resolve relative imports: '._foo' → 'std.pkg._foo', '.._foo' → 'std.parent._foo'
             if mod.startswith('.'):
-                mod = _pkg_prefix + mod.lstrip('.')
+                mod = _resolve_relative(mod, _pkg_prefix)
             try:
                 exports = load_module(mod)
             except Exception:
@@ -2340,7 +2357,17 @@ class GimpleGen:
                           for cp in c_params]
                 self.func_return_types[sym] = ret
                 self.func_param_types[sym] = ptypes
-                decl = f'extern {sig};'
+                # When imported with an alias, replace the original name in the sig
+                # so the extern matches the alias name used at call sites.
+                if alias and name != alias:
+                    import re as _re
+                    sig = _re.sub(r'\b' + _re.escape(name) + r'\b', alias, sig, count=1)
+                # Guard the extern with #ifndef so the pre-defined stubs (which use
+                # the same guard macro _MOJO_STUB_<NAME>) don't produce a second
+                # conflicting declaration. If the extern is emitted here, the stub
+                # will see the macro already defined and skip itself.
+                guard = f'_MOJO_STUB_{sym.upper()}'
+                decl = f'#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif'
                 self._link_import_decl_list.append(decl)
                 seen.add(sym)
 
@@ -2446,7 +2473,13 @@ class GimpleGen:
                             ptypes = _param_ctypes(info.get('c_parameters'))
                         self.func_return_types[sym] = ret
                         self.func_param_types[sym] = ptypes
-                        decls.append(f'extern {sig};')
+                        # Don't emit extern if: (a) locally defined in this module
+                        # (would conflict), or (b) it's a C stdlib symbol GCC already
+                        # declares (conflicting types when Mojo stub has different sig).
+                        _locally_defined = sym in self._global_inline_defs
+                        _is_c_builtin = sym in self._LIBC_DECLARED
+                        if not _locally_defined and not _is_c_builtin:
+                            decls.append(f'extern {sig};')
                 elif isinstance(stmt, FunctionDef):
                     scan(stmt.body)
                 elif isinstance(stmt, IfStmt):
@@ -4052,6 +4085,18 @@ class GimpleGen:
             self._emit(f"  {null_tmp} = 0;  /* class ref {ov} as NULL */")
             ov = null_tmp
 
+
+        # .address on any pointer type: UnsafePointer.address → the raw integer address
+        if node.member == 'address' and ot.endswith(' *'):
+            t = self._new_temp('int64_t')
+            self._emit(f"  {t} = (int64_t){ov};")
+            return 'int64_t', t
+
+        # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
+        if node.member == 'value' and ot == 'char *':
+            t = self._new_temp('char *')
+            self._emit(f"  {t} = {ov};")
+            return 'char *', t
 
         # Special handling for .__name__ on type objects
         if node.member == '__name__':
@@ -6311,6 +6356,34 @@ class GimpleGen:
         # If the mapped C function has a known return type, use it (not the Python inferred type)
         if fname in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[fname][0]
+
+        # Scalar type constructor: Float32(x) → (float)x, Int32(x) → (int32_t)x, etc.
+        # Must come before the "Unknown uppercase name" block which would emit int64_t.
+        _scalar_ctor_map = {
+            'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16',
+            'BFloat16': '__fp16',
+            'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t',
+            'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t',
+            'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool',
+        }
+        if (fname_raw in _scalar_ctor_map and fname_raw not in self.func_return_types
+                and fname_raw not in self.imported_symbols):
+            _sct = _scalar_ctor_map[fname_raw]
+            t = self._new_temp(_sct)
+            if node.args:
+                _at, _av = self.lower_expr(node.args[0])
+                for _xa in node.args[1:]: self.lower_expr(_xa)
+                # Only do direct cast if arg is a C scalar type (not a struct pointer).
+                # Casting a struct pointer to float/double is invalid in C.
+                _arg_is_scalar = not _at.endswith(' *') and _at not in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *', 'char *')
+                if _arg_is_scalar:
+                    _av_local = self._ensure_local(_at, _av)
+                    self._emit(f"  {t} = ({_sct}){_av_local};")
+                else:
+                    self._emit(f"  {t} = ({_sct})0;  /* {fname_raw}(struct) unsupported */")
+            else:
+                self._emit(f"  {t} = ({_sct})0;")
+            return _sct, t
 
         # Unknown uppercase name not in any symbol table — treat as opaque struct constructor.
         # This handles struct types imported indirectly (e.g. FileDescriptor in file.mojo),
@@ -10376,6 +10449,13 @@ class GimpleGen:
             ('main_func',              'void main_func(void);'),
             ('_getpw_linux',           'int64_t _getpw_linux(...);'),
             ('_lstat_macos',           'int64_t _lstat_macos(...);'),
+            # POSIX functions not declared by our minimal header set (<unistd.h> stubs)
+            ('getuid',   'unsigned int getuid (void);'),
+            ('getgid',   'unsigned int getgid (void);'),
+            ('getpid',   'int getpid (void);'),
+            ('getppid',  'int getppid (void);'),
+            ('isatty',   'int isatty (int fd);'),
+            ('sysconf',  'long sysconf (int name);'),
             ('_log2_ceil',             'int64_t _log2_ceil(...);'),
             ('int64_t_unsafe_value',   'int64_t int64_t_unsafe_value(...);'),
             ('MojoDict_unsafe_ptr',    'int64_t MojoDict_unsafe_ptr(...);'),
