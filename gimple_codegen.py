@@ -2288,6 +2288,29 @@ class GimpleGen:
                 if len(parts) > 1:
                     _pkg_prefix = '.'.join(parts[:-1]) + '.'
 
+        # Names that conflict with GCC built-ins or C stdlib declarations — skip
+        # emitting externs for these even if load_module finds them.
+        _C_BUILTINS = frozenset({
+            'abort', 'atof', 'atoi', 'atol', 'atoll', 'exit', '_exit',
+            'fclose', 'fopen', 'fread', 'fwrite', 'fseek', 'ftell', 'fflush',
+            'fma', 'fmaf', 'pow', 'powf', 'sqrt', 'sqrtf',
+            'sin', 'sinf', 'cos', 'cosf', 'tan', 'tanf',
+            'exp', 'expf', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f',
+            'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf',
+            'fabs', 'fabsf', 'fmod', 'fmodf',
+            'malloc', 'free', 'realloc', 'calloc',
+            'pclose', 'popen', 'dlclose', 'dlopen', 'dlsym',
+            'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'sscanf',
+            'strlen', 'strcpy', 'strncpy', 'strcmp', 'strncmp',
+            'strcat', 'strncat', 'strstr', 'strchr', 'strrchr',
+            'memcpy', 'memmove', 'memset', 'memcmp',
+            'stat', 'lstat', 'fstat', 'open', 'close', 'read', 'write',
+            'max', 'min', 'chr', 'ord',
+            'fdopen', 'fileno', 'tmpfile', 'tmpnam',
+            'getenv', 'setenv', 'unsetenv', 'putenv',
+            'isatty', 'getuid', 'getpid', 'getppid',
+        })
+
         for stmt in stmts:
             if not isinstance(stmt, FromImportStmt):
                 continue
@@ -2303,7 +2326,7 @@ class GimpleGen:
                 continue
             for name, alias in stmt.names:
                 sym = alias if alias else name
-                if sym in seen:
+                if sym in seen or sym in _C_BUILTINS:
                     continue
                 info = exports.get(name)
                 if not info:
@@ -5271,6 +5294,58 @@ class GimpleGen:
                 t = self._new_temp('int')
                 self._emit(f"  {t} = 0;  /* {ot}.close() — stubbed */")
                 return 'int', t
+
+        # Methods on any scalar numeric type (int32_t, uint8_t, etc.) —
+        # lower comparison/arithmetic methods to direct C expressions.
+        _ALL_SCALARS = frozenset({
+            'int', 'int64_t', 'int32_t', 'int16_t', 'int8_t',
+            'unsigned int', 'uint64_t', 'uint32_t', 'uint16_t', 'uint8_t',
+            '_Bool', 'double', 'float',
+        })
+        if ot in _ALL_SCALARS:
+            # Load the object into a properly-typed local (GIMPLE: no compound exprs).
+            if ot != self.var_types.get(ov, ot):
+                ov_local = self._new_temp(ot)
+                self._emit(f"  {ov_local} = ({ot}){ov};")
+            else:
+                ov_local = self._ensure_local(ot, ov)
+            if node.args:
+                at, av = self.lower_expr(node.args[0])
+                # Coerce argument to the same type; GIMPLE requires separate cast stmt
+                if at != ot:
+                    av_cast = self._new_temp(ot)
+                    self._emit(f"  {av_cast} = ({ot}){av};")
+                    av_local = av_cast
+                else:
+                    av_local = self._ensure_local(at, av)
+            else:
+                av_local = ov_local
+            _CMP_OPS = {
+                'eq': '==', 'ne': '!=', '__ne__': '!=',
+                'lt': '<',  '__lt__': '<',
+                'le': '<=', '__le__': '<=',
+                'gt': '>',  '__gt__': '>',
+                'ge': '>=', '__ge__': '>=',
+            }
+            if method in _CMP_OPS:
+                t = self._new_temp('_Bool')
+                op = _CMP_OPS[method]
+                self._emit(f"  {t} = {ov_local} {op} {av_local};")
+                return '_Bool', t
+            if method in ('cast', '__cast__', '__int__', '__index__', 'value', 'cast_value'):
+                t = self._new_temp(ot); self._emit(f"  {t} = {ov_local};"); return ot, t
+            if method == 'select' and len(node.args) >= 2:
+                # Bool.select(true_val, false_val) — ternary
+                tt, tv = self.lower_expr(node.args[0])
+                ft, fv = self.lower_expr(node.args[1])
+                tv_local = self._ensure_local(tt, tv)
+                fv_local = self._ensure_local(ft, fv)
+                t = self._new_temp(tt)
+                self._emit(f"  {t} = {ov_local} ? {tv_local} : {fv_local};")
+                return tt, t
+            # Other scalar methods: stub with zero
+            for ea in node.args[1:]: self.lower_expr(ea)
+            t = self._new_temp(ot); self._emit(f"  {t} = {ov_local};  /* {ot}.{method}() stubbed */"); return ot, t
 
         # Stub string-type methods when called on wrong receiver types
         if method == 'isdigit':

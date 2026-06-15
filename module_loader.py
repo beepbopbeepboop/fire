@@ -182,7 +182,7 @@ class ModuleLoader:
                     name = name_part.split()[-1] if name_part else ''
                     params_str = sig[paren_start + 1:paren_end].strip()
 
-                    if not name or name.startswith('_'):
+                    if not name:
                         continue
 
                     # Extract return type
@@ -192,13 +192,18 @@ class ModuleLoader:
                         return_type = after_arrow if after_arrow else 'int'
 
                     # Extract parameters as list of (name, type) tuples
+                    _MOJO_PARAM_MODS = {'var', 'owned', 'inout', 'borrowed', 'mut',
+                                        'ref', 'out', 'copy', 'read', 'write'}
                     parameters = []
                     if params_str:
                         for param in params_str.split(','):
                             param = param.strip()
                             if ':' in param:
                                 param_name, param_type = param.split(':', 1)
-                                param_name = param_name.strip()
+                                # Strip Mojo mutability keywords from parameter name
+                                words = param_name.strip().split()
+                                words = [w for w in words if w not in _MOJO_PARAM_MODS]
+                                param_name = words[-1] if words else '_p'
                                 param_type = param_type.strip()
                                 parameters.append((param_name, param_type))
 
