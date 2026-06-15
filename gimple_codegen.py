@@ -7316,7 +7316,9 @@ class GimpleGen:
                 ti = self._new_temp('int64_t')
                 iv = self._new_temp('int64_t')
                 self._emit(f"  {iv} = (int64_t){v};")
-                self._emit(f"  {ti} = mojo_list_get_int ((MojoList *){iv}, {ip});")
+                lp_cast = self._new_temp('MojoList *')
+                self._emit(f"  {lp_cast} = (MojoList *){iv};")
+                self._emit(f"  {ti} = mojo_list_get_int ({lp_cast}, {ip});")
                 self._emit(f"  {n} = {ti};")
             return
         if node.type_ann in self.struct_field_types and node.value is not None:
