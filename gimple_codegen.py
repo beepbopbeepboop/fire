@@ -2094,6 +2094,7 @@ class GimpleGen:
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
+        self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
         self._sub_toplevels: list[str] = []  # ordered list of sub-module toplevel fn names (shared)
@@ -4948,8 +4949,12 @@ class GimpleGen:
             struct_name = func.obj.name
             mangled = f"{struct_name}_{_safe_name(method)}"
             ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
-            # Pass the class ref (ov) as 'cls' first arg, then the actual args
-            arg_pairs = [(ot, ov)] + [self.lower_expr(a) for a in node.args]
+            actual_args = [self.lower_expr(a) for a in node.args]
+            # @staticmethod methods take no implicit cls arg
+            if mangled in self._static_methods:
+                arg_pairs = actual_args
+            else:
+                arg_pairs = [(ot, ov)] + actual_args
             if ret_type == 'void':
                 return self._void_call(mangled, arg_pairs)
             t = self._call_expr(ret_type, mangled, arg_pairs)
@@ -9573,6 +9578,9 @@ class GimpleGen:
                     mangled = f"{s.name}_{m.name}"
                     if m.return_type is not None:
                         self.func_return_types[mangled] = self._resolve_type(m.return_type)
+                    # Track @staticmethod methods so call sites don't pass cls arg
+                    if hasattr(m, 'decorators') and 'staticmethod' in (m.decorators or []):
+                        self._static_methods.add(mangled)
                     # Also store method param types using the mangled name (for call-site arg padding)
                     if m.params:
                         ctypes = []

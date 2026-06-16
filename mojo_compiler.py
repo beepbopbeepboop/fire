@@ -2105,8 +2105,8 @@ class Parser:
                 if self._peek().kind == 'COLON':
                     self._advance()  # consume ':'
                     type_ann = self._parse_type_ann()
-                    # Skip optional default value
-                    if self._peek().kind == 'EQUAL' or (
+                    # Skip optional default value ('=' tokenizes as ASSIGN)
+                    if self._peek().kind in ('EQUAL', 'ASSIGN') or (
                             self._peek().kind == 'OP' and self._peek().value == '='):
                         self._advance()  # consume '='
                         # Skip default value expression (balanced brackets)
@@ -2232,7 +2232,9 @@ class Parser:
                 # ('raises' lexes as a keyword, the rest as names.)
                 while self._peek().kind in ("NAME", "KW") and self._peek().value in ("capturing", "raises", "unified", "register_passable", "thin", "abi"):
                     self._advance()
-                    # abi may take a parenthesized convention string: abi("C")
+                    # capturing/abi may take a bracketed or parenthesized argument list
+                    if self._peek().kind == "LBRACKET":
+                        self._skip_bracketed()
                     if self._peek().kind == "LPAREN":
                         self._advance()  # consume LPAREN
                         depth = 1
@@ -2291,11 +2293,11 @@ class Parser:
                 else:
                     name += "." + self._expect("NAME").value
         if self._peek().kind != "LBRACKET":
-            # Handle PEP 604 union types: X | Y | Z (before early return)
-            while self._peek().kind == "OP" and self._peek().value == "|":
-                self._advance()
+            # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
+            while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
+                op = self._advance().value
                 rhs = self._parse_type_ann()
-                name = name + " | " + rhs
+                name = name + f" {op} " + rhs
             return name
         # Consume [TypeArgs] and any chained subscripts, .member accesses, or
         # comptime-call applications, e.g. `_field_types_of[Self.T]()[idx]`.
@@ -2340,11 +2342,11 @@ class Parser:
                     else: parts.append(t.value)
                 parts.append("]")
         result = "".join(parts)
-        # Handle PEP 604 union types: X | Y | Z  (and X | None)
-        while self._peek().kind == "OP" and self._peek().value == "|":
-            self._advance()  # consume |
+        # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
+        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
+            op = self._advance().value
             rhs = self._parse_type_ann()
-            result = result + " | " + rhs
+            result = result + f" {op} " + rhs
         return result
 
 # ── Code generator ─────────────────────────────────────────────────
