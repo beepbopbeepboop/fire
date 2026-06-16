@@ -4236,11 +4236,12 @@ class GimpleGen:
                 field_type = struct_name + ' *'
                 t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
-        elif ot in ('int', 'int64_t'):
-            # Opaque Python object typed as int — use runtime attribute accessor
+        elif ot in ('int', 'int64_t') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+            # Opaque Python object typed as int or built-in container — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
+            vp = self._new_val('void *', f'(void *){ov}')
             return 'int64_t', self._call_expr('int64_t', 'mojo_obj_getattr',
-                            [(ot, ov), ('char *', f'"{node.member}"')])
+                            [('void *', vp), ('char *', f'"{node.member}"')])
         else:
             # Unknown struct field — fall back
             # If the object is a pointer type, assume the field is also a pointer
@@ -5889,6 +5890,28 @@ class GimpleGen:
                 return res
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
+        # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr):
+            base = node.func.obj.name
+            if base in ('List', 'InlineList', 'SmallVector', 'DynamicVector', 'InlineArray',
+                        'Buffer', 'NDBuffer'):
+                t = self._new_val('MojoList *', 'mojo_list_new ()')
+                for a in node.args: self.lower_expr(a)
+                return 'MojoList *', t
+            if base in ('Dict', 'OrderedDict'):
+                t = self._new_val('MojoDict *', 'mojo_dict_new ()')
+                for a in node.args: self.lower_expr(a)
+                return 'MojoDict *', t
+            if base in ('Set', 'FrozenSet'):
+                t = self._new_val('MojoSet *', 'mojo_set_new ()')
+                for a in node.args: self.lower_expr(a)
+                return 'MojoSet *', t
+            if base == 'Optional':
+                if node.args:
+                    at, av = self.lower_expr(node.args[0])
+                    t = self._new_val('int64_t', f'(int64_t){av}' if at.endswith(' *') else av)
+                    return 'int64_t', t
+                return 'int64_t', self._new_val('int64_t', '(int64_t)0')
         if not isinstance(node.func, IdentExpr):
             return 'int', self._new_val('int', '0')
 
