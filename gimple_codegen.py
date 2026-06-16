@@ -4236,8 +4236,8 @@ class GimpleGen:
                 field_type = struct_name + ' *'
                 t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
-        elif ot in ('int', 'int64_t') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
-            # Opaque Python object typed as int or built-in container — use runtime attribute accessor
+        elif ot in ('int', 'int64_t', 'void *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+            # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
             vp = self._new_val('void *', f'(void *){ov}')
             return 'int64_t', self._call_expr('int64_t', 'mojo_obj_getattr',
@@ -5003,6 +5003,8 @@ class GimpleGen:
             'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
             'destroy_pointee', 'take_pointee', 'initialize_pointee',
             'strided_load', 'gather', 'strided_store', 'scatter',
+            'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
+            'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr',
         })
         if ot.endswith(' *') and ot not in self._RUNTIME_PTRS and method in _RAW_PTR_METHODS:
             return self._lower_pointer_method(ov, ot, method, node.args)
@@ -5284,9 +5286,11 @@ class GimpleGen:
         if method == 'free':
             self._emit(f"  free ({ov});")
             return 'int', self._new_val('int', '0')
-        if method in ('bitcast', 'address_of'):
+        if method in ('bitcast', 'address_of',
+                      'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
+                      'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr'):
             t = self._new_temp(ot)
-            self._emit(f"  {t} = {ov};  /* TODO: {method} */")
+            self._emit(f"  {t} = {ov};  /* {method}: pass-through */")
             return ot, t
         if method in ('destroy_pointee', 'take_pointee', 'initialize_pointee'):
             if args and method == 'initialize_pointee':
@@ -5890,6 +5894,11 @@ class GimpleGen:
                 return res
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
+        # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, MemberExpr):
+            inner = CallExpr(func=node.func.obj, args=node.args,
+                             kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
+            return self._lower_method_call(inner)
         # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
         if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr):
             base = node.func.obj.name
@@ -7077,7 +7086,12 @@ class GimpleGen:
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         self._emit_label(bb_body)
         key_tmp = self._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
-        self._emit(f"  {gen0.target} = (char *) {key_tmp};")
+        tgt = gen0.target
+        vt = self.var_types.get(tgt, 'char *')
+        if vt in ('int64_t', 'int', 'int32_t'):
+            self._emit(f"  {tgt} = (int64_t)(uintptr_t) {key_tmp};")
+        else:
+            self._emit(f"  {tgt} = (char *) {key_tmp};")
         self._gen_compr_append(node, gen0, res, res_type, bb_after)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
@@ -7608,6 +7622,26 @@ class GimpleGen:
                 suf  = TypeLattice.list_suffix(elem)
                 idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {v});")
+            elif ot in ('int', 'int64_t'):
+                # Opaque int/int64_t used as subscript target — treat as MojoList write
+                ip = self._new_val('int64_t', f"(int64_t){obj_v}")
+                lp = self._new_val('MojoList *', f"(MojoList *){ip}")
+                elem = self._elem_of(obj_v)
+                suf = TypeLattice.list_suffix(elem)
+                idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+                self._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {v});")
+            elif ot.endswith(' *') and _struct_name_of(ot) not in self.struct_field_types:
+                # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow ptr arithmetic)
+                if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                    elem_t = _elem_type(ot)
+                    cn = _c_id(elem_t)
+                    self._ptr_helpers_needed.add(elem_t)
+                    idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+                    ptr_t = self._new_val(ot, f"({ot}){obj_v}")
+                    addr = self._new_val(ot, f"_mojo_at_{cn} ({ptr_t}, {idx64})")
+                    v_cast = self._new_temp(elem_t)
+                    self._safe_coerce_emit(vtype, elem_t, v, v_cast)
+                    self._emit(f"  *{addr} = {v_cast};")
             else:
                 if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
@@ -8627,11 +8661,24 @@ class GimpleGen:
         key_tmp = self._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
         if is_tuple:
             # Assign key to first name, NULL (zero) to remaining names
-            self._emit(f"  {var_names[0]} = (char *) {key_tmp};")
+            vn0 = var_names[0]
+            vt0 = self.var_types.get(vn0, 'char *')
+            if vt0 in ('int64_t', 'int', 'int32_t'):
+                self._emit(f"  {vn0} = (int64_t)(uintptr_t) {key_tmp};")
+            else:
+                self._emit(f"  {vn0} = (char *) {key_tmp};")
             for vn in var_names[1:]:
-                self._emit(f"  {vn} = (char *)0;")
+                vt = self.var_types.get(vn, 'char *')
+                if vt in ('int64_t', 'int', 'int32_t'):
+                    self._emit(f"  {vn} = (int64_t)0;")
+                else:
+                    self._emit(f"  {vn} = (char *)0;")
         else:
-            self._emit(f"  {var} = (char *) {key_tmp};")
+            vt = self.var_types.get(var, 'char *')
+            if vt in ('int64_t', 'int', 'int32_t'):
+                self._emit(f"  {var} = (int64_t)(uintptr_t) {key_tmp};")
+            else:
+                self._emit(f"  {var} = (char *) {key_tmp};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
