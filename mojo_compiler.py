@@ -1378,8 +1378,10 @@ class Parser:
         else:
             self._expect("KW", "struct")
         name = self._expect("NAME").value
-        # Skip generic type-param block [T: Trait, ...]
-        if self._peek().kind == "LBRACKET": self._skip_bracketed()
+        # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
+        param_fields = []
+        if self._peek().kind == "LBRACKET":
+            param_fields = self._parse_struct_params_as_fields()
         if self._peek().kind == "LPAREN":
             self._advance()
             # Skip balanced parentheses in trait list
@@ -1394,7 +1396,7 @@ class Parser:
                     break
         self._expect("COLON")
         body = self._parse_block()
-        fields  = [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
+        fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
@@ -2076,6 +2078,65 @@ class Parser:
         while self._is_kw("for"):
             gens.append(self._parse_generator())
         return gens
+
+    def _parse_struct_params_as_fields(self) -> list:
+        """Parse struct parameter block [name: Type = default, ...] as VarDecl fields.
+        Handles //, * separators and nested brackets in type annotations and defaults."""
+        self._expect("LBRACKET")
+        fields = []
+        while True:
+            t = self._peek()
+            if t.kind in ('RBRACKET', 'EOF'):
+                self._advance()
+                break
+            # Skip positional-only (//) and keyword-only (*) separators
+            if t.kind == 'OP' and t.value in ('//', '*'):
+                self._advance()
+                if self._peek().kind == 'COMMA':
+                    self._advance()
+                continue
+            if t.kind == 'COMMA':
+                self._advance()
+                continue
+            # Try to parse: name: Type [= default]
+            if t.kind == 'NAME':
+                name = t.value
+                self._advance()
+                if self._peek().kind == 'COLON':
+                    self._advance()  # consume ':'
+                    type_ann = self._parse_type_ann()
+                    # Skip optional default value
+                    if self._peek().kind == 'EQUAL' or (
+                            self._peek().kind == 'OP' and self._peek().value == '='):
+                        self._advance()  # consume '='
+                        # Skip default value expression (balanced brackets)
+                        depth = 0
+                        while True:
+                            pk = self._peek()
+                            if pk.kind == 'EOF':
+                                break
+                            if pk.kind in ('LPAREN', 'LBRACKET', 'LBRACE'):
+                                depth += 1
+                                self._advance()
+                            elif pk.kind in ('RPAREN', 'RBRACE'):
+                                depth -= 1
+                                self._advance()
+                            elif pk.kind == 'RBRACKET':
+                                if depth <= 0:
+                                    break
+                                depth -= 1
+                                self._advance()
+                            elif pk.kind == 'COMMA' and depth == 0:
+                                break
+                            else:
+                                self._advance()
+                    fields.append(VarDecl(name=name, type_ann=type_ann, value=None))
+                else:
+                    # No colon — skip this token (could be a bare type name)
+                    pass
+            else:
+                self._advance()  # skip unexpected token
+        return fields
 
     def _skip_bracketed(self):
         """Consume a balanced [...] block."""

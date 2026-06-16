@@ -3385,6 +3385,13 @@ class GimpleGen:
         """Translate a Python variable name to its C name (handles C keyword renaming)."""
         return self._c_names.get(name, name)
 
+    def _write_dest(self, name: str) -> str:
+        """Return the C lvalue for a write to variable `name`.
+        Inside a closure, captured variables must be written through the env pointer."""
+        if name in self._captures and self._env_param:
+            return f'{self._env_param}->{name}'
+        return self._cname(name)
+
     def _new_jbp_temp(self) -> str:
         self.temp_counter += 1
         name = f"_jbp{self.temp_counter}"
@@ -5894,6 +5901,7 @@ class GimpleGen:
         if fname_raw in ('all', 'any')    and len(node.args) == 1:  return self._lower_builtin_all_any(fname_raw, node)
         if fname_raw == 'dir':                                       return self._lower_builtin_dir(node)
         if fname_raw == 'sorted'          and node.args:            return self._lower_builtin_sorted(node)
+        if fname_raw == 'zip'             and len(node.args) > 2:  return self._lower_builtin_zip_n(node)
         if fname_raw == '__import__':                                return self._lower_builtin_import(node)
         if fname_raw in ('set', 'frozenset'):                        return self._lower_builtin_set(node)
         if fname_raw == 'dict':                                      return self._lower_builtin_dict(node)
@@ -6034,6 +6042,15 @@ class GimpleGen:
         at, av = self.lower_expr(node.args[0])
         for a in node.args[1:]: self.lower_expr(a)
         return 'MojoList *', self._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+
+    def _lower_builtin_zip_n(self, node: CallExpr) -> tuple[str, str]:
+        """zip(a, b, c, ...) with >2 args — chain as mojo_zip(mojo_zip(a, b), c, ...)."""
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        # Fold left: mojo_zip(mojo_zip(a,b), c)
+        acc_t, acc_v = 'void *', self._call_expr('void *', 'mojo_zip', [arg_pairs[0], arg_pairs[1]])
+        for ap in arg_pairs[2:]:
+            acc_v = self._call_expr('void *', 'mojo_zip', [('void *', acc_v), ap])
+        return 'void *', acc_v
 
     def _lower_builtin_import(self, node: CallExpr) -> tuple[str, str]:
         for a in node.args: self.lower_expr(a)
@@ -7266,7 +7283,7 @@ class GimpleGen:
             # If value has element type tracking (e.g. split result), propagate to inferred var
             if node.type_ann is None and v in self._elem_types:
                 self._elem_types[node.name] = self._elem_types[v]
-            self._safe_coerce_emit(vtype, actual_dst, v, self._cname(node.name))
+            self._safe_coerce_emit(vtype, actual_dst, v, self._write_dest(node.name))
         else:
             ctype = self._resolve_type(node.type_ann)
             self._declare_var(node.name, ctype)
@@ -7281,7 +7298,7 @@ class GimpleGen:
                 hint = self._inferred_var_types.get(self.current_func_name, {}).get(tgt.name) \
                     if hasattr(self, '_inferred_var_types') else None
                 self._declare_var(tgt.name, hint or et)
-            self._safe_coerce_emit(et, self.var_types[tgt.name], ev, self._cname(tgt.name))
+            self._safe_coerce_emit(et, self.var_types[tgt.name], ev, self._write_dest(tgt.name))
         elif isinstance(tgt, TupleExpr):
             # ev is itself an iterable; view it as a MojoList* and unpack by index.
             lp = ev if et == 'MojoList *' else self._new_temp('MojoList *')
@@ -7406,7 +7423,7 @@ class GimpleGen:
                             self._elem_types[tname] = self._elem_types[v]
                         if v in self._dict_val_types:
                             self._dict_val_types[tname] = self._dict_val_types[v]
-            self._safe_coerce_emit(vtype, dst, v, self._cname(tname))
+            self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
@@ -7537,11 +7554,24 @@ class GimpleGen:
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
             dst   = self._type_of(tname)
-            self._safe_coerce_emit(vtype, dst, v, self._cname(tname))
+            self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
-            op     = '->' if '*' in ot else '.'
-            self._emit(f"  {ov}{op}{_safe_field(node.target.member)} = {v};")
+            if ot in ('int', 'int64_t'):
+                member_str = node.target.member
+                escaped = _c_escape(member_str)
+                if escaped not in self._str_pool:
+                    self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
+                key_slit = self._str_pool[escaped]
+                key_tmp = self._new_val('char *', f"{key_slit}")
+                v64 = self._new_temp('int64_t')
+                self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                vp_tmp = self._new_val('void *', f"(void *){ov}")
+                self._emit_call('void', '', 'mojo_setattr',
+                                [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+            else:
+                op = '->' if '*' in ot else '.'
+                self._emit(f"  {ov}{op}{_safe_field(node.target.member)} = {v};")
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
             _, idx_v  = self.lower_expr(node.target.index)
@@ -7669,15 +7699,47 @@ class GimpleGen:
                 if tname not in self.var_types:
                     self._declare_var(tname, vtype)
                 dst = self.var_types[tname]
-                self._safe_coerce_emit(vtype, dst, v, self._cname(tname))
+                self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
             elif isinstance(target, MemberExpr):
                 ot, ov = self.lower_expr(target.obj)
                 op = '->' if '*' in ot else '.'
                 self._emit(f"  {ov}{op}{_safe_field(target.member)} = {v};")
             elif isinstance(target, SubscriptExpr):
                 ot, obj_v = self.lower_expr(target.obj)
-                _, idx_v  = self.lower_expr(target.index)
-                if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                it2, idx_v = self.lower_expr(target.index)
+                if ot == 'MojoList *':
+                    elem = self._elem_of(obj_v)
+                    suf  = TypeLattice.list_suffix(elem)
+                    idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+                    ev_cast = self._cast_for_list(vtype, v, suf)
+                    self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
+                elif ot == 'MojoDict *':
+                    key_tmp = self._new_temp('char *')
+                    self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp)
+                    self._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
+                elif ot in ('int', 'int64_t'):
+                    actual_type = self._get_actual_type(ot, obj_v)
+                    if actual_type == 'MojoList *':
+                        ip = self._new_temp('int64_t')
+                        lp = self._new_temp('MojoList *')
+                        self._emit(f"  {ip} = (int64_t){obj_v};")
+                        self._emit(f"  {lp} = (MojoList *){ip};")
+                        idx64 = self._new_val('int64_t', f"(int64_t){idx_v}")
+                        elem = self._elem_of(obj_v) or 'int64_t'
+                        suf = TypeLattice.list_suffix(elem)
+                        ev_cast = self._cast_for_list(vtype, v, suf)
+                        self._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {ev_cast});")
+                    else:
+                        ip = self._new_temp('int64_t')
+                        dp = self._new_temp('MojoDict *')
+                        self._emit(f"  {ip} = (int64_t){obj_v};")
+                        self._emit(f"  {dp} = (MojoDict *){ip};")
+                        key_tmp2 = self._new_temp('char *')
+                        self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp2)
+                        self._emit_call('void', '', 'mojo_dict_set_int',
+                                        [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                elif not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
             else:
                 pass  # complex multi-assign target: no-op
@@ -8013,7 +8075,10 @@ class GimpleGen:
                     tmp = self._new_val(vtype, f"{self._env_param}->{vname}")
                     self._emit(f"  {env_var}->{vname} = {tmp};")
                 else:
-                    self._emit(f"  {env_var}->{vname} = {vname};")
+                    # Use _safe_coerce_emit to handle int→int64_t and other conversions.
+                    local_type = self.var_types.get(vname, vtype)
+                    cname = self._write_dest(vname)  # resolve capture path if nested
+                    self._safe_coerce_emit(local_type, vtype, cname, f"{env_var}->{vname}")
             self._closure_envs[node.name] = env_var
         else:
             self._closure_envs[node.name] = ''
@@ -9732,7 +9797,7 @@ class GimpleGen:
                         if hasattr(handler, 'body') and isinstance(handler.body, list):
                             yield from _all_stmts_nonfunc(handler.body)
 
-            # Enrich outer_scope with untyped local variable assignments for capture detection.
+            # Enrich outer_scope with local variable assignments/declarations for capture detection.
             enriched_scope = dict(outer_scope)
             _saved_vt2 = dict(self.var_types)
             self.var_types.update(outer_scope)
@@ -9743,6 +9808,11 @@ class GimpleGen:
                         t = self._quick_type(bstmt.value)
                         enriched_scope[name] = t
                         self.var_types[name] = t
+                elif isinstance(bstmt, VarDecl):
+                    if bstmt.name not in enriched_scope:
+                        t = self._quick_type(bstmt.value) if bstmt.value else 'int64_t'
+                        enriched_scope[bstmt.name] = t
+                        self.var_types[bstmt.name] = t
             self.var_types = _saved_vt2
             for stmt in _all_stmts_nonfunc(body):
                 if not isinstance(stmt, FunctionDef):
