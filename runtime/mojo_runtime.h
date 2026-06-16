@@ -13,6 +13,27 @@ typedef void* mojo_any;
 typedef void* (*mojo_func_ptr)(void);
 typedef void* mojo_generic_func;
 
+/* ── Higher-order function dispatch helpers ──────────────────────────────
+ * __GIMPLE functions cannot cast-and-call in a single expression, so
+ * we call through these small non-GIMPLE helpers that do the cast.
+ * All args/returns are widened to int64_t; callers cast as needed.
+ * Declared static inline so they generate no external symbol.           */
+static inline int64_t mojo_fnptr_call_0(void *fp) {
+    return ((int64_t (*)(void))fp)();
+}
+static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
+    return ((int64_t (*)(int64_t))fp)(a);
+}
+static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
+    return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
+    return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
  * Generated __GIMPLE code calls mojo_try_push/mojo_exc_pop/mojo_raise so
  * that jmp_buf pointer arithmetic stays out of GIMPLE functions.          */

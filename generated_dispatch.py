@@ -97,6 +97,8 @@ _STMT_DISPATCH: dict = {
     'FromImportStmt': '_gen_stmt_FromImportStmt',
     'ComptimeIfStmt': '_gen_stmt_ComptimeIfStmt',
     'ComptimeForStmt': '_gen_stmt_ComptimeForStmt',
+    'ComptimeVarStmt': '_gen_stmt_ComptimeVarStmt',
+    'GlobalStmt': '_gen_stmt_GlobalStmt',
 }
 
 # ---------------------------------------------------------------------------
@@ -124,4 +126,5 @@ _EXPR_DISPATCH: dict = {
     'SetExpr': '_lower_set_literal',
     'TupleExpr': '_lower_tuple_literal',
     'Comprehension': '_lower_comprehension',
+    'LambdaExpr': '_lower_LambdaExpr',
 }

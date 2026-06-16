@@ -1721,7 +1721,7 @@ class Parser:
                 self._advance()
                 # Check for empty subscript [] (dereference/special case)
                 if self._peek().kind == "RBRACKET":
-                    idx = IntLiteral(value="0")  # dummy index for empty subscript
+                    idx = IntLiteral(value=0)  # dummy index for empty subscript
                     self._advance()  # consume RBRACKET
                     expr = SubscriptExpr(obj=expr, index=idx)
                 else:
@@ -1746,7 +1746,7 @@ class Parser:
                                 self._parse_expr(0)
                             if self._peek().kind != "COMMA" and self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"))
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0))
                     # Check if this is a keyword-style bracket (func=value, attr=value)
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                         # Keyword arguments (may include positional args with dotted names and slice values).
@@ -1776,7 +1776,7 @@ class Parser:
                             if self._peek().kind == "COMMA": self._advance()
                             elif self._peek().kind != "RBRACKET": break
                         self._expect("RBRACKET")
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value="0"), attrs=_attrs)
+                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0), attrs=_attrs)
                     else:
                         # Parse a comma-separated list of subscript items. Each
                         # item is a slice (start:stop:step) or a plain expression,
