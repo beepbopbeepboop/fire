@@ -3111,9 +3111,20 @@ class GimpleGen:
         args_str = ', '.join(coerced_args)
         # For imported functions with known C signatures, use the declared return type
         # to avoid "invalid conversion in gimple call" when the caller guessed wrong.
-        imported_ret = (self.imported_symbols.get(fname) or {}).get('c_return_type')
-        # Also check func_return_types (Mojo function return types) for same mismatch
-        if not imported_ret and fname in self.func_return_types:
+        # Priority: _LIBC_DECLARED _KNOWN_SIGS (C stdlib) > imported_symbols > func_return_types.
+        # _KNOWN_SIGS for C stdlib must win because a Mojo fn can shadow a C name (e.g. atan2).
+        # But _KNOWN_SIGS may contain stale struct-method entries; only trust it for _LIBC_DECLARED.
+        imported_ret = None
+        in_libc_known = fname in self._LIBC_DECLARED and fname in self._KNOWN_SIGS
+        if in_libc_known:
+            sig_ret = self._KNOWN_SIGS[fname][0]
+            if sig_ret != ret_type:
+                imported_ret = sig_ret
+        if not imported_ret:
+            imported_ret = (self.imported_symbols.get(fname) or {}).get('c_return_type')
+        # Also check func_return_types (Mojo function return types) for same mismatch,
+        # but skip if fname is a known C stdlib function (to avoid Mojo shadow overriding).
+        if not imported_ret and not in_libc_known and fname in self.func_return_types:
             fn_ret = self.func_return_types[fname]
             if fn_ret != ret_type:
                 imported_ret = fn_ret
@@ -7553,14 +7564,18 @@ class GimpleGen:
                         # e.g. int64_t *ptr; ptr[i] = 0  must use _mojo_at_int64_t helper.
                         if ot.endswith(' *'):
                             elem_t = ot[:-2].rstrip()  # e.g. 'int64_t' from 'int64_t *'
-                            self._ptr_helpers_needed.add(elem_t)
-                            idx64 = self._new_val('int64_t', f"(int64_t){idx_v}")
-                            # Cast obj_v to the pointer type (it may be stored as integer)
-                            ptr_typed = self._new_val(ot, f"({ot}){obj_v}")
-                            addr = self._new_val(ot, f"_mojo_at_{_c_id(elem_t)} ({ptr_typed}, {idx64})")
-                            v_cast = self._new_temp(elem_t)
-                            self._safe_coerce_emit(vtype, elem_t, v, v_cast)
-                            self._emit(f"  *{addr} = {v_cast};")
+                            if elem_t in self.struct_field_types:
+                                # Struct values can't be in GIMPLE registers — emit no-op
+                                self._emit(f"  /* TODO: struct subscript write [{elem_t}] skipped */")
+                            else:
+                                self._ptr_helpers_needed.add(elem_t)
+                                idx64 = self._new_val('int64_t', f"(int64_t){idx_v}")
+                                # Cast obj_v to the pointer type (it may be stored as integer)
+                                ptr_typed = self._new_val(ot, f"({ot}){obj_v}")
+                                addr = self._new_val(ot, f"_mojo_at_{_c_id(elem_t)} ({ptr_typed}, {idx64})")
+                                v_cast = self._new_temp(elem_t)
+                                self._safe_coerce_emit(vtype, elem_t, v, v_cast)
+                                self._emit(f"  *{addr} = {v_cast};")
                         else:
                             self._emit(f"  {obj_v}[{idx_v}] = {v};")
         else:
