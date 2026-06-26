@@ -49,6 +49,24 @@ The stdlib ships per-OS variants that define identical symbols:
 
 ---
 
+## SB-4 — `setvbuf` wrapper drops two of its four arguments
+
+**Symptom:** `std/sys/_libc.mojo:105` — `too few arguments to function 'setvbuf';
+expected 4, have 2`. The wrapper is declared with all four C params but forwards
+only two:
+
+```mojo
+def setvbuf(stream, buffer, mode: c_int, size: c_size_t) -> c_int:
+    return external_call["setvbuf", c_int](stream, buffer)   # mode, size dropped
+```
+
+libc `setvbuf(FILE*, char*, int, size_t)` (declared by the included `<stdio.h>`)
+needs all four. **Nature:** stdlib-source bug — the `mode`/`size` parameters are
+silently ignored. The compiler correctly rejects the 2-arg call. Fix is in the
+stdlib source: `external_call["setvbuf", c_int](stream, buffer, mode, size)`.
+
+---
+
 ## SB-3 — `unlink`-style raising wrappers share a name with the libc symbol
 
 **Observation (not a bug, documents an interaction):** Mojo's `os.unlink` is
