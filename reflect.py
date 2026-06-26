@@ -140,13 +140,12 @@ def emit_table_c(exports: list) -> str:
     Compiled into the dylib alongside the module objects."""
     L = ['/* Generated reflection table — reflect.py (see reflect.h) */',
          '#include "reflect.h"', '']
-    # Emit a typedef for each exported concrete struct type so the method
-    # forward-declarations below (which take `Name *`) type-check.
-    for e in exports:
-        if e['kind'] == SYM_TYPE:
-            body = e['signature'].split('{', 1)[1].rsplit('}', 1)[0].strip()
-            L.append(f"typedef struct {{ {body} }} {e['name']};")
-    L.append('')
+    # NOTE: we deliberately do NOT emit `typedef struct { <fields> } Name;` for the
+    # exported concrete types. Their field bodies reference runtime types (MojoList,
+    # _DLHandle, …) and other user structs that aren't declared in this TU, which
+    # breaks compilation. The reflection table never uses those types as real C
+    # types — callables are forward-declared unprototyped (`extern void sym();`) and
+    # every signature is stored as a string — so the typedefs were vestigial.
     # Forward-declare each callable so `&symbol` resolves at dylib link time.
     # TYPE entries (kind 3) are layout descriptors with no runtime symbol — they
     # carry a NULL address and are never forward-declared. The C symbol of a
