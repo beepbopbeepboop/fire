@@ -2,17 +2,30 @@
 
 > **CURRENT (full-compile / dylib bar):** `python3 build_stdlib_dylib.py` builds
 > **`libmojostdlib.dylib` from 288 host modules with 0 collision-exclusions and
-> only 10 modules skipped** (they fall back to source). 0 GCC ICEs. `make check`
-> (gimple/runner/module-cache/self-host) green. Local generic free functions are
-> now monomorphized (which removed all the cross-module collision-exclusions).
+> only 6 modules skipped** (they fall back to source). 0 GCC ICEs. `make check`
+> (gimple/runner/module-cache/self-host) green.
 >
-> The remaining 10 each need a distinct elaboration feature: **imported generics
-> via re-export chains** (pathlib listdir — defined in os/os.mojo, re-exported by
-> os/__init__.mojo); **generic value params** (quick_bench x0..xn); **comptime/
-> type-param method-overload resolution** (bencher); **MLIR-op member access**
-> (atomic, gpu/_utils, device_context); **Self/struct-collapse** (arc_pointer);
-> **codegen** (unsafe_pointer); **indirect __call__** (python_object); **special
-> libc binding** (_libc — see STDLIB-BUGS.md SB-4).
+> Fixed this push (16 → 6): free-function overload mangling; local-generic
+> monomorphization (removed all collision-exclusions); GIMPLE double-cast in
+> pointer stores; closure-per-method-overload keying (quick_bench, bencher);
+> `Self`-typed method param → struct pointer (arc_pointer); `obj(args)` →
+> `__call__` for callable structs (python_object).
+>
+> The remaining 6 each need a deeper subsystem:
+> - **MLIR-op lowering** — atomic, gpu/_utils, device_context, unsafe_pointer
+>   (`__mlir_op`/`__mlir_type`, strided_load/gather).
+> - **Robust imported-generic elaboration** — pathlib `listdir` (defined in
+>   os/os.mojo, re-exported by os/__init__.mojo). Re-export following is easy; the
+>   blocker is that instantiating a heavyweight stdlib generic on demand pulls in
+>   its whole transitive dependency set — needs the CAS-cached elaboration path,
+>   not a source-text shortcut (a naive attempt timed out).
+> - **Special libc binding** — _libc (setvbuf arity vs `<stdio.h>` — SB-4; POSIX
+>   externs posix_spawnp/dup/pipe/fcntl; dlopen/dlsym pointer typing; waitpid
+>   `int*` vs `int64_t*`).
+>
+> Note: the self-hosted compiler mistypes a list-subscript inside an f-string as
+> int64_t (collapsing the string) — use `zip(a, b)` not `a[i]` in compiler code
+> that must self-host.
 >
 > Everything below is the older `-fsyntax-only` report (a front-end smoke test,
 > not the real bar) and is partly stale; trust this header.
