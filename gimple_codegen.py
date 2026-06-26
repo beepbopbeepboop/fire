@@ -5416,8 +5416,13 @@ class GimpleGen:
         if method == 'load':
             return elem, self._new_val(elem, f"*{ov}")
         if method == 'store' and args:
-            _, av = self.lower_expr(args[0])
-            self._emit(f"  *{ov} = {self._coerce(self._quick_type(args[0]), elem, av)};")
+            at, av = self.lower_expr(args[0])
+            # Spill through a register: a pointer→int64_t coercion is a double cast
+            # `(int64_t)(void*)x` which GIMPLE rejects inside `*p = ...`.
+            ovl = self._ensure_local(ot, ov)
+            sv = self._new_temp(elem)
+            self._safe_coerce_emit(self._quick_type(args[0]), elem, av, sv)
+            self._emit(f"  *{ovl} = {sv};")
             return 'int', self._new_val('int', '0')
         if method == 'offset' and args:
             _, nv = self.lower_expr(args[0])
@@ -5441,8 +5446,12 @@ class GimpleGen:
                 at, av = self.lower_expr(args[0])
                 # GIMPLE requires the pointer operand of `*` to be a register, so
                 # spill ov (which may be a member access like self->_data) first.
+                # Spill the value too: a pointer→int64_t coercion is a double cast
+                # `(int64_t)(void*)x` that GIMPLE rejects inside `*p = ...`.
                 ovl = self._ensure_local(ot, ov)
-                self._emit(f"  *{ovl} = {self._coerce(at, elem, av)};")
+                sv = self._new_temp(elem)
+                self._safe_coerce_emit(at, elem, av, sv)
+                self._emit(f"  *{ovl} = {sv};")
             return 'int', self._new_val('int', '0')
         if method in ('strided_load', 'gather'):
             t = self._new_temp(elem); self._emit(f"  {t} = *{ov};  /* TODO: {method} */"); return elem, t
