@@ -4250,10 +4250,11 @@ class GimpleGen:
             t = self._new_val('int64_t', f"(int64_t){ov}")
             return 'int64_t', t
 
-        # `x._mlir_value` unwraps a scalar newtype (Int/UInt/SIMD over an
-        # __mlir_type) to its underlying MLIR value — at the C level that is the
-        # scalar itself, so pass the operand through unchanged.
-        if node.member == '_mlir_value':
+        # `x._mlir_value` unwraps a scalar newtype (Int/UInt over an __mlir_type)
+        # to its underlying MLIR value — at the C level that is the scalar itself,
+        # so pass the operand through unchanged. Only for already-scalar operands:
+        # struct-typed values (Bool*, SIMD*) keep their existing member handling.
+        if node.member == '_mlir_value' and not (ot.endswith(' *') and _struct_name_of(ot)):
             return ot, ov
 
         # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
