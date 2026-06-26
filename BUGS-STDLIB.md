@@ -1,30 +1,28 @@
 # BUGS-STDLIB.md — Stdlib Compilation Failure Report
 
 > **CURRENT (full-compile / dylib bar):** `python3 build_stdlib_dylib.py` builds
-> **`libmojostdlib.dylib` from 288 host modules with 0 collision-exclusions and
-> only 3 modules skipped** (they fall back to source). 0 GCC ICEs. `make check`
-> (gimple/runner/module-cache/self-host) green.
+> **`libmojostdlib.dylib` from 288 host modules; only 2 modules fail to compile**
+> (pathlib, _libc) and fall back to source, plus 1 collision-exclusion
+> (device_context — see below). 0 GCC ICEs. `make check` green.
 >
-> Fixed this push (16 → 3): free-function overload mangling; local-generic
+> Fixed this push (16 → 2): free-function overload mangling; local-generic
 > monomorphization (removed all collision-exclusions); GIMPLE double-cast in
 > pointer stores; closure-per-method-overload keying (quick_bench, bencher);
 > `Self`-typed method param → struct pointer (arc_pointer); `obj(args)` →
 > `__call__` for callable structs (python_object); `x._mlir_value` scalar
 > pass-through (gpu/_utils); static-vs-instance overload param-type guard
-> (atomic); `strided_load`/`strided_store` scalar-erasure lowering (unsafe_pointer).
+> (atomic); `strided_load`/`strided_store` scalar-erasure lowering (unsafe_pointer);
+> imported-struct registration (device_context `info.emission_kind`).
 >
-> The remaining 3 each need a deeper subsystem or an upstream-source change:
-> - **device_context** — `info: CompiledFunctionInfo` (an imported *parametric*
->   struct from std.compile.compile) types as `char *`, so `info.emission_kind`
->   (a REAL `var` field, not a comptime param — earlier note was wrong) fails.
->   Registering imported structs (parse the StructDef from source, record fields,
->   emit a typedef) fixes THAT access, but device_context uses a whole web of
->   imported structs (DeviceEvent, CompilationTarget, …): registering them makes
->   their method calls resolve to undefined `Struct_method` symbols, hits typedef
->   ordering / forward-reference errors, and `StaticString` still resolves to
->   int64_t not char*. Needs a proper imported-struct *subsystem* (layout + method
->   externs + ordering), not a targeted fix — an attempt cascaded and regressed
->   python, so it was reverted.
+> **device_context** now COMPILES (the imported-struct subsystem registers
+> `CompiledFunctionInfo`'s layout so `info.emission_kind` typechecks). It is
+> collision-excluded only because `DeviceBuffer` (with `__len__`) is defined in
+> BOTH device_context.mojo AND _device_context_hal.mojo — a genuine cross-module
+> duplicate struct (the struct-method analog of SB-1; mangling can't help since
+> it's the same struct+method, so it needs upstream dedup or the build's
+> collision stopgap).
+>
+> The remaining 2 need a deeper subsystem or an upstream-source change:
 > - **pathlib** — robust CAS-cached imported-generic elaboration (`listdir`;
 >   re-export following is easy, but on-demand instantiation of a heavyweight
 >   stdlib generic pulls its whole transitive dep set — naive attempt timed out).
