@@ -9534,7 +9534,12 @@ class GimpleGen:
                 # A non-self parameter typed `Self` (e.g. the keyword copy ctor
                 # `__init__(out self, *, copy: Self)`) is a pointer to this struct.
                 ctype = f"{struct_name} *"
-            elif hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params):
+            elif (hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params)
+                  and not (i == 0 and pname != 'self'
+                           and hardcoded_params[i] == f"{struct_name} *")):
+                # The guard skips a self-pointer leaked onto a non-self first param
+                # from a sibling instance overload sharing this method's base key
+                # (e.g. static fetch_add(ptr) vs instance fetch_add(self) on Atomic).
                 ctype = hardcoded_params[i]
             else:
                 if ptype is None and hasattr(self, '_inferred_param_types'):
