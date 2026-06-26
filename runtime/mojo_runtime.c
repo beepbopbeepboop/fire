@@ -1208,10 +1208,12 @@ char *mojo_input(char *prompt) {
     return _input_buffer;
 }
 
-/* `input` itself is provided by the Mojo stdlib (std/io/io.mojo), which calls
-   the runtime primitive mojo_input. The runtime must not also define `input`,
-   or the two collide when the stdlib object and the runtime object are linked
-   into the same dylib. */
+/* input() — weak so the Mojo stdlib's own `input` (std/io/io.mojo) overrides it
+   when both are linked into the stdlib dylib, while standalone binaries that link
+   only the runtime (e.g. build/mojo) still get a working `input`. */
+__attribute__((weak)) char *input(char *prompt) {
+    return mojo_input(prompt);
+}
 
 /* String utilities — stdlib-equivalent implementations */
 
