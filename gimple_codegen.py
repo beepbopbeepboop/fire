@@ -9512,6 +9512,10 @@ class GimpleGen:
                     continue
                 seen_varargs = True
                 ctype = 'MojoList *'
+            elif ptype == 'Self':
+                # A non-self parameter typed `Self` (e.g. the keyword copy ctor
+                # `__init__(out self, *, copy: Self)`) is a pointer to this struct.
+                ctype = f"{struct_name} *"
             elif hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params):
                 ctype = hardcoded_params[i]
             else:
