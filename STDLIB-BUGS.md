@@ -5,6 +5,15 @@ Tracks things encountered while making the stdlib **fully compile** (`-fgimple -
 issues, as distinct from compiler/codegen bugs (those live in BUGS-AST.md /
 BUGS-STDLIB.md). Updated as found.
 
+**Goal: 100% of the stdlib in the dylib.** The dylib is a speed hack — a client
+uses a symbol from it if present, else falls back to source — so today the build
+*skips* the 16 modules that don't yet compile and *excludes* 4 that collide on a
+C name, and those fall back to source. **That fallback (and the collision
+exclusion) is a stopgap**, not the design endpoint. Closing it needs the real
+fixes: free-function overload mangling (SB-1) and the elaboration/feature work
+for the 16 non-compiling modules (see BUGS-STDLIB.md). Until then the dylib links
+and accelerates everything it does contain.
+
 ---
 
 ## SB-1 — Cross-module C-name collision for overloaded free functions
