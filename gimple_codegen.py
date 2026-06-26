@@ -2502,9 +2502,9 @@ class GimpleGen:
                                     msrc = ''
                                 if re.search(rf'\bstruct\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generic_structs.setdefault(sym, source)
-                                elif re.search(rf'\bfn\s+{re.escape(name)}\s*\[', msrc):
+                                elif re.search(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generics.setdefault(sym, source)
-                                elif len(re.findall(rf'\bfn\s+{re.escape(name)}\s*\(', msrc)) > 1:
+                                elif len(re.findall(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(', msrc)) > 1:
                                     self._imported_overloads.setdefault(sym, source)
                             continue
                         if sym in seen:
@@ -9531,6 +9531,30 @@ class GimpleGen:
         if _overloaded:
             stmts = [s for s in stmts
                      if not (isinstance(s, FunctionDef) and s.name in _overloaded)]
+
+        # Local generic free functions: the parser drops the `[T]` type params, so
+        # detect them from the source text. Register each (with this module's own
+        # source) so call sites elaborate a concrete CAS-cached instantiation
+        # (id[Int64] → id_Int64), and drop the erased template so it is neither
+        # emitted as a type-erased body nor collides across modules.
+        _gsrc = ''
+        if getattr(self, '_current_filename', None):
+            try:
+                _gsrc = open(self._current_filename).read()
+            except Exception:
+                _gsrc = ''
+        if _gsrc:
+            _local_generics = {
+                s.name for s in stmts
+                if isinstance(s, FunctionDef)
+                and s.name not in self._NO_OVERLOAD_MANGLE
+                and re.search(rf'\b(?:fn|def)\s+{re.escape(s.name)}\s*\[', _gsrc)
+            }
+            for _gn in _local_generics:
+                self._imported_generics.setdefault(_gn, self._current_filename)
+            if _local_generics:
+                stmts = [s for s in stmts
+                         if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
 
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
