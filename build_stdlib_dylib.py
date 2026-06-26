@@ -94,6 +94,24 @@ def _imported_sigs(src: str) -> list:
     return sigs
 
 
+def _defined_symbols(gcc: str, obj: str) -> set:
+    """External symbols *defined* (not undefined) by an object file, via nm.
+    Used to drop modules whose symbols collide with an already-included one."""
+    nm = 'nm'  # llvm/bsd nm on the PATH; gcc toolchains ship a compatible one
+    try:
+        out = subprocess.run([nm, '-g', obj], capture_output=True, text=True).stdout
+    except Exception:
+        return set()
+    syms = set()
+    for line in out.splitlines():
+        parts = line.split()
+        # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U> <name>".
+        # Uppercase type letter (T/D/S/B/C/I/R) = external & defined.
+        if len(parts) >= 3 and parts[1] in ('T', 'D', 'S', 'B', 'C', 'I', 'R'):
+            syms.add(parts[2])
+    return syms
+
+
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
           extra_exports: list = None) -> str:
     gcc = find_gcc()
@@ -111,7 +129,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         with open(ofile, 'rb') as f:
             return f.read()
 
-    all_exports = []
+    compiled = []   # (name, ofile, exports) for modules that compiled
     skipped = 0
     for path in modules:
         # Use path-relative module name so __init__.mojo files from different
@@ -142,10 +160,34 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             print(f"  skip {os.path.relpath(path)}: {e}", file=sys.stderr)
             skipped += 1
             continue
-        all_exports.extend(exports)
-        objs.append(ofile)
+        compiled.append((name, ofile, exports))
     if skipped:
         print(f"  ({skipped} modules skipped)", file=sys.stderr)
+
+    # The dylib is a speed hack, not a correctness requirement: a client uses it
+    # for a symbol if present, else falls back to source. So when two modules
+    # define the same external symbol (e.g. an `abs` overload in both math and
+    # complex → `mojo_abs`), we keep the first and drop the colliding module
+    # from the dylib rather than failing the link. Its dependents fall back to
+    # source. Granularity is the module (one .o), so its exports are dropped too.
+    objs = []
+    all_exports = []
+    seen_syms: set = set()
+    # Resolve a collision in favour of the module that defines MORE symbols — a
+    # proxy for "more core" (e.g. keep math over complex for the `abs` clash)
+    # rather than dropping a fundamental module on alphabetical luck.
+    with_syms = [(name, ofile, exports, _defined_symbols(gcc, ofile))
+                 for name, ofile, exports in compiled]
+    with_syms.sort(key=lambda t: len(t[3]), reverse=True)
+    for name, ofile, exports, defs in with_syms:
+        clash = defs & seen_syms
+        if clash:
+            print(f"  exclude {name} from dylib: {len(clash)} symbol(s) already "
+                  f"defined (e.g. {sorted(clash)[0]})", file=sys.stderr)
+            continue
+        seen_syms |= defs
+        objs.append(ofile)
+        all_exports.extend(exports)
 
     # Runtime handling:
     # - For production (link_runtime=False): compile mojo_runtime.c into an object

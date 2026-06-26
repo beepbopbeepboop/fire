@@ -332,8 +332,7 @@ int64_t int_write(int64_t f, char *data);
 int64_t int_parse_module(int parser);
 
 /* REPL and string utilities — stdlib-equivalent C implementations */
-char *mojo_input(char *prompt);  /* Read line from stdin */
-char *input(char *prompt);       /* Alias for mojo_input */
+char *mojo_input(char *prompt);  /* Read line from stdin; `input` itself is the stdlib's */
 
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */

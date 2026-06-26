@@ -1208,10 +1208,10 @@ char *mojo_input(char *prompt) {
     return _input_buffer;
 }
 
-/* input() — stdlib-compatible: reads a line and returns char* */
-char *input(char *prompt) {
-    return mojo_input(prompt);
-}
+/* `input` itself is provided by the Mojo stdlib (std/io/io.mojo), which calls
+   the runtime primitive mojo_input. The runtime must not also define `input`,
+   or the two collide when the stdlib object and the runtime object are linked
+   into the same dylib. */
 
 /* String utilities — stdlib-equivalent implementations */
 
