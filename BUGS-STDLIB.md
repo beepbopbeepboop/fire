@@ -2,32 +2,31 @@
 
 > **CURRENT (full-compile / dylib bar):** `python3 build_stdlib_dylib.py` builds
 > **`libmojostdlib.dylib` from 288 host modules with 0 collision-exclusions and
-> only 5 modules skipped** (they fall back to source). 0 GCC ICEs. `make check`
+> only 3 modules skipped** (they fall back to source). 0 GCC ICEs. `make check`
 > (gimple/runner/module-cache/self-host) green.
 >
-> Fixed this push (16 → 5): free-function overload mangling; local-generic
+> Fixed this push (16 → 3): free-function overload mangling; local-generic
 > monomorphization (removed all collision-exclusions); GIMPLE double-cast in
 > pointer stores; closure-per-method-overload keying (quick_bench, bencher);
 > `Self`-typed method param → struct pointer (arc_pointer); `obj(args)` →
 > `__call__` for callable structs (python_object); `x._mlir_value` scalar
-> pass-through (gpu/_utils).
+> pass-through (gpu/_utils); static-vs-instance overload param-type guard
+> (atomic); `strided_load`/`strided_store` scalar-erasure lowering (unsafe_pointer).
 >
-> The remaining 5 each need a deeper subsystem:
-> - **Comptime struct-parameter access** — device_context (`info.emission_kind`
->   where `emission_kind` is a `CompileInfo[..., emission_kind: StaticString]`
->   parameter, erased by codegen — needs per-instantiation parameter tracking).
-> - **MLIR-op lowering** — unsafe_pointer (`strided_load`/`gather`/`__mlir_op`);
->   atomic (`pop.atomic.rmw` → `__atomic_*`). atomic ALSO hits a fragile spot: its
->   static `fetch_add(ptr)` overload shares the base `func_param_types` key with
->   the instance `fetch_add(self)` overload and picks up `Atomic *`; a clean fix
->   needs per-overload method param types — but both the broad and surgical
->   attempts regressed bool/simd/arc_pointer, so it needs careful work.
-> - **Robust imported-generic elaboration** — pathlib `listdir` (re-export
->   following is easy; on-demand instantiation of a heavyweight stdlib generic
->   pulls its whole transitive dep set — needs CAS-cached elaboration; naive
->   attempt timed out).
-> - **Special libc binding** — _libc (setvbuf arity vs `<stdio.h>` — SB-4; POSIX
->   externs; dlopen/dlsym pointer typing; partly an upstream-source question).
+> The remaining 3 each need a deeper subsystem or an upstream-source change:
+> - **device_context** — TWO compounding issues: `info: CompileInfo[...]` (an
+>   imported *parametric* struct) types as `char *` (imported parametric structs
+>   aren't resolved to their struct pointer), AND `info.emission_kind` reads a
+>   comptime struct *parameter* (`CompileInfo[..., emission_kind: StaticString]`)
+>   that codegen erases — needs imported-struct resolution + per-instantiation
+>   comptime-parameter tracking.
+> - **pathlib** — robust CAS-cached imported-generic elaboration (`listdir`;
+>   re-export following is easy, but on-demand instantiation of a heavyweight
+>   stdlib generic pulls its whole transitive dep set — naive attempt timed out).
+> - **_libc** — 6 libc-binding issues: `dup`/`pipe` POSIX externs; `dlopen`/`dlsym`
+>   + a `void*`→int64_t result need pointer typing (a `_LIBC_SIGS` extension);
+>   `waitpid` `int*` vs `int64_t*`; and **setvbuf** arity vs `<stdio.h>` (SB-4) —
+>   an upstream-source question (do NOT paper over with default-padding).
 >
 > Note: the self-hosted compiler mistypes a list-subscript inside an f-string as
 > int64_t (collapsing the string) — use `zip(a, b)` not `a[i]` in compiler code
