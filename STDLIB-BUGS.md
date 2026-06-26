@@ -18,20 +18,24 @@ and accelerates everything it does contain.
 
 ## SB-1 — Cross-module C-name collision for overloaded free functions
 
-**Symptom:** dylib link fails with `duplicate symbol '_mojo_abs'`.
-`abs` is defined as a free function in **two** modules — `std/math/math.mojo`
-(scalar `abs`) and `std/complex/complex.mojo` (`abs` for `Complex`). Both lower
-to the same C symbol `mojo_abs` (the `abs`→`mojo_abs` keyword rename does not add
-overload disambiguation), so linking both objects collides.
+**FIXED (mostly).** Free-function C symbols are now overload-mangled by their
+parameter types (`_func_csym` in gimple_codegen, mirrored in reflect.py), routed
+through every emission site, so same-named overloads in different modules get
+distinct symbols. This removed the `reduce` collision. The `input` alias was
+fixed separately (weak runtime symbol).
 
-**Nature:** compiler — the C-name mangler must distinguish overloads of a free
-function by parameter types (as it already does for some struct-method overloads
-via the `_<hash>` suffix). Belongs in elaboration/overload resolution.
+**Residual** (handled by the build's collision-dedup stopgap — 3 modules
+excluded; the dylib still links):
 
-Same shape, other symbols: `_reduce`, `_input`, `_get_dylib_function`
-(`std/ffi/__init__.mojo` + `std/gpu/host/_tracing.mojo`), and the codegen trait
-helpers `_all_trivial_copyinit/_moveinit/_del` (`std/ffi/unsafe_union.mojo` +
-`std/utils/variant.mojo`).
+- `mojo_abs` — math `abs(SIMD)` and complex `abs(Complex)` both lower to the same
+  C signature (`int64_t`), so the C-parameter-type hash is identical. Needs
+  Mojo-source-type or module-qualified mangling to distinguish (the C types have
+  collapsed by codegen time). SIMD/Complex scalarization limit.
+- `_all_trivial_copyinit`, `_get_dylib_function` — these are **generic** functions
+  (`def _all_trivial_copyinit[*Ts: AnyType]()`), defined in two modules each and
+  emitted as type-erased zero-arg duplicates. Needs monomorphization
+  (elaboration), not parameter-type mangling — a zero-arg erased generic has no
+  parameters to hash.
 
 ---
 
