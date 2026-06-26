@@ -2073,7 +2073,12 @@ class GimpleGen:
     }
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
-                 emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False):
+                 emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
+                 no_mangle=()):
+        # Function names that must NOT be overload-mangled in this TU — e.g. a
+        # generic instantiation's own symbol, which is already uniquely named by
+        # its type args and is referenced by that exact name from call sites.
+        self._extra_no_mangle: set = set(no_mangle)
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
@@ -2083,6 +2088,11 @@ class GimpleGen:
         self.struct_field_types: dict[str, dict[str, str]] = {}
         # struct name → {alias_name: value AST}; expanded at member access.
         self._struct_comptime_aliases: dict[str, dict] = {}
+        # Bare names of user free functions whose C symbol is overload-mangled by
+        # parameter types (so same-named functions in different modules don't
+        # collide at link). Populated for local defs and imported Mojo functions;
+        # every emission site routes the name through _func_csym for consistency.
+        self._mangled_funcs: set[str] = set()
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
         self._all_closures: dict = {}   # populated by gen_module pre-pass
         self._lambda_outer_closures: dict = {}  # set during lambda body codegen
@@ -2519,8 +2529,16 @@ class GimpleGen:
                         # declares (conflicting types when Mojo stub has different sig).
                         _locally_defined = sym in self._global_inline_defs
                         _is_c_builtin = sym in self._LIBC_DECLARED
+                        if not _is_c_builtin:
+                            # This imported Mojo function is overload-mangled by the
+                            # defining module; the importer must mangle calls + its
+                            # extern identically. Same param types (from the exported
+                            # signature) ⇒ same suffix as the definition.
+                            self._mangled_funcs.add(sym)
                         if not _locally_defined and not _is_c_builtin:
-                            decls.append(f'extern {sig};')
+                            _csym = self._func_csym(sym)
+                            decls.append(
+                                f"extern {ret} {_csym} ({', '.join(ptypes) if ptypes else 'void'});")
                 elif isinstance(stmt, FunctionDef):
                     scan(stmt.body)
                 elif isinstance(stmt, IfStmt):
@@ -3970,7 +3988,8 @@ class GimpleGen:
         # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
         if (name in self.func_return_types and name not in self.var_types
                 and name not in self.struct_field_types and name not in self._global_var_types):
-            c_name = self._c_names.get(name, _safe_name(name))
+            # Use the overload-mangled C symbol so &fn points at the real definition.
+            c_name = self._c_names.get(name, self._func_csym(name))
             self._funcptr_builtins_needed.add(c_name)
             static_name = f'_funcptr_{c_name}'
             t = self._new_val('void *', f'{static_name}')
@@ -6529,7 +6548,8 @@ class GimpleGen:
                 and fname_raw not in self.imported_symbols):
             fname = self.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
         else:
-            fname = self.BUILTIN_VALUE_MAP.get(fname_raw, _safe_name(fname_raw))
+            # _func_csym applies the same overload suffix the definition used.
+            fname = self.BUILTIN_VALUE_MAP.get(fname_raw, self._func_csym(fname_raw))
         ret_type = self.func_return_types.get(fname_raw, 'int64_t')
 
         # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
@@ -6547,7 +6567,12 @@ class GimpleGen:
         if fname in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[fname][0]
 
-        if fname != fname_raw and fname_raw in _C_RESERVED_FUNCS:
+        # A renamed C-reserved *builtin* passthrough (e.g. calling libm exp2 with
+        # no local def) needs a variadic extern. But if there's a local Mojo def of
+        # the same name (now overload-mangled), it already has a typed forward decl
+        # — emitting the variadic stub too would conflict. Skip those.
+        if (fname != fname_raw and fname_raw in _C_RESERVED_FUNCS
+                and fname_raw not in self._mangled_funcs):
             self._renamed_builtin_calls = getattr(self, '_renamed_builtin_calls', {})
             if fname not in self._renamed_builtin_calls:
                 self._renamed_builtin_calls[fname] = ret_type
@@ -8081,7 +8106,8 @@ class GimpleGen:
                         and raw_name not in self.imported_symbols):
                     fname = self.BUILTIN_VALUE_MAP.get(raw_name, raw_name)
                 else:
-                    fname = self.BUILTIN_VALUE_MAP.get(raw_name, _safe_name(raw_name))
+                    # _func_csym applies the overload suffix to match the definition.
+                    fname = self.BUILTIN_VALUE_MAP.get(raw_name, self._func_csym(raw_name))
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
 
             # Handle keyword arguments for regular function calls
@@ -9153,6 +9179,60 @@ class GimpleGen:
                 ctype = 'const ' + ctype
         return ctype
 
+    # Entry points, the toplevel initializer, and the bootstrap/self-host ABI
+    # functions keep fixed C names (they are referenced by fixed name from
+    # hardcoded preamble decls and external harnesses).
+    _NO_OVERLOAD_MANGLE = frozenset({
+        'main', '_toplevel', '_gimple_main', '_lib_main',
+        'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'tokenize',
+        'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
+    })
+
+    @staticmethod
+    def overload_suffix_for(c_param_types) -> str:
+        """A short stable suffix from a function's C parameter-type list. Shared by
+        the codegen and reflect (reflect.func_overload_suffix) so both agree."""
+        if not c_param_types or any('...' in p for p in c_param_types):
+            return ''
+        h = hashlib.md5(','.join(c_param_types).encode(), usedforsecurity=False).hexdigest()[:6]
+        return f'_{h}'
+
+    def _overload_suffix(self, bare_name: str) -> str:
+        return self.overload_suffix_for(self.func_param_types.get(bare_name))
+
+    def _func_mangleable(self, name: str) -> bool:
+        """Whether a free function's C symbol is overload-mangled. True for a local
+        user def (in _mangled_funcs) or an imported Mojo function (a concrete
+        function export with a signature). False for entry points, struct types,
+        and C stdlib symbols, whose names are fixed."""
+        if (name in self._NO_OVERLOAD_MANGLE
+                or name in self._extra_no_mangle
+                or name in self.struct_field_types
+                or name in self._LIBC_DECLARED):
+            return False
+        if name in self._mangled_funcs:
+            return True
+        info = self.imported_symbols.get(name)
+        return bool(info and 'signature' in info and info.get('kind') != 3)
+
+    def _func_csym(self, bare_name: str) -> str:
+        """The C symbol for a free function: _safe_name + overload suffix when the
+        function is a user/imported Mojo function eligible for mangling. Used at the
+        definition, every forward declaration, and every call site so they agree."""
+        base = _safe_name(bare_name)
+        if not self._func_mangleable(bare_name):
+            return base
+        mangled = base + self._overload_suffix(bare_name)
+        # Mirror the param/return types under the mangled key so _emit_call's
+        # argument coercion and return typing (keyed by the emitted name) still
+        # work — func_param_types/func_return_types are keyed by the bare name.
+        if mangled != base:
+            if bare_name in self.func_param_types:
+                self.func_param_types.setdefault(mangled, self.func_param_types[bare_name])
+            if bare_name in self.func_return_types:
+                self.func_return_types.setdefault(mangled, self.func_return_types[bare_name])
+        return mangled
+
     def gen_func(self, node: FunctionDef) -> str:
         self._reset_func()
         # Set module context for global field access
@@ -9241,7 +9321,7 @@ class GimpleGen:
         # Record that this function takes varargs so call sites can pack args
         if has_varargs:
             self.func_param_types[node.name] = self._signature_ctypes(node.params, node)
-        safe = _safe_name(node.name)
+        safe = self._func_csym(node.name)
 
         # For main (in main module only), call class-attr initializer first
         if node.name == 'main' and self.emit_struct_defs:
@@ -9825,6 +9905,10 @@ class GimpleGen:
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+            # A genuine user free function (FunctionDef node, not a libc extern):
+            # eligible for overload-mangling its C symbol by parameter types.
+            if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
+                self._mangled_funcs.add(s.name)
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
         all_structs_for_methods = stmts + (imported_stmts if self.do_imports else [])
         for s in all_structs_for_methods:
@@ -11321,7 +11405,10 @@ class GimpleGen:
                 parts.append(f"{ret_type} {cname} () {body}  /* stub from {module} */")
                 continue
 
-            safe = _safe_name(sym_name)
+            # _func_csym applies the overload suffix for imported Mojo functions so
+            # this extern matches the defining module's mangled symbol and the call
+            # sites in this module.
+            safe = self._func_csym(sym_name)
             if 'signature' in sym_info:
                 # For _C_RESERVED_FUNCS symbols (renamed to mojo_X), the Mojo wrapper may
                 # have optional/default parameters that aren't passed at all call sites.
@@ -11398,7 +11485,9 @@ class GimpleGen:
             ptypes = ', '.join(param_ctypes) if param_ctypes else 'void'
             # For _C_RESERVED_FUNCS (e.g. getuid → mojo_getuid), use the renamed
             # C name as the guard so the original C name's util stub is not blocked.
-            _c_fn_name = _safe_name(fn.name)
+            # _func_csym adds the overload suffix so this forward decl matches the
+            # definition and call sites.
+            _c_fn_name = self._func_csym(fn.name)
             _guard_name = _c_fn_name if fn.name in _C_RESERVED_FUNCS else fn.name
             stub_guard = f'_MOJO_STUB_{_guard_name.upper()}'
             parts.append(f'#ifndef {stub_guard}')

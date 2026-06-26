@@ -118,7 +118,10 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc, _OBJ_FLAGS)
 
     def build():
-        gen = GimpleGen(emit_entry_points=False, module_name=mangled)
+        # The instantiated function is already uniquely named (mangled); don't
+        # overload-suffix it, or the caller's reference (info['symbol'] = mangled)
+        # won't match the definition.
+        gen = GimpleGen(emit_entry_points=False, module_name=mangled, no_mangle={mangled})
         c = gen.gen_module(Parser(tokenize(concrete)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_inst_')
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')

@@ -12,8 +12,44 @@ codegen uses, so the declared signature matches the emitted symbol exactly.
 """
 import re
 
+import hashlib
 from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
-from gimple_codegen import _mojo_type
+from gimple_codegen import _mojo_type, _safe_name, GimpleGen
+
+# Free functions whose C symbol the codegen does NOT overload-mangle (must match
+# GimpleGen._NO_OVERLOAD_MANGLE).
+_NO_MANGLE_FUNCS = frozenset({
+    'main', '_toplevel', '_gimple_main', '_lib_main',
+    'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'tokenize',
+    'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
+})
+
+
+def _sig_param_ctypes(signature: str) -> list:
+    """The C parameter-type list from a C function signature string, stripping
+    parameter names — must match gimple_codegen's func_param_types so the overload
+    suffix computed here equals the one the codegen emits."""
+    inner = signature.split('(', 1)[1].rsplit(')', 1)[0].strip() if '(' in signature else ''
+    if not inner or inner == 'void':
+        return []
+    out = []
+    for p in inner.split(','):
+        toks = p.split()
+        if len(toks) >= 2 and toks[-1].isidentifier():
+            out.append(' '.join(toks[:-1]))   # drop the trailing param name
+        else:
+            out.append(p.strip())
+    return out
+
+
+def _func_export_csym(name: str, signature: str) -> str:
+    """The mangled C symbol for a SYM_FUNCTION export — `_safe_name(name)` plus the
+    same overload suffix gimple_codegen._func_csym appends, so the reflection table
+    advertises the symbol the dylib actually defines."""
+    base = _safe_name(name)
+    if name in _NO_MANGLE_FUNCS:
+        return base
+    return base + GimpleGen.overload_suffix_for(_sig_param_ctypes(signature))
 
 
 # Symbol kinds — must match reflect.h.
@@ -151,11 +187,17 @@ def emit_table_c(exports: list) -> str:
     # carry a NULL address and are never forward-declared. The C symbol of a
     # METHOD entry is the name inside its signature, not the lookup key
     # (`Struct.method`), so we extract it.
+    def _csym(e):
+        # SYM_FUNCTION free functions are overload-mangled by the codegen; methods
+        # already carry their mangled name inside the signature.
+        if e['kind'] == SYM_FUNCTION:
+            return _func_export_csym(e['name'], e['signature'])
+        return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
     seen = set()
     for e in exports:
         if e['kind'] == SYM_TYPE:
             continue
-        sym = e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+        sym = _csym(e)
         if sym not in seen:
             seen.add(sym)
             # Unprototyped extern avoids referencing struct types that may not
@@ -167,7 +209,7 @@ def emit_table_c(exports: list) -> str:
         if e['kind'] == SYM_TYPE:
             addr = '0'
         else:
-            sym = e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+            sym = _csym(e)
             addr = '(void *)' + sym
         L.append(f"  {{ {_cstr(e['name'])}, {_cstr(e['signature'])}, "
                  f"{addr}, {e['kind']} }},")

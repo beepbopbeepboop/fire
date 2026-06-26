@@ -56,7 +56,8 @@ def _build_dylib(src: str, fn_name: str, gcc: str) -> str:
     ext = '.dylib'
 
     def build():
-        gen = GimpleGen(emit_entry_points=False, module_name=fn_name)
+        # The function is dlsym'd by its exact name, so don't overload-mangle it.
+        gen = GimpleGen(emit_entry_points=False, module_name=fn_name, no_mangle={fn_name})
         c = gen.gen_module(Parser(tokenize(src)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_ct_')
         cfile = os.path.join(wd, fn_name + '.c')
