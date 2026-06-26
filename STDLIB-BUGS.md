@@ -53,21 +53,32 @@ The stdlib ships per-OS variants that define identical symbols:
 
 ---
 
-## SB-4 — `setvbuf` wrapper drops two of its four arguments
+## SB-4 — `setvbuf` external_call arity vs the system `<stdio.h>` prototype
 
 **Symptom:** `std/sys/_libc.mojo:105` — `too few arguments to function 'setvbuf';
-expected 4, have 2`. The wrapper is declared with all four C params but forwards
-only two:
+expected 4, have 2`. The wrapper carries all four params but its `external_call`
+forwards only two:
 
 ```mojo
 def setvbuf(stream, buffer, mode: c_int, size: c_size_t) -> c_int:
-    return external_call["setvbuf", c_int](stream, buffer)   # mode, size dropped
+    return external_call["setvbuf", c_int](stream, buffer)
 ```
 
-libc `setvbuf(FILE*, char*, int, size_t)` (declared by the included `<stdio.h>`)
-needs all four. **Nature:** stdlib-source bug — the `mode`/`size` parameters are
-silently ignored. The compiler correctly rejects the 2-arg call. Fix is in the
-stdlib source: `external_call["setvbuf", c_int](stream, buffer, mode, size)`.
+**Not a naive "forgot the args" bug — `setvbuf` is a *special* FFI case.** Mojo's
+buffered-IO model deliberately keeps the libc binding lean: the C status return is
+dropped and re-surfaced as `raises` (check the code internally, panic on failure
+instead of returning an ignorable int), and the buffer crosses the boundary as a
+lifetime-tracked type (not a raw pointer), so the compiler enforces that the buffer
+outlives the stream. The thin `external_call` is intentional within that design.
+
+The blocker for our backend is purely the **C-level arity clash**: our prelude
+includes `<stdio.h>`, whose `setvbuf(FILE*, char*, int, size_t)` prototype is in
+scope, so a 2-arg call is rejected. The compiler-side resolution is to not let the
+system prototype constrain this call — e.g. emit the `external_call` target with a
+matching/variadic local prototype (as we already do for other reserved libc
+wrappers) rather than deferring to `<stdio.h>` — so the intentional Mojo binding
+compiles. (If `mode`/`size` are genuinely meant to reach libc, that part is a
+source question for upstream; the design above is why they may not be.)
 
 ---
 
