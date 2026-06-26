@@ -2411,8 +2411,15 @@ class GimpleGen:
                 # When imported with an alias, replace the original name in the sig
                 # so the extern matches the alias name used at call sites.
                 if alias and name != alias:
-                    import re as _re
-                    sig = _re.sub(r'\b' + _re.escape(name) + r'\b', alias, sig, count=1)
+                    sig = re.sub(r'\b' + re.escape(name) + r'\b', alias, sig, count=1)
+                # Overload-mangle the imported function's name in the extern so it
+                # matches the (mangled) call sites and the defining module's symbol.
+                # Only for genuinely mangled functions — reserved renames (pipe →
+                # mojo_pipe) are handled by other decl paths and must not change here.
+                if self._func_mangleable(sym):
+                    _csym = self._func_csym(sym)
+                    if _csym != sym:
+                        sig = re.sub(r'\b' + re.escape(sym) + r'\b', _csym, sig, count=1)
                 # Guard the extern with #ifndef so the pre-defined stubs (which use
                 # the same guard macro _MOJO_STUB_<NAME>) don't produce a second
                 # conflicting declaration. If the extern is emitted here, the stub
@@ -9207,11 +9214,15 @@ class GimpleGen:
         and C stdlib symbols, whose names are fixed."""
         if (name in self._NO_OVERLOAD_MANGLE
                 or name in self._extra_no_mangle
-                or name in self.struct_field_types
-                or name in self._LIBC_DECLARED):
+                or name in self.struct_field_types):
             return False
+        # A local user def is authoritative — mangle it even if it shares a name
+        # with a libc symbol (e.g. `abs` overloaded in math vs complex: both rename
+        # to mojo_abs and would otherwise collide at link).
         if name in self._mangled_funcs:
             return True
+        if name in self._LIBC_DECLARED:
+            return False
         info = self.imported_symbols.get(name)
         return bool(info and 'signature' in info and info.get('kind') != 3)
 
