@@ -46,7 +46,10 @@ def stdlib_modules() -> list:
     return sorted(modules)
 
 # gcc flags that affect the object output — folded into the CAS key.
-_OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
+# __MOJO_STDLIB_MODE__ must be defined: stdlib modules provide their own
+# definitions of symbols the runtime header would otherwise declare
+# (write/open/close/...), and the header guards those under this macro.
+_OBJ_FLAGS = ('-fgimple', '-fPIC', '-D__MOJO_STDLIB_MODE__', f'-I{RUNTIME}')
 
 
 def compile_module_to_c(src: str, path: str, module_name: str) -> str:
@@ -161,7 +164,11 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     reflect_o = os.path.join(workdir, '_mojo_reflect.o')
     with open(reflect_c, 'w') as f:
         f.write(reflect.emit_table_c(all_exports))
-    subprocess.run([gcc, '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
+    # -fno-builtin: the table forward-declares every exported symbol as
+    # `extern void sym();` purely to take its address. Some exported names
+    # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
+    # rejects the unprototyped redeclaration as a conflicting type.
+    subprocess.run([gcc, '-fno-builtin', '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
     # Linking depends on whether runtime is included or linked separately

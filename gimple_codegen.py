@@ -2669,6 +2669,9 @@ class GimpleGen:
         'mojo_list_get_int':     ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_list_get_str':     ('char *',    ['MojoList *', 'int64_t']),
         'mojo_list_len':         ('int64_t',   ['MojoList *']),
+        'mojo_div_double':       ('double',    ['double', 'double']),
+        'mojo_div_float':        ('float',     ['float', 'float']),
+        'mojo_str_from_int':     ('char *',    ['int64_t']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
@@ -2943,7 +2946,14 @@ class GimpleGen:
         # Rename certain C library functions to mojo_* wrappers with void* params
         fname = self._CALL_RENAMES.get(fname, fname)
         sig = self._KNOWN_SIGS.get(fname)
-        param_types = sig[1] if sig else self.func_param_types.get(fname, [])
+        if sig:
+            param_types = sig[1]
+        elif fname in self._LIBC_SIGS:
+            # Raw libc symbol (e.g. pclose): the canonical C signature wins over
+            # func_param_types, which a same-named Mojo wrapper may have polluted.
+            param_types = self._LIBC_SIGS[fname][1]
+        else:
+            param_types = self.func_param_types.get(fname, [])
 
 
         # If function takes *args, pack variadic args into a MojoList*
@@ -4428,6 +4438,18 @@ class GimpleGen:
                 self._emit(f'  {cp} = (char *){ip};')
                 t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', cp)])
                 return 'char *', t
+            # String + numeric (or numeric + String) where the numeric is a real
+            # value, not a string-stored-as-int. This is String concatenation with
+            # an Int; emitting `char* + int` as C arithmetic is invalid and ICEs
+            # gcc's build2. Stringify the numeric operand and concatenate.
+            if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
+                nv = self._to_int64(rt2, rv2)
+                sv = self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
+                return 'char *', self._call_expr('char *', 'mojo_str_cat', [('char *', lv2), ('char *', sv)])
+            if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
+                nv = self._to_int64(lt2, lv2)
+                sv = self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
+                return 'char *', self._call_expr('char *', 'mojo_str_cat', [('char *', sv), ('char *', rv2)])
 
         # char * * int → string repetition (e.g., "  " * 3)
         if node.op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
@@ -4544,15 +4566,32 @@ class GimpleGen:
         res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
 
         # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
-        # For | on set/list/dict pointer types, use runtime union, not C bitwise |
+        # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
+        # An empty `{}` operand lowers to MojoDict*; coerce such pointer operands
+        # to MojoSet* so GIMPLE's strict pointer typing accepts the call.
+        def _as_set(t, v):
+            if t == 'MojoSet *':
+                return v
+            return self._new_val('MojoSet *', f'(MojoSet *){self._ensure_local(t, v)}')
         if node.op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
-            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_union', [(lt, lv), (rt, rv)])
+            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_union',
+                                                [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
         # For - on set types, use runtime difference, not C subtraction
         if node.op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_difference', [(lt, lv), (rt, rv)])
+            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_difference',
+                                                [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
         # For & on set types, use runtime intersection, not C bitwise &
         if node.op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
-            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_intersection', [('MojoSet *', lv), ('MojoSet *', rv)])
+            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_intersection',
+                                                [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
+        # For ^ on set types, symmetric difference = (a - b) | (b - a).
+        # No dedicated runtime entry; compose from difference + union.
+        if node.op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
+            a, b = _as_set(lt, lv), _as_set(rt, rv)
+            ab = self._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', a), ('MojoSet *', b)])
+            ba = self._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
+            return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_union',
+                                                [('MojoSet *', ab), ('MojoSet *', ba)])
         # Cast operands to result type to satisfy GIMPLE strict type checking
         arith_type = TypeLattice.join(lt, rt)  # common type for arithmetic
         if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
@@ -4569,6 +4608,15 @@ class GimpleGen:
             self._emit(f'  {ip_l} = (int64_t){lv};')
             self._emit(f'  {ip_r} = (int64_t){rv};')
             lv = ip_l; rv = ip_r
+        # Floating-point division: gcc -fgimple ICEs (expmed_mode_index) on a
+        # float/double `/` inside a __GIMPLE body. Route through a normal-C
+        # runtime helper where the division expands correctly. Operands are
+        # already coerced to res_type above.
+        # TODO(gimple-fp-div): drop this indirection once the gcc -fgimple
+        # float/double division ICE is fixed upstream.
+        if c_op == '/' and res_type in ('double', 'float'):
+            fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
+            return res_type, self._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
         t = self._new_val(res_type, f"{lv} {c_op} {rv}")
         return res_type, t
 
@@ -5551,6 +5599,14 @@ class GimpleGen:
         'rand': ('int', []),
         'remove': ('int', ['char *']),
         'dlclose': ('int', ['void *']),
+        # stdio FILE*-taking calls: FILE* modeled as void* so int64_t-lowered
+        # pointer args coerce cleanly (void*→FILE* is implicit in C).
+        'pclose': ('int', ['void *']),
+        'fclose': ('int', ['void *']),
+        'fflush': ('int', ['void *']),
+        'popen': ('void *', ['char *', 'char *']),
+        'fdopen': ('void *', ['int', 'char *']),
+        'setvbuf': ('int', ['void *', 'char *', 'int', 'int64_t']),
     }
 
     def _type_expr_to_ann(self, node) -> str:
@@ -6448,13 +6504,22 @@ class GimpleGen:
         if fname_raw == 'int' and len(arg_pairs) > 1:
             arg_pairs = arg_pairs[:1]
 
-        # abs → llabs for int64_t / pointer args
+        # abs of an integer → inline `x < 0 ? -x : x`.
+        # We deliberately do NOT call the libc `llabs`: gcc -fgimple ICEs
+        # (gimplify_var_or_parm_decl) when the recognized builtin llabs is applied
+        # to a local computed temp. Inlining is also strictly better — no libc call
+        # for a one-instruction operation.
+        # TODO(gimple-builtins): revisit once the gcc -fgimple builtin-arg ICE is
+        # fixed upstream; we could then route abs back through llabs if desired.
         if fname_raw in ('abs', 'mojo_abs') and len(arg_pairs) == 1:
             at, av = arg_pairs[0]
             if at in ('int64_t', 'long long') or at.endswith(' *'):
-                if at.endswith(' *'): av = self._new_val('int64_t', f'(int64_t){av}')
-                arg64 = self._new_val('int64_t', f'(int64_t){av}')
-                return 'int64_t', self._call_expr('int64_t', 'llabs', [('int64_t', arg64)])
+                v = self._ensure_local('int64_t', av if not at.endswith(' *')
+                                       else self._new_val('int64_t', f'(int64_t){av}'))
+                zero = self._new_val('int64_t', '(int64_t)0')
+                neg  = self._new_val('_Bool', f'{v} < {zero}')
+                negv = self._new_val('int64_t', f'-{v}')
+                return 'int64_t', self._new_val('int64_t', f'{neg} ? {negv} : {v}')
 
         # range(stop) or range(start, stop, step)
         if fname_raw == 'range':
@@ -6465,14 +6530,32 @@ class GimpleGen:
                 fname = 'mojo_range3'
             return 'void *', self._call_expr('void *', fname, arg_pairs)
 
-        # min/max → inline ternary (avoids mojo_min(void*) mismatch)
-        if fname_raw in ('min', 'max') and len(arg_pairs) == 2:
-            (at, av), (bt, bv) = arg_pairs
-            if at != 'int64_t': av = self._new_val('int64_t', f'(int64_t){av}')
-            if bt != 'int64_t': bv = self._new_val('int64_t', f'(int64_t){bv}')
-            op    = '<' if fname_raw == 'min' else '>'
-            cond  = self._new_val('_Bool', f'{av} {op} {bv}')
-            return 'int64_t', self._new_val('int64_t', f'{cond} ? {av} : {bv}')
+        # min/max over scalar args → fold into nested ternaries (avoids the
+        # mojo_min(void*) variadic-pack signature, which we don't emit packs for).
+        _NUM = ('int64_t', 'int', '_Bool', 'double', 'float',
+                'uint64_t', 'int32_t', 'uint32_t', 'int16_t', 'uint16_t',
+                'int8_t', 'uint8_t', 'size_t', 'long', 'short')
+        if (fname_raw in ('min', 'max') and arg_pairs
+                and all(t in _NUM for t, _ in arg_pairs)):
+            op = '<' if fname_raw == 'min' else '>'
+            def _as_i64(t, v):
+                return v if t == 'int64_t' else self._new_val('int64_t', f'(int64_t){v}')
+            acc = _as_i64(*arg_pairs[0])
+            for t, v in arg_pairs[1:]:
+                bv = _as_i64(t, v)
+                cond = self._new_val('_Bool', f'{acc} {op} {bv}')
+                acc = self._new_val('int64_t', f'{cond} ? {acc} : {bv}')
+            return 'int64_t', acc
+
+        # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
+        if fname_raw == 'round' and len(arg_pairs) == 2:
+            (xt, xv), (nt, nv) = arg_pairs
+            xd = xv if xt == 'double' else self._new_val('double', f'(double){xv}')
+            nd = nv if nt == 'double' else self._new_val('double', f'(double){nv}')
+            p  = self._new_val('double', f'pow (10.0, {nd})')
+            scaled = self._new_val('double', f'{xd} * {p}')
+            r = self._new_val('double', f'round ({scaled})')
+            return 'double', self._new_val('double', f'{r} / {p}')
 
         # float(x) — direct cast for numeric types
         if fname_raw == 'float' and arg_pairs:
@@ -6835,11 +6918,17 @@ class GimpleGen:
             else:
                 self._dict_val_types[t] = 'int64_t'
         for key_expr, val_expr in node.pairs:
-            _, kv  = self.lower_expr(key_expr)
+            kt, kv = self.lower_expr(key_expr)
             vt, vv = self.lower_expr(val_expr)
             # Load global string literals into temps before passing to dict functions
             if kv.startswith('_slit_'):
                 kv_tmp = self._new_val('char *', f"{kv}")
+                kv = kv_tmp
+            elif kt != 'char *':
+                # Runtime dict keys are always char *; coerce non-string keys
+                # (e.g. Int keys) so GIMPLE doesn't see int→pointer at the call.
+                kv_tmp = self._new_temp('char *')
+                self._safe_coerce_emit(kt, 'char *', kv, kv_tmp)
                 kv = kv_tmp
             if vt in _FLOAT_TYPES:
                 self._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")

@@ -2019,3 +2019,22 @@ int mojo_getattr(int obj, char *attr) { (void)obj; (void)attr; return 0; }
 void *mojo_enumerate(void *iterable) { return iterable; }
 void *mojo_filter(void *func, void *iterable) { (void)func; return iterable; }
 void *mojo_map(void *func, void *iterable) { (void)func; return iterable; }
+
+/* ── Floating-point division helper ──────────────────────────────────
+   gcc -fgimple ICEs (expmed_mode_index, expmed.h:239) when a float/double
+   division operation appears inside a __GIMPLE function body. We emit a call
+   to these normal-C helpers instead; the division is expanded here, in a
+   regularly-compiled translation unit, where it works correctly. */
+double mojo_div_double(double a, double b) { return a / b; }
+float  mojo_div_float(float a, float b)    { return a / b; }
+
+/* Decimal string of an integer (heap-allocated). Used when a string is
+   concatenated with a numeric operand (String + Int) so codegen never has
+   to emit an invalid `char* + int` expression. */
+char *mojo_str_from_int(int64_t v) {
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lld", (long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}

@@ -247,6 +247,7 @@ int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 char *mojo_str_cat(char *a, char *b);
+char *mojo_str_from_int(int64_t v);
 char *mojo_path_join(char *base, char *name);
 char *mojo_cstr_repeat(char *s, int64_t n);
 
@@ -265,6 +266,8 @@ void *mojo_make_tuple(void);
 int64_t mojo_make_int(char *s);
 double mojo_make_float(char *s);
 int mojo_make_bool(int val);
+double mojo_div_double(double a, double b);
+float  mojo_div_float(float a, float b);
 int64_t mojo_max(void *args);
 int64_t mojo_min(void *args);
 int64_t mojo_sum(void *args);

@@ -1628,7 +1628,15 @@ class Parser:
 
     # ── Expressions ──────────────────────────────────────────────────
     def _parse_expr(self, min_prec: int):
-        left = self._parse_unary()
+        # Boolean `not` is a low-precedence prefix operator (binds looser than
+        # comparison/`in`, tighter than `and`): `not a in b` == `not (a in b)`.
+        # The binary `not in` form is handled in the operator loop below.
+        if self._peek().kind == "KW" and self._peek().value == "not":
+            self._advance()
+            operand = self._parse_expr(_KW_PREC['not'])
+            left = UnaryOp(op="not", operand=operand)
+        else:
+            left = self._parse_unary()
         while True:
             t = self._peek()
             if t.kind == "OP":
@@ -1665,9 +1673,7 @@ class Parser:
         if t.kind == "OP" and t.value in ("-", "+", "~"):
             self._advance()
             return UnaryOp(op=t.value, operand=self._parse_unary())
-        if t.kind == "KW" and t.value == "not":
-            self._advance()
-            return UnaryOp(op="not", operand=self._parse_unary())
+        # Boolean `not` is handled as a low-precedence prefix in _parse_expr.
         # Spread/unpack: *expr or **expr (valid inside list/dict/call literals)
         if t.kind == "OP" and t.value == "*":
             self._advance()
