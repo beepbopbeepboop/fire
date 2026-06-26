@@ -3179,6 +3179,44 @@ class GimpleGen:
         else:
             self._emit(f'  {fname} ({args_str});')
 
+    def _strided_data_ptr(self, pt: str, pv: str) -> str:
+        """An `int64_t *` to the scalar data for a strided op's pointer operand —
+        `self->address` for an UnsafePointer struct, else the raw pointer itself.
+        (int→ptr goes through void* in two single casts; GIMPLE rejects a double
+        cast in one statement.)"""
+        sn = _struct_name_of(pt)
+        if sn and 'address' in (self.struct_field_types.get(sn) or {}):
+            addr = self._new_val('int64_t', f"{pv}->address")
+            vp = self._new_val('void *', f"(void *){addr}")
+            return self._new_val('int64_t *', f"(int64_t *){vp}")
+        if pt == 'int64_t *':
+            return self._ensure_local(pt, pv)
+        if pt.endswith(' *'):
+            return self._new_val('int64_t *', f"(int64_t *){self._ensure_local(pt, pv)}")
+        loc = self._ensure_local('int64_t', pv)
+        vp = self._new_val('void *', f"(void *){loc}")
+        return self._new_val('int64_t *', f"(int64_t *){vp}")
+
+    def _lower_strided(self, node, store: bool):
+        """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
+        intrinsics: a plain load/store of the pointer's scalar element. Consistent
+        with the codegen's existing SIMD-to-scalar erasure."""
+        if store:
+            # strided_store(value, ptr, stride, mask)
+            _, vv = self.lower_expr(node.args[0])
+            pt, pv = self.lower_expr(node.args[1])
+            for a in node.args[2:]:
+                self.lower_expr(a)
+            dp = self._strided_data_ptr(pt, pv)
+            self._emit(f"  *{dp} = {vv};")
+            return 'int', self._new_val('int', '0')
+        # strided_load(ptr, stride, mask)
+        pt, pv = self.lower_expr(node.args[0])
+        for a in node.args[1:]:
+            self.lower_expr(a)
+        dp = self._strided_data_ptr(pt, pv)
+        return 'int64_t', self._new_val('int64_t', f"*{dp}")
+
     def _ensure_local(self, ctype: str, val: str) -> str:
         """If val is a global variable (not a local temp or constant), load it into
         a local temp first.  GIMPLE requires all cast/unary operands to be registers."""
@@ -6128,6 +6166,10 @@ class GimpleGen:
                 fname_raw = f"_{_mod_id}_main" if _mod_id else '_lib_main'
 
         # Builtin dispatch
+        if fname_raw == 'strided_load' and node.args:
+            return self._lower_strided(node, store=False)
+        if fname_raw == 'strided_store' and len(node.args) >= 2:
+            return self._lower_strided(node, store=True)
         if fname_raw == 'len'             and node.args:            return self._lower_builtin_len(node)
         if fname_raw == 'isinstance'      and len(node.args) == 2:  return self._lower_builtin_isinstance(node)
         if fname_raw in ('all', 'any')    and len(node.args) == 1:  return self._lower_builtin_all_any(fname_raw, node)
@@ -8076,6 +8118,9 @@ class GimpleGen:
             raw_name = node.value.func.name
             if raw_name == 'print':
                 self._gen_print(node.value.args)
+                return
+            if raw_name in ('strided_load', 'strided_store') and node.value.args:
+                self._lower_strided(node.value, store=(raw_name == 'strided_store'))
                 return
             # Recursive call from inner function to itself
             if raw_name == self._inner_func_name and self._env_param:
