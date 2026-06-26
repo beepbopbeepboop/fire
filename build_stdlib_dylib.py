@@ -32,6 +32,20 @@ RUNTIME = os.path.join(HERE, 'runtime')
 DEFAULT_OUT = os.path.join(HERE, 'build', 'libmojostdlib.dylib')
 
 
+def _excluded_platform(fname: str) -> bool:
+    """True if a platform-specific module does not match the host OS. The stdlib
+    ships per-OS variants (os/_macos.mojo vs os/_linux_x86.mojo, pwd/_linux.mojo
+    vs pwd/_macos.mojo) that define the *same* symbols; linking all of them into
+    one dylib is a duplicate-symbol error. Keep only the host's variant."""
+    stem = fname[:-len('.mojo')] if fname.endswith('.mojo') else fname
+    host = platform.system()
+    tags = {'_linux': 'Linux', '_macos': 'Darwin', '_windows': 'Windows'}
+    for tag, osname in tags.items():
+        if (stem == tag or stem.endswith(tag) or (tag + '_') in stem) and host != osname:
+            return True
+    return False
+
+
 def stdlib_modules() -> list:
     """All library .mojo files under STDLIB_PATH (no tests, no programs)."""
     modules = []
@@ -41,7 +55,7 @@ def stdlib_modules() -> list:
         # prune test subtrees in-place
         dirnames[:] = [d for d in dirnames if d not in ('test', 'tests', 'benchmarks')]
         for fname in filenames:
-            if fname.endswith('.mojo'):
+            if fname.endswith('.mojo') and not _excluded_platform(fname):
                 modules.append(os.path.join(dirpath, fname))
     return sorted(modules)
 
