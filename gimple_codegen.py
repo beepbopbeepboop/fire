@@ -3139,7 +3139,11 @@ class GimpleGen:
         # but skip if fname is a known C stdlib function (to avoid Mojo shadow overriding).
         if not imported_ret and not in_libc_known and fname in self.func_return_types:
             fn_ret = self.func_return_types[fname]
-            if fn_ret != ret_type:
+            # Never coerce a used value through a 'void' call temp (would emit an
+            # illegal `void t; t = f();`). A 'void' entry here is a shadow — e.g. a
+            # Mojo wrapper that shares a name with a value-returning libc symbol
+            # reached via external_call — so the caller's explicit ret_type wins.
+            if fn_ret != ret_type and fn_ret != 'void':
                 imported_ret = fn_ret
         if result_var and imported_ret and imported_ret != ret_type:
             call_tmp = self._new_temp(imported_ret)
@@ -5166,13 +5170,24 @@ class GimpleGen:
             if method in ('cast', '__cast__', '__int__', '__index__', 'value', 'cast_value'):
                 t = self._new_temp(ot); self._emit(f"  {t} = {ov_local};"); return ot, t
             if method == 'select' and len(node.args) >= 2:
-                # Bool.select(true_val, false_val) — ternary
+                # Bool.select(true_val, false_val) — ternary. GIMPLE COND_EXPR
+                # requires both branches and the result to share one type, so
+                # unify them (e.g. a double and an int64_t branch → double).
                 tt, tv = self.lower_expr(node.args[0])
                 ft, fv = self.lower_expr(node.args[1])
+                res_type = TypeLattice.join(tt, ft)
                 tv_local = self._ensure_local(tt, tv)
+                if tt != res_type:
+                    tmp = self._new_temp(res_type)
+                    self._safe_coerce_emit(tt, res_type, tv_local, tmp)
+                    tv_local = tmp
                 fv_local = self._ensure_local(ft, fv)
-                t = self._new_val(tt, f"{ov_local} ? {tv_local} : {fv_local}")
-                return tt, t
+                if ft != res_type:
+                    tmp = self._new_temp(res_type)
+                    self._safe_coerce_emit(ft, res_type, fv_local, tmp)
+                    fv_local = tmp
+                t = self._new_val(res_type, f"{ov_local} ? {tv_local} : {fv_local}")
+                return res_type, t
             # Other scalar methods: stub with zero
             for ea in node.args[1:]: self.lower_expr(ea)
             t = self._new_temp(ot); self._emit(f"  {t} = {ov_local};  /* {ot}.{method}() stubbed */"); return ot, t
