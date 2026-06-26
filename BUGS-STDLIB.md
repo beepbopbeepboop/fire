@@ -14,12 +14,17 @@
 > (atomic); `strided_load`/`strided_store` scalar-erasure lowering (unsafe_pointer).
 >
 > The remaining 3 each need a deeper subsystem or an upstream-source change:
-> - **device_context** — TWO compounding issues: `info: CompileInfo[...]` (an
->   imported *parametric* struct) types as `char *` (imported parametric structs
->   aren't resolved to their struct pointer), AND `info.emission_kind` reads a
->   comptime struct *parameter* (`CompileInfo[..., emission_kind: StaticString]`)
->   that codegen erases — needs imported-struct resolution + per-instantiation
->   comptime-parameter tracking.
+> - **device_context** — `info: CompiledFunctionInfo` (an imported *parametric*
+>   struct from std.compile.compile) types as `char *`, so `info.emission_kind`
+>   (a REAL `var` field, not a comptime param — earlier note was wrong) fails.
+>   Registering imported structs (parse the StructDef from source, record fields,
+>   emit a typedef) fixes THAT access, but device_context uses a whole web of
+>   imported structs (DeviceEvent, CompilationTarget, …): registering them makes
+>   their method calls resolve to undefined `Struct_method` symbols, hits typedef
+>   ordering / forward-reference errors, and `StaticString` still resolves to
+>   int64_t not char*. Needs a proper imported-struct *subsystem* (layout + method
+>   externs + ordering), not a targeted fix — an attempt cascaded and regressed
+>   python, so it was reverted.
 > - **pathlib** — robust CAS-cached imported-generic elaboration (`listdir`;
 >   re-export following is easy, but on-demand instantiation of a heavyweight
 >   stdlib generic pulls its whole transitive dep set — naive attempt timed out).
