@@ -5050,6 +5050,11 @@ class GimpleGen:
             mangled = f"{struct_name}_{_safe_name(method)}"
             ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
             actual_args = [self.lower_expr(a) for a in node.args]
+            # Keyword arguments (e.g. TestReport.skipped(name=...)) are real
+            # parameters — append their values after the positional ones so the
+            # call arity matches the definition.
+            for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
+                actual_args.append(self.lower_expr(_kexpr))
             # @staticmethod methods take no implicit cls arg
             if mangled in self._static_methods:
                 arg_pairs = actual_args
