@@ -11225,7 +11225,10 @@ class GimpleGen:
                 continue  # already emitted by an imported module
             self._emitted_allocs.add(sn)
             parts.append(
-                f"{sn} * __GIMPLE _alloc_{sn} (void)\n"
+                # static: each module that needs it emits its own copy; the
+                # monolithic stdlib dylib compiles modules independently, so an
+                # externally-linked _alloc_<sn> would collide at link time.
+                f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
                 f"{{\n"
                 f"  {sn} * _p;\n"
                 f"  void * _vp;\n"
