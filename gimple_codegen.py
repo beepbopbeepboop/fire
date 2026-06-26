@@ -5558,6 +5558,18 @@ class GimpleGen:
 
     # libc functions already prototyped by our standard includes; re-declaring them
     # (often as variadic, e.g. printf) would clash, so we never emit our own extern.
+    # Symbols that are in _LIBC_DECLARED (so we normally defer to a system header)
+    # but whose declaring header is NOT in our prelude (stdio/stdlib/string/math/
+    # setjmp/dlfcn). For these, external_call must emit its own prototype from the
+    # call's known signature, or the call is an implicit declaration. POSIX file
+    # ops live in <unistd.h>/<sys/stat.h> (not included); scalb/scalbf are obsolete
+    # and absent from modern <math.h>. Excludes names that also have an unrenamed
+    # Mojo wrapper definition (which would collide with the extern).
+    _NEEDS_SELF_EXTERN = frozenset({
+        'stat', 'lstat', 'fstat', 'access', 'unlink', 'rmdir', 'mkdir',
+        'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd',
+        'scalbf',
+    })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
         'malloc', 'calloc', 'realloc', 'free', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr',
@@ -5819,7 +5831,8 @@ class GimpleGen:
         arg_pairs = [self.lower_expr(a) for a in node.args]
         # First use wins: pin the prototype's parameter types and coerce later calls to match.
         # Never register LIBC functions - let system headers provide them
-        if cname not in self._external_protos and cname not in self._LIBC_DECLARED:
+        if cname not in self._external_protos and (
+                cname not in self._LIBC_DECLARED or cname in self._NEEDS_SELF_EXTERN):
             self._external_protos[cname] = (ret_ct, [at for (at, _) in arg_pairs])
         # Track param types for coercion, even if not emitting declaration
         if cname not in self.func_param_types:
@@ -10740,7 +10753,7 @@ class GimpleGen:
         # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
         # Skip libc names already declared by our standard includes to avoid clashes.
         for _ecname in sorted(self._external_protos):
-            if _ecname in self._LIBC_DECLARED:
+            if _ecname in self._LIBC_DECLARED and _ecname not in self._NEEDS_SELF_EXTERN:
                 continue
             _eret, _eargs = self._external_protos[_ecname]
             _argstr = ', '.join(_eargs) if _eargs else 'void'
