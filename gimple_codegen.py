@@ -1651,6 +1651,17 @@ _CMP_OPS  = _GD_CMP_OPS   # operators whose result type is _Bool
 # C keyword avoidance
 # ---------------------------------------------------------------------------
 
+# Trait/dunder method names common across many types — excluded from the imported
+# struct method-call gate (a `.write_to(`/`.__str__(` elsewhere must not veto a
+# struct that's only field-accessed; these also have generic codegen handling).
+_COMMON_METHOD_NAMES = frozenset({
+    'write_to', 'write_text', 'write', 'format', 'copy', 'fdopen',
+    '__contains__', '__str__', '__repr__', '__len__', '__iter__', '__next__',
+    '__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__', '__bool__',
+    '__init__', '__copyinit__', '__moveinit__', '__del__', '__hash__',
+    '__getitem__', '__setitem__', '__add__', '__sub__', '__mul__', '__call__',
+})
+
 _C_KEYWORDS = frozenset({
     'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
     'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if',
@@ -2151,6 +2162,12 @@ class GimpleGen:
         # Imported function name -> module source path, for comptime evaluation
         # (run the function at compile time via comptime.evaluate; slice 3).
         self._imported_fn_sources: dict = {}
+        # Concrete imported structs used as parameter types here: their StructDefs
+        # (so the layout typedef is emitted in dylib mode) and their names (so only
+        # these — not local structs — get the authoritative struct-pointer param
+        # typing, keeping the blast radius tight).
+        self._imported_typedef_structs: list = []
+        self._imported_struct_names: set = set()
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
         # Imported overloaded function name -> module source path (slice 4).
@@ -9493,6 +9510,101 @@ class GimpleGen:
 
     # ── Struct method generation ──────────────────────────────────────────
 
+    def _imported_field_ctype(self, type_ann: str) -> str:
+        """Resolve an imported struct field's type to C. Compile-time string types
+        are char* here (they back string fields like emission_kind) even though the
+        general resolver keeps them as opaque int64_t handles elsewhere."""
+        if type_ann in ('StaticString', 'StringLiteral', 'StringSlice', 'StringRef', 'String'):
+            return 'char *'
+        return self._resolve_type(type_ann) if type_ann else 'int64_t'
+
+    def _register_imported_structs(self, stmts) -> None:
+        """dylib mode: register a concrete imported struct's field layout + queue
+        its typedef, but ONLY for structs used as a parameter type AND whose field
+        is actually accessed here (so e.g. `info: CompiledFunctionInfo` +
+        `info.emission_kind` works). Tightly scoped to avoid disturbing the many
+        imported structs a module merely passes through."""
+        if self.do_imports or not getattr(self, '_current_filename', None):
+            return
+        try:
+            src = open(self._current_filename).read()
+        except Exception:
+            return
+        # struct base name -> set of parameter names with that type (so the field /
+        # method checks below are specific to values actually of this struct, not a
+        # coincidental `.field`/`.method(` on some other object).
+        params_by_struct: dict = {}
+
+        def _base(ann):
+            return ann.split('[', 1)[0].split('.')[0].strip() if isinstance(ann, str) else ''
+
+        def _collect(fn):
+            for _pn, _pt in (getattr(fn, 'params', None) or []):
+                b = _base(_pt)
+                if b:
+                    params_by_struct.setdefault(b, set()).add(
+                        _strip_mojo_param_modifiers(_pn.lstrip('*')))
+        for st in stmts:
+            if isinstance(st, FunctionDef):
+                _collect(st)
+            elif isinstance(st, StructDef):
+                for m in st.methods:
+                    _collect(m)
+        param_type_names = set(params_by_struct)
+
+        for st in stmts:
+            if not (isinstance(st, FromImportStmt) and not getattr(st, 'wildcard', False)):
+                continue
+            for nm, alias in st.names:
+                local = alias or nm
+                if (nm.startswith('_') or local in self.struct_field_types
+                        or local in self._imported_generic_structs
+                        or local not in param_type_names
+                        # Collection-like types have a runtime representation
+                        # (MojoDict*/MojoList*/…) and special method handling —
+                        # registering them as plain structs breaks that.
+                        or any(w in nm for w in ('Dict', 'List', 'Set', 'Array',
+                                                 'Map', 'Kwargs', 'Tuple', 'Span',
+                                                 'Optional', 'Pointer'))):
+                    continue
+                sdef = self._find_imported_struct(st.module, nm)
+                if sdef is None:
+                    continue
+                fields = {f.name: self._imported_field_ctype(f.type_ann)
+                          for f in sdef.fields if isinstance(f, VarDecl)}
+                pnames = params_by_struct.get(nm, set())
+                if not fields or not any(f"{pn}.{fn}" in src
+                                         for pn in pnames for fn in fields):
+                    continue  # no field of this struct is accessed on its params
+                # Skip if a (non-trivial) method is CALLED on this struct anywhere —
+                # typedef-only registration supplies no method body, so the
+                # Struct_method symbol would be undefined. Common trait/dunder
+                # methods are excluded: their names collide with calls on unrelated
+                # objects, and they have generic handling rather than a hard symbol.
+                _uncommon = [m.name for m in sdef.methods
+                             if m.name not in _COMMON_METHOD_NAMES]
+                if any(f".{mn}(" in src for mn in _uncommon):
+                    continue
+                self.struct_field_types[local] = fields
+                self._imported_struct_names.add(local)
+                self._imported_typedef_structs.append(
+                    StructDef(name=local, fields=sdef.fields, methods=[]))
+
+    def _find_imported_struct(self, module: str, name: str):
+        """The StructDef for `name` defined directly in `module`'s source, or None."""
+        try:
+            import imports as _imp
+            path = _imp.resolve_source(module)
+            if not path:
+                return None
+            mod = Parser(tokenize(open(path).read())).parse_module()
+        except Exception:
+            return None
+        for s in mod:
+            if isinstance(s, StructDef) and s.name == name:
+                return s
+        return None
+
     def _struct_method_overload_ids(self, stmt) -> list:
         """Overload-id per method, aligned with stmt.methods. Must match the
         emission loop in gen_module so the method's C symbol, its closure-lookup
@@ -9579,6 +9691,11 @@ class GimpleGen:
                 # A non-self parameter typed `Self` (e.g. the keyword copy ctor
                 # `__init__(out self, *, copy: Self)`) is a pointer to this struct.
                 ctype = f"{struct_name} *"
+            elif ptype and ptype.split('[', 1)[0].split('.')[0].strip() in self._imported_struct_names:
+                # An explicit imported-struct parameter (info: CompiledFunctionInfo)
+                # is authoritative — use the struct pointer, not a type a sibling
+                # overload clobbered onto the shared base key.
+                ctype = f"{ptype.split('[', 1)[0].split('.')[0].strip()} *"
             elif (hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params)
                   and not (i == 0 and pname != 'self'
                            and hardcoded_params[i] == f"{struct_name} *")):
@@ -9667,6 +9784,9 @@ class GimpleGen:
             s.name for s in stmts
             if isinstance(s, StructDef) and any(m.name == '__call__' for m in s.methods)
         }
+
+        # Register concrete imported structs used (with field access) as param types.
+        self._register_imported_structs(stmts)
 
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
@@ -11395,7 +11515,8 @@ class GimpleGen:
         # Struct typedefs (dedup across modules, keep most complete definition)
         if self.emit_struct_defs:
             track_best = {}
-            for s in stmts + (imported_stmts if self.do_imports else []):
+            for s in (stmts + self._imported_typedef_structs
+                      + (imported_stmts if self.do_imports else [])):
                 if isinstance(s, StructDef):
                     field_count = len([f for f in s.fields if isinstance(f, VarDecl)])
                     if s.name not in track_best or field_count > track_best[s.name][1]:
