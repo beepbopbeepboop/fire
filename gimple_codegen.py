@@ -6102,6 +6102,17 @@ class GimpleGen:
             return 'int', self._new_val('int', '0')
 
         fname_raw = node.func.name
+        # A local variable of a callable struct type, invoked like a function:
+        # obj(args) → obj.__call__(args).
+        if (fname_raw in self.var_types and fname_raw not in self.func_return_types
+                and fname_raw not in self._global_inline_defs):
+            _csn = _struct_name_of(self.var_types[fname_raw])
+            if _csn and _csn in getattr(self, '_callable_structs', set()):
+                _cm = MemberExpr(obj=node.func, member='__call__',
+                                 line=getattr(node, 'line', 0))
+                return self._lower_method_call(CallExpr(
+                    func=_cm, args=node.args,
+                    kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0)))
         if fname_raw == 'main' and self.current_func_name != 'main':
             if self.emit_entry_points:
                 fname_raw = '_gimple_main'
@@ -9592,6 +9603,13 @@ class GimpleGen:
             if _local_generics:
                 stmts = [s for s in stmts
                          if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
+
+        # Structs with a __call__ method: a variable of such a type invoked like a
+        # function (obj(args)) routes to Struct___call__(obj, args).
+        self._callable_structs = {
+            s.name for s in stmts
+            if isinstance(s, StructDef) and any(m.name == '__call__' for m in s.methods)
+        }
 
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
