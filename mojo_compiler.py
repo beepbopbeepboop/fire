@@ -400,6 +400,7 @@ class StructDef:
     fields: list
     methods: list
     decorators: list = field(default_factory=list)
+    comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
     line: int = 0
     col: int = 0
 
@@ -1398,9 +1399,15 @@ class Parser:
         body = self._parse_block()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
+        # Struct-level `comptime NAME = expr` are aliases, not physical fields.
+        # Capture them so member access can expand `self.NAME` to its expression
+        # (this codegen does not monomorphize, so e.g. _words_size depends on the
+        # runtime `size` field).
+        aliases = {s.target: s.value for s in body if isinstance(s, ComptimeVarStmt)}
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
-        return StructDef(name=name, fields=fields, methods=methods, decorators=decs)
+        return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
+                         comptime_aliases=aliases)
 
     def _parse_trait(self):
         self._expect("KW", "trait")

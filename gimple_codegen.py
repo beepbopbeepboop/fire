@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import hashlib
+import dataclasses
 
 from mojo_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, EllipsisLiteral,
@@ -2080,6 +2081,8 @@ class GimpleGen:
         self.module_name = module_name  # used to name _{module_name}_toplevel
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # struct name → {alias_name: value AST}; expanded at member access.
+        self._struct_comptime_aliases: dict[str, dict] = {}
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
         self._all_closures: dict = {}   # populated by gen_module pre-pass
         self._lambda_outer_closures: dict = {}  # set during lambda body codegen
@@ -4111,6 +4114,31 @@ class GimpleGen:
         t = self._new_val(res_type, f"{cv} ? {tv} : {ev}")
         return res_type, t
 
+    def _subst_idents(self, expr, mapping: dict):
+        """Return a copy of an AST expression with any IdentExpr whose name is in
+        `mapping` replaced by the mapped node. Used to rebind `Self`/struct-name
+        to a concrete object expression when expanding a struct comptime alias."""
+        if isinstance(expr, IdentExpr) and expr.name in mapping:
+            return mapping[expr.name]
+        if dataclasses.is_dataclass(expr) and not isinstance(expr, type):
+            changes = {}
+            for f in dataclasses.fields(expr):
+                v = getattr(expr, f.name)
+                nv = self._subst_in_value(v, mapping)
+                if nv is not v:
+                    changes[f.name] = nv
+            return dataclasses.replace(expr, **changes) if changes else expr
+        return expr
+
+    def _subst_in_value(self, v, mapping: dict):
+        if isinstance(v, list):
+            return [self._subst_in_value(x, mapping) for x in v]
+        if isinstance(v, tuple):
+            return tuple(self._subst_in_value(x, mapping) for x in v)
+        if dataclasses.is_dataclass(v) and not isinstance(v, type):
+            return self._subst_idents(v, mapping)
+        return v
+
     def _lower_MemberExpr(self, node) -> tuple[str, str]:
         # Check if obj is a simple identifier (module access)
         if isinstance(node.obj, IdentExpr):
@@ -4233,6 +4261,14 @@ class GimpleGen:
             field_type = field_map[node.member]
             t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
+        # Struct-level comptime alias (e.g. BitSet._words_size): not a physical
+        # field — expand its defining expression with `Self`/the struct name
+        # rebound to the accessed object, then lower that.
+        aliases = self._struct_comptime_aliases.get(struct_name)
+        if aliases and node.member in aliases:
+            val_ast = self._subst_idents(aliases[node.member],
+                                         {'Self': node.obj, struct_name: node.obj})
+            return self.lower_expr(val_ast)
         # Class-level attribute (not an instance field) — redirect to global variable
         class_attrs = getattr(self, '_class_attrs', {})
         if struct_name in class_attrs and node.member in class_attrs[struct_name]:
@@ -9374,6 +9410,11 @@ class GimpleGen:
                 for _m in _s.methods:
                     self._global_inline_defs.add(_m.name)
                     self._global_inline_defs.add(f"{_s.name}_{_m.name}")
+                # Struct-level comptime aliases (e.g. BitSet._words_size) expand
+                # to their expression at member-access sites, not physical fields.
+                _al = getattr(_s, 'comptime_aliases', None)
+                if _al:
+                    self._struct_comptime_aliases[_s.name] = _al
 
         # Link mode: register imported symbol signatures (return/param types) from
         # module_loader so call sites lower correctly; decls emitted in preamble.
