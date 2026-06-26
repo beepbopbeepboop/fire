@@ -9430,9 +9430,33 @@ class GimpleGen:
 
     # ── Struct method generation ──────────────────────────────────────────
 
+    def _struct_method_overload_ids(self, stmt) -> list:
+        """Overload-id per method, aligned with stmt.methods. Must match the
+        emission loop in gen_module so the method's C symbol, its closure-lookup
+        key (current_func_name), and the pre-pass closure registration all agree.
+        Empty string for a non-overloaded method."""
+        counts = {}
+        for m in stmt.methods:
+            counts[m.name] = counts.get(m.name, 0) + 1
+        used: dict = {}
+        ids = []
+        for m in stmt.methods:
+            oid = ''
+            if counts[m.name] > 1:
+                oid = _method_overload_id(tuple(m.params or []), stmt.name, m.name)
+                seen = used.setdefault(m.name, {})
+                c = seen.get(oid, 0)
+                seen[oid] = c + 1
+                if c > 0:
+                    oid = f"{oid}_{c + 1}"
+            ids.append(oid)
+        return ids
+
     def _gen_struct_method(self, struct_name: str, node: FunctionDef, overload_id: str = '') -> str:
         self._reset_func()
-        self.current_func_name = f"{struct_name}_{node.name}"
+        # Key by overload so overloaded methods don't share closure state (each
+        # overload's lifted closures + capture env are distinct).
+        self.current_func_name = f"{struct_name}_{node.name}{overload_id}"
         self._current_struct_name = struct_name  # for Self() constructor call lowering
 
         # Seed param types for pre-pass inference
@@ -10318,8 +10342,9 @@ class GimpleGen:
                 _scan_for_closures(s.name, outer_scope, s.body)
             elif isinstance(s, StructDef):
                 # Also scan struct methods for nested functions
-                for method in s.methods:
-                    outer_name = f"{s.name}_{method.name}"
+                _moids = self._struct_method_overload_ids(s)
+                for method, _oid in zip(s.methods, _moids):
+                    outer_name = f"{s.name}_{method.name}{_oid}"
                     outer_scope = {s.name.lower(): f"{s.name} *"}  # struct instance
                     for pname, ptype in method.params:
                         if pname == 'self':
@@ -10543,28 +10568,16 @@ class GimpleGen:
                     self._lambda_parts = []
                 func_parts.append('')
             elif isinstance(stmt, StructDef):
-                # Track method counts for overload detection
-                method_counts = {}
-                for m in stmt.methods:
-                    method_counts[m.name] = method_counts.get(m.name, 0) + 1
-
-                # Track used overload IDs per method name to detect hash collisions
-                _used_overload_ids: dict[str, dict[str, int]] = {}  # name -> {id -> count}
-                for m in stmt.methods:
-                    method_outer_name = f"{stmt.name}_{m.name}"
+                # Overload IDs aligned with stmt.methods; the closure-emit, the
+                # method symbol, and the pre-pass closure registration all key by
+                # the same overload-suffixed name (so overloaded methods with
+                # nested closures don't share capture state).
+                _moids = self._struct_method_overload_ids(stmt)
+                for m, overload_id in zip(stmt.methods, _moids):
+                    method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                     # Emit lifted closures for this method (if any), recursively
                     for ci in self._all_closures.get(method_outer_name, {}).values():
                         _emit_closure_recursive(ci)
-                    # Compute overload ID if multiple methods with same name
-                    overload_id = ''
-                    if method_counts[m.name] > 1:
-                        overload_id = _method_overload_id(tuple(m.params or []), stmt.name, m.name)
-                        # Break hash collisions: if same ID already used, append counter
-                        seen = _used_overload_ids.setdefault(m.name, {})
-                        count = seen.get(overload_id, 0)
-                        seen[overload_id] = count + 1
-                        if count > 0:
-                            overload_id = f"{overload_id}_{count + 1}"
                     func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                     func_parts.append('')
             elif isinstance(stmt, TraitDef):
