@@ -7463,7 +7463,8 @@ class GimpleGen:
                 iv = self._new_val('int64_t', f"(int64_t){v}")
                 lp_cast = self._new_val('MojoList *', f"(MojoList *){iv}")
                 self._emit(f"  {ti} = mojo_list_get_int ({lp_cast}, {ip});")
-                self._emit(f"  {n} = {ti};")
+                # Use the C name (a target like `char` is renamed to `_char`).
+                self._emit(f"  {self._write_dest(n)} = {ti};")
             return
         if node.type_ann in self.struct_field_types and node.value is not None:
             layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
