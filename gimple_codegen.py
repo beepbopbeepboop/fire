@@ -5101,6 +5101,7 @@ class GimpleGen:
         _RAW_PTR_METHODS = frozenset({
             'load', 'store', 'offset', 'free', 'bitcast', 'address_of',
             'destroy_pointee', 'take_pointee', 'initialize_pointee',
+            'init_pointee_copy', 'init_pointee_move', 'init_pointee_explicit_copy',
             'strided_load', 'gather', 'strided_store', 'scatter',
             'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
             'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr',
@@ -5402,10 +5403,15 @@ class GimpleGen:
             t = self._new_temp(ot)
             self._emit(f"  {t} = {ov};  /* {method}: pass-through */")
             return ot, t
-        if method in ('destroy_pointee', 'take_pointee', 'initialize_pointee'):
-            if args and method == 'initialize_pointee':
-                _, av = self.lower_expr(args[0])
-                self._emit(f"  *{ov} = {av};")
+        if method in ('destroy_pointee', 'take_pointee', 'initialize_pointee',
+                      'init_pointee_copy', 'init_pointee_move', 'init_pointee_explicit_copy'):
+            # Placement init/copy/move all write the value into the pointee.
+            if args and method != 'destroy_pointee' and method != 'take_pointee':
+                at, av = self.lower_expr(args[0])
+                # GIMPLE requires the pointer operand of `*` to be a register, so
+                # spill ov (which may be a member access like self->_data) first.
+                ovl = self._ensure_local(ot, ov)
+                self._emit(f"  *{ovl} = {self._coerce(at, elem, av)};")
             return 'int', self._new_val('int', '0')
         if method in ('strided_load', 'gather'):
             t = self._new_temp(elem); self._emit(f"  {t} = *{ov};  /* TODO: {method} */"); return elem, t
