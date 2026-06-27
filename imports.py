@@ -173,4 +173,13 @@ def import_exports(name: str, gcc=None, flags=()) -> dict:
 
 
 def resolve_source(name: str):
-    return get_resolver().resolve(name).source
+    # Only the source *path* is wanted (codegen parses it to find a struct/generic
+    # definition). Do NOT go through resolve(), which builds the whole dylib — that
+    # turns a parse into a recursive build of the module's entire import closure
+    # (each in its own large-stack thread), which on the stdlib never terminates in
+    # any reasonable time. If the module was already fully resolved, reuse its entry.
+    r = get_resolver()
+    if name in r._modules:
+        return r._modules[name].source
+    found, _shadowed = r._find(name)
+    return found
