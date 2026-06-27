@@ -2721,6 +2721,7 @@ class GimpleGen:
         'mojo_read':             ('int64_t',   ['void *', 'char *', 'int64_t']),
         'int64_t_basename':      ('char *',    ['char *']),  # os.path.basename(path)
         'int64_t_splitext':      ('char *',    ['char *']),  # os.path.splitext(path)
+        'int64_t_expanduser':    ('char *',    ['char *']),  # os.path.expanduser(path)
         'mojo_make_int':         ('int64_t',    ['char *']),
         'mojo_make_float':       ('double',     ['char *']),
         'mojo_make_bool':        ('int',        ['int']),   # runtime: int mojo_make_bool(int)
@@ -5001,7 +5002,21 @@ class GimpleGen:
                     return 'char *', t
                 elif outer_member == 'splitext' and len(node.args) == 1:
                     arg_type, arg_val = self.lower_expr(node.args[0])
-                    t = self._call_expr('char *', 'int64_t_splitext', [(arg_type, arg_val)])
+                    root = self._call_expr('char *', 'int64_t_splitext', [(arg_type, arg_val)])
+                    # Python splitext(p) is a (root, ext) pair; every call site does
+                    # `splitext(p)[0]`. Model it as a 2-element string list so the
+                    # subscript recovers the root as a char* (not a single char from
+                    # indexing into a bare string). ext is unused by the compiler.
+                    lst = self._new_val('MojoList *', "mojo_list_new ()")
+                    self._emit_call('void', '', 'mojo_list_append_str',
+                                    [('MojoList *', lst), ('char *', root)])
+                    self._emit_call('void', '', 'mojo_list_append_str',
+                                    [('MojoList *', lst), ('char *', '""')])
+                    self._elem_types[lst] = 'char *'
+                    return 'MojoList *', lst
+                elif outer_member == 'expanduser' and len(node.args) == 1:
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    t = self._call_expr('char *', 'int64_t_expanduser', [(arg_type, arg_val)])
                     return 'char *', t
                 elif outer_member == 'abspath' and len(node.args) == 1:
                     arg_type, arg_val = self.lower_expr(node.args[0])
@@ -10235,7 +10250,10 @@ class GimpleGen:
                     pm = {}
                     for pname, ptype in method.params:
                         if pname != 'self':
-                            pm[pname] = self._resolve_type(ptype) if ptype else 'int'
+                            # Unannotated params hold object handles (pointer-width);
+                            # default to int64_t so a field assigned from one isn't
+                            # truncated to 32-bit int (size-mismatch cast on read).
+                            pm[pname] = self._resolve_type(ptype) if ptype else 'int64_t'
                     new_fields = {}
                     _collect_self_assigns(method.body, pm, new_fields)
                     for fn, ft in new_fields.items():

@@ -1703,6 +1703,21 @@ char *int64_t_splitext(char *path) {
     return (char *)path;
 }
 
+char *int64_t_expanduser(char *path) {
+    if (!path) return "";
+    if (path[0] != '~') return path;
+    const char *home = getenv("HOME");
+    if (!home) return path;
+    /* Only the bare-"~" / "~/..." form is supported (no "~user"). */
+    if (path[1] != '\0' && path[1] != '/') return path;
+    size_t hl = strlen(home), rl = strlen(path + 1);
+    char *out = (char *)malloc(hl + rl + 1);
+    if (!out) return path;
+    memcpy(out, home, hl);
+    memcpy(out + hl, path + 1, rl + 1);
+    return out;
+}
+
 int64_t _char_replace_impl(int64_t s_i, int64_t old_i, int64_t new_i) {
     char *s = (char *)s_i, *old_s = (char *)old_i, *new_s = (char *)new_i;
     if (!s || !old_s || !new_s) return s_i;
