@@ -28,9 +28,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 _OBJ_FLAGS = ('-fgimple', '-fPIC', f'-I{RUNTIME}')
 
-_FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
+_FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 # Generalized head: a `fn` or `struct` template with `[type params]`.
-_HEAD = re.compile(r'\b(fn|struct)\s+(\w+)\s*\[([^\]]*)\]')
+_HEAD = re.compile(r'\b(fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
 def safe_suffix(s: str) -> str:
@@ -91,7 +91,7 @@ def compile_fn(fn_src: str, gcc: str = None) -> tuple:
     keyed by its content. Used for overload instances (slice 4). Returns
     (object_path, hit)."""
     gcc = gcc or find_gcc()
-    m = re.search(r'\bfn\s+(\w+)', fn_src)
+    m = re.search(r'\b(?:fn|def)\s+(\w+)', fn_src)
     name = m.group(1) if m else 'fn'
     key = cas.instantiation_key(fn_src, {'__fn__': name}, None, gcc, _OBJ_FLAGS)
 

@@ -26,9 +26,9 @@ class ConformanceError(Exception):
     method, or its signature differs). The message is the compile error a user
     sees."""
 
-_FN_HEAD = re.compile(r'\bfn\s+(\w+)\s*\[([^\]]*)\]')
+_FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 # Generalized head matching a `fn` or `struct` template with `[type params]`.
-_HEAD = re.compile(r'\b(?:fn|struct)\s+(\w+)\s*\[([^\]]*)\]')
+_HEAD = re.compile(r'\b(?:fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
 def extract_fn_source(module_src: str, fn_name: str):
