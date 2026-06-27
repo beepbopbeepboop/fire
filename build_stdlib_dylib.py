@@ -96,7 +96,7 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
         try:
             threading.stack_size(_sz)   # room for ~100k frames
             break
-        except (ValueError, OSError):
+        except Exception:
             continue
     t = threading.Thread(target=_run)
     t.start()

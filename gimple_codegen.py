@@ -5046,6 +5046,12 @@ class GimpleGen:
                     pat_type, pat_val = self.lower_expr(node.args[0])
                     cb_arg  = node.args[1]
                     src_type, src_val = self.lower_expr(node.args[2])
+                    # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
+                    # takes char * (passing an int is a -Wint-conversion error on GCC 14+).
+                    if pat_type not in ('char *', 'void *'):
+                        pat_val = f"(char *){pat_val}"
+                    if src_type not in ('char *', 'void *'):
+                        src_val = f"(char *){src_val}"
                     # Resolve callback: may be a closure reference with env
                     if isinstance(cb_arg, IdentExpr) and cb_arg.name in self._closure_envs:
                         # _closure_envs maps inner_name → env_var (NOT lifted_name)
