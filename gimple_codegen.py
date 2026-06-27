@@ -1670,6 +1670,9 @@ _C_KEYWORDS = frozenset({
     'unsigned', 'void', 'volatile', 'while',
     '_Bool', '_Complex', '_Imaginary', '_Alignas', '_Alignof', '_Atomic',
     '_Generic', '_Noreturn', '_Static_assert', '_Thread_local',
+    # C23 keywords gcc-15 enforces in its default mode — a Mojo identifier named
+    # any of these (e.g. `nullptr`) would otherwise emit invalid C.
+    'nullptr', 'constexpr', 'thread_local', 'static_assert', 'typeof_unqual',
 })
 
 # Extra identifiers that are valid C keywords in GCC but not in standard C keywords list
