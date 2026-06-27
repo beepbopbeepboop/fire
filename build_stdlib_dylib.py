@@ -145,6 +145,48 @@ def _defined_symbols(gcc: str, obj: str) -> set:
     return syms
 
 
+def _localize_symbols(obj: str, syms: set, workdir: str, name: str) -> str:
+    """Make `syms` file-local in a COPY of `obj` so it can join the link without a
+    duplicate-definition clash, while the object's other globals stay exported.
+
+    This is how two modules that each carry a copy of the same generic struct
+    (e.g. DeviceBuffer in device_context.mojo and _device_context_hal.mojo, both
+    emitting _DeviceBuffer___len__) can both be included: the first keeps the
+    exported symbol, the later one's duplicate is demoted to a local definition.
+    Returns the path to the edited copy, or '' if no symbol-editing tool is found
+    (caller then falls back to excluding the whole module). Portable across the GNU
+    (objcopy) and macOS (nmedit) toolchains."""
+    edited = os.path.join(workdir, name + '.local.o')
+    with open(obj, 'rb') as fi, open(edited, 'wb') as fo:
+        fo.write(fi.read())
+    import shutil
+    objcopy = shutil.which('objcopy') or shutil.which('gobjcopy')
+    if objcopy:
+        cmd = [objcopy]
+        for s in sorted(syms):
+            cmd += ['--localize-symbol', s]
+        cmd.append(edited)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return edited
+        except Exception:
+            return ''
+    nmedit = shutil.which('nmedit')
+    if nmedit:
+        # nmedit -s <keep> localizes every global NOT listed; keep = defs - syms.
+        keep = _defined_symbols(find_gcc(), edited) - set(syms)
+        keepfile = os.path.join(workdir, name + '.keep')
+        with open(keepfile, 'w') as f:
+            f.write('\n'.join(sorted(keep)) + '\n')
+        try:
+            subprocess.run([nmedit, '-s', keepfile, edited],
+                           check=True, capture_output=True)
+            return edited
+        except Exception:
+            return ''
+    return ''
+
+
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
           extra_exports: list = None) -> str:
     gcc = find_gcc()
@@ -205,11 +247,22 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         defs = _defined_symbols(gcc, ofile)
         clash = defs & seen_syms
         if clash:
-            one = sorted(clash)[0]
-            print(f"  exclude {name} from dylib: symbol already defined ({one})",
-                  file=sys.stderr)
-            excluded += 1
-            continue
+            # A duplicate definition (e.g. a generic struct copied into two modules).
+            # Rather than drop the whole module — losing its UNIQUE symbols too —
+            # demote just the clashing symbols to file-local in this object and keep
+            # the rest. The first module's copy stays the exported definition.
+            edited = _localize_symbols(ofile, clash, workdir, name)
+            if edited:
+                ofile = edited
+                defs = defs - clash   # clashing syms no longer exported here
+                print(f"  localize {len(clash)} dup symbol(s) in {name} "
+                      f"(e.g. {sorted(clash)[0]})", file=sys.stderr)
+            else:
+                one = sorted(clash)[0]
+                print(f"  exclude {name} from dylib: symbol already defined ({one})",
+                      file=sys.stderr)
+                excluded += 1
+                continue
         seen_syms |= defs
         objs.append(ofile)
         all_exports.extend(exports)

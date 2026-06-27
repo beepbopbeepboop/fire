@@ -3189,15 +3189,20 @@ class GimpleGen:
         # But _KNOWN_SIGS may contain stale struct-method entries; only trust it for _LIBC_DECLARED.
         imported_ret = None
         in_libc_known = fname in self._LIBC_DECLARED and fname in self._KNOWN_SIGS
+        # A C library symbol's real signature is authoritative; a same-named Mojo
+        # wrapper (e.g. `def dlopen(...) -> _CPointer` → int64_t) must not override
+        # the caller's C return type. Otherwise the void*-returning libc dlopen gets
+        # assigned into an int64_t call temp (int-from-pointer error).
+        is_libc = fname in self._LIBC_DECLARED
         if in_libc_known:
             sig_ret = self._KNOWN_SIGS[fname][0]
             if sig_ret != ret_type:
                 imported_ret = sig_ret
-        if not imported_ret:
+        if not imported_ret and not is_libc:
             imported_ret = (self.imported_symbols.get(fname) or {}).get('c_return_type')
         # Also check func_return_types (Mojo function return types) for same mismatch,
         # but skip if fname is a known C stdlib function (to avoid Mojo shadow overriding).
-        if not imported_ret and not in_libc_known and fname in self.func_return_types:
+        if not imported_ret and not in_libc_known and not is_libc and fname in self.func_return_types:
             fn_ret = self.func_return_types[fname]
             # Never coerce a used value through a 'void' call temp (would emit an
             # illegal `void t; t = f();`). A 'void' entry here is a shadow — e.g. a
