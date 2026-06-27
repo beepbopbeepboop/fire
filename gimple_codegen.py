@@ -1776,6 +1776,21 @@ _C_RESERVED_FUNCS = frozenset({
 # int64_t (e.g. char *). Must always rename to mojo_X even without a local definition.
 _FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv'})
 
+def _is_concrete_type_arg(ann: str) -> bool:
+    """Whether a generic type argument is a concrete type (Int64, String, a struct,
+    DType.int64) rather than an unbound type parameter (T, U, T0, *Ts, Self.T,
+    Self.Types[i]). Only concrete args may be instantiated — substituting one
+    symbol for another never converges and blows up the elaborator."""
+    if not isinstance(ann, str) or not ann:
+        return False
+    base = ann.split('[', 1)[0].strip()
+    if base.startswith('Self') or base.startswith('*') or not base:
+        return False                       # Self.T, Self.Types[i], *Ts
+    if re.fullmatch(r'[A-Z][0-9]?', base):
+        return False                       # lone type param: T, U, K, T0, T1
+    return True
+
+
 def _safe_name(name: str) -> str:
     # Handle backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
     if name.startswith('`') and name.endswith('`') and len(name) > 2:
@@ -5835,6 +5850,13 @@ class GimpleGen:
                 idx = node.func.index
                 elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
                 type_args = [self._type_expr_to_ann(e) for e in elems]
+                # Only instantiate for CONCRETE type args. Inside a still-generic
+                # body the args are unbound type parameters (U, Self.T, *Ts,
+                # Self.Types[i]); "instantiating" those just substitutes symbol for
+                # symbol and recurses without converging — the call must stay
+                # generic and resolve when the OUTER generic is instantiated.
+                if not all(_is_concrete_type_arg(t) for t in type_args):
+                    return None
                 info = el.elaborate_generic_call(module_src, g, type_args)
             else:
                 info = el.elaborate_generic_call_inferred(

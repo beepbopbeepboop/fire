@@ -110,6 +110,11 @@ def compile_fn(fn_src: str, gcc: str = None) -> tuple:
 
 
 _IN_PROGRESS: set = set()
+# Current nesting depth of instantiation builds (for the optional MOJO_ELAB_LOG
+# diagnostic). Deep-but-finite concrete cascades are fine; the thing that must
+# never happen is instantiating with non-concrete (symbolic) type args, which is
+# guarded at the call site (GimpleGen._elaborate_generic_call / _is_concrete_type_arg).
+ELAB_DEPTH: list = [0]
 
 
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
@@ -119,6 +124,12 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     gcc = gcc or find_gcc()
     mangled, concrete = monomorphize_source(template_src, type_args)
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc, _OBJ_FLAGS)
+
+    _log = os.environ.get('MOJO_ELAB_LOG')
+    if _log:
+        with open(_log, 'a') as _f:
+            _re_entrant = ' RE-ENTRANT' if key in _IN_PROGRESS else ''
+            _f.write(f"{ELAB_DEPTH[0]:3d} instantiate {mangled}  targs={type_args}{_re_entrant}\n")
 
     # Recursive generic (e.g. a self-referential instantiation, or a mutual cycle
     # A→B→A): the symbol is already being built by an outer frame. Return it without
@@ -143,8 +154,10 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
             return f.read()
 
     _IN_PROGRESS.add(key)
+    ELAB_DEPTH[0] += 1
     try:
         obj, hit = cas.get_or_build(key, '.o', build)
     finally:
+        ELAB_DEPTH[0] -= 1
         _IN_PROGRESS.discard(key)
     return mangled, obj, hit
