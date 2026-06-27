@@ -5679,6 +5679,9 @@ class GimpleGen:
         'stat', 'lstat', 'fstat', 'access', 'unlink', 'rmdir', 'mkdir',
         'symlink', 'readlink', 'link', 'chmod', 'chown', 'getcwd',
         'scalbf',
+        # POSIX fd/process calls our prelude headers don't pull in → emit the
+        # extern ourselves (using the _LIBC_SIGS prototype) to avoid implicit decls.
+        'dup', 'pipe',
     })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
@@ -5780,6 +5783,16 @@ class GimpleGen:
         'popen': ('void *', ['char *', 'char *']),
         'fdopen': ('void *', ['int', 'char *']),
         'setvbuf': ('int', ['void *', 'char *', 'int', 'int64_t']),
+        # Dynamic-linker + POSIX process/fd calls: pin the C signatures so int64_t-
+        # lowered handle/string/array args coerce to the pointer types the system
+        # headers declare (dlfcn.h, sys/wait.h, unistd.h) instead of clashing.
+        'dlopen': ('void *', ['char *', 'int']),
+        'dlsym': ('void *', ['void *', 'char *']),
+        'waitpid': ('int', ['int', 'int *', 'int']),
+        'dup': ('int', ['int']),
+        'dup2': ('int', ['int', 'int']),
+        'pipe': ('int', ['int *']),
+        'fcntl': ('int', ['int', 'int', 'int64_t']),
     }
 
     def _type_expr_to_ann(self, node) -> str:
@@ -5893,7 +5906,9 @@ class GimpleGen:
         """Record an elaborated instantiation (object on the link line, extern in
         the preamble, signature for calls) and emit the concrete call."""
         sym = info['symbol']
-        if info['object'] not in self._link_objects:
+        # A re-entrant (recursive-cycle) instantiation returns object=None — the
+        # real .o is contributed by the outer frame; don't add a null link entry.
+        if info['object'] is not None and info['object'] not in self._link_objects:
             self._link_objects.append(info['object'])
         self.func_return_types[sym] = info['ret']
         self.func_param_types[sym] = info['params']
@@ -5943,11 +5958,26 @@ class GimpleGen:
             ret_ct = self._LIBC_SIGS[cname][0]
 
         arg_pairs = [self.lower_expr(a) for a in node.args]
+        # Pad to the known libc arity: a Mojo FFI wrapper may forward fewer args than
+        # the C function takes (e.g. `external_call["setvbuf"](stream, buffer)` vs the
+        # 4-arg libc setvbuf). Supplying 0 for the trailing params gives a defined call
+        # that matches <stdio.h>, instead of a "too few arguments" clash. (Whether the
+        # wrapper SHOULD forward its mode/size is an upstream-source question; this just
+        # makes the binding compile with defined behavior rather than reading garbage.)
+        if cname in self._LIBC_SIGS:
+            _sig_params = self._LIBC_SIGS[cname][1]
+            while len(arg_pairs) < len(_sig_params):
+                arg_pairs.append((_sig_params[len(arg_pairs)], '0'))
         # First use wins: pin the prototype's parameter types and coerce later calls to match.
         # Never register LIBC functions - let system headers provide them
         if cname not in self._external_protos and (
                 cname not in self._LIBC_DECLARED or cname in self._NEEDS_SELF_EXTERN):
-            self._external_protos[cname] = (ret_ct, [at for (at, _) in arg_pairs])
+            # Prefer the pinned libc signature for the prototype so a self-emitted
+            # extern (e.g. `int pipe(int *)`) matches the coerced call args rather
+            # than the raw int64_t-lowered argument types.
+            _proto_params = (self._LIBC_SIGS[cname][1] if cname in self._LIBC_SIGS
+                             else [at for (at, _) in arg_pairs])
+            self._external_protos[cname] = (ret_ct, _proto_params)
         # Track param types for coercion, even if not emitting declaration
         if cname not in self.func_param_types:
             if cname in self._LIBC_SIGS:
@@ -5963,6 +5993,15 @@ class GimpleGen:
             self._emit(f"  {t} = 0;  /* void external_call result */")
             return 'int', t
         t = self._call_expr(ret_ct, cname, arg_pairs)
+        if ret_ct == 'void *' and cname in ('dlopen', 'dlsym'):
+            # The dynamic-linker handle functions return void* but Mojo models the
+            # handle as int64_t (c_void_ptr). Coerce through a register so the
+            # surrounding int64_t store/return is a valid single cast rather than a
+            # void*→int64_t direct assignment. (FILE*-returning calls like fopen/
+            # popen keep void* — their results stay pointers.)
+            ct = self._new_temp('int64_t')
+            self._emit(f"  {ct} = (int64_t){t};")
+            return 'int64_t', ct
         return ret_ct, t
 
     def _maybe_lower_mlir_op(self, node: CallExpr):

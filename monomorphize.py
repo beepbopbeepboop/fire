@@ -109,13 +109,24 @@ def compile_fn(fn_src: str, gcc: str = None) -> tuple:
     return cas.get_or_build(key, '.o', build)
 
 
+_IN_PROGRESS: set = set()
+
+
 def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
                 gcc: str = None) -> tuple:
     """Instantiate template_src for type_args, via the shared CAS.
-    Returns (mangled_name, object_path, hit)."""
+    Returns (mangled_name, object_bytes_or_None, hit)."""
     gcc = gcc or find_gcc()
     mangled, concrete = monomorphize_source(template_src, type_args)
     key = cas.instantiation_key(template_src, type_args, comptime_args, gcc, _OBJ_FLAGS)
+
+    # Recursive generic (e.g. a self-referential instantiation, or a mutual cycle
+    # A→B→A): the symbol is already being built by an outer frame. Return it without
+    # rebuilding to break the cycle — the outer frame contributes the .o; this
+    # reference just needs the (already-known) mangled symbol. Its signature is
+    # recovered from the concrete source by the caller, not from the object.
+    if key in _IN_PROGRESS:
+        return mangled, None, True
 
     def build():
         # The instantiated function is already uniquely named (mangled); don't
@@ -131,5 +142,9 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         with open(ofile, 'rb') as f:
             return f.read()
 
-    obj, hit = cas.get_or_build(key, '.o', build)
+    _IN_PROGRESS.add(key)
+    try:
+        obj, hit = cas.get_or_build(key, '.o', build)
+    finally:
+        _IN_PROGRESS.discard(key)
     return mangled, obj, hit
