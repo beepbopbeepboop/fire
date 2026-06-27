@@ -2168,6 +2168,8 @@ class GimpleGen:
         # typing, keeping the blast radius tight).
         self._imported_typedef_structs: list = []
         self._imported_struct_names: set = set()
+        # module name -> (path, source_text, parsed stmts), parsed once.
+        self._imported_src_cache: dict = {}
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
         # Imported overloaded function name -> module source path (slice 4).
@@ -5807,7 +5809,11 @@ class GimpleGen:
         if not source:
             return None
         # Lower args once; their C types drive inference (and the emitted call).
+        # Append keyword-argument values after the positionals (they fill the
+        # trailing params in order — e.g. `_async_execute[T](h, desired_worker_id=-1)`).
         arg_pairs = [self.lower_expr(a) for a in node.args]
+        for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
+            arg_pairs.append(self.lower_expr(_kexpr))
         try:
             module_src = open(source).read()
             import elaborate
@@ -9592,18 +9598,83 @@ class GimpleGen:
 
     def _find_imported_struct(self, module: str, name: str):
         """The StructDef for `name` defined directly in `module`'s source, or None."""
-        try:
-            import imports as _imp
-            path = _imp.resolve_source(module)
-            if not path:
-                return None
-            mod = Parser(tokenize(open(path).read())).parse_module()
-        except Exception:
+        _path, _src, mod = self._parsed_import(module)
+        if mod is None:
             return None
         for s in mod:
             if isinstance(s, StructDef) and s.name == name:
                 return s
         return None
+
+    def _parsed_import(self, module: str):
+        """(path, source_text, stmts) for an imported module, parsed once and
+        cached. (None, '', None) on failure."""
+        cache = self._imported_src_cache
+        if module not in cache:
+            try:
+                import imports as _imp
+                path = _imp.resolve_source(module)
+                src = open(path).read() if path else ''
+                cache[module] = (path, src,
+                                 Parser(tokenize(src)).parse_module() if src else None)
+            except Exception:
+                cache[module] = (None, '', None)
+        return cache[module]
+
+    @staticmethod
+    def _abs_module(ref: str, base: str) -> str:
+        """Resolve a possibly-relative import ref against the base package:
+        `.os` from `std.os` -> `std.os.os`; `..fstat` from `std.os.path` ->
+        `std.os.fstat`. Absolute refs unchanged."""
+        if not ref.startswith('.'):
+            return ref
+        dots = len(ref) - len(ref.lstrip('.'))
+        leaf = ref[dots:]
+        parts = base.split('.')
+        keep = parts[:len(parts) - (dots - 1)] if dots > 1 else parts
+        return '.'.join(keep + ([leaf] if leaf else []))
+
+    def _find_generic_source(self, module: str, name: str, depth: int = 0):
+        """Source path of the module that DEFINES generic free function `name`,
+        reachable from `module` by following `from X import (...)` re-export hops
+        (e.g. std.os re-exports listdir from .os = os.mojo). None if not generic."""
+        if depth > 5 or not module:
+            return None
+        path, src, mod = self._parsed_import(module)
+        if not src:
+            return None
+        if re.search(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\[', src):
+            return path
+        nm = re.escape(name)
+        for mm in re.finditer(r'from\s+([.\w]+)\s+import\s*\(([^)]*)\)', src):
+            if re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', mm.group(2)):
+                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, depth + 1)
+                if r:
+                    return r
+        for mm in re.finditer(r'from\s+([.\w]+)\s+import\s+([^\n(]+)', src):
+            if re.search(rf'(?:^|[\s,]){nm}(?:[\s,]|$)', mm.group(2)):
+                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, depth + 1)
+                if r:
+                    return r
+        return None
+
+    def _register_imported_generics(self, stmts) -> None:
+        """dylib mode: register `from M import gen` where gen is a generic free
+        function (following re-export chains) so its call sites elaborate a
+        concrete CAS-cached instantiation."""
+        if self.do_imports:
+            return
+        for st in stmts:
+            if not (isinstance(st, FromImportStmt) and not getattr(st, 'wildcard', False)):
+                continue
+            for nm, alias in st.names:
+                local = alias or nm
+                if (local in self._imported_generics or local in self.struct_field_types
+                        or nm != local):   # aliased: elaborator looks up the source name
+                    continue
+                src = self._find_generic_source(st.module, nm)
+                if src:
+                    self._imported_generics.setdefault(local, src)
 
     def _struct_method_overload_ids(self, stmt) -> list:
         """Overload-id per method, aligned with stmt.methods. Must match the
@@ -9787,6 +9858,9 @@ class GimpleGen:
 
         # Register concrete imported structs used (with field access) as param types.
         self._register_imported_structs(stmts)
+        # Register imported generic free functions (via re-export chains) so their
+        # calls elaborate a concrete CAS-cached instantiation.
+        self._register_imported_generics(stmts)
 
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
@@ -11937,7 +12011,31 @@ class GimpleGen:
             parts.append("}")
             parts.append('')
 
-        return '\n'.join(parts)
+        return self._dedup_variadic_externs(parts)
+
+    @staticmethod
+    def _dedup_variadic_externs(parts: list) -> str:
+        """Join the preamble, dropping a variadic `extern T name (...);` import
+        declaration when a CONCRETE prototype for the same function is also present
+        (e.g. an elaborated instantiation forward-declares `get_defined_int (void)`
+        while the import-decl pass emits `(...)`, which GCC reports as conflicting
+        types). The concrete prototype wins."""
+        concrete = set()
+        _decl = re.compile(r'\bextern\s+[^;()]+?\b(\w+)\s*\(([^)]*)\)\s*;')
+        for p in parts:
+            for mm in _decl.finditer(p):
+                if mm.group(2).strip() not in ('...', ''):
+                    concrete.add(mm.group(1))
+        if not concrete:
+            return '\n'.join(parts)
+        _vardecl = re.compile(r'\bextern\s+[^;()]+?\b(\w+)\s*\(\s*\.\.\.\s*\)\s*;')
+        kept = []
+        for p in parts:
+            mm = _vardecl.search(p)
+            if mm and mm.group(1) in concrete:
+                continue  # concrete prototype elsewhere supersedes this variadic
+            kept.append(p)
+        return '\n'.join(kept)
 
 
 def compile_to_c(mojo_src: str) -> str:

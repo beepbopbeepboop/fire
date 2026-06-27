@@ -68,6 +68,12 @@ _OBJ_FLAGS = ('-fgimple', '-fPIC', '-D__MOJO_STDLIB_MODE__', f'-I{RUNTIME}')
 
 def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     """Transpile one library module to GIMPLE C with no main/entry points."""
+    # Deep but finite generic-instantiation chains (a module pulling in nested
+    # generics) can exceed CPython's default ~1000-frame limit on a cold cache;
+    # the CAS shortcuts the recursion once warm. Raise the ceiling (well below
+    # what overflows the C stack).
+    if sys.getrecursionlimit() < 8000:
+        sys.setrecursionlimit(8000)
     gen = GimpleGen(emit_entry_points=False, module_name=module_name)
     gen._current_filename = path
     return gen.gen_module(Parser(tokenize(src)).parse_module())
