@@ -6293,6 +6293,10 @@ class GimpleGen:
         if fname_raw == 'open'            and 'open' not in self.func_return_types:
             return self._lower_builtin_open(node)
         if fname_raw == 'Self':                                      return self._lower_self_ctor(node)
+        # iter(x) — the container is already iterable (for-loops consume it directly),
+        # so model the builtin as identity rather than emitting an undefined `iter` call.
+        if fname_raw == 'iter' and len(node.args) == 1 and 'iter' not in self.func_return_types:
+            return self.lower_expr(node.args[0])
 
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {

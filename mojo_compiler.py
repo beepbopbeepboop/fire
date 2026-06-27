@@ -695,32 +695,35 @@ def tokenize(src: str) -> list[Token]:
     return out
 
 # ── Parser ─────────────────────────────────────────────────────────
+# Higher number binds tighter. Mirrors CPython's grammar: boolean ops loosest,
+# then comparisons, then bitwise | ^ &, shifts, arithmetic, power. (Comparisons
+# bind LOOSER than the bitwise ops — `a == b ^ c` is `a == (b ^ c)`.)
 _PREC    = {
     ':=': 1,
-    '|': 2,
-    '^': 3,
-    '&': 4,
     '==': 5,
     '!=': 5,
     '<': 5,
     '<=': 5,
     '>': 5,
     '>=': 5,
-    '<<': 6,
-    '>>': 6,
-    '+': 7,
-    '-': 7,
-    '*': 8,
-    '@': 8,
-    '/': 8,
-    '//': 8,
-    '%': 8,
-    '**': 9,
+    '|': 6,
+    '^': 7,
+    '&': 8,
+    '<<': 9,
+    '>>': 9,
+    '+': 10,
+    '-': 10,
+    '*': 11,
+    '@': 11,
+    '/': 11,
+    '//': 11,
+    '%': 11,
+    '**': 12,
 }
 _KW_PREC = {
     'or': 2,
     'and': 3,
-    'not': 5,
+    'not': 4,
     'in': 5,
     'is': 5,
 }
