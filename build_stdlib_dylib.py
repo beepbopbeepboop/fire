@@ -67,16 +67,43 @@ _OBJ_FLAGS = ('-fgimple', '-fPIC', '-D__MOJO_STDLIB_MODE__', f'-I{RUNTIME}')
 
 
 def compile_module_to_c(src: str, path: str, module_name: str) -> str:
-    """Transpile one library module to GIMPLE C with no main/entry points."""
-    # Deep but finite generic-instantiation chains (a module pulling in nested
-    # generics) can exceed CPython's default ~1000-frame limit on a cold cache;
-    # the CAS shortcuts the recursion once warm. Raise the ceiling (well below
-    # what overflows the C stack).
-    if sys.getrecursionlimit() < 8000:
-        sys.setrecursionlimit(8000)
-    gen = GimpleGen(emit_entry_points=False, module_name=module_name)
-    gen._current_filename = path
-    return gen.gen_module(Parser(tokenize(src)).parse_module())
+    """Transpile one library module to GIMPLE C with no main/entry points.
+
+    Deep-but-finite generic-instantiation chains (a module pulling in nested
+    generics) can run many thousands of Python frames deep on a COLD cache before
+    the CAS shortcuts them. Run codegen in a thread with a large stack and a high
+    recursion limit so legitimate deep cascades complete instead of crashing the
+    module into a source-fallback skip. (True non-convergence — instantiating with
+    symbolic type args — is prevented at the call site, not papered over here.)"""
+    import threading
+    import monomorphize
+    # Fresh elaborator state per module so a prior module's crash can't pollute
+    # this one (cross-module domino).
+    monomorphize._IN_PROGRESS.clear()
+    monomorphize.ELAB_DEPTH[0] = 0
+    box: dict = {}
+
+    def _run():
+        try:
+            sys.setrecursionlimit(120000)
+            gen = GimpleGen(emit_entry_points=False, module_name=module_name)
+            gen._current_filename = path
+            box['c'] = gen.gen_module(Parser(tokenize(src)).parse_module())
+        except BaseException as e:   # propagate to the caller's thread
+            box['err'] = e
+
+    for _sz in (1024 * 1024 * 1024, 512 * 1024 * 1024, 256 * 1024 * 1024):
+        try:
+            threading.stack_size(_sz)   # room for ~100k frames
+            break
+        except (ValueError, OSError):
+            continue
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join()
+    if 'err' in box:
+        raise box['err']
+    return box['c']
 
 
 def _imported_sigs(src: str) -> list:
