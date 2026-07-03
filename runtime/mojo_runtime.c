@@ -17,12 +17,6 @@
 jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
 int     _mojo_exc_top = -1;
 
-int mojo_try_push(void)
-{
-    ++_mojo_exc_top;
-    return setjmp(_mojo_exc_stack[_mojo_exc_top]);
-}
-
 void mojo_exc_pop(void)
 {
     --_mojo_exc_top;
@@ -30,7 +24,7 @@ void mojo_exc_pop(void)
 
 void mojo_raise(void)
 {
-    longjmp(_mojo_exc_stack[_mojo_exc_top], 1);
+    longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }
 
 char *_mojo_exc_msg = NULL;

@@ -35,15 +35,11 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
 }
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
- * Generated __GIMPLE code calls mojo_try_push/mojo_exc_pop/mojo_raise so
- * that jmp_buf pointer arithmetic stays out of GIMPLE functions.          */
+ * setjmp is emitted directly in generated functions (see gimple_codegen).
+ * mojo_exc_pop / mojo_raise are real functions (no setjmp, safe to wrap). */
 #define MOJO_EXC_STACK_MAX 64
 extern jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
 extern int     _mojo_exc_top;
-
-/* Push a new exception frame and call setjmp.
- * Returns 0 on first entry, non-zero after longjmp (exception). */
-int  mojo_try_push(void);
 /* Pop the topmost exception frame. */
 void mojo_exc_pop(void);
 /* Raise (longjmp to current frame). */
@@ -401,7 +397,7 @@ int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
 /* Module functions that are imported */
-MojoList *tokenize(char *source);            /* tokenize function */
+int64_t tokenize(char *source);                /* lexer.tokenize -> Int */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 

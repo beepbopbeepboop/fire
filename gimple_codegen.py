@@ -1430,8 +1430,7 @@ _TYPE_MAP: dict[str | None, str] = {
 
 # Return types of well-known runtime functions (seeds func_return_types)
 _RUNTIME_FUNCS: dict[str, str] = {
-    # exceptions
-    'mojo_try_push':              'int',
+    # exceptions (mojo_try_push is a macro, not a function)
     'mojo_exc_pop':               'void',
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',
@@ -8419,7 +8418,19 @@ class GimpleGen:
         bb_else  = self._new_bb() if node.else_body else None
         bb_after = self._new_bb()
 
-        self._emit(f"  {sj_ret} = mojo_try_push ();")
+        # Emit setjmp directly in the generated function (not via mojo_try_push
+        # wrapper) so the setjmp frame stays live for longjmp from mojo_raise.
+        # Use proper GIMPLE pattern with temporaries for increment and address.
+        temp_top1 = self._new_temp('int')
+        temp_inc = self._new_temp('int')
+        temp_top2 = self._new_temp('int')
+        temp_addr = self._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
+        self._emit(f"  {temp_top1} = _mojo_exc_top;")
+        self._emit(f"  {temp_inc} = {temp_top1} + 1;")
+        self._emit(f"  _mojo_exc_top = {temp_inc};")
+        self._emit(f"  {temp_top2} = _mojo_exc_top;")
+        self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
+        self._emit(f"  {sj_ret} = setjmp ({temp_addr});")
         self._emit(f"  {cond_t} = {sj_ret} != 0;")
         self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
@@ -8534,7 +8545,19 @@ class GimpleGen:
             bb_try   = self._new_bb()
             bb_exc   = self._new_bb()
             bb_after = self._new_bb()
-            self._emit(f"  {sj_ret} = mojo_try_push ();")
+            # Emit setjmp directly in the generated function (not via mojo_try_push
+            # wrapper) so the setjmp frame stays live for longjmp from mojo_raise.
+            # Use proper GIMPLE pattern with temporaries for increment and address.
+            temp_top1 = self._new_temp('int')
+            temp_inc = self._new_temp('int')
+            temp_top2 = self._new_temp('int')
+            temp_addr = self._new_temp('void *')  # jmp_buf is int[48], use void* to avoid type mismatch
+            self._emit(f"  {temp_top1} = _mojo_exc_top;")
+            self._emit(f"  {temp_inc} = {temp_top1} + 1;")
+            self._emit(f"  _mojo_exc_top = {temp_inc};")
+            self._emit(f"  {temp_top2} = _mojo_exc_top;")
+            self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
+            self._emit(f"  {sj_ret} = setjmp ({temp_addr});")
             self._emit(f"  {cond_t} = {sj_ret} != 0;")
             self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 

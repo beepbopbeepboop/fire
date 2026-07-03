@@ -393,8 +393,7 @@ _TYPE_MAP: dict[str | None, str] = {
 
 # Return types of well-known runtime functions (seeds func_return_types)
 _RUNTIME_FUNCS: dict[str, str] = {
-    # exceptions
-    'mojo_try_push':              'int',
+    # exceptions (mojo_try_push is a macro, not a function)
     'mojo_exc_pop':               'void',
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',

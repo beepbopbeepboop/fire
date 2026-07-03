@@ -6,9 +6,14 @@ try/finally normal path, except-handler dispatch, silent-degradation
 diagnostics via `MOJO_DEBUG=1`). The following are real, verified issues
 that were deliberately deferred. Line numbers are as of that pass.
 
-## 1. Exceptions never work at runtime on macOS arm64 (root cause found)
+## 1. ~~Exceptions never work at runtime on macOS arm64 (root cause found)~~
 
-`runtime/mojo_runtime.c` wraps `setjmp` in a function that returns:
+FIXED on 2026-07-03: `mojo_try_push` is now a macro in `mojo_runtime.h`,
+so `setjmp` executes in the caller's frame instead of the wrapper.
+`longjmp` in `mojo_raise()` now correctly returns to the `setjmp` site
+in the generated function.
+
+`runtime/mojo_runtime.c` wrapped `setjmp` in a function that returns:
 
 ```c
 int mojo_try_push(void) { ++_mojo_exc_top; return setjmp(_mojo_exc_stack[_mojo_exc_top]); }
@@ -22,11 +27,8 @@ executes). Consequence: every `try/except` compiled by the backend takes
 the non-exception path; `raise` is a no-op. This is very likely the
 "stage-2 bootstrap segfault / compiled REPL segfault" class of bugs.
 
-Fix direction: the `setjmp` must execute in the frame that stays live —
-either emit `setjmp` directly in the generated function (needs GIMPLE
-frontend support for `returns_twice` / abnormal edges — investigate) or
-make `mojo_try_push` a macro in a header the generated C includes.
-This is a runtime ABI change; version it per ABI.md.
+Fix direction (applied): `mojo_try_push` is a `#define` in `mojo_runtime.h`.
+ABI.md documents the macro nature of this entry point.
 
 ## 2. `_TYPE_MAP` vs ABI.md divergence
 

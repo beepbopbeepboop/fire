@@ -81,6 +81,17 @@ These cross the boundary as opaque pointers to the runtime types in
   hatch to libc / OS syscalls (e.g. `write`).
 - Functions are forward-declared so mutual recursion and cross-module calls work.
 
+### Exception-handling entry points
+
+- **`mojo_exc_pop()`** — pops the topmost frame (`void`).
+- **`mojo_raise()`** — `longjmp`s to the current frame (`void`).
+- **`mojo_try_push()`** — *macro*, not a function: `(++_mojo_exc_top, setjmp(_mojo_exc_stack[_mojo_exc_top]))`.
+  Must be a macro so `setjmp` executes in the caller's frame; calling it as
+  a function would push the `setjmp` frame into the wrapper and break `longjmp`
+  (undefined behavior on macOS arm64).
+- **`mojo_exc_msg_set` / `mojo_exc_msg_get`** — set/get the string payload of a `raise` (`void` / `char *`).
+- **`mojo_exc_obj_set` / `mojo_exc_obj_get`** — set/get the opaque typed exception object (`void *`).
+
 ## Generics (forward-looking — Stage 5)
 
 A generic is not a single symbol; each instantiation is. The boundary symbol for
