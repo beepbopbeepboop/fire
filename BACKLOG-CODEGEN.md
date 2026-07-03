@@ -59,8 +59,10 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   Full type safety requires a tagged-union type system (type tag + int64_t backing).
 - `@` matmul defaults its result type to `int64_t` when `__matmul__`'s
   return type is unknown (~line 4850).
-- `try` body ending in `return` skips the `finally` body entirely (the
-  fixed path only covers normal fallthrough).
+- ~~`try` body ending in `return` skips the `finally` body entirely (the
+  fixed path only covers normal fallthrough).~~
+  FIXED on 2026-07-03: return statements in try body are now intercepted
+  to jump to finally first, then execute the return after cleanup.
 - Typed `except` dispatch is impossible — the runtime carries no
   exception-type tag (`mojo_exc_obj` is an untyped `void *`). Only the
   first handler is emitted (with a compile-time warning). Needs a type
