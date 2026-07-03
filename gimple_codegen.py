@@ -6585,7 +6585,10 @@ class GimpleGen:
         arg_pairs = [self.lower_expr(a) for a in node.args]
         fname_c  = _safe_name(lifted)
         if env_var:
-            env_type = self.func_param_types.get(lifted, [f"{env_var[1:]} *" if '_env_' in env_var else 'void *'])[0]
+            # No slice inside the f-string: the self-hosted f-string parser
+            # reads `[1:]` as a format spec and mis-parses the interpolation.
+            env_base = env_var[1:]
+            env_type = self.func_param_types.get(lifted, [f"{env_base} *" if '_env_' in env_var else 'void *'])[0]
             full_arg_pairs = [(env_type, env_var)] + arg_pairs
         else:
             full_arg_pairs = arg_pairs
