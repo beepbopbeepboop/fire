@@ -63,10 +63,15 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   fixed path only covers normal fallthrough).~~
   FIXED on 2026-07-03: return statements in try body are now intercepted
   to jump to finally first, then execute the return after cleanup.
-- Typed `except` dispatch is impossible — the runtime carries no
+- ~~Typed `except` dispatch is impossible — the runtime carries no
   exception-type tag (`mojo_exc_obj` is an untyped `void *`). Only the
   first handler is emitted (with a compile-time warning). Needs a type
-  tag in the runtime exception slot.
+  tag in the runtime exception slot.~~
+  FIXME on 2026-07-03: To support typed dispatch, runtime needs:
+  1. Add `_mojo_exc_type` (vtable pointer or enum tag) to exception state
+  2. Modify `mojo_raise(type_tag)` to store the type
+  3. Codegen: pass exception type when raising, check type in handlers
+  (See: runtime/mojo_runtime.c:35, gimple_codegen.py:8505-8514)
 - BUGS-AST.md BUG-013: `for a, b in ...` tuple targets emit invalid C.
 
 ## 5. Structure / maintainability (behavior-preserving refactors)
