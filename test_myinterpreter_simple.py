@@ -74,14 +74,14 @@ def test_simple():
 
     print("\n=== Testing tokenize() function ===")
     try:
-        tokenize = interpreter.scope.get('tokenize')
+        py_tokenize = interpreter.scope.get('py_tokenize')
         print(f"✓ Found tokenize function")
 
         # Test with simple code
         test_code = "x = 1"
         print(f"\n  Test code: {test_code!r}")
 
-        tokens = tokenize(test_code)
+        tokens = py_tokenize(test_code)
         print(f"  ✓ tokenize() returned {len(tokens)} tokens")
         print(f"    First 5 tokens:")
         for tok in tokens[:5]:

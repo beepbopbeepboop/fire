@@ -42,7 +42,7 @@ def test_tokenizer():
     print("\n=== Testing tokenize() function ===")
     try:
         # Get the tokenize function from the interpreter
-        tokenize_func = interpreter.scope.get('tokenize')
+        py_tokenize_func = interpreter.scope.get('py_tokenize')
         print(f"✓ Found tokenize function in interpreter")
 
         # Test with simple code
@@ -50,7 +50,7 @@ def test_tokenizer():
         print(f"\n  Test code: {test_code!r}")
 
         # Run through interpreter
-        interp_tokens = tokenize_func(interpreter, test_code)
+        interp_tokens = py_tokenize_func(interpreter, test_code)
         print(f"  Interpreter tokens: {len(interp_tokens)} tokens")
 
         # Run through Python

@@ -1493,7 +1493,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'string_upper':   'char *',
     'compile_to_gimple': 'char *',
     # Interpreter/bridge functions (provided by runtime or compiled code)
-    'tokenize':           'MojoList *',
+    'py_tokenize':           'MojoList *',
     'Parser':             'Parser *',    # Parser() constructor
     'Interpreter':        'Interpreter *',
 }
@@ -2834,7 +2834,7 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        'tokenize':              ('MojoList *', ['char *']),
+        'py_tokenize':              ('MojoList *', ['char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
@@ -8437,9 +8437,8 @@ class GimpleGen:
         self._emit(f"  {temp_inc} = {temp_top1} + 1;")
         self._emit(f"  _mojo_exc_top = {temp_inc};")
         self._emit(f"  {temp_top2} = _mojo_exc_top;")
-        # Simplified GIMPLE: cast array element address directly to void*
-        self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
-        self._emit(f"  {sj_ret} = setjmp (*(jmp_buf *){temp_addr});")
+        # GIMPLE: pass array element directly to setjmp (decays to int*)
+        self._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
         self._emit(f"  {cond_t} = {sj_ret} != 0;")
         self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
@@ -8609,9 +8608,8 @@ class GimpleGen:
             self._emit(f"  {temp_inc} = {temp_top1} + 1;")
             self._emit(f"  _mojo_exc_top = {temp_inc};")
             self._emit(f"  {temp_top2} = _mojo_exc_top;")
-            # Simplified GIMPLE: cast array element address directly to void*
-            self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
-            self._emit(f"  {sj_ret} = setjmp (*(jmp_buf *){temp_addr});")
+            # GIMPLE: pass array element directly to setjmp (decays to int*)
+            self._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
             self._emit(f"  {cond_t} = {sj_ret} != 0;")
             self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
@@ -9505,7 +9503,7 @@ class GimpleGen:
     # hardcoded preamble decls and external harnesses).
     _NO_OVERLOAD_MANGLE = frozenset({
         'main', '_toplevel', '_gimple_main', '_lib_main',
-        'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'tokenize',
+        'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'py_tokenize',
         'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
     })
 
@@ -11901,7 +11899,7 @@ class GimpleGen:
         # Skip symbols that are already hardcoded in the preamble
         hardcoded = {
             'mojo_print', 'gimple_codegen_compile_to_gimple', 'compile_to_gimple',
-            'int_write', 'int_parse_module', 'tokenize', 'Parser', 'Interpreter'
+            'int_write', 'int_parse_module', 'py_tokenize', 'Parser', 'Interpreter'
         }
         # When do_imports=True, imported module code is inlined — functions will
         # have actual definitions, so extern stubs would conflict.

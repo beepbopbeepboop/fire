@@ -65,7 +65,7 @@ def test_tokenizer():
     # Load modules
     print("Loading modules...")
     interpreter = load_modules()
-    tokenize_func = interpreter.scope.get('tokenize')
+    py_tokenize_func = interpreter.scope.get('py_tokenize')
     print("✓ Modules loaded\n")
 
     # Test cases
@@ -89,7 +89,7 @@ def test_tokenizer():
 
         try:
             # Run through interpreter
-            interp_tokens = tokenize_func(test_code)
+            interp_tokens = py_tokenize_func(test_code)
 
             # Run through Python
             python_tokens = python_tokenize(test_code)

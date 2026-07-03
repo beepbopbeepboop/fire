@@ -300,7 +300,7 @@ char *mojo_file_read_all(char *filename);
 
 /* Module function stubs */
 void *mojo_parse(char *source);
-MojoList *mojo_tokenize(char *source);
+MojoList *mojo_py_tokenize(char *source);
 
 /* Builtin file I/O - defined in runtime */
 int64_t mojo_open_file(char *path);  /* opens a file, returns handle as int64_t */
@@ -397,7 +397,7 @@ int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
 /* Module functions that are imported */
-int64_t tokenize(char *source);                /* lexer.tokenize -> Int */
+MojoList *py_tokenize(char *source);                /* lexer.tokenize -> list[Token] */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 

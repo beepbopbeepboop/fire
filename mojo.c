@@ -256,7 +256,7 @@ bb_9:
   _t19 = "\"/* parse error: \"" + _t18;
   _t20 = _t19 + "\" */\"";
   printf ("%s\n", _t20);
-  _t21 = tokenize (src);
+  _t21 = py_tokenize (src);
   tokens = _t21;
   /* TODO: for loop over int */
   goto bb_10;

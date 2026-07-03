@@ -20,7 +20,7 @@ from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 # GimpleGen._NO_OVERLOAD_MANGLE).
 _NO_MANGLE_FUNCS = frozenset({
     'main', '_toplevel', '_gimple_main', '_lib_main',
-    'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'tokenize',
+    'compile_to_gimple', 'gimple_codegen_compile_to_gimple', 'py_tokenize',
     'int_write', 'int_parse_module', 'jit_compile_and_execute', 'mojo_print',
 })
 

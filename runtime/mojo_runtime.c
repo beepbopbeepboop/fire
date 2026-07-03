@@ -1092,7 +1092,7 @@ void *mojo_parse(char *source) {
     return result;
 }
 
-MojoList *mojo_tokenize(char *source) {
+MojoList *mojo_py_tokenize(char *source) {
     /* Basic tokenizer - splits on whitespace and punctuation */
     MojoList *tokens = mojo_list_new();
     if (!source || !source[0]) {

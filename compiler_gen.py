@@ -617,7 +617,7 @@ class PythonCompilerGen:
             ]
 
         L += [
-            'def tokenize(src: str) -> list[Token]:',
+            'def py_tokenize(src: str) -> list[Token]:',
             f'    """{docstring}"""',
         ]
 
@@ -2157,7 +2157,7 @@ class PythonCompilerGen:
         return textwrap.dedent("""\
             # ── Driver ──────────────────────────────────────────────────────────
             def compile(src: str) -> str:
-                tokens = tokenize(src)
+                tokens = py_tokenize(src)
                 stmts  = Parser(tokens).parse_module()
                 return emit_module(stmts)
 

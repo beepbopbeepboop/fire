@@ -86,7 +86,7 @@ _TOKEN_RE = re.compile(r"""
 """, re.VERBOSE | re.DOTALL)
 
 
-def tokenize(source: str) -> list[Token]:
+def py_tokenize(source: str) -> list[Token]:
     """Tokenize source, emitting INDENT/DEDENT layout tokens."""
     tokens: list[Token] = []
     indent_stack = [0]

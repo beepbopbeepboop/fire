@@ -17,7 +17,7 @@ block           := NEWLINE INDENT stmt+ DEDENT
 """
 from __future__ import annotations
 from typing import Optional
-from lexer import Token, TT, tokenize
+from lexer import Token, TT, py_tokenize
 import ast_nodes as N
 
 
@@ -99,7 +99,7 @@ def _peek_words(ts: TokenStream, n: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def parse(source: str, filename: str = "") -> N.Module:
-    tokens = tokenize(source)
+    tokens = py_tokenize(source)
     ts = TokenStream(tokens, filename=filename)
     body = parse_stmts(ts, top_level=True)
     ts.eat(TT.EOF)

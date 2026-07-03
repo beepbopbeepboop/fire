@@ -208,7 +208,7 @@ class Interpreter:
         # Parser and compiler functions
         try:
             from mojo_compiler import py_tokenize, Parser as MojoParser
-            self.scope.define('tokenize', tokenize)
+            self.scope.define('py_tokenize', py_tokenize)
             self.scope.define('Parser', MojoParser)
         except ImportError:
             pass
