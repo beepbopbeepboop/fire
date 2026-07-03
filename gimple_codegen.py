@@ -5714,7 +5714,7 @@ class GimpleGen:
         if (mangled not in self._KNOWN_SIGS
                 and f'{struct_name}_{method}' not in self.func_return_types
                 and mangled not in self._auto_stubbed):
-            _stub_guard = f'_MOJO_STUB_{mangled.upper()}'
+            _stub_guard = f'_MOJO_STUB_{struct_name.upper()}_{method.upper()}'
             _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
             if _stub not in self._elaborated_externs:
                 self._elaborated_externs.append(_stub)
@@ -11188,10 +11188,10 @@ class GimpleGen:
         _builtin_ctors = [
             # Use (...) so any argument type is accepted — these are stubs for
             # Mojo type constructors whose call signatures vary widely at use sites.
-            ('String',   'int64_t String(...);'),
-            ('Int',      'int64_t Int(...);'),
-            ('UInt',     'int64_t UInt(...);'),
-            ('Bool',     'int64_t Bool(...);'),
+            ('String',   'int64_t String(...);'),             # FIXME: should be char *String(void *value) [takes any Python object, returns char *]
+            ('Int',      'int64_t Int(...);'),                # FIXME: should be int64_t Int(void *value) [takes any Python object, returns int64_t]
+            ('UInt',     'int64_t UInt(...);'),               # FIXME: should be uint64_t UInt(void *value)
+            ('Bool',     'int64_t Bool(...);'),               # FIXME: should be _Bool Bool(void *value)
             ('Int8',     'int64_t Int8(...);'),
             ('Int16',    'int64_t Int16(...);'),
             ('Int32',    'int64_t Int32(...);'),
@@ -11200,11 +11200,11 @@ class GimpleGen:
             ('UInt16',   'int64_t UInt16(...);'),
             ('UInt32',   'int64_t UInt32(...);'),
             ('UInt64',   'int64_t UInt64(...);'),
-            ('Float16',  'int64_t Float16(...);'),
-            ('BFloat16', 'int64_t BFloat16(...);'),
-            ('Float32',  'int64_t Float32(...);'),
-            ('Float64',  'int64_t Float64(...);'),
-            ('Error',    'int64_t Error(...);'),
+            ('Float16',  'int64_t Float16(...);'),            # FIXME: should be float16_t Float16(void *value)
+            ('BFloat16', 'int64_t BFloat16(...);'),           # FIXME: should be bfloat16_t BFloat16(void *value)
+            ('Float32',  'int64_t Float32(...);'),            # FIXME: should be float Float32(void *value)
+            ('Float64',  'int64_t Float64(...);'),            # FIXME: should be double Float64(void *value)
+            ('Error',    'int64_t Error(...);'),              # FIXME: should be Error *Error(void *value)
         ]
         def _guarded_ctor(name, decl):
             guard = f'_MOJO_CTOR_{name.upper()}'
@@ -11236,12 +11236,12 @@ class GimpleGen:
         _skip_util = (_local_structs | _imported_names | _local_funcs | _all_defined_funcs
                       | _local_funcs_renamed | _imported_names_renamed)
         _util_pairs = [
-            ('iter',    'int64_t iter(...);'),
-            ('next',    'int64_t next(...);'),
-            ('swap',    'void swap(...);'),
+            ('iter',    'int64_t iter(int64_t obj);'),         # FIXME: should be MojoList *iter(MojoList *obj) [current code boxes pointers as int64_t]
+            ('next',    'int64_t next(int64_t it);'),           # FIXME: should be MojoList *next(MojoList *it) [current code boxes pointers as int64_t]
+            ('swap',    'void swap(int64_t a, int64_t b);'),    # FIXME: should be void swap(int64_t *a, int64_t *b) [takes pointer arguments boxed as int64_t]
             ('op',      'int64_t op(...);'),
             ('U128',    'int64_t U128(...);'),
-            ('divmod',  'int64_t divmod(...);'),
+            ('divmod',  'int64_t divmod(int64_t a, int64_t b);'),  # FIXME: returns MojoList * (tuple) boxed as int64_t [should be MojoList *divmod(int64_t, int64_t)]
             # Pointer: guarded so it's suppressed if the struct typedef was already emitted
             ('Pointer', '#ifndef _MOJO_POINTER_STRUCT_DEF\nint64_t Pointer(...);\n#endif'),
             # Commonly used Mojo stdlib types/constructors — forward-declared as variadic
@@ -11264,9 +11264,9 @@ class GimpleGen:
             ('SIMDSize',               'int64_t SIMDSize(...);'),
             ('List',                   'int64_t List(...);'),
             ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
-            ('ord',                    'int64_t ord(...);'),
-            ('chr',                    'int64_t chr(...);'),
-            ('sort',                   'void sort(...);'),
+            ('ord',                    'int64_t ord(int64_t c);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]
+            ('chr',                    'int64_t chr(int64_t i);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]
+            ('sort',                   'void sort(int64_t list);'),       # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]
             ('Span_byte_length',       'int64_t Span_byte_length(...);'),
             ('_stat_macos',            'int64_t _stat_macos(...);'),
             ('_getpw_macos',           'int64_t _getpw_macos(...);'),

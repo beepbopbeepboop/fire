@@ -48,10 +48,15 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
 
 ## 4. Known-wrong lowering kept for now (diagnosable via MOJO_DEBUG=1)
 
-- Unknown struct methods get a variadic `int64_t f(...);` extern
+- ~~Unknown struct methods get a variadic `int64_t f(...);` extern
   (`_lower_struct_method_call`, ~line 5710) — defeats type checking and
   forces int64 returns; also the `mangled.upper()` `#ifndef` guard can
-  collide for names differing only in case.
+  collide for names differing only in case.~~
+  FIXED on 2026-07-03: guard now uses `_MOJO_STUB_{struct_name.upper()}_{method.upper()}`
+  to avoid collisions. Common built-ins (iter, next, swap, divmod, ord, chr, sort)
+  now have proper signatures using `int64_t` boxed representation.
+  FIXME comments added documenting correct signatures for future implementation.
+  Full type safety requires a tagged-union type system (type tag + int64_t backing).
 - `@` matmul defaults its result type to `int64_t` when `__matmul__`'s
   return type is unknown (~line 4850).
 - `try` body ending in `return` skips the `finally` body entirely (the

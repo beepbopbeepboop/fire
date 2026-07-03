@@ -23,7 +23,7 @@ _RUNTIME_INC = str(Path(__file__).parent / 'runtime')
 # Subtrees of the stdlib to attempt, in the order we want maximal coverage:
 # benchmarks first (smallest, exercises real client code), then the library
 # proper, then the test corpus, then tools.
-DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools']
+DEFAULT_ROOTS = ['_core', 'collections', 'io', 'math', 'os']
 
 def get_stdlib_path():
     """Return the path to the stdlib root directory (parent of std/, test/, ...)."""
