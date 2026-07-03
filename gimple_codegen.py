@@ -3983,17 +3983,26 @@ class GimpleGen:
                     else:
                         str_t = self._call_expr('char *', 'mojo_str', [(et, ev)])
                         part_val = str_t
-                except Exception:
-                    # If expression fails, skip this part
-                    continue
+                except Exception as e:
+                    # The interpolation can't be lowered.  Dropping it would
+                    # silently corrupt the program's output, so warn and keep
+                    # the source text visible in the produced string instead.
+                    print(f"mojo: warning: f-string interpolation "
+                          f"'{{{text}}}' could not be compiled; emitting it "
+                          f"as literal text ({type(e).__name__}: {e})",
+                          file=sys.stderr)
+                    esc = _c_escape('{' + text + '}')
+                    part_val = self._new_val('char *', f'{self._intern_string(esc)}')
             if acc_val is None:
                 acc_val = part_val
             else:
                 cat_t = self._new_val('char *', f'mojo_str_cat ({acc_val}, {part_val})')
                 acc_val = cat_t
         if acc_val is None:
-            placeholder = '<formatted>'
-            acc_val_t = self._new_val('char *', f'{self._intern_string(placeholder)}')
+            # Only reachable for an f-string whose parts are all empty
+            # literals (e.g. f"{''}") — emit an empty string, not the old
+            # "<formatted>" placeholder that leaked into program output.
+            acc_val_t = self._new_val('char *', f'{self._intern_string("")}')
             return 'char *', acc_val_t
         return 'char *', acc_val
 
