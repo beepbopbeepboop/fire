@@ -8428,11 +8428,27 @@ class GimpleGen:
         # Only emit mojo_exc_pop and goto if the try body didn't end with a return
         if not self._last_was_terminal:
             self._emit("  mojo_exc_pop ();")
-            self._emit(f"  goto {bb_else if bb_else else bb_after};")
+            if not bb_else and node.finally_body:
+                # No else block: the normal path skips bb_exc entirely, so the
+                # finally body must run here before leaving the statement.
+                for s in node.finally_body:
+                    self.gen_stmt(s)
+            if not self._last_was_terminal:
+                self._emit(f"  goto {bb_else if bb_else else bb_after};")
 
         self._emit_label(bb_exc)
         self._emit("  mojo_exc_pop ();")
-        for handler in node.handlers:
+        if len(node.handlers) > 1:
+            # The runtime carries no exception-type tag, so typed dispatch is
+            # impossible; running every handler body in sequence (the old
+            # behavior) was strictly wrong.  Run the first handler only.
+            dropped = ', '.join(
+                getattr(h.exc_type, 'name', None) or str(h.exc_type or '<bare>')
+                for h in node.handlers[1:])
+            print(f"mojo: warning: multiple except handlers are not supported "
+                  f"(runtime has no exception types); only the first handler "
+                  f"runs, dropping: {dropped}", file=sys.stderr)
+        for handler in node.handlers[:1]:
             if handler.name:
                 # Exception handlers are typed as pointers to exception objects
                 # Use the exception type from the handler (e.g., ReturnValue, Exception)
