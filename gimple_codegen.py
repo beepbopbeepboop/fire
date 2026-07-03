@@ -4028,11 +4028,9 @@ class GimpleGen:
         literals must go through the pool: inline char[] literals are not
         valid in __GIMPLE assignments or call arguments.
         """
-        name = self._str_pool.get(escaped)
-        if name is None:
-            name = f'_slit_{STRING_POOL_BASE + len(self._str_pool)}'
-            self._str_pool[escaped] = name
-        return name
+        if escaped not in self._str_pool:
+            self._str_pool[escaped] = f'_slit_{STRING_POOL_BASE + len(self._str_pool)}'
+        return self._str_pool[escaped]
 
     def _str_literal_to_slit(self, str_literal: str) -> str:
         """Convert a raw C string literal to a _slit_ name from the string pool.
@@ -5903,8 +5901,8 @@ class GimpleGen:
             else:
                 info = el.elaborate_generic_call_inferred(
                     module_src, g, [ct for ct, _ in arg_pairs])
-        except Exception as e:
-            _debug_note('generic call elaboration failed', e)
+        except Exception:
+            _debug_note('generic call elaboration failed')
             info = None
         if not info:
             return None
@@ -5925,8 +5923,8 @@ class GimpleGen:
             module_src = open(source).read()
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct(module_src, g, type_args)
-        except Exception as e:
-            _debug_note('generic struct elaboration failed', e)
+        except Exception:
+            _debug_note('generic struct elaboration failed')
             info = None
         if not info or not info['fields']:
             return None
@@ -5962,8 +5960,8 @@ class GimpleGen:
             import elaborate
             info = elaborate.Elaborator().elaborate_overload_call(
                 module_src, g, [ct for ct, _ in arg_pairs])
-        except Exception as e:
-            _debug_note('overload elaboration failed', e)
+        except Exception:
+            _debug_note('overload elaboration failed')
             info = None
         if not info:
             return None
@@ -7637,8 +7635,8 @@ class GimpleGen:
                         fn_src = elaborate.extract_fn_source(module_src, node.func.name)
                         if fn_src:
                             return int(comptime.evaluate(fn_src, node.func.name, argvals))
-                    except Exception as e:
-                        _debug_note(f'comptime evaluation of {node.func.name!r} failed', e)
+                    except Exception:
+                        _debug_note('comptime evaluation failed', node.func.name)
         return None
 
     def _eval_const_bool(self, node) -> bool | None:
@@ -9675,8 +9673,8 @@ class GimpleGen:
             return
         try:
             src = open(self._current_filename).read()
-        except Exception as e:
-            _debug_note(f'cannot read {self._current_filename!r} for self-assign scan', e)
+        except Exception:
+            _debug_note('cannot read source for self-assign scan', self._current_filename)
             return
         # struct base name -> set of parameter names with that type (so the field /
         # method checks below are specific to values actually of this struct, not a
@@ -9759,8 +9757,8 @@ class GimpleGen:
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
                                  Parser(tokenize(src)).parse_module() if src else None)
-            except Exception as e:
-                _debug_note(f'cannot resolve/parse module {module!r}', e)
+            except Exception:
+                _debug_note('cannot resolve/parse module', module)
                 cache[module] = (None, '', None)
         return cache[module]
 
@@ -9977,8 +9975,8 @@ class GimpleGen:
         if getattr(self, '_current_filename', None):
             try:
                 _gsrc = open(self._current_filename).read()
-            except Exception as e:
-                _debug_note(f'cannot read {self._current_filename!r} for generics scan', e)
+            except Exception:
+                _debug_note('cannot read source for generics scan', self._current_filename)
                 _gsrc = ''
         if _gsrc:
             _local_generics = {
@@ -10377,9 +10375,9 @@ class GimpleGen:
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
                             _register_sym(sym_name, name, sym_info)
-                except Exception as e:
+                except Exception:
                     # Gracefully ignore module load errors
-                    _debug_note('module load failed while registering imports', e)
+                    _debug_note('module load failed while registering imports')
 
         # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
