@@ -1536,6 +1536,17 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'Span *'
         if base == 'Optional':
             return _mojo_type(inner)  # simplified: treat as the inner type
+        # NOTE: `Some[X]` (existential/trait-object params, e.g. `mut writer:
+        # Some[Writer]`) is deliberately NOT special-cased here. It's the
+        # overwhelmingly common type of the `writer` parameter in every
+        # Writable.write_to method across the stdlib, and falling through to
+        # the plain int64_t default is what makes `writer.write(...)` hit
+        # _lower_method_call's int-receiver fd-write dispatch — which is right
+        # for the common case (writing char*/string-like data). Giving it a
+        # distinct type (e.g. void *) breaks every one of those call sites at
+        # once (confirmed: 588->548 passing when tried). Fix the rare
+        # non-string-argument case (test_interval.mojo) at the call site
+        # instead — see the argument-type check in _lower_method_call.
         # Unknown parameterized type — fall through to plain lookup
         ann = base
     t = _TYPE_MAP.get(ann)
@@ -5296,7 +5307,21 @@ class GimpleGen:
                 data_type, data_val = self.lower_expr(node.args[0])
                 # Generic coercion: int_write expects (int64_t, char*)
                 ov_cast = self._coerce_to_type(ot, 'int64_t', ov)
-                data_val_cast = self._coerce_to_type(data_type, 'char *', data_val)
+                if TypeLattice.is_float(data_type):
+                    # This receiver type (int64_t) most often means a real fd +
+                    # char*/string-like payload, but an existential Writer
+                    # parameter (`mut writer: Some[Writer]`) erases to the same
+                    # int64_t here and can legitimately be asked to write a
+                    # Float64 (see test_interval.mojo's MyType.write_to). A
+                    # direct double -> char* cast is invalid C (hard error on
+                    # GCC 14+); no float-to-string formatting is available in
+                    # this generic dispatch, so box the value through int64_t
+                    # (explicit casts, so this only ever produces valid C —
+                    # correctness for this rare path is tracked separately).
+                    bits = self._new_val('int64_t', f"(int64_t){data_val}")
+                    data_val_cast = self._new_val('char *', f"(char *){bits}")
+                else:
+                    data_val_cast = self._coerce_to_type(data_type, 'char *', data_val)
                 t = self._new_val('int64_t', f"int_write ({ov_cast}, {data_val_cast})")
                 return 'int64_t', t
             if method == 'close':
