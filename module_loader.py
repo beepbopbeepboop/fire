@@ -57,7 +57,7 @@ def _find_stdlib_path():
             return path
 
     # Strategy 2: Hardcoded path to stdlib
-    abs_path = '/Users/mrs/net/chatgpt/claude/mojo/stdlib'
+    abs_path = '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib'
     if os.path.isdir(abs_path):
         return abs_path
 

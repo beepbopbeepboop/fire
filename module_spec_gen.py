@@ -152,7 +152,7 @@ def _find_stdlib_path():
         if os.path.isdir(path):
             return path
 
-    abs_path = '/Users/mrs/net/chatgpt/claude/mojo/stdlib'
+    abs_path = '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib'
     if os.path.isdir(abs_path):
         return abs_path
 
