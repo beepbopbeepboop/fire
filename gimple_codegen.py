@@ -1792,9 +1792,13 @@ _C_RESERVED_FUNCS = frozenset({
     '_end',
 })
 
-# Names in _C_RESERVED_FUNCS where the C version's return type is incompatible with
-# int64_t (e.g. char *). Must always rename to mojo_X even without a local definition.
-_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv'})
+# Names in _C_RESERVED_FUNCS where the real libc signature is incompatible with how
+# the Mojo stdlib prelude redefines them (return type, e.g. char *, or arity, e.g.
+# atol(s, base) vs libc atol(s)) — so a call site with no local def or explicit import
+# (the common case: these are prelude symbols, and we don't model implicit prelude
+# imports) must still be treated as a Mojo call, not real libc. Always renamed to
+# mojo_X, which needs a matching variadic stub in _util_pairs below.
+_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp'})
 
 def _is_concrete_type_arg(ann: str) -> bool:
     """Whether a generic type argument is a concrete type (Int64, String, a struct,
@@ -8671,7 +8675,9 @@ class GimpleGen:
         # target in a comma-separated list (node.extra), not just the first.
         targets = [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
         for module, alias in targets:
-            local_name = alias if alias else module
+            # `import a.b.c` (no alias) binds the top-level package name `a` in
+            # scope (Python semantics) — not the invalid C identifier "a.b.c".
+            local_name = alias if alias else module.split('.')[0]
             self.imported_symbols[local_name] = {
                 'module': module,
                 'return_type': 'unknown',
@@ -11326,6 +11332,8 @@ class GimpleGen:
             ('_stat_linux_x86',        'int64_t _stat_linux_x86(...);'),
             ('func',                   'int64_t func(...);'),
             ('mojo_getenv',            'int64_t mojo_getenv(...);'),
+            ('mojo_atol',              'int64_t mojo_atol(...);'),
+            ('mojo_frexp',             'int64_t mojo_frexp(...);'),
             ('Span_as_bytes',          'int64_t Span_as_bytes(...);'),
             ('Span_get_immutable',     'int64_t Span_get_immutable(...);'),
             ('_Bool___mlir_i1__',      'int64_t _Bool___mlir_i1__(...);'),
@@ -11400,14 +11408,12 @@ class GimpleGen:
             '#endif',
         ])
 
-        # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
-        # Skip libc names already declared by our standard includes to avoid clashes.
-        for _ecname in sorted(self._external_protos):
-            if _ecname in self._LIBC_DECLARED and _ecname not in self._NEEDS_SELF_EXTERN:
-                continue
-            _eret, _eargs = self._external_protos[_ecname]
-            _argstr = ', '.join(_eargs) if _eargs else 'void'
-            parts.append(f'extern {_eret} {_ecname} ({_argstr});')
+        # NOTE: extern prototypes for external_call[...] targets (e.g. write/read/
+        # isatty) are emitted AFTER the struct typedef section below — an
+        # external_call's argument can be a real user struct pointer (e.g.
+        # `external_call["...", Ret](a_device_stream_var, ...)` lowers its arg to
+        # `DeviceStream *`, not a boxed int64_t), so the prototype must not precede
+        # that struct's typedef.
 
         # Link mode: extern decls for imported symbols (bodies live in the linked
         # artifact / stdlib dylib, per ABI.md). Collected by the Phase-0 pre-pass.
@@ -11525,6 +11531,15 @@ class GimpleGen:
         # declarations like `Box_Int64_unbox (Box_Int64 *)` see the type.
         for _decl in getattr(self, '_elaborated_externs', []):
             parts.append(_decl)
+
+        # extern prototypes for external_call[...] targets (e.g. write/read/isatty).
+        # Skip libc names already declared by our standard includes to avoid clashes.
+        for _ecname in sorted(self._external_protos):
+            if _ecname in self._LIBC_DECLARED and _ecname not in self._NEEDS_SELF_EXTERN:
+                continue
+            _eret, _eargs = self._external_protos[_ecname]
+            _argstr = ', '.join(_eargs) if _eargs else 'void'
+            parts.append(f'extern {_eret} {_ecname} ({_argstr});')
 
 
         # Include compiled imported modules.
