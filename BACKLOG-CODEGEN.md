@@ -57,9 +57,8 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   now have proper signatures using `int64_t` boxed representation.
   FIXME comments added documenting correct signatures for future implementation.
   Full type safety requires a tagged-union type system (type tag + int64_t backing).
-- ~~`@` matmul defaults its result type to `int64_t` when `__matmul__`'s
-  return type is unknown (~line 4850).~~
-  FIXME added on 2026-07-03: should infer from struct or use a generic matrix type.
+- `@` matmul defaults its result type to `int64_t` when `__matmul__`'s
+  return type is unknown (~line 4850).
 - `try` body ending in `return` skips the `finally` body entirely (the
   fixed path only covers normal fallthrough).
 - Typed `except` dispatch is impossible — the runtime carries no

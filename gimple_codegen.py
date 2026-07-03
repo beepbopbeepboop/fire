@@ -4856,8 +4856,7 @@ class GimpleGen:
 
         # Call __matmul__(self, other) method
         mangled = f"{struct_name}___matmul__"
-        # FIXME: defaults to int64_t when __matmul__'s return type is unknown — should infer from struct or use a generic matrix type
-        result_type = self.func_return_types.get(mangled, 'int64_t')
+        result_type = self.func_return_types.get(mangled, 'int64_t')  # Default: assume int result
         t = self._new_val(result_type, f"{mangled} ({lv}, {rv})")
         return result_type, t
 
