@@ -30,13 +30,10 @@ the non-exception path; `raise` is a no-op. This is very likely the
 Fix direction (applied): `mojo_try_push` is a `#define` in `mojo_runtime.h`.
 ABI.md documents the macro nature of this entry point.
 
-## 2. `_TYPE_MAP` vs ABI.md divergence
+## 2. ~~`_TYPE_MAP` vs ABI.md divergence~~
 
-`_TYPE_MAP` maps `Int → "int"`, `Bool → "int"`, but ABI.md (authoritative)
-says `Int = int64_t`, `Bool = _Bool`. Boundary signatures must be emitted
-from the ABI table, not raw `_TYPE_MAP` (ABI.md:32–37). Migration touches
-every signature-emission path; needs its own pass with the snapshot
-harness (see below).
+FIXED: `_TYPE_MAP` in `gimple_codegen.py` already maps `Int → int64_t`, `Bool → _Bool`,
+matching ABI.md. ABI.md discrepancy comment removed.
 
 ## 3. Remaining `fix_gimple_*.py` defects not yet fixed at source
 

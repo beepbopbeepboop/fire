@@ -29,13 +29,6 @@ the obvious C scalars:
 | `Float16/32/64` | `__fp16` / `float` / `double` |
 | `None` | `void` (return) |
 
-> **Known discrepancy to reconcile (Stage 1 work):** today `_TYPE_MAP` in
-> `gimple_codegen.py` maps `Int → "int"` and `Bool → "int"`, while the MLIR floor
-> maps the underlying `index → int64_t`. The ABI of record is **`Int = int64_t`,
-> `Bool = _Bool`** (a machine word / a bool). The codegen's `int` usages are to be
-> migrated to match; until then, boundary signatures must be emitted from the ABI
-> table here, not from the raw `_TYPE_MAP`.
-
 ## Pointers
 
 | Mojo | C ABI |
