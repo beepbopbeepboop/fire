@@ -5,7 +5,9 @@ __GIMPLE-annotated functions for gcc-mp-15 -fgimple.
 """
 from __future__ import annotations
 
+import os
 import re
+import sys
 import hashlib
 import dataclasses
 
@@ -32,6 +34,22 @@ from generated_dispatch import (
     _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
     _STMT_DISPATCH, _EXPR_DISPATCH,
 )
+
+# _slit_ numbering starts here to avoid collisions with the mojo compiler's
+# own string-literal numbering when modules are linked together.
+STRING_POOL_BASE = 10000
+
+
+def _debug_note(where: str, detail: object = '') -> None:
+    """Report a deliberately-swallowed error on stderr when MOJO_DEBUG is set.
+
+    Codegen degrades gracefully on some failures (module imports, type
+    inference, generic instantiation).  Those paths intentionally continue
+    with reduced information; this hook makes them diagnosable without
+    changing compiler behavior for normal runs.
+    """
+    if os.environ.get('MOJO_DEBUG'):
+        print(f"[gimple_codegen] {where}: {detail}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # TypeLattice — C11 usual arithmetic conversions + container helpers
@@ -2247,12 +2265,6 @@ class GimpleGen:
 
         Returns (code: str, stmts: list) where stmts are parsed statements from the module.
         """
-        import os
-        import sys
-        import pathlib
-        import re
-        import traceback
-
         # Get the directory where gimple_codegen.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -2278,8 +2290,8 @@ class GimpleGen:
                 stdlib_file = ModuleLoader().resolve_module_path(module_name)
                 if stdlib_file and os.path.exists(stdlib_file):
                     mojo_paths.append(stdlib_file)
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_note(f'stdlib path resolution failed for {module_name!r}', e)
 
         for path in mojo_paths:
             if os.path.exists(path):
@@ -2421,7 +2433,8 @@ class GimpleGen:
                 mod = _resolve_relative(mod, _pkg_prefix)
             try:
                 exports = load_module(mod)
-            except Exception:
+            except Exception as e:
+                _debug_note(f'load_module({mod!r}) failed; skipping import', e)
                 continue
             if not exports:
                 continue
@@ -2510,11 +2523,12 @@ class GimpleGen:
                     if entry.exports and entry.dylib not in self._link_dylibs:
                         self._link_dylibs.append(entry.dylib)
                     return entry.exports, True, entry.source
-            except Exception:
-                pass
+            except Exception as e:
+                _debug_note(f'imports.resolve({module!r}) failed; falling back to load_module', e)
             try:
                 return load_module(module), False, None
-            except Exception:
+            except Exception as e:
+                _debug_note(f'load_module({module!r}) failed; treating module as empty', e)
                 return {}, False, None
 
         def scan(stmt_list):
@@ -2535,7 +2549,8 @@ class GimpleGen:
                             if source:
                                 try:
                                     msrc = open(source).read()
-                                except Exception:
+                                except Exception as e:
+                                    _debug_note(f'cannot read module source {source!r}', e)
                                     msrc = ''
                                 if re.search(rf'\bstruct\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generic_structs.setdefault(sym, source)
@@ -3935,11 +3950,7 @@ class GimpleGen:
             # GIMPLE: char[] arrays can't be implicitly assigned to char* locals.
             # Register in the module-level string pool (emitted as C global char arrays)
             # and emit an explicit (char*) cast so callers always get a plain char* temp.
-            if escaped not in self._str_pool:
-                # Start at 10000 to avoid collisions with mojo compiler's string numbering
-                slit_num = 10000 + len(self._str_pool)
-                self._str_pool[escaped] = f'_slit_{slit_num}'
-            sname = self._str_pool[escaped]
+            sname = self._intern_string(escaped)
             temp = self._new_val('char *', f'{sname}')
             return 'char *', temp
         # F-string: for now, just extract literal parts and return as plain string
@@ -3948,11 +3959,7 @@ class GimpleGen:
         if not parts or all(k == 'lit' for k, _ in parts):
             plain = ''.join(v for _, v in parts)
             escaped = _c_escape(plain)
-            # Must go through string pool — inline char[] literals cause GIMPLE errors
-            if escaped not in self._str_pool:
-                slit_num = 10000 + len(self._str_pool)
-                self._str_pool[escaped] = f'_slit_{slit_num}'
-            temp = self._new_val('char *', f'{self._str_pool[escaped]}')
+            temp = self._new_val('char *', f'{self._intern_string(escaped)}')
             return 'char *', temp
 
         # For f-strings with expressions: build a concatenation of all parts
@@ -3963,9 +3970,7 @@ class GimpleGen:
                 if not text:
                     continue
                 esc = _c_escape(text)
-                if esc not in self._str_pool:
-                    self._str_pool[esc] = f'_slit_{10000 + len(self._str_pool)}'
-                part_t = self._new_val('char *', f'{self._str_pool[esc]}')
+                part_t = self._new_val('char *', f'{self._intern_string(esc)}')
                 part_val = part_t
             else:
                 # Expression: try to evaluate and convert to char*
@@ -3988,11 +3993,22 @@ class GimpleGen:
                 acc_val = cat_t
         if acc_val is None:
             placeholder = '<formatted>'
-            if placeholder not in self._str_pool:
-                self._str_pool[placeholder] = f'_slit_{10000 + len(self._str_pool)}'
-            acc_val_t = self._new_val('char *', f'{self._str_pool[placeholder]}')
+            acc_val_t = self._new_val('char *', f'{self._intern_string(placeholder)}')
             return 'char *', acc_val_t
         return 'char *', acc_val
+
+    def _intern_string(self, escaped: str) -> str:
+        """Return the pool name (_slit_N) for an already-escaped C string.
+
+        Adds the string to the module-level pool on first use.  All string
+        literals must go through the pool: inline char[] literals are not
+        valid in __GIMPLE assignments or call arguments.
+        """
+        name = self._str_pool.get(escaped)
+        if name is None:
+            name = f'_slit_{STRING_POOL_BASE + len(self._str_pool)}'
+            self._str_pool[escaped] = name
+        return name
 
     def _str_literal_to_slit(self, str_literal: str) -> str:
         """Convert a raw C string literal to a _slit_ name from the string pool.
@@ -4013,12 +4029,7 @@ class GimpleGen:
         # Escape the string content
         escaped = _c_escape(val)
 
-        # Register in the module-level string pool if not already present
-        if escaped not in self._str_pool:
-            slit_num = 10000 + len(self._str_pool)
-            self._str_pool[escaped] = f'_slit_{slit_num}'
-        
-        return self._str_pool[escaped]
+        return self._intern_string(escaped)
 
     def _lower_IdentExpr(self, node) -> tuple[str, str]:
         name = node.name
@@ -4026,16 +4037,10 @@ class GimpleGen:
         if name == 'True':  return 'int', '1'
         if name == 'False': return 'int', '0'
         if name == '__file__':
-            escaped = '<bootstrap>'
-            if escaped not in self._str_pool:
-                self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-            t = self._new_val('char *', f'{self._str_pool[escaped]}')
+            t = self._new_val('char *', f'{self._intern_string("<bootstrap>")}')
             return 'char *', t
         if name == '__name__':
-            escaped = '__main__'
-            if escaped not in self._str_pool:
-                self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-            t = self._new_val('char *', f'{self._str_pool[escaped]}')
+            t = self._new_val('char *', f'{self._intern_string("__main__")}')
             return 'char *', t
         if name in self._captures and self._env_param:
             ctype = self._captures[name]
@@ -4360,10 +4365,7 @@ class GimpleGen:
             struct_name_check = _struct_name_of(ot)
             if struct_name_check not in self.struct_field_types:
                 t = self._new_temp('char *')
-                escaped = '<type>'
-                if escaped not in self._str_pool:
-                    self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-                self._emit(f'  {t} = {self._str_pool[escaped]};  /* {ot}.__name__ stubbed */')
+                self._emit(f'  {t} = {self._intern_string("<type>")};  /* {ot}.__name__ stubbed */')
                 return 'char *', t
 
         # Special handling for .__dict__ on int objects (node variable)
@@ -5341,7 +5343,7 @@ class GimpleGen:
             # strip/lstrip/rstrip on non-string: these already have TODO stubs,
             # but catch cases where they'd generate an invalid method name
             if ot in ('int', 'int64_t', '_Bool', 'double'):
-                _es = self._str_pool.setdefault('', f'_slit_{10000 + len(self._str_pool)}')
+                _es = self._intern_string('')
                 t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
         if method == 'get' and ot in ('_Bool', 'int', 'int64_t', 'double'):
             for a in node.args: self.lower_expr(a)
@@ -5353,7 +5355,7 @@ class GimpleGen:
         if method in ('replace', 'find', 'lower', 'upper', 'join', 'split', 'format',
                       'startswith', 'encode', 'decode') and ot in ('MojoSet *', 'MojoList *', 'MojoDict *'):
             for a in node.args: self.lower_expr(a)
-            _es = self._str_pool.setdefault('', f'_slit_{10000 + len(self._str_pool)}')
+            _es = self._intern_string('')
             t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
 
         # MojoSet.copy() → mojo_set_copy()
@@ -5384,10 +5386,7 @@ class GimpleGen:
         # Opaque Python object (int-typed): use mojo_obj_call1 for generic method dispatch
         if ot in ('int', 'int64_t') and not (isinstance(func.obj, IdentExpr)
                                                and func.obj.name in self.struct_field_types):
-            escaped = _c_escape(method)
-            if escaped not in self._str_pool:
-                self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-            method_slit = self._str_pool[escaped]
+            method_slit = self._intern_string(_c_escape(method))
             method_key = self._new_val('char *', f"{method_slit}")
             obj64 = self._to_int64(ot, ov)
             # Lower the first argument (if any), or pass 0
@@ -5890,7 +5889,8 @@ class GimpleGen:
             else:
                 info = el.elaborate_generic_call_inferred(
                     module_src, g, [ct for ct, _ in arg_pairs])
-        except Exception:
+        except Exception as e:
+            _debug_note('generic call elaboration failed', e)
             info = None
         if not info:
             return None
@@ -5911,7 +5911,8 @@ class GimpleGen:
             module_src = open(source).read()
             import elaborate
             info = elaborate.Elaborator().elaborate_generic_struct(module_src, g, type_args)
-        except Exception:
+        except Exception as e:
+            _debug_note('generic struct elaboration failed', e)
             info = None
         if not info or not info['fields']:
             return None
@@ -5947,7 +5948,8 @@ class GimpleGen:
             import elaborate
             info = elaborate.Elaborator().elaborate_overload_call(
                 module_src, g, [ct for ct, _ in arg_pairs])
-        except Exception:
+        except Exception as e:
+            _debug_note('overload elaboration failed', e)
             info = None
         if not info:
             return None
@@ -7619,8 +7621,8 @@ class GimpleGen:
                         fn_src = elaborate.extract_fn_source(module_src, node.func.name)
                         if fn_src:
                             return int(comptime.evaluate(fn_src, node.func.name, argvals))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug_note(f'comptime evaluation of {node.func.name!r} failed', e)
         return None
 
     def _eval_const_bool(self, node) -> bool | None:
@@ -7865,10 +7867,7 @@ class GimpleGen:
             if ot in ('int', 'int64_t'):
                 # Opaque Python object: use mojo_setattr for attribute assignment
                 member_str = node.target.member
-                escaped = _c_escape(member_str)
-                if escaped not in self._str_pool:
-                    self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-                key_slit = self._str_pool[escaped]
+                key_slit = self._intern_string(_c_escape(member_str))
                 key_tmp = self._new_val('char *', f"{key_slit}")
                 v64 = self._new_temp('int64_t')
                 self._safe_coerce_emit(vtype, 'int64_t', v, v64)
@@ -7999,10 +7998,7 @@ class GimpleGen:
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
                 member_str = node.target.member
-                escaped = _c_escape(member_str)
-                if escaped not in self._str_pool:
-                    self._str_pool[escaped] = f'_slit_{10000 + len(self._str_pool)}'
-                key_slit = self._str_pool[escaped]
+                key_slit = self._intern_string(_c_escape(member_str))
                 key_tmp = self._new_val('char *', f"{key_slit}")
                 v64 = self._new_temp('int64_t')
                 self._safe_coerce_emit(vtype, 'int64_t', v, v64)
@@ -9628,7 +9624,8 @@ class GimpleGen:
             return
         try:
             src = open(self._current_filename).read()
-        except Exception:
+        except Exception as e:
+            _debug_note(f'cannot read {self._current_filename!r} for self-assign scan', e)
             return
         # struct base name -> set of parameter names with that type (so the field /
         # method checks below are specific to values actually of this struct, not a
@@ -9711,7 +9708,8 @@ class GimpleGen:
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
                                  Parser(tokenize(src)).parse_module() if src else None)
-            except Exception:
+            except Exception as e:
+                _debug_note(f'cannot resolve/parse module {module!r}', e)
                 cache[module] = (None, '', None)
         return cache[module]
 
@@ -9928,7 +9926,8 @@ class GimpleGen:
         if getattr(self, '_current_filename', None):
             try:
                 _gsrc = open(self._current_filename).read()
-            except Exception:
+            except Exception as e:
+                _debug_note(f'cannot read {self._current_filename!r} for generics scan', e)
                 _gsrc = ''
         if _gsrc:
             _local_generics = {
@@ -10327,9 +10326,9 @@ class GimpleGen:
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
                             _register_sym(sym_name, name, sym_info)
-                except Exception:
+                except Exception as e:
                     # Gracefully ignore module load errors
-                    pass
+                    _debug_note('module load failed while registering imports', e)
 
         # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
