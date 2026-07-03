@@ -8437,8 +8437,9 @@ class GimpleGen:
         self._emit(f"  {temp_inc} = {temp_top1} + 1;")
         self._emit(f"  _mojo_exc_top = {temp_inc};")
         self._emit(f"  {temp_top2} = _mojo_exc_top;")
+        # Simplified GIMPLE: cast array element address directly to void*
         self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
-        self._emit(f"  {sj_ret} = setjmp ({temp_addr});")
+        self._emit(f"  {sj_ret} = setjmp (*(jmp_buf *){temp_addr});")
         self._emit(f"  {cond_t} = {sj_ret} != 0;")
         self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
@@ -8608,8 +8609,9 @@ class GimpleGen:
             self._emit(f"  {temp_inc} = {temp_top1} + 1;")
             self._emit(f"  _mojo_exc_top = {temp_inc};")
             self._emit(f"  {temp_top2} = _mojo_exc_top;")
+            # Simplified GIMPLE: cast array element address directly to void*
             self._emit(f"  {temp_addr} = (void *)&_mojo_exc_stack[{temp_top2}];")
-            self._emit(f"  {sj_ret} = setjmp ({temp_addr});")
+            self._emit(f"  {sj_ret} = setjmp (*(jmp_buf *){temp_addr});")
             self._emit(f"  {cond_t} = {sj_ret} != 0;")
             self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
