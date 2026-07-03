@@ -72,6 +72,12 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   2. Modify `mojo_raise(type_tag)` to store the type
   3. Codegen: pass exception type when raising, check type in handlers
   (See: runtime/mojo_runtime.c:35, gimple_codegen.py:8505-8514)
+
+- ~~GIMPLE `setjmp` address computation uses invalid `&_array[idx]`
+  syntax. Should use pointer arithmetic: `(void *)&_array[idx]` with
+  proper cast through void*.~~
+  FIXED on 2026-07-03: Updated to use `(void *)&_mojo_exc_stack[idx]`
+  pattern which compiles correctly in GIMPLE.
 - BUGS-AST.md BUG-013: `for a, b in ...` tuple targets emit invalid C.
 
 ## 5. Structure / maintainability (behavior-preserving refactors)
