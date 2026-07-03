@@ -11280,12 +11280,12 @@ class GimpleGen:
         _skip_util = (_local_structs | _imported_names | _local_funcs | _all_defined_funcs
                       | _local_funcs_renamed | _imported_names_renamed)
         _util_pairs = [
-            ('iter',    'int64_t iter(int64_t obj);'),         # FIXME: should be MojoList *iter(MojoList *obj) [current code boxes pointers as int64_t]
-            ('next',    'int64_t next(int64_t it);'),           # FIXME: should be MojoList *next(MojoList *it) [current code boxes pointers as int64_t]
-            ('swap',    'void swap(int64_t a, int64_t b);'),    # FIXME: should be void swap(int64_t *a, int64_t *b) [takes pointer arguments boxed as int64_t]
+            ('iter',    'int64_t iter(...);'),         # FIXME: should be MojoList *iter(MojoList *obj) [current code boxes pointers as int64_t]; variadic so both int and pointer call sites typecheck
+            ('next',    'int64_t next(...);'),           # FIXME: should be MojoList *next(MojoList *it) [current code boxes pointers as int64_t]; variadic so both int and pointer call sites typecheck
+            ('swap',    'void swap(...);'),    # FIXME: should be void swap(int64_t *a, int64_t *b) [takes pointer arguments boxed as int64_t]; variadic so both int and pointer call sites typecheck
             ('op',      'int64_t op(...);'),
             ('U128',    'int64_t U128(...);'),
-            ('divmod',  'int64_t divmod(int64_t a, int64_t b);'),  # FIXME: returns MojoList * (tuple) boxed as int64_t [should be MojoList *divmod(int64_t, int64_t)]
+            ('divmod',  'int64_t divmod(...);'),  # FIXME: returns MojoList * (tuple) boxed as int64_t [should be MojoList *divmod(int64_t, int64_t)]; variadic so both int and pointer call sites typecheck
             # Pointer: guarded so it's suppressed if the struct typedef was already emitted
             ('Pointer', '#ifndef _MOJO_POINTER_STRUCT_DEF\nint64_t Pointer(...);\n#endif'),
             # Commonly used Mojo stdlib types/constructors — forward-declared as variadic
@@ -11308,9 +11308,9 @@ class GimpleGen:
             ('SIMDSize',               'int64_t SIMDSize(...);'),
             ('List',                   'int64_t List(...);'),
             ('MojoDict__reserved',     'int64_t MojoDict__reserved(...);'),
-            ('ord',                    'int64_t ord(int64_t c);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]
-            ('chr',                    'int64_t chr(int64_t i);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]
-            ('sort',                   'void sort(int64_t list);'),       # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]
+            ('ord',                    'int64_t ord(...);'),         # FIXME: should be int64_t ord(char *c) [takes char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
+            ('chr',                    'int64_t chr(...);'),        # FIXME: should be char *chr(int64_t i) [returns char * boxed as int64_t]; variadic so both int and pointer call sites typecheck
+            ('sort',                   'void sort(...);'),       # FIXME: should be void sort(MojoList *list) [takes MojoList * boxed as int64_t]; variadic so both int and pointer call sites typecheck
             ('Span_byte_length',       'int64_t Span_byte_length(...);'),
             ('_stat_macos',            'int64_t _stat_macos(...);'),
             ('_getpw_macos',           'int64_t _getpw_macos(...);'),
