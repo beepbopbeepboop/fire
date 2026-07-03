@@ -8442,19 +8442,63 @@ class GimpleGen:
         self._emit(f"  {cond_t} = {sj_ret} != 0;")
         self._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
+        bb_finally = self._new_bb() if node.finally_body else None
+        bb_finally_done = self._new_bb() if node.finally_body else None
+        bb_do_return = self._new_bb()  # Label to do the actual return after finally
+
         self._emit_label(bb_try)
+        _had_terminal = False
+        _return_value = None
+        _return_type = None
         for s in node.body:
+            # Temporarily override _emit to intercept return statements
+            original_emit = self._emit
+            def intercepted_emit(line, rv=None, rt=None):
+                nonlocal _return_value, _return_type
+                stripped = line.strip()
+                if stripped.startswith('return ') or stripped == 'return;':
+                    # Extract return value if any
+                    if stripped.startswith('return ') and stripped != 'return;':
+                        _return_value = stripped[7:].rstrip(';').strip()
+                        _return_type = 'int64_t'  # Simplified
+                    else:
+                        _return_value = None
+                    # Emit goto to finally instead of return
+                    if node.finally_body:
+                        original_emit(f"  goto {bb_finally};")
+                    else:
+                        original_emit(line)
+                    self._last_was_terminal = True
+                    return
+                original_emit(line)
+
+            self._emit = intercepted_emit
             self.gen_stmt(s)
-        # Only emit mojo_exc_pop and goto if the try body didn't end with a return
-        if not self._last_was_terminal:
+            self._emit = original_emit  # Restore
+
+            if self._last_was_terminal:
+                _had_terminal = True
+                break
+
+        # Emit finally body
+        if bb_finally:
+            self._emit_label(bb_finally)
+            for s in node.finally_body:
+                self.gen_stmt(s)
+            self._emit(f"  goto {bb_finally_done};")
+
+        # After finally: do the actual return if needed
+        if bb_finally_done:
+            self._emit_label(bb_finally_done)
+        if _had_terminal and _return_value is not None:
+            self._emit(f"  return {_return_value};")
+        elif not _had_terminal:
             self._emit("  mojo_exc_pop ();")
-            if not bb_else and node.finally_body:
-                # No else block: the normal path skips bb_exc entirely, so the
-                # finally body must run here before leaving the statement.
-                for s in node.finally_body:
-                    self.gen_stmt(s)
-            if not self._last_was_terminal:
-                self._emit(f"  goto {bb_else if bb_else else bb_after};")
+            self._emit(f"  goto {bb_else if bb_else else bb_after};")
+
+        # Reset terminal state for caller
+        if not _had_terminal:
+            self._last_was_terminal = False
 
         self._emit_label(bb_exc)
         self._emit("  mojo_exc_pop ();")
