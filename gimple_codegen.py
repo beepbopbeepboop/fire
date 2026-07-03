@@ -3864,6 +3864,7 @@ class GimpleGen:
         handler_name = _EXPR_DISPATCH.get(type(node).__name__)
         if handler_name:
             return getattr(self, handler_name)(node)
+        _debug_note('unknown expression lowered to 0', type(node).__name__)
         self._emit(f"  /* TODO: unknown expr {type(node).__name__} */")
         t = self._new_val('int', "0")
         return 'int', t
@@ -4005,6 +4006,20 @@ class GimpleGen:
             acc_val_t = self._new_val('char *', f'{self._intern_string("")}')
             return 'char *', acc_val_t
         return 'char *', acc_val
+
+    def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
+        """Emit a placeholder result for an operation codegen cannot lower.
+
+        The generated program receives `value` (typically 0 or an empty
+        string) instead of a real implementation, annotated with a
+        `/* note */` comment.  Every use is reported through _debug_note so
+        stubbed-out behavior is diagnosable with MOJO_DEBUG instead of
+        silently returning wrong answers.
+        """
+        _debug_note('stubbed operation', note)
+        t = self._new_temp(ctype)
+        self._emit(f"  {t} = {value};  /* {note} */")
+        return ctype, t
 
     def _intern_string(self, escaped: str) -> str:
         """Return the pool name (_slit_N) for an already-escaped C string.
@@ -4379,9 +4394,7 @@ class GimpleGen:
 
         # Special handling for .__dict__ on int objects (node variable)
         if node.member == '__dict__' and ot == 'int':
-            t = self._new_temp('int')
-            self._emit(f'  {t} = 0;  /* __dict__ stub */')
-            return 'int', t
+            return self._stub_result('int', '0', '__dict__ stub')
 
         op = '->' if '*' in ot else '.'
         struct_name = _struct_name_of(ot)
@@ -5279,9 +5292,7 @@ class GimpleGen:
                 return 'int64_t', t
             if method == 'close':
                 # Stub: mojo_close is defined by stdlib and may not be visible here
-                t = self._new_temp('int')
-                self._emit(f"  {t} = 0;  /* {ot}.close() — stubbed */")
-                return 'int', t
+                return self._stub_result('int', '0', f'{ot}.close() — stubbed')
 
         # Methods on any scalar numeric type (int32_t, uint8_t, etc.) —
         # lower comparison/arithmetic methods to direct C expressions.
@@ -5339,33 +5350,31 @@ class GimpleGen:
                     fv_local = tmp
                 t = self._new_val(res_type, f"{ov_local} ? {tv_local} : {fv_local}")
                 return res_type, t
-            # Other scalar methods: stub with zero
+            # Other scalar methods: pass the receiver through unchanged
             for ea in node.args[1:]: self.lower_expr(ea)
-            t = self._new_temp(ot); self._emit(f"  {t} = {ov_local};  /* {ot}.{method}() stubbed */"); return ot, t
+            return self._stub_result(ot, ov_local, f'{ot}.{method}() stubbed')
 
         # Stub string-type methods when called on wrong receiver types
         if method == 'isdigit':
-            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.isdigit() stubbed */"); return 'int', t
+            return self._stub_result('int', '0', f'{ot}.isdigit() stubbed')
         if method == 'endswith' and ot not in ('char *', 'void *') and (not ot.endswith(' *') or ot in ('MojoSet *', 'MojoList *', 'MojoDict *')):
-            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.endswith() stubbed */"); return 'int', t
+            return self._stub_result('int', '0', f'{ot}.endswith() stubbed')
         if method in ('strip', 'lstrip', 'rstrip') and ot not in ('char *', 'void *') and not ot.startswith('Mojo'):
             # strip/lstrip/rstrip on non-string: these already have TODO stubs,
             # but catch cases where they'd generate an invalid method name
             if ot in ('int', 'int64_t', '_Bool', 'double'):
-                _es = self._intern_string('')
-                t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
+                return self._stub_result('char *', self._intern_string(''), f'{ot}.{method}() stubbed')
         if method == 'get' and ot in ('_Bool', 'int', 'int64_t', 'double'):
             for a in node.args: self.lower_expr(a)
-            t = self._new_temp('int64_t'); self._emit(f"  {t} = (int64_t)0;  /* {ot}.get() stubbed */"); return 'int64_t', t
+            return self._stub_result('int64_t', '(int64_t)0', f'{ot}.get() stubbed')
         if method in ('strip', 'lstrip', 'rstrip') and ot in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             for a in node.args: self.lower_expr(a)
-            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* {ot}.{method}() stubbed */"); return 'int', t
+            return self._stub_result('int', '0', f'{ot}.{method}() stubbed')
         # Stub string methods called on Mojo container types (would generate invalid struct method)
         if method in ('replace', 'find', 'lower', 'upper', 'join', 'split', 'format',
                       'startswith', 'encode', 'decode') and ot in ('MojoSet *', 'MojoList *', 'MojoDict *'):
             for a in node.args: self.lower_expr(a)
-            _es = self._intern_string('')
-            t = self._new_temp('char *'); self._emit(f'  {t} = {_es};  /* {ot}.{method}() stubbed */'); return 'char *', t
+            return self._stub_result('char *', self._intern_string(''), f'{ot}.{method}() stubbed')
 
         # MojoSet.copy() → mojo_set_copy()
         if method == 'copy' and ot == 'MojoSet *':
@@ -5570,9 +5579,9 @@ class GimpleGen:
                 self._emit(f"  *{ovl} = {sv};")
             return 'int', self._new_val('int', '0')
         if method in ('strided_load', 'gather'):
-            t = self._new_temp(elem); self._emit(f"  {t} = *{ov};  /* TODO: {method} */"); return elem, t
+            return self._stub_result(elem, f'*{ov}', f'TODO: {method}')
         if method in ('strided_store', 'scatter'):
-            t = self._new_temp('int'); self._emit(f"  {t} = 0;  /* TODO: {method} */"); return 'int', t
+            return self._stub_result('int', '0', f'TODO: {method}')
         return 'int', self._new_val('int', '0')
 
     def _lower_file_method(self, ov: str, method: str, args: list) -> tuple:
@@ -5655,13 +5664,9 @@ class GimpleGen:
             self._elem_types[t] = 'char *'
             return 'MojoList *', t
         if method in ('encode', 'decode', 'format'):
-            t = self._new_temp('char *')
-            self._emit(f"  {t} = {cstr_ov};  /* TODO: {method} */")
-            return 'char *', t
+            return self._stub_result('char *', cstr_ov, f'TODO: {method}')
         # Unknown method on char* — stub
-        t = self._new_temp('int')
-        self._emit(f"  {t} = 0;  /* TODO: char*.{method} */")
-        return 'int', t
+        return self._stub_result('int', '0', f'TODO: char*.{method}')
 
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:
         """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
@@ -6419,8 +6424,10 @@ class GimpleGen:
                 else:
                     self._emit(f'  {t} = mojo_isinstance ({obj_val}, {type_id});')
         elif isinstance(type_arg, TupleExpr):
+            _debug_note('isinstance with tuple of types stubbed to 0')
             self._emit(f'  {t} = 0;  /* TODO: isinstance with tuple of types */')
         else:
+            _debug_note('isinstance with complex type arg stubbed to 0')
             self._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
         return 'int', t
 
@@ -7680,6 +7687,7 @@ class GimpleGen:
         if handler_name:
             getattr(self, handler_name)(node)
         else:
+            _debug_note('unknown statement dropped', type(node).__name__)
             self._emit(f"  /* TODO: {type(node).__name__} */")
 
     # ── Statement handlers (one per AST node type) ────────────────────────
@@ -8810,8 +8818,10 @@ class GimpleGen:
             if has_next in self.func_return_types or nxt in self.func_return_types:
                 self._gen_for_struct_iter(var, it_type, it_val, node.body)
             else:
+                _debug_note('for loop dropped (no iterator protocol)', it_type)
                 self._emit(f"  /* TODO: for loop over {it_type} (no iterator protocol) */")
         else:
+            _debug_note('for loop dropped (unsupported iterable)', it_type)
             self._emit(f"  /* TODO: for loop over {it_type} */")
 
     @staticmethod
@@ -9288,6 +9298,7 @@ class GimpleGen:
             self._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
             self._emit(f"  {cond_t} = {hn_t} != 0;")
         else:
+            _debug_note('iterator loop emitted with false condition (no __has_next__)', iter_base)
             cond_t = self._new_temp('_Bool')
             self._emit(f"  {cond_t} = 0;  /* TODO: no __has_next__ on {iter_base} */")
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
@@ -9298,6 +9309,7 @@ class GimpleGen:
             nxt = self._new_val(elem_type, f"{next_fn} ({iter_var})")
             self._emit(f"  {var} = {nxt};")
         else:
+            _debug_note('iterator loop body has no __next__', iter_base)
             self._emit(f"  /* TODO: no __next__ on {iter_base} */")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
@@ -10986,6 +10998,7 @@ class GimpleGen:
                 # Collect all executable statements for _toplevel()
                 toplevel_stmts.append(stmt)
             else:
+                _debug_note('top-level statement dropped', type(stmt).__name__)
                 func_parts.append(f"/* TODO: top-level {type(stmt).__name__} */")
 
         # Populate func_param_types BEFORE _gen_toplevel so call-site coercion works
