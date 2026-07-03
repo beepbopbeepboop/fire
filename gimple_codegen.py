@@ -7964,8 +7964,22 @@ class GimpleGen:
                         if ot.endswith(' *'):
                             elem_t = ot[:-2].rstrip()  # e.g. 'int64_t' from 'int64_t *'
                             if elem_t in self.struct_field_types:
-                                # Struct values can't be in GIMPLE registers — emit no-op
-                                self._emit(f"  /* TODO: struct subscript write [{elem_t}] skipped */")
+                                # Struct values can't sit in GIMPLE registers, so an
+                                # aggregate `*addr = v` is not emittable; copy the
+                                # struct into the slot field by field instead.
+                                fields = self.struct_field_types[elem_t]
+                                if fields and vtype == f'{elem_t} *':
+                                    self._ptr_helpers_needed.add(elem_t)
+                                    idx64 = self._new_val('int64_t', f"(int64_t){idx_v}")
+                                    ptr_typed = self._new_val(ot, f"({ot}){obj_v}")
+                                    addr = self._new_val(ot, f"_mojo_at_{_c_id(elem_t)} ({ptr_typed}, {idx64})")
+                                    for fname, ftype in fields.items():
+                                        fv = self._new_val(ftype, f"{v}->{_safe_field(fname)}")
+                                        self._emit(f"  {addr}->{_safe_field(fname)} = {fv};")
+                                else:
+                                    _debug_note('struct subscript write dropped',
+                                                f'{elem_t}[...] = {vtype}')
+                                    self._emit(f"  /* TODO: struct subscript write [{elem_t}] skipped */")
                             else:
                                 self._ptr_helpers_needed.add(elem_t)
                                 idx64 = self._new_val('int64_t', f"(int64_t){idx_v}")
