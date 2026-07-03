@@ -6985,6 +6985,17 @@ class GimpleGen:
         return True
 
     def _lower_subscript(self, node: SubscriptExpr) -> tuple[str, str]:
+        # Keyword-parametrized slice, e.g. `x[byte=:-1]` (slice by byte offset).
+        # The parser stashes the real SliceExpr in node.attrs (obj=None, since
+        # the object wasn't known yet at that point) and leaves node.index as a
+        # dummy IntLiteral(0) placeholder — attach the real object and lower it
+        # as an actual slice instead of falling through to the scalar-index path.
+        if node.attrs:
+            for _attr_name, _attr_val in node.attrs:
+                if _attr_name == 'byte' and isinstance(_attr_val, SliceExpr):
+                    _attr_val.obj = node.obj
+                    return self._lower_slice(_attr_val)
+
         ot, ov = self.lower_expr(node.obj)
         idx_type, iv  = self.lower_expr(node.index)
 
@@ -7166,6 +7177,29 @@ class GimpleGen:
                 self._elem_types[t] = self._elem_types[ov]
             return 'MojoList *', t
 
+        if ot == 'Span *':
+            # Span is the fat-pointer {_data, _len} struct (see _mojo_type's
+            # Span/StringSlice branch) — slicing it means allocating a new Span
+            # whose _data is advanced by `start` bytes and whose _len is
+            # shortened accordingly, not raw pointer-to-the-struct arithmetic
+            # (which is what the generic fallback below would do, corrupting it).
+            self._struct_allocs_needed.add('Span')
+            t = self._new_temp('Span *')
+            self._emit(f"  {t} = _alloc_Span ();")
+            old_data = self._new_val('char *', f"{ov}->_data")
+            old_data_i = self._new_val('int64_t', f"(int64_t){old_data}")
+            start_i = self._new_val('int64_t', f"(int64_t){start_v}")
+            new_data_i = self._new_val('int64_t', f"{old_data_i} + {start_i}")
+            new_data = self._new_val('char *', f"(char *){new_data_i}")
+            self._emit(f"  {t}->_data = {new_data};")
+            old_len = self._new_val('int64_t', f"{ov}->_len")
+            if node.stop is not None:
+                new_len = self._new_val('int64_t', f"{stop_v} - {start_i}")
+            else:
+                new_len = self._new_val('int64_t', f"{old_len} - {start_i}")
+            self._emit(f"  {t}->_len = {new_len};")
+            return 'Span *', t
+
         # Plain pointer: return pointer to start (no bounds check)
         # GIMPLE: no pointer+integer; cast pointer through int64_t; both operands
         # must be plain variables (no cast expressions in binary operands).
@@ -7290,7 +7324,11 @@ class GimpleGen:
         self._emit(f"  {t} = mojo_list_new ();")
         lowered = [(el, *self.lower_expr(el)) for el in node.elements]
         scalar_sufs = {TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
-        per_element = 'str' in scalar_sufs and scalar_sufs != {'str'}
+        # Any mix of suffixes (not just str-vs-other) needs per-element dispatch —
+        # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
+        # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
+        # single list-wide suffix would append-cast the pointer as a double.
+        per_element = len(scalar_sufs) > 1
         for _el, et, ev in lowered:
             use = TypeLattice.list_suffix(et) if per_element else suf
             ev_cast = self._cast_for_list(et, ev, use)
