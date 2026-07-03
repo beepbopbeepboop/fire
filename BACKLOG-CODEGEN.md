@@ -54,9 +54,15 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   collide for names differing only in case.~~
   FIXED on 2026-07-03: guard now uses `_MOJO_STUB_{struct_name.upper()}_{method.upper()}`
   to avoid collisions. Common built-ins (iter, next, swap, divmod, ord, chr, sort)
-  now have proper signatures using `int64_t` boxed representation.
-  FIXME comments added documenting correct signatures for future implementation.
-  Full type safety requires a tagged-union type system (type tag + int64_t backing).
+  were briefly given concrete `int64_t`-typed signatures, but that only
+  compiles when every call site happens to pass an int64_t — real callers
+  pass pointer types (e.g. `MojoList *`) too, which is a hard error
+  (`-Wint-conversion`) on GCC 14+, not a warning. Reverted to variadic
+  `(...)` declarations on 2026-07-03 (same day) after this broke 13 files
+  in `compile_stdlib.py` against the real modular stdlib.
+  FIXME comments document the correct (non-variadic) signatures for future
+  implementation. Full type safety requires a tagged-union type system
+  (type tag + int64_t backing).
 - `@` matmul defaults its result type to `int64_t` when `__matmul__`'s
   return type is unknown (~line 4850).
 - ~~`try` body ending in `return` skips the `finally` body entirely (the
