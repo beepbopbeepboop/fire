@@ -14,7 +14,7 @@ record the object on the link line.
 import re
 
 import monomorphize as mm
-from mojo_compiler import tokenize, Parser, FunctionDef, StructDef, TraitDef
+from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef, TraitDef
 from gimple_codegen import _mojo_type
 
 
@@ -69,7 +69,7 @@ def extract_overloads(module_src: str, fn_name: str):
                 j += 1
             src = ''.join(lines[i:j])
             fn = None
-            for s in Parser(tokenize(src)).parse_module():
+            for s in Parser(py_tokenize(src)).parse_module():
                 if isinstance(s, FunctionDef):
                     fn = s
                     break
@@ -132,7 +132,7 @@ def _method_sig(fn: FunctionDef):
 def extract_trait(module_src: str, trait_name: str):
     """The required method signatures of `trait trait_name`, as a list of
     (name, [param_types], ret_type). None if the trait is not defined here."""
-    for s in Parser(tokenize(module_src)).parse_module():
+    for s in Parser(py_tokenize(module_src)).parse_module():
         if isinstance(s, TraitDef) and s.name == trait_name:
             return [_method_sig(m) for m in s.methods]
     return None
@@ -141,7 +141,7 @@ def extract_trait(module_src: str, trait_name: str):
 def type_methods(module_src: str, type_name: str):
     """The method signatures a concrete `struct type_name` defines, as a list
     of (name, [param_types], ret_type). None if the type is not a struct here."""
-    for s in Parser(tokenize(module_src)).parse_module():
+    for s in Parser(py_tokenize(module_src)).parse_module():
         if isinstance(s, StructDef) and s.name == type_name:
             return [_method_sig(m) for m in s.methods]
     return None
@@ -239,7 +239,7 @@ def infer_type_args(template_src: str, arg_ctypes):
     if not params:
         return None
     fn = None
-    for s in Parser(tokenize(template_src)).parse_module():
+    for s in Parser(py_tokenize(template_src)).parse_module():
         if isinstance(s, FunctionDef):
             fn = s
             break
@@ -257,7 +257,7 @@ def infer_type_args(template_src: str, arg_ctypes):
 def _struct_layout(concrete_src: str, name: str):
     """(fields, methods) of the monomorphized struct: fields as (name, c_type),
     methods as (name, ret_ctype, [param_ctypes excluding self])."""
-    for s in Parser(tokenize(concrete_src)).parse_module():
+    for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, StructDef) and s.name == name:
             fields = [(f.name, _mojo_type(f.type_ann)) for f in getattr(s, 'fields', [])]
             methods = []
@@ -271,7 +271,7 @@ def _struct_layout(concrete_src: str, name: str):
 
 def _signature(concrete_src: str, name: str):
     """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
-    for s in Parser(tokenize(concrete_src)).parse_module():
+    for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
             ret = _mojo_type(s.return_type) if s.return_type else 'void'
             return ret, [_mojo_type(t) for _, t in s.params]

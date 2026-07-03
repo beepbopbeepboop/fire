@@ -22,7 +22,7 @@ import subprocess
 import cas
 from build_config import find_gcc
 from gimple_codegen import GimpleGen
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -97,7 +97,7 @@ def compile_fn(fn_src: str, gcc: str = None) -> tuple:
 
     def build():
         gen = GimpleGen(emit_entry_points=False, module_name=name)
-        c = gen.gen_module(Parser(tokenize(fn_src)).parse_module())
+        c = gen.gen_module(Parser(py_tokenize(fn_src)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_ovl_')
         cf, of = os.path.join(wd, name + '.c'), os.path.join(wd, name + '.o')
         with open(cf, 'w') as f:
@@ -144,7 +144,7 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
         # overload-suffix it, or the caller's reference (info['symbol'] = mangled)
         # won't match the definition.
         gen = GimpleGen(emit_entry_points=False, module_name=mangled, no_mangle={mangled})
-        c = gen.gen_module(Parser(tokenize(concrete)).parse_module())
+        c = gen.gen_module(Parser(py_tokenize(concrete)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_inst_')
         cfile, ofile = os.path.join(wd, mangled + '.c'), os.path.join(wd, mangled + '.o')
         with open(cfile, 'w') as f:

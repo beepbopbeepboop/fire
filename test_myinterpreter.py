@@ -4,7 +4,7 @@
 import sys
 sys.path.insert(0, 'mojo')
 
-from mojo_compiler import tokenize as python_tokenize
+from mojo_compiler import py_tokenize as python_tokenize
 from parser import parse
 from myinterpreter import Interpreter
 

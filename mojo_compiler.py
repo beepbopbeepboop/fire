@@ -602,7 +602,7 @@ def _split_on_separators(s: str) -> list[str]:
     parts.append("".join(buf))
     return parts
 
-def tokenize(src: str) -> list[Token]:
+def py_tokenize(src: str) -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
         - Indentation (4 spaces) → INDENT/DEDENT
         - ';' → statement separator
@@ -2557,7 +2557,7 @@ def emit(node, indent: int = 0) -> str:
 
 # ── Driver ──────────────────────────────────────────────────────────
 def compile(src: str) -> str:
-    tokens = tokenize(src)
+    tokens = py_tokenize(src)
     stmts  = Parser(tokens).parse_module()
     return emit_module(stmts)
 

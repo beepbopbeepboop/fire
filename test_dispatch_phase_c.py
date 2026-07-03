@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase C: GimpleGen integration and dispatch table emission."""
 
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import GimpleGen
 
 # Test case: myinterpreter pattern
@@ -29,7 +29,7 @@ def test_dispatch_table_emission_in_codegen():
     """Test that dispatch tables are emitted in generated C code."""
     print("Test 1: Dispatch table emission in GimpleGen...")
 
-    tokens = tokenize(myinterp_test)
+    tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
     # Generate GIMPLE code with dispatch solver enabled
@@ -77,7 +77,7 @@ def test_dispatch_table_structure():
     """Test that emitted dispatch tables have correct structure."""
     print("\nTest 2: Dispatch table structure validation...")
 
-    tokens = tokenize(myinterp_test)
+    tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
     gen = GimpleGen()
@@ -146,7 +146,7 @@ class Dispatcher:
         return 4
 """
 
-    tokens = tokenize(multi_pattern_test)
+    tokens = py_tokenize(multi_pattern_test)
     stmts = Parser(tokens).parse_module()
 
     gen = GimpleGen()
@@ -167,7 +167,7 @@ def test_gimple_syntax_validity():
     """Test that generated dispatch table code is valid C syntax."""
     print("\nTest 4: Generated C syntax validity...")
 
-    tokens = tokenize(myinterp_test)
+    tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
     gen = GimpleGen()
@@ -204,7 +204,7 @@ def test_dispatch_tables_before_functions():
     """Test that dispatch tables are emitted before __GIMPLE functions."""
     print("\nTest 5: Dispatch tables positioned before functions...")
 
-    tokens = tokenize(myinterp_test)
+    tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
     gen = GimpleGen()

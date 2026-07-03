@@ -6,7 +6,7 @@ integrated into the gimple_codegen.py compilation pipeline.
 """
 
 from gimple_codegen import GimpleGen
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 import sys
 from io import StringIO
 
@@ -14,7 +14,7 @@ from io import StringIO
 def compile_with_type_checking(mojo_code, strict=False):
     """Compile code and return (success: bool, gimple: str, errors: str)"""
     try:
-        tokens = tokenize(mojo_code)
+        tokens = py_tokenize(mojo_code)
         stmts = Parser(tokens).parse_module()
 
         gen = GimpleGen()

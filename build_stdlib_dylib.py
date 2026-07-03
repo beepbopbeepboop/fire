@@ -24,7 +24,7 @@ import cas
 import reflect
 from build_config import find_gcc
 from gimple_codegen import GimpleGen, FromImportStmt
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from module_loader import load_module, STDLIB_PATH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +88,7 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
             sys.setrecursionlimit(120000)
             gen = GimpleGen(emit_entry_points=False, module_name=module_name)
             gen._current_filename = path
-            box['c'] = gen.gen_module(Parser(tokenize(src)).parse_module())
+            box['c'] = gen.gen_module(Parser(py_tokenize(src)).parse_module())
         except BaseException as e:   # propagate to the caller's thread
             box['err'] = e
 
@@ -111,7 +111,7 @@ def _imported_sigs(src: str) -> list:
     dependency's signature change invalidates this module's cached object."""
     sigs = []
     try:
-        stmts = Parser(tokenize(src)).parse_module()
+        stmts = Parser(py_tokenize(src)).parse_module()
     except Exception:
         return sigs
     for s in stmts:

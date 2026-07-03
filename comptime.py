@@ -21,7 +21,7 @@ import subprocess
 import cas
 from build_config import find_gcc
 from gimple_codegen import GimpleGen
-from mojo_compiler import tokenize, Parser, FunctionDef
+from mojo_compiler import py_tokenize, Parser, FunctionDef
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -42,7 +42,7 @@ _CTYPES = {
 def _signature(src: str, fn_name: str):
     """(ret_ctype, [param_ctypes]) for fn_name, via the ABI type mapping."""
     from gimple_codegen import _mojo_type
-    for s in Parser(tokenize(src)).parse_module():
+    for s in Parser(py_tokenize(src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == fn_name:
             ret = _mojo_type(s.return_type) if s.return_type else 'void'
             params = [_mojo_type(t) for _, t in s.params]
@@ -58,7 +58,7 @@ def _build_dylib(src: str, fn_name: str, gcc: str) -> str:
     def build():
         # The function is dlsym'd by its exact name, so don't overload-mangle it.
         gen = GimpleGen(emit_entry_points=False, module_name=fn_name, no_mangle={fn_name})
-        c = gen.gen_module(Parser(tokenize(src)).parse_module())
+        c = gen.gen_module(Parser(py_tokenize(src)).parse_module())
         wd = tempfile.mkdtemp(prefix='mojo_ct_')
         cfile = os.path.join(wd, fn_name + '.c')
         ofile = os.path.join(wd, fn_name + '.o')

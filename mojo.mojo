@@ -28,11 +28,11 @@ def dump_file(input_file):
     basename = os.path.splitext(os.path.basename(input_file))[0]
 
     import gimple_codegen
-    from mojo_compiler import tokenize, Parser
+    from mojo_compiler import py_tokenize, Parser
 
     # Generate tokens file
     try:
-        tokens = tokenize(src)
+        tokens = py_tokenize(src)
         with open(basename + ".tok", "w") as f:
             f.write(repr(tokens))
     except:
@@ -40,7 +40,7 @@ def dump_file(input_file):
 
     # Generate AST file
     try:
-        tokens = tokenize(src)
+        tokens = py_tokenize(src)
         ast = Parser(tokens).parse_module()
         with open(basename + ".ast", "w") as f:
             f.write(repr(ast))
@@ -69,9 +69,9 @@ def interpret_file(input_file):
         return
 
     try:
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
-        tokens = tokenize(src)
+        tokens = py_tokenize(src)
         stmts = Parser(tokens).parse_module()
         interpreter = Interpreter()
         for stmt in stmts:
@@ -82,7 +82,7 @@ def interpret_file(input_file):
 def run_repl():
     """Interactive REPL for Mojo code."""
     try:
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
     except:
         return
@@ -102,7 +102,7 @@ def run_repl():
             if line.lower() in ("exit", "quit"):
                 break
             try:
-                tokens = tokenize(line)
+                tokens = py_tokenize(line)
                 stmts = Parser(tokens).parse_module()
                 for stmt in stmts:
                     result = interpreter.execute(stmt)

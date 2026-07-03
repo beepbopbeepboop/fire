@@ -152,8 +152,7 @@ def _find_stdlib_path():
         if os.path.isdir(path):
             return path
 
-    relative_path = os.path.join(HERE, '..', 'modular', 'mojo', 'stdlib')
-    abs_path = os.path.abspath(relative_path)
+    abs_path = '/Users/mrs/net/chatgpt/claude/mojo/stdlib'
     if os.path.isdir(abs_path):
         return abs_path
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integration test: DispatchSolver on myinterpreter.mojo patterns."""
 
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver
 
 # Simplified version of the interpreter's execute pattern
@@ -51,7 +51,7 @@ def analyze_interpreter():
     print("DispatchSolver Analysis of Interpreter Pattern")
     print("=" * 70)
 
-    tokens = tokenize(myinterp_pattern)
+    tokens = py_tokenize(myinterp_pattern)
     stmts = Parser(tokens).parse_module()
 
     # Initialize solver with interpreter struct info

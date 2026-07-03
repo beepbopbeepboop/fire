@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase A implementation."""
 
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver
 
 # Test case 1: Simple direct call graph
@@ -47,7 +47,7 @@ fn dispatcher(stmt_type):
 def test_call_graph_simple():
     """Test building call graph from simple direct calls."""
     print("Test 1: Direct call graph...")
-    tokens = tokenize(test_direct_calls)
+    tokens = py_tokenize(test_direct_calls)
     stmts = Parser(tokens).parse_module()
 
     solver = DispatchSolver({}, {})
@@ -63,7 +63,7 @@ def test_call_graph_simple():
 def test_getattr_pattern_detection():
     """Test detecting getattr dispatch patterns."""
     print("Test 2: getattr pattern detection...")
-    tokens = tokenize(test_getattr_pattern)
+    tokens = py_tokenize(test_getattr_pattern)
     stmts = Parser(tokens).parse_module()
 
     struct_field_types = {'Interpreter': {'scope': 'int'}}
@@ -85,7 +85,7 @@ def test_getattr_pattern_detection():
 def test_struct_methods_mapping():
     """Test struct method mapping."""
     print("Test 3: Struct method mapping...")
-    tokens = tokenize(test_getattr_pattern)
+    tokens = py_tokenize(test_getattr_pattern)
     stmts = Parser(tokens).parse_module()
 
     solver = DispatchSolver({}, {})
@@ -102,7 +102,7 @@ def test_struct_methods_mapping():
 def test_monomorphism_detection():
     """Test monomorphism detection (functions with single caller)."""
     print("Test 4: Monomorphism detection...")
-    tokens = tokenize(test_direct_calls)
+    tokens = py_tokenize(test_direct_calls)
     stmts = Parser(tokens).parse_module()
 
     solver = DispatchSolver({}, {})

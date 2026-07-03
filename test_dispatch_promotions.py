@@ -5,7 +5,7 @@ This tests the new extensions to DispatchSolver for identifying functions
 that can be compiled to C and for promoting types across the full closure.
 """
 
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver, FunctionCompilability, TypePromotionSolver
 
 # Test case 1: Functions with full signatures (compilable)
@@ -53,7 +53,7 @@ def test_function_compilability():
     """Test identifying C-compilable functions."""
     print("Test 1: Function compilability (def→fn promotions)...")
 
-    tokens = tokenize(compilable_test)
+    tokens = py_tokenize(compilable_test)
     stmts = Parser(tokens).parse_module()
 
     compilability = FunctionCompilability({}, {})
@@ -74,7 +74,7 @@ def test_partial_signatures():
     """Test detection of functions with incomplete signatures."""
     print("\nTest 2: Partial signatures (not compilable)...")
 
-    tokens = tokenize(mixed_signatures_test)
+    tokens = py_tokenize(mixed_signatures_test)
     stmts = Parser(tokens).parse_module()
 
     compilability = FunctionCompilability({}, {})
@@ -99,7 +99,7 @@ def test_struct_method_compilability():
     """Test compilability analysis on struct methods."""
     print("\nTest 3: Struct method compilability...")
 
-    tokens = tokenize(struct_methods_test)
+    tokens = py_tokenize(struct_methods_test)
     stmts = Parser(tokens).parse_module()
 
     compilability = FunctionCompilability({}, {})
@@ -121,7 +121,7 @@ def test_dispatch_solver_with_compilability():
     """Test DispatchSolver integration with compilability analysis."""
     print("\nTest 4: DispatchSolver with compilability (integrated)...")
 
-    tokens = tokenize(compilable_test)
+    tokens = py_tokenize(compilable_test)
     stmts = Parser(tokens).parse_module()
 
     struct_field_types = {}
@@ -187,7 +187,7 @@ def safe_call(x: int) -> int:
     return x + 1
 """
 
-    tokens = tokenize(dynamic_test)
+    tokens = py_tokenize(dynamic_test)
     stmts = Parser(tokens).parse_module()
 
     compilability = FunctionCompilability({}, {})
@@ -211,7 +211,7 @@ def test_full_promotion_report():
     """Test comprehensive compilability report."""
     print("\nTest 7: Comprehensive compilability report...")
 
-    tokens = tokenize(compilable_test)
+    tokens = py_tokenize(compilable_test)
     stmts = Parser(tokens).parse_module()
 
     solver = DispatchSolver({}, {

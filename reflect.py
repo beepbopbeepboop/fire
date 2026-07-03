@@ -13,7 +13,7 @@ codegen uses, so the declared signature matches the emitted symbol exactly.
 import re
 
 import hashlib
-from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
+from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
 
 # Free functions whose C symbol the codegen does NOT overload-mangle (must match
@@ -162,7 +162,7 @@ def collect_exports_src(src: str) -> list:
     # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
     # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
     # parametric on its own.
-    return [e for e in collect_exports(Parser(tokenize(src)).parse_module())
+    return [e for e in collect_exports(Parser(py_tokenize(src)).parse_module())
             if e['name'].split('.', 1)[0] not in skip
             and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
 

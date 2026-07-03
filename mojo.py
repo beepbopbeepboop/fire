@@ -53,9 +53,9 @@ def _extract_codegen_flags(args):
 
 def interpret_and_execute(src_code, filename=None):
     try:
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
-        tokens = tokenize(src_code)
+        tokens = py_tokenize(src_code)
         stmts = Parser(tokens).parse_module()
         interpreter = Interpreter(filename=filename)
         for stmt in stmts:
@@ -114,7 +114,7 @@ _repl_expr()
 def run_repl():
     """Interactive REPL for Mojo code."""
     try:
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
     except ImportError as e:
         print(f"Error: Could not import interpreter components: {e}")
@@ -135,7 +135,7 @@ def run_repl():
 
             # Eval
             try:
-                tokens = tokenize(line)
+                tokens = py_tokenize(line)
                 stmts = Parser(tokens).parse_module()
 
                 # Print results for expressions
@@ -403,8 +403,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
             # Generate tokens
             try:
-                from mojo_compiler import tokenize
-                tokens = tokenize(src)
+                from mojo_compiler import py_tokenize
+                tokens = py_tokenize(src)
                 # Format tokens for consistent output
                 def format_token(tok):
                     kind_str = tok.kind
@@ -418,8 +418,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
             # Generate AST
             try:
-                from mojo_compiler import Parser, tokenize
-                tokens = tokenize(src)
+                from mojo_compiler import Parser, py_tokenize
+                tokens = py_tokenize(src)
                 ast = Parser(tokens).parse_module()
                 with open(f"{basename}.ast", "w") as f:
                     f.write(repr(ast))

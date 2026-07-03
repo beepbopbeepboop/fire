@@ -119,7 +119,7 @@ def _collect_stmts(entry_path, visited=None):
     Local .mojo imports are resolved relative to the entry file's directory;
     stdlib / site-package imports are skipped (they have no .mojo peer).
     """
-    from mojo_compiler import tokenize, Parser, ImportStmt, FromImportStmt
+    from mojo_compiler import py_tokenize, Parser, ImportStmt, FromImportStmt
 
     if visited is None:
         visited = {}   # path -> [(path, stmts), ...]  (memoised per root call)
@@ -134,7 +134,7 @@ def _collect_stmts(entry_path, visited=None):
     with open(path) as f:
         src = f.read()
 
-    tokens = tokenize(src)
+    tokens = py_tokenize(src)
     try:
         stmts  = Parser(tokens).parse_module()
     except SyntaxError as e:
@@ -211,7 +211,7 @@ def handle_dump(flag, input_file):
         sys.exit(1)
 
     try:
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
 
         want_all = (flag == '--dump-all')
 
@@ -223,7 +223,7 @@ def handle_dump(flag, input_file):
             for path, stmts in ordered:
                 with open(path) as f:
                     src = f.read()
-                tokens = tokenize(src)
+                tokens = py_tokenize(src)
                 for tok in tokens:
                     print(f"{tok.kind} {tok.value!r}")
             if want_all:
@@ -234,7 +234,7 @@ def handle_dump(flag, input_file):
                 print("=== AST ===")
             with open(input_file) as f:
                 src = f.read()
-            tokens = tokenize(src)
+            tokens = py_tokenize(src)
             stmts = Parser(tokens).parse_module()
             for stmt in stmts:
                 print(repr(stmt))

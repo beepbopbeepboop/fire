@@ -9,7 +9,7 @@ import argparse
 from pathlib import Path
 
 from gimple_codegen import compile_to_gimple, GimpleGen
-from mojo_compiler import tokenize, Parser, FunctionDef, StructDef
+from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
 from build_config import find_gcc
 
 
@@ -70,7 +70,7 @@ def build_module(input_file, output_so, output_symbols=None):
         source = f.read()
 
     # Parse and validate
-    tokens = tokenize(source)
+    tokens = py_tokenize(source)
     stmts = Parser(tokens).parse_module()
 
     # Extract symbols before compilation

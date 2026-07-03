@@ -66,9 +66,9 @@ def test_stage1_extern_boundary(wd):
               'extern int64_t s1_add' in cC and 's1_add (int64_t a, int64_t b)\n{' not in cC)
         # build library artifact separately, link, run
         from gimple_codegen import GimpleGen
-        from mojo_compiler import tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser
         lib_c = GimpleGen(emit_entry_points=False, module_name='s1lib').gen_module(
-            Parser(tokenize(libsrc)).parse_module())
+            Parser(py_tokenize(libsrc)).parse_module())
         cc, lc = os.path.join(wd, 'c1.c'), os.path.join(wd, 'l1.c')
         open(cc, 'w').write(cC); open(lc, 'w').write(lib_c)
         co, lo = os.path.join(wd, 'c1.o'), os.path.join(wd, 'l1.o')

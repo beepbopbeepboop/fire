@@ -15,7 +15,7 @@ mojo_file = sys.argv[1]
 sys.argv = ['mojo', mojo_file]
 
 # Import tokenizer to follow transitive closure
-from mojo_compiler import tokenize
+from mojo_compiler import py_tokenize
 
 def collect_transitive_files(entry_path, visited=None):
     """Collect all files in transitive import closure."""
@@ -35,7 +35,7 @@ def collect_transitive_files(entry_path, visited=None):
     try:
         with open(path) as f:
             src = f.read()
-        tokens = tokenize(src)
+        tokens = py_tokenize(src)
 
         # Simple import detection
         i = 0

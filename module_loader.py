@@ -56,10 +56,8 @@ def _find_stdlib_path():
         if os.path.isdir(path):
             return path
 
-    # Strategy 2: Relative to this module (from mojo-reference/)
-    # Pattern: mojo-reference/ -> ../modular/mojo/stdlib
-    relative_path = os.path.join(HERE, '..', 'modular', 'mojo', 'stdlib')
-    abs_path = os.path.abspath(relative_path)
+    # Strategy 2: Hardcoded path to stdlib
+    abs_path = '/Users/mrs/net/chatgpt/claude/mojo/stdlib'
     if os.path.isdir(abs_path):
         return abs_path
 

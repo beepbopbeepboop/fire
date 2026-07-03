@@ -7,7 +7,7 @@ Uses Python implementation:
 """
 
 import sys
-from mojo_compiler import tokenize
+from mojo_compiler import py_tokenize
 
 def main():
     """Entry point when run as Python script."""
@@ -22,7 +22,7 @@ def main():
         return
 
     # Tokenize and print tokens
-    tokens = tokenize(src)
+    tokens = py_tokenize(src)
     for tok in tokens:
         print(f"{tok.kind} {tok.value!r}")
 

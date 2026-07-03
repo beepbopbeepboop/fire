@@ -8,7 +8,7 @@ import re
 sys.path.insert(0, 'mojo')
 
 from myinterpreter import Interpreter
-from mojo_compiler import tokenize as python_tokenize
+from mojo_compiler import py_tokenize as python_tokenize
 
 def mojo_to_python(src: str) -> str:
     """Convert Mojo syntax to Python."""

@@ -25,7 +25,7 @@ from mojo_compiler import (
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
     GlobalStmt,
     StructDef, TraitDef,
-    tokenize, Parser,
+    py_tokenize, Parser,
 )
 from module_loader import load_module, get_symbol_type
 import mlir
@@ -2304,7 +2304,7 @@ class GimpleGen:
                         source = f.read()
 
                     # Compile the module to get both code and type info
-                    tokens = tokenize(source)
+                    tokens = py_tokenize(source)
                     stmts = Parser(tokens).parse_module()
 
                     # Create a temporary codegen to extract types
@@ -3975,7 +3975,7 @@ class GimpleGen:
             else:
                 # Expression: try to evaluate and convert to char*
                 try:
-                    from mojo_compiler import Parser as _P, tokenize as _tok
+                    from mojo_compiler import Parser as _P, py_tokenize as _tok
                     expr_node = _P(_tok(text))._parse_expr(0)
                     et, ev = self.lower_expr(expr_node)
                     if et == 'char *':
@@ -9790,7 +9790,7 @@ class GimpleGen:
                 path = _imp.resolve_source(module)
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
-                                 Parser(tokenize(src)).parse_module() if src else None)
+                                 Parser(py_tokenize(src)).parse_module() if src else None)
             except Exception:
                 _debug_note('cannot resolve/parse module', module)
                 cache[module] = (None, '', None)
@@ -12223,7 +12223,7 @@ def compile_to_c(mojo_src: str) -> str:
 
     Useful for execution tests where __GIMPLE restrictions don't apply.
     """
-    tokens = tokenize(mojo_src)
+    tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).parse_module()
     c_code = GimpleGen().gen_module(stmts)
 
@@ -12247,7 +12247,7 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     matching forward declaration for it. Link mode is a separate entry point —
     compile_to_gimple_linked — to avoid changing this ABI.)
     """
-    tokens = tokenize(mojo_src)
+    tokens = py_tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
@@ -12265,7 +12265,7 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     """Link-mode compile that also returns what the driver must link: the dylibs
     `import` recorded and the object files elaboration produced (generic
     instantiations). Returns (c_code, [dylib, ...], [object, ...])."""
-    tokens = tokenize(mojo_src)
+    tokens = py_tokenize(mojo_src)
     stmts  = Parser(tokens).parse_module()
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase B: dispatch table planning and C code generation."""
 
-from mojo_compiler import tokenize, Parser
+from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import DispatchSolver, DispatchTable
 
 # Test case: myinterpreter pattern
@@ -179,7 +179,7 @@ def test_dispatch_solver_phase_b():
     """Test DispatchSolver._plan_dispatch_tables() (Phase B)."""
     print("Test 6: DispatchSolver Phase B dispatch table planning...")
 
-    tokens = tokenize(myinterp_test)
+    tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
     struct_field_types = {
