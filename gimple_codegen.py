@@ -5092,10 +5092,15 @@ class GimpleGen:
                     src_type, src_val = self.lower_expr(node.args[2])
                     # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
                     # takes char * (passing an int is a -Wint-conversion error on GCC 14+).
+                    # Extract casts to temps (GIMPLE requires SSA values in call args).
                     if pat_type not in ('char *', 'void *'):
-                        pat_val = f"(char *){pat_val}"
+                        pat_cast = self._new_temp('char *')
+                        self._emit(f'  {pat_cast} = (char *){pat_val};')
+                        pat_val = pat_cast
                     if src_type not in ('char *', 'void *'):
-                        src_val = f"(char *){src_val}"
+                        src_cast = self._new_temp('char *')
+                        self._emit(f'  {src_cast} = (char *){src_val};')
+                        src_val = src_cast
                     # Resolve callback: may be a closure reference with env
                     if isinstance(cb_arg, IdentExpr) and cb_arg.name in self._closure_envs:
                         # _closure_envs maps inner_name → env_var (NOT lifted_name)
@@ -5138,8 +5143,11 @@ class GimpleGen:
                 if len(node.args) >= 1:
                     src_type, src_val = self.lower_expr(node.args[0])
                     # Cast to char* if needed (legacy int-cast strings)
+                    # Extract casts to temps (GIMPLE requires SSA values in call args).
                     if src_type not in ('char *', 'void *'):
-                        src_val = f"(char *){src_val}"
+                        src_cast = self._new_temp('char *')
+                        self._emit(f'  {src_cast} = (char *){src_val};')
+                        src_val = src_cast
                     # Extract do_imports if provided, default to 0 (false)
                     do_imports_val = '0'
                     if len(node.args) >= 2:

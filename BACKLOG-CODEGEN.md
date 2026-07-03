@@ -35,20 +35,16 @@ ABI.md documents the macro nature of this entry point.
 FIXED: `_TYPE_MAP` in `gimple_codegen.py` already maps `Int → int64_t`, `Bool → _Bool`,
 matching ABI.md. ABI.md discrepancy comment removed.
 
-## 3. Remaining `fix_gimple_*.py` defects not yet fixed at source
+## 3. ~~Remaining `fix_gimple_*.py` defects not yet fixed at source~~
 
-- `fix_gimple_casts.py` — casts still emitted in call-arg position on some
-  paths (GIMPLE requires a temp). Root fix belongs in `_emit_call`
-  (~line 3020); high blast radius.
-- `fix_gimple_literals.py` / `fix_gimple_slit_args.py` — some paths emit
-  raw string-literal assignments / pass `_slit_` globals directly as call
-  args. Route through `GimpleGen._intern_string` + a local temp.
-- `fix_gimple_global_args.py` — bootstrap output contains
-  `GimpleGen__emit(self, _slit_N)` debug-comment calls and an invalid
-  list-concat `+`.
-- `fix_gimple_struct_dups.py` / `fix_gimple_struct_order.py` — duplicate
-  `typedef struct` emission across modules and typedefs emitted after
-  forward decls that use them (assembly order in `gen_module` Phase 2b).
+FIXED: All `fix_gimple_*.py` post-processing scripts are now unnecessary.
+The codegen emits proper GIMPLE directly:
+- `_emit_call` properly loads `_slit_` globals and string literals into temps
+- Casts in call arguments are extracted to temps before the call
+- Struct typedefs are emitted before forward declarations
+- No duplicate typedefs or out-of-order struct definitions
+
+The `fix_gimple_*.py` scripts have been removed as legacy.
 
 ## 4. Known-wrong lowering kept for now (diagnosable via MOJO_DEBUG=1)
 
