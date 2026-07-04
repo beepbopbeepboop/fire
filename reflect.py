@@ -113,10 +113,14 @@ def collect_exports(stmts) -> list:
                 'signature': _struct_layout_sig(s, struct_names),
                 'kind': SYM_TYPE,
             })
-            for m in getattr(s, 'methods', []):
-                # Mangled C symbol is Struct_method (matches gimple_codegen);
-                # self is the first param, passed by pointer.
-                msym = f"{s.name}_{m.name}"
+            _moids = GimpleGen._struct_method_overload_ids(s)
+            for m, _oid in zip(getattr(s, 'methods', []), _moids):
+                # Mangled C symbol is Struct_method (matches gimple_codegen),
+                # plus a hash suffix when the method is overloaded (same
+                # _struct_method_overload_ids the codegen itself uses to name
+                # the emitted symbol) — self is the first param, passed by
+                # pointer.
+                msym = f"{s.name}_{m.name}{_oid}"
                 cret = _mt(m.return_type, struct_names) if m.return_type else 'void'
                 cparams = [f"{s.name} *"] + [
                     _mt(t, struct_names) for n, t in m.params if n != 'self']

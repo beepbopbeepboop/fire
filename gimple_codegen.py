@@ -7324,23 +7324,26 @@ class GimpleGen:
 
         best = max(survivors, key=_score)
         best_score = _score(best)
-        if best_score == 0:
-            # Same arity, but no candidate's declared param type matched any
-            # argument's type at all — our type erasure genuinely can't tell
-            # these overloads apart (e.g. two structurally-different Mojo
-            # generic types, like Tuple[T,T] and Interval[T], both erasing to
-            # int64_t in this codegen's type system today). Guessing via
-            # declaration order here would silently commit to a symbol a real
-            # call site may not mean, and is strictly worse than the
-            # pre-existing behavior for this case (an unsuffixed call against
-            # a catch-all variadic stub, which at least type-checks). Signal
-            # "can't resolve" so the caller falls back to that old path.
-            _debug_note('overload arity-tied but type-indistinguishable, deferring to unsuffixed fallback',
-                        f"candidates={[c['overload_id'] for c in survivors]}")
-            return None
+        # Same arity, but (when best_score == 0) no candidate's declared param
+        # type matched any argument's type at all — our type erasure genuinely
+        # can't tell these overloads apart (e.g. two structurally-different
+        # Mojo generic types, like Tuple[T,T] and Interval[T], both erasing to
+        # int64_t in this codegen's type system today). This used to return
+        # None here so the caller would fall back to an unsuffixed call
+        # against a "catch-all variadic stub" — but survivors has 2+ entries
+        # whenever we reach this point (the len(survivors)==1 case returns
+        # above), and gimple_codegen always hash-suffixes a method once it has
+        # 2+ overloads, so that stub is never actually defined: the fallback
+        # call site links (against -undefined dynamic_lookup) but crashes at
+        # dyld resolution the moment it's actually invoked (confirmed via
+        # AMDBufferResource/String in build/libmojostdlib.dylib — the "use"
+        # side's assumption didn't match what the "generate" side emits).
+        # Picking a real, defined candidate deterministically — same
+        # first-in-declaration-order rule already used for genuine ties below
+        # — is strictly safer: a plausible overload beats a guaranteed crash.
         ties = [c for c in survivors if _score(c) == best_score]
         if len(ties) > 1:
-            _debug_note('ambiguous overload, picking first in declaration order',
+            _debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                         f"candidates={[c['overload_id'] for c in ties]}")
         return ties[0]
 
@@ -10688,11 +10691,18 @@ class GimpleGen:
                 if src:
                     self._imported_generic_structs.setdefault(local, src)
 
-    def _struct_method_overload_ids(self, stmt) -> list:
+    @staticmethod
+    def _struct_method_overload_ids(stmt) -> list:
         """Overload-id per method, aligned with stmt.methods. Must match the
         emission loop in gen_module so the method's C symbol, its closure-lookup
         key (current_func_name), and the pre-pass closure registration all agree.
-        Empty string for a non-overloaded method."""
+        Empty string for a non-overloaded method. A @staticmethod (no `self` use)
+        so reflect.py's collect_exports can call the exact same logic when
+        building each method's exported C symbol — reflect.py previously used a
+        bare `Struct_method` name unconditionally, which silently diverged from
+        this hash-suffix scheme for any overloaded method and produced a
+        reflection-table entry (and forward-declared `extern` in the dylib's
+        merged reflect table) pointing at a symbol nothing ever defines."""
         counts = {}
         for m in stmt.methods:
             counts[m.name] = counts.get(m.name, 0) + 1
