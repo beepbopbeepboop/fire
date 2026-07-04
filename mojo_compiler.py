@@ -351,6 +351,7 @@ class FunctionDef:
     body: list
     decorators: list = field(default_factory=list)
     param_convs: dict = field(default_factory=dict)  # name -> convention str|None
+    param_has_default: dict = field(default_factory=dict)  # name -> True if a default value was given
     line: int = 0
     col: int = 0
 
@@ -728,6 +729,47 @@ _KW_PREC = {
     'is': 5,
 }
 
+def _synthesize_fieldwise_inits(stmts: list) -> list:
+    """Mojo's @fieldwise_init decorator synthesizes a memberwise
+    __init__(out self, field1, field2, ...) constructor alongside any
+    explicit __init__ a struct already defines. The parser only sees Mojo
+    source text and has no other way to represent this real, additional
+    constructor overload, so materialize it here as an ordinary
+    FunctionDef appended to StructDef.methods.
+
+    Called once, unconditionally, at the end of parse_module() — not as an
+    opt-in step some callers remember to invoke — so every consumer of a
+    parsed module (codegen's own struct-method walk, source-based overload
+    elaboration, dylib reflection export) sees the identical
+    StructDef.methods list. If different consumers synthesized this
+    independently, a dylib-resolved call and a source-elaborated call for
+    the same struct could disagree on the overload's parameter order/mangling.
+
+    Idempotent via a marker on the StructDef itself (not a local set),
+    since parsed stmts get cached and handed to multiple GimpleGen
+    instances (module_stmts) — a second call on the same objects must not
+    double-append.
+    """
+    for s in stmts:
+        if not isinstance(s, StructDef):
+            continue
+        if getattr(s, '_fieldwise_ctor_synthesized', False):
+            continue
+        s._fieldwise_ctor_synthesized = True
+        if 'fieldwise_init' not in (s.decorators or []):
+            continue
+        field_decls = [f for f in s.fields if isinstance(f, VarDecl)]
+        if not field_decls:
+            continue
+        params = [('self', s.name)] + [(f.name, f.type_ann) for f in field_decls]
+        body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
+                            value=IdentExpr(name=f.name))
+                for f in field_decls]
+        s.methods.append(FunctionDef(
+            name='__init__', params=params, return_type=None, body=body,
+            param_convs={'self': 'out'}))
+    return stmts
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -774,7 +816,7 @@ class Parser:
         while not self._at_end():
             stmts.append(self._parse_stmt())
             self._skip_newlines()
-        return stmts
+        return _synthesize_fieldwise_inits(stmts)
 
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line
@@ -1218,6 +1260,7 @@ class Parser:
         self._expect("LPAREN")
         params = []
         param_convs = {}
+        param_has_default = {}
         while self._peek().kind != "RPAREN":
             # Skip newlines and indentation within parameter list
             while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
@@ -1270,6 +1313,7 @@ class Parser:
                         self._advance(); ptype = self._parse_type_ann()
                     if self._peek().kind == "ASSIGN":
                         self._advance(); self._parse_expr(0)
+                        param_has_default[pname] = True
                     params.append(("*" + pname, ptype))
                     if conv is not None: param_convs[pname] = conv
                     if self._peek().kind == "COMMA": self._advance()
@@ -1292,9 +1336,12 @@ class Parser:
             ptype = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
-            # skip default value =expr
+            # Default value =expr: parsed and discarded (no comptime evaluator here),
+            # but its mere presence narrows this param's contribution to the
+            # function's minimum callable arity — needed for overload resolution.
             if self._peek().kind == "ASSIGN":
                 self._advance(); self._parse_expr(0)
+                param_has_default[pname] = True
             params.append((pname, ptype))
             if conv is not None: param_convs[pname] = conv
             # Skip trailing comma and newlines
@@ -1372,7 +1419,8 @@ class Parser:
         body = self._parse_block()
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
-                           param_convs=param_convs)
+                           param_convs=param_convs,
+                           param_has_default=param_has_default)
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
