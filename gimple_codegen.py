@@ -2265,6 +2265,7 @@ class GimpleGen:
         # Container / layout state
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
         self._nested_elem_types: dict[str, str] = {}  # container var → element type of lists within lists
+        self._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
         # Actual type of int64_t-boxed pointers, keyed by temp/var name. MUST reset
         # per function: temp names (_tN) recycle, so a stale entry from one function
         # would mis-type a same-named temp in the next (e.g. an open() file handle
@@ -4432,6 +4433,20 @@ class GimpleGen:
 
         op = '->' if '*' in ot else '.'
         struct_name = _struct_name_of(ot)
+        # Span/StringSlice's `mut` bracket-parameter isn't a real field of the
+        # erased fat-pointer struct (see struct_field_types['Span'] and
+        # _param_ctype's _span_mut_params bookkeeping) — resolve it from the
+        # literal recorded at the binding site instead of falling through to
+        # the generic "unknown struct field" fallback below, which would
+        # otherwise emit an invalid `->mut` access.
+        if node.member == 'mut' and struct_name == 'Span' and isinstance(node.obj, IdentExpr):
+            mv = self._span_mut_params.get(node.obj.name)
+            if mv is not None:
+                # GIMPLE strict mode: a bare nonzero integer constant is typed
+                # 'int', and assigning it to a _Bool without an explicit cast
+                # is a 'non-trivial conversion in integer_cst' error (same
+                # reason _new_val special-cases int64_t constants).
+                return '_Bool', self._new_val('_Bool', '(_Bool)1' if mv else '(_Bool)0')
         field_map = self.struct_field_types.get(struct_name, {})
         if node.member in field_map:
             field_type = field_map[node.member]
@@ -9833,6 +9848,16 @@ class GimpleGen:
             # Only add const if not already present
             if not ctype.startswith('const '):
                 ctype = 'const ' + ctype
+        # Span/StringSlice's `mut` comptime Bool bracket-parameter is erased by
+        # _mojo_type/_resolve_type down to the fat-pointer `Span *` above, with
+        # no record of what it was bound to — but the literal is still visible
+        # in the raw annotation text here (e.g. "StringSlice[mut=True,...]").
+        # Recorded so _lower_MemberExpr can answer `b.mut` instead of emitting
+        # an invalid field access on the erased struct.
+        if isinstance(ptype, str):
+            m = re.search(r'\b(?:Span|StringSlice)\[.*\bmut\s*=\s*(True|False)\b', ptype)
+            if m:
+                self._span_mut_params[pname] = (m.group(1) == 'True')
         return ctype
 
     # Entry points, the toplevel initializer, and the bootstrap/self-host ABI
