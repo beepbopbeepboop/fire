@@ -7383,6 +7383,30 @@ class GimpleGen:
                     ftype = fields_dict[kname]
                     at, av = self.lower_expr(kexpr)
                     self._safe_coerce_emit(at, ftype, av, f"{t}->{_safe_field(kname)}")
+        if struct_name == 'Span':
+            # Span is erased to a hardcoded fat-pointer {_data, _len} struct
+            # with no notion of its real element type (see struct_field_types
+            # seed + _mojo_type's Span/StringSlice branch) — track it
+            # ourselves, mirroring the existing _elem_types side-table
+            # already used for MojoList *, so _lower_subscript's Span arm can
+            # answer `span[i]` with the real element type instead of always
+            # assuming a raw byte. Only covers the constructor shapes this
+            # file actually needs (Span(ptr=.., length=..), Span(list_var),
+            # Span(list=list_var)); anything else leaves _elem_types
+            # untracked and _lower_subscript falls back to its existing
+            # byte-oriented behavior unchanged.
+            kw = dict(kwargs or [])
+            elem_ct = None
+            if 'ptr' in kw and isinstance(kw['ptr'], IdentExpr):
+                ptr_ct = self.var_types.get(kw['ptr'].name)
+                if ptr_ct:
+                    elem_ct = _elem_type(ptr_ct)
+            elif 'list' in kw and isinstance(kw['list'], IdentExpr):
+                elem_ct = self._elem_types.get(kw['list'].name)
+            elif args and isinstance(args[0], IdentExpr):
+                elem_ct = self._elem_types.get(args[0].name)
+            if elem_ct:
+                self._elem_types[t] = elem_ct
         return ctype, t
 
     # ── Subscript lowering ────────────────────────────────────────────────
@@ -7558,6 +7582,31 @@ class GimpleGen:
 
         # Struct pointer subscript: Span[i] → Span->_data[i] etc.
         if ot.endswith(' *') and _struct_name_of(ot) in self.struct_field_types:
+            tracked = self._elem_types.get(ov)
+            if tracked and tracked in self.struct_field_types:
+                # Span's hardcoded {_data, _len} model always assumes a raw
+                # byte element (see struct_field_types['Span'] and
+                # _struct_data_field) — but this particular Span * was
+                # constructed from a real struct-typed source and its element
+                # type was tracked (_lower_struct_constructor's Span
+                # handling), mirroring the existing _elem_types side-table
+                # already used for MojoList *. Cast the raw byte _data
+                # pointer through the real element pointer type and reuse the
+                # same generic _mojo_at_ scaled-arithmetic helper (already
+                # works for any element C type, struct or scalar — no new
+                # helper-generation code needed) instead of the byte-oriented
+                # fallback below.
+                fname, ftype = self._struct_data_field(ot)
+                if fname is not None:
+                    raw = self._new_val(ftype, f"{ov}->{fname}")
+                    et_ptr = tracked + ' *'
+                    dp = self._new_val(et_ptr, f"({et_ptr}){raw}")
+                    cn = _c_id(tracked)
+                    self._ptr_helpers_needed.add(tracked)
+                    idx64 = self._new_val('int64_t', f"(int64_t) {iv}")
+                    addr = self._new_val(et_ptr, f"_mojo_at_{cn} ({dp}, {idx64})")
+                    t = self._new_val(tracked, f"*{addr}")
+                    return tracked, t
             fname, ftype = self._struct_data_field(ot)
             if fname is not None:
                 dp = self._new_val(ftype, f"{ov}->{fname}")
