@@ -218,11 +218,29 @@ class ModuleLoader:
                         c_params.append(f"{c_type} {pname}")
 
                     if name in exports:
-                        # Overloaded function: use variadic so all arities work
+                        # Overloaded function: go fully variadic (bare `(...)`,
+                        # no leading typed param) so every call site — whatever
+                        # overload it actually resolves to — typechecks.
+                        #
+                        # This used to keep the FIRST overload's leading
+                        # parameter type (e.g. `(uint32_t uid, ...)`), which
+                        # looks more informative but is actively wrong: a call
+                        # site invoking a DIFFERENT overload (e.g.
+                        # `_getpw_macos(name: String)`, called with a char*)
+                        # got its argument force-coerced to that unrelated
+                        # first type — not just a cosmetic mismatch in the
+                        # extern text, since func_param_types (built from
+                        # c_parameters below) drives real call-site coercion
+                        # in _emit_call. A bare `(...)` gives c_parameters=[],
+                        # so _emit_call has no declared type to coerce
+                        # against and passes each argument through as its own
+                        # natural type — correct for whichever overload is
+                        # actually meant, instead of silently correct-looking
+                        # for only the first.
                         existing = exports[name]
-                        first_param = existing['c_parameters'][0] if existing.get('c_parameters') else ''
-                        variadic_sig = f"{existing['c_return_type']} {name} ({first_param + ', ...' if first_param else '...'})"
-                        existing['signature'] = variadic_sig
+                        existing['signature'] = f"{existing['c_return_type']} {name} (...)"
+                        existing['c_parameters'] = []
+                        existing['parameters'] = []
                         existing['variadic'] = True
                         continue
 

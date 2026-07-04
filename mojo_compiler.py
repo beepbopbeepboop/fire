@@ -960,6 +960,11 @@ class Parser:
             if kw.kind == "KW" and kw.value in ("def", "fn"):
                 self._advance()
                 return self._parse_funcdef(decs)
+            # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
+            # applied to a `var` declaration: decorators carry no codegen
+            # meaning here, so just parse the var decl and drop them.
+            if kw.kind == "KW" and kw.value == "var":
+                return self._parse_var_decl()
             self._expect("KW", "def or fn")
             return self._parse_funcdef(decs)
         expr = self._parse_expr(0)

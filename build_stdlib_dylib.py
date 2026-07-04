@@ -19,6 +19,7 @@ import platform
 import argparse
 import tempfile
 import subprocess
+from concurrent.futures import ProcessPoolExecutor
 
 import cas
 import reflect
@@ -187,22 +188,95 @@ def _localize_symbols(obj: str, syms: set, workdir: str, name: str) -> str:
     return ''
 
 
+def _module_name_for(path: str) -> str:
+    """Path-relative module name so __init__.mojo files from different
+    packages get unique symbol prefixes (std_os___init__ vs std___init__).
+    Falls back to basename for modules outside STDLIB_PATH (e.g. test
+    modules) — os.path.relpath would produce '../../../...' paths with dots
+    that are invalid in C identifiers and cause GCC to reject the generated
+    .c file."""
+    rel = os.path.relpath(path, STDLIB_PATH)
+    if rel.startswith('..'):
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    return os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+
+
+def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str) -> bytes:
+    """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
+    cfile = os.path.join(workdir, name + '.c')
+    ofile = os.path.join(workdir, name + '.o')
+    with open(cfile, 'w') as f:
+        f.write(compile_module_to_c(src, path, name))
+    subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
+    with open(ofile, 'rb') as f:
+        return f.read()
+
+
+def _compile_module_job(path: str, workdir: str, use_cache: bool):
+    """Per-module independent work (source → object): read, collect exports,
+    compile (cache-or-build). Each module is fully independent — no shared
+    state — so this parallelizes across processes the same way
+    compile_stdlib.py's transpile_file does. Returns (path, name, ofile,
+    exports, error, hit) — error is None on success; the symbol-collision
+    dedup afterward (order-sensitive, so kept sequential) reads ofile.
+
+    `hit` reports this job's own CAS hit/miss so the parent can aggregate
+    cas.stats: with -j>1 each job runs in its own worker process, so
+    cas.get_or_build's in-process stats increment is invisible to the
+    parent's cas.stats (a separate module-global per process) — the
+    aggregate would otherwise silently under-report."""
+    gcc = find_gcc()
+    name = _module_name_for(path)
+    src = open(path).read()
+    try:
+        exports = reflect.collect_exports_src(src)
+    except Exception:
+        exports = []
+    hit = None
+    try:
+        if use_cache:
+            key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
+            ofile, hit = cas.get_or_build(
+                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc))
+        else:
+            ofile = os.path.join(workdir, name + '.o')
+            with open(ofile, 'wb') as f:
+                f.write(_compile_one_object(src, path, name, workdir, gcc))
+    except Exception as e:
+        return path, name, None, exports, str(e), hit
+    return path, name, ofile, exports, None, hit
+
+
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
-          extra_exports: list = None) -> str:
+          extra_exports: list = None, jobs: int = 1) -> str:
     gcc = find_gcc()
     os.makedirs(os.path.dirname(out), exist_ok=True)
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
 
-    def compile_one_object(src, path, name):
-        """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
-        cfile = os.path.join(workdir, name + '.c')
-        ofile = os.path.join(workdir, name + '.o')
-        with open(cfile, 'w') as f:
-            f.write(compile_module_to_c(src, path, name))
-        subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
-        with open(ofile, 'rb') as f:
-            return f.read()
+    # Compile every module's source → object first (fully independent per
+    # module, so parallelizes cleanly across processes — same scheme as
+    # compile_stdlib.py's ProcessPoolExecutor use). Order is preserved
+    # (pool.map, not as_completed) because the symbol-collision dedup below
+    # is order-sensitive ("first module wins") and must stay sequential.
+    if jobs > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(
+                _compile_module_job, modules,
+                [workdir] * len(modules), [use_cache] * len(modules)))
+        # Merge each job's own CAS hit/miss into this process's cas.stats —
+        # see _compile_module_job's docstring on why worker-process stats
+        # don't propagate on their own. Only needed here: the jobs<=1 path
+        # below calls cas.get_or_build in-process, where it already
+        # increments cas.stats directly — redoing it here would double-count.
+        for r in results:
+            hit = r[-1]
+            if hit is True:
+                cas.stats['hits'] += 1
+            elif hit is False:
+                cas.stats['misses'] += 1
+    else:
+        results = [_compile_module_job(path, workdir, use_cache) for path in modules]
 
     # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
     # symbol from it if present, else falls back to source), so it need not be
@@ -215,33 +289,9 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     seen_syms = set()
     skipped = 0
     excluded = 0
-    for path in modules:
-        # Use path-relative module name so __init__.mojo files from different
-        # packages get unique symbol prefixes (std_os___init__ vs std___init__).
-        # Fall back to basename for modules outside STDLIB_PATH (e.g. test modules)
-        # — os.path.relpath would produce '../../../...' paths with dots that are
-        # invalid in C identifiers and cause GCC to reject the generated .c file.
-        rel = os.path.relpath(path, STDLIB_PATH)
-        if rel.startswith('..'):
-            name = os.path.splitext(os.path.basename(path))[0].replace('-', '_')
-        else:
-            name = os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
-        src = open(path).read()
-        try:
-            exports = reflect.collect_exports_src(src)
-        except Exception:
-            exports = []
-        try:
-            if use_cache:
-                key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
-                ofile, hit = cas.get_or_build(
-                    key, '.o', lambda s=src, p=path, n=name: compile_one_object(s, p, n))
-            else:
-                ofile = os.path.join(workdir, name + '.o')
-                with open(ofile, 'wb') as f:
-                    f.write(compile_one_object(src, path, name))
-        except Exception as e:
-            print(f"  skip {os.path.relpath(path)}: {e}", file=sys.stderr)
+    for path, name, ofile, exports, error, _hit in results:
+        if error is not None:
+            print(f"  skip {os.path.relpath(path)}: {error}", file=sys.stderr)
             skipped += 1
             continue
         defs = _defined_symbols(gcc, ofile)
@@ -368,11 +418,11 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     return out
 
 
-def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True) -> str:
+def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1) -> str:
     """Build the monolithic stdlib dylib from all auto-discovered library modules."""
     rt_header = os.path.join(RUNTIME, 'mojo_runtime.h')
     rt_exports = reflect.collect_runtime_exports_h(rt_header)
-    return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports)
+    return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports, jobs=jobs)
 
 
 def main():
@@ -380,12 +430,18 @@ def main():
     ap.add_argument('modules', nargs='*', help='library .mojo modules to bundle (default: all stdlib)')
     ap.add_argument('-o', '--output', default=DEFAULT_OUT, help='output dylib path')
     ap.add_argument('--no-cache', action='store_true', help='bypass the CAS')
+    ap.add_argument('-j', '--jobs', type=int, default=os.cpu_count(),
+                     help='Parallel workers for the per-module Mojo→C→.o compile '
+                          '(each module is independent, same scheme as '
+                          'compile_stdlib.py). Default: os.cpu_count(). Use -j1 '
+                          'for sequential (deterministic ordering, easier to read '
+                          'failures as they happen).')
     args = ap.parse_args()
     modules = stdlib_modules()
     if args.modules:
         modules = list(args.modules)
     cas.reset_stats()
-    out = build(modules, args.output, use_cache=not args.no_cache)
+    out = build(modules, args.output, use_cache=not args.no_cache, jobs=args.jobs)
     msg = f"built {out} from {len(modules)} module(s) + runtime"
     if not args.no_cache:
         msg += f"  [cas hits={cas.stats['hits']} misses={cas.stats['misses']}]"

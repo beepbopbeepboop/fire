@@ -3374,7 +3374,12 @@ class GimpleGen:
                     self._emit(f'  {dest} = {ip};')
                 else:
                     self._emit(f'  {dest} = (int){ip};')
-            elif d.endswith(' *') and s in ('int', 'int64_t'):
+            elif d.endswith(' *') and s in ('int', 'int64_t', 'char'):
+                # 'char' here too: a narrower-than-pointer scalar (e.g. a
+                # single dereferenced byte from an unresolved generic
+                # element access) cast directly to a pointer type is the
+                # same -Wint-to-pointer-cast size mismatch as 'int' — widen
+                # through int64_t first, same as the other narrow sources.
                 v = self._ensure_local(s, v)
                 ip = self._new_val('int64_t', f'(int64_t){v}')
                 self._emit(f'  {dest} = ({d}){ip};')
@@ -3952,6 +3957,16 @@ class GimpleGen:
     # ── Expression handlers (one per AST node type) ───────────────────────
 
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
+        # A literal beyond INT64_MAX (e.g. UInt64.MAX == 2**64-1, used as a
+        # mask) doesn't fit any signed C integer type; GCC silently treats
+        # the bare decimal as unsigned but still warns ("integer constant is
+        # so large that it is unsigned"). An explicit ULL suffix says what we
+        # mean and silences the warning without changing the value.
+        if node.value > 0x7FFFFFFFFFFFFFFF:
+            # Also widen the type tag to uint64_t: a plain 'int' temp holding
+            # this literal would itself overflow (e.g. UInt64.MAX truncating
+            # to -1) before any later cast gets a chance to widen it.
+            return 'uint64_t', f'{node.value}ULL'
         return 'int', str(node.value)
 
     def _lower_FloatLiteral(self, node) -> tuple[str, str]:
@@ -4161,9 +4176,16 @@ class GimpleGen:
             'InlineArray', 'InlineList', 'StaticTuple',
         })
         if (name in self.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in self.var_types:
-            t = self._new_temp('int')
-            self._emit(f'  {t} = 0;  /* class ref {name} as value */')
-            return 'int', t
+            # int64_t, not int: this placeholder commonly flows into a (void *)
+            # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
+            # refs) — a 4-byte int there is a real -Wint-to-pointer-cast size
+            # mismatch on LP64, whereas int64_t matches pointer width exactly.
+            t = self._new_temp('int64_t')
+            # GIMPLE requires an int64_t lvalue's initializer to itself be an
+            # int64_t-typed constant — a bare `0` is `int` and GCC rejects the
+            # mismatch as a "non-trivial conversion in 'integer_cst'".
+            self._emit(f'  {t} = (int64_t)0;  /* class ref {name} as value */')
+            return 'int64_t', t
         # Python builtin used as a value (e.g. passed to scope.define) — map to C function pointer
         if name in self.BUILTIN_VALUE_MAP and name not in self.var_types:
             c_name = self.BUILTIN_VALUE_MAP[name]
@@ -4409,7 +4431,16 @@ class GimpleGen:
                 and node.obj.name not in self.BUILTIN_VALUE_MAP):
             _fn_name = node.obj.name
             _c_fn = self._c_names.get(_fn_name, _safe_name(_fn_name))
-            _ret = self.func_return_types.get(_fn_name, 'int64_t')
+            # Resolve through _resolve_type: some imports register a bare
+            # 'int' sentinel (unknown-signature placeholder, see
+            # _gen_stmt_FromImportStmt) rather than a real C type. Declaring
+            # this temp as a genuine 4-byte int when the value later gets
+            # boxed via `(void *)` for mojo_obj_getattr is a real
+            # -Wint-to-pointer-cast size mismatch; resolving narrows the fix
+            # to this call-result temp without touching the shared dict (a
+            # wider fix there previously broke unrelated bare-`0`-literal
+            # class-ref temps expecting the raw, unresolved type).
+            _ret = self._resolve_type(self.func_return_types.get(_fn_name, 'int64_t'))
             ot = _ret
             ov = self._new_val(_ret, f'{_c_fn} ()')
         else:
@@ -4417,9 +4448,9 @@ class GimpleGen:
 
         # If the object lowered to a C type name (class used as cls argument),
         # treat it as NULL — the method shouldn't use cls for value access
-        if ov in self.struct_field_types and ot == 'int':
-            null_tmp = self._new_temp('int')
-            self._emit(f"  {null_tmp} = 0;  /* class ref {ov} as NULL */")
+        if ov in self.struct_field_types and ot == 'int64_t':
+            null_tmp = self._new_temp('int64_t')
+            self._emit(f"  {null_tmp} = (int64_t)0;  /* class ref {ov} as NULL */")
             ov = null_tmp
 
 
@@ -4530,6 +4561,13 @@ class GimpleGen:
         elif ot in ('int', 'int64_t', 'void *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
             # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
+            # A genuine 4-byte 'int' (as opposed to the 8-byte int64_t most
+            # producers actually emit under this same 'int' type tag) is a
+            # real -Wint-to-pointer-cast size mismatch when boxed directly —
+            # widen through int64_t first, same as every other narrow-source
+            # pointer cast in this file.
+            if ot == 'int':
+                ov = self._new_val('int64_t', f'(int64_t){ov}')
             vp = self._new_val('void *', f'(void *){ov}')
             return 'int64_t', self._call_expr('int64_t', 'mojo_obj_getattr',
                             [('void *', vp), ('char *', f'"{node.member}"')])
@@ -5675,10 +5713,14 @@ class GimpleGen:
             at, av = self.lower_expr(args[0])
             if at == 'char *':
                 return self._void_call('mojo_set_add_str', [('MojoSet *', ov), ('char *', av)])
-            return self._void_call('mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av)])
+            av64 = self._to_int64(at, av)
+            return self._void_call('mojo_set_add_int', [('MojoSet *', ov), ('int64_t', av64)])
         if method == 'discard' and args:
             at, av = self.lower_expr(args[0])
-            return self._void_call('mojo_set_discard', [('MojoSet *', ov), (at, av)])
+            if at == 'char *':
+                return self._void_call('mojo_set_discard', [('MojoSet *', ov), (at, av)])
+            av64 = self._to_int64(at, av)
+            return self._void_call('mojo_set_discard', [('MojoSet *', ov), ('int64_t', av64)])
         if method == 'copy':
             return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_copy', [('MojoSet *', ov)])
         return 'int', self._new_val('int', '0')
@@ -5788,6 +5830,12 @@ class GimpleGen:
                 iter_val = arg_vals[0]
                 iter_type = arg_pairs[0][0] if arg_pairs else 'MojoList *'
                 if iter_type != 'MojoList *':
+                    # A narrow scalar (e.g. an unsupported `materialize[...]`
+                    # comptime call stubbed to plain int 0) cast straight to
+                    # a pointer type is a real -Wint-to-pointer-cast size
+                    # mismatch — widen through int64_t first, as elsewhere.
+                    if iter_type in ('int', 'char'):
+                        iter_val = self._new_val('int64_t', f'(int64_t){iter_val}')
                     iter_val = self._new_val('MojoList *', f"(MojoList *){iter_val}")
                 return 'char *', self._call_expr('char *', 'mojo_str_join', [('char *', cstr_ov), ('MojoList *', iter_val)])
             t = self._new_temp('char *')
@@ -6142,7 +6190,7 @@ class GimpleGen:
                     else:
                         new_type_args.append(ta)
                 type_args = new_type_args
-                info = el.elaborate_generic_call(module_src, g, type_args)
+                info = el.elaborate_generic_call(module_src, g, type_args, arg_count=len(arg_pairs))
                 if info:
                     self._refine_generic_return_type(info, module_src, g, type_args, len(node.args))
             else:
@@ -6312,6 +6360,15 @@ class GimpleGen:
         # padding) — semantically a stand-in, but keeps the call C-typesafe.
         while len(arg_pairs) < len(info['params']):
             arg_pairs.append(('int', '0'))
+        # A variadic pack param (`*args: *Ts`) collapses to a single generic
+        # slot in the elaborated signature (elaborate.py's _signature has no
+        # notion of packing N call-site args into one MojoList*), so a call
+        # site passing more values than the template's own params can supply
+        # more arg_pairs than info['params'] has slots. Truncate the excess —
+        # a stand-in like the padding above, just in the other direction —
+        # so the call stays argument-count-safe against the extern decl.
+        if len(arg_pairs) > len(info['params']):
+            arg_pairs = arg_pairs[:len(info['params'])]
         _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
         if _decl not in self._elaborated_externs:
             self._elaborated_externs.append(_decl)

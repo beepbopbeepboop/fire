@@ -34,9 +34,13 @@ _HEAD = re.compile(r'\b(?:fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 def _bracket_depth_by_line(module_src: str) -> list[int]:
     """depths[j] = bracket nesting depth (from `([{`) in effect at the START
     of 0-indexed line `j` of `module_src.splitlines()`. Comment- and
-    string-literal-aware (including triple-quoted docstrings) so a `[`/`]`/
-    `(`/`)`/`{`/`}` inside a literal or comment is never mistaken for a
-    structural bracket.
+    string-literal-aware (including triple-quoted docstrings and single
+    backtick-delimited MLIR literals, e.g. `` `#interp.pointer<0> : ` `` —
+    without backtick-awareness a literal `#` inside one of these is
+    mistaken for a comment-start, silently swallowing the rest of the line
+    including its closing bracket and permanently desyncing depth for the
+    rest of the file) so a `[`/`]`/`(`/`)`/`{`/`}` inside a literal or
+    comment is never mistaken for a structural bracket.
 
     Exists because a generic's header (`def name[T, /](args) -> Ret[...]:`)
     may itself span multiple physical lines, with a continuation line — e.g.
@@ -74,7 +78,7 @@ def _bracket_depth_by_line(module_src: str) -> list[int]:
             in_str = module_src[i:i + 3]
             i += 3
             continue
-        if c in ('"', "'"):
+        if c in ('"', "'", '`'):
             in_str = c
             i += 1
             continue
@@ -383,6 +387,17 @@ class Elaborator:
         if not params or len(type_args) < len(params):
             return None
         targs = dict(zip(params, type_args[:len(params)]))
+        # A variadic type-pack param (`*Ts`) collapses to a single bound type
+        # (the first arg's) regardless of how many variadic value-args were
+        # actually passed (infer_type_args/zip only ever see one slot for it).
+        # Two calls with the same element type but different arities (e.g.
+        # `chain(a, b)` vs `chain(a, b, c)`) would otherwise mangle/cache to
+        # the identical symbol built for whichever arity compiled first,
+        # producing a real argument-count mismatch at the other call site.
+        # Fold the call arity into the instantiation identity so each arity
+        # gets its own mangled symbol/cache entry.
+        if arg_count is not None and any(p.startswith('*') for p in params):
+            targs['ArgC'] = arg_count
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
