@@ -3397,6 +3397,25 @@ class GimpleGen:
     def _resolve_type(self, ann: str | None) -> str:
         if ann in self.struct_field_types:
             return f"{ann} *"
+        # _mojo_type is a stateless module-level function with no access to
+        # struct_field_types, so a pointer-to-a-known-struct annotation like
+        # `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` would otherwise
+        # fall through _mojo_type's UnsafePointer branch to its int64_t
+        # default, even though the element type IS a real, known struct here.
+        if isinstance(ann, str) and '[' in ann:
+            base, rest = ann.split('[', 1)
+            base = base.strip()
+            if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
+                elem_ann = _split_top_level_commas(rest.rstrip(']').strip())[0].strip()
+                # Scalar newtypes (Int, UInt8, Bool, ...) ARE real `struct
+                # X(...)` definitions in the stdlib and so CAN end up
+                # registered in struct_field_types, but the codegen
+                # deliberately erases them to raw C scalars everywhere via
+                # _TYPE_MAP — that convention must win here, or e.g.
+                # alloc[UInt8]'s return type gets wrongly boxed as "UInt8 *"
+                # instead of the correct "uint8_t *".
+                if elem_ann in self.struct_field_types and elem_ann not in _TYPE_MAP:
+                    return f"{elem_ann} *"
         return _mojo_type(ann)
 
     def _infer_param_types(self, func: FunctionDef) -> dict[str, str]:
@@ -5700,12 +5719,26 @@ class GimpleGen:
                 at, av = self.lower_expr(args[0])
                 # GIMPLE requires the pointer operand of `*` to be a register, so
                 # spill ov (which may be a member access like self->_data) first.
-                # Spill the value too: a pointer→int64_t coercion is a double cast
-                # `(int64_t)(void*)x` that GIMPLE rejects inside `*p = ...`.
                 ovl = self._ensure_local(ot, ov)
-                sv = self._new_temp(elem)
-                self._safe_coerce_emit(at, elem, av, sv)
-                self._emit(f"  *{ovl} = {sv};")
+                if elem in self.struct_field_types:
+                    # The constructed value (av) is itself a pointer to the
+                    # struct (struct constructors return `StructName *`, see
+                    # _lower_struct_constructor) — write through by
+                    # dereferencing it. Coercing into a by-value struct temp
+                    # (the scalar path below) would cast a pointer directly to
+                    # a VALUE type, which GCC rejects ("conversion to
+                    # non-scalar type requested") — a pointer needs a
+                    # dereference here, not a cast.
+                    elem_ptr = elem + ' *'
+                    av_ptr = av if at == elem_ptr else self._new_val(elem_ptr, f"({elem_ptr}){av}")
+                    self._emit(f"  *{ovl} = *{av_ptr};")
+                else:
+                    # Spill the value too: a pointer→int64_t coercion is a
+                    # double cast `(int64_t)(void*)x` that GIMPLE rejects
+                    # inside `*p = ...`.
+                    sv = self._new_temp(elem)
+                    self._safe_coerce_emit(at, elem, av, sv)
+                    self._emit(f"  *{ovl} = {sv};")
             return 'int', self._new_val('int', '0')
         if method in ('strided_load', 'gather'):
             return self._stub_result(elem, f'*{ov}', f'TODO: {method}')
@@ -8592,6 +8625,24 @@ class GimpleGen:
                         self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp2)
                         self._emit_call('void', '', 'mojo_dict_set_int',
                                         [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                elif ot.endswith(' *') and _struct_name_of(ot) not in self.struct_field_types:
+                    # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow
+                    # ptr arithmetic) — mirrors _gen_stmt_AugAssignStmt's
+                    # equivalent branch, which this one was missing entirely,
+                    # falling through to plain (invalid in strict GIMPLE)
+                    # subscript syntax for a genuine buffer pointer (e.g.
+                    # `buf[i] = src[i] = 2` once alloc[UInt8] correctly
+                    # returns uint8_t * instead of a boxed int64_t).
+                    if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                        elem_t = _elem_type(ot)
+                        cn = _c_id(elem_t)
+                        self._ptr_helpers_needed.add(elem_t)
+                        idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+                        ptr_t = self._new_val(ot, f"({ot}){obj_v}")
+                        addr = self._new_val(ot, f"_mojo_at_{cn} ({ptr_t}, {idx64})")
+                        v_cast = self._new_temp(elem_t)
+                        self._safe_coerce_emit(vtype, elem_t, v, v_cast)
+                        self._emit(f"  *{addr} = {v_cast};")
                 elif not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
                     self._emit(f"  {obj_v}[{idx_v}] = {v};")
             else:
