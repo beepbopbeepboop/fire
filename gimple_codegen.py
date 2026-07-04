@@ -9997,7 +9997,7 @@ class GimpleGen:
         for i, (pname, ptype) in enumerate(node.params):
             # Strip Mojo parameter modifiers (inout, borrowed, etc.)
             bare = _strip_mojo_param_modifiers(pname.lstrip('*'))
-            if i == 0 and pname == 'self':
+            if pname == 'self':
                 self.var_types['self'] = f"{struct_name} *"
             elif pname.startswith('*'):
                 self.var_types[bare] = 'MojoList *'
@@ -10005,7 +10005,31 @@ class GimpleGen:
                 self.var_types[bare] = self._resolve_type(ptype)
 
         if node.return_type is not None:
-            ret_type = self._resolve_type(node.return_type)
+            # A method returning a bracketed generic instantiation of its OWN
+            # enclosing struct (e.g. UnsafePointer.as_any_origin() -> UnsafePointer[
+            # Self.type, AnyOrigin[mut=Self.mut], address_space=Self.address_space])
+            # hits _mojo_type's hardcoded builtin-pointer-name shortcut (meant for
+            # ordinary *uses* of these generic types elsewhere, e.g. a field
+            # annotated UnsafePointer[Int]) and silently defaults to int64_t,
+            # since the complex bracket contents aren't a simple type. Recognize
+            # this specific case narrowly — only when the return annotation's
+            # base name is literally this struct's own name AND the struct is
+            # one of the pointer-family types actually represented as a real
+            # struct pointer — rather than in _resolve_type generally (shared
+            # by all parameter resolution; a broader fix there previously
+            # mistyped sibling parameters like `other: UnsafePointer[...]`
+            # that rely on the existing boxed-pointer representation), and
+            # rather than for ANY self-referencing struct (tried that too:
+            # broke SIMD, which returns bracketed Self-generics like
+            # `SIMD[target, Self.size]` but is represented as a boxed scalar,
+            # not a struct pointer — forcing `SIMD *` there broke every
+            # SIMD-returning method).
+            _ret_base = node.return_type.split('[', 1)[0].strip()
+            if (_ret_base == struct_name
+                    and struct_name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')):
+                ret_type = f"{struct_name} *"
+            else:
+                ret_type = self._resolve_type(node.return_type)
         else:
             ret_type = self._infer_return_type(node.body)
             if ret_type == 'void':
@@ -10034,7 +10058,7 @@ class GimpleGen:
         for i, (pname, ptype) in enumerate(node.params):
             # Strip Mojo parameter modifiers (inout, borrowed, etc.)
             bare = _strip_mojo_param_modifiers(pname.lstrip('*'))
-            if i == 0 and pname == 'self':
+            if pname == 'self':
                 ctype = f"{struct_name} *"
             elif pname.startswith('**'):
                 # **kwargs: a real MojoDict* parameter (forwarding pattern)
@@ -10597,7 +10621,7 @@ class GimpleGen:
                                 pn for pn, _pt in m.params if pn != 'self']
                         if m.return_type is None:
                             for i, (pname, ptype) in enumerate(m.params):
-                                if i == 0 and pname == 'self':
+                                if pname == 'self':
                                     self.var_types[pname] = f"{s.name} *"
                                 else:
                                     self.var_types[pname] = self._resolve_type(ptype)
@@ -10656,7 +10680,7 @@ class GimpleGen:
                         for i, (pname, ptype) in enumerate(m.params):
                             if pname.startswith('**'):
                                 continue  # skip **kwargs
-                            if i == 0 and pname == 'self':
+                            if pname == 'self':
                                 param_ctypes.append(f"{s.name} *")
                             else:
                                 param_ctypes.append(self._param_ctype(pname, ptype, m))
@@ -12175,7 +12199,7 @@ class GimpleGen:
                     for i, (pname, ptype) in enumerate(m.params):
                         if pname.startswith('**'):
                             continue  # skip **kwargs
-                        if i == 0 and pname == 'self':
+                        if pname == 'self':
                             ct = f"{sd.name} *"
                         elif ptype is None and hasattr(self, '_inferred_param_types'):
                             if method_full_name in self._inferred_param_types and pname in self._inferred_param_types[method_full_name]:
