@@ -2170,6 +2170,22 @@ class GimpleGen:
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
+        # (struct_name, method_name) -> list of candidate overloads, each a dict:
+        #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
+        # Populated from the CURRENT file's own AST only (same-file resolution);
+        # a struct imported from elsewhere without local source has no entry here.
+        self._struct_method_signatures: dict[tuple, list] = {}
+        # mangled C symbol -> full param C-type list (incl. self), for a
+        # not-yet-emitted overload's forward-referenced call to be coerced
+        # correctly by _emit_call. Deliberately kept separate from the shared
+        # func_param_types dict: writing this same info into func_param_types
+        # early (before the overload's own definition is emitted) was tried
+        # and reverted — confirmed it changes codegen elsewhere in ways not
+        # limited to _emit_call's coercion (broke std/python/python.mojo's
+        # Python.dict(Span[Tuple[K,V]]) overload's own Span-subscript
+        # lowering, for reasons not fully isolated). This dict is read ONLY
+        # by _emit_call as a fallback, so it can't have that kind of reach.
+        self._mangled_signature_ctypes: dict[str, list] = {}
         self._actual_types: dict[str, str] = {}      # var_name -> actual type (for int64_t-stored pointers)
         self._sub_toplevels: list[str] = []  # ordered list of sub-module toplevel fn names (shared)
         self._has_toplevel_code: bool = False  # set per-module; whether root has top-level statements
@@ -3047,8 +3063,14 @@ class GimpleGen:
             # Raw libc symbol (e.g. pclose): the canonical C signature wins over
             # func_param_types, which a same-named Mojo wrapper may have polluted.
             param_types = self._LIBC_SIGS[fname][1]
+        elif fname in self.func_param_types:
+            param_types = self.func_param_types[fname]
         else:
-            param_types = self.func_param_types.get(fname, [])
+            # Fall back to a same-file overloaded struct method/constructor's
+            # own precomputed signature (Pass 2b-bis) for a call to a sibling
+            # overload whose real definition hasn't been emitted yet — see
+            # _mangled_signature_ctypes's own comment.
+            param_types = self._mangled_signature_ctypes.get(fname, [])
 
 
         # If function takes *args, pack variadic args into a MojoList*
@@ -5716,8 +5738,30 @@ class GimpleGen:
                     if func.obj.obj.name == 'self':
                         if method == 'set' and func.obj.member == 'parent':
                             struct_name = 'Scope'
-        mangled = f"{struct_name}_{_safe_name(method)}"
-        ret_type = self.func_return_types.get(f"{struct_name}_{method}", None)
+        # Same-file overload resolution: if this method's overloads were
+        # registered from the CURRENT file's own AST (Pass 2b-bis), pick the
+        # one matching this call site's arity/types instead of always
+        # building the unsuffixed name — which is only ever actually defined
+        # when the method isn't overloaded (see _struct_method_overload_ids:
+        # overload_id is '' unless 2+ methods share this name). A struct
+        # known only via dylib reflection has no entry here and falls
+        # through to the unsuffixed name unchanged (cross-module overload
+        # resolution is a separate follow-on, elaborate.py extension).
+        _method_candidates = self._struct_method_signatures.get((struct_name, method))
+        _method_overload_suffix = ''
+        _chosen_method = None
+        if _method_candidates and len(_method_candidates) > 1:
+            _chosen_method = self._resolve_overload(_method_candidates, node.args, node.kwargs)
+            if _chosen_method is not None:
+                _method_overload_suffix = _chosen_method['overload_id']
+        mangled = f"{struct_name}_{_safe_name(method)}{_method_overload_suffix}"
+        # Prefer the candidate's own precomputed return type (Pass 2b-bis) over
+        # func_return_types[suffixed_key], which is only populated once THAT
+        # overload's own body is emitted (Phase 2a, declaration order) — a call
+        # from an earlier sibling overload's body would otherwise see nothing
+        # yet and silently default to int64_t below.
+        ret_type = _chosen_method['ret_type'] if _chosen_method is not None else \
+            self.func_return_types.get(f"{struct_name}_{method}{_method_overload_suffix}", None)
         if ret_type is None and mangled in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[mangled][0]
         if (ret_type is None and method == 'copy'
@@ -5732,15 +5776,37 @@ class GimpleGen:
             else:
                 ret_type = 'int64_t'
         arg_pairs = [self.lower_expr(a) for a in node.args]
-        full_param_list = self.func_param_types.get(f"{struct_name}_{method}", [])
+        if node.kwargs and _chosen_method is not None:
+            # Bind keyword args to the resolved overload's parameter positions
+            # (mirrors _lower_struct_constructor's kwarg binding). Previously
+            # unhandled here entirely — a kwarg-only call always went through
+            # the unsuffixed catch-all variadic stub, which silently dropped
+            # kwargs since it accepts any args. Now that a real, concretely-
+            # typed candidate is resolved, the value must actually be passed.
+            kw = dict(node.kwargs)
+            for idx, pname in enumerate(_chosen_method['param_names']):
+                if pname not in kw:
+                    continue
+                while len(arg_pairs) <= idx:
+                    arg_pairs.append(('int', '0'))
+                arg_pairs[idx] = self.lower_expr(kw[pname])
+        full_param_list = self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", [])
         if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
             is_class_ref = True
         expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
         if full_param_list and len(arg_pairs) < expected_non_self:
             while len(arg_pairs) < expected_non_self:
                 arg_pairs.append(('int', '0'))
-        # Auto-stub if the mangled method name has no known declaration
+        # Auto-stub if the mangled method name has no known declaration. Check
+        # both the suffixed key (this specific overload) and the bare key
+        # (set for ANY overload by Pass 2b's return-type inference, which
+        # runs to a fixpoint before any method body is lowered) — a same-
+        # struct call from one overload's body into a not-yet-processed
+        # sibling overload only has the bare key available at this point,
+        # since the suffixed key is only set when THAT overload's own
+        # definition is emitted, which may happen later in emission order.
         if (mangled not in self._KNOWN_SIGS
+                and f'{struct_name}_{method}{_method_overload_suffix}' not in self.func_return_types
                 and f'{struct_name}_{method}' not in self.func_return_types
                 and mangled not in self._auto_stubbed):
             _stub_guard = f'_MOJO_STUB_{struct_name.upper()}_{method.upper()}'
@@ -6915,6 +6981,75 @@ class GimpleGen:
             return self._void_call(fname, arg_pairs)
         return ret_type, self._call_expr(ret_type, fname, arg_pairs)
 
+    # ── Overload resolution (struct methods and constructors) ─────────────
+
+    def _resolve_overload(self, candidates: list, args: list, kwargs: list | None) -> dict | None:
+        """Pick the candidate overload matching a call site's argument count/
+        types, from a list of signature dicts as built by the Pass 2b-bis
+        registration loop (each: overload_id, param_names, param_ctypes,
+        min_arity, max_arity).
+
+        Mirrors real Mojo's observed overload resolution closely enough for
+        already-valid, already-typechecked source (which is all this compiler
+        ever transpiles — genuine ambiguity is a hard error in real Mojo, so a
+        real call site should never present one): filter by arity range
+        (accounting for default parameters), then by keyword-argument names,
+        then score remaining candidates by per-position exact C-type match.
+        Only ever calls the side-effect-free `_quick_type` here — the actual
+        `lower_expr` (which emits code) happens once, after the caller uses
+        the chosen candidate to build the real call.
+        """
+        if not candidates:
+            return None
+        kwargs = kwargs or []
+        call_arity = len(args) + len(kwargs)
+        kwarg_names = [kn for kn, _ke in kwargs]
+        survivors = [c for c in candidates
+                     if c['min_arity'] <= call_arity <= c['max_arity']
+                     and all(kn in c['param_names'] for kn in kwarg_names)]
+        if not survivors:
+            return None
+        if len(survivors) == 1:
+            return survivors[0]
+
+        arg_types = [self._quick_type(a) for a in args]
+        # Keyword args bind by name to whichever positional slot that name
+        # occupies in a given candidate; scored per-candidate below since
+        # candidates can disagree on where a name falls.
+        def _score(cand: dict) -> int:
+            score = 0
+            for i, at in enumerate(arg_types):
+                if i < len(cand['param_ctypes']) and cand['param_ctypes'][i] == at:
+                    score += 1
+            for kn, ke in kwargs:
+                if kn in cand['param_names']:
+                    idx = cand['param_names'].index(kn)
+                    if idx < len(cand['param_ctypes']) and cand['param_ctypes'][idx] == self._quick_type(ke):
+                        score += 1
+            return score
+
+        best = max(survivors, key=_score)
+        best_score = _score(best)
+        if best_score == 0:
+            # Same arity, but no candidate's declared param type matched any
+            # argument's type at all — our type erasure genuinely can't tell
+            # these overloads apart (e.g. two structurally-different Mojo
+            # generic types, like Tuple[T,T] and Interval[T], both erasing to
+            # int64_t in this codegen's type system today). Guessing via
+            # declaration order here would silently commit to a symbol a real
+            # call site may not mean, and is strictly worse than the
+            # pre-existing behavior for this case (an unsuffixed call against
+            # a catch-all variadic stub, which at least type-checks). Signal
+            # "can't resolve" so the caller falls back to that old path.
+            _debug_note('overload arity-tied but type-indistinguishable, deferring to unsuffixed fallback',
+                        f"candidates={[c['overload_id'] for c in survivors]}")
+            return None
+        ties = [c for c in survivors if _score(c) == best_score]
+        if len(ties) > 1:
+            _debug_note('ambiguous overload, picking first in declaration order',
+                        f"candidates={[c['overload_id'] for c in ties]}")
+        return ties[0]
+
     # ── Struct constructor lowering (data layout solver decision) ─────────
 
     def _lower_struct_constructor(self, struct_name: str,
@@ -6929,6 +7064,45 @@ class GimpleGen:
         t      = self._new_temp(ctype)
         self._struct_allocs_needed.add(struct_name)
         self._emit(f"  {t} = _alloc_{struct_name} ();")
+
+        # Same-file overload resolution: if this struct's __init__ overloads
+        # (including any @fieldwise_init-synthesized one) were registered from
+        # the CURRENT file's own AST, pick the one matching this call site's
+        # arity/types instead of assuming there's only one. Structs known only
+        # via dylib reflection (_struct_has_init set without a
+        # _struct_method_signatures entry — see ~line 2672) fall through to
+        # the single-signature path below unchanged; cross-module overload
+        # resolution is a separate follow-on (elaborate.py extension).
+        _init_candidates = self._struct_method_signatures.get((struct_name, '__init__'))
+        if _init_candidates:
+            _chosen = self._resolve_overload(_init_candidates, args, kwargs)
+            if _chosen is not None:
+                init_fname = f"{struct_name}___init__{_chosen['overload_id']}"
+                arg_pairs = [(f"{struct_name} *", t)]
+                for arg in args:
+                    arg_pairs.append(self.lower_expr(arg))
+                if kwargs:
+                    kw = dict(kwargs)
+                    for idx, pname in enumerate(_chosen['param_names']):
+                        if pname not in kw:
+                            continue
+                        pos = idx + 1  # +1 for self slot
+                        while len(arg_pairs) <= pos:
+                            arg_pairs.append(('int', '0'))
+                        arg_pairs[pos] = self.lower_expr(kw[pname])
+                while len(arg_pairs) - 1 < _chosen['max_arity']:
+                    arg_pairs.append(('int', '0'))
+                self._emit_call('void', '', init_fname, arg_pairs)
+                return ctype, t
+            # No candidate could be resolved — either no candidate's arity fits
+            # this call at all, or (same arity, but every candidate erases to
+            # an identical C signature — e.g. two structurally different Mojo
+            # generics both boxed as int64_t — so there's no type signal to
+            # pick between them). Either way, guessing a specific overload_id
+            # would be worse than what this struct has always done before
+            # same-file resolution existed: fall straight through to the
+            # single-signature path below (unsuffixed call if __init__ exists
+            # at all, field-assignment otherwise) rather than returning here.
 
         # If struct has __init__, call it with the provided arguments
         if struct_name in self._struct_has_init:
@@ -7671,8 +7845,23 @@ class GimpleGen:
     # ── Print helper ───────────────────────────────────────────────────────
 
     def _gen_print(self, args: list):
+        # Inline string-literal call arguments (e.g. `mojo_print (" ")`) are not
+        # valid in __GIMPLE — every literal must go through the _slit_ pool and
+        # be loaded into a char* temp first (see _intern_string's docstring).
+        # print()'s own separator/end/empty literals previously violated this
+        # directly, which silently "worked" for top-level code (compiled as
+        # plain C, where inline literals are fine) but corrupted the argument
+        # at runtime for any struct method (always emitted as raw __GIMPLE) —
+        # confirmed via a genuinely minimal repro (any struct method calling
+        # print() with 2+ args segfaults; single-arg print was unaffected
+        # since it skips the separator/uses only the pooled user string).
+        def _emit_literal_print(escaped: str):
+            slit = self._intern_string(escaped)
+            t = self._new_val('char *', slit)
+            self._emit(f'  mojo_print ({t});')
+
         if not args:
-            self._emit('  mojo_print ("");')
+            _emit_literal_print('')
             return
         parts = [self.lower_expr(a) for a in args]
         for i, (atype, aval) in enumerate(parts):
@@ -7681,15 +7870,19 @@ class GimpleGen:
             else:
                 t = self._new_temp('char *')
                 vp = self._new_temp('void *')
-                fmt = TypeLattice.printf_fmt(atype)
+                # The format string is itself an inline literal in a call
+                # argument position — same __GIMPLE restriction as the
+                # separator/newline literals above, so pool it too.
+                fmt_slit = self._intern_string(TypeLattice.printf_fmt(atype))
+                fmt_t = self._new_val('char *', fmt_slit)
                 self._emit(f'  {vp} = malloc (256);')
                 self._emit(f'  {t} = (char *) {vp};')
-                self._emit(f'  sprintf ({t}, "{fmt}", {aval});')
+                self._emit(f'  sprintf ({t}, {fmt_t}, {aval});')
                 self._emit(f'  mojo_print ({t});')
                 self._emit(f'  free ({t});')
             if i < len(parts) - 1:
-                self._emit('  mojo_print (" ");')
-        self._emit('  mojo_print ("\\n");')
+                _emit_literal_print(' ')
+        _emit_literal_print('\\n')
 
     # ── Compile-time constant evaluators (for comptime) ───────────────────
 
@@ -9530,6 +9723,21 @@ class GimpleGen:
                 # appear in the definition and must match the forward declaration.
             elif i == 0 and pn == 'self' and self_struct:
                 out.append(f"{self_struct} *")
+            elif (self_struct and isinstance(pt, str) and pt.split('[', 1)[0].strip() == self_struct
+                    and self_struct in self.struct_field_types):
+                # A non-self param whose annotation is a bracketed generic
+                # instantiation of THIS SAME struct (e.g. List.extend(mut
+                # self, var other: List[Self.T, ...])) means "another
+                # instance of the struct I'm compiling," not the builtin
+                # generic — but _mojo_type's List/Dict/Set/Span bracket
+                # handling can't distinguish those and always erases to the
+                # runtime's boxed representation (MojoList*/MojoDict*/...).
+                # That's correct for every OTHER file merely using List[T]/
+                # Dict[K,V]/etc, but wrong here, in the one file that IS
+                # List/Dict/Set/Span's own real implementation — `other`
+                # needs the real struct pointer so `other->_len` etc. resolve
+                # against the actual fields, not the runtime's builtin ones.
+                out.append(f"{self_struct} *")
             else:
                 out.append(self._param_ctype(pn, pt, node))
         return out
@@ -9567,6 +9775,14 @@ class GimpleGen:
                 ctype = self._resolve_type(ptype)
         else:
             ctype = self._resolve_type(ptype)
+        if ctype == 'void':
+            # _mojo_type('None') correctly maps NoneType -> void for RETURN
+            # types, but a named PARAMETER can never be typed void in a
+            # multi-argument C signature (only the sole, unnamed `(void)` no-
+            # args marker is legal) — e.g. Bool.__init__(out self, value:
+            # None). Box it the same generic way every other
+            # no-runtime-representation type already is throughout this file.
+            ctype = 'int64_t'
         conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
         if conv in ('read', 'ref') and TypeLattice.is_pointer(ctype):
             # Immutable borrow of a pointer arg → const T *
@@ -10061,7 +10277,19 @@ class GimpleGen:
             # Keep self + any fixed params before *args, then pack the rest; e.g.
             # __call__(self, interpreter, *args) must keep `interpreter`.
             self.func_param_types[method_full_name] = self._signature_ctypes(node.params, node, struct_name)
-        hardcoded_params = self.func_param_types.get(method_full_name, [])
+        # Prefer THIS overload's own suffixed entry (registered in Pass 2b-bis,
+        # gimple_codegen.py's per-struct-method overload-candidate pass) over
+        # the bare/unsuffixed key. A later pre-pass (~line 10907, "CRITICAL:
+        # must happen before Phase 2a") writes the bare key unconditionally for
+        # every method sharing a name — last overload processed wins — so for
+        # an overloaded method the bare key can hold a DIFFERENT overload's
+        # param types entirely (confirmed: Logger.log(x: Int) vs
+        # Logger.log(x: String) both ended up compiled with `x` as char*,
+        # corrupting the Int overload's own body). The suffixed key is always
+        # this specific overload's real signature.
+        _suffixed_params = self.func_param_types.get(f"{method_full_name}{overload_id}")
+        hardcoded_params = (_suffixed_params if _suffixed_params is not None
+                             else self.func_param_types.get(method_full_name, []))
         seen_varargs = False
         for i, (pname, ptype) in enumerate(node.params):
             # Strip Mojo parameter modifiers (inout, borrowed, etc.)
@@ -10641,6 +10869,71 @@ class GimpleGen:
                             self.var_types.clear()
             if not _changed:
                 break
+
+        # ── Pass 2b-bis: register per-struct-method overload candidates ────
+        # Static/syntactic (arity range + C param types), so no fixpoint needed —
+        # a single pass over every struct's own methods (including any
+        # @fieldwise_init-synthesized __init__, since that's already a real
+        # FunctionDef in s.methods by the time the parser hands stmts to us).
+        # Used by _lower_struct_constructor/_lower_struct_method_call to pick
+        # the right overload instead of guessing an unsuffixed symbol name.
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                _moids = self._struct_method_overload_ids(s)
+                for m, _oid in zip(s.methods, _moids):
+                    _has_self_first = bool(m.params) and m.params[0][0] == 'self'
+                    real_params = [(pn, pt) for pn, pt in
+                                   (m.params[1:] if _has_self_first else m.params)
+                                   if not pn.startswith('*')]
+                    _defaults = m.param_has_default or {}
+                    min_arity = sum(1 for pn, _pt in real_params if pn not in _defaults)
+                    max_arity = len(real_params)
+                    _all_ctypes = self._signature_ctypes(m.params, m, s.name)
+                    param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
+                    # Compute this overload's own return type here, rather than
+                    # reading func_return_types[f"{struct}_{method}{overload_id}"]
+                    # at the call site later: that key is only populated when
+                    # THIS overload's own body gets emitted (Phase 2a, in
+                    # declaration order), so a call from an earlier-processed
+                    # sibling overload's body into this one would see nothing
+                    # yet and silently default to int64_t. Mirrors the logic
+                    # in _gen_struct_method (return-type resolution + the
+                    # pointer-family self-referencing-generic special case).
+                    if m.return_type is not None:
+                        _ret_base = m.return_type.split('[', 1)[0].strip() if isinstance(m.return_type, str) else ''
+                        if (_ret_base == s.name
+                                and s.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')):
+                            _ret_type = f"{s.name} *"
+                        else:
+                            _ret_type = self._resolve_type(m.return_type)
+                    else:
+                        _saved_var_types = dict(self.var_types)
+                        self.var_types['self'] = f"{s.name} *"
+                        for _pn, _pt in real_params:
+                            self.var_types[_pn] = self._resolve_type(_pt)
+                        _ret_type = self._infer_return_type(m.body)
+                        self.var_types = _saved_var_types
+                    key = (s.name, m.name)
+                    self._struct_method_signatures.setdefault(key, []).append({
+                        'overload_id': _oid,
+                        'param_names': [pn for pn, _pt in real_params],
+                        'param_ctypes': param_ctypes,
+                        'min_arity': min_arity,
+                        'max_arity': max_arity,
+                        'ret_type': _ret_type,
+                    })
+                    # Also register this overload's full param signature (incl.
+                    # self) in _mangled_signature_ctypes — NOT func_param_types
+                    # (see that dict's own comment for why: writing this same
+                    # info into func_param_types early was tried and reverted,
+                    # confirmed to change codegen elsewhere in ways not limited
+                    # to argument coercion). _emit_call reads this dict as a
+                    # fallback so a call to a not-yet-emitted sibling overload
+                    # (Phase 2a processes s.methods in declaration order) still
+                    # gets its arguments coerced correctly — confirmed fixing
+                    # std/ffi/__init__.mojo's DLHandle.get_symbol
+                    # kwarg-forwarding call, which regressed without this.
+                    self._mangled_signature_ctypes[f"{s.name}_{m.name}{_oid}"] = _all_ctypes
 
         # ── Pass 1.3: Infer parameter types from usage ─────────────────────
         # For parameters without type annotations, infer from member accesses
