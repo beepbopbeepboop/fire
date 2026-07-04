@@ -6105,7 +6105,46 @@ class GimpleGen:
                 # generic and resolve when the OUTER generic is instantiated.
                 if not all(_is_concrete_type_arg(t) for t in type_args):
                     return None
+                # A type arg can itself be a generic-struct instantiation
+                # (e.g. `alloc[MoveOnly[Int]]`). elaborate.py's monomorphizer
+                # only does textual substitution — it has no notion that
+                # "MoveOnly[Int]" mangles to a real struct "MoveOnly_Int" — so
+                # pre-elaborate+register any such nested struct HERE (where
+                # self._imported_generic_structs / struct_field_types are
+                # available) and substitute its mangled name in place of the
+                # raw generic text before handing type_args to the elaborator.
+                # (The isolated monomorphized alloc_MoveOnly_Int_ body still
+                # can't resolve the bare name "MoveOnly_Int" either — it falls
+                # back to int64_t/int64_t* internally — but that's ABI-harmless
+                # for a pointer return: see the return-type override below,
+                # which corrects the CALLER-side declared type using this
+                # instance's own struct-aware _resolve_type.)
+                orig_type_args = type_args
+                new_type_args = []
+                for ta in type_args:
+                    base = ta.split('[', 1)[0].strip()
+                    if '[' in ta and base in self._imported_generic_structs:
+                        inner = ta.split('[', 1)[1].rstrip(']')
+                        sub_args = [a.strip() for a in _split_top_level_commas(inner)]
+                        # _is_concrete_type_arg only inspects the OUTER base
+                        # name — "DictEntry[Self.K, Self.V, Self.H]" (inside
+                        # Dict's own still-generic methods) has a concrete
+                        # outer base ("DictEntry") but unbound nested args, so
+                        # check those recursively before attempting to
+                        # elaborate; otherwise this would try (and fail, or
+                        # worse, wrongly succeed) to monomorphize a struct
+                        # against unbound Self.X placeholders.
+                        if not all(_is_concrete_type_arg(sa) for sa in sub_args):
+                            new_type_args.append(ta)
+                            continue
+                        mangled = self._ensure_generic_struct(base, sub_args)
+                        new_type_args.append(mangled if mangled else ta)
+                    else:
+                        new_type_args.append(ta)
+                type_args = new_type_args
                 info = el.elaborate_generic_call(module_src, g, type_args)
+                if info:
+                    self._refine_generic_return_type(info, module_src, g, type_args, len(node.args))
             else:
                 info = el.elaborate_generic_call_inferred(
                     module_src, g, [ct for ct, _ in arg_pairs])
@@ -6116,21 +6155,67 @@ class GimpleGen:
             return None
         return self._emit_generic_instantiation(info, arg_pairs)
 
-    def _elaborate_generic_struct_call(self, node: CallExpr):
-        """Elaborate Struct[TypeArgs](args): materialize the concrete monomorphized
-        struct (register its layout + typedef, declare its methods, record its
-        object on the link line), then lower the call as a constructor."""
-        g = node.func.obj.name
-        source = self._imported_generic_structs.get(g)
+    def _refine_generic_return_type(self, info: dict, module_src: str, g: str,
+                                     mangled_type_args: list, arg_count: int) -> None:
+        """elaborate.py's _signature() resolves a generic's return type via the
+        bare, stateless _mojo_type(), which has no notion of a struct newly
+        monomorphized by _ensure_generic_struct just above (e.g. "MoveOnly_Int")
+        — it only matches _TYPE_MAP's builtin names, so it silently falls back
+        to int64_t/int64_t* whenever a type argument is such a struct. Recompute
+        the return type here using this instance's own struct-aware
+        _resolve_type (which DOES know about struct_field_types) over the
+        template's own return annotation, substituted with the mangled type
+        args — and only override info['ret'] when that yields something more
+        specific than the generic int64_t default, so ordinary (non-struct)
+        generics are unaffected."""
+        import elaborate
+        tmpl = elaborate.extract_fn_source(module_src, g, arg_count=arg_count)
+        if not tmpl:
+            return
+        params = elaborate.type_param_names(tmpl)
+        if not params:
+            return
+        for s in Parser(py_tokenize(tmpl)).parse_module():
+            if isinstance(s, FunctionDef) and s.name == g and s.return_type:
+                ret_ann = s.return_type
+                for tp, concrete in zip(params, mangled_type_args):
+                    ret_ann = re.sub(rf'\b{re.escape(tp)}\b', concrete, ret_ann)
+                better_ret = self._resolve_type(ret_ann)
+                if better_ret != 'int64_t':
+                    info['ret'] = better_ret
+                break
+
+    def _ensure_generic_struct(self, base_name: str, type_args: list) -> str | None:
+        """Elaborate+register `base_name[type_args]` (idempotent) via
+        elaborate.Elaborator.elaborate_generic_struct: materialize the concrete
+        monomorphized struct (register its layout + typedef, declare its
+        methods, record its object on the link line). Returns the mangled
+        struct name, or None if base_name isn't a known imported generic
+        struct or elaboration fails.
+
+        Factored out of _elaborate_generic_struct_call so a nested generic
+        struct used as a TYPE ARGUMENT to another generic (e.g. `alloc[
+        MoveOnly[Int]]`) can also be resolved to a real struct, not just one
+        used at a direct `Struct[Args](...)` construction call site."""
+        source = self._imported_generic_structs.get(base_name)
         if not source:
             return None
-        idx = node.func.index
-        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
-        type_args = [self._type_expr_to_ann(e) for e in elems]
+        # Only instantiate for CONCRETE type args (mirrors the same guard
+        # _elaborate_generic_call already has). Inside a still-generic body
+        # a type arg can be an unbound placeholder (`Self.size`, `Self.K`,
+        # a lone type param) — e.g. `StaticTuple[Self.size](...)` called from
+        # StaticTuple's OWN generic methods, or `alloc[DictEntry[Self.K,
+        # Self.V, Self.H]]` from Dict's own methods. Monomorphizing against
+        # an unbound placeholder textually "succeeds" but produces a bogus,
+        # inconsistently-mangled struct/symbol that collides with the real
+        # compiled definition ("conflicting types") — confirmed regression
+        # once _imported_generic_structs started actually being populated.
+        if not all(_is_concrete_type_arg(ta) for ta in type_args):
+            return None
         try:
             module_src = open(source).read()
             import elaborate
-            info = elaborate.Elaborator().elaborate_generic_struct(module_src, g, type_args)
+            info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
         except Exception:
             _debug_note('generic struct elaboration failed')
             info = None
@@ -6139,6 +6224,26 @@ class GimpleGen:
 
         name = info['name']
         if name not in self.struct_field_types:
+            # elaborate_generic_struct's method extraction doesn't mangle
+            # overloaded methods by signature — two `__init__`s (or e.g.
+            # LinkedList's `pop()` / `pop(index)`, a common pattern) both come
+            # back named "{name}_{method}", which would need two DIFFERENT
+            # extern declarations for the same C symbol ("conflicting
+            # types"). Rather than register a subset (silently making the
+            # OTHER overload uncallable — confirmed to actively break
+            # LinkedList, which has real callers of both `pop` forms), bail
+            # out of elaborating this struct entirely: the caller
+            # (_lower_call's `if res is not None: return res` pattern) then
+            # falls through to whatever path already handled this struct
+            # correctly before _imported_generic_structs started actually
+            # being populated (this whole mechanism was previously dead code
+            # — see _register_imported_generic_structs).
+            seen_sigs: dict = {}
+            for mname, ret, ps in info['methods']:
+                sig = (ret, tuple(ps))
+                if mname in seen_sigs and seen_sigs[mname] != sig:
+                    return None
+                seen_sigs[mname] = sig
             # Register the layout; the struct-typedef section emits the typedef.
             self.struct_field_types[name] = {f: ct for f, ct in info['fields']}
             for mname, ret, ps in info['methods']:
@@ -6151,7 +6256,19 @@ class GimpleGen:
                     self._elaborated_externs.append(decl)
         if info['object'] not in self._link_objects:
             self._link_objects.append(info['object'])
+        return name
 
+    def _elaborate_generic_struct_call(self, node: CallExpr):
+        """Elaborate Struct[TypeArgs](args): materialize the concrete monomorphized
+        struct (register its layout + typedef, declare its methods, record its
+        object on the link line), then lower the call as a constructor."""
+        g = node.func.obj.name
+        idx = node.func.index
+        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+        type_args = [self._type_expr_to_ann(e) for e in elems]
+        name = self._ensure_generic_struct(g, type_args)
+        if not name:
+            return None
         return self._lower_struct_constructor(name, node.args, getattr(node, 'kwargs', None))
 
     def _elaborate_overload_call(self, node: CallExpr):
@@ -10268,6 +10385,36 @@ class GimpleGen:
                 return s
         return None
 
+    def _resolve_test_relative_module(self, module: str) -> str | None:
+        """Fallback for local test-only packages (e.g. `test_utils`) that
+        `imports.py`'s resolver can't find: it only searches MOJO_PATH/
+        PYTHONPATH/the stdlib root, none of which include a plain `test/`
+        subtree, so a bare `test_utils` (living at `test/test_utils/`,
+        imported test-relatively by sibling files like
+        `test/memory/test_span.mojo`) is unresolvable there at any level —
+        not a re-export-chain issue, the module itself has no path. Walk
+        upward from the currently-compiled file's directory (bounded to
+        avoid escaping the stdlib checkout) looking for `<dir>/<module path>/
+        __init__.mojo` or `<dir>/<module path>.mojo`. `module` may itself be
+        dotted (e.g. `test_utils.types`, produced when following a re-export
+        chain via _find_generic_source — not just the bare top-level name)."""
+        if not self._current_filename:
+            return None
+        rel_parts = module.split('.')
+        d = os.path.dirname(os.path.abspath(self._current_filename))
+        for _ in range(6):
+            cand_pkg = os.path.join(d, *rel_parts, '__init__.mojo')
+            if os.path.isfile(cand_pkg):
+                return cand_pkg
+            cand_mod = os.path.join(d, *rel_parts[:-1], rel_parts[-1] + '.mojo')
+            if os.path.isfile(cand_mod):
+                return cand_mod
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        return None
+
     def _parsed_import(self, module: str):
         """(path, source_text, stmts) for an imported module, parsed once and
         cached. (None, '', None) on failure."""
@@ -10275,7 +10422,7 @@ class GimpleGen:
         if module not in cache:
             try:
                 import imports as _imp
-                path = _imp.resolve_source(module)
+                path = _imp.resolve_source(module) or self._resolve_test_relative_module(module)
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
                                  Parser(py_tokenize(src)).parse_module() if src else None)
@@ -10297,29 +10444,39 @@ class GimpleGen:
         keep = parts[:len(parts) - (dots - 1)] if dots > 1 else parts
         return '.'.join(keep + ([leaf] if leaf else []))
 
-    def _find_generic_source(self, module: str, name: str, depth: int = 0):
-        """Source path of the module that DEFINES generic free function `name`,
-        reachable from `module` by following `from X import (...)` re-export hops
-        (e.g. std.os re-exports listdir from .os = os.mojo). None if not generic."""
+    def _find_generic_source(self, module: str, name: str, kind: str = 'fn', depth: int = 0):
+        """Source path of the module that DEFINES generic `name` (a free
+        function when kind='fn', a struct when kind='struct'), reachable from
+        `module` by following `from X import (...)` re-export hops (e.g.
+        std.os re-exports listdir from .os = os.mojo). None if not generic."""
         if depth > 5 or not module:
             return None
         path, src, mod = self._parsed_import(module)
         if not src:
             return None
-        if re.search(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\[', src):
+        head = r'\bstruct\s+' if kind == 'struct' else r'\b(?:fn|def)\s+'
+        if re.search(head + rf'{re.escape(name)}\s*\[', src):
             return path
         nm = re.escape(name)
         for mm in re.finditer(r'from\s+([.\w]+)\s+import\s*\(([^)]*)\)', src):
             if re.search(rf'(?:^|[\s,(]){nm}(?:[\s,)]|$)', mm.group(2)):
-                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, depth + 1)
+                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, kind, depth + 1)
                 if r:
                     return r
         for mm in re.finditer(r'from\s+([.\w]+)\s+import\s+([^\n(]+)', src):
             if re.search(rf'(?:^|[\s,]){nm}(?:[\s,]|$)', mm.group(2)):
-                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, depth + 1)
+                r = self._find_generic_source(self._abs_module(mm.group(1), module), name, kind, depth + 1)
                 if r:
                     return r
         return None
+
+    # Generic free functions available without an explicit import — real Mojo
+    # has an implicit prelude this codegen doesn't otherwise model (mirrors the
+    # existing _FORCE_RENAME_RESERVED comment: "these are prelude symbols, and
+    # we don't model implicit prelude imports"). Without this, a file that uses
+    # e.g. `alloc[T](...)` without `from std.memory import alloc` never
+    # registers it in _imported_generics, so the call silently stubs to 0.
+    _PRELUDE_GENERICS = {'alloc': 'std.memory.unsafe_pointer'}
 
     def _register_imported_generics(self, stmts) -> None:
         """dylib mode: register `from M import gen` where gen is a generic free
@@ -10338,6 +10495,39 @@ class GimpleGen:
                 src = self._find_generic_source(st.module, nm)
                 if src:
                     self._imported_generics.setdefault(local, src)
+        for name, module in self._PRELUDE_GENERICS.items():
+            if name in self._imported_generics or name in self.struct_field_types:
+                continue
+            src = self._find_generic_source(module, name)
+            if src:
+                self._imported_generics.setdefault(name, src)
+
+    def _register_imported_generic_structs(self, stmts) -> None:
+        """Register `from M import GenericStruct` (following re-export chains,
+        same as _register_imported_generics does for free functions) so both
+        `Struct[Args](...)` constructor call sites and a nested generic-struct
+        TYPE ARGUMENT to another generic (_elaborate_generic_call's use of
+        _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
+
+        `MoveOnly` (test_utils.types) is only re-exported through
+        `test_utils/__init__.mojo`, and `test_utils` itself isn't resolvable
+        via imports.py's MOJO_PATH-based search at all (it's a local
+        test-only package, sibling to the test files that import it, not on
+        any search path) — _find_generic_source's _parsed_import call falls
+        back to _resolve_test_relative_module for that case."""
+        if self.do_imports:
+            return
+        for st in stmts:
+            if not (isinstance(st, FromImportStmt) and not getattr(st, 'wildcard', False)):
+                continue
+            for nm, alias in st.names:
+                local = alias or nm
+                if (local in self._imported_generic_structs or local in self.struct_field_types
+                        or nm != local):
+                    continue
+                src = self._find_generic_source(st.module, nm, kind='struct')
+                if src:
+                    self._imported_generic_structs.setdefault(local, src)
 
     def _struct_method_overload_ids(self, stmt) -> list:
         """Overload-id per method, aligned with stmt.methods. Must match the
@@ -10561,6 +10751,9 @@ class GimpleGen:
         # Register imported generic free functions (via re-export chains) so their
         # calls elaborate a concrete CAS-cached instantiation.
         self._register_imported_generics(stmts)
+        # Register imported generic structs (via re-export chains) so
+        # Struct[Args](...) calls / nested generic-struct type args elaborate too.
+        self._register_imported_generic_structs(stmts)
 
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
