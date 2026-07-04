@@ -31,16 +31,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 
 
-def _prog_key(c_code, dylibs, gcc, flags):
-    # c_code already encodes the client + imported signatures; the dylib basenames
-    # are content hashes, so they capture each dependency's implementation.
+def _file_sha(path):
+    """Content hash of a linked artifact (dylib or object)."""
+    with open(path, 'rb') as f:
+        return cas._hash(f.read())
+
+
+def _prog_key(c_code, link_files, gcc, flags):
+    # Everything that shapes the linked binary is in the key: the client C
+    # (which already encodes imported signatures), the toolchain, and the
+    # *content* of every dylib/object on the link line.  Hashing contents —
+    # not just basenames — means a rebuilt stdlib dylib invalidates cached
+    # programs (a fixed name like libmojostdlib.dylib carries no version
+    # information).  In production the dylibs never change, so the extra
+    # read-and-hash per compile is a cheap price for exactness.
     return 'prog/' + cas._hash(
-        'mojo-prog-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        'mojo-prog-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
         cas.toolchain_fingerprint(gcc, flags), c_code,
-        '\0'.join(sorted(os.path.basename(d) for d in dylibs)))
+        '\0'.join(f'{os.path.basename(p)}={_file_sha(p)}'
+                  for p in sorted(link_files)))
 
 
-def _build(c_code, dylibs, objects, target, gcc, objflags):
+def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags):
     """Compile the client object (cached) and link it against the runtime dylib +
     the import dylibs `import` recorded + the objects elaboration produced
     (generic instantiations). Returns True on success."""
@@ -58,9 +70,6 @@ def _build(c_code, dylibs, objects, target, gcc, objflags):
 
     client_o = cas.get_or_build(ckey, '.o', _client)[0]
 
-    # Stdlib dylib: monolithic, CAS-built on first use; runtime folded in,
-    # so programs need only one dylib on the link line.
-    stdlib = bsd.build_stdlib()
     link_dylibs = list(dict.fromkeys([stdlib] + list(dylibs)))
     rpaths = sorted({os.path.dirname(d) for d in link_dylibs})
 
@@ -92,14 +101,20 @@ def compile_program(input_file, src, output=None, run=True,
     c_code, dylibs, objects = compile_linked(src, filename=input_file)
     target = os.path.abspath(output or os.path.splitext(os.path.basename(input_file))[0])
 
+    # Stdlib dylib: monolithic, CAS-built on first use; runtime folded in, so
+    # programs need only one dylib on the link line.  Resolved *before* the
+    # cache key so its content participates in invalidation.
+    stdlib = bsd.build_stdlib()
+
     # Warm path: the whole program is content-addressed — a cache hit is a copy.
-    pkey = _prog_key(c_code, list(dylibs) + list(objects), gcc, objflags)
+    link_files = list(dict.fromkeys([stdlib] + list(dylibs))) + list(objects)
+    pkey = _prog_key(c_code, link_files, gcc, objflags)
     hit = cas.lookup(pkey, '')
     if hit:
         shutil.copy(hit, target)
         os.chmod(target, 0o755)
     else:
-        if not _build(c_code, dylibs, objects, target, gcc, objflags):
+        if not _build(c_code, stdlib, dylibs, objects, target, gcc, objflags):
             return None
         cas.publish(pkey, '', open(target, 'rb').read())
 
