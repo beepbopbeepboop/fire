@@ -1525,6 +1525,20 @@ def dbg(label: String, n: Int64):
     external_call["free", NoneType](buf)
 """)
 
+    # 155b. external_call to a genuinely variadic libc function (printf) at two
+    #       different arities in the same file — regression test locking in that
+    #       variadic functions are deliberately excluded from custom fixed-arity
+    #       prototype generation (they fall through to the system header's own
+    #       variadic declaration), so neither call site is arity-clobbered by a
+    #       prototype sized for the other.
+    test("external_call_variadic_printf", """\
+def one_arg(n: Int64):
+    external_call["printf", Int32]("count: %lld\\n", n)
+
+def two_args(label: String, n: Int64):
+    external_call["printf", Int32]("%s: %lld\\n", label, n)
+""")
+
     # 156. _c_escape: source escapes pass through (\\n stays one backslash, not two)
     from gimple_codegen import _c_escape
     _esc_ok = (_c_escape('%s%lld\\n') == '%s%lld\\n'      # \\n preserved, not doubled

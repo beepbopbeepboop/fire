@@ -5815,6 +5815,10 @@ class GimpleGen:
             cstr_ov = ov
         if method == 'group':
             return 'char *', cstr_ov
+        if method in ('as_c_string_slice', 'unsafe_cstr_ptr', 'unsafe_ptr', 'data'):
+            # A Mojo string is already represented as a bare char* here, so
+            # these C-string accessors are identity — return the same pointer.
+            return 'char *', cstr_ov
         _CSTR_METHODS: dict[str, str] = {
             'lower': 'string_lower', 'upper': 'string_upper',
             'strip': 'string_strip',
@@ -10435,6 +10439,28 @@ class GimpleGen:
                 if b:
                     params_by_struct.setdefault(b, set()).add(
                         _strip_mojo_param_modifiers(_pn.lstrip('*')))
+            # Nested `def`s (e.g. a raises-helper closure declared inside a
+            # test function, typed on an imported struct) live inside the
+            # enclosing statement's body/orelse/handler blocks, not at
+            # top-level — walk those too (iteratively: a nested generator
+            # calling itself doesn't survive self-host closure-lifting) so
+            # their typed params count too.
+            _worklist = [getattr(fn, 'body', None)]
+            while _worklist:
+                _blk = _worklist.pop()
+                for _st in (_blk or []):
+                    if isinstance(_st, FunctionDef):
+                        _collect(_st)
+                    for _attr in ('body', 'orelse', 'finally_body'):
+                        _sub = getattr(_st, _attr, None)
+                        if isinstance(_sub, list):
+                            _worklist.append(_sub)
+                    _handlers = getattr(_st, 'handlers', None)
+                    if isinstance(_handlers, list):
+                        for _h in _handlers:
+                            _hb = getattr(_h, 'body', None)
+                            if isinstance(_hb, list):
+                                _worklist.append(_hb)
         for st in stmts:
             if isinstance(st, FunctionDef):
                 _collect(st)
@@ -10464,22 +10490,49 @@ class GimpleGen:
                 fields = {f.name: self._imported_field_ctype(f.type_ann)
                           for f in sdef.fields if isinstance(f, VarDecl)}
                 pnames = params_by_struct.get(nm, set())
-                if not fields or not any(f"{pn}.{fn}" in src
-                                         for pn in pnames for fn in fields):
-                    continue  # no field of this struct is accessed on its params
-                # Skip if a (non-trivial) method is CALLED on this struct anywhere —
-                # typedef-only registration supplies no method body, so the
-                # Struct_method symbol would be undefined. Common trait/dunder
-                # methods are excluded: their names collide with calls on unrelated
-                # objects, and they have generic handling rather than a hard symbol.
+                _field_accessed = fields and any(
+                    f"{pn}.{fn}" in src for pn in pnames for fn in fields)
+                # A (non-trivial) method CALLED on this struct anywhere: common
+                # trait/dunder methods are excluded (their names collide with
+                # calls on unrelated objects, and they have generic handling
+                # rather than a hard symbol).
                 _uncommon = [m.name for m in sdef.methods
                              if m.name not in _COMMON_METHOD_NAMES]
-                if any(f".{mn}(" in src for mn in _uncommon):
+                _called_uncommon = any(f".{mn}(" in src for mn in _uncommon)
+                if not fields and not _called_uncommon:
                     continue
+                if not _field_accessed and not _called_uncommon:
+                    continue  # struct is merely passed through, untouched
+                # Carry the struct's real methods along so the signature-
+                # registration pass (all_structs_for_methods) resolves their
+                # return/param C types and mangled names exactly as it would
+                # for an in-file struct — this lets calls to e.g. DLHandle's
+                # get_symbol()/call() route to the real linked symbol (emitted
+                # when the struct's home module is compiled directly) via an
+                # extern declaration, instead of falling to the generic
+                # scalar-method stub. No body is emitted here (Phase 2a only
+                # walks `stmts`, never `_imported_typedef_structs`), so this
+                # is safe even though the method has no local implementation.
+                # Once a struct is registered, constructor/method call sites
+                # switch to per-overload hash-mangled symbol names (matching
+                # in-file struct handling) whenever it has 2+ overloads of the
+                # same method — so methods must ALWAYS be carried along (not
+                # just when an uncommon method is called), or those call
+                # sites reference a mangled symbol nothing declared an extern
+                # for. Smoke-test the overload-id computation first — if it
+                # raises (e.g. an exotic param type this pass can't handle),
+                # fall back to the previous typedef-only (methods=[])
+                # registration rather than risk a broken signature.
+                _methods_for_reg: list = []
+                try:
+                    self._struct_method_overload_ids(sdef)
+                    _methods_for_reg = sdef.methods
+                except Exception as e:
+                    _debug_note(f'cannot resolve method signatures for imported struct {nm}', e)
                 self.struct_field_types[local] = fields
                 self._imported_struct_names.add(local)
                 self._imported_typedef_structs.append(
-                    StructDef(name=local, fields=sdef.fields, methods=[]))
+                    StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
 
     def _find_imported_struct(self, module: str, name: str):
         """The StructDef for `name` defined directly in `module`'s source, or None."""
@@ -11252,8 +11305,14 @@ class GimpleGen:
             # eligible for overload-mangling its C symbol by parameter types.
             if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
                 self._mangled_funcs.add(s.name)
+            # @export: callable from C under its plain Mojo name — never
+            # overload-mangled (mirrors the _static_methods decorator-read
+            # pattern below, for the free-function case).
+            if isinstance(s, FunctionDef) and 'export' in (getattr(s, 'decorators', None) or []):
+                self._extra_no_mangle.add(s.name)
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
-        all_structs_for_methods = stmts + (imported_stmts if self.do_imports else [])
+        all_structs_for_methods = (stmts + (imported_stmts if self.do_imports else [])
+                                    + self._imported_typedef_structs)
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 for m in s.methods:
@@ -11384,6 +11443,62 @@ class GimpleGen:
                     # std/ffi/__init__.mojo's DLHandle.get_symbol
                     # kwarg-forwarding call, which regressed without this.
                     self._mangled_signature_ctypes[f"{s.name}_{m.name}{_oid}"] = _all_ctypes
+
+        # Imported structs (_register_imported_structs): no body is emitted for
+        # these here — the real definition lives in the struct's home module,
+        # compiled separately (e.g. into build/libmojostdlib.dylib). Emit an
+        # `extern` for each of their methods now that the loop above has
+        # resolved its real mangled name/return type/param types, so calls
+        # route to the actual linked symbol instead of the generic scalar-
+        # method stub in _lower_struct_method_call.
+        for s in self._imported_typedef_structs:
+            if not s.methods:
+                continue
+            for _oid, m in zip(self._struct_method_overload_ids(s), s.methods):
+                mangled = f"{s.name}_{m.name}{_oid}"
+                param_ctypes = self._mangled_signature_ctypes.get(mangled)
+                if param_ctypes is None:
+                    continue
+                # The suffixed func_return_types[mangled] key is only ever
+                # populated when a struct's OWN method body is emitted
+                # (Phase 2a) — which never happens here, since no body is
+                # available for an imported struct. Pull the return type from
+                # _struct_method_signatures instead (populated for every
+                # struct in all_structs_for_methods regardless of emission).
+                ret_type = None
+                for _cand in self._struct_method_signatures.get((s.name, m.name), []):
+                    if _cand.get('overload_id') == _oid:
+                        ret_type = _cand.get('ret_type')
+                        break
+                if ret_type is None:
+                    ret_type = self.func_return_types.get(f"{s.name}_{m.name}", 'void' if m.name == '__init__' else 'int64_t')
+                # A "..." entry mid-list (e.g. a *args/**kwargs-style param)
+                # is a bookkeeping placeholder in _mangled_signature_ctypes,
+                # not literal C — splicing it in as-is produces invalid syntax
+                # like `(T *, ..., int64_t)`. Fall back to a fully variadic
+                # signature whenever that marker appears anywhere.
+                if any('...' in p for p in param_ctypes):
+                    params_str = '...'
+                else:
+                    params_str = ', '.join(param_ctypes) or 'void'
+                sig = f"{ret_type} {mangled} ({params_str})"
+                guard = f"_MOJO_STUB_{mangled.upper()}"
+                decl = f"#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif"
+                if decl not in self._elaborated_externs:
+                    self._elaborated_externs.append(decl)
+                # Call-site overload resolution (_resolve_overload) can fail
+                # to confidently pick a candidate (e.g. a bracketed type
+                # argument like get_symbol[NoneType] it can't match) and
+                # falls back to the bare, unsuffixed mangled name even when
+                # the method IS overloaded — declare that variadic fallback
+                # too, mirroring the auto-stub pattern _lower_struct_method_call
+                # already uses elsewhere for genuinely-unknown methods.
+                if _oid:
+                    bare = f"{s.name}_{m.name}"
+                    bare_guard = f"_MOJO_STUB_{bare.upper()}"
+                    bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {bare} (...);\n#endif"
+                    if bare_decl not in self._elaborated_externs:
+                        self._elaborated_externs.append(bare_decl)
 
         # ── Pass 1.3: Infer parameter types from usage ─────────────────────
         # For parameters without type annotations, infer from member accesses
