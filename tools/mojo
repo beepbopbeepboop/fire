@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Wrapper to run the REAL Mojo compiler (Modular's, via pixi) for ground-truthing
+# this project's from-scratch transpiler against actual Mojo semantics.
+#
+# Usage:
+#   tools/mojo run some_file.mojo        # compile + run
+#   tools/mojo build some_file.mojo      # compile only
+#   tools/mojo --version
+#
+# Setup: the real compiler lives in the pixi-managed environment declared by
+# /Users/mrs/net/chatgpt/claude/modular/mojo/pixi.toml (Modular's own mojo repo
+# checkout, used elsewhere in this project as the source of the real stdlib).
+# `pixi` itself is installed at ~/.pixi/bin (see ~/.bashrc: this is normally on
+# PATH already, but this wrapper doesn't depend on that).
+set -euo pipefail
+
+MOJO_REPO="/Users/mrs/net/chatgpt/claude/modular/mojo"
+PIXI_BIN="$HOME/.pixi/bin"
+
+if [ ! -d "$MOJO_REPO" ]; then
+  echo "tools/mojo: expected Mojo repo checkout at $MOJO_REPO (not found)" >&2
+  exit 1
+fi
+
+export PATH="$PIXI_BIN:$PATH"
+
+if ! command -v pixi >/dev/null 2>&1; then
+  echo "tools/mojo: pixi not found on PATH or at $PIXI_BIN" >&2
+  exit 1
+fi
+
+cd "$MOJO_REPO"
+exec pixi run mojo "$@"

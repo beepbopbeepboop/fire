@@ -13,6 +13,7 @@ import subprocess
 import argparse
 import tempfile
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from module_loader import STDLIB_PATH
 from build_config import find_gcc
 from build_stdlib_dylib import compile_module_to_c
@@ -110,6 +111,11 @@ def main():
     parser.add_argument('--module', default=None, help='Restrict to a specific module under std/ (e.g., time)')
     parser.add_argument('--roots', default=None,
                         help='Comma-separated subtrees to scan (default: %s)' % ','.join(DEFAULT_ROOTS))
+    parser.add_argument('-j', '--jobs', type=int, default=os.cpu_count(),
+                        help='Parallel workers (each file is independent: its own codegen '
+                             'instance + gcc subprocess). Default: os.cpu_count(). Use -j1 '
+                             'for sequential (deterministic ordering, easier to read failures '
+                             'as they happen).')
     args = parser.parse_args()
 
     roots = [r.strip() for r in args.roots.split(',')] if args.roots else DEFAULT_ROOTS
@@ -134,21 +140,43 @@ def main():
 
     print(f"Found {len(mojo_files)} .mojo files\n")
 
-    # Transpile each file
+    # Transpile each file. Each file is fully independent (own codegen
+    # instance + its own gcc subprocess), so this parallelizes cleanly across
+    # processes — no shared state between files.
     passed = []
     failed = []
+    done = 0
 
-    for i, (rel_path, abs_path) in enumerate(mojo_files):
-        success, error = transpile_file(abs_path)
+    if args.jobs > 1:
+        with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(transpile_file, abs_path): rel_path
+                       for rel_path, abs_path in mojo_files}
+            for fut in as_completed(futures):
+                rel_path = futures[fut]
+                success, error = fut.result()
+                done += 1
+                if success:
+                    passed.append(rel_path)
+                else:
+                    print(f"  {rel_path}...FAIL")
+                    failed.append((rel_path, error))
+                if done % 50 == 0 or done == len(mojo_files):
+                    print(f"\r  Progress: {len(passed)} passed, {len(failed)} failed", end="", flush=True)
+    else:
+        for rel_path, abs_path in mojo_files:
+            success, error = transpile_file(abs_path)
+            done += 1
+            if success:
+                passed.append(rel_path)
+            else:
+                print(f"  {rel_path}...FAIL")
+                failed.append((rel_path, error))
+            if done % 50 == 0 or done == len(mojo_files):
+                print(f"\r  Progress: {len(passed)} passed, {len(failed)} failed", end="", flush=True)
 
-        if success:
-            passed.append(rel_path)
-        else:
-            print(f"  {rel_path}...FAIL")
-            failed.append((rel_path, error))
-
-        if (i + 1) % 50 == 0 or (i + 1) == len(mojo_files):
-            print(f"\r  Progress: {len(passed)} passed, {len(failed)} failed", end="", flush=True)
+    # Sort for deterministic, reviewable output regardless of completion order
+    passed.sort()
+    failed.sort(key=lambda pe: pe[0])
 
     # Print summary
     print("\n" + "="*70)
