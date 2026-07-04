@@ -31,26 +31,112 @@ _FN_HEAD = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 _HEAD = re.compile(r'\b(?:fn|def|struct)\s+(\w+)\s*\[([^\]]*)\]')
 
 
-def extract_fn_source(module_src: str, fn_name: str):
-    """Pull the source text of a single `fn fn_name[...](...): body` from a module,
-    by indentation (the generic template we'll instantiate). None if not found."""
-    lines = module_src.splitlines(keepends=True)
-    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
-    start = None
-    for i, l in enumerate(lines):
-        if pat.match(l):
-            start = i
-            break
-    if start is None:
-        return None
-    base = len(lines[start]) - len(lines[start].lstrip())
-    end = len(lines)
+def _bracket_depth_by_line(module_src: str) -> list[int]:
+    """depths[j] = bracket nesting depth (from `([{`) in effect at the START
+    of 0-indexed line `j` of `module_src.splitlines()`. Comment- and
+    string-literal-aware (including triple-quoted docstrings) so a `[`/`]`/
+    `(`/`)`/`{`/`}` inside a literal or comment is never mistaken for a
+    structural bracket.
+
+    Exists because a generic's header (`def name[T, /](args) -> Ret[...]:`)
+    may itself span multiple physical lines, with a continuation line — e.g.
+    the `]`/`)` that closes the parameter list — starting at column 0. A
+    plain "dedent to <= base indentation ends the block" check misreads that
+    continuation line as the end of the function/struct, silently truncating
+    the extracted template before its real body."""
+    depth = 0
+    depths = [0]
+    in_str = None  # None, or '"', "'", '"""', "'''"
+    i, n = 0, len(module_src)
+    while i < n:
+        c = module_src[i]
+        if in_str:
+            if in_str in ('"""', "'''"):
+                if module_src.startswith(in_str, i):
+                    i += 3
+                    in_str = None
+                    continue
+            else:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == in_str:
+                    in_str = None
+            if c == '\n':
+                depths.append(depth)
+            i += 1
+            continue
+        if c == '#':
+            j = module_src.find('\n', i)
+            i = n if j == -1 else j
+            continue
+        if module_src.startswith('"""', i) or module_src.startswith("'''", i):
+            in_str = module_src[i:i + 3]
+            i += 3
+            continue
+        if c in ('"', "'"):
+            in_str = c
+            i += 1
+            continue
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth = max(0, depth - 1)
+        if c == '\n':
+            depths.append(depth)
+        i += 1
+    return depths
+
+
+def _find_block_end(lines: list[str], depths: list[int], start: int, base: int) -> int:
+    """First line index after `start` that both dedents to <= `base`
+    indentation AND sits at bracket depth 0 — i.e. an ordinary top-level
+    statement boundary, not a continuation of a still-open `([{` header."""
     for j in range(start + 1, len(lines)):
         l = lines[j]
-        if l.strip() and (len(l) - len(l.lstrip())) <= base:
-            end = j
-            break
-    return ''.join(lines[start:end])
+        d = depths[j] if j < len(depths) else 0
+        if l.strip() and d == 0 and (len(l) - len(l.lstrip())) <= base:
+            return j
+    return len(lines)
+
+
+def extract_fn_source(module_src: str, fn_name: str, arg_count: int | None = None):
+    """Pull the source text of a single `fn fn_name[...](...): body` from a
+    module, by indentation (the generic template we'll instantiate). None if
+    not found.
+
+    A generic name can have multiple same-named definitions distinguished
+    only by arity (e.g. `itertools.product` has separate `[IterableTypeA,
+    IterableTypeB](a, b)` / `(a, b, c)` / `(a, b, c, d)` overloads — there is
+    no separate "generic overload" mechanism the way non-generic overloads
+    get one via `extract_overloads`). When `arg_count` is given and more than
+    one candidate matches by name, pick the one whose non-self, non-variadic
+    parameter count equals it; otherwise fall back to the first match."""
+    lines = module_src.splitlines(keepends=True)
+    pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*[\[\(]')
+    depths = _bracket_depth_by_line(module_src)
+    candidates = []
+    i = 0
+    while i < len(lines):
+        if pat.match(lines[i]):
+            base = len(lines[i]) - len(lines[i].lstrip())
+            end = _find_block_end(lines, depths, i, base)
+            candidates.append(''.join(lines[i:end]))
+            i = end
+        else:
+            i += 1
+    if not candidates:
+        return None
+    if arg_count is None or len(candidates) == 1:
+        return candidates[0]
+    for src in candidates:
+        for s in Parser(py_tokenize(src)).parse_module():
+            if isinstance(s, FunctionDef) and s.name == fn_name:
+                n = len([1 for pn, _ in s.params if pn != 'self' and not pn.startswith('*')])
+                if n == arg_count:
+                    return src
+                break
+    return candidates[0]
 
 
 def extract_overloads(module_src: str, fn_name: str):
@@ -58,15 +144,13 @@ def extract_overloads(module_src: str, fn_name: str):
     ret_mojo_type), one per definition, by indentation."""
     lines = module_src.splitlines(keepends=True)
     pat = re.compile(rf'^(\s*)(?:fn|def)\s+{re.escape(fn_name)}\s*\(')
+    depths = _bracket_depth_by_line(module_src)
     out = []
     i = 0
     while i < len(lines):
         if pat.match(lines[i]):
             base = len(lines[i]) - len(lines[i].lstrip())
-            j = i + 1
-            while j < len(lines) and not (
-                    lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip())) <= base):
-                j += 1
+            j = _find_block_end(lines, depths, i, base)
             src = ''.join(lines[i:j])
             fn = None
             for s in Parser(py_tokenize(src)).parse_module():
@@ -84,12 +168,14 @@ def extract_overloads(module_src: str, fn_name: str):
 
 def type_param_names(template_src: str):
     """The generic's type-parameter names — for `fn` or `struct`, e.g.
-    `struct Box[T, U]` -> ['T', 'U']."""
+    `struct Box[T, U]` -> ['T', 'U']. Skips the bare `/` and `*` separators
+    (positional-only / keyword-only markers), which are not parameter names."""
     m = _HEAD.search(template_src)
     if not m:
         return []
     return [p.strip().split(':')[0].strip()
-            for p in m.group(2).split(',') if p.strip()]
+            for p in m.group(2).split(',')
+            if p.strip() and p.strip() not in ('/', '*')]
 
 
 # ── Trait / conformance bound-checking (slice 6) ─────────────────────────
@@ -113,7 +199,7 @@ def parse_bounds(template_src: str):
     bounds = {}
     for p in m.group(2).split(','):
         p = p.strip()
-        if not p:
+        if not p or p in ('/', '*'):
             continue
         if ':' in p:
             name, bound = p.split(':', 1)
@@ -206,12 +292,8 @@ def extract_struct_source(module_src: str, name: str):
     if start is None:
         return None
     base = len(lines[start]) - len(lines[start].lstrip())
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        l = lines[j]
-        if l.strip() and (len(l) - len(l.lstrip())) <= base:
-            end = j
-            break
+    depths = _bracket_depth_by_line(module_src)
+    end = _find_block_end(lines, depths, start, base)
     return ''.join(lines[start:end])
 
 
@@ -284,13 +366,17 @@ class Elaborator:
     def __init__(self, gcc=None):
         self.gcc = gcc
 
-    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args):
+    def elaborate_generic_call(self, module_src: str, fn_name: str, type_args, arg_count: int | None = None):
         """Instantiate `fn_name` for `type_args` (a list of concrete type strings)
         via the CAS. Returns a dict {symbol, object, ret, params} or None.
 
+        `arg_count` (the call's actual argument count, when known) disambiguates
+        same-named generic overloads distinguished only by arity (e.g.
+        itertools.product's 2/3/4-iterable versions) — see extract_fn_source.
+
         Elaborate-once-ever: the instantiation is content-addressed, so a repeat
         (here or in another program) is a cache hit."""
-        tmpl = extract_fn_source(module_src, fn_name)
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=arg_count if arg_count is not None else len(type_args))
         if tmpl is None:
             return None
         params = type_param_names(tmpl)
@@ -356,10 +442,10 @@ class Elaborator:
     def elaborate_generic_call_inferred(self, module_src: str, fn_name: str, arg_ctypes):
         """Like elaborate_generic_call but infers the type args from the call
         argument C types (slice 2): `box(42)` with no explicit `[Int64]`."""
-        tmpl = extract_fn_source(module_src, fn_name)
+        tmpl = extract_fn_source(module_src, fn_name, arg_count=len(arg_ctypes))
         if tmpl is None:
             return None
         type_args = infer_type_args(tmpl, arg_ctypes)
         if type_args is None:
             return None
-        return self.elaborate_generic_call(module_src, fn_name, type_args)
+        return self.elaborate_generic_call(module_src, fn_name, type_args, arg_count=len(arg_ctypes))

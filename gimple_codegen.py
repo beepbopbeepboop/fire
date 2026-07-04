@@ -1809,7 +1809,7 @@ _C_RESERVED_FUNCS = frozenset({
 # (the common case: these are prelude symbols, and we don't model implicit prelude
 # imports) must still be treated as a Mojo call, not real libc. Always renamed to
 # mojo_X, which needs a matching variadic stub in _util_pairs below.
-_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp'})
+_FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp', 'abort'})
 
 def _is_concrete_type_arg(ann: str) -> bool:
     """Whether a generic type argument is a concrete type (Int64, String, a struct,
@@ -4761,12 +4761,46 @@ class GimpleGen:
             self._emit_call('char *', t, 'mojo_path_join', [('char *', lv_str), ('char *', rv)])
             return 'char *', t
 
-        # Cast struct pointer operands through int64_t so C arithmetic is valid.
-        # e.g., `self * -1` inside Int.__neg__ where self: Int * → (int64_t)self * -1.
-        # Must happen before res_type is computed to avoid declaring result as struct ptr.
+        # Raw pointer arithmetic: `ptr + n` / `ptr - n` for a genuine buffer
+        # pointer (UnsafePointer et al., lowered by _mojo_type to `<elem> *`).
+        # This must be distinguished from a *boxed scalar* pointer like the
+        # `self: Int *` receiver inside Int.__neg__ (`self * -1`) — both are
+        # spelled `<name> *`, but a real Mojo struct's boxed self-pointer uses
+        # the struct's own name (`Int *`) and IS registered in
+        # struct_field_types (from parsing `struct Int(...)`), whereas a raw
+        # buffer pointer's element type is a plain C scalar (`int64_t *`,
+        # `double *`, ...) that never is. GIMPLE forbids raw `p + n` pointer
+        # arithmetic directly, so route through the same _mojo_at_<elem>
+        # scaled-offset helper already used for subscripting/`.offset()`, and
+        # keep the pointer's own type as the result (real Mojo semantics)
+        # instead of falling into the boxed-scalar collapse below, which would
+        # otherwise silently degrade the pointer to a bare address integer.
         _KNOWN_PTRS = frozenset({
             'void *', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *',
         })
+        def _is_raw_ptr(t: str) -> bool:
+            return (t.endswith(' *') and t not in _KNOWN_PTRS
+                    and _struct_name_of(t) not in self.struct_field_types)
+        if node.op in ('+', '-'):
+            if _is_raw_ptr(lt) and not rt.endswith(' *'):
+                elem = _elem_type(lt)
+                cn = _c_id(elem)
+                self._ptr_helpers_needed.add(elem)
+                rv64 = rv if rt == 'int64_t' else self._new_val('int64_t', f"(int64_t){rv}")
+                off = rv64 if node.op == '+' else self._new_val('int64_t', f"-{rv64}")
+                pt = self._new_val(lt, f"_mojo_at_{cn} ({lv}, {off})")
+                return lt, pt
+            if node.op == '+' and _is_raw_ptr(rt) and not lt.endswith(' *'):
+                elem = _elem_type(rt)
+                cn = _c_id(elem)
+                self._ptr_helpers_needed.add(elem)
+                lv64 = lv if lt == 'int64_t' else self._new_val('int64_t', f"(int64_t){lv}")
+                pt = self._new_val(rt, f"_mojo_at_{cn} ({rv}, {lv64})")
+                return rt, pt
+
+        # Cast struct pointer operands through int64_t so C arithmetic is valid.
+        # e.g., `self * -1` inside Int.__neg__ where self: Int * → (int64_t)self * -1.
+        # Must happen before res_type is computed to avoid declaring result as struct ptr.
         if lt.endswith(' *') and lt not in _KNOWN_PTRS and node.op not in ('==', '!=', 'is', 'is not'):
             ip = self._new_val('int64_t', f'(int64_t){lv}')
             lt = 'int64_t'; lv = ip
@@ -6079,6 +6113,16 @@ class GimpleGen:
             self._link_objects.append(info['object'])
         self.func_return_types[sym] = info['ret']
         self.func_param_types[sym] = info['params']
+        # The template may have trailing params with a default value (e.g.
+        # `alloc[type](count: Int, *, alignment: Int = align_of[type]())`);
+        # the parser deliberately discards default-value expressions (no
+        # comptime evaluator), so a call site that relies on the default
+        # (`alloc[Int](5)`) legitimately has fewer args than `info['params']`.
+        # Pad with the same best-effort placeholder used for every other
+        # missing-argument case in this file (e.g. _lower_call's general kwarg
+        # padding) — semantically a stand-in, but keeps the call C-typesafe.
+        while len(arg_pairs) < len(info['params']):
+            arg_pairs.append(('int', '0'))
         _decl = f"extern {info['ret']} {sym} ({', '.join(info['params']) or 'void'});"
         if _decl not in self._elaborated_externs:
             self._elaborated_externs.append(_decl)
@@ -11722,6 +11766,10 @@ class GimpleGen:
             ('mojo_getenv',            'int64_t mojo_getenv(...);'),
             ('mojo_atol',              'int64_t mojo_atol(...);'),
             ('mojo_frexp',             'int64_t mojo_frexp(...);'),
+            # Mojo's abort() is overloaded (0-arg trap, or message + optional
+            # SourceLocation) — incompatible with libc's `void abort(void)`;
+            # variadic so every call shape typechecks (see _FORCE_RENAME_RESERVED).
+            ('mojo_abort',             'void mojo_abort(...);'),
             ('Span_as_bytes',          'int64_t Span_as_bytes(...);'),
             ('Span_get_immutable',     'int64_t Span_get_immutable(...);'),
             ('_Bool___mlir_i1__',      'int64_t _Bool___mlir_i1__(...);'),
