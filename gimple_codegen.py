@@ -1500,6 +1500,25 @@ _RUNTIME_FUNCS: dict[str, str] = {
 
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
 
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split `s` on commas that are not nested inside ([{ }]). Used to pull
+    just the element-type segment out of a multi-arg bracket annotation like
+    `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
+    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`)."""
+    parts, depth, buf = [], 0, []
+    for c in s:
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth = max(0, depth - 1)
+        if c == ',' and depth == 0:
+            parts.append(''.join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    parts.append(''.join(buf))
+    return parts
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'  # Default to 64-bit signed integer
@@ -1522,7 +1541,11 @@ def _mojo_type(ann: str | type | None) -> str:
         base, rest = ann.split('[', 1)
         inner = rest.rstrip(']').strip()
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
-            elem = _mojo_type(inner)
+            # `inner` may carry trailing origin/mut params (e.g. "X,
+            # SomeOrigin") — only the first top-level segment is the element
+            # type; passing the whole multi-arg string through never matches
+            # _TYPE_MAP and silently defaulted to int64_t.
+            elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f"{elem} *"
         if base in ('List', 'list', 'InlineArray'):
             return 'MojoList *'
@@ -1535,7 +1558,8 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('Span', 'StringSlice'):
             return 'Span *'
         if base == 'Optional':
-            return _mojo_type(inner)  # simplified: treat as the inner type
+            # simplified: treat as the inner (first, if multi-arg) type
+            return _mojo_type(_split_top_level_commas(inner)[0].strip())
         # NOTE: `Some[X]` (existential/trait-object params, e.g. `mut writer:
         # Some[Writer]`) is deliberately NOT special-cased here. It's the
         # overwhelmingly common type of the `writer` parameter in every
@@ -7460,7 +7484,14 @@ class GimpleGen:
             self._emit(f"  {t}->_data = {new_data};")
             old_len = self._new_val('int64_t', f"{ov}->_len")
             if node.stop is not None:
-                new_len = self._new_val('int64_t', f"{stop_v} - {start_i}")
+                # GIMPLE strict mode: a bare literal stop bound (e.g. `[:0]`)
+                # comes back from _to_int64 uncast (its _ensure_local fast path
+                # treats a bare digit as "already fine"), so re-cast defensively
+                # here — mirroring start_i just above — or `stop_v - start_i`
+                # mixes an untyped int literal with an int64_t and GIMPLE
+                # rejects the binary expression outright.
+                stop_i = self._new_val('int64_t', f"(int64_t){stop_v}")
+                new_len = self._new_val('int64_t', f"{stop_i} - {start_i}")
             else:
                 new_len = self._new_val('int64_t', f"{old_len} - {start_i}")
             self._emit(f"  {t}->_len = {new_len};")
