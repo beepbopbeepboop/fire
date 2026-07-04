@@ -112,9 +112,11 @@ must be byte-identical; deliberate fixes get reviewed hunk-by-hunk.
 - ~~`compile_stdlib.py` / `build_stdlib_dylib.py` need
   `MOJO_STDLIB=/Users/mrs/net/chatgpt/claude/mojo/stdlib` on this machine
   (the default `../modular/mojo/stdlib` checkout is absent).~~
-  FIXED on 2026-07-03: `module_spec_gen.py` now uses the absolute path
-  `/Users/mrs/net/chatgpt/claude/mojo/stdlib` directly; the env var is
-  optional.
+  FIXED on 2026-07-03, then corrected later the same day:
+  `module_loader.py`/`module_spec_gen.py` hardcode the absolute path
+  `/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib` (the real modular
+  stdlib checkout, not the small `mojo/stdlib` mock used briefly mid-day)
+  directly; the env var is optional and no longer needs to be passed.
 - ~~`stdlib/lexer.mojo` fails to compile (pre-existing, verified against
   commit 2f2f330): its `tokenize` is inferred `int64_t(char *)` but
   `runtime/mojo_runtime.h:404` declares `MojoList *tokenize(char *)`.~~
@@ -122,4 +124,4 @@ must be byte-identical; deliberate fixes get reviewed hunk-by-hunk.
   `int64_t tokenize(char *)` matching the frozen stdlib lexer.mojo.
 - A stale `build/libmojostdlib.dylib` causes
   `dyld: symbol not found '_MojoList__write_to'` when running compiled
-  binaries; rebuild with `build_stdlib_dylib.py` (with `MOJO_STDLIB` set).
+  binaries; rebuild with `build_stdlib_dylib.py`.

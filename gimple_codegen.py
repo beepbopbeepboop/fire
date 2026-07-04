@@ -7078,7 +7078,15 @@ class GimpleGen:
             return 'int64_t', t
 
         # Opaque Python object (typed as int) — treat as MojoList via cast
-        if ot in ('int', 'int64_t'):
+        # `_Bool` is included here too: a SIMD comparison result (`simd_val.lt(...)`)
+        # collapses to a scalar _Bool (SIMD itself has no width tracking — every
+        # SIMD[dtype, N] value is scalar-erased regardless of N; subscripting the
+        # vector directly, e.g. `simd_val[0]`, already goes through this exact
+        # same MojoList-cast fakery below and "compiles" the same way). Without
+        # this, `_Bool` falls to the final generic-pointer-deref fallback further
+        # down, which assumes its receiver is a real pointer and errors trying to
+        # dereference a bare _Bool.
+        if ot in ('int', 'int64_t', '_Bool'):
             # Check actual type for globals loaded as int64_t
             actual_type = self._get_actual_type(ot, ov)
             if actual_type == 'MojoDict *':
