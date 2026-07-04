@@ -86,53 +86,68 @@ The `fix_gimple_*.py` scripts have been removed as legacy.
   pattern which compiles correctly in GIMPLE.
 - BUGS-AST.md BUG-013: `for a, b in ...` tuple targets emit invalid C.
 
-## 4b. `test/memory/test_span.mojo`'s last error: `span[0].data` (deferred 2026-07-04)
+## 4b. ~~`test/memory/test_span.mojo`'s last error: `span[0].data`~~
 
-The final failure in `compile_stdlib.py` (594/1) is `span[0].data` where
-`span: Span[MoveOnly[Int]]`. Root-caused fully; deliberately deferred because
-a full fix regressed 3 other files and requires resolving a real
-pre-existing ambiguity, not just adding a new capability. Two independent
-sub-problems, only the first of which is fixed:
+FIXED on 2026-07-04: `compile_stdlib.py` reaches **595/0** — every stdlib
+file now compiles. This was the last of the original 3 failures
+(`test_unsafe_pointer_v2.mojo`, `test_string_slice.mojo`, `test_span.mojo`).
 
-- FIXED: `Span(data)[:0]`'s slice `_len` computation mixed an uncast integer
-  literal with an int64_t temp (`_lower_slice`'s `Span *` arm, ~line 7446) —
-  `start_v` was defensively re-cast before use but `stop_v` wasn't. Fixed by
-  mirroring the same re-cast for `stop_v`.
-- DEFERRED: `_lower_subscript`'s `Span *` arm always assumes the element is a
-  raw byte (`struct_field_types['Span'] = {'_data': 'char *', ...}`,
-  ~line 10558), regardless of what `Span[T]` was actually constructed from —
-  so `span[0]` is always typed `char`, and `.data` (a `MoveOnly` field) fails
-  with "request for member 'data' in something not a structure or union".
+An earlier same-day attempt regressed 3 other files and was reverted (see
+git history / `compile-stdlib-boxing-stub-regression.md` for the full
+account) because it tried to fix the ambiguity in `_lower_binary`'s
+`_is_raw_ptr` dispatch directly. The actual fix took a different path that
+never needed to touch `_is_raw_ptr` at all:
 
-  Fixing this requires tracking `Span`'s real element type (mirroring the
-  existing `_elem_types` side-table already used for `MojoList *`), which in
-  turn requires `alloc[MoveOnly[Int]]` to actually resolve to a real
-  `MoveOnly_Int *` return type instead of the generic `int64_t *` fallback.
-  That's reachable — `_mojo_type`'s `UnsafePointer[X, Origin]` branch already
-  had an unrelated pre-existing bug (fixed 2026-07-04: it passed the *entire*
-  multi-arg bracket interior, including trailing origin params, to the
-  recursive element-type lookup, so it never matched anything and silently
-  defaulted to `int64_t`; now split on top-level commas first — see
-  `_split_top_level_commas`) — but teaching `_resolve_type` to *also* resolve
-  a bracket's element type against `struct_field_types` (not just the whole
-  annotation string) surfaces a real ambiguity in `_lower_binary`'s raw
-  pointer-arithmetic dispatch (`_is_raw_ptr`, ~line 4849, added 2026-07-03):
-  it distinguishes a genuine buffer pointer (`alloc[T]`'s `T *` return) from
-  a *boxed scalar* self-receiver (`self: Int *` inside `Int.__neg__`) by
-  checking whether `T` is a registered struct name — which breaks the moment
-  a buffer pointer's element type genuinely *is* a registered struct (exactly
-  what this fix produces). Substituting a "is this literally the `self`
-  parameter" check instead (the only place a struct's own name is used as a
-  boxed-scalar pointer — `_gen_struct_method` seeds
-  `self.var_types['self'] = f"{struct_name} *"` by name, nothing else does)
-  was tried and made things *worse* (591/4: new regressions in
-  `std/collections/dict.mojo`, `std/python/_cpython.mojo`,
-  `test/memory/test_memory.mojo`), meaning there's at least one more
-  boxed-scalar-via-struct-name pattern beyond `self` that isn't yet
-  identified. Needs dedicated investigation into every place a struct's own
-  name is used as a non-buffer pointer before `_is_raw_ptr`/`_resolve_type`
-  can be safely broadened. Reverted; `_resolve_type` and `_is_raw_ptr` are
-  unchanged as of this note.
+- `_lower_slice`'s `Span *` `_len` computation mixed an uncast integer
+  literal with an int64_t temp when the stop bound was a bare literal
+  (`start_v` was defensively re-cast before use, `stop_v` wasn't) — mirrored
+  the fix.
+- `_mojo_type`'s `UnsafePointer[X, Origin]` branch passed the *entire*
+  multi-arg bracket interior to the recursive element-type lookup, so it
+  never matched anything and silently defaulted to `int64_t` for any such
+  two-arg annotation — added `_split_top_level_commas`.
+- `_resolve_type` learned to resolve a bracket's element against
+  `struct_field_types` too (not just the whole annotation string), so
+  `UnsafePointer[MoveOnly_Int, MutExternalOrigin]` resolves to
+  `MoveOnly_Int *` instead of falling through to `_mojo_type`'s int64_t
+  default. Guarded so `_TYPE_MAP` scalar newtypes (`Int`, `UInt8`, ...) still
+  win — they're real `struct X(...)` definitions too but are deliberately
+  erased to raw C scalars everywhere else.
+- That alone is safe, but real struct pointers flowing through `alloc[T]`'s
+  return type exposed two dormant assumptions that only ever mattered once a
+  buffer pointer's pointee could be a genuine (non-scalar-newtype) struct:
+  `_gen_stmt_MultiAssignStmt`'s subscript-write case had no raw-pointer
+  branch at all (only `_gen_stmt_AugAssignStmt`'s did); `_lower_pointer_method`'s
+  `init_pointee_*` methods assumed the pointee was always scalar, casting a
+  pointer directly to a struct *value* type (invalid — needs a dereference).
+  Both fixed to match their already-correct sibling patterns.
+- Nested generic-struct type arguments (`alloc[MoveOnly[Int]]`) needed
+  pre-elaborating the inner generic (`_ensure_generic_struct`, factored out
+  of `_elaborate_generic_struct_call`) and re-deriving the outer generic's
+  return type via `_resolve_type` (elaborate.py's bare `_mojo_type` has no
+  `struct_field_types` access). This also required making
+  `_imported_generic_structs` actually get populated for the first time —
+  it turned out to be entirely dead code before (the only writer was a
+  `scan()` closure gated behind `link_imports`, a flag `compile_stdlib.py`
+  never sets) — via a new `_register_imported_generic_structs`, plus
+  `_find_generic_source` gaining struct-lookup support and a test-relative
+  module-resolution fallback for local packages like `test_utils` that
+  aren't on `imports.py`'s `MOJO_PATH`-based search at all. Making that
+  registration real exposed two *more* dormant bugs in the
+  never-before-exercised `_elaborate_generic_struct_call` path: no
+  concreteness check on type args (self-referential generics like
+  `StaticTuple[Self.size]` used inside `StaticTuple`'s own methods got
+  wrongly monomorphized against the unbound placeholder) and no
+  signature-aware method mangling (a struct with overloaded methods, e.g.
+  `LinkedList.pop()`/`pop(index)`, produced two conflicting `extern`
+  declarations for the same C symbol). Both fixed by aborting elaboration
+  entirely on either condition, falling back to whatever path already
+  handled that struct correctly before this registration existed.
+- Finally, `Span`'s own subscript gained the same `_elem_types` side-table
+  tracking `MojoList *` already has, populated at construction time from
+  whichever argument supplies the real element type.
+
+Commits: `c3ec7d9`, `9a56490`, `b608a09`, `2b96926`.
 
 ## 5. Structure / maintainability (behavior-preserving refactors)
 
