@@ -5495,10 +5495,12 @@ class GimpleGen:
                 ov_local = self._ensure_local(ot, ov)
             if node.args:
                 at, av = self.lower_expr(node.args[0])
-                # Coerce argument to the same type; GIMPLE requires separate cast stmt
+                # Coerce argument to the same type; GIMPLE requires separate cast stmt.
+                # Route through _coerce_to_type (not a raw C cast) since av may be a
+                # pointer (e.g. os.path.isdir(char *) stubbed to this int branch) —
+                # a direct (int)ptr cast is a -Wpointer-to-int-cast size mismatch.
                 if at != ot:
-                    av_cast = self._new_val(ot, f"({ot}){av}")
-                    av_local = av_cast
+                    av_local = self._coerce_to_type(at, ot, av)
                 else:
                     av_local = self._ensure_local(at, av)
             else:
