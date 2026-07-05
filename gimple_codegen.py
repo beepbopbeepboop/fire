@@ -2793,6 +2793,8 @@ class GimpleGen:
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_stdin_read':       ('char *',     []),
         'mojo_platform_system':  ('char *',     []),
+        'mojo_print_stderr':     ('void',       ['char *']),
+        'mojo_strlen':           ('int64_t',    ['char *']),
         'mojo_platform_machine': ('char *',     []),
         'mojo_subprocess_run':        ('MojoCompletedProcess *', ['MojoList *', 'int64_t']),
         'mojo_subprocess_returncode': ('int64_t', ['MojoCompletedProcess *']),
@@ -2895,6 +2897,7 @@ class GimpleGen:
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),
         'mojo_list_pop':         ('int64_t',    ['MojoList *']),
+        'mojo_list_pop_at':      ('int64_t',    ['MojoList *', 'int64_t']),
         'mojo_list_clear':       ('void',       ['MojoList *']),
         'mojo_list_reverse':     ('void',       ['MojoList *']),
         'mojo_list_remove_at':   ('void',       ['MojoList *', 'int64_t']),
@@ -4091,6 +4094,12 @@ class GimpleGen:
                 try:
                     from mojo_compiler import Parser as _P, py_tokenize as _tok
                     expr_node = _P(_tok(text))._parse_expr(0)
+                    # This is parsed fresh from raw source text at codegen
+                    # time (unlike the rest of the module), so it never went
+                    # through ast_rewriter.rewrite() — do that here, or e.g.
+                    # f"...{result.stderr}..." falls straight to
+                    # mojo_obj_getattr's stub instead of the real rewrite.
+                    expr_node = ast_rewriter.rewrite_node(expr_node)
                     et, ev = self.lower_expr(expr_node)
                     if et == 'char *':
                         part_val = ev
@@ -5728,7 +5737,25 @@ class GimpleGen:
                     self._nested_elem_types[ov] = self._nested_elem_types[av]
             return 'int', self._new_val('int', '0')
         if method == 'pop':
-            return 'int64_t', self._new_val('int64_t', f"mojo_list_pop ({ov})")
+            # Was `mojo_list_pop(ov)` unconditionally — any index argument
+            # (e.g. `argv.pop(1)`, removing a specific element, not the
+            # last) was silently ignored; always popped the last element.
+            if args:
+                idx_type, idx_v = self.lower_expr(args[0])
+                idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+            else:
+                # GIMPLE rejects a bare `(int64_t)-1` initializer directly
+                # ("non-trivial conversion in integer_cst") — needs the
+                # int-then-cast two-step used elsewhere in this file.
+                neg1 = self._new_val('int', '-1')
+                idx64 = self._new_val('int64_t', f'(int64_t){neg1}')
+            raw = self._call_expr('int64_t', 'mojo_list_pop_at', [('MojoList *', ov), ('int64_t', idx64)])
+            elem = self._elem_of(ov)
+            suf = TypeLattice.list_suffix(elem)
+            if suf == 'str':
+                t = self._new_val('char *', f"(char *){raw}")
+                return 'char *', t
+            return 'int64_t', raw
         if method in ('sort', 'reverse', 'clear'):
             self._emit(f"  mojo_list_{method} ({ov});")
             return 'int', self._new_val('int', '0')
@@ -5911,9 +5938,15 @@ class GimpleGen:
         if method == 'find' and arg_vals:
             sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
             return 'int64_t', self._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
-        if method == 'split' and arg_vals:
+        if method == 'split':
+            # No-arg split() (or split(None)) means whitespace-split — was
+            # `and arg_vals`-gated, so the no-arg call fell through to the
+            # unknown-method stub (silently an empty list). Real bug found
+            # via py_cflags = getenv_output.strip().split() corrupting a
+            # subprocess argv (see mojo_str_split's doc comment).
             sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
-            t = self._call_expr('MojoList *', 'mojo_str_split', [('char *', cstr_ov), (sep_type, arg_vals[0])])
+            sep_val = arg_vals[0] if arg_vals else '0'
+            t = self._call_expr('MojoList *', 'mojo_str_split', [('char *', cstr_ov), (sep_type, sep_val)])
             self._elem_types[t] = 'char *'
             return 'MojoList *', t
         if method == 'rsplit':
@@ -6843,6 +6876,13 @@ class GimpleGen:
         }
         if at in _LEN_FNS:
             return 'int64_t', self._new_val('int64_t', _LEN_FNS[at])
+        if at == 'char *':
+            # A plain string (the overwhelmingly common representation of
+            # Mojo/Python `str` in this compiler) had no case here at all —
+            # fell all the way to the final "unsupported type" fallback,
+            # so len(any_string) always silently returned 0. Found via
+            # len(c_code) on a real compiled program's C output.
+            return 'int64_t', self._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
         if at.endswith(' *') and at[:-2] in self.struct_field_types \
                 and '_len' in self.struct_field_types[at[:-2]]:
             return 'int64_t', self._new_val('int64_t', f'{av}->_len')
@@ -8295,7 +8335,28 @@ class GimpleGen:
 
     # ── Print helper ───────────────────────────────────────────────────────
 
-    def _gen_print(self, args: list):
+    @staticmethod
+    def _is_sys_stderr(expr) -> bool:
+        """Structural check for `sys.stderr` — deliberately not lowered as a
+        runtime value at all (see mojo_print_stderr's doc comment: a bare
+        FILE* isn't safely passable through -fgimple's restricted subset)."""
+        return (isinstance(expr, MemberExpr) and isinstance(expr.obj, IdentExpr)
+                and expr.obj.name == 'sys' and expr.member == 'stderr')
+
+    def _gen_print(self, args: list, kwargs: list = None):
+        # print(..., file=sys.stderr): kwargs used to be silently dropped
+        # entirely (the file= expression was never even inspected), so every
+        # print(..., file=sys.stderr) — the standard error-reporting idiom
+        # throughout this codebase's own source — always printed to stdout
+        # AND, once self-hosted, crashed evaluating `sys.stderr` generically
+        # (mojo_obj_getattr's stub). Detected here by AST shape at compile
+        # time; see _is_sys_stderr.
+        print_fn = 'mojo_print'
+        if kwargs:
+            for kw_name, kw_val in kwargs:
+                if kw_name == 'file' and self._is_sys_stderr(kw_val):
+                    print_fn = 'mojo_print_stderr'
+
         # Inline string-literal call arguments (e.g. `mojo_print (" ")`) are not
         # valid in __GIMPLE — every literal must go through the _slit_ pool and
         # be loaded into a char* temp first (see _intern_string's docstring).
@@ -8309,7 +8370,7 @@ class GimpleGen:
         def _emit_literal_print(escaped: str):
             slit = self._intern_string(escaped)
             t = self._new_val('char *', slit)
-            self._emit(f'  mojo_print ({t});')
+            self._emit(f'  {print_fn} ({t});')
 
         if not args:
             _emit_literal_print('')
@@ -8317,7 +8378,7 @@ class GimpleGen:
         parts = [self.lower_expr(a) for a in args]
         for i, (atype, aval) in enumerate(parts):
             if atype == 'char *':
-                self._emit(f'  mojo_print ({aval});')
+                self._emit(f'  {print_fn} ({aval});')
             else:
                 t = self._new_temp('char *')
                 vp = self._new_temp('void *')
@@ -8329,7 +8390,7 @@ class GimpleGen:
                 self._emit(f'  {vp} = malloc (256);')
                 self._emit(f'  {t} = (char *) {vp};')
                 self._emit(f'  sprintf ({t}, {fmt_t}, {aval});')
-                self._emit(f'  mojo_print ({t});')
+                self._emit(f'  {print_fn} ({t});')
                 self._emit(f'  free ({t});')
             if i < len(parts) - 1:
                 _emit_literal_print(' ')
@@ -9029,7 +9090,7 @@ class GimpleGen:
         if isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr):
             raw_name = node.value.func.name
             if raw_name == 'print':
-                self._gen_print(node.value.args)
+                self._gen_print(node.value.args, node.value.kwargs)
                 return
             if raw_name in ('strided_load', 'strided_store') and node.value.args:
                 self._lower_strided(node.value, store=(raw_name == 'strided_store'))

@@ -124,6 +124,7 @@ MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
 char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);
+int64_t mojo_strlen(char *s);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
@@ -180,6 +181,7 @@ MojoList   *mojo_list_copy(MojoList *l);
 int         mojo_list_all(MojoList *l);
 int         mojo_list_any(MojoList *l);
 int64_t     mojo_list_pop(MojoList *l);
+int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
 void        mojo_list_sort(MojoList *l);
 void        mojo_list_reverse(MojoList *l);
@@ -255,6 +257,7 @@ void     mojo_set_print(MojoSet *s);
 
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(char *str);
+void mojo_print_stderr(char *str);
 char *mojo_input(char *prompt);
 
 /* Python built-in functions for C strings */

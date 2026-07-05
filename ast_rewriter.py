@@ -589,3 +589,12 @@ TRIE = build_trie(RULES)
 def rewrite(stmts):
     """Entry point: run the full registered ruleset over a parsed module."""
     return rewrite_module(stmts, TRIE)
+
+
+def rewrite_node(node):
+    """Entry point for rewriting a single expression/statement node, not a
+    whole module — needed for f-string interpolations, which gimple_codegen.py
+    parses lazily at codegen time (from raw source text still embedded in a
+    StringLiteral node) rather than upfront alongside the rest of the module,
+    so they never pass through rewrite() otherwise."""
+    return _rewrite_node(node, TRIE)

@@ -281,7 +281,8 @@ def main():
   mojo --jit                       Interactive REPL (JIT mode, ARM64)
   mojo repl                        Interactive REPL (explicit, interpreter)
   mojo repl --jit                  Interactive REPL (explicit, JIT mode)
-  mojo <file.mojo>                 Interpret and execute file
+  mojo <file.mojo>                 Compile and run (falls back to the interpreter on failure)
+  mojo run <file.mojo>             Run through the interpreter only (myinterpreter.py, no compile attempt)
   mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
@@ -313,6 +314,18 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         if len(sys.argv) < 2:
             run_jit_repl(opt_flag, debug_flag)
             return
+
+    # Check for run command — explicitly selects the interpreter (myinterpreter.py),
+    # bypassing the default's compile-then-run attempt via driver.compile_program.
+    # Real Mojo's own `mojo run <file>` also "builds and executes" rather than
+    # interpreting (there's no separate interpreter in real Mojo) — but this
+    # project has two real implementations (compiled and interpreted) worth
+    # comparing directly, so `run` here means "run through the interpreter" and
+    # `build`/the bare-filename default mean "run through the compiler".
+    run_interp = False
+    if sys.argv[1] == 'run':
+        run_interp = True
+        sys.argv.pop(1)
 
     # Check for build command
     build = False
@@ -439,6 +452,11 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             print(f"Error generating dump files: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+        return
+
+    # `mojo run <file>`: force the interpreter, no compile attempt at all.
+    if run_interp:
+        interpret_and_execute(src, filename=input_file)
         return
 
     # Default for a .mojo program: compile and run it through the module-cache

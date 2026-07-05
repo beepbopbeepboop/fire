@@ -108,6 +108,17 @@ void mojo_print(char *str) {
     fflush(stdout);
 }
 
+/* print(..., file=sys.stderr): a separate function rather than passing a
+ * FILE* through generated GIMPLE code — `stderr`/`stdout` are macros on
+ * macOS (e.g. __stderrp), not necessarily legal inline in -fgimple's
+ * restricted subset. gimple_codegen.py's _gen_print detects `file=` by AST
+ * shape at compile time and picks mojo_print vs this, so no FILE* value
+ * ever needs to flow through the generated code at all. */
+void mojo_print_stderr(char *str) {
+    fprintf(stderr, "%s", str);
+    fflush(stderr);
+}
+
 /* File I/O — via Python (if enabled) or via C stdio */
 #if USE_PYTHON
 MojoFileHandle mojo_open(char *filename, char *mode) {
@@ -591,6 +602,15 @@ int mojo_truthy_cstr(char *s) {
     return s != NULL && s[0] != '\0';
 }
 
+/* len(a_plain_string): real libc strlen() returns size_t, not int64_t —
+ * GIMPLE's strict typing rejects assigning that straight into an int64_t
+ * temp ("invalid conversion in gimple call"), the same class of issue as
+ * mojo_getenv/mojo_c_getenv. This wrapper gives it the guaranteed-correct
+ * signature codegen expects. */
+int64_t mojo_strlen(char *s) {
+    return s ? (int64_t)strlen(s) : 0;
+}
+
 /* platform.system()/platform.machine(): resolved via preprocessor macros at
  * the C compiler's own build time (not Python's `platform` module — this
  * runtime is itself compiled by whatever gcc builds the self-hosted binary,
@@ -679,13 +699,51 @@ int64_t mojo_subprocess_returncode(MojoCompletedProcess *p) { return p->returnco
 char   *mojo_subprocess_stdout(MojoCompletedProcess *p)     { return p->out; }
 char   *mojo_subprocess_stderr(MojoCompletedProcess *p)     { return p->err; }
 
+/* Shared by mojo_str_split/mojo_str_rsplit: split on runs of whitespace,
+ * leading/trailing whitespace ignored — Python's str.split()/str.split(None)
+ * semantics (as opposed to strtok's "sep" splitting on any one of a set of
+ * literal delimiter characters).
+ *
+ * mojo_list_append_str stores the raw pointer it's given (MojoList never
+ * copies or frees string contents — see mojo_list_free), so every token
+ * appended here must be its own independent allocation, not a pointer into
+ * `copy`: real bug found via list iteration printing empty strings, once
+ * `copy` was freed after the loop, every stored pointer was already
+ * dangling. */
+static void _split_whitespace_into(MojoList *out, char *s) {
+    char *copy = strdup(s);
+    char *p = copy;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        char saved = *p;
+        *p = '\0';
+        mojo_list_append_str(out, strdup(start));
+        *p = saved;
+    }
+    free(copy);
+}
+
+/* Python str.split(sep): sep NULL (or "") means split on runs of whitespace
+ * (leading/trailing ignored, unlike strtok's delimiter-set semantics) — the
+ * common no-argument `s.split()` call. Found via a real corrupted-argv bug:
+ * `subprocess.run(["gcc"] + ... + py_cflags + ...)` where
+ * py_cflags = getenv_output.strip().split() silently produced an empty list
+ * (this function used to just bail out on a NULL/empty sep) instead of the
+ * real whitespace-split flags, breaking exec of the child process. */
 MojoList *mojo_str_split(char *s, char *sep) {
     MojoList *l = mojo_list_new();
-    if (!s || !sep) return l;
+    if (!s) return l;
+    if (!sep || !*sep) {
+        _split_whitespace_into(l, s);
+        return l;
+    }
     char *copy = strdup(s);
     char *token = strtok(copy, sep);
     while (token) {
-        mojo_list_append_str(l, token);
+        mojo_list_append_str(l, strdup(token));
         token = strtok(NULL, sep);
     }
     free(copy);
@@ -707,24 +765,12 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
         char *copy = strdup(s);
         char *token = strtok(copy, sep);
         while (token) {
-            mojo_list_append_str(all, token);
+            mojo_list_append_str(all, strdup(token));
             token = strtok(NULL, sep);
         }
         free(copy);
     } else {
-        char *copy = strdup(s);
-        char *p = copy;
-        while (*p) {
-            while (*p && isspace((unsigned char)*p)) p++;
-            if (!*p) break;
-            char *start = p;
-            while (*p && !isspace((unsigned char)*p)) p++;
-            char saved = *p;
-            *p = '\0';
-            mojo_list_append_str(all, start);
-            *p = saved;
-        }
-        free(copy);
+        _split_whitespace_into(all, s);
     }
 
     int64_t n = mojo_list_len(all);
@@ -1696,10 +1742,24 @@ int mojo_list_any(MojoList *l) {
     return 0;
 }
 
-int64_t mojo_list_pop(MojoList *l) {
+/* Python list.pop(index=-1): removes and returns the element at `idx`
+ * (negative indices count from the end), shifting later elements down.
+ * mojo_list_pop(l) (no index) used to be the only implementation, always
+ * popping the last element regardless of any index argument codegen passed
+ * it — a real bug: `argv.pop(1)` (removing a specific flag/token, not the
+ * last one) silently popped the wrong element instead. */
+int64_t mojo_list_pop_at(MojoList *l, int64_t idx) {
     if (!l || l->len == 0) return 0;
+    idx = _norm_idx(l, idx);
+    if (idx < 0 || idx >= l->len) return 0;
+    int64_t val = l->data[idx];
+    for (int64_t i = idx; i < l->len - 1; i++) l->data[i] = l->data[i + 1];
     l->len--;
-    return l->data[l->len];
+    return val;
+}
+
+int64_t mojo_list_pop(MojoList *l) {
+    return mojo_list_pop_at(l, -1);
 }
 
 void mojo_list_extend(MojoList *dst, MojoList *src) {
