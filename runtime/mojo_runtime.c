@@ -4,8 +4,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 #define USE_PYTHON 0
 
@@ -331,16 +334,26 @@ void mojo_list_append_str(MojoList *l, const char *v)
     mojo_list_append_int(l, (int64_t)(uintptr_t)v);
 }
 
-int64_t mojo_list_get_int(MojoList *l, int64_t i)   { return l->data[i]; }
+/* Python negative-index semantics (list[-1] == list[len-1]) — none of the
+ * list/string accessors below normalized this before; a negative index was
+ * passed straight through to `data[i]`, reading out of bounds. Found via a
+ * real crash: `line_nums[-1] if line_nums else 0` in mojo_compiler.py's
+ * tokenizer, compiled with a NULL line_nums (empty input) — but the bug
+ * itself is general, not specific to that call site. */
+static int64_t _norm_idx(MojoList *l, int64_t i) {
+    return i < 0 ? i + l->len : i;
+}
+
+int64_t mojo_list_get_int(MojoList *l, int64_t i)   { return l->data[_norm_idx(l, i)]; }
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
     double v;
-    memcpy(&v, &l->data[i], sizeof(v));
+    memcpy(&v, &l->data[_norm_idx(l, i)], sizeof(v));
     return v;
 }
 
-int64_t mojo_list_len(MojoList *l) { return l->len; }
+int64_t mojo_list_len(MojoList *l) { return l ? l->len : 0; }
 
 int mojo_list_contains_int(MojoList *l, int64_t v)
 {
@@ -365,23 +378,23 @@ int mojo_list_contains_str(MojoList *l, char *v)
     return 0;
 }
 
-void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)   { l->data[i] = v; }
+void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)   { l->data[_norm_idx(l, i)] = v; }
 
 void mojo_list_set_double(MojoList *l, int64_t i, double v)
 {
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
-    l->data[i] = bits;
+    l->data[_norm_idx(l, i)] = bits;
 }
 
 void mojo_list_set_str(MojoList *l, int64_t i, char *v)
 {
-    l->data[i] = (int64_t)(uintptr_t)v;
+    l->data[_norm_idx(l, i)] = (int64_t)(uintptr_t)v;
 }
 
 char *mojo_list_get_str(MojoList *l, int64_t i)
 {
-    return (char *)(uintptr_t)l->data[i];
+    return (char *)(uintptr_t)l->data[_norm_idx(l, i)];
 }
 
 MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
@@ -520,7 +533,7 @@ int mojo_str_contains(char *haystack, char *needle)
     return strstr(haystack, needle) != NULL;
 }
 
-char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i]; }
+char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i < 0 ? i + s->len : i]; }
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
 int mojo_str_startswith(char *s, char *prefix) {
@@ -558,6 +571,114 @@ int64_t mojo_str_find(char *s, char *needle) {
     return (int64_t)(found - s);
 }
 
+/* Deliberately NOT named mojo_getenv: `getenv` is in _FORCE_RENAME_RESERVED
+ * in gimple_codegen.py, so the real Mojo stdlib's own `getenv` (std/os/
+ * env.mojo, a genuine `def getenv(name, default="") -> String`) also
+ * compiles to a C function literally called `mojo_getenv` — naming this
+ * wrapper the same collided with that (conflicting-types build failure in
+ * std/python/_cpython.mojo, which calls the stdlib's real getenv). ast_
+ * rewriter.py's os.environ.* rules call this one directly by name instead
+ * of relying on the reserved-name rewrite. */
+char *mojo_c_getenv(char *name) {
+    if (!name) return NULL;
+    return getenv(name);
+}
+
+/* Python str truthiness: "" is falsy, NULL is falsy, anything else truthy.
+ * Used by _ensure_bool_cond so `if some_char_star:` matches Python semantics
+ * (a pointer-nullity check alone treats a non-null empty string as truthy). */
+int mojo_truthy_cstr(char *s) {
+    return s != NULL && s[0] != '\0';
+}
+
+/* platform.system()/platform.machine(): resolved via preprocessor macros at
+ * the C compiler's own build time (not Python's `platform` module — this
+ * runtime is itself compiled by whatever gcc builds the self-hosted binary,
+ * so baking the answer in via CPython's platform.system() from ast_rewriter.py
+ * would recurse, since ast_rewriter.py is part of the self-hosted closure too). */
+char *mojo_platform_system(void) {
+#if defined(__APPLE__)
+    return "Darwin";
+#elif defined(__linux__)
+    return "Linux";
+#elif defined(_WIN32)
+    return "Windows";
+#else
+    return "";
+#endif
+}
+
+char *mojo_platform_machine(void) {
+#if defined(__aarch64__) || defined(__arm64__)
+    return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#else
+    return "";
+#endif
+}
+
+/* Read a pipe fd to EOF into a malloc'd, NUL-terminated buffer. */
+static char *_read_all(int fd) {
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    for (;;) {
+        if (len + 4096 > cap) { cap *= 2; buf = realloc(buf, cap); }
+        ssize_t n = read(fd, buf + len, cap - len - 1);
+        if (n < 0) { if (errno == EINTR) continue; break; }
+        if (n == 0) break;
+        len += (size_t)n;
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+char *mojo_stdin_read(void) {
+    return _read_all(STDIN_FILENO);
+}
+
+MojoCompletedProcess *mojo_subprocess_run(MojoList *argv, int64_t capture_output) {
+    int64_t n = mojo_list_len(argv);
+    char **cargv = malloc((size_t)(n + 1) * sizeof(char *));
+    for (int64_t i = 0; i < n; i++) cargv[i] = mojo_list_get_str(argv, i);
+    cargv[n] = NULL;
+
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
+    if (capture_output) { pipe(out_pipe); pipe(err_pipe); }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (capture_output) {
+            dup2(out_pipe[1], STDOUT_FILENO);
+            dup2(err_pipe[1], STDERR_FILENO);
+            close(out_pipe[0]); close(out_pipe[1]);
+            close(err_pipe[0]); close(err_pipe[1]);
+        }
+        execvp(cargv[0], cargv);
+        _exit(127);  /* execvp failed (e.g. command not found) */
+    }
+
+    MojoCompletedProcess *p = malloc(sizeof(MojoCompletedProcess));
+    p->out = strdup("");
+    p->err = strdup("");
+    if (capture_output) {
+        close(out_pipe[1]); close(err_pipe[1]);
+        free(p->out); free(p->err);
+        p->out = _read_all(out_pipe[0]);
+        p->err = _read_all(err_pipe[0]);
+        close(out_pipe[0]); close(err_pipe[0]);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    p->returncode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    free(cargv);
+    return p;
+}
+
+int64_t mojo_subprocess_returncode(MojoCompletedProcess *p) { return p->returncode; }
+char   *mojo_subprocess_stdout(MojoCompletedProcess *p)     { return p->out; }
+char   *mojo_subprocess_stderr(MojoCompletedProcess *p)     { return p->err; }
+
 MojoList *mojo_str_split(char *s, char *sep) {
     MojoList *l = mojo_list_new();
     if (!s || !sep) return l;
@@ -568,6 +689,65 @@ MojoList *mojo_str_split(char *s, char *sep) {
         token = strtok(NULL, sep);
     }
     free(copy);
+    return l;
+}
+
+/* Python str.rsplit(sep, maxsplit): sep NULL means split on runs of
+ * whitespace (leading/trailing whitespace ignored); maxsplit < 0 means
+ * unlimited. Splits are taken from the right, so with a positive maxsplit
+ * the leftmost element absorbs any excess separators. */
+MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
+    MojoList *l = mojo_list_new();
+    if (!s) return l;
+
+    /* Collect tokens left-to-right first (unlimited), then merge from the
+     * left once we know how many splits maxsplit allows. */
+    MojoList *all = mojo_list_new();
+    if (sep && *sep) {
+        char *copy = strdup(s);
+        char *token = strtok(copy, sep);
+        while (token) {
+            mojo_list_append_str(all, token);
+            token = strtok(NULL, sep);
+        }
+        free(copy);
+    } else {
+        char *copy = strdup(s);
+        char *p = copy;
+        while (*p) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            char *start = p;
+            while (*p && !isspace((unsigned char)*p)) p++;
+            char saved = *p;
+            *p = '\0';
+            mojo_list_append_str(all, start);
+            *p = saved;
+        }
+        free(copy);
+    }
+
+    int64_t n = mojo_list_len(all);
+    if (maxsplit < 0 || maxsplit >= n - 1) {
+        for (int64_t i = 0; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+        return l;
+    }
+    /* Merge the leftmost (n - maxsplit) tokens back together with sep
+     * (or a single space, for whitespace splitting) as the join separator. */
+    int64_t n_keep = n - maxsplit;
+    const char *joiner = (sep && *sep) ? sep : " ";
+    char *merged = strdup(mojo_list_get_str(all, 0));
+    for (int64_t i = 1; i < n_keep; i++) {
+        char *piece = mojo_list_get_str(all, i);
+        size_t newlen = strlen(merged) + strlen(joiner) + strlen(piece) + 1;
+        char *next = malloc(newlen);
+        snprintf(next, newlen, "%s%s%s", merged, joiner, piece);
+        free(merged);
+        merged = next;
+    }
+    mojo_list_append_str(l, merged);
+    free(merged);
+    for (int64_t i = n_keep; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
     return l;
 }
 
@@ -705,7 +885,7 @@ void mojo_dict_print(MojoDict *d)
     printf("}");
 }
 
-int64_t mojo_dict_len(MojoDict *d) { return d->used; }
+int64_t mojo_dict_len(MojoDict *d) { return d ? d->used : 0; }
 
 /* ── MojoDictIter ─────────────────────────────────────────────────────────*/
 
@@ -867,7 +1047,7 @@ void mojo_set_print(MojoSet *s)
     printf("}");
 }
 
-int64_t mojo_set_len(MojoSet *s) { return s->used; }
+int64_t mojo_set_len(MojoSet *s) { return s ? s->used : 0; }
 
 MojoSet *mojo_set_union(MojoSet *a, MojoSet *b) {
     MojoSet *out = mojo_set_new();
@@ -1324,13 +1504,19 @@ char *string_upper(char *str) {
 }
 
 /* ── Generic Python-object attribute accessor ──────────────────────────────
- * Used when GIMPLE code accesses fields of opaque AST node objects (typed as
- * int).  In a proper implementation this would call into the Python C API or
- * a reflection table; here we return 0 as a safe stub so the compiled binary
- * at least links and runs without crashing on attribute access.             */
+ * Reached whenever codegen couldn't statically resolve obj.attr to a real
+ * struct field or a known stdlib call (see gimple_codegen.py's os.path.*
+ * block and ast_rewriter.py for the cases that ARE resolved statically —
+ * there is no dynamic module/object system at runtime to look this up in).
+ * Returning 0 here used to mean the caller silently got a null pointer and
+ * crashed several calls later somewhere unrelated (see the os.environ bug
+ * hunt). Aborting immediately, with the attribute name, turns that into an
+ * instant, greppable failure at the actual missing-case site instead. */
 int64_t mojo_obj_getattr(void *obj, char *attr) {
-    (void)obj; (void)attr;
-    return 0;  /* stub: real value returned by Python layer via popen path */
+    fprintf(stderr, "mojo_obj_getattr: unresolved attribute access '.%s' on obj=%p "
+                     "(codegen fell back to the generic accessor instead of resolving "
+                     "this statically)\n", attr ? attr : "?", obj);
+    abort();
 }
 
 

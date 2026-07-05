@@ -30,6 +30,54 @@ the non-exception path; `raise` is a no-op. This is very likely the
 Fix direction (applied): `mojo_try_push` is a `#define` in `mojo_runtime.h`.
 ABI.md documents the macro nature of this entry point.
 
+UPDATE 2026-07-04: the setjmp fix above was necessary but not sufficient —
+the "stage-2 bootstrap segfault / compiled REPL segfault" class turned out
+to be at least nine separate, independent bugs, found and fixed one at a
+time by actually running stage2/stage3 under lldb until they stopped
+crashing (`stage2/mojo --dump ../mojo.py`, then every `.mojo`/`.py` file
+`stage2`/`stage3` dump):
+- `os.environ.get`/`[]`/`in`/assignment had no lowering at all (fell to
+  `mojo_obj_getattr`'s stub → null deref) — see `ast_rewriter.py`'s
+  `os_environ_*` rules.
+- `str.rsplit` was an unimplemented stub returning `0` typed `int`, boxed as
+  a null `MojoList *` — real `mojo_str_rsplit` added.
+- No list/string accessor normalized negative indices (`list[-1]` read
+  `data[-1]`, out of bounds) — fixed in `mojo_list_get_int/get_double/
+  get_str/set_*` and `mojo_str_char_at` (`runtime/mojo_runtime.c`).
+- Container truthiness (`if some_list:`) was a pointer-null check, not a
+  length check — an allocated-but-empty list was always "truthy". Fixed in
+  `_ensure_bool_cond`/`_lower_UnaryOp`/`_lower_TernaryExpr`
+  (`gimple_codegen.py`) to call `mojo_list_len`/`mojo_dict_len`/
+  `mojo_set_len`/`mojo_truthy_cstr`, all now NULL-safe.
+- Ternary expressions evaluate *both* branches unconditionally (no real
+  branch in the generated C) — see §4d. Two real crashes traced to this;
+  worked around at the two call sites, not fixed at the root (§4d).
+- `subprocess.run(...).returncode`/`.stdout`/`.stderr`, `sys.stdin.read()`,
+  `platform.system()`/`.machine()` had no implementation — real runtime
+  functions added (`mojo_subprocess_run`, `mojo_stdin_read`,
+  `mojo_platform_system`/`_machine`) and wired via `ast_rewriter.py`.
+- `_TYPE_MAP` (`gimple_codegen.py`) had a literal `None` dict key — crashed
+  building the dict (`MojoDict` is string-keyed only, no way to represent a
+  `None` key). Entry was dead code (`_mojo_type`'s `if not ann: return
+  'int64_t'` already short-circuits before any lookup); removed.
+- `__name__` was hardcoded to the literal `"__main__"` for *every* compiled
+  module, root or transitively imported — every inlined script's own
+  `if __name__ == '__main__': main()` guard fired, running that script's
+  CLI entry point as a side effect of merely being imported into the
+  closure (e.g. `build_stdlib_dylib.py`'s `main()` running `argparse`
+  during a plain `--dump` of `mojo.py`). Now resolves per-module via
+  `self.module_name`.
+- Fixing `__name__` above then exposed a genuine double-invocation bug it
+  had been masking: the auto-generated C `main()` wrapper called
+  `_toplevel()` (which now correctly runs the root's own
+  `if __name__ == '__main__': main()`) *and then* called the renamed
+  `_gimple_main()` again unconditionally right after. Every self-hosted
+  program's `main()` was running twice.
+
+With all of the above, `make bootstrap`'s stage1/stage2/stage3/verify
+sequence passes cleanly (see CLAUDE.md). Three real generalizations were
+deliberately deferred rather than fixed on the spot — see §4c/4d/4e.
+
 ## 2. ~~`_TYPE_MAP` vs ABI.md divergence~~
 
 FIXED: `_TYPE_MAP` in `gimple_codegen.py` already maps `Int → int64_t`, `Bool → _Bool`,
@@ -148,6 +196,69 @@ never needed to touch `_is_raw_ptr` at all:
   whichever argument supplies the real element type.
 
 Commits: `c3ec7d9`, `9a56490`, `b608a09`, `2b96926`.
+
+## 4c. Deferred generalizations found building `ast_rewriter.py` (2026-07-04)
+
+`ast_rewriter.py` (an AST-to-AST rewrite pass, run between parsing and
+`gimple_codegen.py`, that gives the "Python idiom -> concrete runtime call"
+mappings a real rule table instead of inline `elif` chains — see its module
+docstring, and the `os_environ_*` rules for the motivating case) is itself
+part of the self-hosted closure, so it had to stay inside the currently
+self-hostable Python subset. That ruled out three genuinely useful features,
+each real, standalone compiler work — logged here rather than solved on the
+spot:
+
+- **Real `type()`/RTTI.** `mojo_type()` and `mojo_obj_getattr` (see the
+  latter's doc comment in `runtime/mojo_runtime.c` — it now `abort()`s with
+  the attribute name instead of silently returning 0, precisely so gaps like
+  this show up immediately instead of as a null-deref three calls later)
+  are stubs because there is no runtime type tag on boxed values. Fixing
+  this for real needs a tagged-union object representation (type tag +
+  int64_t backing) — the same conclusion item 4 above already reached from
+  a different direction. Highest payoff of the three: fixes every future
+  generic/dynamic-idiom gap, not just this one. `ast_rewriter.py` works
+  around it today with a literal `isinstance` chain (`_node_type_name`)
+  instead of `type(x).__name__`.
+- **Generators (`yield`).** No coroutine/iterator-state-machine codegen
+  exists; a generator function can't currently be self-hosted at all.
+  `ast_rewriter.py` avoids this by returning lists instead of yielding.
+- **Tuple-keyed dicts.** `MojoDict` is string-keyed only; there's no
+  composite-key hashing. `ast_rewriter.py`'s discrimination trie encodes
+  what would naturally be a `(path, kind, value)` tuple key as a single
+  string key (`_edge_key`) instead.
+
+## 4d. Ternary expressions evaluate both branches eagerly (2026-07-04)
+
+`_lower_TernaryExpr` (`gimple_codegen.py`) lowers `a if cond else b` by
+unconditionally emitting code for *both* `then_val` and `else_val` at codegen
+time, then selecting between the two already-computed results — there's no
+branch in the generated C that skips the untaken side. For pure expressions
+this is merely wasteful, but for anything with a side effect (I/O, a
+function call) it's a correctness bug: the untaken branch's side effect
+still happens. Found via `mojo_compiler.py:2625`'s
+`sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()` —
+compiled and run with an argv file present (so the `else` should be taken),
+it still called `sys.stdin.read()` unconditionally, which is what actually
+hit the `.stdin` `mojo_obj_getattr` gap during the bootstrap bug hunt (see
+`ast_rewriter.py`'s `sys_stdin_read` rule, added to give it a real
+implementation rather than leave it to crash). The real fix is emitting an
+actual `if/else` with each branch's evaluation inside its own block —
+broader and riskier than fixing on the spot (every ternary in the
+self-hosted closure is affected), so logged here instead of changed live.
+
+## 4e. `re` module flags are stubbed constants, not honored (2026-07-04)
+
+`ast_rewriter.py`'s `re_multiline`/`re_dotall`/`re_ignorecase`/`re_verbose`
+rules give `re.MULTILINE` etc. their real CPython integer values so
+evaluating the constant doesn't crash (same `mojo_obj_getattr` gap class as
+`os.environ`). But the regex engine backing this runtime
+(`mojo_re_sub_fn`, `runtime/mojo_runtime.c`) calls POSIX `regcomp` with a
+hardcoded `REG_EXTENDED` and never consumes a flags argument at all — so
+`re.compile(pattern, re.MULTILINE)` compiles and runs, but multiline
+anchoring (or DOTALL/IGNORECASE/VERBOSE) has no actual effect. Real fix
+needs `mojo_re_*` to translate the flags int into `regcomp`'s
+`REG_ICASE`/etc. (MULTILINE and VERBOSE have no direct POSIX ERE
+equivalent and would need pattern preprocessing instead).
 
 ## 5. Structure / maintainability (behavior-preserving refactors)
 

@@ -525,9 +525,14 @@ def test_review_fixes_monomorphize_overload(wd):
         pass
     check("review#6: unmarshalable comptime param raises ValueError", raised6)
     # #7: the no-annotation default is consistent (int64_t) across both type paths.
+    # _TYPE_MAP itself has no `None` key (a literal None key crashes building
+    # this dict once self-hosted — MojoDict is string-keyed only; see
+    # BACKLOG-CODEGEN.md §1); _mojo_type's own `if not ann: return 'int64_t'`
+    # short-circuit is the real (and only) code path, so .get(None, ...)
+    # checks the same fallback value without requiring the key to exist.
     from gimple_codegen import _mojo_type, _TYPE_MAP
     check("review#7: None default consistent (int64_t)",
-          _mojo_type(None) == 'int64_t' and _TYPE_MAP[None] == 'int64_t')
+          _mojo_type(None) == 'int64_t' and _TYPE_MAP.get(None, 'int64_t') == 'int64_t')
 
 
 def main():

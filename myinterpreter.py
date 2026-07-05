@@ -337,6 +337,12 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
+    def execute_VarDecl(self, node: N.VarDecl):
+        """Execute variable declaration."""
+        value = self.eval_expr(node.value)
+        self.scope.define(node.name, value)
+        return value
+
     def execute_AugAssignStmt(self, node):
         """Execute augmented assignment (+=, -=, etc.)."""
         # Get current value

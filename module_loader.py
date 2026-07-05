@@ -13,7 +13,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def _mkfn(sig):
     before_paren = sig.split('(')[0].strip()
     parts = before_paren.rsplit(None, 1)  # split on last whitespace token
-    ret = parts[0].strip() if len(parts) > 1 else 'void'
+    ret = 'void'
+    if len(parts) > 1:
+        ret = parts[0].strip()
     return {'c_return_type': ret, 'c_parameters': [], 'signature': sig,
             'return_type': ret, 'parameters': []}
 

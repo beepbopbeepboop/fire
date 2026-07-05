@@ -56,7 +56,7 @@ ABI_VERSION = "1"
 # Keep this list complete: anything that changes generated C / objects belongs
 # here. The version (below) is the safety net if something is missing.
 _COMPILER_SOURCES = [
-    'gimple_codegen.py', 'mlir.py', 'module_loader.py',
+    'gimple_codegen.py', 'mlir.py', 'module_loader.py', 'ast_rewriter.py',
     'generated_dispatch.py', 'mojo_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',

@@ -1,6 +1,6 @@
 # Testing
 
 Beyond `make check`, three comprehensive quality gates:
-- `make bootstrap` — full self-host bootstrap; *running* the produced binaries has a known pre-existing failure (see BACKLOG-CODEGEN.md §1), ignore that and judge the compile/link stages.
-- `python3 compile_stdlib.py --roots _core,collections,io,math,os` — transpiles the standard library and gcc-syntax-checks every module.
+- `make bootstrap` — full self-host bootstrap. Stage 1/2/3 (compile, run, idempotency re-run) all pass cleanly as of 2026-07-04 (see BACKLOG-CODEGEN.md §1) — the historical "stage-2 bootstrap segfault" is fixed. The `validate-all` step still fails: it's a real gap, but a separate, pre-existing one — the `stage1:` Makefile target only ever dumps `mojo.py` itself (`--dump-full`), never loops over the 40 test/core files the way `stage2`/`stage3` do, so `stage1/<file>.ci` etc. are legitimately missing for every other file. Judge the compile/link/self-host stages (`stage1`, `stage2/mojo`, `stage2`, `stage3`, `verify`); the `validate-all` file-count mismatch is expected until that Makefile asymmetry is fixed.
+- `python3 compile_stdlib.py --roots std/_core,std/collections,std/io,std/math,std/os` — transpiles the standard library and gcc-syntax-checks every module. (Roots are relative to the stdlib checkout root, e.g. `std/_core` not `_core` — everything now lives under `std/`; the old bare `_core,collections,io,math,os` form silently matches nothing.)
 - `python3 build_stdlib_dylib.py` — rebuilds `build/libmojostdlib.dylib`; the dylib is a compilation speed hack (comptime/elaboration introspection included) and MUST be rebuilt after codegen changes or it is stale and buggy.

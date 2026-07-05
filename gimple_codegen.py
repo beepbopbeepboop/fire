@@ -28,6 +28,7 @@ from mojo_compiler import (
     py_tokenize, Parser,
 )
 from module_loader import load_module, get_symbol_type
+import ast_rewriter
 import mlir
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
@@ -1425,7 +1426,12 @@ _TYPE_MAP: dict[str | None, str] = {
     # A boxed object reference (AST node child, dynamic value) is a 64-bit tagged
     # handle in this runtime, accessed via mojo_obj_getattr — never a 32-bit int.
     'object': 'int64_t',
-    None:     'int64_t',   # consistent with _mojo_type(None); was 'int' (#7)
+    # No `None:` entry: MojoDict (this compiler's own dict representation,
+    # once self-hosted) is string-keyed only — a literal `None` key crashes
+    # building this dict at runtime (hashing a NULL key). Harmless to drop:
+    # `_mojo_type`'s first line (`if not ann: return 'int64_t'`) already
+    # short-circuits on None before ever reaching a `_TYPE_MAP` lookup, so
+    # this entry was unreachable dead code, not a real default.
 }
 
 # Return types of well-known runtime functions (seeds func_return_types)
@@ -2361,7 +2367,7 @@ class GimpleGen:
 
                     # Compile the module to get both code and type info
                     tokens = py_tokenize(source)
-                    stmts = Parser(tokens).parse_module()
+                    stmts = ast_rewriter.rewrite(Parser(tokens).parse_module())
 
                     # Create a temporary codegen to extract types
                     # Use do_imports=True for transitive closure; share dedup sets and type information
@@ -2783,6 +2789,15 @@ class GimpleGen:
         'llabs':                 ('int64_t',   ['int64_t']),
         'labs':                  ('int64_t',   ['int64_t']),
         'mojo_str_split':        ('MojoList *', ['char *', 'char *']),
+        'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
+        'mojo_c_getenv':         ('char *',     ['char *']),
+        'mojo_stdin_read':       ('char *',     []),
+        'mojo_platform_system':  ('char *',     []),
+        'mojo_platform_machine': ('char *',     []),
+        'mojo_subprocess_run':        ('MojoCompletedProcess *', ['MojoList *', 'int64_t']),
+        'mojo_subprocess_returncode': ('int64_t', ['MojoCompletedProcess *']),
+        'mojo_subprocess_stdout':     ('char *',  ['MojoCompletedProcess *']),
+        'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
@@ -2805,6 +2820,9 @@ class GimpleGen:
         'mojo_list_get_int':     ('int64_t',   ['MojoList *', 'int64_t']),
         'mojo_list_get_str':     ('char *',    ['MojoList *', 'int64_t']),
         'mojo_list_len':         ('int64_t',   ['MojoList *']),
+        'mojo_dict_len':         ('int64_t',   ['MojoDict *']),
+        'mojo_set_len':          ('int64_t',   ['MojoSet *']),
+        'mojo_truthy_cstr':      ('int',       ['char *']),
         'mojo_div_double':       ('double',    ['double', 'double']),
         'mojo_div_float':        ('float',     ['float', 'float']),
         'mojo_str_from_int':     ('char *',    ['int64_t']),
@@ -4157,7 +4175,17 @@ class GimpleGen:
             t = self._new_val('char *', f'{self._intern_string("<bootstrap>")}')
             return 'char *', t
         if name == '__name__':
-            t = self._new_val('char *', f'{self._intern_string("__main__")}')
+            # self.module_name is "" only for the root module actually being
+            # compiled as the entry point (compile_to_gimple's own GimpleGen);
+            # every transitively-inlined import gets its real module name
+            # (see _compile_imported_module). Hardcoding "__main__"
+            # unconditionally here meant every imported script's own
+            # `if __name__ == '__main__': main()` guard fired too, running
+            # that script's CLI entry point as a side effect of merely being
+            # imported into the closure (found via build_stdlib_dylib.py's
+            # main() executing during a plain `--dump` of mojo.py).
+            own_name = self.module_name if self.module_name else "__main__"
+            t = self._new_val('char *', f'{self._intern_string(own_name)}')
             return 'char *', t
         if name in self._captures and self._env_param:
             ctype = self._captures[name]
@@ -4262,7 +4290,16 @@ class GimpleGen:
         ot, ov = self.lower_expr(node.operand)
         if node.op == 'not':
             t = self._new_temp('_Bool')
-            if ot in ('char *', 'void *') or (ot.endswith(' *') and ot != '_Bool'):
+            if ot in self._CONTAINER_LEN_FN or ot == 'char *':
+                # Delegate to _ensure_bool_cond for real Python truthiness
+                # (container length / non-empty string), then negate.
+                # GIMPLE doesn't accept `!x`; cast-and-compare instead
+                # (mirrors the existing _Bool branch below).
+                cond = self._ensure_bool_cond(ot, ov)
+                cond_i = self._new_val('int', f"(int){cond}")
+                self._emit(f"  {t} = {cond_i} == 0;")
+                return '_Bool', t
+            if ot in ('void *',) or (ot.endswith(' *') and ot != '_Bool'):
                 ip = self._new_temp('int64_t')
                 zero = self._new_temp('int64_t')
                 self._emit(f"  {ip} = (int64_t){ov};")
@@ -4322,7 +4359,9 @@ class GimpleGen:
         # GIMPLE: condition must be _Bool, branches must have identical types
         if ct != '_Bool':
             cond = self._new_temp('_Bool')
-            if ct in ('char *', 'void *') or ct.endswith(' *'):
+            if ct in self._CONTAINER_LEN_FN or ct == 'char *':
+                cond = self._ensure_bool_cond(ct, cv)
+            elif ct in ('void *',) or ct.endswith(' *'):
                 ip = self._new_temp('int64_t')
                 zero = self._new_temp('int64_t')
                 self._emit(f"  {ip} = (int64_t){cv};")
@@ -5185,6 +5224,10 @@ class GimpleGen:
                 return rt, rv
 
         # Handle chained attribute calls: os.path.basename(arg) → int64_t_basename(arg)
+        # TODO: move to ast_rewriter — this whole os.path.* block is the same
+        # kind of "Python idiom -> concrete runtime call" mapping the rewriter
+        # (see ast_rewriter.py, e.g. the os_environ_* rules) is meant to hold,
+        # just not yet migrated.
         if isinstance(func.obj, MemberExpr):
             inner_obj = func.obj.obj
             inner_member = func.obj.member
@@ -5873,6 +5916,14 @@ class GimpleGen:
             t = self._call_expr('MojoList *', 'mojo_str_split', [('char *', cstr_ov), (sep_type, arg_vals[0])])
             self._elem_types[t] = 'char *'
             return 'MojoList *', t
+        if method == 'rsplit':
+            sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+            sep_val = arg_vals[0] if arg_vals else '0'
+            maxsplit_val = arg_vals[1] if len(arg_vals) > 1 else '-1'
+            t = self._call_expr('MojoList *', 'mojo_str_rsplit',
+                                 [('char *', cstr_ov), (sep_type, sep_val), ('int64_t', maxsplit_val)])
+            self._elem_types[t] = 'char *'
+            return 'MojoList *', t
         if method == 'splitlines':
             sep = self._str_literal_to_slit('"\n"')
             sep_tmp = self._new_val('char *', f"{sep}")
@@ -6075,6 +6126,7 @@ class GimpleGen:
         'strncpy': ('char *', ['char *', 'char *', 'int']),
         'strcat': ('char *', ['char *', 'char *']),
         'getenv': ('char *', ['char *']),
+        'setenv': ('int', ['char *', 'char *', 'int']),
         'realpath': ('char *', ['char *', 'char *']),
         'cos': ('double', ['double']),
         'sin': ('double', ['double']),
@@ -8767,11 +8819,34 @@ class GimpleGen:
             else:
                 self._emit(f"  return {v};")
 
+    # Python truthiness for a container checks length, not reference identity
+    # (`if []:` is False even though the list object itself is a real,
+    # non-null pointer) — found via a real crash: `if line_nums:` guarding
+    # `line_nums[-1]` was compiled as a pointer-null check, so an allocated-
+    # but-empty list was still "truthy" and the guard never actually fired.
+    _CONTAINER_LEN_FN = {
+        'MojoList *': 'mojo_list_len',
+        'MojoDict *': 'mojo_dict_len',
+        'MojoSet *':  'mojo_set_len',
+    }
+
     def _ensure_bool_cond(self, ctype: str, val: str) -> str:
         """Convert val to a GIMPLE-safe _Bool for use in if/while conditions."""
         if ctype == '_Bool':
             return val
-        if ctype in ('char *', 'void *') or (ctype.endswith(' *') and ctype != '_Bool'):
+        if ctype in self._CONTAINER_LEN_FN:
+            n = self._call_expr('int64_t', self._CONTAINER_LEN_FN[ctype], [(ctype, val)])
+            b = self._new_temp('_Bool')
+            zero = self._new_temp('int64_t')
+            self._emit(f"  {zero} = (int64_t)0;")
+            self._emit(f"  {b} = {n} != {zero};")
+            return b
+        if ctype == 'char *':
+            n = self._call_expr('int', 'mojo_truthy_cstr', [('char *', val)])
+            b = self._new_temp('_Bool')
+            self._emit(f"  {b} = {n} != 0;")
+            return b
+        if ctype in ('void *',) or (ctype.endswith(' *') and ctype != '_Bool'):
             ip   = self._new_temp('int64_t')
             zero = self._new_temp('int64_t')
             b    = self._new_temp('_Bool')
@@ -10412,9 +10487,17 @@ class GimpleGen:
                 lines.append(f"  {sub_fn} ();")
             # Only call root's _toplevel if root actually has top-level statements;
             # pre-scanned into _has_toplevel_code so we trim the call when empty.
+            # If it does, _toplevel() already runs the root module's own
+            # `if __name__ == '__main__': main()` (now that __name__ correctly
+            # resolves per-module — see the __name__ lowering above) — calling
+            # {safe}() again here unconditionally was a real double-invocation
+            # bug, previously masked because that guard never used to fire
+            # correctly (__name__ was hardcoded to "__main__" everywhere).
             if getattr(self, '_has_toplevel_code', False):
                 lines.append(f"  _toplevel ();")
-            lines.append(f"  {ret_type} result = {safe} ();")
+                lines.append(f"  {ret_type} result = 0;")
+            else:
+                lines.append(f"  {ret_type} result = {safe} ();")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Finalize ();")
             lines.append(f"#endif")
@@ -10633,7 +10716,7 @@ class GimpleGen:
                 path = _imp.resolve_source(module) or self._resolve_test_relative_module(module)
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
-                                 Parser(py_tokenize(src)).parse_module() if src else None)
+                                 ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)
             except Exception:
                 _debug_note('cannot resolve/parse module', module)
                 cache[module] = (None, '', None)
@@ -13321,7 +13404,7 @@ def compile_to_c(mojo_src: str) -> str:
     Useful for execution tests where __GIMPLE restrictions don't apply.
     """
     tokens = py_tokenize(mojo_src)
-    stmts = Parser(tokens).parse_module()
+    stmts = ast_rewriter.rewrite(Parser(tokens).parse_module())
     c_code = GimpleGen().gen_module(stmts)
 
     # Strip __GIMPLE annotations for executability
@@ -13345,7 +13428,7 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     compile_to_gimple_linked — to avoid changing this ABI.)
     """
     tokens = py_tokenize(mojo_src)
-    stmts  = Parser(tokens).parse_module()
+    stmts  = ast_rewriter.rewrite(Parser(tokens).parse_module())
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
     return gen.gen_module(stmts)
@@ -13363,7 +13446,7 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     `import` recorded and the object files elaboration produced (generic
     instantiations). Returns (c_code, [dylib, ...], [object, ...])."""
     tokens = py_tokenize(mojo_src)
-    stmts  = Parser(tokens).parse_module()
+    stmts  = ast_rewriter.rewrite(Parser(tokens).parse_module())
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
     code = gen.gen_module(stmts)

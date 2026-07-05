@@ -121,6 +121,29 @@ int mojo_str_endswith_char(char *s, char c);
 int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
+MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
+char *mojo_c_getenv(char *name);
+int mojo_truthy_cstr(char *s);
+char *mojo_platform_system(void);
+char *mojo_platform_machine(void);
+char *mojo_stdin_read(void);
+
+/* ── subprocess.run ──────────────────────────────────────────────────────
+ * Mirrors Python's subprocess.CompletedProcess just enough for this
+ * compiler's own build tooling (mojo.py, version.py, compile_stdlib.py, …):
+ * a captured returncode/stdout/stderr. `capture_output`/`text` are the only
+ * modes exercised by real call sites; `check`-triggered raising and
+ * `timeout` enforcement are not implemented (see BACKLOG-CODEGEN.md).    */
+typedef struct {
+    int64_t returncode;
+    char   *out;
+    char   *err;
+} MojoCompletedProcess;
+
+MojoCompletedProcess *mojo_subprocess_run(MojoList *argv, int64_t capture_output);
+int64_t mojo_subprocess_returncode(MojoCompletedProcess *p);
+char   *mojo_subprocess_stdout(MojoCompletedProcess *p);
+char   *mojo_subprocess_stderr(MojoCompletedProcess *p);
 
 /* ── Dict ─────────────────────────────────────────────────────────────────
  * Open-addressing hash map with string keys and int64_t values.

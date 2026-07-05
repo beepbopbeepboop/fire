@@ -689,10 +689,13 @@ def py_tokenize(src: str) -> list[Token]:
             # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens)
             if paren_depth == 0:
                 out.append(Token("NEWLINE", "", line=physical_line))
+    last_line = 0
+    if line_nums:
+        last_line = line_nums[-1]
     while len(stack) > 1:
         stack.pop()
-        out.append(Token("DEDENT", "", line=line_nums[-1] if line_nums else 0))
-    out.append(Token("EOF", "", line=line_nums[-1] if line_nums else 0))
+        out.append(Token("DEDENT", "", line=last_line))
+    out.append(Token("EOF", "", line=last_line))
     return out
 
 # ── Parser ─────────────────────────────────────────────────────────
@@ -778,7 +781,13 @@ class Parser:
 
     def _peek(self, offset: int = 0) -> Token:
         i = self._pos + offset
-        return self._tok[i] if i < len(self._tok) else Token("EOF", "", line=self._tok[-1].line if self._tok else 0)
+        if i < len(self._tok):
+            return self._tok[i]
+        last_line = 0
+        if self._tok:
+            last_tok = self._tok[-1]
+            last_line = last_tok.line
+        return Token("EOF", "", line=last_line)
 
     def _advance(self) -> Token:
         t = self._tok[self._pos]
@@ -1919,7 +1928,7 @@ class Parser:
                 # Postfix: followed by statement-ending token or member/subscript access
                 # Binary: followed by expression start token
                 next_t = self._peek(1)
-                is_postfix = next_t.kind in ("NEWLINE", "DEDENT", "EOF", "COMMA", "RPAREN", "RBRACKET", "RBRACE", "COLON", "SEMICOLON", "DOT", "LPAREN", "LBRACKET")
+                is_postfix = next_t.kind in ("NEWLINE", "DEDENT", "EOF", "COMMA", "RPAREN", "RBRACKET", "RBRACE", "COLON", "SEMICOLON", "DOT", "LBRACKET")
                 if is_postfix:
                     self._advance()
                     expr = UnaryOp(op="^", operand=expr, line=line, col=col)
