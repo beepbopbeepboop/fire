@@ -5,6 +5,7 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 """
 from __future__ import annotations
 import re
+import sys
 from dataclasses import dataclass, field
 
 # ── Mojo pointer type shims ────────────────────────────────────────
@@ -830,8 +831,31 @@ class Parser:
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line
         if self._peek().kind != "NEWLINE":
+            start_line = self._peek().line
             stmt = self._parse_stmt()
-            return [stmt] if stmt is not None else []
+            stmts = [stmt] if stmt is not None else []
+            # Same-line multi-statement inline body: "if x: a = 1; continue" —
+            # the tokenizer (see py_tokenize's `_split_on_separators` loop)
+            # splits each ';'-separated piece of a physical line into its own
+            # token run terminated by a NEWLINE, which loses the fact that
+            # every piece after the colon is still part of THIS compound
+            # statement's body, not a sibling of the enclosing block. Without
+            # this loop, only the first piece ("a = 1") became the body and
+            # anything after the first ';' (here, "continue") silently became
+            # a sibling statement instead — executing unconditionally on every
+            # loop iteration regardless of `x`. Detected via physical line
+            # number: every ';'-split piece from the same source line shares
+            # the same `line`, so a NEWLINE followed by a token still on the
+            # same line means "more of this same-line body", not a new line.
+            while (self._peek().kind == "NEWLINE"
+                   and self._peek(1).line == start_line
+                   and self._peek(1).kind not in ("DEDENT", "EOF")):
+                self._advance()  # consume the semicolon-split NEWLINE
+                start_line = self._peek().line
+                nxt = self._parse_stmt()
+                if nxt is not None:
+                    stmts.append(nxt)
+            return stmts
         self._expect("NEWLINE")
         self._skip_newlines()
         # Empty block: comment-only body produces DEDENT with no INDENT

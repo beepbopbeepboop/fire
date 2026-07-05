@@ -105,6 +105,7 @@ char *mojo_str_data(MojoStr *s);
 int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
+char       *mojo_char_to_str(char c);
 
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);

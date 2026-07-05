@@ -2320,6 +2320,12 @@ class GimpleGen:
         self._c_names:    dict[str, str]    = {}
         # Names declared `global` inside this function — reads/writes route to module struct
         self._func_declared_globals: set    = set()
+        # True only while generating a module's own _toplevel()/_{module}_toplevel()
+        # body (see _gen_toplevel) — distinguishes genuine module-scope statements
+        # (whose assignments must persist to that module's globals struct) from a
+        # real Python function's body (current_func_name is ALSO non-empty there,
+        # e.g. '_cas_toplevel', so current_func_name alone can't tell them apart).
+        self._in_toplevel_gen: bool          = False
 
     def _compile_imported_module(self, module_name: str) -> tuple:
         """Find and compile an imported .mojo module, extracting type information.
@@ -2791,6 +2797,7 @@ class GimpleGen:
         'mojo_str_split':        ('MojoList *', ['char *', 'char *']),
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
         'mojo_c_getenv':         ('char *',     ['char *']),
+        'mojo_char_to_str':      ('char *',     ['char']),
         'mojo_stdin_read':       ('char *',     []),
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
@@ -3510,6 +3517,30 @@ class GimpleGen:
                                 and len(expr.args) >= 3):
                             if isinstance(expr.args[2], IdentExpr) and expr.args[2].name == param_name:
                                 function_calls.append(('__re_sub_src', 2))
+                        # os.path.*(param, ...) — basename/splitext/expanduser/
+                        # abspath/dirname/exists/join all take char* path
+                        # arguments (see the os.path.* block in lower_expr).
+                        # Not tracked before: a MemberExpr call func (anything
+                        # but the re.sub special case above) was silently
+                        # ignored here, so a parameter *only* ever used as
+                        # os.path.basename(param) got no type hint at all and
+                        # defaulted to int64_t. Real bug found via
+                        # build_executable(input_file, ...) in mojo.py, where
+                        # input_file is used via
+                        # os.path.basename(os.path.splitext(input_file)) —
+                        # the parameter held a real char* pointer throughout,
+                        # just declared with the wrong C type, so print(x)
+                        # showed a raw address instead of the string.
+                        elif (isinstance(expr.func.obj, MemberExpr)
+                                and isinstance(expr.func.obj.obj, IdentExpr)
+                                and expr.func.obj.obj.name == 'os'
+                                and expr.func.obj.member == 'path'
+                                and expr.func.member in (
+                                    'basename', 'splitext', 'expanduser',
+                                    'abspath', 'dirname', 'exists', 'join')):
+                            for i, arg in enumerate(expr.args):
+                                if isinstance(arg, IdentExpr) and arg.name == param_name:
+                                    function_calls.append(('__os_path_arg', i))
                     scan_expr(expr.func)
                     for arg in expr.args:
                         scan_expr(arg)
@@ -3574,6 +3605,10 @@ class GimpleGen:
                     for func_name, arg_index in function_calls:
                         # re.sub src argument (index 2) is always char*
                         if func_name == '__re_sub_src':
+                            inferred[pname] = 'char *'
+                            break
+                        # os.path.*(param) — see the MemberExpr scan above
+                        if func_name == '__os_path_arg':
                             inferred[pname] = 'char *'
                             break
                         # Infer from known function signatures
@@ -3664,7 +3699,33 @@ class GimpleGen:
         if isinstance(node, StringLiteral): return 'char *'
         if isinstance(node, IdentExpr):     return self.var_types.get(node.name, 'int64_t')
         if isinstance(node, BinaryOp):
-            if node.op in _CMP_OPS:         return '_Bool'
+            # 'in'/'not in' are missing from _CMP_OPS (generated_dispatch.py) —
+            # real, pre-existing gap: falling through to
+            # TypeLattice.join(type(left), type(right)) for e.g.
+            # `dump = '--dump' in sys.argv` joins 'char *' (the string
+            # literal) with whatever sys.argv itself quick-types to, giving
+            # 'char *' instead of '_Bool'. The variable then gets declared
+            # char* while every value stored in it is really a 0/1 _Bool bit
+            # pattern; `if dump:`'s char*-truthiness coercion
+            # (_ensure_bool_cond -> mojo_truthy_cstr) dereferences that
+            # bit pattern as a pointer — a real crash for `dump = True`
+            # (address 0x1). Found chasing self-hosted mojo.py evaluating
+            # its own `dump = '--dump' in sys.argv`.
+            # _CMP_OPS (generated_dispatch.py) also contains 'and'/'or' —
+            # correct for the STATEMENT-condition dispatch table it's really
+            # meant for, wrong here: real Python `and`/`or` return whichever
+            # OPERAND was selected (see the _lower_BinaryOp fix), never a bare
+            # bool. Treating them as _Bool here mis-typed cas.py's own
+            # `GMOJO_HOME = os.environ.get(...) or os.path.expanduser(...)`
+            # global as `_Bool`: the real string value computed at runtime then
+            # got cast down to a 0/1 bit pattern when stored into that
+            # (wrongly-typed) global, and the next read (os.path.join(GMOJO_HOME,
+            # 'cas')) dereferenced it as a pointer — a real crash at address 0x1.
+            if node.op in ('and', 'or'):
+                lt = self._quick_type(node.left)
+                rt = self._quick_type(node.right)
+                return TypeLattice.join(lt, rt)
+            if node.op in _CMP_OPS or node.op in ('in', 'not in'): return '_Bool'
             lt = self._quick_type(node.left)
             rt = self._quick_type(node.right)
             return TypeLattice.join(lt, rt)
@@ -3692,12 +3753,54 @@ class GimpleGen:
                 return f'{fname} *'
             return self.func_return_types.get(fname, 'int64_t')
         if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr):
+            # .read()/.readline()/.readlines() on ANY receiver shape (not just
+            # a plain IdentExpr file handle) — e.g. `sys.stdin.read()` (obj is
+            # itself a MemberExpr) or `open(path).read()` (obj is a CallExpr).
+            # The IdentExpr-only checks below never match these chained
+            # shapes, so this must come first and be receiver-shape-agnostic.
+            if node.func.member in ('read', 'readline') and not node.args:
+                return 'char *'
+            if node.func.member == 'readlines':
+                return 'MojoList *'
             # Module method calls: re.sub → char *, str.join → char *, etc.
             if isinstance(node.func.obj, IdentExpr):
                 mod: str
                 mod = node.func.obj.name
                 meth: str
                 meth = node.func.member
+                # file_handle.read()/.readline(): this pre-pass runs before
+                # any real var_types are populated (it's the upfront scan
+                # that *produces* them), so `ot = self.var_types.get(mod, '')`
+                # below is always empty for a `with open(...) as f:` handle
+                # at this point — falls through to the int64_t default,
+                # regardless of what `mod` actually is. Real bug found via
+                # `with open(input_file) as f: src = f.read()` in mojo.py's
+                # own main(): `src` got declared int64_t while every value
+                # written to it was really a char* pointer to the file
+                # content, so len(src) and print(src) both read it as a
+                # raw integer instead of the string.
+                if meth in ('read', 'readline') and not node.args:
+                    return 'char *'
+                if meth == 'readlines':
+                    return 'MojoList *'
+                # Unambiguous string-only methods: in this codebase's Python
+                # subset, these are only ever called on real strings — return
+                # char* regardless of whether the receiver's own type is known
+                # yet (this pre-pass runs before var_types is populated, so
+                # `ot` below is empty here for a not-yet-declared local, same
+                # blind spot as the .read()/.readline() case above). Missing
+                # this made e.g. `expanded = line.expandtabs(N)` infer
+                # `expanded` as int64_t; a later `len(expanded)` then treated
+                # the real char* as a boxed MojoList* pointer, reading garbage
+                # struct fields as the string's "length" — the real source of
+                # `_strip_inline_comment`-style tokenizer stack corruption
+                # (a huge garbage `indent` value). Found via py_tokenize's own
+                # `expanded = line.expandtabs(_INDENT_SIZE)`.
+                if meth in ('expandtabs', 'lstrip', 'rstrip', 'strip', 'lower',
+                            'upper', 'title', 'capitalize', 'swapcase',
+                            'replace', 'format', 'zfill', 'center', 'ljust', 'rjust',
+                            'encode', 'decode', 'join'):
+                    return 'char *'
                 if mod == 're' and meth == 'sub':    return 'char *'
                 if mod == 're' and meth == 'match':  return 'int'
                 if mod == 're' and meth == 'search': return 'int'
@@ -3711,6 +3814,24 @@ class GimpleGen:
                     rt = self.func_return_types.get(mangled)
                     if rt:
                         return rt
+            # os.path.basename(...)/.splitext(...)/etc.: node.func.obj here is
+            # itself a MemberExpr (os.path), not a plain IdentExpr, so the
+            # `mod == 'os'` branch above never matches this chained shape at
+            # all — this pre-pass had no case for it whatsoever. Mirrors the
+            # real lowering (the os.path.* block in lower_expr): basename/
+            # expanduser return char*, splitext returns a 2-element char*
+            # list. Real bug found via
+            # `os.path.splitext(os.path.basename(input_file))[0]` in mojo.py's
+            # build_executable: the parameter fix above still left this local
+            # variable declared int64_t (a real char* pointer value shown as
+            # a raw address by print()).
+            elif (isinstance(node.func.obj, MemberExpr)
+                    and isinstance(node.func.obj.obj, IdentExpr)
+                    and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
+                if node.func.member in ('basename', 'expanduser'):
+                    return 'char *'
+                if node.func.member == 'splitext':
+                    return 'MojoList *'
         if isinstance(node, MemberExpr):
             ot: str
             ot = self._quick_type(node.obj)
@@ -3729,6 +3850,28 @@ class GimpleGen:
             # same side-tables the subscript lowering uses. Covers nested reads
             # (outer[i][j]) via the container's nested element type.
             obj = node.obj
+            # sys.argv[i]: a real MojoList * of strings (mojo_get_argv(), see
+            # the `sys`/`argv` MemberExpr lowering), but `obj` here is a
+            # MemberExpr, not a tracked IdentExpr — this pre-pass had no case
+            # for it at all, so it fell through to the int64_t default below.
+            # Real bug found via `input_file = sys.argv[1]` in mojo.py's own
+            # build command handling: the variable got declared int64_t while
+            # every value stored in it was actually a char* pointer (same
+            # bit pattern, so no crash — just wrong for any later use, e.g.
+            # print() showing a raw address instead of the string).
+            if (isinstance(obj, MemberExpr) and isinstance(obj.obj, IdentExpr)
+                    and obj.obj.name == 'sys' and obj.member == 'argv'):
+                return 'char *'
+            # os.path.splitext(...)[0]: the CallExpr case above returns
+            # 'MojoList *' for splitext's own type, but this needs the
+            # *element* type for the subscript — always char* (root, ext),
+            # for any index. Same os.path.* blind spot as above.
+            if (isinstance(obj, CallExpr) and isinstance(obj.func, MemberExpr)
+                    and isinstance(obj.func.obj, MemberExpr)
+                    and isinstance(obj.func.obj.obj, IdentExpr)
+                    and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
+                    and obj.func.member == 'splitext'):
+                return 'char *'
             if isinstance(obj, IdentExpr):
                 e = self._elem_types.get(obj.name)
                 if e:
@@ -4493,6 +4636,21 @@ class GimpleGen:
             ov = self._new_val(_ret, f'{_c_fn} ()')
         else:
             ot, ov = self.lower_expr(node.obj)
+            # Resolve an int64_t-boxed pointer to its real struct type (e.g.
+            # `t = self._peek()` boxes a `Token *` as int64_t) — without this,
+            # `t.line` never found a real struct field and fell through to the
+            # generic dynamic-getattr path. Mirrors the same resolution (and
+            # the GIMPLE-required intermediate-cast dance) `_lower_method_call`
+            # already does for `obj.method(...)`.
+            ot_orig = ot
+            ot = self._get_actual_type(ot, ov)
+            if ot != ot_orig and ot.endswith(' *') and ot_orig == 'int64_t':
+                ov_local = self._ensure_local('int64_t', ov)
+                ip_cast = self._new_temp('int64_t')
+                np_cast = self._new_temp(ot)
+                self._emit(f"  {ip_cast} = (int64_t){ov_local};")
+                self._emit(f"  {np_cast} = ({ot}){ip_cast};")
+                ov = np_cast
 
         # If the object lowered to a C type name (class used as cls argument),
         # treat it as NULL — the method shouldn't use cls for value access
@@ -4680,25 +4838,42 @@ class GimpleGen:
             return self._lower_in_impl(node, negate=True)
 
         if node.op in ('and', 'or'):
-            # GIMPLE does not allow && or || in assignments; lower to branching form.
+            # Real Python `and`/`or` return whichever OPERAND was selected, not
+            # a bool — e.g. `x = os.environ.get('K') or os.path.expanduser('~/.gmojo')`
+            # must yield the string, not True/False. The previous lowering
+            # collapsed both operands to `_Bool` unconditionally: a real bug,
+            # invisible until module-scope statements using this idiom (like
+            # cas.py's `GMOJO_HOME = os.environ.get(...) or os.path.expanduser(...)`)
+            # actually executed — before that, the `int(True)` bit pattern got
+            # stored into what the rest of the program treats as a `char *`,
+            # and any later dereference (e.g. os.path.join(GMOJO_HOME, 'cas'))
+            # crashed reading address 0x1. Same eager-both-branches trade-off
+            # already accepted for ternaries (see _lower_TernaryExpr / BACKLOG
+            # §4d) — this mirrors that lowering instead of introducing a new one.
             ltype, lval = self.lower_expr(node.left)
-            result = self._new_temp('_Bool')
-            bb_right = self._new_bb()
-            bb_merge = self._new_bb()
-            # Must use proper bool conversion (no direct pointer→_Bool cast)
-            lcast = self._ensure_bool_cond(ltype, lval)
-            self._emit(f'  {result} = {lcast};')
-            if node.op == 'and':
-                self._emit(f'  if ({lcast}) goto {bb_right}; else goto {bb_merge};')
-            else:
-                self._emit(f'  if ({lcast}) goto {bb_merge}; else goto {bb_right};')
-            self._emit_label(bb_right)
             rtype, rval = self.lower_expr(node.right)
-            rcast = self._ensure_bool_cond(rtype, rval)
-            self._emit(f'  {result} = {rcast};')
-            self._emit(f'  goto {bb_merge};')
-            self._emit_label(bb_merge)
-            return '_Bool', result
+            res_type = TypeLattice.join(ltype, rtype)
+            lval_c = lval
+            if ltype != res_type:
+                l_tmp = self._new_temp(res_type)
+                self._safe_coerce_emit(ltype, res_type, lval, l_tmp)
+                lval_c = l_tmp
+            rval_c = rval
+            if rtype != res_type:
+                r_tmp = self._new_temp(res_type)
+                self._safe_coerce_emit(rtype, res_type, rval, r_tmp)
+                rval_c = r_tmp
+            # GIMPLE: load global string literals into temps before the ternary
+            if res_type == 'char *' and lval_c.startswith('_slit_'):
+                lval_c = self._new_val('char *', f'{lval_c}')
+            if res_type == 'char *' and rval_c.startswith('_slit_'):
+                rval_c = self._new_val('char *', f'{rval_c}')
+            cond = self._ensure_bool_cond(ltype, lval)
+            if node.op == 'and':
+                t = self._new_val(res_type, f"{cond} ? {rval_c} : {lval_c}")
+            else:
+                t = self._new_val(res_type, f"{cond} ? {lval_c} : {rval_c}")
+            return res_type, t
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
@@ -4846,6 +5021,18 @@ class GimpleGen:
                 def _to_char_star(typ, var):
                     if typ == 'char *':
                         t2 = self._new_temp('char *'); self._emit(f'  {t2} = {var};'); return t2
+                    # A raw single character (real C 'char', or an 'int'/'int64_t'
+                    # holding a small ASCII code with no tracked pointer identity)
+                    # is a distinct representation from a char*-boxed-as-int64_t
+                    # pointer — reinterpreting its numeric byte value as a
+                    # pointer produces a garbage address (e.g. 0x22 for '"').
+                    # Build a real 1-char string instead, mirroring the same fix
+                    # in _cast_for_list ('in' lowering). Found via
+                    # mojo_compiler.py's own `c == "\\"` (c from `s[i]`).
+                    actual = self._actual_types.get(var)
+                    if typ == 'char' or (typ in ('int', 'int64_t') and not (actual and actual.endswith(' *'))):
+                        cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
+                        return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                     ip = self._new_val('int64_t', f'(int64_t){var}')
                     cp = self._new_val('char *', f'(char *){ip}')
                     return cp
@@ -5164,8 +5351,27 @@ class GimpleGen:
                 return val
             t = self._new_val('double', f"(double){val}")
             return t
-        # str: cast int-cast strings to char*
-        if suf == 'str' and elem_type in ('int', 'int64_t', 'char'):
+        # str: a genuine single character (real C `char`/`int`/`int64_t` holding
+        # a small ASCII code, e.g. from string indexing via mojo_str_char_at)
+        # is a distinct representation from a char*-boxed-as-int64_t pointer —
+        # reinterpreting its raw byte value as a pointer produces a garbage
+        # address (e.g. 0x22 for '"'). `elem_type == 'char'` always means a raw
+        # byte (only mojo_str_char_at produces that C type); a declared
+        # 'int'/'int64_t' local is ambiguous — it's a real boxed pointer only
+        # when _actual_types records one (set wherever a pointer got stored
+        # into an int64_t elsewhere, see _gen_stmt_AssignStmt). Build a real
+        # 1-char string in the unambiguous/small-value cases instead of
+        # numeric-casting. Found via mojo_compiler.py's own
+        # `c in ('"', "'", '`')`, where `c`'s declared type ended up `int64_t`
+        # (joined across other assignment sites in the same function) even
+        # though every value actually stored in it here is a raw char byte.
+        actual = self._actual_types.get(val)
+        if suf == 'str' and (elem_type == 'char'
+                              or (elem_type in ('int', 'int64_t') and not (actual and actual.endswith(' *')))):
+            cval = val if elem_type == 'char' else self._new_val('char', f"(char){val}")
+            return self._call_expr('char *', 'mojo_char_to_str', [('char', cval)])
+        # str: cast int-cast strings (boxed pointers stored as int64_t) to char*
+        if suf == 'str' and elem_type in ('int', 'int64_t'):
             cp = self._new_temp('char *')
             ip = self._new_val('int64_t', f"(int64_t){val}")
             self._emit(f"  {cp} = (char *){ip};")
@@ -5367,15 +5573,33 @@ class GimpleGen:
                         src_cast = self._new_temp('char *')
                         self._emit(f'  {src_cast} = (char *){src_val};')
                         src_val = src_cast
+                    # do_imports/filename are almost always passed as KEYWORD args
+                    # at the real call site (`compile_to_gimple(src, do_imports=True,
+                    # filename=input_file)`, e.g. mojo.py's own --dump handler) —
+                    # node.args is positional-only, so len(node.args) >= 2/3 was
+                    # never true for that shape and both silently defaulted to
+                    # False/"" here, regardless of what the caller actually passed.
+                    # That meant every self-hosted `--dump`/`--dump-full` lost its
+                    # transitive-import closure: the compiled binary always asked
+                    # this subprocess-fallback for a do_imports=False single-file
+                    # compile. Check node.kwargs too, positional args still win.
+                    node_kwargs = getattr(node, 'kwargs', None) or []
+                    kwarg_map = {k: v for k, v in node_kwargs}
                     # Extract do_imports if provided, default to 0 (false)
                     do_imports_val = '0'
                     if len(node.args) >= 2:
                         di_type, di_val = self.lower_expr(node.args[1])
                         do_imports_val = di_val
+                    elif 'do_imports' in kwarg_map:
+                        di_type, di_val = self.lower_expr(kwarg_map['do_imports'])
+                        do_imports_val = di_val
                     # Extract filename if provided, default to ""
                     filename_val = '""'
                     if len(node.args) >= 3:
                         fn_type, fn_val = self.lower_expr(node.args[2])
+                        filename_val = fn_val
+                    elif 'filename' in kwarg_map:
+                        fn_type, fn_val = self.lower_expr(kwarg_map['filename'])
                         filename_val = fn_val
                     t = self._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                     return 'char *', t
@@ -5717,6 +5941,24 @@ class GimpleGen:
         """Lower MojoList * method calls."""
         if method == 'append' and args:
             at, av = self.lower_expr(args[0])
+            # A real Python `str[i]` result is itself a 1-character STRING
+            # (not a scalar) — this compiler's `char` representation for it
+            # (see mojo_str_char_at) breaks that invariant, so `.append(c)`
+            # must still store a real string, not raw ASCII (mojo_list_append_int
+            # would silently turn a `list[str]` accumulator into a list of
+            # ints; a later `"".join(buf)` then reads each "string" as a
+            # garbage pointer at its numeric value — e.g. crashing at address
+            # 0x20 for a space). `at == 'char'` catches a direct `s[i]` call
+            # result; `self._actual_types.get(av) == 'char'` catches reading it
+            # back through a named variable whose declared type was widened to
+            # int64_t by joining with other assignment sites in the same
+            # function (see the AssignStmt fix tracking this). Found via
+            # mojo_compiler.py's own `_split_on_separators`'s `c = s[i]` then
+            # `buf.append(c)` / `"".join(buf)`.
+            if at == 'char' or self._actual_types.get(av) == 'char':
+                cv = av if at == 'char' else self._new_val('char', f"(char){av}")
+                av = self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+                at = 'char *'
             if at == 'char *':
                 self._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
                 self._elem_types[ov] = 'char *'
@@ -8595,13 +8837,50 @@ class GimpleGen:
                 global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
                 safe_module = _c_field_name(global_module) if global_module else "root"
                 field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
-                gtype = self._global_var_types[tname]
+                # The struct field's REAL declared C type can differ from the
+                # semantic _global_var_types entry (e.g. a MojoDict* global not
+                # in _dispatch_names is boxed as `int64_t` at the C level, see
+                # the global-scan's DictExpr/ListExpr/SetExpr cases) — coerce to
+                # that actual declared type, not the semantic one, or GIMPLE
+                # rejects the direct pointer/int64_t mismatch.
+                gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
                 self._safe_coerce_emit(vtype, gtype, v, field_ref)
                 return
-            # Check if target is a module-level global (module-scope init path)
-            if tname in self._global_var_types and tname not in self.var_types:
-                # Skip: module globals are initialized in struct definition, not in _toplevel
-                # Complex initialization will need runtime support in future
+            # Genuine module-scope statement (we're generating THIS module's own
+            # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
+            # target is a tracked global: actually execute the initializer and
+            # store it into this module's globals struct field, rather than the
+            # previous behavior of silently skipping the assignment altogether
+            # ("module globals are initialized in struct definition, not in
+            # _toplevel" — true only for simple literals; a computed initializer
+            # like `CAS_DIR = os.path.join(GMOJO_HOME, 'cas')` in cas.py was never
+            # actually run, leaving the field permanently zero). Always target
+            # self._current_module_ctx (this module), not
+            # _global_to_module.get(tname) — that map is name-keyed only and
+            # "first module wins" when two different inlined files declare a
+            # same-named global (e.g. every file's own `HERE = os.path.dirname(...)`),
+            # so trusting it here could redirect this module's own write into a
+            # different module's struct.
+            #
+            # current_func_name is NOT a usable signal for "are we at module
+            # scope" here — _gen_toplevel sets it to '_toplevel'/'_{module}_toplevel'
+            # so it's non-empty even for genuine top-level statements. Use the
+            # dedicated _in_toplevel_gen flag instead. Inside a *real* Python
+            # function body (_in_toplevel_gen is False there), Python scoping
+            # makes an assignment without `global` a fresh local no matter what
+            # name it uses — even if do_imports=True's flat, unnamespaced
+            # _global_var_types happens to contain the same name from a
+            # completely different inlined file's module scope (e.g. this
+            # function's local `src` vs. another inlined file's module-level
+            # `src`) — so that case still falls through to the regular local
+            # path below, and must not be redirected to any global struct.
+            if self._in_toplevel_gen and tname in self._global_var_types:
+                safe_module = _c_field_name(self._current_module_ctx or "root")
+                field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
+                # See the _func_declared_globals branch above: coerce to the
+                # struct field's real declared C type, not the semantic one.
+                gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
+                self._safe_coerce_emit(vtype, gtype, v, field_ref)
                 return
             # Regular local variable assignment
             if tname not in self.var_types:
@@ -8645,14 +8924,34 @@ class GimpleGen:
                 if v in self._actual_types:
                     actual_type = self._actual_types[v]
                     self._actual_types[tname] = actual_type
-                # If value type itself is a pointer, track it as the actual type
-                elif vtype in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                # If value type itself is a pointer, track it as the actual type.
+                # Was hardcoded to just the container/string types — any other
+                # struct pointer (e.g. `Token *` from `t = self._peek()`) never
+                # got recorded, so `_lower_MemberExpr`'s `t.line` access later
+                # couldn't recover the real struct type behind the int64_t-boxed
+                # local and fell back to the generic dynamic-getattr path
+                # (`mojo_obj_getattr`, which aborts by design — see its comment
+                # in runtime/mojo_runtime.c). Found via Parser__parse_stmt's own
+                # `t = self._peek(); line, col = t.line, t.col`.
+                elif vtype.endswith(' *'):
                     self._actual_types[tname] = vtype
                     # Also copy element/value type tracking
                     if v in self._elem_types:
                         self._elem_types[tname] = self._elem_types[v]
                     if v in self._dict_val_types:
                         self._dict_val_types[tname] = self._dict_val_types[v]
+                # A raw single character (e.g. `c = s[i]`) stored into a local
+                # whose declared type got widened to int64_t (joined with other
+                # assignment sites in the same function) still needs to be
+                # recognized as a real Python 1-char *string* everywhere else
+                # that reads it (`.append()`, `==`, `in`) — otherwise its raw
+                # ASCII byte value gets reinterpreted as a pointer downstream.
+                # Real bug found via mojo_compiler.py's own `_split_on_separators`:
+                # `c = s[i]` then `buf.append(c)` used the plain (stale, int64_t)
+                # `at` from lower_expr(IdentExpr('c')), not this per-assignment
+                # provenance, and silently appended the numeric byte as an int.
+                elif vtype == 'char':
+                    self._actual_types[tname] = 'char'
                 # If actual type is a container, track element types
                 if tname in self._actual_types:
                     actual_type = self._actual_types[tname]
@@ -10073,13 +10372,29 @@ class GimpleGen:
 
     # ── Closure lifting ───────────────────────────────────────────────────
 
-    def _gen_lifted_closure(self, ci: ClosureInfo) -> str:
+    def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str = None) -> str:
         """Generate a top-level C function for a nested (closure) function."""
         self._reset_func()
         self.current_func_name = ci.lifted_name
         self._captures  = dict(ci.captures)
         self._env_param = '_env' if ci.env_struct else ''
         self._inner_func_name = ci.inner_def.name  # original name for recursive call detection
+
+        # Expose sibling closures (other nested `def`s in the same enclosing
+        # scope) so a call from THIS closure's body to one of them resolves to
+        # the real lifted C name instead of falling through to a bare,
+        # never-declared call. `_lower_call`'s existing `_lambda_outer_closures`
+        # lookup (previously populated only for lifted lambdas calling an outer
+        # function's other nested defs) already handles exactly this shape —
+        # reused here rather than adding a parallel mechanism. Real bug found
+        # via gimple_codegen.py's own `_register_imported_structs`, whose nested
+        # `_collect` calls its sibling `_base`: the call site emitted a bare
+        # `_base (...)` with no declaration anywhere, an undefined symbol at
+        # link time (this method's own body only gets compiled at all once the
+        # 552-line-stub / local-global-collision bug above was fixed, since
+        # only then does the self-hosted closure reach this far).
+        if outer_name:
+            self._lambda_outer_closures = dict(self._all_closures.get(outer_name, {}))
 
         node = ci.inner_def
         # Infer parameter types from usage before seeding var_types
@@ -10190,6 +10505,7 @@ class GimpleGen:
         ]
         self._captures  = {}
         self._env_param = ''
+        self._lambda_outer_closures = {}
         return '\n'.join(lines)
 
     # ── Struct iterator protocol (for x in obj where obj has __iter__) ────
@@ -10582,8 +10898,12 @@ class GimpleGen:
         self.func_return_types[fn_name] = 'void'
 
         # Generate code for each top-level statement
-        for stmt in toplevel_stmts:
-            self.gen_stmt(stmt)
+        self._in_toplevel_gen = True
+        try:
+            for stmt in toplevel_stmts:
+                self.gen_stmt(stmt)
+        finally:
+            self._in_toplevel_gen = False
 
         lines = [
             f"void {fn_name} (void)",
@@ -12111,10 +12431,26 @@ class GimpleGen:
                             self._global_var_types[_gname] = 'char *'
                         else:
                             self._global_var_types[_gname] = 'int64_t'
+                    elif (isinstance(_scan_stmt.value.func, MemberExpr)
+                            and _scan_stmt.value.func.member in ('read', 'readline')
+                            and not _scan_stmt.value.args):
+                        # Same gap as _quick_type's: a MemberExpr call func
+                        # (anything but the IdentExpr case above) always fell
+                        # to the int64_t default, so `x = f.read()` promoted
+                        # to a global (see the surrounding pre-scan's
+                        # docstring) got the wrong C type — a real char*
+                        # pointer stored in a declared-int64_t global. Real
+                        # bug found via mojo.py's own
+                        # `with open(input_file) as f: src = f.read()`.
+                        self._global_var_types[_gname] = 'char *'
+                    elif (isinstance(_scan_stmt.value.func, MemberExpr)
+                            and _scan_stmt.value.func.member == 'readlines'):
+                        self._global_var_types[_gname] = 'MojoList *'
                     else:
                         self._global_var_types[_gname] = 'int64_t'
                 else:
-                    self._global_var_types[_gname] = 'int64_t'
+                    qt = self._quick_type(_scan_stmt.value) or 'int64_t'
+                    self._global_var_types[_gname] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
             elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
                 _pre_declared_globals.add(_scan_stmt.name)
                 if _scan_stmt.name not in self._global_to_module:
@@ -12141,10 +12477,18 @@ class GimpleGen:
                                     self._global_var_types[_scan_stmt.name] = 'char *'
                                 else:
                                     self._global_var_types[_scan_stmt.name] = 'int64_t'
+                            elif (isinstance(_scan_stmt.value.func, MemberExpr)
+                                    and _scan_stmt.value.func.member in ('read', 'readline')
+                                    and not _scan_stmt.value.args):
+                                self._global_var_types[_scan_stmt.name] = 'char *'
+                            elif (isinstance(_scan_stmt.value.func, MemberExpr)
+                                    and _scan_stmt.value.func.member == 'readlines'):
+                                self._global_var_types[_scan_stmt.name] = 'MojoList *'
                             else:
                                 self._global_var_types[_scan_stmt.name] = 'int64_t'
                         else:
-                            self._global_var_types[_scan_stmt.name] = 'int64_t'
+                            qt = self._quick_type(_scan_stmt.value) or 'int64_t'
+                            self._global_var_types[_scan_stmt.name] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
                     else:
                         self._global_var_types[_scan_stmt.name] = 'int64_t'
 
@@ -12194,7 +12538,7 @@ class GimpleGen:
 
         _emitted_closures: set[str] = set()
 
-        def _emit_closure_recursive(ci) -> None:
+        def _emit_closure_recursive(ci, outer_name: str = None) -> None:
             """Emit sub-closures first (depth-first), then this closure's allocator + body."""
             # Deduplicate: overloaded methods share the same closure outer_name, so
             # the same lifted closure may be emitted multiple times (once per overload).
@@ -12202,7 +12546,7 @@ class GimpleGen:
                 return
             _emitted_closures.add(ci.lifted_name)
             for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
-                _emit_closure_recursive(sub_ci)
+                _emit_closure_recursive(sub_ci, ci.lifted_name)
             if ci.env_struct:
                 alloc_fn = f"_alloc_{ci.env_struct}"
                 func_parts.append(
@@ -12217,7 +12561,7 @@ class GimpleGen:
                     f"}}"
                 )
                 func_parts.append('')
-            func_parts.append(self._gen_lifted_closure(ci))
+            func_parts.append(self._gen_lifted_closure(ci, outer_name))
             func_parts.append('')
 
         # Collect top-level statements for _toplevel() function
@@ -12237,7 +12581,7 @@ class GimpleGen:
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
                 for ci in self._all_closures.get(stmt.name, {}).values():
-                    _emit_closure_recursive(ci)
+                    _emit_closure_recursive(ci, stmt.name)
                 self._lambda_parts = []
                 func_parts.append(self.gen_func(stmt))
                 # Flush any lambdas lifted during gen_func, emitting them
@@ -12257,7 +12601,7 @@ class GimpleGen:
                     method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                     # Emit lifted closures for this method (if any), recursively
                     for ci in self._all_closures.get(method_outer_name, {}).values():
-                        _emit_closure_recursive(ci)
+                        _emit_closure_recursive(ci, method_outer_name)
                     func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                     func_parts.append('')
             elif isinstance(stmt, TraitDef):
@@ -12860,14 +13204,42 @@ class GimpleGen:
                             global_decls.append(f"int64_t {gname};")
                             self._global_var_types[gname] = 'int64_t'
                             self._global_c_decl_types[gname] = 'int64_t'
+                    elif (isinstance(stmt.value.func, MemberExpr)
+                            and stmt.value.func.member in ('read', 'readline')
+                            and not stmt.value.args):
+                        # Same MemberExpr-call blind spot as the Phase 1.7
+                        # pre-scan above (and _quick_type): `x = f.read()`
+                        # always fell to the int64_t default here too — this
+                        # is the pass that actually emits the C declaration
+                        # text, so this one drove the real (wrong)
+                        # `int64_t src;` field. Real bug found via mojo.py's
+                        # own `with open(input_file) as f: src = f.read()`.
+                        global_decls.append(f"char * {gname};")
+                        self._global_var_types[gname] = 'char *'
+                        self._global_c_decl_types[gname] = 'char *'
+                    elif (isinstance(stmt.value.func, MemberExpr)
+                            and stmt.value.func.member == 'readlines'):
+                        global_decls.append(f"int64_t {gname};  /* MojoList * */")
+                        self._global_var_types[gname] = 'MojoList *'
+                        self._global_c_decl_types[gname] = 'int64_t'
                     else:
                         global_decls.append(f"int64_t {gname};")
                         self._global_var_types[gname] = 'int64_t'
                         self._global_c_decl_types[gname] = 'int64_t'
                 else:
-                    global_decls.append(f"int64_t {gname};")
-                    self._global_var_types[gname] = 'int64_t'
-                    self._global_c_decl_types[gname] = 'int64_t'
+                    qt = self._quick_type(stmt.value) or 'int64_t'
+                    if qt.endswith(' *') or qt == 'char *':
+                        global_decls.append(f"{qt} {gname};")
+                        self._global_var_types[gname] = qt
+                        self._global_c_decl_types[gname] = qt
+                    elif qt == '_Bool':
+                        global_decls.append(f"int {gname};")
+                        self._global_var_types[gname] = 'int'
+                        self._global_c_decl_types[gname] = 'int'
+                    else:
+                        global_decls.append(f"int64_t {gname};")
+                        self._global_var_types[gname] = 'int64_t'
+                        self._global_c_decl_types[gname] = 'int64_t'
             elif isinstance(stmt, VarDecl) and stmt.name not in _declared_globals:
                 _declared_globals.add(stmt.name)
                 ctype = self._resolve_type(stmt.type_ann) if stmt.type_ann else 'int64_t'

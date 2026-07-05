@@ -547,6 +547,18 @@ int mojo_str_contains(char *haystack, char *needle)
 char mojo_str_char_at(MojoStr *s, int64_t i) { return s->data[i < 0 ? i + s->len : i]; }
 void mojo_str_print(MojoStr *s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
+/* A single character (raw `char`, e.g. from string indexing) is a distinct
+ * representation from a 1-character `char *` string — reinterpreting its
+ * numeric byte value as a pointer (the boxed-int64_t-as-pointer convention
+ * used elsewhere for containers of strings) produces a garbage address
+ * (e.g. 0x22 for '"'). Build a real 1-char C string instead. */
+char *mojo_char_to_str(char c) {
+    char *s = malloc(2);
+    s[0] = c;
+    s[1] = '\0';
+    return s;
+}
+
 int mojo_str_startswith(char *s, char *prefix) {
     if (!s || !prefix) return 0;
     while (*prefix) {
@@ -1574,7 +1586,8 @@ char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename
      * and capture the output.  Falls back to a valid-but-empty stub only on
      * hard failures (popen/write errors).
      */
-    static char result_buf[1 << 22];  /* 4 MiB — enough for full compiler */
+    static char *result_buf = NULL;
+    static size_t result_cap = 0;
     char tmppath[128];
     snprintf(tmppath, sizeof(tmppath), "/tmp/_mojo_src_%d.mojo", (int)getpid());
 
@@ -1606,7 +1619,25 @@ char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename
     FILE *fp = popen(cmd, "r");
     if (!fp) { unlink(tmppath); goto fallback; }
 
-    size_t n = fread(result_buf, 1, sizeof(result_buf) - 1, fp);
+    /* Read the WHOLE subprocess output, growing the buffer as needed. A fixed
+     * 4 MiB cap here used to silently truncate any transitive-closure dump
+     * once the self-hosted compiler's own generated C exceeded that size
+     * (mojo.py's own full closure is 5+ MiB): fread stopped short of EOF,
+     * pclose() then closed the read end while the child still had more to
+     * write, the child got SIGPIPE/EPIPE and exited non-zero, and THAT non-zero
+     * rc silently triggered the "Python call failed" fallback stub below —
+     * every --dump of mojo.py itself losing its whole transitive closure. */
+    if (!result_buf) { result_cap = 1 << 20; result_buf = malloc(result_cap); }
+    size_t n = 0;
+    for (;;) {
+        if (n + 65536 >= result_cap) {
+            result_cap *= 2;
+            result_buf = realloc(result_buf, result_cap);
+        }
+        size_t got = fread(result_buf + n, 1, result_cap - n - 1, fp);
+        n += got;
+        if (got == 0) break;  /* EOF or error */
+    }
     int rc = pclose(fp);
     unlink(tmppath);
 
@@ -1618,7 +1649,8 @@ char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename
 fallback:
     /* Should never be reached in a working installation — emit a valid-but-
        minimal stub that at least compiles without errors. */
-    snprintf(result_buf, sizeof(result_buf),
+    if (!result_buf) { result_cap = 1 << 12; result_buf = malloc(result_cap); }
+    snprintf(result_buf, result_cap,
         "/* gimple_codegen_compile_to_gimple: Python call failed */\n"
         "#include \"mojo_runtime.h\"\n"
         "int _gimple_main(void) { return 0; }\n"
@@ -1931,16 +1963,25 @@ char *int64_t_basename(char *path) {
     return (char *)base;
 }
 
+/* os.path.splitext(path) -> (root, ext). Codegen (see the os.path.splitext
+ * call site in gimple_codegen.py) treats this function's return value as
+ * the root and builds a [root, ""] list around it — but this returned
+ * `dot` (everything from the last '.' onward, i.e. the *extension*), not
+ * the root, unconditionally swapping the two. Real bug found via
+ * mojo.py's own build_executable: `os.path.splitext(basename)[0]` (meant
+ * to strip the .mojo extension) returned ".mojo" itself instead. */
 char *int64_t_splitext(char *path) {
     if (!path) return "";
     const char *dot = NULL;
     for (const char *p = path; *p; p++) {
         if (*p == '.') dot = p;
     }
-    if (dot) {
-        return (char *)dot;
-    }
-    return (char *)path;
+    if (!dot) return path;
+    size_t root_len = (size_t)(dot - path);
+    char *root = malloc(root_len + 1);
+    memcpy(root, path, root_len);
+    root[root_len] = '\0';
+    return root;
 }
 
 char *int64_t_expanduser(char *path) {
