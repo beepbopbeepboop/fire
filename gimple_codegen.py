@@ -5933,21 +5933,20 @@ class GimpleGen:
                 ret_type = 'int64_t'
             else:
                 ret_type = 'int64_t'
-        arg_pairs = [self.lower_expr(a) for a in node.args]
-        if node.kwargs and _chosen_method is not None:
-            # Bind keyword args to the resolved overload's parameter positions
-            # (mirrors _lower_struct_constructor's kwarg binding). Previously
-            # unhandled here entirely — a kwarg-only call always went through
-            # the unsuffixed catch-all variadic stub, which silently dropped
-            # kwargs since it accepts any args. Now that a real, concretely-
-            # typed candidate is resolved, the value must actually be passed.
-            kw = dict(node.kwargs)
-            for idx, pname in enumerate(_chosen_method['param_names']):
-                if pname not in kw:
-                    continue
-                while len(arg_pairs) <= idx:
-                    arg_pairs.append(('int', '0'))
-                arg_pairs[idx] = self.lower_expr(kw[pname])
+        # Bind keyword args to the resolved overload's parameter positions,
+        # and (when the overload has a `*args` pack, e.g. DeviceGraphBuilder.
+        # add_function's *Ts-typed variadic overloads) box the pack-matched
+        # positional args into the MojoList* the real signature expects
+        # instead of trying to pass them one-for-one by flat position — see
+        # _build_call_args_for_candidate. Previously a kwarg-only call always
+        # went through the unsuffixed catch-all variadic stub, which silently
+        # dropped kwargs since it accepts any args; now that a real,
+        # concretely-typed candidate is resolved, the value must actually be
+        # passed.
+        if _chosen_method is not None:
+            arg_pairs = self._build_call_args_for_candidate(_chosen_method, node.args, node.kwargs)
+        else:
+            arg_pairs = [self.lower_expr(a) for a in node.args]
         full_param_list = self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", [])
         if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
             is_class_ref = True
@@ -7312,7 +7311,19 @@ class GimpleGen:
         # candidates can disagree on where a name falls.
         def _score(cand: dict) -> int:
             score = 0
+            # For a `*args` pack candidate, every positional arg at or past
+            # pre_star_count is consumed by the pack, not by a fixed param —
+            # param_ctypes past that point belongs to necessarily-keyword-only
+            # params (Mojo syntax forbids positional args after a `*args`), so
+            # comparing a pack-bound arg's type against one of those ctypes at
+            # the same flat index is a category error, not a real type match
+            # (confirmed: it let DeviceGraphBuilder.add_function's *args-pack
+            # overload lose a tie to a same-arity sibling by a coincidental
+            # int64_t/int64_t collision at a position that meant nothing).
+            _cap = cand['pre_star_count'] if cand.get('has_varargs') else len(arg_types)
             for i, at in enumerate(arg_types):
+                if i >= _cap:
+                    break
                 if i < len(cand['param_ctypes']) and cand['param_ctypes'][i] == at:
                     score += 1
             for kn, ke in kwargs:
@@ -7349,6 +7360,51 @@ class GimpleGen:
 
     # ── Struct constructor lowering (data layout solver decision) ─────────
 
+    def _lower_varargs_pack(self, pack_args: list) -> tuple:
+        """Lower the call-site positional args matched to a `*args` pack
+        parameter into a single MojoList* value. A lone arg that already
+        lowers to a MojoList* (e.g. `*args` re-forwarded from the caller's
+        own pack param, as in `def f(*args): g(*args)`) is passed straight
+        through unchanged; otherwise each value is boxed individually,
+        mirroring _emit_call's trailing-'...' packing convention."""
+        lowered = [self.lower_expr(a) for a in pack_args]
+        if len(lowered) == 1 and lowered[0][0] == 'MojoList *':
+            return lowered[0]
+        lst = self._new_val('MojoList *', "mojo_list_new ()")
+        for atype, aval in lowered:
+            aval = self._coerce_to_type(atype, 'int64_t', aval)
+            self._emit(f"  mojo_list_append_int ({lst}, {aval});")
+        return ('MojoList *', lst)
+
+    def _build_call_args_for_candidate(self, chosen: dict, args: list, kwargs: list | None) -> list:
+        """Build the C arg-value list (self excluded) for a resolved struct
+        constructor/method overload. When the overload has a `*args` pack
+        parameter (chosen['has_varargs']), the params before it are lowered
+        positionally, the pack itself is boxed via _lower_varargs_pack, and
+        every param after it is necessarily keyword-only (Mojo syntax) so is
+        bound by name from kwargs, defaulting to 0 when omitted — the old flat
+        by-position scheme had no slot for the pack at all. Otherwise,
+        unchanged from before: args lowered positionally, kwargs overlaid by
+        name, then zero-padded up to max_arity."""
+        kw = dict(kwargs or [])
+        if chosen.get('has_varargs'):
+            pre_n = chosen['pre_star_count']
+            out = [self.lower_expr(a) for a in args[:pre_n]]
+            out.append(self._lower_varargs_pack(args[pre_n:]))
+            for pname in chosen['param_names'][pre_n:]:
+                out.append(self.lower_expr(kw[pname]) if pname in kw else ('int', '0'))
+            return out
+        out = [self.lower_expr(a) for a in args]
+        for idx, pname in enumerate(chosen['param_names']):
+            if pname not in kw:
+                continue
+            while len(out) <= idx:
+                out.append(('int', '0'))
+            out[idx] = self.lower_expr(kw[pname])
+        while len(out) < chosen['max_arity']:
+            out.append(('int', '0'))
+        return out
+
     def _lower_struct_constructor(self, struct_name: str,
                                   args: list, kwargs: list | None = None) -> tuple[str, str]:
         """
@@ -7375,20 +7431,8 @@ class GimpleGen:
             _chosen = self._resolve_overload(_init_candidates, args, kwargs)
             if _chosen is not None:
                 init_fname = f"{struct_name}___init__{_chosen['overload_id']}"
-                arg_pairs = [(f"{struct_name} *", t)]
-                for arg in args:
-                    arg_pairs.append(self.lower_expr(arg))
-                if kwargs:
-                    kw = dict(kwargs)
-                    for idx, pname in enumerate(_chosen['param_names']):
-                        if pname not in kw:
-                            continue
-                        pos = idx + 1  # +1 for self slot
-                        while len(arg_pairs) <= pos:
-                            arg_pairs.append(('int', '0'))
-                        arg_pairs[pos] = self.lower_expr(kw[pname])
-                while len(arg_pairs) - 1 < _chosen['max_arity']:
-                    arg_pairs.append(('int', '0'))
+                arg_pairs = [(f"{struct_name} *", t)] + \
+                    self._build_call_args_for_candidate(_chosen, args, kwargs)
                 self._emit_call('void', '', init_fname, arg_pairs)
                 return ctype, t
             # No candidate could be resolved — either no candidate's arity fits
@@ -11401,14 +11445,37 @@ class GimpleGen:
                 _moids = self._struct_method_overload_ids(s)
                 for m, _oid in zip(s.methods, _moids):
                     _has_self_first = bool(m.params) and m.params[0][0] == 'self'
-                    real_params = [(pn, pt) for pn, pt in
-                                   (m.params[1:] if _has_self_first else m.params)
-                                   if not pn.startswith('*')]
+                    _params_no_self = m.params[1:] if _has_self_first else m.params
+                    # A `*args: *Ts` pack param (single '*', not '**') consumes
+                    # every call-site positional arg from its position onward —
+                    # everything named after it in Mojo syntax is necessarily
+                    # keyword-only. Treating it (as the old real_params filter
+                    # below did) as contributing NOTHING to arity meant a call
+                    # with more positional args than the struct's OTHER,
+                    # non-variadic overloads could ever match would find no
+                    # survivor in _resolve_overload and fall through to a bare,
+                    # never-defined symbol (confirmed via String's *args:
+                    # *Ts-typed Writable constructor and DeviceGraphBuilder.
+                    # add_function's *Ts-typed overloads in the real stdlib).
+                    _star_idx = next((i for i, (pn, _pt) in enumerate(_params_no_self)
+                                       if pn.startswith('*') and not pn.startswith('**')), None)
+                    real_params = [(pn, pt) for pn, pt in _params_no_self if not pn.startswith('*')]
                     _defaults = m.param_has_default or {}
-                    min_arity = sum(1 for pn, _pt in real_params if pn not in _defaults)
-                    max_arity = len(real_params)
+                    if _star_idx is not None:
+                        _pre_star = _params_no_self[:_star_idx]
+                        min_arity = sum(1 for pn, _pt in _pre_star if pn not in _defaults)
+                        max_arity = float('inf')
+                    else:
+                        min_arity = sum(1 for pn, _pt in real_params if pn not in _defaults)
+                        max_arity = len(real_params)
                     _all_ctypes = self._signature_ctypes(m.params, m, s.name)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
+                    if _star_idx is not None:
+                        # Drop the pack's own sentinel entry ('...', from the
+                        # default _signature_ctypes sentinel) so param_ctypes
+                        # stays aligned with param_names/real_params, which
+                        # already exclude the pack's own name.
+                        param_ctypes = [c for c in param_ctypes if c != '...']
                     # Compute this overload's own return type here, rather than
                     # reading func_return_types[f"{struct}_{method}{overload_id}"]
                     # at the call site later: that key is only populated when
@@ -11440,6 +11507,8 @@ class GimpleGen:
                         'min_arity': min_arity,
                         'max_arity': max_arity,
                         'ret_type': _ret_type,
+                        'has_varargs': _star_idx is not None,
+                        'pre_star_count': _star_idx if _star_idx is not None else None,
                     })
                     # Also register this overload's full param signature (incl.
                     # self) in _mangled_signature_ctypes — NOT func_param_types
