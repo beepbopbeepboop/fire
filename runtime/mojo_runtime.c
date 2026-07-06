@@ -1652,6 +1652,31 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
     abort();
 }
 
+/* Reached whenever _gen_for_iter (gimple_codegen.py) couldn't statically
+ * resolve `for x in y:`'s iterable to a known container/struct-iterator
+ * shape. That fallback used to just emit a "/* TODO *-/" comment and drop
+ * the ENTIRE loop body silently -- zero iterations, no error, no crash --
+ * which is how `for m in _TOKEN_RE.finditer(s):` in mojo_compiler.py's own
+ * py_tokenize (a regex .finditer() call, which has no codegen lowering at
+ * all -- see BACKLOG-CODEGEN.md) silently produced an EMPTY token stream
+ * for every self-hosted `.tok`/`.ast` dump instead of a visible failure.
+ *
+ * Unlike mojo_obj_getattr's abort() (a "should never happen, this is an
+ * internal compiler bug" case), this fires for a legitimate, cataloged
+ * feature gap that real compiled programs can legitimately hit and
+ * recover from (mojo.py's own `.tok`/`.ast` generation wraps the call in a
+ * try/except specifically anticipating this). abort() raises SIGABRT,
+ * which no Mojo-level try/except can catch, so it would take down the
+ * WHOLE process instead of just failing the one diagnostic step -- a
+ * worse regression than the silent-empty-loop it replaces. So: print
+ * loudly (visible, greppable), but let execution continue with the same
+ * zero-iterations behavior as before. */
+void mojo_unsupported_iter(const char *type_name) {
+    fprintf(stderr, "mojo_unsupported_iter: 'for' loop over unsupported iterable "
+                     "type %s (codegen has no lowering for this container/iterator "
+                     "shape; the loop body runs zero times)\n", type_name ? type_name : "?");
+}
+
 
 char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename) {
     /*

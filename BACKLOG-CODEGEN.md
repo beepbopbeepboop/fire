@@ -260,6 +260,55 @@ needs `mojo_re_*` to translate the flags int into `regcomp`'s
 `REG_ICASE`/etc. (MULTILINE and VERBOSE have no direct POSIX ERE
 equivalent and would need pattern preprocessing instead).
 
+## 4f. `re.Pattern.finditer()` has no codegen lowering at all (2026-07-05)
+
+Found chasing why `mojo --dump`'s `.tok`/`.ast` diagnostic files were
+either garbage or an empty-message exception for EVERY file, self-hosted.
+`_lower_method_call` has no case whatsoever for `.finditer()` (only
+`re.sub`/`.match`/`.search` get any lowering — see §4e). A `for m in
+pattern.finditer(s):` loop therefore falls through to `_gen_for_iter`'s
+final "unsupported iterable" branch, which — before this pass — silently
+emitted a `/* TODO */` comment and dropped the entire loop body: zero
+iterations, no error, no crash. `mojo_compiler.py`'s own `py_tokenize` uses
+exactly this pattern (`_TOKEN_RE.finditer(stmt_final)`) as its core lexer
+loop, so the self-hosted, *compiled* tokenizer silently produces an empty
+token stream (just structural NEWLINE/INDENT/DEDENT/EOF, no actual
+NAME/KW/OP/STRING content) for every input, no matter how simple
+(confirmed for both `hello.mojo` and `t1.mojo`).
+
+This is significant beyond the diagnostic dumps: `mojo --dump`'s *main*
+`.ci` generation never actually exercises this path, because
+`gimple_codegen.compile_to_gimple(...)` is hardcoded (see `_lower_method_call`)
+to route through the subprocess-based `gimple_codegen_compile_to_gimple`
+runtime stub, which shells out to a fresh `python3` and runs the real,
+*interpreted* tokenizer/parser/codegen — never the compiled one. So
+`make bootstrap`'s `verify` step, which only compares the `.ci` output,
+gives no signal at all about whether the self-hosted Parser/tokenizer
+actually *work* when executed rather than merely compiling cleanly. The
+`.tok`/`.ast` dump code in `mojo.py` is the *only* place in the entire
+bootstrap that calls the compiled `Parser`/`py_tokenize` directly,
+in-process — which is exactly where this surfaced.
+
+Partial fix landed 2026-07-05: `_gen_for_iter`'s unsupported-iterable
+fallback now calls `mojo_unsupported_iter(type_name)` (prints a loud,
+greppable diagnostic to stderr) instead of silently emitting nothing —
+turns "mysteriously empty result" into "visibly zero-lowered iterable,
+here's which type." Deliberately does NOT abort() (unlike
+`mojo_obj_getattr`'s precedent): this fires for a legitimate, cataloged
+feature gap that real compiled programs can hit and are meant to recover
+from (`mojo.py`'s own dump handler wraps the call in `try/except`
+specifically anticipating failure here) — `abort()` raises SIGABRT, which
+no Mojo-level `try/except` can catch, so it would take down the whole
+process instead of just failing the one diagnostic step.
+
+Real fix needs actual `.finditer()` (and likely `.findall()`/`.split()`)
+lowering — either a small hand-rolled NFA/DFA engine for the fixed,
+compile-time-known patterns this codebase actually uses (`_TOKEN_RE` etc.
+are all literal, non-dynamic `re.compile(...)` calls — a targeted,
+bounded scope, not a general Python `re` engine), or bridging through
+POSIX `regexec` with a match-iteration wrapper. Meaningfully larger than
+everything else in this file — budget it as its own pass, not a quick fix.
+
 ## 5. Structure / maintainability (behavior-preserving refactors)
 
 - `gen_module` is ~2,200 lines with ten numbered "Phase" sections —

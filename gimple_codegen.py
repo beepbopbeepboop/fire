@@ -2864,6 +2864,7 @@ class GimpleGen:
         'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
         'mojo_hasattr':          ('int',        ['int', 'char *']),
         'mojo_obj_getattr':      ('int64_t',   ['void *', 'char *']),
+        'mojo_unsupported_iter': ('void',      ['char *']),
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
@@ -10091,6 +10092,16 @@ class GimpleGen:
             return self._actual_types[val]
         return ctype
 
+    def _emit_unsupported_iter(self, it_type: str) -> None:
+        """Abort at runtime instead of silently running a for-loop body zero
+        times — see mojo_unsupported_iter in runtime/mojo_runtime.c."""
+        name_lit = self._intern_string(it_type.replace('"', '\\"'))
+        # GIMPLE: a call argument must be a local register value, not a raw
+        # global/static string-literal reference — load it into a temp first
+        # (same requirement _call_expr/_ensure_local handle elsewhere).
+        name_local = self._new_val('char *', f'{name_lit}')
+        self._emit(f'  mojo_unsupported_iter ({name_local});')
+
     def _gen_for_iter(self, node: ForStmt):
         it_type, it_val = self.lower_expr(node.iterable)
         var = node.target if isinstance(node.target, str) else node.target.name
@@ -10115,10 +10126,10 @@ class GimpleGen:
                 self._gen_for_struct_iter(var, it_type, it_val, node.body)
             else:
                 _debug_note('for loop dropped (no iterator protocol)', it_type)
-                self._emit(f"  /* TODO: for loop over {it_type} (no iterator protocol) */")
+                self._emit_unsupported_iter(it_type)
         else:
             _debug_note('for loop dropped (unsupported iterable)', it_type)
-            self._emit(f"  /* TODO: for loop over {it_type} */")
+            self._emit_unsupported_iter(it_type)
 
     @staticmethod
     def _split_top_level_comma(s: str) -> list[str]:

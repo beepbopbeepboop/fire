@@ -195,6 +195,7 @@ int64_t     MojoList_index(MojoList *l, int v);
 
 /* Generic Python-object attribute accessor (used by GIMPLE codegen for opaque int nodes) */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
+void        mojo_unsupported_iter(const char *type_name);
 
 int         mojo_dict_contains(MojoDict *d, char *key);
 void        mojo_dict_print(MojoDict *d);
