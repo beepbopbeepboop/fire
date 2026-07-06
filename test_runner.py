@@ -64,6 +64,45 @@ def run_executable(exe_path: str) -> int:
     return result.returncode
 
 
+def run_executable_capture(exe_path: str) -> tuple:
+    """Execute the program, returning (exit code, decoded stdout)."""
+    result = subprocess.run(
+        [exe_path],
+        capture_output=True,
+        timeout=10
+    )
+    return result.returncode, result.stdout.decode('utf-8', errors='replace')
+
+
+def test_file_output(name: str, mojo_path: str, must_contain: str, must_not_contain: str = None):
+    """Compile a .mojo FILE (not an inline snippet) and assert on its stdout,
+    for programs that report success via printed text rather than a return
+    code (e.g. a self-check that tallies pass/fail counts internally)."""
+    global _PASS, _FAIL
+    exe_path = None
+    try:
+        with open(mojo_path) as f:
+            mojo_src = f.read()
+        exe_path = compile_mojo_to_executable(mojo_src)
+        rc, out = run_executable_capture(exe_path)
+        ok = must_contain in out and (must_not_contain is None or must_not_contain not in out)
+        if ok:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {must_contain!r} in output (rc={rc}):\n{out}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def test_execution(name: str, mojo_src: str, expected_return: int = 0):
     """Test that mojo code compiles and executes with expected return code."""
     global _PASS, _FAIL
@@ -276,6 +315,18 @@ def main() -> Int:
     out = {k: 1 for k in ["a", "b", "c"]}
     return out.get("b", 0)
 """, expected_return=1)
+
+    # 17. test_simple.mojo: a hand-written self-check exercising arithmetic,
+    #     comparisons, booleans, collections, control flow, and function calls
+    #     end-to-end. It tallies its own pass/fail counts internally and prints
+    #     a SUCCESS/FAILURE marker rather than returning a distinguishing exit
+    #     code, so this asserts on stdout instead of the return code.
+    test_file_output(
+        "test_simple_mojo",
+        os.path.join(HERE, 'test_simple.mojo'),
+        must_contain="SUCCESS: All tests passed",
+        must_not_contain="FAILURE",
+    )
 
 
 def main():
