@@ -2823,7 +2823,10 @@ class GimpleGen:
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
-        'mojo_repr':             ('char *',    ['int']),  # expects int, not void*
+        'mojo_repr_int':         ('char *',    ['int64_t']),
+        'mojo_repr_str':         ('char *',    ['char *']),
+        'mojo_repr_obj':         ('char *',    ['int64_t']),
+        'mojo_repr_float':       ('char *',    ['double']),
         'mojo_print':            ('void',      ['char *']),
         'mojo_open_file':        ('int64_t',   ['char *']),  # Added: returns handle, takes path
         'mojo_close':            ('void',      ['void *']),
@@ -3759,7 +3762,7 @@ class GimpleGen:
             # lists silently read/return as int.
             _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
                                 'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
-                                'bool': '_Bool'}
+                                'bool': '_Bool', 'repr': 'char *'}
             if fname in _BUILTIN_SCALARS:
                 return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:
@@ -7052,10 +7055,35 @@ class GimpleGen:
         if fname_raw == 'iter' and len(node.args) == 1 and 'iter' not in self.func_return_types:
             return self.lower_expr(node.args[0])
 
+        # repr(x): dispatch by the argument's own static type instead of
+        # boxing everything through one generic runtime function. The old
+        # single mojo_repr(int) both truncated any 64-bit value AND treated
+        # a string/list/struct pointer as a plain integer, printing a
+        # plausible-looking-but-wrong decimal number for anything that wasn't
+        # a small int. Real strings need quoting (Python's repr("hi") ==
+        # "'hi'"); anything else (list/dict/set/struct pointer) has no
+        # runtime field-metadata table to reconstruct a real Python repr
+        # from, so it's formatted as an address rather than silently
+        # mistaken for a number. Found via mojo.py's own `--dump`'s
+        # `repr(ast)` on a parsed AST list.
+        if fname_raw == 'repr' and node.args:
+            rat, rav = self.lower_expr(node.args[0])
+            if rat == 'char *':
+                return 'char *', self._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
+            if rat.endswith(' *') or rat == 'void *':
+                rav_local = self._ensure_local(rat, rav)
+                vp = self._new_val('void *', f'(void *){rav_local}')
+                addr = self._new_val('int64_t', f'(int64_t){vp}')
+                return 'char *', self._call_expr('char *', 'mojo_repr_obj', [('int64_t', addr)])
+            if rat in ('double', 'float'):
+                rav_d = rav if rat == 'double' else self._new_val('double', f'(double){rav}')
+                return 'char *', self._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
+            rav64 = rav if rat == 'int64_t' else self._new_val('int64_t', f'(int64_t){rav}')
+            return 'char *', self._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
+
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {
             'str':       ('char *',  'mojo_str'),
-            'repr':      ('char *',  'mojo_repr'),
             'enumerate': ('void *',  'mojo_enumerate'),
             'hasattr':   ('int',     'mojo_hasattr'),
         }

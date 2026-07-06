@@ -1255,10 +1255,58 @@ char *mojo_str(void *obj) {
     return buffer;
 }
 
-char *mojo_repr(int obj) {
-    /* Representation of integer */
+char *mojo_repr_int(int64_t obj) {
+    /* Was `mojo_repr(int obj)` -- a plain 32-bit `int` parameter silently
+     * truncated any 64-bit value (Int is the 64-bit machine word per ABI.md),
+     * and every OTHER call shape (repr() on a string, list, or struct
+     * pointer) was ALSO routed through this same int-formatting function,
+     * printing a plausible-looking-but-meaningless decimal number for a
+     * pointer instead of the real content. gimple_codegen.py's
+     * _lower_call now dispatches repr() by the argument's static type
+     * instead of always calling one generic function -- see
+     * mojo_repr_str/mojo_repr_obj below for the other cases. Found via
+     * mojo.py's own `--dump`'s `repr(ast)` on a parsed AST list producing a
+     * garbage number as the .ast file's entire content. */
+    static char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%" PRId64, obj);
+    return buffer;
+}
+
+char *mojo_repr_str(char *s) {
+    /* Python repr() of a string is quoted: repr("hi") == "'hi'". Minimal
+     * escaping (backslash and single-quote) -- good enough for a debug
+     * dump, not a full Python string-literal round-trip. */
+    if (!s) s = "";
+    size_t len = strlen(s);
+    char *buf = malloc(len * 2 + 3);
+    char *p = buf;
+    *p++ = '\'';
+    for (const char *c = s; *c; c++) {
+        if (*c == '\'' || *c == '\\') *p++ = '\\';
+        *p++ = *c;
+    }
+    *p++ = '\'';
+    *p = '\0';
+    return buf;
+}
+
+char *mojo_repr_float(double v) {
     static char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%d", obj);
+    snprintf(buffer, sizeof(buffer), "%g", v);
+    return buffer;
+}
+
+char *mojo_repr_obj(int64_t addr) {
+    /* Fallback for anything that isn't a plain scalar or a string: a real
+     * struct/list/dict/set pointer. A full Python-style field-by-field repr
+     * would need a runtime struct-metadata table (field names + types per
+     * struct) this compiler doesn't build -- only a type TAG, see
+     * mojo_read_type_tag above, which is enough for isinstance() but not for
+     * reconstructing field names. Format as an address instead of silently
+     * printing a decimal number indistinguishable from real data. */
+    static char buffer[40];
+    if (!addr) return "None";
+    snprintf(buffer, sizeof(buffer), "<object at 0x%" PRIx64 ">", addr);
     return buffer;
 }
 
