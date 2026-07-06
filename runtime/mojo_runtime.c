@@ -1207,8 +1207,35 @@ void mojo_set_iter_free(MojoSetIter *it) { free(it); }
 /* ── Python builtin functions for C types ──────────────────────────────────*/
 
 int mojo_isinstance(int obj, int type_id) {
-    /* Stub: returns 0 (false) for now */
+    /* Stub: returns 0 (false) for now. Only covers scalar builtins
+     * (bool, int, float, str, list, dict, set) -- those have no tagged
+     * runtime representation in this compiler (a plain int64_t, double,
+     * char pointer, or MojoList pointer carries no dynamic type marker), so
+     * a real isinstance() there would need a much bigger boxing-scheme
+     * change. isinstance() against a real user-defined struct/dataclass
+     * type does NOT go through this stub -- see mojo_read_type_tag below
+     * and _lower_builtin_isinstance's struct_field_types branch in
+     * gimple_codegen.py. */
     return 0;
+}
+
+/* Every codegen-emitted struct typedef (see gimple_codegen.py's struct-typedef
+ * emission) carries an `int64_t __mojo_type_id;` as its FIRST field, set once
+ * at allocation time (_alloc_<StructName>, the sole struct-construction choke
+ * point). Because it's the first field, its address equals the struct's own
+ * address (no padding precedes the first member in C), so reading it back
+ * needs no struct-specific knowledge — just a plain int64_t* dereference.
+ * isinstance(x, StructName) compares this tag against StructName's own
+ * deterministic hash (_struct_type_id in gimple_codegen.py — computed
+ * independently at both the allocation site and the isinstance call site, no
+ * shared registry needed). Real bug this fixes: mojo_isinstance() above was a
+ * hardcoded-false stub for EVERY non-scalar type, so isinstance(node, SomeASTType)
+ * always took the "not this type" branch — found via find_imports() (used by
+ * `mojo --dump`'s own do_imports resolution) never recognizing any import
+ * statement inside a nested function/if/try block once self-hosted. */
+int64_t mojo_read_type_tag(int64_t addr) {
+    if (!addr) return 0;
+    return *(int64_t *)(intptr_t)addr;
 }
 
 char *mojo_str(void *obj) {

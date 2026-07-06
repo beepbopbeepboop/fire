@@ -263,6 +263,7 @@ char *mojo_input(char *prompt);
 
 /* Python built-in functions for C strings */
 int mojo_isinstance(int obj, int type_id);
+int64_t mojo_read_type_tag(int64_t addr);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr(int obj);
 int mojo_type(int obj);

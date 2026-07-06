@@ -1754,6 +1754,18 @@ def _struct_name_of(ctype: str) -> str:
         s = s[6:]
     return s.replace(' *', '').strip()
 
+def _struct_type_id(name: str) -> int:
+    """Deterministic runtime type tag for a struct name — a pure function of
+    the name, so the allocation site (which stamps this into the struct's
+    leading `__mojo_type_id` field) and any isinstance(x, name) call site
+    (which compares against it) always agree without a shared registry, even
+    across separately-compiled modules. See mojo_read_type_tag in
+    runtime/mojo_runtime.c for the read side."""
+    h = 0
+    for c in name:
+        h = (h * 31 + ord(c)) & 0x7FFFFFFF
+    return h
+
 # libc/system symbols a Mojo *function definition* must not shadow: the library
 # itself defines e.g. `fn exit(...)` whose body calls libc `exit` via
 # external_call. Emitting that as C `exit` would self-recurse and clash with the
@@ -2798,6 +2810,7 @@ class GimpleGen:
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
+        'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
         'mojo_stdin_read':       ('char *',     []),
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
@@ -7142,6 +7155,33 @@ class GimpleGen:
             type_name = type_arg.name
             if type_name == 'type':
                 self._emit(f'  {t} = 0;  /* isinstance(x, type) always false in C */')
+            elif type_name in self.struct_field_types:
+                # A real user-defined struct/dataclass type: compare the
+                # object's runtime type tag (see mojo_read_type_tag in
+                # runtime/mojo_runtime.c, and the tag stamped by every
+                # _alloc_<StructName> helper) against this type's own
+                # deterministic hash — NOT the always-false mojo_isinstance()
+                # stub below, which only covers scalar builtins with no
+                # tagged runtime representation. Was a real, general bug:
+                # isinstance(node, AnyStructType) always took the "not this
+                # type" branch when compiled, found via find_imports() (used
+                # by `mojo --dump`'s own do_imports resolution) never
+                # recognizing an import statement nested in a function/if/try
+                # block once self-hosted.
+                target_id = _struct_type_id(type_name)
+                if obj_type.endswith(' *'):
+                    ov_local = self._ensure_local(obj_type, obj_val)
+                    vp = self._new_val('void *', f'(void *){ov_local}')
+                    addr = self._new_val('int64_t', f'(int64_t){vp}')
+                elif obj_type == 'int64_t':
+                    addr = obj_val
+                else:
+                    addr = self._new_val('int64_t', f'(int64_t){obj_val}')
+                tag = self._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
+                target = self._new_val('int64_t', f'(int64_t){target_id}')
+                cmp_t = self._new_temp('_Bool')
+                self._emit(f'  {cmp_t} = {tag} == {target};')
+                self._emit(f'  {t} = (int){cmp_t};')
             else:
                 _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
                              'list': '5', 'dict': '6', 'set': '7'}
@@ -13034,6 +13074,15 @@ class GimpleGen:
                     if struct_name == 'Pointer':
                         parts.append('#define _MOJO_POINTER_STRUCT_DEF')
                     parts.append(f"typedef struct {struct_name} {{")
+                    # Runtime type tag, always first — see the other struct-typedef
+                    # emission below (Section 2 for AST-sourced StructDefs) and
+                    # mojo_read_type_tag in runtime/mojo_runtime.c. This is a
+                    # SEPARATE typedef-emission path (topologically sorted from
+                    # struct_field_types rather than walking StructDef nodes
+                    # directly) that needs the same leading field, or a struct
+                    # emitted via THIS path never gets tagged and isinstance()
+                    # against it always reads a stale/garbage first field.
+                    parts.append(f"  int64_t __mojo_type_id;")
                     if fields:
                         for field_name, field_type in sorted(fields.items()):
                             field_type: str
@@ -13394,6 +13443,12 @@ class GimpleGen:
                     if sd.name == 'Pointer':
                         parts.append('#define _MOJO_POINTER_STRUCT_DEF')
                     parts.append(f"typedef struct {sd.name} {{")
+                    # Runtime type tag, always first — see mojo_read_type_tag
+                    # in runtime/mojo_runtime.c and _struct_type_id above. Must
+                    # be the leading field: reading it back needs no per-struct
+                    # layout knowledge, just a plain int64_t* dereference of the
+                    # struct's own address (no padding precedes a first member).
+                    parts.append(f"  int64_t __mojo_type_id;")
                     emitted_fields = set()
                     for field in sd.fields:
                         if isinstance(field, VarDecl):
@@ -13447,13 +13502,20 @@ class GimpleGen:
                 # static: each module that needs it emits its own copy; the
                 # monolithic stdlib dylib compiles modules independently, so an
                 # externally-linked _alloc_<sn> would collide at link time.
+                # Stamps __mojo_type_id (the struct's first field, see the
+                # typedef emission above) so isinstance(x, sn) can recognize
+                # this instance later — the sole struct-construction choke
+                # point, so this is the only place that needs to set it.
                 f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
                 f"{{\n"
                 f"  {sn} * _p;\n"
                 f"  void * _vp;\n"
+                f"  int64_t _tag;\n"
                 f"\nbb_2:\n"
                 f"  _vp = malloc (sizeof({sn}));\n"
                 f"  _p = ({sn} *) _vp;\n"
+                f"  _tag = (int64_t){_struct_type_id(sn)};\n"
+                f"  _p->__mojo_type_id = _tag;\n"
                 f"  return _p;\n"
                 f"}}"
             )
