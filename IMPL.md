@@ -279,6 +279,51 @@ parsing (`expr.name if isinstance(expr, IdentExpr) else None` was calling
 Not yet done: `.findall()`/`.split()` still have no lowering; `re` flags
 still aren't honored by either regex backend; see `PLAN.md`.
 
+### `re.sub(pattern, repl, src)` fixed for a plain replacement string, not just a callback
+
+Real Python's `re.sub` accepts either a callback *or* a plain replacement
+string as its second argument, but this codegen's `re.sub()` lowering
+(both the POSIX `mojo_re_sub_fn` path and the new engine-backed
+`mojo_regex_sub_fn` path above) always assumed a callback: a plain
+replacement string got cast straight to a function pointer and then
+*called* — a `SIGILL` calling the string's own bytes as machine code.
+Confirmed via `monomorphize.py`'s own `safe_suffix`
+(`re.sub(r'[^A-Za-z0-9_]', '_', s)`) and `monomorphize_source`
+(`re.sub(rf'\b{re.escape(tp)}\b', str(concrete), src)`), both real,
+exercised logic — reproduced directly with a minimal test program
+(`SIGILL`, exit 132) and verified the fix produces output matching real
+Python exactly. This is a pre-existing bug, not introduced by the
+`.finditer()`/`re.sub()` work above (the callback-resolution logic was
+only extracted into a shared helper, `_lower_re_sub_callback`, not
+changed) — `safe_suffix`'s pattern just newly reaches the real engine
+(being compile-time-foldable) instead of silently no-opping via the old
+POSIX path, which is what surfaced it.
+
+Fixed by adding `_re_sub_repl_is_callback(cb_arg)`: in this restricted
+codegen, the only way to reference "a function" is by a bare,
+undeclared name (a closure tracked in `_closure_envs`, or a plain
+top-level `def` name) — a bare identifier that's already a known local
+or global *variable* can't be one, which is the tell used to distinguish
+the two `re.sub()` forms. The string-replacement form now routes through
+two new runtime functions mirroring the callback ones minus the callback
+machinery: `mojo_re_sub_str` (POSIX) and `mojo_regex_sub_str`
+(engine-backed) — both a straightforward find/replace loop appending the
+literal replacement string. No backreference support (`\1` etc. in
+`repl`), since nothing in this codebase's actual usage needs it.
+
+**Found but not fixed while investigating this: `re.search()`/`re.match()`
+have zero real implementation as expressions** — a `re`/pattern receiver
+is typed as a plain scalar, so `re.search(pat, s)` falls through
+`_lower_method_call`'s generic "unknown method on a scalar receiver"
+fallback and silently returns the *receiver's own value* unchanged
+(diagnosable via `MOJO_DEBUG=1`, but not caught by `-fsyntax-only`, so
+`compile_stdlib.py`'s 647/647 doesn't catch it either). Confirmed via
+`monomorphize.py`'s `compile_fn`, whose `m = re.search(...)` /
+`name = m.group(1)` compiles to `m = re;` / `name = (char *)m;` — a
+wild-pointer read, not the captured text. See `PLAN.md` — this is a real,
+standalone feature (a genuine Match-or-None representation), not a quick
+patch, so left there rather than attempted alongside the `re.sub()` fix.
+
 ### `compile_stdlib.py` reaches 595/0 — every stdlib file compiles
 
 Last of the original 3 failures (`test_unsafe_pointer_v2.mojo`,

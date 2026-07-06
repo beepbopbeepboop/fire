@@ -2886,8 +2886,11 @@ class GimpleGen:
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
+        'mojo_re_sub_str':       ('char *',    ['char *', 'char *', 'char *']),
         'mojo_regex_sub_fn':     ('char *',    ['const ReNode *', 'const ReRange *', 'const ReClassInfo *',
                                                  'int', 'int', 'void *', 'void *', 'char *']),
+        'mojo_regex_sub_str':    ('char *',    ['const ReNode *', 'const ReRange *', 'const ReClassInfo *',
+                                                 'int', 'int', 'char *', 'char *']),
         'mojo_set_union':        ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_difference':   ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_discard':      ('void',      ['MojoSet *', 'int64_t']),
@@ -5642,14 +5645,24 @@ class GimpleGen:
                                 # nothing to do with the one that actually failed.
                                 info = None
                                 _debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
+                    is_callback = self._re_sub_repl_is_callback(cb_arg)
                     if info is not None:
                         prog_local = self._new_val('const ReNode *', info['prog_var'])
                         ranges_local = self._new_val('const ReRange *', info['ranges_var'])
                         classinfo_local = self._new_val('const ReClassInfo *', info['classinfo_var'])
-                        fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
                         t = self._new_temp('char *')
-                        self._emit(f'  {t} = mojo_regex_sub_fn ({prog_local}, {ranges_local}, {classinfo_local}, '
-                                   f'{info["root"]}, {info["ngroups"]}, {fn_ptr_t}, {env_t}, {src_val});')
+                        if is_callback:
+                            fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
+                            self._emit(f'  {t} = mojo_regex_sub_fn ({prog_local}, {ranges_local}, {classinfo_local}, '
+                                       f'{info["root"]}, {info["ngroups"]}, {fn_ptr_t}, {env_t}, {src_val});')
+                        else:
+                            repl_type, repl_val = self.lower_expr(cb_arg)
+                            if repl_type not in ('char *', 'void *'):
+                                repl_cast = self._new_temp('char *')
+                                self._emit(f'  {repl_cast} = (char *){repl_val};')
+                                repl_val = repl_cast
+                            self._emit(f'  {t} = mojo_regex_sub_str ({prog_local}, {ranges_local}, {classinfo_local}, '
+                                       f'{info["root"]}, {info["ngroups"]}, {repl_val}, {src_val});')
                         return 'char *', t
                     pat_type, pat_val = self.lower_expr(node.args[0])
                     # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
@@ -5659,10 +5672,17 @@ class GimpleGen:
                         pat_cast = self._new_temp('char *')
                         self._emit(f'  {pat_cast} = (char *){pat_val};')
                         pat_val = pat_cast
-                    fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
                     t = self._new_temp('char *')
-                    # Pass fn_ptr_t as void* (matched to mojo_re_sub_fn param type)
-                    self._emit(f'  {t} = mojo_re_sub_fn ({pat_val}, {fn_ptr_t}, {env_t}, {src_val});')
+                    if is_callback:
+                        fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
+                        self._emit(f'  {t} = mojo_re_sub_fn ({pat_val}, {fn_ptr_t}, {env_t}, {src_val});')
+                    else:
+                        repl_type, repl_val = self.lower_expr(cb_arg)
+                        if repl_type not in ('char *', 'void *'):
+                            repl_cast = self._new_temp('char *')
+                            self._emit(f'  {repl_cast} = (char *){repl_val};')
+                            repl_val = repl_cast
+                        self._emit(f'  {t} = mojo_re_sub_str ({pat_val}, {repl_val}, {src_val});')
                     return 'char *', t
 
             if module_name == 'gimple_codegen' and method_name == 'compile_to_gimple':
@@ -10274,6 +10294,29 @@ class GimpleGen:
                 return None
             return sv * iv
         return None
+
+    def _re_sub_repl_is_callback(self, cb_arg) -> bool:
+        """True if re.sub()'s second argument is a real callable reference
+        (a closure, or a bare top-level function name used as a callback);
+        False if it's a plain replacement-STRING expression — the far more
+        common `re.sub(pattern, repl_str, src)` form (e.g.
+        `re.sub(r'[^A-Za-z0-9_]', '_', s)`, `re.sub(pat, str(concrete), src)`).
+        Both real Python re.sub call shapes were previously treated as the
+        callback form unconditionally: a plain replacement string got cast
+        straight to a function pointer and then *called*, a SIGILL calling
+        the string's own bytes as machine code (found via monomorphize.py's
+        own `safe_suffix`/`monomorphize_source`). In this restricted codegen
+        the only way to reference "a function" is by its bare, undeclared
+        name — a closure (tracked in `_closure_envs`) or a plain top-level
+        `def` name — so a bare identifier that's already a known local/
+        global *variable* can't be one; that's the tell used below."""
+        if not isinstance(cb_arg, IdentExpr):
+            return False
+        if cb_arg.name in self._closure_envs:
+            return True
+        if cb_arg.name in self.var_types or cb_arg.name in self._global_var_types:
+            return False
+        return True
 
     def _lower_re_sub_callback(self, cb_arg) -> tuple[str, str]:
         """Resolve a re.sub(pattern, CALLBACK, src) callback argument to a

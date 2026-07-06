@@ -2333,6 +2333,58 @@ char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env
     return out;
 }
 
+/* re.sub(pattern, repl, src) where repl is a plain replacement STRING, not a
+ * callback — Python's `re.sub` accepts either, but this codegen's `re.sub`
+ * lowering assumed every second argument was a callback and cast the
+ * replacement string straight to a function pointer, then called it: a
+ * SIGILL calling a string's bytes as machine code. Found via
+ * monomorphize.py's own `re.sub(r'[^A-Za-z0-9_]', '_', s)` /
+ * `re.sub(rf'\b{re.escape(tp)}\b', str(concrete), src)`. Same substitution
+ * loop as mojo_re_sub_fn, minus the callback machinery — no backreference
+ * support (`\1` etc in repl), since nothing in this codebase's actual usage
+ * needs it. */
+char *mojo_re_sub_str(char *pattern, char *repl, char *src) {
+    if (!pattern || !src) return src ? src : "";
+    if (!repl) repl = "";
+    regex_t re;
+    if (regcomp(&re, pattern, REG_EXTENDED) != 0) return src;
+
+    size_t src_len = strlen(src);
+    size_t out_cap = src_len * 4 + 64;
+    char *out = (char *)malloc(out_cap);
+    if (!out) { regfree(&re); return src; }
+    size_t out_len = 0;
+    size_t rlen = strlen(repl);
+
+    const char *pos = src;
+    regmatch_t pmatch[1];
+    while (*pos) {
+        int rc = regexec(&re, pos, 1, pmatch, 0);
+        if (rc != 0) {
+            size_t rest = strlen(pos);
+            while (out_len + rest + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, pos, rest);
+            out_len += rest;
+            break;
+        }
+        size_t pre = (size_t)pmatch[0].rm_so;
+        while (out_len + pre + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, pos, pre);
+        out_len += pre;
+
+        while (out_len + rlen + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, repl, rlen);
+        out_len += rlen;
+
+        size_t adv = (size_t)pmatch[0].rm_eo;
+        if (adv == 0) { if (*pos) { out[out_len++] = *pos++; } else break; }
+        else pos += adv;
+    }
+    out[out_len] = '\0';
+    regfree(&re);
+    return out;
+}
+
 int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
     /* Stub: dynamic method call on opaque Python object.
      * In the bootstrap, interpreter execute() calls are not needed
@@ -2712,6 +2764,62 @@ char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClass
         }
 
         /* Advance past the match (avoid infinite loop on zero-length match) */
+        if (mend == mstart) {
+            if (mstart < src_len) {
+                out[out_len++] = src[mstart];
+                pos = mstart + 1;
+            } else {
+                break;
+            }
+        } else {
+            pos = mend;
+        }
+    }
+    out[out_len] = '\0';
+    free(gstart);
+    free(gend);
+    return out;
+}
+
+/* Engine-backed counterpart to mojo_re_sub_str: re.sub(pattern, repl, src)
+ * where repl is a plain replacement string, not a callback. See
+ * mojo_re_sub_str's comment for the bug this fixes. No backreference
+ * support in repl, same as mojo_re_sub_str. */
+char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                          int root, int ngroups, char *repl, char *src) {
+    if (!src) return "";
+    if (!repl) repl = "";
+    int64_t src_len = (int64_t)strlen(src);
+    size_t out_cap = (size_t)src_len * 4 + 64;
+    char *out = (char *)malloc(out_cap);
+    if (!out) return src;
+    size_t out_len = 0;
+    size_t rlen = strlen(repl);
+
+    int64_t *gstart = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 1));
+    int64_t *gend = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 1));
+
+    int64_t pos = 0;
+    while (pos <= src_len) {
+        int64_t mstart, mend;
+        int ok = mojo_regex_search(prog, ranges, classinfo, root, ngroups,
+                                    src, src_len, pos, &mstart, &mend, gstart, gend);
+        if (!ok) {
+            size_t rest = (size_t)(src_len - pos);
+            while (out_len + rest + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, src + pos, rest);
+            out_len += rest;
+            break;
+        }
+        size_t pre = (size_t)(mstart - pos);
+        while (out_len + pre + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, src + pos, pre);
+        out_len += pre;
+
+        while (out_len + rlen + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, repl, rlen);
+        out_len += rlen;
+
         if (mend == mstart) {
             if (mstart < src_len) {
                 out[out_len++] = src[mstart];

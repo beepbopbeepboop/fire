@@ -47,27 +47,61 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   the bugs above, but real — some Parser code path behaves differently
   once compiled than interpreted for this file's actual `from X import
   Y` + function-call shape.
-- **Several already-self-hosted files likely have latent, undiscovered
-  `re.sub`/`re.search`/`re.findall` bugs on this platform** — found while
-  investigating whether to expand regex engine coverage (2026-07-06, not
-  yet confirmed by running them under lldb). `monomorphize.py`,
-  `reflect.py`, `elaborate.py`, and `gimple_spec_gen.py` all use
-  runtime-built patterns like `rf'\b{re.escape(name)}\b'` with `\s`/`\b`
-  shorthand classes. Those aren't compile-time-foldable (see
-  `_try_const_fold_str` in `IMPL.md`), so they still route through
-  `mojo_re_sub_fn`'s POSIX `regcomp`/`regexec` backend — which doesn't
-  support `\s`/`\S`/`\d`/`\w` on macOS/BSD libc, the same root cause fixed
-  for `.finditer()`/foldable `.sub()` patterns. These code paths may simply
-  not be exercised in ways that surface it yet (unlike the tokenizer,
-  which runs on every input).
+- **`re.search()`/`re.match()` (and `.group()`/`.start()`/`.end()` on their
+  result) have zero real implementation as expressions** — confirmed
+  2026-07-06 investigating `monomorphize.py`. `re`/a compiled pattern is
+  typed as a plain scalar (`int64_t`) at the call site, so `re.search(pat,
+  s)` falls through to `_lower_method_call`'s generic "unknown method on a
+  scalar receiver" fallback (~line 5941, `gimple_codegen.py`): it silently
+  returns the *receiver's own value* unchanged, annotated
+  `/* {ot}.{method}() stubbed */`. Concretely, `m = re.search(pat, s)`
+  compiles to `m = re;` (the `re`-module marker, always non-null), so
+  `if m:` is *always true* regardless of whether a match occurred, and
+  `m.group(1)` similarly returns garbage (the same non-null marker,
+  reinterpreted as `char *` — a wild pointer, not the captured text).
+  This is a **silent miscompile**, not a crash — worse than the
+  `re.sub()` bug below in that GCC's `-fsyntax-only` check (what
+  `compile_stdlib.py` validates) can't catch it, since the generated C is
+  syntactically fine. It *is* diagnosable today via `MOJO_DEBUG=1` (uses
+  the existing `_stub_result`/`_debug_note` mechanism — see
+  `monomorphize.py`'s own `compile_fn`, whose `m = re.search(...)` /
+  `name = m.group(1)` is exactly this). Real fix needs `re.search()`/
+  `.match()` to return a genuine Match-or-None representation (probably a
+  side-table keyed the same way `.finditer()`'s per-iteration match vars
+  are, but for a single expression rather than a for-loop) — a real,
+  standalone feature, not a quick patch.
+- **`re.sub(pattern, repl, src)` where `repl` is a plain replacement
+  *string* (not a callback) crashed with `SIGILL`** — fixed 2026-07-06,
+  see `IMPL.md`. Confirmed via `monomorphize.py`'s own
+  `safe_suffix`/`monomorphize_source`, both of which use exactly this form
+  (`re.sub(r'[^A-Za-z0-9_]', '_', s)`, `re.sub(rf'\b{re.escape(tp)}\b',
+  str(concrete), src)`). Pre-existing bug (not introduced by this
+  session's regex-engine work — the callback-resolution logic was only
+  extracted into a shared helper, not changed), just newly exposed because
+  `safe_suffix`'s pattern is compile-time-foldable and so now actually
+  reaches the real engine instead of silently no-opping via the old
+  POSIX-regcomp fallback.
+- **`elaborate.py`'s own `re.sub(..., f'fn {mangled}', src, count=1)`**
+  would hit the same `repl`-is-a-string shape (now fixed) **but the file
+  doesn't currently parse through this compiler at all** (`SyntaxError:
+  Unexpected INDENT`, an unrelated, pre-existing front-end gap) — so this
+  specific call site is unreachable/moot until that's fixed separately.
+  Also note: `count=1` (limit to first replacement) isn't honored by
+  either `re.sub()` backend — always replaces every match. Not yet known
+  to matter for any *reachable* call site.
+- **`consolidate_string_pool.py`'s `re.sub()` calls** use the same
+  string-replacement form (now fixed) but the file isn't imported by
+  anything and isn't part of the self-hosted closure — a standalone dev
+  script, always run interpreted. Not a live risk.
 
 ## Known feature gaps (regex)
 
 - **`re.findall()`/`re.split()` have no codegen lowering at all** — only
   `.finditer()` and `.sub()` (with a compile-time-foldable pattern) are
   implemented (see `IMPL.md`'s regex-engine section). `.match()`/`.search()`
-  still return a dummy `int` stub type from `_quick_type` and have no real
-  runtime behavior.
+  don't even have a stub type in `_quick_type` that matches their real
+  shape (returns a dummy `int`) — see the confirmed silent-miscompile bug
+  above for what actually happens at the real lowering site.
 - **`re` module flags are stubbed constants, not honored.**
   `ast_rewriter.py`'s `re_multiline`/`re_dotall`/`re_ignorecase`/`re_verbose`
   rules give `re.MULTILINE` etc. their real CPython integer values so

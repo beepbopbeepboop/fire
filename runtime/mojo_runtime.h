@@ -480,6 +480,8 @@ int any(void *iterable);                        /* Python any() builtin */
 /* ── Regex substitution with callback (for re.sub(pattern, fn, src)) ────── */
 /* callback receives (env, matched_substring) and returns replacement string */
 char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src);
+/* re.sub(pattern, repl, src) where repl is a plain replacement string */
+char *mojo_re_sub_str(char *pattern, char *repl, char *src);
 
 
 /* ── Small, bounded regex engine (see mojo_runtime.c's own section comment
@@ -501,3 +503,5 @@ char *mojo_regex_substr(const char *text, int64_t start, int64_t end);
 char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
                          int root, int ngroups,
                          char *(*callback)(void *, char *), void *env, char *src);
+char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                          int root, int ngroups, char *repl, char *src);
