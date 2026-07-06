@@ -4561,46 +4561,38 @@ class GimpleGen:
         return actual_ot, t
 
     def _lower_TernaryExpr(self, node) -> tuple[str, str]:
+        # Real branching, not a C `?:` built from two already-evaluated
+        # operands: the previous lowering unconditionally emitted code for
+        # BOTH then_val and else_val before selecting between the results,
+        # so any side effect in the untaken branch (I/O, a function call)
+        # still happened — a real correctness bug, not just waste, and one
+        # every ternary in the self-hosted closure was exposed to (see
+        # BACKLOG-CODEGEN.md §4d; found via mojo_compiler.py's own
+        # `sys.stdin.read() if len(sys.argv) < 2 else open(...).read()`
+        # reading stdin unconditionally even when a file argv was given).
+        # _quick_type gives each branch's C type WITHOUT evaluating it (the
+        # same "estimate a type, don't run the code" contract already used
+        # for list/tuple literal element-type inference), so the merged
+        # result type — and therefore the shared result temp's declared
+        # type — can be fixed before either branch actually executes.
         ct, cv = self.lower_expr(node.condition)
+        cv = self._ensure_bool_cond(ct, cv)
+        res_type = TypeLattice.join(self._quick_type(node.then_val), self._quick_type(node.else_val))
+        result = self._new_temp(res_type)
+        bb_then = self._new_bb()
+        bb_else = self._new_bb()
+        bb_merge = self._new_bb()
+        self._emit(f"  if ({cv}) goto {bb_then}; else goto {bb_else};")
+        self._emit_label(bb_then)
         tt, tv = self.lower_expr(node.then_val)
+        self._safe_coerce_emit(tt, res_type, tv, result)
+        self._emit(f"  goto {bb_merge};")
+        self._emit_label(bb_else)
         et, ev = self.lower_expr(node.else_val)
-
-        # GIMPLE: condition must be _Bool, branches must have identical types
-        if ct != '_Bool':
-            cond = self._new_temp('_Bool')
-            if ct in self._CONTAINER_LEN_FN or ct == 'char *':
-                cond = self._ensure_bool_cond(ct, cv)
-            elif ct in ('void *',) or ct.endswith(' *'):
-                ip = self._new_temp('int64_t')
-                zero = self._new_temp('int64_t')
-                self._emit(f"  {ip} = (int64_t){cv};")
-                self._emit(f"  {zero} = (int64_t)0;")
-                self._emit(f"  {cond} = {ip} != {zero};")
-            elif ct == 'int64_t':
-                zero = self._new_val('int64_t', "(int64_t)0")
-                self._emit(f"  {cond} = {cv} != {zero};")
-            else:
-                self._emit(f"  {cond} = {cv} != 0;")
-            cv = cond
-        # Coerce branches to common type
-        res_type = TypeLattice.join(tt, et)
-        if tt != res_type:
-            t_tmp = self._new_temp(res_type)
-            self._safe_coerce_emit(tt, res_type, tv, t_tmp)
-            tv = t_tmp
-        if et != res_type:
-            e_tmp = self._new_temp(res_type)
-            self._safe_coerce_emit(et, res_type, ev, e_tmp)
-            ev = e_tmp
-        # GIMPLE: load global string literals into temps before ternary
-        if res_type == 'char *' and tv.startswith('_slit_'):
-            tv_tmp = self._new_val('char *', f'{tv}')
-            tv = tv_tmp
-        if res_type == 'char *' and ev.startswith('_slit_'):
-            ev_tmp = self._new_val('char *', f'{ev}')
-            ev = ev_tmp
-        t = self._new_val(res_type, f"{cv} ? {tv} : {ev}")
-        return res_type, t
+        self._safe_coerce_emit(et, res_type, ev, result)
+        self._emit(f"  goto {bb_merge};")
+        self._emit_label(bb_merge)
+        return res_type, result
 
     def _subst_idents(self, expr, mapping: dict):
         """Return a copy of an AST expression with any IdentExpr whose name is in
@@ -4914,9 +4906,12 @@ class GimpleGen:
             # actually executed — before that, the `int(True)` bit pattern got
             # stored into what the rest of the program treats as a `char *`,
             # and any later dereference (e.g. os.path.join(GMOJO_HOME, 'cas'))
-            # crashed reading address 0x1. Same eager-both-branches trade-off
-            # already accepted for ternaries (see _lower_TernaryExpr / BACKLOG
-            # §4d) — this mirrors that lowering instead of introducing a new one.
+            # crashed reading address 0x1. Same eager-both-operands shape as
+            # the ternary bug fixed in _lower_TernaryExpr (BACKLOG §4d) — that
+            # one now branches for real, but this lowering still doesn't:
+            # `x = f() or g()` still calls g() even when f() is truthy. Left
+            # as-is for now (not yet hit in practice the way the ternary case
+            # was); logged as the same still-open risk in BACKLOG §4d.
             ltype, lval = self.lower_expr(node.left)
             rtype, rval = self.lower_expr(node.right)
             res_type = TypeLattice.join(ltype, rtype)

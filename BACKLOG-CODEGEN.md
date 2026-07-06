@@ -227,7 +227,7 @@ spot:
   what would naturally be a `(path, kind, value)` tuple key as a single
   string key (`_edge_key`) instead.
 
-## 4d. Ternary expressions evaluate both branches eagerly (2026-07-04)
+## 4d. ~~Ternary expressions evaluate both branches eagerly~~ (2026-07-04)
 
 `_lower_TernaryExpr` (`gimple_codegen.py`) lowers `a if cond else b` by
 unconditionally emitting code for *both* `then_val` and `else_val` at codegen
@@ -245,6 +245,27 @@ implementation rather than leave it to crash). The real fix is emitting an
 actual `if/else` with each branch's evaluation inside its own block —
 broader and riskier than fixing on the spot (every ternary in the
 self-hosted closure is affected), so logged here instead of changed live.
+
+**Fixed 2026-07-06.** `_lower_TernaryExpr` now emits a real branch (two
+basic blocks + a merge label) and only evaluates the taken side; the
+merged result type is determined via `_quick_type` on both branches
+(estimates a C type without emitting code — the same "look, don't run"
+contract used elsewhere for list/tuple literal element-type inference) so
+the shared result temp can be declared before either branch runs. This
+directly enabled fixing §4f's `example_imports.mojo` crash: a `re.sub()`
+failure left a docstring split into lines, one of which hit
+`mojo_compiler.py`'s bare-annotation parser's own
+`expr.name if isinstance(expr, IdentExpr) else None` — with the OLD eager
+lowering, `.name` was called on a non-`IdentExpr` regardless of the
+`isinstance` check, hitting the dynamic-getattr abort.
+
+**Not fixed: `and`/`or` (`_lower_BinaryOp`) have the identical
+eager-both-operands shape** (`x = f() or g()` still calls `g()` even when
+`f()` is truthy) — it was written mirroring the ternary lowering at the
+time, and the code comment there said as much. Not yet known to have
+caused a real bug the way the ternary case did, so left alone rather than
+fixed opportunistically alongside the ternary change (same
+real-branching fix would apply if it ever does).
 
 ## 4e. `re` module flags are stubbed constants, not honored (2026-07-04)
 
@@ -308,6 +329,81 @@ are all literal, non-dynamic `re.compile(...)` calls — a targeted,
 bounded scope, not a general Python `re` engine), or bridging through
 POSIX `regexec` with a match-iteration wrapper. Meaningfully larger than
 everything else in this file — budget it as its own pass, not a quick fix.
+
+**Real fix landed 2026-07-05/06.** `.finditer()` now lowers for real:
+`regex_compile.py` (new file) is a compile-time-only Python regex
+parser/emitter (backtracking NFA over a flat node array — char/any/class/
+concat/alt/group/repeat, greedy and non-greedy, named groups, `{m,n}`);
+`runtime/mojo_runtime.c`'s `mojo_regex_search`/`mojo_regex_lastgroup`/
+`mojo_regex_substr` walk it at runtime via an explicit continuation-list
+struct (no closures, since GIMPLE has none). `_gen_for_regex_iter`
+(`gimple_codegen.py`) wires `for m in <pattern>.finditer(text):` to it,
+validated by comparing the self-hosted tokenizer's token stream against
+real Python's on real source files.
+
+Making tokenization *actually run* for the first time (rather than
+silently emitting zero iterations) immediately surfaced a cascade of
+previously-unreachable bugs elsewhere in the self-hosted closure — all
+found and fixed in the same pass, since none of them are specific to
+regex, they were just never exercised until real input reached the
+Parser:
+- `strcmp` on a genuine NULL `char *` (a `str = None` default parameter)
+  segfaulted — POSIX `strcmp` has no NULL handling. Fixed with a
+  null-safe `mojo_cstr_cmp`.
+- This codegen's `and`/`or`/ternary never short-circuit (both operands
+  always evaluate — see §4d for the ternary case). Two of
+  `mojo_compiler.py`'s own guards relied on short-circuiting to protect
+  indexing/attribute-access on empty strings or non-`IdentExpr` nodes;
+  fixed by rewriting as explicit nested `if`s.
+- A struct method's varargs-packing sentinel (`func_param_types[mangled]`
+  ending in `'...'`) gets overwritten with the method's concrete C
+  signature once its body is emitted (needed so forward declarations
+  match), silently disabling `*args` packing for every call site compiled
+  afterward — `self._is_kw("as")` cast a raw string pointer straight to
+  `MojoList *` and segfaulted in `mojo_list_contains_str`. Fixed by
+  preferring `_mangled_signature_ctypes`'s untouched sentinel copy in
+  `_emit_call`.
+- Tuple-unpack assignments (`a, b = x[:n], x[n:]`) never ran the
+  "remember the real pointer type behind this int64_t-boxed local" logic
+  that plain assignments do — a sliced string got misread as `MojoList *`
+  by `len()`/indexing, crashing across every test/stdlib file once the
+  parser genuinely ran on them. Fixed via a shared
+  `_track_pointer_actual_type` helper used by both assignment paths, plus
+  the same missing check in `_lower_builtin_len`/`_lower_subscript`.
+- `ord()`/`chr()` were dead variadic stubs with zero real implementation.
+- `mojo_compiler.py`'s raw/byte-prefixed string literals (`r'...'`,
+  `b'...'`) never had their prefix stripped, only their quotes — general,
+  pre-existing, and highest-impact for `_TOKEN_RE` itself, since
+  `_TOKEN_RE = re.compile(r'...')` is *itself* an r-string.
+
+**Follow-on (2026-07-06): `re.sub()` still used POSIX `regcomp`/`regexec`
+(`mojo_re_sub_fn`) even after the above — a *different* re operation from
+`.finditer()`, needing its own fix.** `mojo_compiler.py`'s own
+`replace_multiline_strings` (hides multi-line triple-quoted strings
+*before* line-based tokenization — the mechanism `_TOKEN_RE` itself relies
+on to never have to see a multi-line string directly) calls `re.sub()`
+with `\s`/`\S`/non-greedy `*?`, none of which POSIX ERE supports;
+`regcomp` failed and `mojo_re_sub_fn`'s own "compile failed → return input
+unchanged" fallback made the substitution a silent no-op, so a module
+docstring got split into physical lines and mis-tokenized one line at a
+time — reaching a bare-annotation parse path with a non-`IdentExpr` node,
+which (via the ternary-eager-eval bug, §4d) called `mojo_obj_getattr` and
+aborted. Fixed by adding compile-time constant-folding
+(`_try_const_fold_str`, handles literal concatenation/repetition and
+already-folded locals like `_dq = '"' * 3`) so a foldable `re.sub()`
+pattern routes through the same regex engine via a new
+`mojo_regex_sub_fn`, falling back to the POSIX path for anything the
+engine doesn't support (e.g. lookahead `(?=...)`, found in a *different*
+`gimple_codegen.py` pattern during this same fix). Also fixed an
+incidental bug where `_regex_progs_defined` could get permanently
+poisoned — marked "already emitted" for patterns whose emitting compile
+attempt later failed and got rolled back by an ancestor module's
+exception handler — silently dropping other, unrelated modules' regex
+array declarations file-wide (`_re0_prog` etc. undeclared).
+
+Not yet fixed: `.findall()`/`.split()` still have no lowering; `re`
+flags (`re.MULTILINE` etc., see §4e) are still not honored by either
+regex backend.
 
 ## 5. Structure / maintainability (behavior-preserving refactors)
 
