@@ -2215,6 +2215,7 @@ class GimpleGen:
         self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result
         self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
+        self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
@@ -2407,6 +2408,7 @@ class GimpleGen:
                     temp_gen._regex_patterns = self._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                     temp_gen._regex_progs = self._regex_progs        # share: bubble compiled regex data up to root preamble
                     temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
+                    temp_gen._const_str_locals = self._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                     temp_gen.struct_field_types = self.struct_field_types
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
@@ -2884,6 +2886,8 @@ class GimpleGen:
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
+        'mojo_regex_sub_fn':     ('char *',    ['const ReNode *', 'const ReRange *', 'const ReClassInfo *',
+                                                 'int', 'int', 'void *', 'void *', 'char *']),
         'mojo_set_union':        ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_difference':   ('MojoSet *', ['MojoSet *', 'MojoSet *']),
         'mojo_set_discard':      ('void',      ['MojoSet *', 'int64_t']),
@@ -5592,9 +5596,67 @@ class GimpleGen:
             if module_name == 're' and method_name == 'sub':
                 # re.sub(pattern, callback, src) → mojo_re_sub_fn(pattern, callback, env, src)
                 if len(node.args) >= 3:
-                    pat_type, pat_val = self.lower_expr(node.args[0])
                     cb_arg  = node.args[1]
                     src_type, src_val = self.lower_expr(node.args[2])
+                    if src_type not in ('char *', 'void *'):
+                        src_cast = self._new_temp('char *')
+                        self._emit(f'  {src_cast} = (char *){src_val};')
+                        src_val = src_cast
+                    # A compile-time-foldable pattern (a literal, or a
+                    # concatenation/repetition of literals and already-folded
+                    # locals — see _try_const_fold_str) routes through this
+                    # codegen's own regex engine (mojo_regex_sub_fn) instead
+                    # of mojo_re_sub_fn's POSIX regcomp/regexec: POSIX ERE
+                    # has no \s/\S/\d/\w shorthand classes and no non-greedy
+                    # quantifiers, so any such pattern makes regcomp() fail,
+                    # and mojo_re_sub_fn silently returns its input UNCHANGED
+                    # on a compile failure — found via mojo_compiler.py's own
+                    # replace_multiline_strings, whose `"""[\s\S]*?"""`-style
+                    # patterns (built as `lit + _dq + lit + _dq`, not a bare
+                    # literal, hence not caught by the simpler _regex_patterns
+                    # `X = re.compile("...")` scan used for .finditer()) were
+                    # silently never replacing anything, leaving a
+                    # multi-line docstring to be split into physical lines
+                    # and mis-tokenized one line at a time.
+                    folded_pattern = self._try_const_fold_str(node.args[0])
+                    info = None
+                    if folded_pattern is not None:
+                        info = self._regex_progs.get(folded_pattern)
+                        if info is None:
+                            try:
+                                prog_id = f"re{len(self._regex_progs)}"
+                                info = regex_compile.compile_pattern(folded_pattern, prog_id)
+                                self._regex_progs[folded_pattern] = info
+                            except Exception as e:
+                                # Not every real regex feature is implemented by this
+                                # codegen's own engine (e.g. lookahead `(?=...)`, used
+                                # by gimple_codegen.py's own inout/borrowed/... keyword
+                                # pattern) — fall back to mojo_re_sub_fn (POSIX) below
+                                # rather than letting compile_pattern's exception
+                                # propagate. That propagation previously blew up an
+                                # ancestor module's entire compile partway through
+                                # (caught far up by _compile_imported_module's own
+                                # generic except-and-rollback), which discarded that
+                                # attempt's whole output — including any *other*,
+                                # perfectly good regex declarations it had already
+                                # emitted — while _regex_progs_defined (not part of
+                                # that rollback) kept remembering them as "already
+                                # emitted," so no later successful recompile ever
+                                # emitted them either: real declarations silently
+                                # missing from the final file for patterns that had
+                                # nothing to do with the one that actually failed.
+                                info = None
+                                _debug_note(f're.sub compile-time regex compile failed for {folded_pattern!r}', e)
+                    if info is not None:
+                        prog_local = self._new_val('const ReNode *', info['prog_var'])
+                        ranges_local = self._new_val('const ReRange *', info['ranges_var'])
+                        classinfo_local = self._new_val('const ReClassInfo *', info['classinfo_var'])
+                        fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
+                        t = self._new_temp('char *')
+                        self._emit(f'  {t} = mojo_regex_sub_fn ({prog_local}, {ranges_local}, {classinfo_local}, '
+                                   f'{info["root"]}, {info["ngroups"]}, {fn_ptr_t}, {env_t}, {src_val});')
+                        return 'char *', t
+                    pat_type, pat_val = self.lower_expr(node.args[0])
                     # pattern/src may arrive as int64_t string handles; mojo_re_sub_fn
                     # takes char * (passing an int is a -Wint-conversion error on GCC 14+).
                     # Extract casts to temps (GIMPLE requires SSA values in call args).
@@ -5602,42 +5664,7 @@ class GimpleGen:
                         pat_cast = self._new_temp('char *')
                         self._emit(f'  {pat_cast} = (char *){pat_val};')
                         pat_val = pat_cast
-                    if src_type not in ('char *', 'void *'):
-                        src_cast = self._new_temp('char *')
-                        self._emit(f'  {src_cast} = (char *){src_val};')
-                        src_val = src_cast
-                    # Resolve callback: may be a closure reference with env
-                    if isinstance(cb_arg, IdentExpr) and cb_arg.name in self._closure_envs:
-                        # _closure_envs maps inner_name → env_var (NOT lifted_name)
-                        # Get the actual lifted function name from _all_closures
-                        _outer_cls = getattr(self, '_all_closures', {}).get(self.current_func_name, {})
-                        _ci_cb = _outer_cls.get(cb_arg.name)
-                        if _ci_cb:
-                            lifted_name = _ci_cb.lifted_name
-                        else:
-                            lifted_name = cb_arg.name
-                        env_var = self._closure_envs.get(cb_arg.name, '') or '0'
-                        # GIMPLE: &func_name is not allowed; mojo_re_sub_fn takes void*
-                        # for the callback, so we store the env and pass NULL as callback.
-                        # The runtime uses a global fn pointer set by mojo_re_sub_set_fn.
-                        # Simpler: use a global static pointer assigned at file scope.
-                        fn_ptr_t = self._new_temp('void *')
-                        # Use a static C non-GIMPLE pointer to the function (valid from file scope)
-                        static_name = f"_mojo_cb_{lifted_name}"
-                        if not hasattr(self, '_cb_statics'):
-                            self._cb_statics = {}
-                        self._cb_statics[static_name] = lifted_name
-                        self._emit(f'  {fn_ptr_t} = {static_name};')
-                        env_t = self._new_temp('void *')
-                        if env_var != '0':
-                            self._emit(f'  {env_t} = (void *){env_var};')
-                        else:
-                            self._emit(f'  {env_t} = (void *)0;')
-                    else:
-                        # Fallback: treat callback as a simple function pointer
-                        cb_type, cb_val = self.lower_expr(cb_arg)
-                        fn_ptr_t = self._new_val('void *', f'(void *){cb_val}')
-                        env_t = self._new_val('void *', '(void *)0')
+                    fn_ptr_t, env_t = self._lower_re_sub_callback(cb_arg)
                     t = self._new_temp('char *')
                     # Pass fn_ptr_t as void* (matched to mojo_re_sub_fn param type)
                     self._emit(f'  {t} = mojo_re_sub_fn ({pat_val}, {fn_ptr_t}, {env_t}, {src_val});')
@@ -9055,6 +9082,9 @@ class GimpleGen:
         vtype, v = self.lower_expr(node.value)
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
+            folded = self._try_const_fold_str(node.value)
+            if folded is not None:
+                self._const_str_locals[(self.current_func_name, tname)] = folded
             # Write to module struct when `global x` was declared in this function
             if tname in self._func_declared_globals and tname in self._global_var_types:
                 global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
@@ -10209,6 +10239,79 @@ class GimpleGen:
         # (same requirement _call_expr/_ensure_local handle elsewhere).
         name_local = self._new_val('char *', f'{name_lit}')
         self._emit(f'  mojo_unsupported_iter ({name_local});')
+
+    def _try_const_fold_int(self, expr) -> int | None:
+        if isinstance(expr, IntLiteral):
+            return expr.value
+        return None
+
+    def _try_const_fold_str(self, expr) -> str | None:
+        """Evaluate a compile-time-constant string expression (literal,
+        concatenation, or repetition of foldable pieces, or a reference to
+        an already-folded local — see _const_str_locals, populated as a
+        side effect of ordinary AssignStmt/VarDecl lowering in program
+        order) without running the program. Needed for re.sub(pattern,
+        callback, src) call sites whose pattern isn't a bare string literal
+        but is still fully known ahead of time, e.g. mojo_compiler.py's own
+        `_dq = '"' * 3; pattern = r'...' + _dq + r'...' + _dq` in
+        replace_multiline_strings — that pattern needs this codegen's real
+        regex engine (see _gen_for_regex_iter/regex_compile.py), not
+        mojo_re_sub_fn's POSIX regcomp/regexec backend, which can't express
+        \\s/\\S or non-greedy *? at all and silently no-ops on failure."""
+        if isinstance(expr, StringLiteral):
+            return expr.value
+        if isinstance(expr, IdentExpr):
+            return self._const_str_locals.get((self.current_func_name, expr.name))
+        if isinstance(expr, BinaryOp) and expr.op == '+':
+            lv = self._try_const_fold_str(expr.left)
+            rv = self._try_const_fold_str(expr.right)
+            if lv is not None and rv is not None:
+                return lv + rv
+            return None
+        if isinstance(expr, BinaryOp) and expr.op == '*':
+            sv = self._try_const_fold_str(expr.left)
+            iv = self._try_const_fold_int(expr.right)
+            if sv is None or iv is None:
+                sv2 = self._try_const_fold_str(expr.right)
+                iv2 = self._try_const_fold_int(expr.left)
+                if sv2 is not None and iv2 is not None:
+                    return sv2 * iv2
+                return None
+            return sv * iv
+        return None
+
+    def _lower_re_sub_callback(self, cb_arg) -> tuple[str, str]:
+        """Resolve a re.sub(pattern, CALLBACK, src) callback argument to a
+        (fn_ptr_temp, env_temp) pair of void* values, shared by both the
+        POSIX-backed mojo_re_sub_fn path and the regex-engine-backed
+        mojo_regex_sub_fn path (identical callback ABI: char *(*)(void *, char *))."""
+        if isinstance(cb_arg, IdentExpr) and cb_arg.name in self._closure_envs:
+            # _closure_envs maps inner_name → env_var (NOT lifted_name)
+            # Get the actual lifted function name from _all_closures
+            _outer_cls = getattr(self, '_all_closures', {}).get(self.current_func_name, {})
+            _ci_cb = _outer_cls.get(cb_arg.name)
+            lifted_name = _ci_cb.lifted_name if _ci_cb else cb_arg.name
+            env_var = self._closure_envs.get(cb_arg.name, '') or '0'
+            # GIMPLE: &func_name is not allowed; the callback param is void*,
+            # so we store the env and use a static C non-GIMPLE pointer to
+            # the function (valid from file scope) instead.
+            fn_ptr_t = self._new_temp('void *')
+            static_name = f"_mojo_cb_{lifted_name}"
+            if not hasattr(self, '_cb_statics'):
+                self._cb_statics = {}
+            self._cb_statics[static_name] = lifted_name
+            self._emit(f'  {fn_ptr_t} = {static_name};')
+            env_t = self._new_temp('void *')
+            if env_var != '0':
+                self._emit(f'  {env_t} = (void *){env_var};')
+            else:
+                self._emit(f'  {env_t} = (void *)0;')
+            return fn_ptr_t, env_t
+        # Fallback: treat callback as a simple function pointer
+        cb_type, cb_val = self.lower_expr(cb_arg)
+        fn_ptr_t = self._new_val('void *', f'(void *){cb_val}')
+        env_t = self._new_val('void *', '(void *)0')
+        return fn_ptr_t, env_t
 
     def _gen_for_regex_iter(self, node: ForStmt, pattern: str) -> None:
         """`for m in <pattern>.finditer(text): ... m.lastgroup/.group()/.start() ...`

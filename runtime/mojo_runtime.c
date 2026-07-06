@@ -2659,3 +2659,72 @@ char *mojo_regex_substr(const char *text, int64_t start, int64_t end) {
     out[len] = '\0';
     return out;
 }
+
+/* re.sub(pattern, callback, src) backed by this file's own regex engine
+ * instead of mojo_re_sub_fn's POSIX regcomp/regexec: POSIX ERE has neither
+ * PCRE shorthand classes (\s, \S, \d, \w) nor non-greedy quantifiers (*?),
+ * so any pattern using them (e.g. mojo_compiler.py's own
+ * replace_multiline_strings, matching a triple-quoted docstring via
+ * `"""[\s\S]*?"""`) made regcomp() fail outright — mojo_re_sub_fn's own
+ * "compile failed, return src unchanged" fallback then silently no-opped
+ * the whole substitution, leaving multi-line strings unreplaced for the
+ * line-by-line tokenizer that runs after it. Same substitution loop as
+ * mojo_re_sub_fn, but scanning via mojo_regex_search/re_match_node. */
+char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                         int root, int ngroups,
+                         char *(*callback)(void *, char *), void *env, char *src) {
+    if (!src) return "";
+    int64_t src_len = (int64_t)strlen(src);
+    size_t out_cap = (size_t)src_len * 4 + 64;
+    char *out = (char *)malloc(out_cap);
+    if (!out) return src;
+    size_t out_len = 0;
+
+    int64_t *gstart = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 1));
+    int64_t *gend = (int64_t *)malloc(sizeof(int64_t) * (size_t)(ngroups + 1));
+
+    int64_t pos = 0;
+    while (pos <= src_len) {
+        int64_t mstart, mend;
+        int ok = mojo_regex_search(prog, ranges, classinfo, root, ngroups,
+                                    src, src_len, pos, &mstart, &mend, gstart, gend);
+        if (!ok) {
+            size_t rest = (size_t)(src_len - pos);
+            while (out_len + rest + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, src + pos, rest);
+            out_len += rest;
+            break;
+        }
+        /* Copy text before the match */
+        size_t pre = (size_t)(mstart - pos);
+        while (out_len + pre + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + out_len, src + pos, pre);
+        out_len += pre;
+
+        char *matched = mojo_regex_substr(src, mstart, mend);
+        char *repl = callback(env, matched);
+        free(matched);
+        if (repl) {
+            size_t rlen = strlen(repl);
+            while (out_len + rlen + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+            memcpy(out + out_len, repl, rlen);
+            out_len += rlen;
+        }
+
+        /* Advance past the match (avoid infinite loop on zero-length match) */
+        if (mend == mstart) {
+            if (mstart < src_len) {
+                out[out_len++] = src[mstart];
+                pos = mstart + 1;
+            } else {
+                break;
+            }
+        } else {
+            pos = mend;
+        }
+    }
+    out[out_len] = '\0';
+    free(gstart);
+    free(gend);
+    return out;
+}

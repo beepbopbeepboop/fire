@@ -1034,8 +1034,16 @@ class Parser:
                 val = self._parse_expr(0)
                 return AssignStmt(target=expr, value=val, line=line, col=col)
             else:
-                # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields
-                name = expr.name if isinstance(expr, IdentExpr) else None
+                # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields.
+                # NOTE: this codegen's ternary always evaluates BOTH branches (no
+                # real short-circuiting), so `expr.name if isinstance(expr, IdentExpr)
+                # else None` would call `.name` unconditionally even when expr isn't
+                # an IdentExpr — falling to the dynamic-getattr runtime path, which
+                # aborts by design for an unresolvable static type. Use a real `if`
+                # instead. Found via example_imports.mojo's module docstring.
+                name = None
+                if isinstance(expr, IdentExpr):
+                    name = expr.name
                 if name:
                     return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
                 return ExprStmt(expr, line=line, col=col)
@@ -1869,7 +1877,14 @@ class Parser:
                                     # all of start:stop:step, fn-types, and exprs.
                                     self._advance()
                                     _val = self._parse_subscript_item()
-                                    _name = arg_expr.name if isinstance(arg_expr, IdentExpr) else None
+                                    # Real `if`, not a ternary: this codegen's ternary
+                                    # always evaluates both branches, so `.name` would
+                                    # run even when arg_expr isn't an IdentExpr (see the
+                                    # identical fix + note in _parse_stmt's bare-annotation
+                                    # branch above).
+                                    _name = None
+                                    if isinstance(arg_expr, IdentExpr):
+                                        _name = arg_expr.name
                                     _attrs.append((_name, _val))
                                 # else positional arg: arg_expr already fully parsed
                             # Handle ellipsis (...) as an argument (three DOTs)

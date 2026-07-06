@@ -498,3 +498,6 @@ int mojo_regex_search(const ReNode *prog, const ReRange *ranges, const ReClassIn
                        int64_t *out_start, int64_t *out_end, int64_t *gstart, int64_t *gend);
 char *mojo_regex_lastgroup(const char **names, int ngroups, const int64_t *gstart);
 char *mojo_regex_substr(const char *text, int64_t start, int64_t end);
+char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                         int root, int ngroups,
+                         char *(*callback)(void *, char *), void *env, char *src);
