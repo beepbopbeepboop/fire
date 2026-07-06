@@ -106,6 +106,8 @@ int         mojo_str_eq(MojoStr *a, MojoStr *b);
 char        mojo_str_char_at(MojoStr *s, int64_t i);
 void        mojo_str_print(MojoStr *s);
 char       *mojo_char_to_str(char c);
+int64_t     mojo_ord(char *s);
+char       *mojo_chr(int64_t code);
 
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
@@ -119,6 +121,7 @@ int mojo_str_startswith(char *s, char *prefix);
 int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_startswith_char(char *s, char c);
 int mojo_str_endswith_char(char *s, char c);
+int mojo_cstr_cmp(char *a, char *b);
 int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
@@ -478,3 +481,20 @@ int any(void *iterable);                        /* Python any() builtin */
 /* callback receives (env, matched_substring) and returns replacement string */
 char *mojo_re_sub_fn(char *pattern, char *(*callback)(void *, char *), void *env, char *src);
 
+
+/* ── Small, bounded regex engine (see mojo_runtime.c's own section comment
+ * and regex_compile.py for the compile-time parser/emitter; BACKLOG-CODEGEN.md
+ * §4f for why this exists) ─────────────────────────────────────────────── */
+typedef struct {
+    int op;   /* 0=CHAR 1=ANY 2=CLASS 3=CONCAT 4=ALT 5=GROUP 6=REPEAT */
+    int a, b, c, d, e, f;
+} ReNode;
+
+typedef struct { int lo, hi; } ReRange;
+typedef struct { int offset, count; } ReClassInfo;
+
+int mojo_regex_search(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                       int root, int ngroups, const char *text, int64_t text_len, int64_t from_pos,
+                       int64_t *out_start, int64_t *out_end, int64_t *gstart, int64_t *gend);
+char *mojo_regex_lastgroup(const char **names, int ngroups, const int64_t *gstart);
+char *mojo_regex_substr(const char *text, int64_t start, int64_t end);

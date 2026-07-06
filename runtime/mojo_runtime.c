@@ -539,6 +539,17 @@ int mojo_str_eq(MojoStr *a, MojoStr *b)
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
+/* Null-safe strcmp: mirrors Python's None-vs-str comparison semantics
+   (never crashes; None == None, None != any real string). Needed because
+   a `str = None` default parameter lowers to a genuine NULL char *, and
+   raw strcmp() on NULL segfaults. */
+int mojo_cstr_cmp(char *a, char *b)
+{
+    if (a == NULL || b == NULL)
+        return a == b ? 0 : 1;
+    return strcmp(a, b);
+}
+
 int mojo_str_contains(char *haystack, char *needle)
 {
     return strstr(haystack, needle) != NULL;
@@ -557,6 +568,22 @@ char *mojo_char_to_str(char c) {
     s[0] = c;
     s[1] = '\0';
     return s;
+}
+
+/* Python's ord()/chr() builtins had NO real implementation at all — just a
+ * declared-but-never-defined variadic stub (`int64_t ord(...);`), an
+ * undefined symbol at link time for any program that actually calls either.
+ * Byte-range only (this codebase's strings are plain bytes, not full
+ * Unicode codepoints), matching mojo_char_to_str's own scope. Found via
+ * regex_compile.py's own ord(c) calls (the first code in this self-hosted
+ * codebase to actually call ord()). */
+int64_t mojo_ord(char *s) {
+    if (!s || !s[0]) return 0;
+    return (int64_t)(unsigned char)s[0];
+}
+
+char *mojo_chr(int64_t code) {
+    return mojo_char_to_str((char)code);
 }
 
 int mojo_str_startswith(char *s, char *prefix) {
@@ -1654,7 +1681,7 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
 
 /* Reached whenever _gen_for_iter (gimple_codegen.py) couldn't statically
  * resolve `for x in y:`'s iterable to a known container/struct-iterator
- * shape. That fallback used to just emit a "/* TODO *-/" comment and drop
+ * shape. That fallback used to just emit a "TODO" comment and drop
  * the ENTIRE loop body silently -- zero iterations, no error, no crash --
  * which is how `for m in _TOKEN_RE.finditer(s):` in mojo_compiler.py's own
  * py_tokenize (a regex .finditer() call, which has no codegen lowering at
@@ -2434,5 +2461,201 @@ char *mojo_str_from_int(int64_t v) {
     snprintf(buf, sizeof buf, "%lld", (long long)v);
     char *out = (char *)malloc(strlen(buf) + 1);
     strcpy(out, buf);
+    return out;
+}
+
+/* ── Small, bounded regex engine ─────────────────────────────────────────
+ * See regex_compile.py (compile-time parser/emitter) and BACKLOG-CODEGEN.md
+ * §4f for why this exists: re.Pattern.finditer() had no codegen lowering at
+ * all, so the self-hosted tokenizer (mojo_compiler.py's py_tokenize, built
+ * on _TOKEN_RE.finditer()) silently produced an empty token stream whenever
+ * the compiled Parser ran in-process instead of via the interpreted-Python
+ * subprocess fallback. Supports exactly the subset of Python regex syntax
+ * _TOKEN_RE-shaped patterns use: literals, '.', character classes (ranges,
+ * negation, \d \s \S \w \W), alternation, capturing/non-capturing/named
+ * groups, and the quantifiers * + ? {m,n} greedy and non-greedy. No
+ * lookaround, no backreferences, no \b, no flags — not a general `re`
+ * implementation. Kept in this file (rather than its own object) so every
+ * existing build site that already links mojo_runtime.c gets it for free.
+ * ReNode/ReRange/ReClassInfo are declared once, in mojo_runtime.h. */
+
+#define RE_OP_CHAR   0
+#define RE_OP_ANY    1
+#define RE_OP_CLASS  2
+#define RE_OP_CONCAT 3
+#define RE_OP_ALT    4
+#define RE_OP_GROUP  5
+#define RE_OP_REPEAT 6
+
+/* Continuation list: "what to match next after the current node succeeds."
+ * kind 0: match node `node_idx` next.
+ * kind 1: this is the closing half of a GROUP -- record its end position,
+ *         then continue with `next`.
+ * kind 2: this is the "try one more repetition" step of a REPEAT -- see
+ *         match_repeat below.
+ * A NULL continuation means "nothing left to match -- this position is the
+ * overall match end." Allocated on the C call stack (one frame per
+ * GROUP/REPEAT/CONCAT step actually taken), never heap-allocated. */
+typedef struct ReCont {
+    int kind;
+    int node_idx;                                     /* kind 0 */
+    int group_idx;                                     /* kind 1 */
+    int r_inner_idx, r_lo, r_hi, r_greedy, r_count;     /* kind 2 */
+    int64_t r_start_pos;                                 /* kind 2 */
+    const struct ReCont *next;
+} ReCont;
+
+static int64_t re_match_node(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                              const char *text, int64_t text_len, int node_idx, int64_t pos,
+                              const ReCont *cont, int64_t *gstart, int64_t *gend);
+
+static int64_t re_match_cont(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                              const char *text, int64_t text_len, int64_t pos,
+                              const ReCont *cont, int64_t *gstart, int64_t *gend);
+
+static int64_t re_match_repeat(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                                const char *text, int64_t text_len,
+                                int inner_idx, int lo, int hi, int greedy, int count, int64_t pos,
+                                const ReCont *outer_cont, int64_t *gstart, int64_t *gend) {
+    if (greedy) {
+        if (hi < 0 || count < hi) {
+            ReCont rep_cont = { 2, 0, 0, inner_idx, lo, hi, greedy, count, pos, outer_cont };
+            int64_t r = re_match_node(prog, ranges, classinfo, text, text_len, inner_idx, pos, &rep_cont, gstart, gend);
+            if (r >= 0) return r;
+        }
+        if (count >= lo) return re_match_cont(prog, ranges, classinfo, text, text_len, pos, outer_cont, gstart, gend);
+        return -1;
+    } else {
+        if (count >= lo) {
+            int64_t r = re_match_cont(prog, ranges, classinfo, text, text_len, pos, outer_cont, gstart, gend);
+            if (r >= 0) return r;
+        }
+        if (hi < 0 || count < hi) {
+            ReCont rep_cont = { 2, 0, 0, inner_idx, lo, hi, greedy, count, pos, outer_cont };
+            return re_match_node(prog, ranges, classinfo, text, text_len, inner_idx, pos, &rep_cont, gstart, gend);
+        }
+        return -1;
+    }
+}
+
+static int64_t re_match_cont(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                              const char *text, int64_t text_len, int64_t pos,
+                              const ReCont *cont, int64_t *gstart, int64_t *gend) {
+    if (!cont) return pos;
+    if (cont->kind == 0) {
+        return re_match_node(prog, ranges, classinfo, text, text_len, cont->node_idx, pos, cont->next, gstart, gend);
+    }
+    if (cont->kind == 1) {
+        int64_t old_end = gend[cont->group_idx];
+        gend[cont->group_idx] = pos;
+        int64_t r = re_match_cont(prog, ranges, classinfo, text, text_len, pos, cont->next, gstart, gend);
+        if (r < 0) gend[cont->group_idx] = old_end;
+        return r;
+    }
+    /* kind == 2: one more repetition, unless it would be a zero-width
+     * repeat past the minimum (which would loop forever). */
+    if (pos == cont->r_start_pos && cont->r_count >= cont->r_lo) return -1;
+    return re_match_repeat(prog, ranges, classinfo, text, text_len,
+                           cont->r_inner_idx, cont->r_lo, cont->r_hi, cont->r_greedy, cont->r_count + 1,
+                           pos, cont->next, gstart, gend);
+}
+
+static int64_t re_match_node(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                              const char *text, int64_t text_len, int node_idx, int64_t pos,
+                              const ReCont *cont, int64_t *gstart, int64_t *gend) {
+    const ReNode *n = &prog[node_idx];
+    switch (n->op) {
+    case RE_OP_CHAR:
+        if (pos < text_len && (unsigned char)text[pos] == (unsigned char)n->a)
+            return re_match_cont(prog, ranges, classinfo, text, text_len, pos + 1, cont, gstart, gend);
+        return -1;
+    case RE_OP_ANY:
+        if (pos < text_len && text[pos] != '\n')
+            return re_match_cont(prog, ranges, classinfo, text, text_len, pos + 1, cont, gstart, gend);
+        return -1;
+    case RE_OP_CLASS: {
+        if (pos >= text_len) return -1;
+        const ReClassInfo *info = &classinfo[n->a];
+        unsigned char ch = (unsigned char)text[pos];
+        int inside = 0;
+        for (int i = 0; i < info->count; i++) {
+            const ReRange *r = &ranges[info->offset + i];
+            if (ch >= r->lo && ch <= r->hi) { inside = 1; break; }
+        }
+        if (inside != n->b) return re_match_cont(prog, ranges, classinfo, text, text_len, pos + 1, cont, gstart, gend);
+        return -1;
+    }
+    case RE_OP_CONCAT: {
+        if (n->a < 0) return re_match_cont(prog, ranges, classinfo, text, text_len, pos, cont, gstart, gend);
+        ReCont cont2 = { 0, n->b, 0, 0, 0, 0, 0, 0, 0, cont };
+        return re_match_node(prog, ranges, classinfo, text, text_len, n->a, pos, &cont2, gstart, gend);
+    }
+    case RE_OP_ALT: {
+        int64_t r = re_match_node(prog, ranges, classinfo, text, text_len, n->a, pos, cont, gstart, gend);
+        if (r >= 0) return r;
+        return re_match_node(prog, ranges, classinfo, text, text_len, n->b, pos, cont, gstart, gend);
+    }
+    case RE_OP_GROUP: {
+        int gi = n->c;
+        if (gi == 0) {
+            /* non-capturing group */
+            return re_match_node(prog, ranges, classinfo, text, text_len, n->a, pos, cont, gstart, gend);
+        }
+        int64_t old_start = gstart[gi], old_end = gend[gi];
+        gstart[gi] = pos;
+        ReCont mark = { 1, 0, gi, 0, 0, 0, 0, 0, 0, cont };
+        int64_t r = re_match_node(prog, ranges, classinfo, text, text_len, n->a, pos, &mark, gstart, gend);
+        if (r < 0) { gstart[gi] = old_start; gend[gi] = old_end; }
+        return r;
+    }
+    case RE_OP_REPEAT:
+        return re_match_repeat(prog, ranges, classinfo, text, text_len, n->a, n->d, n->e, n->f, 0, pos, cont, gstart, gend);
+    }
+    return -1;
+}
+
+/* Searches for the pattern starting at or after from_pos (mirrors
+ * re.Pattern.finditer's per-iteration scan, NOT re.match's anchored-at-start
+ * semantics). On success, returns 1 and fills out_start/out_end with the
+ * whole-match span, and gstart[1..ngroups]/gend[1..ngroups] with each
+ * capturing group's span (-1/-1 if that group didn't participate in this
+ * particular match). Returns 0 if no match exists anywhere in
+ * [from_pos, text_len]. gstart/gend must have ngroups+1 elements (index 0
+ * is unused; groups are 1-based, matching Python's re.Match.group(1) etc). */
+int mojo_regex_search(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
+                       int root, int ngroups, const char *text, int64_t text_len, int64_t from_pos,
+                       int64_t *out_start, int64_t *out_end, int64_t *gstart, int64_t *gend) {
+    for (int64_t start = from_pos; start <= text_len; start++) {
+        for (int i = 0; i <= ngroups; i++) { gstart[i] = -1; gend[i] = -1; }
+        int64_t end = re_match_node(prog, ranges, classinfo, text, text_len, root, start, (const ReCont *)0, gstart, gend);
+        if (end >= 0) {
+            *out_start = start;
+            *out_end = end;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Python's Match.lastgroup: the name of the highest-index capturing group
+ * that actually participated in the match, or NULL if none of the named
+ * groups did (e.g. the match went through an unnamed/non-capturing
+ * alternative). names[i] is the compile-time-known name for group i (index
+ * 0 unused, NULL for unnamed groups) -- see regex_compile.py's compile_pattern. */
+char *mojo_regex_lastgroup(const char **names, int ngroups, const int64_t *gstart) {
+    for (int i = ngroups; i >= 1; i--) {
+        if (gstart[i] >= 0 && names[i]) return (char *)names[i];
+    }
+    return (char *)0;
+}
+
+/* Substring [start, end) of text, as a freshly malloc'd NUL-terminated
+ * string -- the char* representation Match.group() needs. */
+char *mojo_regex_substr(const char *text, int64_t start, int64_t end) {
+    int64_t len = end - start;
+    if (len < 0) len = 0;
+    char *out = (char *)malloc((size_t)len + 1);
+    memcpy(out, text + start, (size_t)len);
+    out[len] = '\0';
     return out;
 }

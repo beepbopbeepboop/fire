@@ -1962,6 +1962,58 @@ class Parser:
                 break
         return expr
 
+    def _strip_string_prefix_and_quotes(self, raw: str) -> str:
+        """A STRING token's value may carry a prefix (f/F/r/R/b/B/u/U/t/T,
+        0-2 chars) before the quotes. F-strings deliberately KEEP their
+        prefix+quotes in the StringLiteral value (gimple_codegen.py's
+        _lower_StringLiteral needs both, for f-string interpolation) but
+        every other prefixed string (r'...', b'...', rb'...', etc.) must
+        have BOTH the prefix and the quotes stripped — this previously only
+        stripped quotes when the raw token started with a quote character
+        directly, silently leaving any r/b/u prefix as literal text in the
+        StringLiteral's value for every non-f prefixed string. Found via
+        reflect.py's own `_PROTO_RE = re.compile(r'...')`: the compiled
+        StringLiteral's value was the literal text "r'...'" (prefix and
+        quotes included), not the real pattern text.
+        """
+        # NOTE: this codegen's `and`/`or` always evaluate BOTH operands (no
+        # real short-circuiting — see gimple_codegen.py's BinaryOp lowering),
+        # so every guard below must be a separate nested `if`, never
+        # `cond and raw[i]`-style — otherwise the index/slice still runs
+        # even when the guard is false and crashes on an empty string.
+        prefix_len = 0
+        while prefix_len < len(raw) and prefix_len < 2:
+            if raw[prefix_len] not in 'fFrRbBuUtT':
+                break
+            prefix_len += 1
+        prefix, rest = raw[:prefix_len], raw[prefix_len:]
+        has_quote_after_prefix = False
+        if len(rest) >= 1:
+            if rest[0] in ('"', "'"):
+                has_quote_after_prefix = True
+        if not has_quote_after_prefix:
+            prefix, rest = '', raw  # no real prefix (nothing quote-like follows it)
+        if 'f' in prefix.lower():
+            return raw
+        if len(rest) >= 6:
+            if rest.startswith('"""') and rest.endswith('"""'):
+                return rest[3:-3]
+            if rest.startswith("'''") and rest.endswith("'''"):
+                return rest[3:-3]
+        if len(rest) >= 2:
+            # Compare characters directly (`first == last`) rather than
+            # `rest.endswith(rest[0])`: `rest[0]` is a raw single-character
+            # scalar (this codegen's string-indexing result), and passing it
+            # straight into a call expecting `char *` reinterprets its byte
+            # value as a garbage pointer — the same "raw char vs char*"
+            # mismatch documented in gimple_codegen.py's _to_char_star, just
+            # hit via a call argument instead of a `==` comparison this time.
+            first = rest[0]
+            last = rest[len(rest) - 1]
+            if (first == '"' or first == "'") and first == last:
+                return rest[1:-1]
+        return raw
+
     def _parse_primary(self):
         t = self._peek()
         line, col = t.line, t.col
@@ -1973,21 +2025,10 @@ class Parser:
             self._advance()
             return BoolLiteral(t.value == "True", line=line, col=col)
         if t.kind == "STRING":
-            val = self._advance().value
-            # Strip surrounding quotes from string literal
-            if val and val[0] in ('"', "'"):
-                quote = val[0]
-                if val.endswith(quote) and len(val) >= 2:
-                    val = val[1:-1]
+            val = self._strip_string_prefix_and_quotes(self._advance().value)
             # Handle implicit string concatenation (adjacent strings)
             while self._peek().kind == "STRING":
-                s = self._advance().value
-                # Strip quotes from concatenated string
-                if s and s[0] in ('"', "'"):
-                    quote = s[0]
-                    if s.endswith(quote) and len(s) >= 2:
-                        s = s[1:-1]
-                val += s
+                val += self._strip_string_prefix_and_quotes(self._advance().value)
             return StringLiteral(val, line=line, col=col)
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()

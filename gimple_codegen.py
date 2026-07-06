@@ -30,6 +30,7 @@ from mojo_compiler import (
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
+import regex_compile
 from generated_dispatch import (
     _SIGNED as _GD_SIGNED, _UNSIGNED as _GD_UNSIGNED, _FLOAT as _GD_FLOAT,
     _BIN_OPS as _GD_BIN_OPS, _CMP_OPS as _GD_CMP_OPS,
@@ -2209,6 +2210,11 @@ class GimpleGen:
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
+        # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
+        self._regex_patterns: dict[str, str] = {}    # `X = re.compile("...")` var name → pattern source
+        self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result
+        self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
+        self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
@@ -2398,6 +2404,9 @@ class GimpleGen:
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._str_pool = self._str_pool
+                    temp_gen._regex_patterns = self._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
+                    temp_gen._regex_progs = self._regex_progs        # share: bubble compiled regex data up to root preamble
+                    temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
                     temp_gen.struct_field_types = self.struct_field_types
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
@@ -2810,6 +2819,8 @@ class GimpleGen:
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
+        'mojo_ord':              ('int64_t',    ['char *']),
+        'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
         'mojo_stdin_read':       ('char *',     []),
         'mojo_platform_system':  ('char *',     []),
@@ -2865,6 +2876,11 @@ class GimpleGen:
         'mojo_hasattr':          ('int',        ['int', 'char *']),
         'mojo_obj_getattr':      ('int64_t',   ['void *', 'char *']),
         'mojo_unsupported_iter': ('void',      ['char *']),
+        'mojo_regex_search':     ('int', ['const ReNode *', 'const ReRange *', 'const ReClassInfo *',
+                                           'int', 'int', 'char *', 'int64_t', 'int64_t',
+                                           'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
+        'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
+        'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
@@ -2876,6 +2892,7 @@ class GimpleGen:
         'mojo_str_startswith_char': ('int',    ['char *', 'char']),
         'mojo_str_endswith_char':   ('int',    ['char *', 'char']),
         'strcmp':                ('int',       ['char *', 'char *']),
+        'mojo_cstr_cmp':         ('int',       ['char *', 'char *']),
         'snprintf':              ('int',       ['char *', 'int64_t', 'char *']),
         'strlen':                ('int64_t',   ['char *']),
         'strcat':                ('char *',    ['char *', 'char *']),
@@ -3133,14 +3150,33 @@ class GimpleGen:
             # Raw libc symbol (e.g. pclose): the canonical C signature wins over
             # func_param_types, which a same-named Mojo wrapper may have polluted.
             param_types = self._LIBC_SIGS[fname][1]
-        elif fname in self.func_param_types:
-            param_types = self.func_param_types[fname]
         else:
             # Fall back to a same-file overloaded struct method/constructor's
             # own precomputed signature (Pass 2b-bis) for a call to a sibling
             # overload whose real definition hasn't been emitted yet — see
             # _mangled_signature_ctypes's own comment.
-            param_types = self._mangled_signature_ctypes.get(fname, [])
+            param_types = self.func_param_types.get(fname)
+            mangled_sig = self._mangled_signature_ctypes.get(fname)
+            # A `*args`-taking method's func_param_types entry starts life
+            # ending in the packing sentinel '...' (registered when its body
+            # is generated) but gets overwritten with the concrete real
+            # signature (e.g. [..., 'MojoList *']) right after, so forward
+            # declarations can match exactly (see the "Store per-overload
+            # param types" comment near where mangled/param_ctypes_only is
+            # built). Every OTHER call site compiled afterwards then sees the
+            # concrete signature and silently skips packing, casting the
+            # first loose vararg straight to MojoList* instead — found via a
+            # real crash: `self._is_kw("as")` (Parser__is_kw, mojo_compiler.py)
+            # reinterpreted the "as" string's raw pointer bits as a MojoList*
+            # and segfaulted deep in mojo_list_contains_str. The sentinel form
+            # survives untouched in _mangled_signature_ctypes (Pass 2b-bis
+            # registers it for every method, not just overloaded ones), so
+            # prefer it here whenever func_param_types's own copy lost it.
+            if mangled_sig and mangled_sig[-1] == '...' and (
+                    not param_types or param_types[-1] != '...'):
+                param_types = mangled_sig
+            if param_types is None:
+                param_types = mangled_sig or []
 
 
         # If function takes *args, pack variadic args into a MojoList*
@@ -4588,6 +4624,16 @@ class GimpleGen:
         return v
 
     def _lower_MemberExpr(self, node) -> tuple[str, str]:
+        # `m.lastgroup` where m is a regex-match for-loop variable — see
+        # _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f.
+        if (isinstance(node.obj, IdentExpr) and node.obj.name in self._regex_match_vars
+                and node.member == 'lastgroup'):
+            ctx = self._regex_match_vars[node.obj.name]
+            return 'char *', self._call_expr('char *', 'mojo_regex_lastgroup',
+                                              [('const char * *', ctx['names_var']),
+                                               ('int', str(ctx['ngroups'])),
+                                               ('int64_t *', ctx['gstart_var'])])
+
         # Check if obj is a simple identifier (module access)
         if isinstance(node.obj, IdentExpr):
             module_name = node.obj.name
@@ -5055,7 +5101,7 @@ class GimpleGen:
                     return cp
                 ls = _to_char_star(lt, lv)
                 rs = _to_char_star(rt, rv)
-                eq_t = self._call_expr('int', 'strcmp', [('char *', ls), ('char *', rs)])
+                eq_t = self._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
                 t = self._new_temp('_Bool')
                 cmp = '== 0' if node.op == '==' else '!= 0'
                 self._emit(f'  {t} = {eq_t} {cmp};')
@@ -5445,6 +5491,23 @@ class GimpleGen:
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
+
+        # `m.group()`/`m.start()` where m is a regex-match for-loop variable
+        # (see _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f).
+        # Only the no-arg forms py_tokenize's own `for m in _TOKEN_RE.finditer(...)`
+        # uses are handled — `.group(n)`, `.span()`, etc. are not.
+        if (isinstance(func.obj, IdentExpr) and func.obj.name in self._regex_match_vars
+                and not node.args):
+            ctx = self._regex_match_vars[func.obj.name]
+            if func.member == 'group':
+                return 'char *', self._call_expr('char *', 'mojo_regex_substr',
+                                                  [('char *', ctx['text_val']),
+                                                   ('int64_t', ctx['mstart_var']),
+                                                   ('int64_t', ctx['mend_var'])])
+            if func.member == 'start':
+                return 'int64_t', ctx['mstart_var']
+            if func.member == 'end':
+                return 'int64_t', ctx['mend_var']
 
         # Int/scalar MLIR accessors are identity on our scalar representation:
         # `x._int_mlir_index()` / `x.__mlir_index__()` just yield the machine word.
@@ -7039,6 +7102,20 @@ class GimpleGen:
         if fname_raw == 'strided_store' and len(node.args) >= 2:
             return self._lower_strided(node, store=True)
         if fname_raw == 'len'             and node.args:            return self._lower_builtin_len(node)
+        # ord()/chr() had NO real lowering at all — any call fell through to
+        # a declared-but-never-defined variadic stub (`int64_t ord(...);`),
+        # an undefined symbol at link time. Found via regex_compile.py's own
+        # ord(c) calls. mojo_ord/mojo_chr operate on the first byte only
+        # (this codebase's strings are plain bytes, not full Unicode).
+        if fname_raw == 'ord' and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            if at != 'char *':
+                av = self._new_val('char *', f'(char *){self._ensure_local(at, av)}')
+            return 'int64_t', self._call_expr('int64_t', 'mojo_ord', [('char *', av)])
+        if fname_raw == 'chr' and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            av64 = av if at == 'int64_t' else self._new_val('int64_t', f'(int64_t){av}')
+            return 'char *', self._call_expr('char *', 'mojo_chr', [('int64_t', av64)])
         if fname_raw == 'isinstance'      and len(node.args) == 2:  return self._lower_builtin_isinstance(node)
         if fname_raw in ('all', 'any')    and len(node.args) == 1:  return self._lower_builtin_all_any(fname_raw, node)
         if fname_raw == 'dir':                                       return self._lower_builtin_dir(node)
@@ -7171,6 +7248,28 @@ class GimpleGen:
                 and '_len' in self.struct_field_types[at[:-2]]:
             return 'int64_t', self._new_val('int64_t', f'{av}->_len')
         if at in ('int', 'int64_t'):
+            # `at` is just the local's declared storage type — for a value
+            # widened to int64_t because it's joined with other assignment
+            # sites in the same function (e.g. `rest = raw[prefix_len:]`
+            # then `rest = raw`, both really char*), the actual pointer kind
+            # survives in _actual_types (set wherever the value was stored;
+            # see AssignStmt's "Track actual type if storing a pointer as
+            # int64_t"). Blindly assuming MojoList* here — the previous,
+            # only case — misroutes a boxed char* through mojo_list_len,
+            # which then reads len*8 bytes off the string as if they were a
+            # MojoList header. Found via mojo_compiler.py's own
+            # _strip_string_prefix_and_quotes: len(rest) on a `rest` that's
+            # really a string segfaulted deep in mojo_list_get_int.
+            actual = self._actual_types.get(av)
+            if actual == 'char *':
+                cp = self._new_val('char *', f'(char *){av}')
+                return 'int64_t', self._call_expr('int64_t', 'mojo_strlen', [('char *', cp)])
+            if actual == 'MojoDict *':
+                dp = self._new_val('MojoDict *', f'(MojoDict *){av}')
+                return 'int64_t', self._new_val('int64_t', f'mojo_dict_len ({dp})')
+            if actual == 'MojoSet *':
+                sp = self._new_val('MojoSet *', f'(MojoSet *){av}')
+                return 'int64_t', self._new_val('int64_t', f'mojo_set_len ({sp})')
             ip = self._new_val('int64_t', f'(int64_t){av}')
             lp = self._new_val('MojoList *', f'(MojoList *){ip}')
             return 'int64_t', self._new_val('int64_t', f'mojo_list_len ({lp})')
@@ -8033,6 +8132,21 @@ class GimpleGen:
         if ot in ('int', 'int64_t', '_Bool'):
             # Check actual type for globals loaded as int64_t
             actual_type = self._get_actual_type(ot, ov)
+            if actual_type == 'char *':
+                # A string boxed as int64_t (its declared storage type was
+                # widened joining with other assignment sites in the same
+                # function — see _lower_builtin_len's identical blind spot,
+                # fixed alongside this) still needs real char indexing, not
+                # the MojoList* fallback below: that reinterprets the
+                # string's own bytes as a MojoList header and segfaults deep
+                # in mojo_list_get_int. Found via mojo_compiler.py's own
+                # `rest[0]` in _strip_string_prefix_and_quotes.
+                cp = self._new_val('char *', f'(char *){self._ensure_local(ot, ov)}')
+                idx64 = self._new_val('int64_t', f"(int64_t) {iv}")
+                self._ptr_helpers_needed.add('char')
+                addr = self._new_val('char *', f"_mojo_at_char ({cp}, {idx64})")
+                t = self._new_val('char', f"*{addr}")
+                return 'char', t
             if actual_type == 'MojoDict *':
                 # Dict subscript: int64_t → MojoDict *
                 dp = self._new_temp('MojoDict *')
@@ -8843,6 +8957,45 @@ class GimpleGen:
             self._declare_var(node.name, ctype)
         self._layout_hint = LayoutSolver.HEAP
 
+    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
+        """When storing a pointer value into an int64_t-declared local (either
+        because the local's own type was widened joining another assignment
+        site in the same function, or it's simply this codegen's
+        boxed-pointer storage convention), remember its real pointer type in
+        _actual_types so a later read (len(), x[i], x.attr, etc.) recovers
+        the right runtime dispatch instead of guessing MojoList*. Shared by
+        both the plain scalar AssignStmt path and the tuple-unpack path
+        (_assign_target) — the latter used to skip this tracking entirely,
+        which is why `prefix, rest = raw[:n], raw[n:]`-style tuple
+        assignments (unlike an equivalent plain `rest = raw[n:]`) left
+        `rest` with no actual-type record at all: found via
+        mojo_compiler.py's own _strip_string_prefix_and_quotes, where
+        `len(rest)`/`rest[0]` on the tuple-unpacked `rest` misread it as a
+        MojoList* and segfaulted deep in mojo_list_get_int."""
+        if dst != 'int64_t':
+            return
+        if v in self._actual_types:
+            self._actual_types[tname] = self._actual_types[v]
+        elif vtype.endswith(' *'):
+            self._actual_types[tname] = vtype
+            if v in self._elem_types:
+                self._elem_types[tname] = self._elem_types[v]
+            if v in self._dict_val_types:
+                self._dict_val_types[tname] = self._dict_val_types[v]
+        elif vtype == 'char':
+            self._actual_types[tname] = 'char'
+        if tname in self._actual_types:
+            actual_type = self._actual_types[tname]
+            if actual_type == 'MojoList *' and v in self._elem_types:
+                self._elem_types[tname] = self._elem_types[v]
+                if v in self._nested_elem_types:
+                    self._nested_elem_types[tname] = self._nested_elem_types[v]
+            elif actual_type == 'MojoDict *':
+                if v in self._elem_types:
+                    self._elem_types[tname] = self._elem_types[v]
+                if v in self._dict_val_types:
+                    self._dict_val_types[tname] = self._dict_val_types[v]
+
     def _assign_target(self, tgt, et, ev):
         """Assign a lowered value (et, ev) to one unpack target, which may be a
         plain name or a nested tuple (e.g. (a, b), (c, d) = ...). Recurses for
@@ -8852,6 +9005,7 @@ class GimpleGen:
                 hint = self._inferred_var_types.get(self.current_func_name, {}).get(tgt.name) \
                     if hasattr(self, '_inferred_var_types') else None
                 self._declare_var(tgt.name, hint or et)
+            self._track_pointer_actual_type(tgt.name, self.var_types[tgt.name], ev, et)
             self._safe_coerce_emit(et, self.var_types[tgt.name], ev, self._write_dest(tgt.name))
         elif isinstance(tgt, TupleExpr):
             # ev is itself an iterable; view it as a MojoList* and unpack by index.
@@ -8987,53 +9141,7 @@ class GimpleGen:
                     self._elem_types[tname] = self._elem_types[v]
                 if v in self._dict_val_types:
                     self._dict_val_types[tname] = self._dict_val_types[v]
-            # Track actual type if storing a pointer as int64_t
-            if dst == 'int64_t':
-                # If source has tracked actual type, copy it
-                if v in self._actual_types:
-                    actual_type = self._actual_types[v]
-                    self._actual_types[tname] = actual_type
-                # If value type itself is a pointer, track it as the actual type.
-                # Was hardcoded to just the container/string types — any other
-                # struct pointer (e.g. `Token *` from `t = self._peek()`) never
-                # got recorded, so `_lower_MemberExpr`'s `t.line` access later
-                # couldn't recover the real struct type behind the int64_t-boxed
-                # local and fell back to the generic dynamic-getattr path
-                # (`mojo_obj_getattr`, which aborts by design — see its comment
-                # in runtime/mojo_runtime.c). Found via Parser__parse_stmt's own
-                # `t = self._peek(); line, col = t.line, t.col`.
-                elif vtype.endswith(' *'):
-                    self._actual_types[tname] = vtype
-                    # Also copy element/value type tracking
-                    if v in self._elem_types:
-                        self._elem_types[tname] = self._elem_types[v]
-                    if v in self._dict_val_types:
-                        self._dict_val_types[tname] = self._dict_val_types[v]
-                # A raw single character (e.g. `c = s[i]`) stored into a local
-                # whose declared type got widened to int64_t (joined with other
-                # assignment sites in the same function) still needs to be
-                # recognized as a real Python 1-char *string* everywhere else
-                # that reads it (`.append()`, `==`, `in`) — otherwise its raw
-                # ASCII byte value gets reinterpreted as a pointer downstream.
-                # Real bug found via mojo_compiler.py's own `_split_on_separators`:
-                # `c = s[i]` then `buf.append(c)` used the plain (stale, int64_t)
-                # `at` from lower_expr(IdentExpr('c')), not this per-assignment
-                # provenance, and silently appended the numeric byte as an int.
-                elif vtype == 'char':
-                    self._actual_types[tname] = 'char'
-                # If actual type is a container, track element types
-                if tname in self._actual_types:
-                    actual_type = self._actual_types[tname]
-                    if actual_type == 'MojoList *' and v in self._elem_types:
-                        self._elem_types[tname] = self._elem_types[v]
-                        # Also propagate nested element types
-                        if v in self._nested_elem_types:
-                            self._nested_elem_types[tname] = self._nested_elem_types[v]
-                    elif actual_type == 'MojoDict *':
-                        if v in self._elem_types:
-                            self._elem_types[tname] = self._elem_types[v]
-                        if v in self._dict_val_types:
-                            self._dict_val_types[tname] = self._dict_val_types[v]
+            self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
@@ -10102,7 +10210,120 @@ class GimpleGen:
         name_local = self._new_val('char *', f'{name_lit}')
         self._emit(f'  mojo_unsupported_iter ({name_local});')
 
+    def _gen_for_regex_iter(self, node: ForStmt, pattern: str) -> None:
+        """`for m in <pattern>.finditer(text): ... m.lastgroup/.group()/.start() ...`
+        — lowered to a real scan loop over the small regex engine in
+        runtime/mojo_runtime.c, instead of _gen_for_iter's generic
+        unsupported-iterable fallback. See regex_compile.py and
+        BACKLOG-CODEGEN.md §4f. Only .lastgroup/.group()/.start() on the
+        loop variable are supported (that's everything py_tokenize's own
+        `for m in _TOKEN_RE.finditer(...)` uses); .group(n) with an
+        argument, .span(), etc. are not implemented — a not-yet-covered
+        accessor on the match var simply won't be recognized by
+        _lower_MemberExpr/_lower_method_call's regex-match-var checks and
+        falls through to their normal (unrelated) handling, which is safe
+        but likely wrong; this lowering does not try to detect that ahead
+        of time.
+        """
+        var = node.target if isinstance(node.target, str) else node.target.name
+        text_type, text_val = self.lower_expr(node.iterable.args[0])
+        if text_type != 'char *':
+            text_val = self._new_val('char *', f'(char *){self._ensure_local(text_type, text_val)}')
+
+        if pattern not in self._regex_progs:
+            prog_id = f"re{len(self._regex_progs)}"
+            self._regex_progs[pattern] = regex_compile.compile_pattern(pattern, prog_id)
+        info = self._regex_progs[pattern]
+        ngroups = info['ngroups']
+
+        prog_local = self._new_val('const ReNode *', info['prog_var'])
+        ranges_local = self._new_val('const ReRange *', info['ranges_var'])
+        classinfo_local = self._new_val('const ReClassInfo *', info['classinfo_var'])
+        names_local = self._new_val('const char * *', info['names_var'])
+
+        text_len = self._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
+        pos_var = self._new_temp('int64_t')
+        self._emit(f'  {pos_var} = (int64_t)0;')
+        gsize = self._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
+        gstart_vp = self._new_val('void *', f'malloc ({gsize})')
+        gstart_var = self._new_val('int64_t *', f'(int64_t *){gstart_vp}')
+        gend_vp = self._new_val('void *', f'malloc ({gsize})')
+        gend_var = self._new_val('int64_t *', f'(int64_t *){gend_vp}')
+        mstart_var = self._new_temp('int64_t')
+        mend_var = self._new_temp('int64_t')
+        ok_var = self._new_temp('int')
+
+        bb_cond = self._new_bb(); bb_body = self._new_bb()
+        bb_post = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f'  goto {bb_cond};')
+        self._emit_label(bb_cond)
+        self._emit(f'  {ok_var} = mojo_regex_search ({prog_local}, {ranges_local}, {classinfo_local}, '
+                   f'{info["root"]}, {ngroups}, {text_val}, {text_len}, {pos_var}, '
+                   f'&{mstart_var}, &{mend_var}, {gstart_var}, {gend_var});')
+        self._emit(f'  if ({ok_var}) goto {bb_body}; else goto {bb_after};')
+        self._emit_label(bb_body, f'count(guessed_local({10 ** (self._loop_depth + 1)}))')
+
+        self._declare_var(var, 'int64_t')  # `m` itself is never read directly, only via .lastgroup/.group()/.start()
+        self._regex_match_vars[var] = {
+            'names_var': names_local, 'ngroups': ngroups, 'text_val': text_val,
+            'mstart_var': mstart_var, 'mend_var': mend_var, 'gstart_var': gstart_var,
+        }
+        self._loop_depth += 1
+        # `continue`'s target must be bb_post (which does the pos advance),
+        # NOT bb_cond directly — mirroring _gen_for_list's own bb_cond/bb_post
+        # split. Pointing continue straight at bb_cond (my first attempt)
+        # skipped the advance entirely: mojo_regex_search got called again
+        # with the exact same pos, matching the exact same token forever —
+        # a real infinite loop, hit immediately by py_tokenize's own
+        # `if kind in ("WS", "UNK", "XFER"): continue`.
+        self.loop_stack.append((bb_post, bb_after))
+        try:
+            for s in node.body:
+                self.gen_stmt(s)
+        finally:
+            self.loop_stack.pop()
+            self._loop_depth -= 1
+            del self._regex_match_vars[var]
+
+        if not self._last_was_terminal:
+            self._emit(f'  goto {bb_post};')
+        self._emit_label(bb_post)
+        # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
+        # one char on a zero-width match, exactly like Python's finditer.
+        pos_plus1 = self._new_val('int64_t', f'{pos_var} + (int64_t)1')
+        cmp_t = self._new_val('_Bool', f'{mend_var} > {pos_var}')
+        next_pos = self._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
+        self._emit(f'  {pos_var} = {next_pos};')
+        self._emit(f'  goto {bb_cond};')
+        self._emit_label(bb_after)
+
     def _gen_for_iter(self, node: ForStmt):
+        # `for m in <compile-time-known-pattern>.finditer(text):` — see
+        # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
+        # BEFORE the generic lower_expr(node.iterable) below (which has no
+        # case for .finditer() and would otherwise route to the
+        # unsupported-iterable fallback). Wrapped in try/except: this is new,
+        # narrowly-tested machinery — any failure to compile the pattern or
+        # emit the loop falls back to the pre-existing safe behavior rather
+        # than breaking a build that doesn't even care about this loop's
+        # correctness (e.g. compiling this file as an IMPORTED module for an
+        # unrelated program).
+        it = node.iterable
+        if (isinstance(it, CallExpr) and isinstance(it.func, MemberExpr)
+                and it.func.member == 'finditer' and isinstance(it.func.obj, IdentExpr)
+                and it.func.obj.name in self._regex_patterns and len(it.args) == 1):
+            # Transactional: roll back any partially-emitted lines/decls if
+            # the attempt fails partway, so the fallback path below starts
+            # from clean state instead of leaving stray/inconsistent C.
+            body_mark, decls_mark = len(self.body_lines), len(self.decls)
+            try:
+                self._gen_for_regex_iter(node, self._regex_patterns[it.func.obj.name])
+                return
+            except Exception as e:
+                del self.body_lines[body_mark:]
+                del self.decls[decls_mark:]
+                _debug_note('regex finditer lowering failed, falling back', e)
+
         it_type, it_val = self.lower_expr(node.iterable)
         var = node.target if isinstance(node.target, str) else node.target.name
 
@@ -12483,6 +12704,21 @@ class GimpleGen:
         for _scan_stmt in stmts + (imported_stmts if self.do_imports else []):
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
+                # Track `X = re.compile("literal pattern")` so a later
+                # `X.finditer(...)` call (in some function compiled after this
+                # module-level scan — see _gen_for_iter) can look the pattern
+                # up and get a REAL regex lowering instead of falling to the
+                # "unsupported iterable" fallback. See regex_compile.py and
+                # BACKLOG-CODEGEN.md §4f for why this exists: re.Pattern.finditer()
+                # previously had no codegen lowering at all.
+                if (isinstance(_scan_stmt.value, CallExpr)
+                        and isinstance(_scan_stmt.value.func, MemberExpr)
+                        and isinstance(_scan_stmt.value.func.obj, IdentExpr)
+                        and _scan_stmt.value.func.obj.name == 're'
+                        and _scan_stmt.value.func.member == 'compile'
+                        and _scan_stmt.value.args
+                        and isinstance(_scan_stmt.value.args[0], StringLiteral)):
+                    self._regex_patterns[_gname] = _scan_stmt.value.args[0].value
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
@@ -13891,6 +14127,33 @@ class GimpleGen:
                 # the main module's full `static T foo = "..."` definition wins.
                 for escaped, sname in sorted(self._str_pool.items(), key=lambda x: x[1]):
                     parts.append(f'static char * {sname};')
+            parts.append('')
+        # Compile-time-known regex program data (see regex_compile.py,
+        # _gen_for_regex_iter, BACKLOG-CODEGEN.md §4f) — one prog/ranges/
+        # classinfo/names array set per distinct pattern actually used via
+        # `.finditer()`, populated during Phase 2a body generation above.
+        # self._regex_progs is a dict SHARED across every recursively-compiled
+        # submodule's own GimpleGen instance (see _compile_imported_module),
+        # same as _str_pool. Unlike a scalar, these are `static const ARRAY[]
+        # = {...}` with a full initializer — C doesn't allow repeating that as
+        # a tentative definition the way _str_pool's imported-module branch
+        # does for `static char *`. A module can be reached (and therefore
+        # have its own gen_module() run this same final-assembly code) via
+        # more than one do_imports path (e.g. mojo_compiler.py compiled
+        # directly AND via gimple_codegen.py's own `import mojo_compiler`),
+        # and the submodule that actually POPULATES an entry (compiling its
+        # own .finditer() call in ITS Phase 2a) is also the only one whose
+        # own func_parts (right after this point, in ITS OWN returned code
+        # string) ever reference it — so gate on "not yet emitted anywhere"
+        # (self._regex_progs_defined, shared the same way) rather than on
+        # emit_str_pool/root-ness, so it lands in the right submodule's own
+        # output, before that submodule's own use of it.
+        _regex_new = {p: i for p, i in self._regex_progs.items() if p not in self._regex_progs_defined}
+        if _regex_new:
+            parts.append("/* Compile-time-compiled regex programs (finditer support) */")
+            for pattern, info in _regex_new.items():
+                parts.append(info['decls'])
+                self._regex_progs_defined.add(pattern)
             parts.append('')
         # Also collect from func_parts generators (they share self._str_pool via gen_func)
         parts.extend(func_parts)
