@@ -39,6 +39,15 @@ void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
+/* Exception type tag: a small int id (assigned per exception class name at
+ * compile time, see GimpleGen._exc_type_id) that lets a multi-handler
+ * try/except dispatch on which exception was actually raised instead of
+ * always running the first handler. 0 means untyped/unknown (e.g. a bare
+ * `raise` re-raising whatever is already live). */
+int64_t _mojo_exc_type = 0;
+void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
+int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
+
 /* ── Global state for argc/argv ───────────────────────────────────────────*/
 static int _mojo_argc = 0;
 static const char **_mojo_argv = NULL;

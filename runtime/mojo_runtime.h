@@ -54,6 +54,11 @@ extern void *_mojo_exc_obj;
 void        mojo_exc_obj_set(void *obj);
 void *      mojo_exc_obj_get(void);
 
+/* Exception type tag (see mojo_runtime.c for the dispatch rationale). */
+extern int64_t _mojo_exc_type;
+void    mojo_exc_type_set(int64_t type_id);
+int64_t mojo_exc_type_get(void);
+
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
  * string pointers are stored as uintptr_t casts (64-bit only).           */

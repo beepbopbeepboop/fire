@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import hashlib
+import zlib
 import dataclasses
 
 from mojo_compiler import (
@@ -2299,7 +2300,48 @@ class GimpleGen:
         # gen_module after the surrounding function body is emitted.
         self._lambda_counter: int = 0
         self._lambda_parts: list[str] = []   # lifted C function bodies, in emission order
+        # Exception class name -> stable small int tag, shared for the whole
+        # compile so a `raise Foo(...)` site and an `except Foo:` handler
+        # anywhere else in the program agree on the same id. 0 is reserved
+        # for "untyped" (a bare `raise` re-raising the live exception, or an
+        # exception object with no statically-known class name).
+        self._exc_type_ids: dict[str, int] = {}
         self._reset_func()
+
+    def _exc_type_id(self, name: str) -> int:
+        """The tag for an exception class name: a hash of the name, not a
+        first-seen-order counter. Stdlib compilation runs many GimpleGen
+        instances (parallel process pool, one per module) and a plain
+        incrementing counter would assign a different id to the same name
+        depending on which process visits it first — same logical program,
+        different generated C, which defeats the CAS content-cache (every
+        build looks like new content, forcing a full stdlib rebuild every
+        time instead of a cache hit)."""
+        if name not in self._exc_type_ids:
+            self._exc_type_ids[name] = (zlib.crc32(name.encode()) & 0x7fffffff) or 1
+        return self._exc_type_ids[name]
+
+    # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
+    # the other common Python builtins) — used to tell `raise SomeClass` (tag
+    # it) apart from `raise e` re-raising a bound variable (leave the type tag
+    # from when `e` was first raised alone; retagging with a fresh id for the
+    # variable name `e` would be wrong).
+    _KNOWN_EXCEPTION_NAMES = frozenset({
+        'Exception', 'BaseException', 'KeyboardInterrupt', 'EOFError',
+        'ValueError', 'TypeError', 'RuntimeError', 'StopIteration',
+        'KeyError', 'IndexError', 'NameError', 'AttributeError',
+        'FileNotFoundError', 'NotImplementedError', 'ZeroDivisionError',
+        'OverflowError', 'ImportError', 'ModuleNotFoundError',
+        'StopAsyncIteration', 'GeneratorExit', 'SystemExit',
+        'ArithmeticError', 'LookupError', 'OSError', 'IOError',
+        'UnicodeDecodeError', 'UnicodeEncodeError', 'AssertionError',
+    })
+
+    def _is_exc_class_name(self, name: str) -> bool:
+        """Whether `name` is confidently an exception *class*, not a local
+        variable — a user-defined struct (naturally exception-shaped or not;
+        struct_field_types has no notion of inheritance) or a known builtin."""
+        return name in self._KNOWN_EXCEPTION_NAMES or name in self.struct_field_types
 
     def _reset_func(self):
         self.bb_counter   = 2
@@ -9754,11 +9796,124 @@ class GimpleGen:
         self._emit_label(bb_ok)
 
     def _gen_stmt_RaiseStmt(self, node):
-        # For raise statements with exception constructors like NameError(...),
-        # we can't compile them directly to GIMPLE. Just emit mojo_raise().
-        # If there's a simple string value, we could set it as the message, but
-        # CallExpr nodes (exception constructors) can't be safely lowered.
+        # Bare `raise` (re-raise): the currently-live exception's type tag,
+        # message, and object were already set when it was first raised (or
+        # by the handler binding below), so just propagate.
+        if node.value is None:
+            self._emit("  mojo_raise ();")
+            return
+
+        # `raise ExcName(...)` / `raise ExcName` (constructor call or bare
+        # class reference): tag the runtime's exception slot with a stable
+        # per-class id (see _exc_type_id) so a multi-handler try/except can
+        # dispatch on which exception this actually is, instead of always
+        # running the first handler. Exception *constructors* still can't be
+        # generally lowered to GIMPLE, but a single string argument is a
+        # common enough case (str(e) / the message) to special-case.
+        val = node.value
+        exc_name = None
+        msg_arg = None
+        if isinstance(val, CallExpr) and isinstance(val.func, IdentExpr):
+            exc_name = val.func.name
+            if len(val.args) == 1:
+                msg_arg = val.args[0]
+        elif isinstance(val, IdentExpr) and self._is_exc_class_name(val.name):
+            # `raise SomeExceptionClass` with no call — legal Python,
+            # equivalent to `raise SomeExceptionClass()`.
+            exc_name = val.name
+        # else: `raise e` re-raising a bound variable — the type tag set
+        # when `e` was originally raised (and copied onto it in the handler
+        # below) is still live in the runtime slot; leave it alone.
+
+        if exc_name:
+            self._emit(f"  mojo_exc_type_set ({self._exc_type_id(exc_name)});")
+        if isinstance(msg_arg, (StringLiteral, IdentExpr)):
+            mt, mv = self.lower_expr(msg_arg)
+            if mt == 'char *':
+                self._emit(f"  mojo_exc_msg_set ({mv});")
+                # The object slot is what `except X as e:` actually binds
+                # (see _emit_handler_body) — without this, `e` reads back
+                # whatever was last there (frequently NULL), regardless of
+                # the message just set above. A bare string is the only
+                # payload shape raise-lowering supports right now (an
+                # arbitrary Int/Dict/struct payload would need real value
+                # construction here plus a way for the handler to know
+                # which of several possible C types to cast back to —
+                # tracked as a follow-up, not done here).
+                self._emit(f"  mojo_exc_obj_set ({mv});")
+
         self._emit("  mojo_raise ();")
+
+    def _handler_exc_name(self, h):
+        if h.exc_type is None:
+            return None
+        if hasattr(h.exc_type, 'name'):
+            return h.exc_type.name
+        if isinstance(h.exc_type, str):
+            return h.exc_type
+        return None
+
+    def _emit_except_handler(self, handler, node, bb_after):
+        """Emit one except-handler's binding + body + finally + exit goto.
+        A plain method (not a closure nested in _gen_stmt_TryStmt): this file
+        self-hosts, and a large method with several nested `def`s pushed
+        _gen_stmt_TryStmt's own compiled form into a code path that mishandled
+        it — kept flat here instead."""
+        had_c_name = False
+        restore_c_name = None
+        if handler.name:
+            # Exception handlers are typed as pointers to exception objects.
+            exc_type_name = self._handler_exc_name(handler)
+            if exc_type_name and exc_type_name in self.struct_field_types:
+                exc_ctype = f"{exc_type_name} *"
+            else:
+                # Builtin exceptions (ValueError, KeyError, ...) and bare
+                # `except as e` have no struct: the object slot is populated
+                # as a bare message string (see _gen_stmt_RaiseStmt), so bind
+                # as char * — matches what is actually stored instead of an
+                # opaque void * that would print as a raw address.
+                exc_ctype = 'char *'
+
+            # Bind through a fresh, guaranteed-unique C temp rather than
+            # declaring `handler.name` itself as a plain local: GCC's raw
+            # -GIMPLE parser trips when the same plain local is assigned from
+            # two different, non-dominating basic blocks — which is exactly
+            # what happens when two separate try/except statements in the
+            # same function both bind the same name (commonly `e`). It
+            # re-interprets the second assignment as an implicit-int
+            # redeclaration instead of a plain store (found self-hosting
+            # gimple_codegen.py's own _compile_imported_module, which has two
+            # sequential `except Exception as e:` blocks). _c_names — the
+            # same rename table _declare_var uses for keyword/shadow
+            # collisions — redirects every reference to `handler.name` inside
+            # this handler's body to the fresh temp, and is restored after so
+            # an unrelated same-named binding elsewhere in the function is
+            # unaffected.
+            self.var_types.setdefault(handler.name, exc_ctype)
+            had_c_name = handler.name in self._c_names
+            restore_c_name = self._c_names.get(handler.name)
+
+            # Retrieve the exception object from the runtime.
+            # Use a temp to avoid casting function call results in GIMPLE.
+            temp_var = self._new_temp('void *')
+            self._emit(f"  {temp_var} = mojo_exc_obj_get ();")
+            bound = self._new_temp(exc_ctype)
+            self._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
+            self._c_names[handler.name] = bound
+        self._last_was_terminal = False
+        for s in handler.body:
+            self.gen_stmt(s)
+        if node.finally_body:
+            for s in node.finally_body:
+                self.gen_stmt(s)
+        # Only emit goto if the exception handler didn't end with a return
+        if not self._last_was_terminal:
+            self._emit(f"  goto {bb_after};")
+        if handler.name:
+            if had_c_name:
+                self._c_names[handler.name] = restore_c_name
+            else:
+                del self._c_names[handler.name]
 
     def _gen_stmt_TryStmt(self, node):
         sj_ret = self._new_temp('int')
@@ -9844,49 +9999,85 @@ class GimpleGen:
 
         self._emit_label(bb_exc)
         self._emit("  mojo_exc_pop ();")
-        if len(node.handlers) > 1:
-            # The runtime carries no exception-type tag, so typed dispatch is
-            # impossible; running every handler body in sequence (the old
-            # behavior) was strictly wrong.  Run the first handler only.
-            dropped = ', '.join(
-                getattr(h.exc_type, 'name', None) or str(h.exc_type or '<bare>')
-                for h in node.handlers[1:])
-            print(f"mojo: warning: multiple except handlers are not supported "
-                  f"(runtime has no exception types); only the first handler "
-                  f"runs, dropping: {dropped}", file=sys.stderr)
-        for handler in node.handlers[:1]:
-            if handler.name:
-                # Exception handlers are typed as pointers to exception objects
-                # Use the exception type from the handler (e.g., ReturnValue, Exception)
-                exc_type_name = None
-                if handler.exc_type:
-                    # Extract the type name from the exception type annotation
-                    if hasattr(handler.exc_type, 'name'):
-                        exc_type_name = handler.exc_type.name
-                    elif isinstance(handler.exc_type, str):
-                        exc_type_name = handler.exc_type
 
-                # Determine the C type for the exception
-                if exc_type_name and exc_type_name in self.struct_field_types:
-                    exc_ctype = f"{exc_type_name} *"
+        handlers = node.handlers
+        typed = [h for h in handlers if self._handler_exc_name(h) is not None]
+        bare = [h for h in handlers if self._handler_exc_name(h) is None]
+
+        if not typed:
+            # Only bare handler(s) (or none) — nothing to dispatch on.
+            for handler in bare[:1]:
+                self._emit_except_handler(handler, node, bb_after)
+        else:
+            # Real per-exception-type dispatch (see mojo_exc_type_set /
+            # _exc_type_id): each typed handler matches only its own tag —
+            # including when it's the sole handler, so e.g. `except KeyError`
+            # correctly lets an unrelated ValueError propagate instead of
+            # swallowing it (the old behavior ran whatever single handler was
+            # there unconditionally). Tag 0 (untagged: a raise site that
+            # couldn't be statically identified, or a bare re-raise of
+            # something never tagged) is treated leniently and matches the
+            # first typed handler, so pre-existing untyped raises don't
+            # regress from "always caught" to "always propagates". A bare
+            # handler (no exc_type) matches anything and — mirroring
+            # Python's own rule that a bare except must be last — is tried
+            # only after every typed handler, regardless of source position.
+            # If nothing matches, this try wasn't meant to catch it:
+            # propagate to the enclosing frame instead of guessing.
+            exc_type_t = self._new_temp('int64_t')
+            self._declare_var(exc_type_t, 'int64_t')
+            self._emit(f"  {exc_type_t} = mojo_exc_type_get ();")
+
+            handler_bbs = {id(h): self._new_bb() for h in handlers}
+            bb_no_match = self._new_bb()
+
+            # A bare int literal (e.g. `== 12345`) defaults to plain `int`
+            # in C, mismatching the int64_t exc_type_t in this dialect's
+            # stricter comparison check — and the cast has to land in its
+            # own temp first, since raw GIMPLE also rejects an inline cast
+            # *inside* a comparison (same two-step pattern _new_val uses).
+            n_typed = len(typed)
+            for i, h in enumerate(typed):
+                tid = self._exc_type_id(self._handler_exc_name(h))
+                tid_t = self._new_temp('int64_t')
+                self._emit(f"  {tid_t} = (int64_t){tid};")
+                is_match = self._new_temp('_Bool')
+                self._emit(f"  {is_match} = {exc_type_t} == {tid_t};")
+                if i == 0:
+                    # Untagged (0) is treated leniently and falls to the
+                    # first typed handler — see the rationale above. Two
+                    # separate comparisons combined via a temp bool rather
+                    # than an inline `||`: this file's raw-GIMPLE dialect
+                    # wants one comparison per statement.
+                    zero_t = self._new_temp('int64_t')
+                    self._emit(f"  {zero_t} = (int64_t)0;")
+                    is_untagged = self._new_temp('_Bool')
+                    self._emit(f"  {is_untagged} = {exc_type_t} == {zero_t};")
+                    combined = self._new_temp('_Bool')
+                    # Bitwise, not `||`: both operands are already plain 0/1
+                    # _Bool values, and this file's raw-GIMPLE dialect wants
+                    # one simple binary op per statement, not a short-circuit
+                    # operator (see the and/or eager-evaluation note in
+                    # PLAN.md for the same underlying constraint).
+                    self._emit(f"  {combined} = {is_untagged} | {is_match};")
+                    is_match = combined
+                # Raw-GIMPLE wants both branches of every conditional
+                # explicit — no implicit fallthrough — so each check needs
+                # its own "else keep checking" label.
+                if i + 1 < n_typed:
+                    next_bb = self._new_bb()
                 else:
-                    exc_ctype = 'void *'
+                    next_bb = handler_bbs[id(bare[0])] if bare else bb_no_match
+                self._emit(f"  if ({is_match}) goto {handler_bbs[id(h)]}; else goto {next_bb};")
+                if i + 1 < n_typed:
+                    self._emit_label(next_bb)
 
-                self._declare_var(handler.name, exc_ctype)
-                # Retrieve the exception object from the runtime
-                # Use a temp to avoid casting function call results in GIMPLE
-                temp_var = self._new_temp('void *')
-                self._declare_var(temp_var, 'void *')
-                self._emit(f"  {temp_var} = mojo_exc_obj_get ();")
-                self._emit(f"  {handler.name} = ({exc_ctype}) {temp_var};")
-            for s in handler.body:
-                self.gen_stmt(s)
-        if node.finally_body:
-            for s in node.finally_body:
-                self.gen_stmt(s)
-        # Only emit goto if the exception handler didn't end with a return
-        if not self._last_was_terminal:
-            self._emit(f"  goto {bb_after};")
+            for h in typed + bare[:1]:
+                self._emit_label(handler_bbs[id(h)])
+                self._emit_except_handler(h, node, bb_after)
+
+            self._emit_label(bb_no_match)
+            self._emit("  mojo_raise ();")
 
         if bb_else:
             self._emit_label(bb_else)
