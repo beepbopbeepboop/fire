@@ -88,7 +88,7 @@ def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags):
 
 
 def compile_program(input_file, src, output=None, run=True,
-                    opt_flag=None, debug_flag=None):
+                    opt_flag=None, debug_flag=None, program_args=None):
     """Compile (and optionally run) a Mojo program through the module-cache system.
     Returns the program's exit code when run / 0 on a successful build, or None if
     the build failed (caller decides the fallback)."""
@@ -119,6 +119,6 @@ def compile_program(input_file, src, output=None, run=True,
         cas.publish(pkey, '', open(target, 'rb').read())
 
     if run:
-        return subprocess.run([target]).returncode
+        return subprocess.run([target] + list(program_args or [])).returncode
     print(f"Built: {target}")
     return 0

@@ -51,13 +51,13 @@ def _extract_codegen_flags(args):
     return opt_flag, debug_flag, remaining
 
 
-def interpret_and_execute(src_code, filename=None):
+def interpret_and_execute(src_code, filename=None, argv=None):
     try:
         from mojo_compiler import py_tokenize, Parser
         from myinterpreter import Interpreter
         tokens = py_tokenize(src_code)
         stmts = Parser(tokens).parse_module()
-        interpreter = Interpreter(filename=filename)
+        interpreter = Interpreter(filename=filename, argv=argv)
         for stmt in stmts:
             interpreter.execute(stmt)
     except Exception as e:
@@ -120,7 +120,7 @@ def run_repl():
         print(f"Error: Could not import interpreter components: {e}")
         return
 
-    interpreter = Interpreter()
+    interpreter = Interpreter(filename=None, argv=['<stdin>'])
     print("Mojo REPL - type 'exit' or 'quit' to exit")
     print()
 
@@ -354,6 +354,9 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         return
 
     input_file = sys.argv[1]
+    # Everything after the input file is the executed program's own argv,
+    # not a mojo.py flag — keep it isolated from mojo.py's own CLI parsing.
+    program_args = sys.argv[2:]
 
     # Bootstrap case: if interpreting a .py file with 'repl' next arg,
     # modify sys.argv so the interpreted code will run repl on next main() call
@@ -456,7 +459,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
     # `mojo run <file>`: force the interpreter, no compile attempt at all.
     if run_interp:
-        interpret_and_execute(src, filename=input_file)
+        interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
         return
 
     # Default for a .mojo program: compile and run it through the module-cache
@@ -466,7 +469,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         try:
             import driver
             rc = driver.compile_program(input_file, src, run=True,
-                                        opt_flag=opt_flag, debug_flag=debug_flag)
+                                        opt_flag=opt_flag, debug_flag=debug_flag,
+                                        program_args=program_args)
         except Exception as e:
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None
@@ -474,7 +478,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             sys.exit(rc)
 
     # Otherwise interpret as Mojo
-    interpret_and_execute(src, filename=input_file)
+    interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
 
 if __name__ == '__main__':
     main()

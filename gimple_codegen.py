@@ -12010,6 +12010,7 @@ class GimpleGen:
         self.struct_field_types['Interpreter'] = {
             'scope': 'Scope *',
             'filename': 'char *',
+            'argv': 'MojoList *',
         }
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
@@ -14177,7 +14178,7 @@ class GimpleGen:
         # (e.g. Parser_parse_module from mojo_compiler, Interpreter from myinterpreter)
         parts.append("MojoList * Parser_parse_module (Parser *);")
         parts.append("void Parser___init__ (Parser *, MojoList *);")
-        parts.append("void Interpreter___init__ (Interpreter *, char *);")
+        parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
         parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
         parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
         parts.append('')

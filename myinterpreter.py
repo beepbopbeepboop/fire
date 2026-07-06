@@ -116,10 +116,25 @@ class MojoClass:
         return instance
 
 
+class _SysProxy:
+    """Presents the executed program's own argv (`[filename] + program_args`)
+    while forwarding everything else to the real `sys` module. Without this,
+    interpreted code that reads `sys.argv` sees the *host* process's live
+    argv instead of its own — harmless for most scripts, but fatal for
+    self-referential ones: `mojo run mojo.py help` would otherwise have the
+    nested interpretation of mojo.py re-read the unchanged host argv, take
+    the same branch, and re-interpret itself forever."""
+    def __init__(self, argv):
+        self.argv = argv
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
 class Interpreter:
     """Executes Mojo AST nodes."""
 
-    def __init__(self, filename: str = None):
+    def __init__(self, filename: str = None, argv: list = None):
         # Increase recursion limit for meta-programming (interpreter on itself)
         import sys
         old_limit = sys.getrecursionlimit()
@@ -128,6 +143,7 @@ class Interpreter:
 
         self.scope = Scope()
         self.filename = filename
+        self.argv = argv if argv is not None else [filename or '<input>']
         self._setup_builtins()
 
     def _is_instance(self, obj, class_name):
@@ -194,7 +210,7 @@ class Interpreter:
         import tempfile
         import traceback
         self.scope.define('os', os)
-        self.scope.define('sys', sys)
+        self.scope.define('sys', _SysProxy(self.argv))
         self.scope.define('subprocess', subprocess)
         self.scope.define('shutil', shutil)
         self.scope.define('sysconfig', sysconfig)
@@ -289,6 +305,15 @@ class Interpreter:
         Failing loudly (rather than the old silent skip) is the point: a skipped
         import surfaces later as a baffling "name '...' is not defined".
         """
+        # `import sys` is special: the program must see its own argv (see
+        # _SysProxy), not the real process argv reinstated by a fresh
+        # importlib.import_module('sys'). Re-binding the real module here is
+        # what turned `mojo run mojo.py help` into unbounded recursion — the
+        # nested interpretation of mojo.py would re-read the host's live
+        # argv instead of the isolated one and take the same branch forever.
+        if node.module == 'sys' or node.module.split('.')[0] == 'sys':
+            self.scope.define(node.alias or 'sys', self.scope.get('sys'))
+            return None
         try:
             mod = importlib.import_module(node.module)
         except ModuleNotFoundError:
@@ -305,11 +330,16 @@ class Interpreter:
 
     def execute_FromImportStmt(self, node: N.FromImportStmt):
         """Execute `from mod import a, b as c` / `from mod import *`."""
-        try:
-            mod = importlib.import_module(node.module)
-        except ModuleNotFoundError:
-            # Not a Python module — sibling .mojo module, treated as pre-loaded; skip.
-            return None
+        # See execute_ImportStmt: keep the isolated-argv sys proxy, don't
+        # pull attributes off the real sys module.
+        if node.module == 'sys':
+            mod = self.scope.get('sys')
+        else:
+            try:
+                mod = importlib.import_module(node.module)
+            except ModuleNotFoundError:
+                # Not a Python module — sibling .mojo module, treated as pre-loaded; skip.
+                return None
         if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
@@ -720,9 +750,14 @@ class Interpreter:
         args = [self.eval_expr(arg) for arg in expr.args]
         kwargs = {}
 
-        # Evaluate keyword arguments
-        if hasattr(expr, 'keywords') and expr.keywords:
-            kwargs = {k: self.eval_expr(v) for k, v in expr.keywords.items()}
+        # Evaluate keyword arguments. CallExpr stores these as `kwargs`, a
+        # list of (name, expr) tuples (see mojo_compiler.py's CallExpr and
+        # ast_nodes.py) — not a `keywords` dict. The old attribute-name
+        # mismatch meant `hasattr(expr, 'keywords')` was always False, so
+        # every keyword argument to every call was silently dropped in
+        # favor of the callee's default value.
+        if getattr(expr, 'kwargs', None):
+            kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
 
         if isinstance(func, MojoFunction):
             return func(self, *args, **kwargs)
