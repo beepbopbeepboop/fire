@@ -14,9 +14,14 @@ current stdlib transpilation status, what fails, and remaining gaps.
   `MODULE_CACHE_DESIGN.md`, exercised end-to-end (link, dylib, CAS, reflection,
   monomorphization, comptime).
 - `make check` = gimple + runner + module-cache (all green). The self-hosting
-  bootstrap (`make bootstrap`: stage1-3 + `validate-all`) is a **separate**,
-  aspirational target — stage 2 has a known pre-existing codegen segfault — and
-  is intentionally not gated into `check` so `check` stays a meaningful signal.
+  bootstrap (`make bootstrap`: stage1-3 + `validate-all`) is a **separate**
+  target, not gated into `check`. **Update 2026-07-06**: stage1/stage2/stage3/
+  `verify` now pass cleanly with zero crashes anywhere in the transitive
+  closure (the historical stage-2 segfault and a long chain of follow-on bugs
+  are fixed — see "Recent Work (2026-07)" below). `validate-all` still fails
+  its file-count check — a real but separate, pre-existing gap: the `stage1:`
+  Makefile target only ever dumps `mojo.py` itself, never loops over the
+  other ~40 test/core files the way `stage2`/`stage3` do.
 
 ---
 
@@ -113,6 +118,226 @@ current stdlib transpilation status, what fails, and remaining gaps.
   - Multi-dimensional slice subscripts: `a[0:2, ::]`, `a[:, 0]`, via a unified
     `_parse_subscript_item()` model.
   - Parenthesized ownership binding targets: `(var x), (ref y) = ...`.
+
+---
+
+## Recent Work (2026-07)
+
+### Exceptions actually work at runtime on macOS arm64
+
+`mojo_try_push` wrapped `setjmp` in a function that returns — `longjmp` to a
+`jmp_buf` whose `setjmp` frame has already returned is undefined behavior, and
+on macOS arm64 it silently resumed *after* the raise site instead of entering
+the handler, so every compiled `try/except` took the non-exception path and
+`raise` was a no-op. Fixed by making `mojo_try_push` a `#define` macro in
+`mojo_runtime.h` so `setjmp` executes directly in the caller's frame.
+`ABI.md` documents the macro nature of this entry point.
+
+That fix was necessary but not sufficient: the "stage-2 bootstrap segfault"
+class turned out to be at least nine separate, independent bugs, found one at
+a time by running `stage2/mojo --dump ../mojo.py` (then every `.mojo`/`.py`
+file) under lldb until they stopped crashing:
+
+- `os.environ.get`/`[]`/`in`/assignment had no lowering (fell to
+  `mojo_obj_getattr`'s stub → null deref) — added `ast_rewriter.py`'s
+  `os_environ_*` rules.
+- `str.rsplit` was an unimplemented stub returning a null `MojoList *` —
+  real `mojo_str_rsplit` added.
+- No list/string accessor normalized negative indices (`list[-1]` read
+  `data[-1]`, out of bounds) — fixed in `mojo_list_get_int/get_double/
+  get_str/set_*` and `mojo_str_char_at`.
+- Container truthiness (`if some_list:`) was a pointer-null check, not a
+  length check — fixed to call `mojo_list_len`/`mojo_dict_len`/
+  `mojo_set_len`/`mojo_truthy_cstr`, all NULL-safe.
+- Ternary expressions evaluated both branches unconditionally — worked
+  around at two call sites here; fixed at the root below.
+- `subprocess.run(...).returncode`/`.stdout`/`.stderr`, `sys.stdin.read()`,
+  `platform.system()`/`.machine()` had no implementation — real runtime
+  functions added (`mojo_subprocess_run`, `mojo_stdin_read`,
+  `mojo_platform_system`/`_machine`), wired via `ast_rewriter.py`.
+- `_TYPE_MAP` had a literal `None` dict key, crashing `MojoDict` construction
+  (string-keyed only) — the entry was dead code; removed.
+- `__name__` was hardcoded to `"__main__"` for *every* compiled module, root
+  or transitively imported, so every inlined script's own
+  `if __name__ == '__main__': main()` guard fired as a side effect of being
+  imported. Now resolves per-module via `self.module_name`.
+- Fixing `__name__` exposed a masked double-invocation bug: the generated
+  `main()` wrapper called `_toplevel()` (which now correctly runs the root's
+  own `if __name__ ==`) *and then* called `_gimple_main()` again
+  unconditionally. Every self-hosted program's `main()` was running twice.
+
+With all of the above, `make bootstrap`'s stage1/stage2/stage3/`verify`
+sequence passes cleanly.
+
+### Ternary expressions branch for real instead of evaluating both sides
+
+`_lower_TernaryExpr` used to lower `a if cond else b` by unconditionally
+emitting code for *both* `then_val` and `else_val`, then selecting between
+the two already-computed results — a correctness bug for any branch with a
+side effect (I/O, a function call), not just waste. Found via
+`sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()` reading
+stdin unconditionally even when a file argv was given. Now emits a real
+branch (two basic blocks + a merge label) and only evaluates the taken side;
+the merged result type is determined via `_quick_type` on both branches
+(estimates a C type without emitting code — the same "look, don't run"
+contract used for list/tuple literal element-type inference) so the shared
+result temp can be declared before either branch runs. Verified with a test
+program: only the taken branch's `print()` fires.
+
+`and`/`or` (`_lower_BinaryOp`) have the identical eager-both-operands shape
+and are **not yet fixed** — see `PLAN.md`.
+
+### Real regex engine: `.finditer()` and compile-time-foldable `.sub()`
+
+`re.Pattern.finditer()` had no codegen lowering at all — `for m in
+pattern.finditer(s):` fell through to the "unsupported iterable" branch,
+which silently dropped the entire loop body (zero iterations, no error, no
+crash). `mojo_compiler.py`'s own `py_tokenize` uses exactly this pattern as
+its core lexer loop, so the self-hosted, *compiled* tokenizer silently
+produced an empty token stream for every input. This mattered beyond
+diagnostics: `mojo --dump`'s main `.ci` generation routes through a
+subprocess that runs the real *interpreted* tokenizer/parser, so
+`make bootstrap`'s `verify` step gave no signal at all about whether the
+self-hosted Parser/tokenizer actually *worked* when executed — only the
+`.tok`/`.ast` diagnostic dump code calls the compiled `Parser`/`py_tokenize`
+directly, in-process, which is exactly where this surfaced.
+
+An interim step made the gap loud instead of silent:
+`mojo_unsupported_iter(type_name)` prints a greppable diagnostic instead of
+emitting nothing (deliberately not `abort()`, since this is a legitimate,
+cataloged feature gap that `mojo.py`'s own dump handler wraps in
+`try`/`except`, and `abort()`'s `SIGABRT` can't be caught at the Mojo level).
+
+The real fix: `regex_compile.py` (new file) is a compile-time-only Python
+regex parser/emitter — a backtracking NFA over a flat node array
+(char/any/class/concat/alt/group/repeat, greedy and non-greedy, named
+groups, `{m,n}`). `runtime/mojo_runtime.c`'s `mojo_regex_search`/
+`mojo_regex_lastgroup`/`mojo_regex_substr` walk it at runtime via an
+explicit continuation-list struct (no closures — GIMPLE has none).
+`_gen_for_regex_iter` (`gimple_codegen.py`) wires `for m in
+<pattern>.finditer(text):` to it. Validated by comparing the self-hosted
+tokenizer's token stream against real Python's on real source files.
+
+Making tokenization *actually run* for the first time immediately surfaced a
+cascade of previously-unreachable bugs elsewhere in the self-hosted closure
+— none specific to regex, just never exercised until real input reached the
+Parser:
+
+- `strcmp` on a genuine NULL `char *` (a `str = None` default parameter)
+  segfaulted — fixed with a null-safe `mojo_cstr_cmp`.
+- This codegen's `and`/`or`/ternary never short-circuit (both operands
+  always evaluate). Two of `mojo_compiler.py`'s own guards relied on
+  short-circuiting to protect indexing/attribute-access on empty strings or
+  non-`IdentExpr` nodes; fixed by rewriting as explicit nested `if`s.
+- A struct method's varargs-packing sentinel (`func_param_types[mangled]`
+  ending in `'...'`) gets overwritten with the method's concrete C signature
+  once its body is emitted (needed so forward declarations match), silently
+  disabling `*args` packing for every call site compiled afterward —
+  `self._is_kw("as")` cast a raw string pointer straight to `MojoList *` and
+  segfaulted in `mojo_list_contains_str`. Fixed by preferring
+  `_mangled_signature_ctypes`'s untouched sentinel copy in `_emit_call`.
+- Tuple-unpack assignments (`a, b = x[:n], x[n:]`) never ran the "remember
+  the real pointer type behind this int64_t-boxed local" logic that plain
+  assignments do — a sliced string got misread as `MojoList *` by
+  `len()`/indexing, crashing across every test/stdlib file once the parser
+  genuinely ran on them. Fixed via a shared `_track_pointer_actual_type`
+  helper used by both assignment paths, plus the same missing check in
+  `_lower_builtin_len`/`_lower_subscript`.
+- `ord()`/`chr()` were dead variadic stubs with zero real implementation.
+- `mojo_compiler.py`'s raw/byte-prefixed string literals (`r'...'`,
+  `b'...'`) never had their prefix stripped, only their quotes — general,
+  pre-existing, highest-impact for `_TOKEN_RE` itself since
+  `_TOKEN_RE = re.compile(r'...')` is *itself* an r-string.
+
+**Follow-on fix**: `re.sub()` still used POSIX `regcomp`/`regexec`
+(`mojo_re_sub_fn`) — a different re operation from `.finditer()`, needing
+its own fix. `mojo_compiler.py`'s own `replace_multiline_strings` (hides
+multi-line triple-quoted strings *before* line-based tokenization) calls
+`re.sub()` with `\s`/`\S`/non-greedy `*?`, none of which POSIX ERE supports;
+`regcomp` failed and `mojo_re_sub_fn`'s "compile failed → return input
+unchanged" fallback made the substitution a silent no-op, so a module
+docstring got split into physical lines and mis-tokenized one line at a
+time — reaching a bare-annotation parse path with a non-`IdentExpr` node
+that (via the ternary-eager-eval bug, fixed above) called `mojo_obj_getattr`
+and aborted (this was the `example_imports.mojo` crash). Fixed by adding
+compile-time constant-folding (`_try_const_fold_str`, handles literal
+concatenation/repetition and already-folded locals like `_dq = '"' * 3`) so
+a foldable `re.sub()` pattern routes through the same regex engine via a new
+`mojo_regex_sub_fn`, falling back to the POSIX path for anything the engine
+doesn't support (e.g. lookahead `(?=...)`, found in a *different*
+`gimple_codegen.py` pattern during this fix). Also fixed an incidental bug
+where `_regex_progs_defined` could get permanently poisoned — marked
+"already emitted" for patterns whose emitting compile attempt later failed
+and got rolled back by an ancestor module's exception handler — silently
+dropping other, unrelated modules' regex array declarations file-wide.
+
+Also fixed the same eager-ternary-evaluation shape directly in
+`mojo_compiler.py`'s own bare-annotation and bracket-subscript-keyword-arg
+parsing (`expr.name if isinstance(expr, IdentExpr) else None` was calling
+`.name` unconditionally).
+
+Not yet done: `.findall()`/`.split()` still have no lowering; `re` flags
+still aren't honored by either regex backend; see `PLAN.md`.
+
+### `compile_stdlib.py` reaches 595/0 — every stdlib file compiles
+
+Last of the original 3 failures (`test_unsafe_pointer_v2.mojo`,
+`test_string_slice.mojo`, `test_span.mojo`) fixed. Root causes (none touched
+`_lower_binary`'s `_is_raw_ptr` dispatch, despite an earlier same-day attempt
+along that path regressing 3 other files and being reverted):
+
+- `_lower_slice`'s `Span *` `_len` computation mixed an uncast integer
+  literal with an int64_t temp when the stop bound was a bare literal.
+- `_mojo_type`'s `UnsafePointer[X, Origin]` branch passed the entire
+  multi-arg bracket interior to the recursive element-type lookup, silently
+  defaulting to `int64_t` — added `_split_top_level_commas`.
+- `_resolve_type` learned to resolve a bracket's element against
+  `struct_field_types` too, so `UnsafePointer[MoveOnly_Int,
+  MutExternalOrigin]` resolves to `MoveOnly_Int *` instead of falling
+  through to `int64_t`. Guarded so `_TYPE_MAP` scalar newtypes still win.
+- `_gen_stmt_MultiAssignStmt`'s subscript-write case had no raw-pointer
+  branch (only `_gen_stmt_AugAssignStmt`'s did); `_lower_pointer_method`'s
+  `init_pointee_*` methods assumed the pointee was always scalar. Both
+  fixed to match their already-correct sibling patterns.
+- Nested generic-struct type arguments (`alloc[MoveOnly[Int]]`) needed
+  pre-elaborating the inner generic and re-deriving the outer generic's
+  return type via `_resolve_type`. This required making
+  `_imported_generic_structs` actually get populated for the first time (it
+  had been entirely dead code — the only writer was gated behind a flag
+  `compile_stdlib.py` never sets), via a new
+  `_register_imported_generic_structs`. That exposed two more dormant bugs
+  in the never-before-exercised `_elaborate_generic_struct_call` path: no
+  concreteness check on type args (self-referential generics got wrongly
+  monomorphized against an unbound placeholder), and no signature-aware
+  method mangling (overloaded methods produced conflicting `extern`
+  declarations). Both fixed by aborting elaboration on either condition,
+  falling back to whatever path already handled that struct before.
+- `Span`'s own subscript gained the same `_elem_types` side-table tracking
+  `MojoList *` already has.
+
+### Smaller fixes
+
+- **`_TYPE_MAP` vs `ABI.md` divergence**: already matched (`Int → int64_t`,
+  `Bool → _Bool`); stale discrepancy comment removed.
+- **`fix_gimple_*.py` post-processing scripts removed as legacy** — the
+  codegen now emits proper GIMPLE directly (`_emit_call` loads globals/
+  literals into temps, casts in call args extracted to temps, struct
+  typedefs ordered before forward declarations).
+- **Struct method extern-stub guard collision**: the `#ifndef` guard for an
+  unknown struct method's variadic stub now uses
+  `_MOJO_STUB_{struct}_{method}` (upper-cased) consistently, avoiding
+  collisions between names differing only in case.
+- **`try` body ending in `return` used to skip `finally` entirely** — return
+  statements in a `try` body are now intercepted to jump to `finally` first,
+  then execute the return after cleanup.
+- **GIMPLE `setjmp` address computation** used invalid `&_array[idx]`
+  syntax — now uses `(void *)&_mojo_exc_stack[idx]`, which compiles.
+- **`MOJO_STDLIB` env var is now optional** — `module_loader.py`/
+  `module_spec_gen.py` hardcode the real modular stdlib checkout path
+  directly.
+- **`stdlib/lexer.mojo`'s `tokenize` signature mismatch fixed** —
+  `runtime/mojo_runtime.h` now declares `int64_t tokenize(char *)` matching
+  the frozen stdlib lexer, instead of `MojoList *tokenize(char *)`.
 
 ---
 

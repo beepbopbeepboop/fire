@@ -1,185 +1,165 @@
-# GIMPLE Bootstrap Compilation Fix - Implementation Plan
+# Known Bugs and Outstanding Work
 
-**Status**: 16 GIMPLE errors remaining (from initial 30+)  
-**Validation**: `make bootstrap` must complete without errors  
-**Priority**: HIGHEST - Fix make bootstrap compilation
-
----
-
-## CRITICAL PATH: Make Bootstrap Work
-
-### Problem Summary
-When `make bootstrap` runs, the mojo compiler generates C code that fails GIMPLE validation. The root cause: gimple_codegen.py is imported by mojo.mojo, and when transpiled to C, it produces invalid GIMPLE code.
-
-**Current Error Count**: 16 errors in stage1/mojo.ci after GCC -fgimple compilation
-
-### Error Categories (All Must Be Fixed)
-
-#### Category 1: Invalid Casts in Function Arguments (8+ errors)
-**Pattern**: `(char *)varname` or `(int64_t)varname` as function arguments
-**Lines**: 4817, 6589, 6638, 6911, 7165, 7886 in stage1/mojo.ci
-**Root Cause**: Variables assigned from `TypeLattice.join()` results don't have clear types in transpiled C
-
-**Examples**:
-```c
-mojo_list_append_str (_t67, (char *)res_type);  // INVALID - res_type is int
-_t625 = mojo_list_contains_str (_t623, (char *)arith_type);  // INVALID
-```
-
-**Fix Strategy**:
-1. **Approach A (Recommended)**: Rewrite gimple_codegen.py to avoid storing TypeLattice.join() results in variables
-   - Inline the join calls where used instead of assigning to `res_type`, `arith_type`, `td`
-   - This prevents type loss during transpilation
-   
-2. **Approach B (Fallback)**: Create explicit type declarations in generated code
-   - Force variables to be typed as strings before use
-   - Requires ensuring Python->C transpilation preserves types
-
-**Affected Methods**:
-- `_lower_binary` (line 1487): `res_type = '_Bool' if ... else TypeLattice.join(lt, rt)`
-- `_lower_TernaryExpr` (line 1234): `res_type = TypeLattice.join(tt, et)`
-- `_lower_floordiv`, `_lower_pow` (similar pattern with `td`)
-
-#### Category 2: Global Dictionary Cast Errors (2+ errors)
-**Pattern**: `(int64_t) _BIN_OPS` or similar global variable casts
-**Line**: 6709 (error message shows `_t593 = (int64_t) _BIN_OPS;`)
-**Root Cause**: Module-level dict `_BIN_OPS` being incorrectly cast during transpilation
-
-**Fix Strategy**:
-1. Pre-compute needed values from `_BIN_OPS` instead of accessing at call site
-2. Store lookups in local variables with proper types
-3. Example: Instead of `c_op = _BIN_OPS.get(node.op, node.op)` in complex context, pre-compute
-
-**Affected Line**: gimple_codegen.py line 1486
-
-#### Category 3: Type Conversion Errors (4+ errors)
-**Pattern**: `non-trivial conversion in 'var_decl'` - type mismatches in variable initialization
-**Line**: 2462, 2620, 2621, 7886
-**Root Cause**: Variables declared with wrong types in transpiled code
-
-**Fix Strategy**:
-- Ensure variable types are explicit in transpiled C
-- Add type hints or force Python code to be unambiguous for transpiler
+This document tracks verified, still-open defects and deferred feature work.
+See `IMPL.md` for what's already implemented and working, and `STDLIB.md` for
+stdlib transpilation status. Historically this file also tracked the GIMPLE
+bootstrap error-fixing plan from the project's early phase (May 2026) and
+`BACKLOG-CODEGEN.md` tracked defects deferred from the 2026-07-03 hardening
+pass — both are long since resolved or superseded and have been folded in
+here (open items) and into `IMPL.md` (fixed items). `BACKLOG-CODEGEN.md`
+itself is now a thin redirect, kept only because a number of in-code
+comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ---
 
-## Implementation Steps (In Priority Order)
+## Known bugs (verified, real, still open)
 
-### STEP 1: Fix TypeLattice.join() Variable Storage (Highest Priority)
-**Goal**: Eliminate 8+ cast-in-function-argument errors
+- **`and`/`or` evaluate both operands eagerly** (`_lower_BinaryOp`,
+  `gimple_codegen.py`) — `x = f() or g()` still calls `g()` even when `f()`
+  is truthy, since there's no branch in the generated C that skips the
+  untaken side. The identical bug in ternaries (`a if cond else b`) was
+  fixed 2026-07-06 by emitting a real `if/else` with a merge label (see
+  `IMPL.md`); `and`/`or` was written mirroring that same eager lowering and
+  was deliberately *not* fixed alongside it — no known real-world trigger
+  yet (unlike the ternary case, which crashed twice), but the same
+  real-branching fix would apply if one shows up.
+- **`@` matmul defaults its result type to `int64_t`** when `__matmul__`'s
+  return type is unknown (`_lower_matmul`, `gimple_codegen.py` ~line 5323).
+- **Typed `except` dispatch is impossible** — the runtime carries no
+  exception-type tag (`mojo_exc_obj` is an untyped `void *`), so only the
+  first `except` handler is ever emitted (with a compile-time warning:
+  "multiple except handlers are not supported"). Needs a type tag in the
+  runtime exception slot: (1) add `_mojo_exc_type` to exception state, (2)
+  `mojo_raise(type_tag)` stores it, (3) codegen passes the type when
+  raising and checks it in handlers. See `runtime/mojo_runtime.c` (near the
+  exception stack) and `gimple_codegen.py`'s except-handler dispatch.
+- **`for a, b in ...` tuple for-targets emit invalid C** — `BUGS-AST.md`
+  BUG-013, still listed there as outstanding. The for-loop target isn't
+  validated as a plain identifier before being spliced into the generated
+  C loop variable name.
+- **`example_imports.mojo`'s `.ast` generation fails when self-hosted**
+  (found 2026-07-06, not yet root-caused). The file no longer crashes (the
+  `mojo_obj_getattr` abort chased down that day is fixed — see `IMPL.md`),
+  but `mojo --dump` on the self-hosted `stage2/mojo` binary still prints
+  `Warning: Could not generate .ast: None` for it specifically, while the
+  interpreted compiler (`python3 mojo.py --dump example_imports.mojo`)
+  handles it cleanly. Caught gracefully (no crash), so lower urgency than
+  the bugs above, but real — some Parser code path behaves differently
+  once compiled than interpreted for this file's actual `from X import
+  Y` + function-call shape.
+- **Several already-self-hosted files likely have latent, undiscovered
+  `re.sub`/`re.search`/`re.findall` bugs on this platform** — found while
+  investigating whether to expand regex engine coverage (2026-07-06, not
+  yet confirmed by running them under lldb). `monomorphize.py`,
+  `reflect.py`, `elaborate.py`, and `gimple_spec_gen.py` all use
+  runtime-built patterns like `rf'\b{re.escape(name)}\b'` with `\s`/`\b`
+  shorthand classes. Those aren't compile-time-foldable (see
+  `_try_const_fold_str` in `IMPL.md`), so they still route through
+  `mojo_re_sub_fn`'s POSIX `regcomp`/`regexec` backend — which doesn't
+  support `\s`/`\S`/`\d`/`\w` on macOS/BSD libc, the same root cause fixed
+  for `.finditer()`/foldable `.sub()` patterns. These code paths may simply
+  not be exercised in ways that surface it yet (unlike the tokenizer,
+  which runs on every input).
 
-**Changes to gimple_codegen.py**:
+## Known feature gaps (regex)
 
-1. **Line 1234-1254 (_lower_TernaryExpr)**:
-   - Replace: `res_type = TypeLattice.join(tt, et)` stored in variable
-   - Inline the type computation at the point of use
-   - Create temp only with explicit type name string
+- **`re.findall()`/`re.split()` have no codegen lowering at all** — only
+  `.finditer()` and `.sub()` (with a compile-time-foldable pattern) are
+  implemented (see `IMPL.md`'s regex-engine section). `.match()`/`.search()`
+  still return a dummy `int` stub type from `_quick_type` and have no real
+  runtime behavior.
+- **`re` module flags are stubbed constants, not honored.**
+  `ast_rewriter.py`'s `re_multiline`/`re_dotall`/`re_ignorecase`/`re_verbose`
+  rules give `re.MULTILINE` etc. their real CPython integer values so
+  evaluating the constant doesn't crash, but neither regex backend
+  (`mojo_re_sub_fn`'s POSIX `regcomp`, or the new compile-time engine in
+  `regex_compile.py`/`mojo_regex_search`) actually consumes a flags
+  argument. `re.compile(pattern, re.MULTILINE)` compiles and runs, but the
+  flag has no effect. Real fix: for the POSIX path, translate the flags int
+  into `regcomp`'s `REG_ICASE` etc. (`MULTILINE`/`VERBOSE` have no direct
+  POSIX ERE equivalent and would need pattern preprocessing); for the new
+  engine, it could honor flags directly at compile time (e.g. case-fold
+  character ranges for `IGNORECASE`), which is more tractable now that a
+  real compile-time-known-pattern engine exists.
+- **Lookahead/lookbehind assertions (`(?=...)`, `(?!...)`, etc.) are
+  unsupported** by the new regex engine (`regex_compile.py`) — found via
+  `gimple_codegen.py`'s own `\b(inout|borrowed|...)\s+(?=\w)` pattern
+  during the `re.sub()` fix. Falls back to the POSIX backend gracefully
+  (no crash), but POSIX ERE doesn't support lookahead either, so such a
+  pattern silently no-ops via `re.sub`'s "compile failed, return input
+  unchanged" behavior either way.
 
-2. **Line 1487 (_lower_binary)**:
-   - Replace: `res_type = '_Bool' if ... else TypeLattice.join(lt, rt)`
-   - Move the entire computation inline into the _new_temp call
-   - Example: `t = self._new_temp('_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt))`
+## Deferred generalizations (2026-07-04, still open)
 
-3. **Line 1494 (_lower_binary - arith_type)**:
-   - Replace: `arith_type = TypeLattice.join(lt, rt)`
-   - Inline at each comparison and cast point
-   - Pass TypeLattice.join result directly to string operations
+Found while building `ast_rewriter.py` (an AST-to-AST rewrite pass giving
+"Python idiom → concrete runtime call" mappings a real rule table instead of
+inline `elif` chains). `ast_rewriter.py` is itself part of the self-hosted
+closure, so it had to stay inside the currently self-hostable Python subset —
+that ruled out three genuinely useful features, each real standalone compiler
+work:
 
-4. **Similar fixes in _lower_floordiv, _lower_pow** (lines 1509-1540):
-   - Replace `td = TypeLattice.join(...)` with inline computation
-   - Only create named variable if absolutely necessary
+- **Real `type()`/RTTI.** `mojo_type()` and `mojo_obj_getattr` are stubs
+  because there is no runtime type tag on boxed values. Fixing this for
+  real needs a tagged-union object representation (type tag + int64_t
+  backing) — same root need as the typed-`except`-dispatch bug above.
+  Highest payoff of the three: fixes every future generic/dynamic-idiom
+  gap, not just this one. `ast_rewriter.py` works around it today with a
+  literal `isinstance` chain (`_node_type_name`) instead of
+  `type(x).__name__`.
+- **Generators (`yield`).** No coroutine/iterator-state-machine codegen
+  exists; a generator function can't currently be self-hosted at all.
+  `ast_rewriter.py` avoids this by returning lists instead of yielding.
+- **Tuple-keyed dicts.** `MojoDict` is string-keyed only; there's no
+  composite-key hashing. `ast_rewriter.py`'s discrimination trie encodes
+  what would naturally be a `(path, kind, value)` tuple key as a single
+  string key (`_edge_key`) instead.
 
-**Expected Result**: Eliminates invalid casts like `(char *)res_type`
+## Struct method type safety (deferred)
 
----
+Unknown struct methods get a variadic `int64_t f(...);` extern
+(`_lower_struct_method_call`) — defeats type checking and forces int64
+returns for anything not already known. Concrete (non-variadic) signatures
+for common built-ins (`iter`, `next`, `swap`, `divmod`, `ord`, `chr`, `sort`)
+were tried and reverted (broke 13 files in `compile_stdlib.py` against the
+real modular stdlib, since real callers pass pointer types too — a hard
+`-Wint-conversion` error on GCC 14+, not a warning). Full type safety here
+needs the same tagged-union type system (type tag + int64_t backing) called
+for above.
 
-### STEP 2: Fix Global Dictionary Access (Medium Priority)
-**Goal**: Fix `(int64_t) _BIN_OPS` errors
+## Structure / maintainability (behavior-preserving refactors)
 
-**Changes to gimple_codegen.py**:
+Pure tech debt — no known bug, just size/organization:
 
-1. **Line 1486 (_lower_binary)**:
-   - Move `c_op = _BIN_OPS.get(node.op, node.op)` earlier or inline it
-   - Ensure the lookup result is used directly, not stored in complex expressions
+- `gen_module` is ~2,200 lines with ten numbered "Phase" sections —
+  decompose along those comments into `_gen_module_phase*` methods.
+- `_lower_method_call` (~430 lines), `_lower_binary` (~350),
+  `_gen_stmt_AssignStmt` (~230), `_emit_call` (~220) similarly.
+- `_KNOWN_SIGS` and the hardcoded interpreter/AST struct-field tables in
+  `gen_module` belong in `gimple_spec_gen.py` (created for that purpose).
+- Three parallel type dicts (`_actual_types`, `_global_c_decl_types`,
+  `_global_var_types`) must stay manually synchronized
+  (`POINTER_TYPE_AUDIT.md`) — unify into one `TypeInfo` table.
+- Other modules import private helpers (`_mojo_type`, `_safe_name`,
+  `_c_escape`, `_TYPE_MAP`) — promote to a documented public surface.
+- The regex-detection/pattern-folding logic embedded in `gimple_codegen.py`
+  (`_try_const_fold_str`, the `re.sub`/`.finditer()` branches in
+  `_lower_call`, the Phase 1.7 `_regex_patterns` module-level scan) is a
+  good candidate to move into `ast_rewriter.py`'s declarative rule table —
+  but only the *detection* side moves cleanly; the actual C emission
+  (compile-time array generation, custom for-loop control flow, per-match
+  accessors) is inherently codegen work and can't be expressed as a pure
+  AST-to-AST rewrite. Worth doing once the regex feature gaps above are
+  closed, not before (no point relocating logic that's still being
+  actively extended). See conversation 2026-07-06 for the full analysis.
 
-2. **Alternative**: Pre-populate operator mappings
-   - Create local operator lookup table in the method
-   - Avoid accessing module-level `_BIN_OPS` dict during transpilation
+## Tooling notes for future refactor work
 
-**Expected Result**: No more invalid global dict casts
-
----
-
-### STEP 3: Verify Type Handling (Lower Priority)
-**Goal**: Fix remaining type conversion errors
-
-**Changes**:
-1. Check variable declarations in generated code
-2. Ensure type hints are present where needed
-3. Add explicit type markers in Python code that transpiles poorly
-
-**Expected Result**: Cleans up remaining "non-trivial conversion" errors
-
----
-
-## Testing Strategy
-
-### Validation Command
-```bash
-make bootstrap
-```
-
-This will:
-1. Generate stage1/mojo.ci (Python transpiles to C via mojo.py)
-2. Run gcc-mp-15 -fgimple to validate GIMPLE syntax
-3. Compile to stage2/mojo binary
-4. Verify idempotency with stage3
-
-### Success Criteria
-- ✅ All GCC -fgimple errors resolved
-- ✅ stage2/mojo binary created successfully
-- ✅ stage2 and stage3 outputs match (idempotency)
-
-### Debugging
-If errors persist:
-1. Check stage1/mojo.ci for the exact error location
-2. Trace back to gimple_codegen.py source via function name
-3. Verify the variable is properly typed in generated C
-4. Consider if TypeLattice.join needs different handling
-
----
-
-## Key Files to Modify
-
-| File | Lines | Change Type | Priority |
-|------|-------|------------|----------|
-| gimple_codegen.py | 1234-1254 | _lower_TernaryExpr refactor | CRITICAL |
-| gimple_codegen.py | 1486-1505 | _lower_binary refactor | CRITICAL |
-| gimple_codegen.py | 1509-1540 | _lower_floordiv/_lower_pow | CRITICAL |
-| mojo/gimple_codegen.mojo | Sync with above | Mirror changes | HIGH |
-
----
-
-## Success Indicators
-
-1. **After Step 1**: 8+ errors eliminated
-2. **After Step 2**: 10+ errors eliminated  
-3. **After Step 3**: All 16 errors eliminated
-4. **Final**: `make bootstrap` completes → stage2/mojo binary created
-
----
-
-## Notes for Next Developer
-
-- **Do NOT use mojo/gimple_codegen.mojo** - It's a transpiled copy that has the same issues. Focus on gimple_codegen.py.
-- **TypeLattice.join()** is the core issue - it returns a string but the transpiler loses type info
-- **Test incrementally** - After each method change, run `make clean-bootstrap && make bootstrap 2>&1 | grep "error:" | wc -l` to track progress
-- **Commit frequently** - Each fixed method should be a separate commit with clear messaging
-
----
-
-## Background Context
-
-The mojo compiler (written in Python/Mojo) uses gimple_codegen.py to generate GIMPLE-annotated C code. When mojo.py is itself dumped to C as part of bootstrap, gimple_codegen.py gets transpiled alongside it. The Python patterns in gimple_codegen.py don't map cleanly to GIMPLE-compatible C, causing validation errors.
-
-This is a **transpilation limitation**, not a logic error. The fix is to rewrite problematic patterns in gimple_codegen.py to be more transpiler-friendly.
+- **Snapshot harness**: `test_gimple.py`'s 157 sources can be snapshotted
+  without gcc in ~0.1s by monkeypatching `test_gimple.test` to dump
+  `compile_to_gimple(src)` to a directory; `diff -rq` the dirs before/after.
+  Behavior-preserving commits must be byte-identical; deliberate fixes get
+  reviewed hunk-by-hunk. Use this for any of the structure refactors above.
+- **A stale `build/libmojostdlib.dylib` causes**
+  `dyld: symbol not found '_MojoList__write_to'` (or similar) when running
+  compiled binaries — rebuild with `build_stdlib_dylib.py` after any
+  codegen or runtime.c change (see `CLAUDE.md`'s quality-gates section).
