@@ -5014,43 +5014,43 @@ class GimpleGen:
         if node.op in ('and', 'or'):
             # Real Python `and`/`or` return whichever OPERAND was selected, not
             # a bool — e.g. `x = os.environ.get('K') or os.path.expanduser('~/.gmojo')`
-            # must yield the string, not True/False. The previous lowering
-            # collapsed both operands to `_Bool` unconditionally: a real bug,
-            # invisible until module-scope statements using this idiom (like
-            # cas.py's `GMOJO_HOME = os.environ.get(...) or os.path.expanduser(...)`)
-            # actually executed — before that, the `int(True)` bit pattern got
-            # stored into what the rest of the program treats as a `char *`,
-            # and any later dereference (e.g. os.path.join(GMOJO_HOME, 'cas'))
-            # crashed reading address 0x1. Same eager-both-operands shape as
-            # the ternary bug fixed in _lower_TernaryExpr (BACKLOG §4d) — that
-            # one now branches for real, but this lowering still doesn't:
-            # `x = f() or g()` still calls g() even when f() is truthy. Left
-            # as-is for now (not yet hit in practice the way the ternary case
-            # was); logged as the same still-open risk in BACKLOG §4d.
+            # must yield the string, not True/False.
+            #
+            # Real branching, not a C `?:` built from two already-evaluated
+            # operands: the previous lowering unconditionally evaluated BOTH
+            # operands before selecting between the results — the same
+            # eager-both-branches shape the ternary-expression fix addressed
+            # (BACKLOG-CODEGEN.md §4d) — so `x = f() or g()` called g() even
+            # when f() was truthy and any side effect (I/O, a function call)
+            # in the untaken branch still happened; a real correctness bug,
+            # not just wasted work. Mirrors _lower_TernaryExpr: the left
+            # operand is always evaluated (needed to decide which branch to
+            # take), but the right operand only gets evaluated in its own
+            # basic block, reached only when actually needed. _quick_type
+            # gives the right operand's C type without evaluating it, so the
+            # merged result type is fixed before either branch runs.
             ltype, lval = self.lower_expr(node.left)
-            rtype, rval = self.lower_expr(node.right)
-            res_type = TypeLattice.join(ltype, rtype)
-            lval_c = lval
-            if ltype != res_type:
-                l_tmp = self._new_temp(res_type)
-                self._safe_coerce_emit(ltype, res_type, lval, l_tmp)
-                lval_c = l_tmp
-            rval_c = rval
-            if rtype != res_type:
-                r_tmp = self._new_temp(res_type)
-                self._safe_coerce_emit(rtype, res_type, rval, r_tmp)
-                rval_c = r_tmp
-            # GIMPLE: load global string literals into temps before the ternary
-            if res_type == 'char *' and lval_c.startswith('_slit_'):
-                lval_c = self._new_val('char *', f'{lval_c}')
-            if res_type == 'char *' and rval_c.startswith('_slit_'):
-                rval_c = self._new_val('char *', f'{rval_c}')
             cond = self._ensure_bool_cond(ltype, lval)
+            res_type = TypeLattice.join(ltype, self._quick_type(node.right))
+            result = self._new_temp(res_type)
+            bb_short = self._new_bb()
+            bb_eval_right = self._new_bb()
+            bb_merge = self._new_bb()
             if node.op == 'and':
-                t = self._new_val(res_type, f"{cond} ? {rval_c} : {lval_c}")
+                # Left truthy -> right decides; left falsy -> short-circuit on left.
+                self._emit(f"  if ({cond}) goto {bb_eval_right}; else goto {bb_short};")
             else:
-                t = self._new_val(res_type, f"{cond} ? {lval_c} : {rval_c}")
-            return res_type, t
+                # Left truthy -> short-circuit on left; left falsy -> right decides.
+                self._emit(f"  if ({cond}) goto {bb_short}; else goto {bb_eval_right};")
+            self._emit_label(bb_short)
+            self._safe_coerce_emit(ltype, res_type, lval, result)
+            self._emit(f"  goto {bb_merge};")
+            self._emit_label(bb_eval_right)
+            rtype, rval = self.lower_expr(node.right)
+            self._safe_coerce_emit(rtype, res_type, rval, result)
+            self._emit(f"  goto {bb_merge};")
+            self._emit_label(bb_merge)
+            return res_type, result
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
