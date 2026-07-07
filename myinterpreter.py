@@ -2619,10 +2619,26 @@ class Interpreter:
 
     def eval_BinaryOp(self, expr: N.BinaryOp):
         """Evaluate binary operation."""
+        op = expr.op
+        # 'and'/'or' must short-circuit — evaluating both operands
+        # unconditionally like every other operator here breaks the
+        # extremely common `guard and use_guarded_value` pattern (e.g.
+        # `isinstance(x, FunctionDef) and x.name == 'main'`): the right
+        # side would still run and raise (AttributeError: no `.name`) even
+        # when the left side was falsy and specifically meant to prevent
+        # that. Found via 3-levels-deep self-referential interpretation
+        # (`mojo.py run mojo.py run mojo.py help`) tripping over exactly
+        # this pattern in the project's own source.
+        if op == 'and':
+            left = self.eval_expr(expr.left)
+            return left if not left else self.eval_expr(expr.right)
+        if op == 'or':
+            left = self.eval_expr(expr.left)
+            return left if left else self.eval_expr(expr.right)
+
         left = self.eval_expr(expr.left)
         right = self.eval_expr(expr.right)
 
-        op = expr.op
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+': return self._wrap_int(left + right)
@@ -2638,8 +2654,6 @@ class Interpreter:
         elif op == '>': return left > right
         elif op == '<=': return left <= right
         elif op == '>=': return left >= right
-        elif op == 'and': return left and right
-        elif op == 'or': return left or right
         elif op == 'in': return left in right
         elif op == 'is': return left is right
         elif op == 'is not': return left is not right
