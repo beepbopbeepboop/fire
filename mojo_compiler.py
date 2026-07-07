@@ -405,6 +405,7 @@ class StructDef:
     methods: list
     decorators: list = field(default_factory=list)
     comptime_aliases: dict = field(default_factory=dict)  # name -> value expr
+    bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
     line: int = 0
     col: int = 0
 
@@ -430,6 +431,40 @@ class TryStmt:
     handlers: list
     else_body: object
     finally_body: object
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class MatchCase:
+    """One `case pattern1, pattern2, ...: body` clause. `patterns` is a list
+    of Expr (comma-separated is an "or" — matches if the subject equals any
+    of them); an empty `patterns` list means `case _:` (wildcard, always
+    matches). Deliberately not full PEP 634 structural pattern matching —
+    see MatchStmt's docstring."""
+    patterns: list
+    body: list
+    guard: object = None  # optional `if <expr>` after the pattern
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class MatchStmt:
+    """`match subject: case p1: ... case p2, p3: ... case _: ...`
+
+    Deliberately implemented as switch-style equality dispatch (evaluate
+    each case's pattern(s) as plain expressions, compare with `==` against
+    the subject) rather than full PEP 634 structural pattern matching
+    (capture patterns, class patterns, sequence/mapping patterns, `as`
+    bindings). Real Python match statements treat a bare lowercase name in a
+    pattern as an *irrefutable capture* that always matches and rebinds the
+    name — but every real use of `match`/`case` seen in practice here uses
+    bare names as references to already-defined constants (e.g.
+    `case NODE_FUNCTION_DECL:`) expecting a value comparison, not a capture.
+    Switch-style dispatch matches that intent; true capture-pattern
+    semantics would make those cases match unconditionally on the first
+    case, which is never what's wanted here."""
+    subject: object
+    cases: list
     line: int = 0
     col: int = 0
 
@@ -881,6 +916,12 @@ class Parser:
             self._advance()  # consume from
             self._parse_expr(0)  # parse the delegated generator expression
             return ExprStmt(value=IdentExpr(name='yield'), line=line, col=col)
+        # `match` is a soft keyword (like Python's own) — only a match
+        # statement when followed by a real expression and a top-level `:`
+        # before the line ends; otherwise it's an ordinary identifier
+        # (`match(x)` a call, `match = 5` an assignment, etc).
+        if t.kind == "NAME" and t.value == "match" and self._is_match_stmt():
+            return self._parse_match()
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
@@ -1236,6 +1277,71 @@ class Parser:
             else_body = self._parse_block()
         return WhileStmt(condition=cond, body=body, else_body=else_body)
 
+    def _is_match_stmt(self):
+        """Lookahead for the `match` soft keyword: it's a match statement
+        only if, after the subject expression, the next token before any
+        NEWLINE is a top-level `:` — a real expression can never contain a
+        bare top-level colon (dict/slice colons are always inside braces/
+        brackets, which this tracks via depth). Doesn't consume anything;
+        always restores position."""
+        saved = self._pos
+        self._advance()  # consume 'match'
+        depth = 0
+        is_match = False
+        while True:
+            t = self._peek()
+            if t.kind in ("NEWLINE", "EOF"):
+                break
+            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
+                depth += 1
+            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
+                depth -= 1
+            elif t.kind == "COLON" and depth == 0:
+                is_match = True
+                break
+            self._advance()
+        self._pos = saved
+        return is_match
+
+    def _parse_match(self):
+        self._advance()  # consume 'match' (a NAME token, soft keyword)
+        subject = self._parse_expr(0)
+        self._expect("COLON")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        self._expect("INDENT")
+        cases = []
+        self._skip_newlines()
+        while self._peek().kind not in ("DEDENT", "EOF"):
+            cases.append(self._parse_match_case())
+            self._skip_newlines()
+        self._expect("DEDENT")
+        return MatchStmt(subject=subject, cases=cases)
+
+    def _parse_match_case(self):
+        # 'case' is also a soft keyword (NAME, not KW) — same as real Python.
+        t = self._peek()
+        if not (t.kind == "NAME" and t.value == "case"):
+            raise SyntaxError(f"Expected 'case' got {t.kind}({t.value!r})")
+        self._advance()
+        # `case _:` (bare wildcard, an IdentExpr named '_') is recognized at
+        # match time (interpreter/codegen), not specially here — parsing it
+        # as a plain expression pattern keeps this parser simple, and lets
+        # `_` combine with an or-pattern list the same as any other pattern.
+        patterns = [self._parse_expr(0)]
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._peek().kind == "COLON" or self._is_kw("if"):
+                break  # trailing comma before guard/colon
+            patterns.append(self._parse_expr(0))
+        guard = None
+        if self._is_kw("if"):
+            self._advance()
+            guard = self._parse_expr(0)
+        self._expect("COLON")
+        body = self._parse_block()
+        return MatchCase(patterns=patterns, body=body, guard=guard)
+
     def _parse_for(self):
         self._expect("KW", "for")
         # Skip optional convention keyword (var, ref, mut, etc.)
@@ -1492,18 +1598,37 @@ class Parser:
         param_fields = []
         if self._peek().kind == "LBRACKET":
             param_fields = self._parse_struct_params_as_fields()
+        # `struct Child(Base1, Base2):` / `class Child(Base):` — Python-style
+        # base-class list. Capture the top-level names (skipping keyword
+        # args like `metaclass=X` and trait-bound expressions we can't
+        # resolve as a real base) instead of discarding the whole
+        # parenthesized list; MojoClass merges the named bases' fields and
+        # methods at struct-definition time (see execute_StructDef).
+        bases = []
         if self._peek().kind == "LPAREN":
             self._advance()
-            # Skip balanced parentheses in trait list
             depth = 1
+            expect_name = True
             while depth > 0:
-                t = self._advance()
+                t = self._peek()
                 if t.kind == "LPAREN":
-                    depth += 1
-                elif t.kind == "RPAREN":
-                    depth -= 1
-                elif t.kind == "EOF":
+                    self._advance(); depth += 1; continue
+                if t.kind == "RPAREN":
+                    self._advance(); depth -= 1; continue
+                if t.kind == "EOF":
                     break
+                if t.kind == "COMMA" and depth == 1:
+                    self._advance(); expect_name = True; continue
+                if depth == 1 and expect_name and t.kind == "NAME":
+                    nxt = self._peek(1)
+                    is_kwarg = nxt.kind in ("ASSIGN", "EQUAL") or (
+                        nxt.kind == "OP" and nxt.value == "=")
+                    if not is_kwarg:
+                        bases.append(t.value)
+                    self._advance()
+                    expect_name = False
+                    continue
+                self._advance()
         self._expect("COLON")
         body = self._parse_block()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
@@ -1516,7 +1641,7 @@ class Parser:
         decs    = getattr(self, "_pending_decs", [])
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
-                         comptime_aliases=aliases)
+                         comptime_aliases=aliases, bases=bases)
 
     def _parse_trait(self):
         self._expect("KW", "trait")

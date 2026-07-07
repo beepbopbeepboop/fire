@@ -99,6 +99,7 @@ _STMT_DISPATCH: dict = {
     'ComptimeForStmt': '_gen_stmt_ComptimeForStmt',
     'ComptimeVarStmt': '_gen_stmt_ComptimeVarStmt',
     'GlobalStmt': '_gen_stmt_GlobalStmt',
+    'MatchStmt': '_gen_stmt_MatchStmt',
 }
 
 # ---------------------------------------------------------------------------

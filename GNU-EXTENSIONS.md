@@ -474,6 +474,83 @@ result_type _t2 = _t1 ? x : y;
 - For each iteration, evaluate expression and append/insert result
 - Return result collection
 
+#### Struct/Class Inheritance: `struct Child(Base1, Base2): ...` (GNU extension)
+
+Real Mojo's `struct` only accepts trait conformance in parens — struct-from-struct
+inheritance is rejected outright ("structs only conform to traits or trait
+compositions"). This implementation adds real Python-style single/multiple
+inheritance for both `struct` and `class` definitions, since Mojo aims to be a
+Python superset and `class Child(Base):` is ordinary Python. Added 2026-07-06
+(BUG-2026-001).
+
+**Semantics**: fields and methods from each named base are merged in, in
+declaration order — later bases override earlier ones (matching Python's
+left-to-right MRO for non-diamond hierarchies), then the child's own
+fields/methods are layered on top, overriding same-named base methods exactly
+like a Python subclass overriding a method. No `super()` support yet.
+
+**Lowering (interpreter, `myinterpreter.py`)**: `execute_StructDef` resolves
+each base name to an already-defined `MojoClass`, merges `.fields` (base
+fields prepended) and `.methods` (dict `update`, base first so the child's own
+methods win), and constructs the new `MojoClass` with the merged view.
+
+**Lowering (compiled path, `gimple_codegen.py`)**: `_merge_struct_inheritance`
+runs once, up front, over every `StructDef` (including transitively-imported
+ones) before any other struct-registration logic — it mutates `.fields`/
+`.methods` in place to the fully-merged view, so every other
+`struct_field_types`/method-registration/`self.x`-scanning call site
+downstream (there are roughly a dozen) just reads `.fields`/`.methods`
+directly and sees the merged result for free, with no per-call-site changes
+needed. Concretely this means: the child's C struct embeds the base's fields
+first (prefix layout, like classic single-inheritance-via-struct-embedding in
+C/C++), and inherited-but-not-overridden methods get their own compiled copy
+under the child's own mangled name (not a shared vtable entry) — correct for
+non-virtual calls, which is all that's supported.
+
+#### Match Statement: `match subject: case p1: ... case p2, p3: ... case _: ...` (GNU extension)
+
+Neither real Mojo nor this project previously supported `match`/`case` — Mojo
+doesn't have this construct yet (Modular has stated intent to add it, no
+timeline). Since Mojo aims to be a Python superset and `match`/`case` is
+standard, current Python, this implementation adds it. Added 2026-07-06
+(BUG-2026-002, BUG-2026-003).
+
+**Deliberately not full PEP 634 structural pattern matching.** Real Python
+treats a bare lowercase name in a `case` pattern as an *irrefutable capture*
+(it always matches and rebinds that name) — but every real use of
+`match`/`case` found in practice here uses a bare name as a reference to an
+already-defined constant (e.g. `case NODE_FUNCTION_DECL:`), expecting a value
+comparison against it, not a capture. This implementation is switch-style
+equality dispatch instead: each pattern is evaluated as a plain expression and
+compared with `==` against the subject. This matches the actual intent of
+every real call site; true capture-pattern semantics would make those cases
+match unconditionally on the first case, which is never what's wanted.
+Supported: literal/expression patterns, comma-separated or-patterns
+(`case 2, 3:`), the wildcard `case _:`, and an optional `if` guard. Not
+supported: capture patterns, class patterns, sequence/mapping patterns, `as`
+bindings.
+
+`match`/`case` are soft keywords, exactly like real Python's own — `match`
+is only treated as a match statement if, after the subject expression, the
+next token before any `NEWLINE` is a top-level `:` (tracked via bracket
+depth; a real expression can't contain a bare top-level colon). Otherwise
+`match`/`case` parse as ordinary identifiers (`match(x)` a call, `match = 5`
+an assignment, etc).
+
+**Lowering (interpreter)**: `execute_MatchStmt` evaluates the subject once,
+then for each case, checks each pattern (`_` always matches; anything else is
+compared by value), applies the guard if present, and runs the first
+matching case's body.
+
+**Lowering (compiled path)**: `_gen_stmt_MatchStmt` lowers the subject once
+into a temp, then emits a chain of basic blocks, one per case — each case's
+match condition is built by lowering a synthetic `subject == pattern`
+`BinaryOp` per pattern (reusing the existing `==` lowering, which already
+knows how to compare strings via `mojo_str_eq`/`strcmp` vs. plain value
+equality — no new string-comparison logic needed) and combining multiple
+patterns/the guard via bitwise `|`/`&` on `_Bool` temps (this dialect wants
+one comparison per statement, not an inline `||`/`&&`).
+
 ### Type Resolution
 
 #### TypeLattice (C11 Usual Arithmetic Conversion Rules)
@@ -639,5 +716,5 @@ Our implementation extends the official specification in these areas:
 
 ---
 
-**Last Updated**: 2026-04-28  
+**Last Updated**: 2026-07-06  
 **Status**: Comprehensive; consolidates module system, GIMPLE spec, and code generation architecture

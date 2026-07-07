@@ -239,11 +239,12 @@ class BoundMethod:
 
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
-    def __init__(self, name, fields, methods, interpreter):
+    def __init__(self, name, fields, methods, interpreter, bases=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
         self.interpreter = interpreter
+        self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -1921,16 +1922,35 @@ class Interpreter:
         return self._register_function(self.scope.vars, node.name, func, spec)
 
     def execute_StructDef(self, node: N.StructDef):
-        """Execute struct/class definition."""
+        """Execute struct/class definition.
+
+        `struct Child(Base1, Base2):` — Python-style class inheritance:
+        fields and methods from each named base are merged in first, in
+        declaration order (later bases override earlier ones, matching
+        Python's own left-to-right MRO for non-diamond hierarchies), then
+        Child's own fields/methods are layered on top, overriding same-named
+        base methods exactly like a Python subclass overriding a method."""
         methods = {}
+        base_names = getattr(node, 'bases', None) or []
+        base_classes = []
+        merged_fields = []
+        for base_name in base_names:
+            try:
+                base_cls = self.scope.get(base_name)
+            except NameError:
+                base_cls = None
+            if isinstance(base_cls, MojoClass):
+                base_classes.append(base_cls)
+                merged_fields.extend(base_cls.fields)
+                methods.update(base_cls.methods)
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
             spec = self._classify_params(m)
             self._register_function(methods, m.name, method_func, spec)
-        fields = getattr(node, 'fields', None) or []
-        cls = MojoClass(node.name, fields, methods, self)
+        fields = merged_fields + (getattr(node, 'fields', None) or [])
+        cls = MojoClass(node.name, fields, methods, self, bases=base_classes)
         self.scope.define(node.name, cls)
         return cls
 
@@ -1951,16 +1971,25 @@ class Interpreter:
         if node.module == 'sys' or node.module.split('.')[0] == 'sys':
             self.scope.define(node.alias or 'sys', self.scope.get('sys'))
             return None
-        try:
-            mod = importlib.import_module(node.module)
-        except ModuleNotFoundError:
-            mod = self._load_mojo_sibling_module(node.module)
-            if mod is None:
-                return None
+        # Prefer a sibling .mojo file/package over a same-named *real*
+        # Python module — otherwise a coincidentally-named .py file
+        # anywhere on sys.path (including this very project's own helper
+        # scripts, e.g. mojo-reference/lexer.py shadowing some other Mojo
+        # project's own lexer.mojo) silently wins over the file the Mojo
+        # source obviously meant, with a confusing "no attribute X" error
+        # instead of a clean import. A .mojo file sitting right next to the
+        # importing source is a much stronger signal of intent than a
+        # name collision with an installed/local Python module.
+        mod = self._load_mojo_sibling_module(node.module)
+        if mod is not None:
             if node.alias:
                 self.scope.define(node.alias, mod)
             else:
                 self._bind_dotted_import(node.module, mod)
+            return None
+        try:
+            mod = importlib.import_module(node.module)
+        except ModuleNotFoundError:
             return None
         if node.alias:
             self.scope.define(node.alias, mod)
@@ -1985,11 +2014,16 @@ class Interpreter:
             if mod is None:
                 return None
         else:
-            try:
-                mod = importlib.import_module(node.module)
-            except ModuleNotFoundError:
-                mod = self._load_mojo_sibling_module(node.module)
-                if mod is None:
+            # Prefer a sibling .mojo file/package over a same-named *real*
+            # Python module — see execute_ImportStmt for why (a coincidental
+            # same-named .py file on sys.path, e.g. this project's own
+            # lexer.py, would otherwise silently shadow the .mojo file the
+            # source obviously meant).
+            mod = self._load_mojo_sibling_module(node.module)
+            if mod is None:
+                try:
+                    mod = importlib.import_module(node.module)
+                except ModuleNotFoundError:
                     return None
         if node.wildcard:
             names = getattr(mod, '__all__', None)
@@ -2145,6 +2179,37 @@ class Interpreter:
             if node.else_body:
                 for stmt in node.else_body:
                     self.execute(stmt)
+        return None
+
+    def execute_MatchStmt(self, node):
+        """`match subject: case p1: ... case p2, p3: ... case _: ...`
+
+        Switch-style equality dispatch, not full PEP 634 structural pattern
+        matching — see mojo_compiler.py's MatchStmt docstring for why (bare
+        names in real Python match patterns are irrefutable captures, but
+        every real use here wants a value comparison against an
+        already-defined constant)."""
+        subject = self.eval_expr(node.subject)
+        # `case` is deliberately never used as a Python variable name here —
+        # it's a reserved word in C, and this file self-hosts (gets compiled
+        # to C by gimple_codegen.py), which doesn't rename local variables
+        # that happen to collide with a C keyword.
+        for match_case in node.cases:
+            matched = False
+            for pattern in match_case.patterns:
+                if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                    matched = True
+                    break
+                if self.eval_expr(pattern) == subject:
+                    matched = True
+                    break
+            if not matched:
+                continue
+            if match_case.guard is not None and not self.eval_expr(match_case.guard):
+                continue
+            for stmt in match_case.body:
+                self.execute(stmt)
+            return None
         return None
 
     def execute_ComptimeIfStmt(self, node):

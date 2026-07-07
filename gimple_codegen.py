@@ -1527,6 +1527,47 @@ def _split_top_level_commas(s: str) -> list[str]:
     parts.append(''.join(buf))
     return parts
 
+def _merge_struct_inheritance(all_struct_defs):
+    """`struct Child(Base1, Base2):` — Python-style class inheritance.
+    Mutates each StructDef with `.bases` in place so `.fields`/`.methods`
+    become the fully-merged view (base fields/methods first, in declaration
+    order — later bases override earlier ones, own members override every
+    base, matching Python's left-to-right MRO for non-diamond hierarchies),
+    once, up front. Every other struct_field_types/method-registration/
+    self.x-scanning site in this file just reads `.fields`/`.methods`
+    directly, so doing the merge here — rather than teaching each of those
+    ~15 call sites about inheritance individually — means they transparently
+    see the merged view for free. Mirrors myinterpreter.py's
+    execute_StructDef, which does the same merge for the interpreted path."""
+    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
+    resolved = set()
+
+    def resolve(s):
+        if s.name in resolved:
+            return
+        resolved.add(s.name)  # mark first: guards against an inheritance cycle
+        if not getattr(s, 'bases', None):
+            return
+        merged_fields = []
+        merged_methods = {}
+        for base_name in s.bases:
+            base = by_name.get(base_name)
+            if base is None:
+                continue
+            resolve(base)
+            merged_fields.extend(base.fields)
+            for m in base.methods:
+                merged_methods[m.name] = m
+        own_names = {m.name for m in s.methods}
+        inherited = [m for name, m in merged_methods.items() if name not in own_names]
+        s.fields = merged_fields + s.fields
+        s.methods = inherited + s.methods
+
+    for s in all_struct_defs:
+        if isinstance(s, StructDef):
+            resolve(s)
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'  # Default to 64-bit signed integer
@@ -9535,6 +9576,63 @@ class GimpleGen:
 
         self._emit_label(bb_merge)
 
+    def _gen_stmt_MatchStmt(self, node):
+        """`match subject: case p1: ... case p2, p3: ... case _: ...`
+
+        Switch-style equality dispatch (see mojo_compiler.py's MatchStmt
+        docstring for why this isn't full structural pattern matching):
+        lowered as a chain of `if (subject == p1 | subject == p2 | ...)`
+        checks, reusing the existing `==` lowering (_lower_BinaryOp already
+        knows how to compare strings via mojo_str_eq/strcmp vs. plain value
+        equality for everything else) rather than duplicating that type
+        dispatch here. The subject is lowered exactly once, up front, into a
+        temp — each pattern comparison references that temp via a synthetic
+        IdentExpr rather than re-lowering `node.subject`, since re-lowering
+        would re-evaluate it (with side effects) once per pattern."""
+        subj_type, subj_v = self.lower_expr(node.subject)
+        subj_ref = IdentExpr(name=subj_v)
+
+        bb_merge = self._new_bb()
+        case_bbs = [self._new_bb() for _ in node.cases]
+        next_check_bb = self._new_bb() if node.cases else bb_merge
+        self._emit(f"  goto {next_check_bb};")
+        for i, match_case in enumerate(node.cases):
+            self._emit_label(next_check_bb)
+            has_more = i + 1 < len(node.cases)
+            next_check_bb = self._new_bb() if has_more else bb_merge
+
+            is_wildcard = any(
+                isinstance(p, IdentExpr) and p.name == '_' for p in match_case.patterns)
+            if is_wildcard:
+                match_bool = self._new_temp('_Bool')
+                self._emit(f"  {match_bool} = 1;")
+            else:
+                match_bool = None
+                for p in match_case.patterns:
+                    ct, cv = self.lower_expr(BinaryOp(op='==', left=subj_ref, right=p))
+                    cv = self._ensure_bool_cond(ct, cv)
+                    if match_bool is None:
+                        match_bool = cv
+                    else:
+                        combined = self._new_temp('_Bool')
+                        self._emit(f"  {combined} = {match_bool} | {cv};")
+                        match_bool = combined
+            if match_case.guard is not None:
+                gt, gv = self.lower_expr(match_case.guard)
+                gv = self._ensure_bool_cond(gt, gv)
+                combined = self._new_temp('_Bool')
+                self._emit(f"  {combined} = {match_bool} & {gv};")
+                match_bool = combined
+            self._emit(f"  if ({match_bool}) goto {case_bbs[i]}; else goto {next_check_bb};")
+
+        for i, match_case in enumerate(node.cases):
+            self._emit_label(case_bbs[i])
+            for s in match_case.body:
+                self.gen_stmt(s)
+            self._emit(f"  goto {bb_merge};")
+
+        self._emit_label(bb_merge)
+
     def _gen_stmt_WhileStmt(self, node):
         bb_cond  = self._new_bb()
         bb_body  = self._new_bb()
@@ -12272,6 +12370,7 @@ class GimpleGen:
             'fields': 'MojoList *',
             'methods': 'MojoDict *',
             'interpreter': 'Interpreter *',
+            'bases': 'MojoList *',
         }
         self.struct_field_types['MojoInstance'] = {
             '_mojo_class': 'MojoClass *',
@@ -12337,6 +12436,7 @@ class GimpleGen:
         }
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
+        _merge_struct_inheritance(all_struct_defs)
         # Pre-register all struct names so cross-references in _collect_self_assigns work
         # regardless of definition order (e.g. DispatchSolver before FunctionCompilability).
         for _s in all_struct_defs:
