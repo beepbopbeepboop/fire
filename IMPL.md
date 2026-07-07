@@ -190,6 +190,44 @@ interpreter (`eval_BinaryOp`) and the compiled path (`_lower_binary`) —
 verified with `x = f() or g()`, where `g()` no longer runs once `f()` is
 truthy.
 
+### Struct reflection no longer collides across same-named classes in different modules
+
+`struct_field_types` (`gen_module`, `gimple_codegen.py`) is scanned once per
+self-hosted closure across every transitively-imported module, keyed by bare
+class name — but that scan *merged* fields from every `StructDef` node found
+under a given name into one shared entry, rather than treating a same-named
+`StructDef` from an unrelated module as a distinct class. `mojo_compiler.py`
+and `ast_nodes.py` (reachable via `myinterpreter.py`'s import, which uses
+`ast_nodes` only for method-parameter type annotations, never actually
+instantiating its classes) both define their own unrelated `FunctionDef`
+(and `ExprStmt`, `StringLiteral`, `CallExpr`, …) dataclasses with different
+field layouts. Since `_struct_type_id` (the runtime dispatch tag for
+`getattr()`/`setattr()`/`dataclasses.fields()`/the field-by-field `repr()`
+added earlier this session) hashes only the bare name, every real
+`FunctionDef` instance — regardless of which module's shape it actually
+is — got read through whichever definition's fields happened to merge in
+last, corrupting field offsets. Reproduced independently via `repr(ast)` on
+`hello.mojo`'s own trivial two-statement AST: `FunctionDef(...)` grew a
+phantom `is_static` field (only `ast_nodes.py`'s `FunctionDef` has one).
+
+Fixed by tracking, per struct name, the `id()` of the *first* `StructDef`
+AST node whose fields were merged in (`_struct_name_owner`) — any later
+`StructDef` with the same name but different node identity is skipped
+entirely rather than having its fields merged in. This map has to be shared
+across every `temp_gen` sub-compile the same way `struct_field_types`
+itself already is: `do_imports`'s per-module recursion compiles each
+imported module through its own `GimpleGen` instance, so a name claimed
+while compiling one module must stay claimed when a different sub-compile
+later reaches an unrelated same-named class in another module — a
+call-local dict would reset per sub-compile and miss the collision.
+Verified: `hello.mojo`'s self-hosted `repr(ast)` no longer has the phantom
+`is_static` field. Not a complete fix for byte-identical `.ast` output
+(fields typed generically as Python `object` are a separate, real,
+currently-accepted limitation — see `PLAN.md`), but the specific
+cross-module data corruption is gone. A full fix would give struct type IDs
+module-qualified names instead of just the bare class name; not attempted
+here (see `PLAN.md`).
+
 ### Real regex engine: `.finditer()` and compile-time-foldable `.sub()`
 
 `re.Pattern.finditer()` had no codegen lowering at all — `for m in

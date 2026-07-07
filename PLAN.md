@@ -28,36 +28,20 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   BUG-013, still listed there as outstanding. The for-loop target isn't
   validated as a plain identifier before being spliced into the generated
   C loop variable name.
-- **Struct reflection (`getattr()`/`setattr()`/`dataclasses.fields()`/the
-  new field-by-field `repr()`) is keyed by bare struct *name*, which
-  collides across modules that happen to define a same-named class** —
-  root-caused 2026-07-07 chasing a stale symptom of this same bug (the
-  `example_imports.mojo` `.ast` failure below). Concretely:
-  `mojo_compiler.py` and `ast_nodes.py` (imported by `myinterpreter.py`,
-  which is part of the same self-hosted closure) each define their own
-  unrelated `FunctionDef` dataclass with a *different* field layout.
-  `struct_field_types` (`gen_module`, `gimple_codegen.py`) is a plain
-  `dict[str, dict]` keyed by class name, so scanning both modules leaves
-  only whichever definition was scanned last; `_struct_type_id`
-  (a hash of the bare name) then dispatches *every* runtime `FunctionDef`
-  instance — from either module — to that one field layout. A `FunctionDef`
-  instance that's really `ast_nodes.py`'s shape gets read through
-  `mojo_compiler.py`'s field list (or vice versa): wrong offsets, an
-  `is_static` field that doesn't exist on the other class, garbage values
-  for everything after the point their layouts diverge. Reproduced via
-  `repr(ast)` on `hello.mojo`'s own trivial two-statement AST once
-  self-hosted — `FunctionDef(... is_static=0)` with every field beyond
-  that point corrupted to a raw address. Real fix needs struct type IDs
-  (and `struct_field_types`'s dict key) to be module-qualified, not just
-  the bare class name — a real, standalone fix, not a quick patch found
-  this late in an unrelated session.
-- **`example_imports.mojo`'s `.ast` generation used to hard-crash when
-  self-hosted** (found 2026-07-06); no longer crashes as of 2026-07-07 (the
-  underlying `mojo_obj_getattr` abort is fixed — see `IMPL.md`), but its
-  `.ast` output is still wrong, for the reason above: `example_imports.mojo`
-  exercises `FromImportStmt` + several `FunctionDef`/`CallExpr` nodes, and
-  once self-hosted those get corrupted the same way `hello.mojo`'s do. Not
-  a distinct bug — merged into the entry above.
+- **Struct reflection field *lists* can still cross-contaminate between two
+  modules' same-named classes, even after the field-merge collision fix
+  below** — `mojo_compiler.py`'s `ExprStmt.value: object` (and similar
+  generically-typed AST fields: `VarDecl.value`, `ReturnStmt.value`, etc.)
+  resolve to a plain `int64_t` in `struct_field_types`, indistinguishable
+  from a genuine int field (same root ambiguity as the `.ast`
+  `repr()`/`None` note in `IMPL.md`'s reflection section — Python's dynamic
+  `object` typing has no equivalent in this erased-to-C64 representation).
+  Not module-collision-related; a real, currently-accepted limitation of
+  field-by-field `repr()`.
+- ~~Struct reflection keyed by bare struct name collided across modules
+  defining a same-named class~~ **fixed 2026-07-07** — see `IMPL.md`,
+  "Struct reflection no longer collides across same-named classes in
+  different modules".
 - **`re.search()`/`re.match()` (and `.group()`/`.start()`/`.end()` on their
   result) have zero real implementation as expressions** — confirmed
   2026-07-06 investigating `monomorphize.py`. `re`/a compiled pattern is

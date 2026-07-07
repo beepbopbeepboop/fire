@@ -2259,6 +2259,19 @@ class GimpleGen:
         self.module_name = module_name  # used to name _{module_name}_toplevel
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # struct name -> id() of the first StructDef AST node whose fields were
+        # merged into struct_field_types[name] — see gen_module's struct-field
+        # scan. Must be shared across every temp_gen sub-compile the same way
+        # struct_field_types itself is (do_imports's per-module recursion),
+        # not just local to one gen_module call: two unrelated same-named
+        # classes reached via *different* modules (mojo_compiler.py's
+        # FunctionDef vs ast_nodes.py's own FunctionDef, both present once
+        # myinterpreter.py — which imports ast_nodes purely for method-
+        # signature type annotations — is compiled) are scanned by two
+        # different temp_gen instances, each of which would otherwise start
+        # from a fresh, empty "have I seen this name" view and merge its own
+        # fields in regardless of what an earlier temp_gen already decided.
+        self._struct_name_owner: dict[str, int] = {}
         # struct name → {alias_name: value AST}; expanded at member access.
         self._struct_comptime_aliases: dict[str, dict] = {}
         # Bare names of user free functions whose C symbol is overload-mangled by
@@ -2523,6 +2536,7 @@ class GimpleGen:
                     temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
                     temp_gen._const_str_locals = self._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                     temp_gen.struct_field_types = self.struct_field_types
+                    temp_gen._struct_name_owner = self._struct_name_owner  # share: cross-module same-name collision guard
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
                     temp_gen._emitted_ptr_helpers = self._emitted_ptr_helpers
@@ -12765,8 +12779,35 @@ class GimpleGen:
         for _s in all_struct_defs:
             if isinstance(_s, StructDef) and _s.name not in self.struct_field_types:
                 self.struct_field_types[_s.name] = {}
+        # Two unrelated classes sharing a bare name (found via mojo_compiler.py's
+        # FunctionDef/ExprStmt/StringLiteral/... vs ast_nodes.py's own, entirely
+        # separate, same-named AST-node classes — both reachable in the same
+        # self-hosted closure since myinterpreter.py imports ast_nodes purely
+        # for method-signature type annotations, never actually instantiating
+        # them) must NOT have their fields merged into the same
+        # struct_field_types[name] entry: struct reflection (_struct_type_id,
+        # getattr/setattr/dataclasses.fields/repr) dispatches purely on that
+        # bare name, so every REAL instance of either class — regardless of
+        # which module it's really from — would get read through one
+        # Frankenstein field list combining both. Found via `repr(ast)` on
+        # even hello.mojo's trivial 2-statement AST once self-hosted:
+        # FunctionDef gained a phantom `is_static` field (only ast_nodes.py's
+        # FunctionDef has one) and unrelated later fields read as raw
+        # addresses. First StructDef seen under a given name wins entirely;
+        # track by identity (in the cross-module-shared _struct_name_owner,
+        # not a call-local dict — a name claimed while compiling one imported
+        # module must stay claimed when a *different* temp_gen sub-compile
+        # later reaches an unrelated same-named class in another module) so a
+        # legitimate re-scan of the *same* node (e.g. the transitive closure
+        # reaching one file via two import paths) is still a harmless no-op,
+        # not itself treated as a collision.
+        for s in all_struct_defs:
+            if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
+                self._struct_name_owner[s.name] = id(s)
         for s in all_struct_defs:
             if isinstance(s, StructDef):
+                if self._struct_name_owner.get(s.name) != id(s):
+                    continue
                 if s.name not in self.struct_field_types:
                     self.struct_field_types[s.name] = {}
                 # For now, assume all struct fields on unknown types are pointers to the same struct
