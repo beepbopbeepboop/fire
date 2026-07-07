@@ -587,6 +587,41 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
     result = []
     i = 0
     while i < len(stmt):
+        # An ordinary (non-t-prefixed) string literal, e.g. `'t"'`, must be
+        # skipped as one whole unit once its opening quote is reached —
+        # otherwise the t-prefix regex below gets applied to its *contents*
+        # too, on the next loop iteration(s), and a value that merely starts
+        # with the two characters "t\"" (a completely ordinary string, not a
+        # t-string) gets misdetected as one. Found via myinterpreter.py's own
+        # `value.startswith('t"')`: `'t"'`'s content ('t' immediately
+        # followed by '"') triggered exactly this false-positive prefix
+        # match, corrupting the literal into a dangling placeholder.
+        #
+        # Deliberately NOT _find_tstring_closing_quote here: its brace-depth
+        # tracking exists for real t-string interpolation, where `{`/`}` are
+        # guaranteed balanced — applying that same assumption to an ordinary
+        # string's literal content (e.g. mojo.py's own C-code-snippet string
+        # literals, full of unbalanced `{`/`}` as plain text) scans past the
+        # real closing quote entirely, misreading unrelated later source as
+        # part of this "string" — a real, more severe regression than the
+        # bug being fixed here. A plain string only ever ends at its own
+        # closing quote, so a simple backslash-escape-aware scan is correct
+        # and sufficient.
+        if stmt[i] in ('"', "'") and (i == 0 or stmt[i-1] not in
+                'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'):
+            qch = stmt[i]
+            j = i + 1
+            while j < len(stmt):
+                if stmt[j] == '\\' and j + 1 < len(stmt):
+                    j += 2
+                    continue
+                if stmt[j] == qch:
+                    break
+                j += 1
+            if j < len(stmt):
+                result.append(stmt[i:j + 1])
+                i = j + 1
+                continue
         m = re.match(r'[rRfFbBuU]*[tT]{1}[rRfFbBuU]*', stmt[i:])
         if m:
             prefix_end = i + len(m.group())

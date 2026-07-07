@@ -13,6 +13,20 @@ typedef void* mojo_any;
 typedef void* (*mojo_func_ptr)(void);
 typedef void* mojo_generic_func;
 
+/* Sentinel passed as mojo_cstr_slice/mojo_str_slice/mojo_list_slice's `stop`
+ * for an omitted upper bound (`s[start:]`) — must be distinguishable from
+ * every real (possibly negative) Python slice index, including a literal
+ * `s[:-1]`; this value can never arise from `len(s) + stop` for any real
+ * string/list, unlike the previous sentinel of plain -1, which collided
+ * with `s[:-1]` itself. Deliberately NOT INT64_MIN: that's only expressible
+ * as the compound expression `(-9223372036854775807LL-1)` (see stdint.h),
+ * and this sentinel gets inlined directly as a GIMPLE call argument — a
+ * compound expression there is invalid (the exact class of bug this
+ * project hit once already with the char_replace() macro; see
+ * gimple_codegen.py's _char_replace_impl comment). A single literal token
+ * avoids that entirely while still being an impossible real index. */
+#define MOJO_SLICE_STOP_OMITTED -9223372036854775807LL
+
 /* ── Higher-order function dispatch helpers ──────────────────────────────
  * __GIMPLE functions cannot cast-and-call in a single expression, so
  * we call through these small non-GIMPLE helpers that do the cast.
@@ -131,6 +145,8 @@ int mojo_cstr_cmp(char *a, char *b);
 int mojo_str_contains(char *haystack, char *needle);
 int64_t mojo_str_find(char *s, char *needle);
 MojoList *mojo_str_split(char *s, char *sep);
+MojoList *mojo_str_splitlines(char *s);
+int64_t mojo_str_count(char *s, char *sub);
 MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
 char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);

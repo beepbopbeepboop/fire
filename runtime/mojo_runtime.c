@@ -436,6 +436,12 @@ char *mojo_list_get_str(MojoList *l, int64_t i)
 
 MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
 {
+    /* stop == MOJO_SLICE_STOP_OMITTED means "no stop given" (`lst[start:]`)
+     * — without this check, that omitted bound fell into `stop < 0` below
+     * and got treated as a literal `stop=-1` (`lst[start:-1]`), silently
+     * dropping the list's last element from every plain `lst[start:]`
+     * slice. Same class of bug as mojo_cstr_slice's own sentinel fix. */
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
     if (start < 0) start = l->len + start;
     if (stop  < 0) stop  = l->len + stop;
     if (start < 0) start = 0;
@@ -525,16 +531,22 @@ char *mojo_str_data(MojoStr *s) { return s->data; }
  * `for`/`import`/etc keywords — flow straight into the token stream once
  * self-hosted.
  *
- * `stop == -1` is _lower_slice's sentinel for "no stop given" (`s[start:]`)
- * — mirrors mojo_str_slice's contract above for MojoStr, even though that
- * makes a literal `s[:-1]` request (a real negative index, not "no bound")
- * indistinguishable from "to the end"; matching the existing contract here
- * for consistency rather than fixing that separately. */
+ * `stop == MOJO_SLICE_STOP_OMITTED` is _lower_slice's sentinel for "no stop
+ * given" (`s[start:]`) — a plain -1 doesn't work as that sentinel: it's
+ * indistinguishable from a real `s[:-1]` request, which silently returned
+ * the whole string unsliced instead of dropping the last character (found
+ * via mojo_compiler.py's own backslash-line-continuation joining, whose
+ * `line.rstrip()[:-1]` — meant to drop the trailing `\` — left it in place,
+ * shifting every subsequent token's column on that logical line by one).
+ * mojo_str_slice/mojo_list_slice had the same collision in the opposite
+ * direction: their omitted-stop case fell into the `stop < 0` branch below
+ * and got treated as literal `stop=-1`, silently dropping the last
+ * character/element from every plain `x[start:]`. */
 char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
 {
     if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
     int64_t len = (int64_t)strlen(s);
-    if (stop == -1) stop = len;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = len;
     if (start < 0) start += len;
     if (stop  < 0) stop  += len;
     if (start < 0) start = 0;
@@ -549,6 +561,10 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
 
 MojoStr *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop)
 {
+    /* See mojo_list_slice's identical fix: MOJO_SLICE_STOP_OMITTED (not a
+     * plain -1) means "no stop given" (`s[start:]`), distinct from a real
+     * `s[start:-1]`. */
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = s->len;
     if (start < 0) start = s->len + start;
     if (stop  < 0) stop  = s->len + stop;
     if (start < 0) start = 0;
@@ -842,13 +858,68 @@ MojoList *mojo_str_split(char *s, char *sep) {
         _split_whitespace_into(l, s);
         return l;
     }
-    char *copy = strdup(s);
-    char *token = strtok(copy, sep);
-    while (token) {
-        mojo_list_append_str(l, strdup(token));
-        token = strtok(NULL, sep);
+    /* Split on the literal `sep` substring, keeping empty fields between
+     * consecutive occurrences (Python semantics) — strtok treats `sep` as a
+     * set of delimiter characters and collapses runs of them, silently
+     * dropping the empty string between two adjacent separators. Real bug
+     * found via py_tokenize's own `src.splitlines()` (== split("\n")):
+     * every blank line in the input vanished, shifting every subsequent
+     * physical line number down by one. */
+    size_t sep_len = strlen(sep);
+    const char *p = s;
+    const char *hit;
+    while ((hit = strstr(p, sep)) != NULL) {
+        size_t seg_len = (size_t)(hit - p);
+        char *seg = (char *)malloc(seg_len + 1);
+        memcpy(seg, p, seg_len);
+        seg[seg_len] = '\0';
+        mojo_list_append_str(l, seg);
+        p = hit + sep_len;
     }
-    free(copy);
+    mojo_list_append_str(l, strdup(p));
+    return l;
+}
+
+/* Python str.count(sub): number of non-overlapping occurrences. `str.count`
+ * had no lowering at all before (any call fell through to the generic
+ * "unknown char* method" stub, always returning 0) — real bug found via
+ * mojo_compiler.py's own multi-line-string handling, which counts '\n' in a
+ * matched docstring to preserve line numbers after collapsing it to a
+ * placeholder; every count silently came back 0, undoing that fix once
+ * self-hosted. */
+int64_t mojo_str_count(char *s, char *sub) {
+    if (!s || !sub || !*sub) return 0;
+    size_t sub_len = strlen(sub);
+    int64_t n = 0;
+    const char *p = s;
+    while ((p = strstr(p, sub)) != NULL) { n++; p += sub_len; }
+    return n;
+}
+
+/* Python str.splitlines(): splits on \n, \r\n or \r, but — unlike
+ * split("\n") — a trailing line terminator does NOT produce a final empty
+ * element (used by py_tokenize's `raw_lines = src.splitlines()`, where every
+ * Mojo/Python source file ends in a trailing newline). */
+MojoList *mojo_str_splitlines(char *s) {
+    MojoList *l = mojo_list_new();
+    if (!s) return l;
+    const char *p = s;
+    const char *start = p;
+    while (*p) {
+        if (*p == '\n' || *p == '\r') {
+            size_t seg_len = (size_t)(p - start);
+            char *seg = (char *)malloc(seg_len + 1);
+            memcpy(seg, start, seg_len);
+            seg[seg_len] = '\0';
+            mojo_list_append_str(l, seg);
+            if (*p == '\r' && *(p + 1) == '\n') p++;
+            p++;
+            start = p;
+        } else {
+            p++;
+        }
+    }
+    if (p != start) mojo_list_append_str(l, strdup(start));
     return l;
 }
 
@@ -864,13 +935,21 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
      * left once we know how many splits maxsplit allows. */
     MojoList *all = mojo_list_new();
     if (sep && *sep) {
-        char *copy = strdup(s);
-        char *token = strtok(copy, sep);
-        while (token) {
-            mojo_list_append_str(all, strdup(token));
-            token = strtok(NULL, sep);
+        /* See mojo_str_split's comment: strtok collapses consecutive
+         * separators, dropping empty fields that Python's rsplit(sep)
+         * keeps. */
+        size_t sep_len = strlen(sep);
+        const char *p = s;
+        const char *hit;
+        while ((hit = strstr(p, sep)) != NULL) {
+            size_t seg_len = (size_t)(hit - p);
+            char *seg = (char *)malloc(seg_len + 1);
+            memcpy(seg, p, seg_len);
+            seg[seg_len] = '\0';
+            mojo_list_append_str(all, seg);
+            p = hit + sep_len;
         }
-        free(copy);
+        mojo_list_append_str(all, strdup(p));
     } else {
         _split_whitespace_into(all, s);
     }
@@ -1378,17 +1457,23 @@ char *mojo_repr_int(int64_t obj) {
 }
 
 char *mojo_repr_str(char *s) {
-    /* Python repr() of a string is quoted: repr("hi") == "'hi'". Minimal
-     * escaping (backslash and single-quote) -- good enough for a debug
-     * dump, not a full Python string-literal round-trip. */
+    /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
+     * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
+     * than the raw byte -- needed for e.g. a compiled AST's StringLiteral
+     * nodes whose value is itself a multi-line docstring. Minimal escaping
+     * (backslash, single-quote, \n \r \t) -- good enough for a debug dump,
+     * not a full Python string-literal round-trip. */
     if (!s) s = "";
     size_t len = strlen(s);
     char *buf = malloc(len * 2 + 3);
     char *p = buf;
     *p++ = '\'';
     for (const char *c = s; *c; c++) {
-        if (*c == '\'' || *c == '\\') *p++ = '\\';
-        *p++ = *c;
+        if (*c == '\'' || *c == '\\') { *p++ = '\\'; *p++ = *c; }
+        else if (*c == '\n') { *p++ = '\\'; *p++ = 'n'; }
+        else if (*c == '\r') { *p++ = '\\'; *p++ = 'r'; }
+        else if (*c == '\t') { *p++ = '\\'; *p++ = 't'; }
+        else *p++ = *c;
     }
     *p++ = '\'';
     *p = '\0';
@@ -2843,9 +2928,20 @@ char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClass
         memcpy(out + out_len, src + pos, pre);
         out_len += pre;
 
+        /* `matched` (the callback's `m.group(0)`) is NOT freed here: a
+         * callback is free to retain it (e.g. store into a dict/list, as
+         * Python's real re.sub callback allows), same as every other
+         * MojoList/MojoDict string-ownership convention in this runtime
+         * (see mojo_list_append_str's comment). Freeing it unconditionally
+         * right after the call left any retained reference dangling — real
+         * bug found via mojo_compiler.py's own replace_multiline_strings:
+         * `string_cache[placeholder] = m.group(0)` inside its re.sub
+         * callback stored a pointer that was freed moments later, so every
+         * later read of that cache came back empty (a picture-perfect
+         * use-after-free: glibc's free() commonly zeroes/reuses the first
+         * bytes of a small allocation immediately). */
         char *matched = mojo_regex_substr(src, mstart, mend);
         char *repl = callback(env, matched);
-        free(matched);
         if (repl) {
             size_t rlen = strlen(repl);
             while (out_len + rlen + 1 > out_cap) { out_cap *= 2; out = realloc(out, out_cap); }

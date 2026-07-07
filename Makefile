@@ -80,11 +80,43 @@ stdlib:
 #  verify   stage1 == stage2 == stage3  for all generated files
 
 # ── Stage 1: Python drives the compiler ──────────────────────────────────────
+# The --dump-full step is load-bearing: it's the single transitive-closure
+# mojo.ci that stage2/mojo gets compiled from below, and must stay exactly as
+# is. The per-file --dump loop is separate and additional — bootstrap-
+# validate.mojo (see validate-all) compares stage1/<file>.{ci,tok,ast,pyi}
+# against stage2/stage3 for every source file, but until now stage1 only
+# ever produced those 4 outputs for mojo.py itself (and even then, only
+# .ci — --dump-full doesn't emit .tok/.ast/.pyi at all), so validate-all's
+# "154 mismatches" were never a real regression signal, just this asymmetry.
 stage1:
 	@mkdir -p stage1
 	@echo "=== Stage 1: Python → stage1/ ==="
 	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
-	@echo "✓ Stage 1 complete"
+	@FAILED=0; \
+	run_dump() { \
+	    out=$$(cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump "../$$1" 2>&1); \
+	    rc=$$?; \
+	    [ -n "$$out" ] && echo "$$out"; \
+	    if [ $$rc -ne 0 ] || echo "$$out" | grep -q "mojo_unsupported_iter"; then \
+	        echo "  FAILED: $$1"; \
+	        FAILED=1; \
+	    fi; \
+	}; \
+	echo "--- Dumping all .mojo source files ---"; \
+	for f in $(MOJO_FILES); do \
+	    echo "  dump $$f"; \
+	    run_dump $$f; \
+	done; \
+	echo "--- Dumping core .py source files ---"; \
+	for f in $(PY_FILES); do \
+	    echo "  dump $$f"; \
+	    run_dump $$f; \
+	done; \
+	if [ "$$FAILED" = "0" ]; then \
+	    echo "✓ Stage 1 complete"; \
+	else \
+	    echo "✗ Stage 1 had failures (see FAILED lines above)"; exit 1; \
+	fi
 
 # ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
 mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
