@@ -27,6 +27,23 @@ void mojo_exc_pop(void)
 
 void mojo_raise(void)
 {
+    /* _mojo_exc_top < 0 means no enclosing try/with is active — either a
+     * genuinely uncaught exception reaching the top of the program (real
+     * Mojo would print a traceback and exit(1); this from-scratch runtime
+     * has no such top-level handler), or a push/pop imbalance in the
+     * generated code (a codegen bug, not a program bug). Either way,
+     * longjmp-ing into _mojo_exc_stack[-1] is out-of-bounds and undefined —
+     * previously a silent memory corruption that only crashed much later,
+     * far from the real cause. Fail loudly and immediately instead. */
+    if (_mojo_exc_top < 0) {
+        fprintf(stderr, "Unhandled exception: %s\n", mojo_exc_msg_get());
+        exit(1);
+    }
+    if (_mojo_exc_top >= MOJO_EXC_STACK_MAX) {
+        fprintf(stderr, "mojo_raise: exception stack overflow (>%d nested try/with)\n",
+                MOJO_EXC_STACK_MAX);
+        exit(1);
+    }
     longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }
 

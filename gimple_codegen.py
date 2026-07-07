@@ -9962,12 +9962,37 @@ class GimpleGen:
                         _return_type = 'int64_t'  # Simplified
                     else:
                         _return_value = None
+                    # An early return leaves the try block's protected region
+                    # just as much as falling off the end of it does — it
+                    # must pop the exception stack (_mojo_exc_top) the same
+                    # way the normal-exit path below does. Omitting this
+                    # leaked one _mojo_exc_top level per early return with no
+                    # matching pop: harmless for a single try, but a whole
+                    # self-hosted compiler run has many `try: ... return ...`
+                    # sites, so _mojo_exc_top crept up across the run and
+                    # eventually walked off the end of the fixed-size
+                    # _mojo_exc_stack[MOJO_EXC_STACK_MAX] array — silent OOB
+                    # writes that corrupted nearby memory, surfacing much
+                    # later as a longjmp into a garbage jmp_buf.
+                    original_emit("  mojo_exc_pop ();")
                     # Emit goto to finally instead of return
                     if node.finally_body:
                         original_emit(f"  goto {bb_finally};")
                     else:
                         original_emit(line)
                     self._last_was_terminal = True
+                    return
+                # break/continue lower to a bare `goto <loop label>;` (see
+                # _gen_stmt_BreakStmt/_gen_stmt_ContinueStmt) — anywhere
+                # inside the try body, even nested in an if/while, they jump
+                # out of this try's protected region exactly like an early
+                # return does, and leak the same way if unaccounted for.
+                if self.loop_stack and stripped in (
+                    f"goto {self.loop_stack[-1][0]};",
+                    f"goto {self.loop_stack[-1][1]};",
+                ):
+                    original_emit("  mojo_exc_pop ();")
+                    original_emit(line)
                     return
                 original_emit(line)
 
@@ -9986,10 +10011,14 @@ class GimpleGen:
                 self.gen_stmt(s)
             self._emit(f"  goto {bb_finally_done};")
 
-        # After finally: do the actual return if needed
+        # After finally: do the actual return if needed. Only re-emit the
+        # return here when a finally deferred it (see intercepted_emit above)
+        # — without a finally_body, the interceptor already emitted the real
+        # return statement directly, and doing it again here would duplicate
+        # it (unreachable dead code, not a compile error, but still wrong).
         if bb_finally_done:
             self._emit_label(bb_finally_done)
-        if _had_terminal and _return_value is not None:
+        if _had_terminal and _return_value is not None and node.finally_body:
             self._emit(f"  return {_return_value};")
         elif not _had_terminal:
             self._emit("  mojo_exc_pop ();")
@@ -10003,8 +10032,24 @@ class GimpleGen:
         self._emit("  mojo_exc_pop ();")
 
         handlers = node.handlers
-        typed = [h for h in handlers if self._handler_exc_name(h) is not None]
-        bare = [h for h in handlers if self._handler_exc_name(h) is None]
+        # `except Exception`/`except BaseException` must catch *anything* —
+        # in real Python every raised type is an Exception subclass, but the
+        # tag-equality dispatch below has no notion of inheritance, so
+        # without this special case `except Exception as e:` only matched a
+        # literal Exception tag and let every other exception type (e.g. the
+        # very common `except Exception: <log and continue>` guarding a
+        # SyntaxError from a speculative/lookahead parse) propagate straight
+        # past it — a regression from the old "run whatever handler is here
+        # unconditionally" behavior, where this happened to work by
+        # accident. Treated as a catch-all (`bare`) the same as a
+        # type-less `except:`.
+        _UNIVERSAL_CATCH_NAMES = ('Exception', 'BaseException')
+        typed = [h for h in handlers
+                 if self._handler_exc_name(h) is not None
+                 and self._handler_exc_name(h) not in _UNIVERSAL_CATCH_NAMES]
+        bare = [h for h in handlers
+                if self._handler_exc_name(h) is None
+                or self._handler_exc_name(h) in _UNIVERSAL_CATCH_NAMES]
 
         if not typed:
             # Only bare handler(s) (or none) — nothing to dispatch on.
@@ -10150,13 +10195,35 @@ class GimpleGen:
 
             self._emit_label(bb_try)
             for s in node.body:
+                # break/continue lower to a bare `goto <loop label>;` and jump
+                # out of this with's protected region same as an early return
+                # — same leak as in _gen_stmt_TryStmt if unaccounted for.
+                original_emit = self._emit
+                def intercepted_emit(line, rv=None, rt=None):
+                    stripped = line.strip()
+                    if self.loop_stack and stripped in (
+                        f"goto {self.loop_stack[-1][0]};",
+                        f"goto {self.loop_stack[-1][1]};",
+                    ):
+                        original_emit("  mojo_exc_pop ();")
+                        original_emit(line)
+                        return
+                    original_emit(line)
+                self._emit = intercepted_emit
                 self.gen_stmt(s)
-            # Only emit cleanup and goto if the with body didn't end with a return
+                self._emit = original_emit
+            # Only emit cleanup and goto if the with body didn't end with a
+            # return — but an early return still leaves the protected region
+            # and must pop the exception stack (_mojo_exc_top) exactly like
+            # the normal-exit path does (see the matching fix and comment in
+            # _gen_stmt_TryStmt — this is the same leak, in the `with`
+            # codegen instead of `try`).
             if not self._last_was_terminal:
                 self._emit("  mojo_exc_pop ();")
                 _emit_exits()
                 self._emit(f"  goto {bb_after};")
             else:
+                self._emit("  mojo_exc_pop ();")
                 _emit_exits()
 
             self._emit_label(bb_exc)
