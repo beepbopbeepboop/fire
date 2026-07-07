@@ -14,15 +14,6 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
-- **`and`/`or` evaluate both operands eagerly** (`_lower_BinaryOp`,
-  `gimple_codegen.py`) — `x = f() or g()` still calls `g()` even when `f()`
-  is truthy, since there's no branch in the generated C that skips the
-  untaken side. The identical bug in ternaries (`a if cond else b`) was
-  fixed 2026-07-06 by emitting a real `if/else` with a merge label (see
-  `IMPL.md`); `and`/`or` was written mirroring that same eager lowering and
-  was deliberately *not* fixed alongside it — no known real-world trigger
-  yet (unlike the ternary case, which crashed twice), but the same
-  real-branching fix would apply if one shows up.
 - **`@` matmul defaults its result type to `int64_t`** when `__matmul__`'s
   return type is unknown (`_lower_matmul`, `gimple_codegen.py` ~line 5323).
 - **Typed `except` dispatch is impossible** — the runtime carries no
@@ -37,16 +28,36 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   BUG-013, still listed there as outstanding. The for-loop target isn't
   validated as a plain identifier before being spliced into the generated
   C loop variable name.
-- **`example_imports.mojo`'s `.ast` generation fails when self-hosted**
-  (found 2026-07-06, not yet root-caused). The file no longer crashes (the
-  `mojo_obj_getattr` abort chased down that day is fixed — see `IMPL.md`),
-  but `mojo --dump` on the self-hosted `stage2/mojo` binary still prints
-  `Warning: Could not generate .ast: None` for it specifically, while the
-  interpreted compiler (`python3 mojo.py --dump example_imports.mojo`)
-  handles it cleanly. Caught gracefully (no crash), so lower urgency than
-  the bugs above, but real — some Parser code path behaves differently
-  once compiled than interpreted for this file's actual `from X import
-  Y` + function-call shape.
+- **Struct reflection (`getattr()`/`setattr()`/`dataclasses.fields()`/the
+  new field-by-field `repr()`) is keyed by bare struct *name*, which
+  collides across modules that happen to define a same-named class** —
+  root-caused 2026-07-07 chasing a stale symptom of this same bug (the
+  `example_imports.mojo` `.ast` failure below). Concretely:
+  `mojo_compiler.py` and `ast_nodes.py` (imported by `myinterpreter.py`,
+  which is part of the same self-hosted closure) each define their own
+  unrelated `FunctionDef` dataclass with a *different* field layout.
+  `struct_field_types` (`gen_module`, `gimple_codegen.py`) is a plain
+  `dict[str, dict]` keyed by class name, so scanning both modules leaves
+  only whichever definition was scanned last; `_struct_type_id`
+  (a hash of the bare name) then dispatches *every* runtime `FunctionDef`
+  instance — from either module — to that one field layout. A `FunctionDef`
+  instance that's really `ast_nodes.py`'s shape gets read through
+  `mojo_compiler.py`'s field list (or vice versa): wrong offsets, an
+  `is_static` field that doesn't exist on the other class, garbage values
+  for everything after the point their layouts diverge. Reproduced via
+  `repr(ast)` on `hello.mojo`'s own trivial two-statement AST once
+  self-hosted — `FunctionDef(... is_static=0)` with every field beyond
+  that point corrupted to a raw address. Real fix needs struct type IDs
+  (and `struct_field_types`'s dict key) to be module-qualified, not just
+  the bare class name — a real, standalone fix, not a quick patch found
+  this late in an unrelated session.
+- **`example_imports.mojo`'s `.ast` generation used to hard-crash when
+  self-hosted** (found 2026-07-06); no longer crashes as of 2026-07-07 (the
+  underlying `mojo_obj_getattr` abort is fixed — see `IMPL.md`), but its
+  `.ast` output is still wrong, for the reason above: `example_imports.mojo`
+  exercises `FromImportStmt` + several `FunctionDef`/`CallExpr` nodes, and
+  once self-hosted those get corrupted the same way `hello.mojo`'s do. Not
+  a distinct bug — merged into the entry above.
 - **`re.search()`/`re.match()` (and `.group()`/`.start()`/`.end()` on their
   result) have zero real implementation as expressions** — confirmed
   2026-07-06 investigating `monomorphize.py`. `re`/a compiled pattern is

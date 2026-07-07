@@ -184,8 +184,11 @@ contract used for list/tuple literal element-type inference) so the shared
 result temp can be declared before either branch runs. Verified with a test
 program: only the taken branch's `print()` fires.
 
-`and`/`or` (`_lower_BinaryOp`) have the identical eager-both-operands shape
-and are **not yet fixed** — see `PLAN.md`.
+`and`/`or` (`_lower_BinaryOp`) had the identical eager-both-operands shape;
+fixed the same way (real branch, only the taken side evaluated) in both the
+interpreter (`eval_BinaryOp`) and the compiled path (`_lower_binary`) —
+verified with `x = f() or g()`, where `g()` no longer runs once `f()` is
+truthy.
 
 ### Real regex engine: `.finditer()` and compile-time-foldable `.sub()`
 
