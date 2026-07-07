@@ -51,9 +51,36 @@ def _extract_codegen_flags(args):
     return opt_flag, debug_flag, remaining
 
 
+def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
+    """Does this statement list call `main()` anywhere reachable at module
+    scope — including the extremely common Python idiom
+    `if __name__ == '__main__': main()`? A first version of this check only
+    looked for a *bare* top-level `main()` call, so mojo.py's own
+    `if __name__ == '__main__': main()` guard wasn't recognized as already
+    having called it — main() got invoked once by that guard executing
+    normally, then a second time by the auto-invoke fallback below,
+    printing everything twice. Recurses into if/elif/else bodies (that
+    covers the idiom; deeper nesting inside a loop or function call is
+    deliberately not chased — main() is a module-scope entry point, not
+    something reasonably called from inside a loop body)."""
+    for s in stmts:
+        if (isinstance(s, ExprStmt) and isinstance(s.value, CallExpr)
+                and isinstance(s.value.func, IdentExpr) and s.value.func.name == 'main'):
+            return True
+        if isinstance(s, IfStmt):
+            if _calls_main(s.then_body, IfStmt, ExprStmt, CallExpr, IdentExpr):
+                return True
+            for _cond, body in (s.elifs or []):
+                if _calls_main(body, IfStmt, ExprStmt, CallExpr, IdentExpr):
+                    return True
+            if s.else_body and _calls_main(s.else_body, IfStmt, ExprStmt, CallExpr, IdentExpr):
+                return True
+    return False
+
+
 def interpret_and_execute(src_code, filename=None, argv=None):
     try:
-        from mojo_compiler import py_tokenize, Parser, FunctionDef, ExprStmt, CallExpr, IdentExpr
+        from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
         from myinterpreter import Interpreter
         tokens = py_tokenize(src_code)
         stmts = Parser(tokens).parse_module()
@@ -65,14 +92,10 @@ def interpret_and_execute(src_code, filename=None, argv=None):
         # the entry point and gets invoked automatically (like C's main), the
         # same way the compiled path (gimple_codegen) wires it up. Scripts
         # written in the Python-style dialect (explicit `main()` call at file
-        # scope) already ran it above, so only auto-invoke when no top-level
-        # statement already called it.
+        # scope, or guarded by `if __name__ == '__main__':`) already ran it
+        # above, so only auto-invoke when nothing already called it.
         has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
-        already_called = any(
-            isinstance(s, ExprStmt) and isinstance(s.value, CallExpr)
-            and isinstance(s.value.func, IdentExpr) and s.value.func.name == 'main'
-            for s in stmts
-        )
+        already_called = _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr)
         if has_main_def and not already_called:
             interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
     except Exception as e:
