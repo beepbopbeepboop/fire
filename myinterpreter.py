@@ -10,8 +10,14 @@ Eventually will be transpiled to .mojo for full bootstrap.
 """
 
 import sys
+import os
 import re
 import importlib
+import types
+import platform
+import operator
+import math
+import collections
 from dataclasses import dataclass
 import ast_nodes as N
 try:
@@ -63,15 +69,31 @@ class Scope:
 
 class MojoFunction:
     """Represents a function defined in Mojo code."""
-    def __init__(self, name, params, body, closure_scope):
+    def __init__(self, name, params, body, closure_scope, comptime_params=None):
         self.name = name
         self.params = params
         self.body = body
         self.closure_scope = closure_scope
+        # Names from `def f[dtype: DType, ...](...)`'s bracketed generic
+        # parameter list (see mojo_compiler.py's _parse_generic_params_capture)
+        # — bound by `__getitem__` when the call site subscripts the
+        # function (`f[Int32](...)`), not passed as regular arguments.
+        self.comptime_params = comptime_params or []
 
     def __call__(self, interpreter, *args, **kwargs):
+        return self._invoke(interpreter, {}, args, kwargs)
+
+    def __getitem__(self, item):
+        values = item if isinstance(item, tuple) else (item,)
+        bindings = dict(zip(self.comptime_params, values))
+        return _MojoBoundComptimeFunction(self, bindings)
+
+    def _invoke(self, interpreter, comptime_bindings, args, kwargs):
         # Create new scope for function execution
         func_scope = Scope(parent=self.closure_scope)
+
+        for name, value in comptime_bindings.items():
+            func_scope.define(name, value)
 
         # Bind parameters to arguments
         for i, param in enumerate(self.params):
@@ -98,22 +120,1210 @@ class MojoFunction:
         return result
 
 
-class MojoClass:
-    """Represents a class/struct defined in Mojo code."""
-    def __init__(self, name, body, methods=None):
+class _MojoBoundComptimeFunction:
+    """Result of subscripting a generic function at a call site
+    (`run_func[DType.float64](8, 0.125, ctx)`) — the comptime parameter
+    names are pre-bound; calling it runs the function body with both those
+    and the regular call-time arguments in scope."""
+    def __init__(self, func, comptime_bindings):
+        self.func = func
+        self.comptime_bindings = comptime_bindings
+
+    def __call__(self, interpreter, *args, **kwargs):
+        return self.func._invoke(interpreter, self.comptime_bindings, args, kwargs)
+
+
+class MojoOverloadSet:
+    """Multiple `def name(...)` definitions sharing a name are Mojo overloads,
+    not redefinitions of the same function — real Mojo picks the candidate
+    whose signature matches the call site. We can only realistically dispatch
+    on argument count and keyword names (the interpreter is untyped, so
+    parameter *types* can't disambiguate); no match is a hard error rather
+    than a silent first-pick, matching this project's own compiled-path
+    overload-resolution philosophy (see gimple_codegen's "no-match overload
+    returns None" test)."""
+    def __init__(self, name):
         self.name = name
-        self.body = body
-        self.methods = methods or {}
+        self.candidates = []  # list of (MojoFunction, required, optional, kwonly, has_var_kwargs)
+
+    def add(self, func, required, optional, kwonly, has_var_kwargs):
+        self.candidates.append((func, required, optional, kwonly, has_var_kwargs))
+
+    @staticmethod
+    def _matches(spec, args, kwargs):
+        required, optional, kwonly, has_var_kwargs = spec[1], spec[2], spec[3], spec[4]
+        n = len(args)
+        if n < len(required) or n > len(required) + len(optional):
+            return False
+        covered = (required + optional)[:n]
+        for key in kwargs:
+            if key in covered:
+                return False  # supplied both positionally and by keyword
+            if key not in required and key not in optional and key not in kwonly and not has_var_kwargs:
+                return False
+        for name in required[n:]:
+            if name not in kwargs:
+                return False
+        return True
+
+    def __call__(self, interpreter, *args, **kwargs):
+        for spec in self.candidates:
+            if self._matches(spec, args, kwargs):
+                func = spec[0]
+                return func(interpreter, *args, **kwargs)
+        raise TypeError(
+            f"no overload of '{self.name}' matches {len(args)} positional "
+            f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
+        )
+
+
+class _MojoWriter:
+    """Minimal stand-in for real Mojo's `Writer` trait — `write_to`/
+    `write_repr_to` methods call `writer.write(*args)` one or more times with
+    a mix of strings/values to concatenate; this just accumulates them."""
+    def __init__(self):
+        self._parts = []
+
+    def write(self, *args):
+        for a in args:
+            self._parts.append(str(a))
+
+    def getvalue(self):
+        return ''.join(self._parts)
+
+
+class MojoInstance:
+    """An instance of a Mojo-defined struct/class."""
+    def __init__(self, mojo_class):
+        self._mojo_class = mojo_class
+
+    def _write_via(self, method_name):
+        """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
+        method, if the struct defines one, and return the accumulated text —
+        or None if it doesn't (no reflection-based default synthesis here,
+        unlike real Mojo's compiler-derived Writable for plain structs)."""
+        method = self._mojo_class.methods.get(method_name)
+        if method is None:
+            return None
+        writer = _MojoWriter()
+        method(self._mojo_class.interpreter, self, writer)
+        return writer.getvalue()
+
+    def __str__(self):
+        result = self._write_via('write_to')
+        if result is not None:
+            return result
+        return repr(self)
+
+    def __repr__(self):
+        result = self._write_via('write_repr_to')
+        if result is not None:
+            return result
+        result = self._write_via('write_to')
+        if result is not None:
+            return result
+        return f"<{self._mojo_class.name} instance>"
+
+
+class BoundMethod:
+    """A struct/class method bound to a specific instance (`self` already filled in)."""
+    def __init__(self, bound_func, instance, interpreter):
+        self.bound_func = bound_func
+        self.instance = instance
+        self.interpreter = interpreter
 
     def __call__(self, *args, **kwargs):
-        instance = type(self.name, (), {})()
-        # Set attributes from body or initialization
-        for stmt in self.body:
-            if isinstance(stmt, N.AssignStmt):
-                for target in stmt.targets:
-                    if isinstance(target, N.IdentExpr):
-                        setattr(instance, target.name, None)
+        f = self.bound_func
+        return f(self.interpreter, self.instance, *args, **kwargs)
+
+
+class MojoClass:
+    """Represents a class/struct defined in Mojo code."""
+    def __init__(self, name, fields, methods, interpreter):
+        self.name = name
+        self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
+        self.methods = methods  # dict: name -> MojoFunction
+        self.interpreter = interpreter
+
+    def __call__(self, *args, **kwargs):
+        instance = MojoInstance(self)
+        for f in self.fields:
+            if self.interpreter._is_instance(f, 'VarDecl'):
+                value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
+                setattr(instance, f.name, value)
+            elif self.interpreter._is_instance(f, 'AssignStmt'):
+                value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                for target in f.targets:
+                    if self.interpreter._is_instance(target, 'IdentExpr'):
+                        setattr(instance, target.name, value)
+        init = self.methods.get('__init__')
+        if init is not None:
+            init(self.interpreter, instance, *args, **kwargs)
         return instance
+
+    def __getitem__(self, item):
+        # A user-defined generic struct instantiated with explicit type/value
+        # params, e.g. `Layout[Int]`. No monomorphization here — same
+        # simplification as _MojoGenericCtor's `List[Int]`.
+        return self
+
+
+class _MojoGenericCtor:
+    """Mojo's `List[Int]()`/`Dict[String, Int]()` subscript the type with its
+    element type(s) before calling it. The interpreter has no generic-type
+    system, so the subscript is a no-op — `List[Int]` and `List[String]` both
+    just resolve back to this same constructor, and `[...]` is ignored."""
+    def __init__(self, ctor):
+        self._ctor = ctor
+
+    def __call__(self, *args, **kwargs):
+        ctor = self._ctor
+        # Mojo's `List(1, 2, 3)`/`Set(1, 2, 3)` pass elements variadically;
+        # Python's own list()/set()/deque() take a single iterable argument.
+        if len(args) > 1 and not kwargs:
+            return ctor(list(args))
+        return ctor(*args, **kwargs)
+
+    def __getitem__(self, item):
+        return self
+
+
+class _MojoBitcastToken:
+    """`ptr.bitcast[NewType]()` — subscript with the target type (ignored, no
+    real memory typing here), call with no arguments to get the same pointer
+    back reinterpreted (a no-op, since `_MojoPointer` isn't typed)."""
+    def __init__(self, pointer):
+        self.pointer = pointer
+
+    def __getitem__(self, type_arg):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return self.pointer
+
+
+class _MojoPointer:
+    """Stand-in for real Mojo's `UnsafePointer[T]`. There's no real memory
+    model here — it's a Python list (`buffer`) playing the role of the
+    pointee's backing storage, plus an `offset` into it, so pointer
+    arithmetic (`ptr + n`) and dereference (`ptr[]`, which the parser lowers
+    to `ptr[0]` — see mojo_compiler.py's subscript parsing) both fall out of
+    plain list indexing. `UnsafePointer(to=x)` boxes `x` into a fresh
+    single-element buffer: reads/writes through the returned pointer work,
+    but (unlike real Mojo) don't alias back to the original variable `x` —
+    the interpreter has no way to take "the address of" a Python local."""
+    def __init__(self, buffer, offset=0):
+        self.buffer = buffer
+        self.offset = offset
+
+    def __getitem__(self, i):
+        return self.buffer[self.offset + i]
+
+    def __setitem__(self, i, value):
+        self.buffer[self.offset + i] = value
+
+    def load(self, i=0):
+        return self.buffer[self.offset + i]
+
+    def store(self, *args):
+        # `ptr.store(value)` or `ptr.store(i, value)`.
+        if len(args) == 1:
+            i, value = 0, args[0]
+        else:
+            i, value = args[0], args[1]
+        self.buffer[self.offset + i] = value
+
+    def __add__(self, n):
+        return _MojoPointer(self.buffer, self.offset + n)
+
+    def __sub__(self, n):
+        if isinstance(n, _MojoPointer):
+            return self.offset - n.offset
+        return _MojoPointer(self.buffer, self.offset - n)
+
+    def __eq__(self, other):
+        if not isinstance(other, _MojoPointer):
+            return NotImplemented
+        return self.buffer is other.buffer and self.offset == other.offset
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    def __hash__(self):
+        return id(self.buffer) ^ self.offset
+
+    def __bool__(self):
+        return True
+
+    def __int__(self):
+        # A real (if fake) nonzero "address" — enough for `assert_not_equal(0, Int(ptr))`.
+        return id(self.buffer) + self.offset
+
+    def __repr__(self):
+        return f"UnsafePointer(0x{self.__int__():x})"
+
+    def free(self):
+        pass  # no real memory to release; Python GC owns `buffer`
+
+    def as_immutable(self):
+        return self
+
+    def as_unsafe_any_origin(self):
+        return self
+
+    def address_space_cast(self, *args, **kwargs):
+        return self
+
+    @property
+    def bitcast(self):
+        # Real Mojo calls this as `ptr.bitcast[NewType]()` — subscript with
+        # the target type, then call. A plain method can't be subscripted
+        # (`ptr.bitcast[T]` would try to subscript a bound method object), so
+        # this is a property returning a subscript-then-call token instead.
+        return _MojoBitcastToken(self)
+
+    def address_of(self):
+        return self
+
+    def map_to_host(self):
+        # Real Mojo's `with dev_buf.map_to_host() as host_buf:` copies device
+        # memory to host-visible memory for the duration of the `with` block.
+        # There's no real device/host split in this simulation — buffers
+        # allocated by `DeviceContext.enqueue_create_buffer` are already
+        # plain host lists — so this just hands back the same pointer.
+        return _MojoMapToHostCtx(self)
+
+    def enqueue_copy_to(self, other):
+        # `ctx.enqueue_copy(dst, src)` / `src.enqueue_copy_to(dst)`.
+        for i in range(len(self.buffer) - self.offset):
+            other[i] = self[i]
+
+
+class _MojoMapToHostCtx:
+    def __init__(self, ptr):
+        self.ptr = ptr
+
+    def __enter__(self):
+        return self.ptr
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+class _MojoUnsafePointerType:
+    """`UnsafePointer[Int]` (subscript ignored, no generic-type system),
+    `UnsafePointer(to=x)` (address-of, see _MojoPointer), and
+    `UnsafePointer.alloc(n)` (fresh n-element backing buffer)."""
+    def __getitem__(self, item):
+        return self
+
+    def __call__(self, to=None, **kwargs):
+        return _MojoPointer([to])
+
+    def alloc(self, count, *args, **kwargs):
+        return _MojoPointer([None] * count)
+
+    def copy(self, ptr):
+        return _MojoPointer(list(ptr.buffer), ptr.offset)
+
+
+class _MojoDim3:
+    """Mutable (x, y, z) thread/block coordinate — backs the `thread_idx`/
+    `block_idx`/`block_dim`/`grid_dim` globals a GPU kernel body reads.
+    Mutable and shared (one instance per interpreter, updated in place by
+    `_MojoEnqueueFunctionCall` before each simulated thread's invocation)
+    rather than rebound per thread, since a kernel reads these as bare
+    module-level names, not as parameters it's passed."""
+    def __init__(self, x=0, y=0, z=0):
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def __repr__(self):
+        return f"({self.x}, {self.y}, {self.z})"
+
+
+def _mojo_as_dim3(d):
+    """Normalize a `grid_dim=`/`block_dim=` argument (a bare int for 1-D, or
+    an (x, y, z)-ish tuple/list) to an (x, y, z) tuple."""
+    if isinstance(d, int):
+        return (d, 1, 1)
+    if isinstance(d, (tuple, list)):
+        vals = list(d) + [1, 1, 1]
+        return (vals[0], vals[1], vals[2])
+    return (getattr(d, 'x', 1), getattr(d, 'y', 1), getattr(d, 'z', 1))
+
+
+class _MojoEnqueueFunctionCall:
+    """`ctx.enqueue_function[kernel](*args, grid_dim=.., block_dim=..)` —
+    there's no real GPU to dispatch to, so this "launches" the kernel by
+    just calling it once per simulated thread, serially, on the CPU, with
+    `thread_idx`/`block_idx`/`block_dim`/`grid_dim` updated before each call.
+    Fine for correctness testing of small kernels; a launch with a large
+    grid (real GPU workloads routinely use thousands+ of threads) will be
+    slow, since this is genuinely serial — there's no parallelism here at
+    all, simulated or otherwise."""
+    def __init__(self, kernel, interpreter):
+        self.kernel = kernel
+        self.interpreter = interpreter
+
+    def __call__(self, *args, grid_dim=1, block_dim=1, **kwargs):
+        interpreter = self.interpreter
+        kernel = self.kernel
+        grid = _mojo_as_dim3(grid_dim)
+        block = _mojo_as_dim3(block_dim)
+        thread_idx = interpreter.scope.get('thread_idx')
+        block_idx = interpreter.scope.get('block_idx')
+        block_dim_g = interpreter.scope.get('block_dim')
+        grid_dim_g = interpreter.scope.get('grid_dim')
+        global_idx = interpreter.scope.get('global_idx')
+        block_dim_g.x, block_dim_g.y, block_dim_g.z = block
+        grid_dim_g.x, grid_dim_g.y, grid_dim_g.z = grid
+        for bz in range(grid[2]):
+            for by in range(grid[1]):
+                for bx in range(grid[0]):
+                    block_idx.x, block_idx.y, block_idx.z = bx, by, bz
+                    for tz in range(block[2]):
+                        for ty in range(block[1]):
+                            for tx in range(block[0]):
+                                thread_idx.x, thread_idx.y, thread_idx.z = tx, ty, tz
+                                global_idx.x = bx * block[0] + tx
+                                global_idx.y = by * block[1] + ty
+                                global_idx.z = bz * block[2] + tz
+                                interpreter.invoke(kernel, *args)
+
+
+class _MojoEnqueueFunctionAccessor:
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+
+    def __getitem__(self, item):
+        # `ctx.enqueue_function[kernel]` or `[kernel, extra_type_param, ...]`
+        # — the kernel function is always the first element when subscripted
+        # with more than one.
+        kernel = item[0] if isinstance(item, tuple) else item
+        return _MojoEnqueueFunctionCall(kernel, self.interpreter)
+
+
+class _MojoCreateBufferCall:
+    def __init__(self, dtype):
+        self.dtype = dtype
+
+    def __call__(self, size, *args, **kwargs):
+        fill = 0.0 if getattr(self.dtype, '_is_float', False) else 0
+        return _MojoPointer([fill] * size)
+
+
+class _MojoCreateBufferAccessor:
+    def __getitem__(self, dtype):
+        return _MojoCreateBufferCall(dtype)
+
+
+class _MojoDeviceContext:
+    """Stand-in for real Mojo's `std.gpu.host.DeviceContext`. This
+    interpreter has no GPU backend of any kind (simulated or otherwise) —
+    kernels launched via `enqueue_function` just run serially on the CPU,
+    see `_MojoEnqueueFunctionCall`. Good enough to exercise a kernel's
+    *logic* (the actual point of most stdlib correctness tests, which
+    typically launch a `grid_dim=1, block_dim=1` single-thread kernel), not
+    to test anything about real device dispatch, memory transfer cost, or
+    concurrency."""
+    def __init__(self, device_id=0, api=None, interpreter=None):
+        self.device_id = device_id
+        self.api = api or 'cpu'
+        self.interpreter = interpreter
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def name(self):
+        return "CPU (simulated — no GPU backend in this interpreter)"
+
+    def synchronize(self):
+        pass
+
+    def __eq__(self, other):
+        return isinstance(other, _MojoDeviceContext) and self.device_id == other.device_id
+
+    def __hash__(self):
+        return id(self)
+
+    @property
+    def enqueue_function(self):
+        return _MojoEnqueueFunctionAccessor(self.interpreter)
+
+    @property
+    def enqueue_create_buffer(self):
+        return _MojoCreateBufferAccessor()
+
+    def enqueue_copy(self, dst, src):
+        if isinstance(src, _MojoPointer):
+            src.enqueue_copy_to(dst)
+        else:
+            for i, v in enumerate(src):
+                dst[i] = v
+
+    def enqueue_memset(self, dst, value):
+        for i in range(len(dst.buffer) - dst.offset):
+            dst[i] = value
+
+
+class _MojoGPUInfo:
+    """Stand-in for `std.gpu.host.info.GPUInfo` — real per-architecture GPU
+    capability lookup. `from_name[arch]()` always returns this same generic
+    placeholder, since there's no real accelerator here to describe."""
+    api = "cpu"
+
+    def __repr__(self):
+        return "GPUInfo(cpu, simulated)"
+
+
+class _MojoGPUInfoType:
+    def __getitem__(self, item):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return _MojoGPUInfo()
+
+    @property
+    def from_name(self):
+        return self
+
+
+class _MojoAddressSpaceValue:
+    def __init__(self, name, value):
+        self._name = name
+        self.value = value
+
+    def __repr__(self):
+        return f"AddressSpace.{self._name}"
+
+    def __eq__(self, other):
+        if isinstance(other, _MojoAddressSpaceValue):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self):
+        return self.value
+
+
+class _MojoAddressSpaceNS:
+    """Stand-in for `std.memory.pointer.AddressSpace` — an enum-like
+    namespace of GPU memory-space markers. Meaningless without a real GPU
+    backend; kept only so code that names/prints/compares them doesn't
+    crash."""
+    GENERIC = _MojoAddressSpaceValue('GENERIC', 0)
+    GLOBAL = _MojoAddressSpaceValue('GLOBAL', 1)
+    SHARED = _MojoAddressSpaceValue('SHARED', 2)
+    CONSTANT = _MojoAddressSpaceValue('CONSTANT', 3)
+    LOCAL = _MojoAddressSpaceValue('LOCAL', 4)
+
+
+class _MojoTrace:
+    """Stand-in for `std.runtime.tracing.Trace` — a profiling-span context
+    manager. No-op here; there's no real runtime to trace."""
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+class _MojoInvokeWrapper:
+    """A plain-callable adapter around Interpreter.invoke, so real Python
+    builtins (map/filter) that call their function argument directly
+    (`func(item)`) can invoke a MojoFunction (which needs the interpreter
+    threaded through as its first argument) transparently."""
+    def __init__(self, func, interpreter):
+        self._func = func
+        self._interpreter = interpreter
+
+    def __call__(self, *args, **kwargs):
+        func = self._func
+        interpreter = self._interpreter
+        return interpreter.invoke(func, *args, **kwargs)
+
+
+class _MojoBoundArgCall:
+    """Result of `map[func]`/`filter[func]` — the wrapped builtin partially
+    applied with `func` as its first (call-time) argument."""
+    def __init__(self, fn, wrapped_func):
+        self._fn = fn
+        self._wrapped_func = wrapped_func
+
+    def __call__(self, *args, **kwargs):
+        fn = self._fn
+        wrapped_func = self._wrapped_func
+        return fn(wrapped_func, *args, **kwargs)
+
+
+class _MojoParametricFn:
+    """Wraps a builtin like `map` that real Mojo calls as `map[func](iterable)`
+    — the function argument goes in the subscript, not the call parens (the
+    subscript is Mojo's compile-time-parameter syntax, here just borrowed for
+    an ordinary runtime argument). `[func]` curries it in; the returned
+    callable then takes the normal call-time arguments."""
+    def __init__(self, fn, interpreter):
+        self._fn = fn
+        self._interpreter = interpreter
+
+    def __getitem__(self, bound_arg):
+        wrapped_func = _MojoInvokeWrapper(bound_arg, self._interpreter)
+        return _MojoBoundArgCall(self._fn, wrapped_func)
+
+    def __call__(self, *args, **kwargs):
+        fn = self._fn
+        return fn(*args, **kwargs)
+
+
+class _MojoScalarType:
+    """A sized Mojo scalar type (Int8/UInt32/Float32/...). Plain Python
+    int/float already behave like the value side of these types; this only
+    carries the `.size_bytes` metadata that `size_of[T]()`/`align_of[T]()`/
+    `bit_width_of[T]()` read off the type itself."""
+    def __init__(self, name, size_bytes, is_float=False):
+        self.name = name
+        self.size_bytes = size_bytes
+        self._is_float = is_float
+
+    def __call__(self, x=0):
+        return float(x) if self._is_float else int(x)
+
+    def __repr__(self):
+        return self.name
+
+    def is_floating_point(self):
+        return self._is_float
+
+    def is_integral(self):
+        return not self._is_float
+
+    def is_signed(self):
+        return not self.name.startswith('UInt')
+
+    def is_unsigned(self):
+        return self.name.startswith('UInt')
+
+    def is_half_float(self):
+        return self.name in ('Float16', 'BFloat16')
+
+    def is_single_float(self):
+        return self.name == 'Float32'
+
+    def is_double_float(self):
+        return self.name == 'Float64'
+
+
+class _MojoTypeInfoCall:
+    def __init__(self, fn, type_arg):
+        self._fn = fn
+        self._type_arg = type_arg
+
+    def __call__(self):
+        fn = self._fn
+        type_arg = self._type_arg
+        return fn(type_arg)
+
+
+class _MojoTypeInfoFn:
+    """`size_of[T]()`/`align_of[T]()`/`simd_width_of[T]()`/`bit_width_of[T]()`
+    — subscript with a type (or DType.xxx value), call with no arguments."""
+    def __init__(self, fn):
+        self._fn = fn
+
+    def __getitem__(self, type_arg):
+        fn = self._fn
+        return _MojoTypeInfoCall(fn, type_arg)
+
+
+class _MojoConstCall:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+class _MojoGetDefinedFn:
+    """`get_defined_bool["NAME", default]()`/`get_defined_int[...]` — reads a
+    compile-time `-D` define, subscripted as `[name, default]`. This
+    interpreter has no build-time define mechanism, so it always falls back
+    to whatever default the call site supplied."""
+    def __getitem__(self, args):
+        default = args[1] if isinstance(args, tuple) and len(args) >= 2 else None
+        return _MojoConstCall(default)
+
+
+class _MojoIsDefinedFn:
+    """`is_defined["MODULAR_SOME_FLAG"]()` — no build-time `-D` define
+    mechanism here, so always False."""
+    def __getitem__(self, name):
+        return _MojoConstCall(False)
+
+
+def _mojo_size_of(t):
+    return getattr(t, 'size_bytes', 8)
+
+
+def _mojo_bit_width_of(t):
+    return getattr(t, 'size_bytes', 8) * 8
+
+
+def _mojo_simd_width_of(t):
+    # Not hardware-accurate (real Mojo picks this per-target); 1 is at least
+    # a self-consistent value (a "vector" of width 1 is just the scalar).
+    return 1
+
+
+class _MojoCompilationTarget:
+    """Stand-in for real Mojo's `sys.info.CompilationTarget` platform-predicate
+    namespace. Answers for *this* interpreter host (macOS/arm64), not
+    whatever `mojo build` would actually target — fine for the predicates
+    stdlib tests branch on, since we're not cross-compiling."""
+    def is_macos(self):
+        return sys.platform == 'darwin'
+
+    def is_linux(self):
+        return sys.platform.startswith('linux')
+
+    def is_apple_silicon(self):
+        return sys.platform == 'darwin' and platform.machine() == 'arm64'
+
+    def is_apple_m1(self): return False
+    def is_apple_m2(self): return False
+    def is_apple_m3(self): return False
+    def is_apple_m4(self): return False
+    def is_apple_m5(self): return False
+    def has_neon(self):
+        return platform.machine() == 'arm64'
+    def has_neon_int8_dotprod(self): return False
+    def has_neon_int8_matmul(self): return False
+    def has_avx(self): return False
+    def has_avx2(self): return False
+    def has_avx512f(self): return False
+    def has_sse4(self): return False
+    def has_fma(self): return False
+    def has_vnni(self): return False
+    def has_intel_amx(self): return False
+
+
+def _mojo_simd_elementwise(a, b, fn):
+    """Combine two SIMD-or-scalar operands lane-by-lane with `fn` (used for
+    arithmetic operators and for the elementwise `min`/`max` builtins Mojo
+    overloads for SIMD — unlike Python's own min/max, which just pick one of
+    their two whole arguments)."""
+    if isinstance(a, _MojoSIMD) and isinstance(b, _MojoSIMD):
+        return _MojoSIMD(a.dtype, a.width, [fn(x, y) for x, y in zip(a.values, b.values)])
+    if isinstance(a, _MojoSIMD):
+        return _MojoSIMD(a.dtype, a.width, [fn(x, b) for x in a.values])
+    if isinstance(b, _MojoSIMD):
+        return _MojoSIMD(b.dtype, b.width, [fn(a, y) for y in b.values])
+    return fn(a, b)
+
+
+def _scalar_max2(a, b):
+    if a > b:
+        return a
+    return b
+
+
+def _scalar_min2(a, b):
+    if a < b:
+        return a
+    return b
+
+
+def _mojo_max(*args, **kwargs):
+    """Mojo overloads `max` for SIMD to mean elementwise max, not "pick one
+    of these two whole values" like Python's own builtin. Deliberately
+    avoids ever calling the bare name `max(...)`/`min(...)`: this file is
+    self-hosted-compiled together with gimple_codegen.py, which has an
+    existing single-positional-plus-`key=`-kwarg call site
+    (`max(survivors, key=_score)`) that fixes the self-host compiler's
+    static arity inference for the global `max` symbol at 1 argument —
+    calling it here with 2 positional args breaks that compile
+    ("too many arguments to function 'mojo_max'")."""
+    if len(args) == 2 and not kwargs:
+        a, b = args
+        if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
+            return _mojo_simd_elementwise(a, b, _scalar_max2)
+        return _scalar_max2(a, b)
+    items = args[0] if len(args) == 1 else args
+    result = None
+    have_result = False
+    for x in items:
+        if not have_result:
+            result = x
+            have_result = True
+        elif x > result:
+            result = x
+    return result
+
+
+def _mojo_min(*args, **kwargs):
+    if len(args) == 2 and not kwargs:
+        a, b = args
+        if isinstance(a, _MojoSIMD) or isinstance(b, _MojoSIMD):
+            return _mojo_simd_elementwise(a, b, _scalar_min2)
+        return _scalar_min2(a, b)
+    items = args[0] if len(args) == 1 else args
+    result = None
+    have_result = False
+    for x in items:
+        if not have_result:
+            result = x
+            have_result = True
+        elif x < result:
+            result = x
+    return result
+
+
+class _MojoSIMD:
+    """Stand-in for real Mojo's `SIMD[dtype, width]` vector type. No real
+    vectorization/hardware backend here — just a fixed-width list of scalars
+    with elementwise arithmetic. `==`/`!=` compare whole vectors (True only
+    if every lane matches, returning a plain bool) rather than real Mojo's
+    per-lane vector result, since that's what `assert_equal(simd_a, simd_b)`
+    needs; ordering comparisons (`<`, `>`, ...) return a real elementwise
+    `_MojoSIMD` of bools, closer to actual Mojo semantics."""
+    def __init__(self, dtype, width, values):
+        values = list(values)
+        if len(values) == 1 and width > 1:
+            values = values * width
+        self.dtype = dtype
+        self.width = width
+        self.values = values
+
+    def _binary(self, other, fn):
+        return _mojo_simd_elementwise(self, other, fn)
+
+    def __add__(self, other): return self._binary(other, operator.add)
+    def __radd__(self, other): return _mojo_simd_elementwise(other, self, operator.add)
+    def __sub__(self, other): return self._binary(other, operator.sub)
+    def __rsub__(self, other): return _mojo_simd_elementwise(other, self, operator.sub)
+    def __mul__(self, other): return self._binary(other, operator.mul)
+    def __rmul__(self, other): return _mojo_simd_elementwise(other, self, operator.mul)
+    def __truediv__(self, other): return self._binary(other, operator.truediv)
+    def __rtruediv__(self, other): return _mojo_simd_elementwise(other, self, operator.truediv)
+    def __floordiv__(self, other): return self._binary(other, operator.floordiv)
+    def __mod__(self, other): return self._binary(other, operator.mod)
+    def __pow__(self, other): return self._binary(other, operator.pow)
+    def __and__(self, other): return self._binary(other, operator.and_)
+    def __or__(self, other): return self._binary(other, operator.or_)
+    def __xor__(self, other): return self._binary(other, operator.xor)
+    def __neg__(self): return _MojoSIMD(self.dtype, self.width, [-v for v in self.values])
+    def __abs__(self): return _MojoSIMD(self.dtype, self.width, [abs(v) for v in self.values])
+
+    def __eq__(self, other):
+        if isinstance(other, _MojoSIMD):
+            return self.values == other.values
+        return all(v == other for v in self.values)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = None
+
+    def __lt__(self, other): return self._binary(other, operator.lt)
+    def __gt__(self, other): return self._binary(other, operator.gt)
+    def __le__(self, other): return self._binary(other, operator.le)
+    def __ge__(self, other): return self._binary(other, operator.ge)
+
+    def __getitem__(self, i): return self.values[i]
+    def __setitem__(self, i, v): self.values[i] = v
+    def __len__(self): return len(self.values)
+    def __iter__(self): return iter(self.values)
+    def __bool__(self): return all(bool(v) for v in self.values)
+
+    def __repr__(self):
+        vals = ', '.join(str(v) for v in self.values)
+        return f"SIMD[{self.width}]({vals})"
+
+
+class _MojoSIMDCtor:
+    def __init__(self, dtype, width):
+        self.dtype = dtype
+        self.width = width
+
+    def __call__(self, *values):
+        return _MojoSIMD(self.dtype, self.width, values)
+
+
+class _MojoSIMDType:
+    """`SIMD[DType.float32, 4](0.0, 1.5, -42.5, -12.7)` — subscript with
+    (dtype, width), call with `width` scalar values (or a single value,
+    broadcast to fill every lane)."""
+    def __getitem__(self, item):
+        dtype, width = item
+        return _MojoSIMDCtor(dtype, width)
+
+
+class MojoString(str):
+    """`str` subclass carrying the extra methods real Mojo's String/
+    StringSlice/StaticString expose that plain Python str doesn't
+    (`byte_length`, `ascii_*`, `is_ascii_*`, `__float__`) — subclassing
+    (rather than wrapping) means it still behaves exactly like a normal
+    string everywhere else: comparisons, isinstance checks, concatenation,
+    dict keys, etc. Operations not overridden here (slicing, `+`, `.upper()`)
+    fall back to plain `str` and lose these extra methods on their result —
+    a known gap, not attempted, since re-deriving MojoString from every
+    str method would be a much bigger change for marginal benefit."""
+    def byte_length(self):
+        return len(str.encode(self, 'utf-8'))
+
+    def is_ascii_digit(self):
+        return str.isascii(self) and str.isdigit(self)
+
+    def is_ascii_printable(self):
+        return str.isascii(self) and all(32 <= ord(c) <= 126 for c in self)
+
+    def ascii_rjust(self, width, fillchar=' '):
+        return MojoString(str.rjust(self, width, fillchar))
+
+    def ascii_ljust(self, width, fillchar=' '):
+        return MojoString(str.ljust(self, width, fillchar))
+
+    def ascii_center(self, width, fillchar=' '):
+        return MojoString(str.center(self, width, fillchar))
+
+    def __float__(self):
+        return float(str(self))
+
+    def codepoints(self):
+        return list(self)
+
+    def codepoint_slices(self):
+        return list(self)
+
+
+class _MojoBoolType:
+    MIN = False
+    MAX = True
+    def __call__(self, x=False):
+        return bool(x)
+
+
+class _MojoIntType:
+    MIN = -(2 ** 63)
+    MAX = 2 ** 63 - 1
+    def __call__(self, x=0):
+        return int(x)
+
+
+class _MojoUIntType:
+    MIN = 0
+    MAX = 2 ** 64 - 1
+    def __call__(self, x=0):
+        return int(x)
+
+
+def _mojo_resolve_ambiguous_empty_braces(a, b):
+    """See Interpreter._resolve_ambiguous_empty_braces — same `{}`-as-empty-
+    dict-vs-empty-set ambiguity, needed here too since `assert_equal(x, {})`
+    compares a real set against a literal dict `{}` the parser can't have
+    known should have been a set."""
+    if isinstance(a, set) and isinstance(b, dict) and not b:
+        b = set()
+    elif isinstance(b, set) and isinstance(a, dict) and not a:
+        a = set()
+    return a, b
+
+
+def _mojo_assert_equal(a, b, msg=None):
+    a, b = _mojo_resolve_ambiguous_empty_braces(a, b)
+    if a != b:
+        raise AssertionError(msg or f"AssertionError: {a!r} is not equal to {b!r}")
+
+
+def _mojo_assert_not_equal(a, b, msg=None):
+    if a == b:
+        raise AssertionError(msg or f"AssertionError: {a!r} is equal to {b!r}")
+
+
+def _mojo_assert_true(cond, msg=None):
+    if not cond:
+        raise AssertionError(msg or "AssertionError: condition was unexpectedly False")
+
+
+def _mojo_assert_false(cond, msg=None):
+    if cond:
+        raise AssertionError(msg or "AssertionError: condition was unexpectedly True")
+
+
+def _mojo_assert_almost_equal(a, b, msg=None, atol=1e-8, rtol=1e-5):
+    if abs(a - b) > atol + rtol * abs(b):
+        raise AssertionError(msg or f"AssertionError: {a!r} is not close to {b!r}")
+
+
+class _MojoAssertRaises:
+    """`with assert_raises(): ...` / `with assert_raises(contains="x"): ...`
+    — asserts the block raises (optionally with a matching message)."""
+    def __init__(self, contains=None, location=None):
+        self.contains = contains
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            raise AssertionError("AssertionError: Didn't raise")
+        contains = self.contains
+        if contains is not None and contains not in str(exc_val):
+            return False
+        return True
+
+
+class _MojoTestSuiteRunner:
+    """Backs `TestSuite.discover_tests[__functions_in_module()]().run()`, the
+    boilerplate every stdlib test file ends with. Mirrors real Mojo's own
+    `PASS/FAIL ... Summary ...` console output (see `stdlib/std/testing/suite.mojo`)
+    closely enough to be a drop-in for the interpreter, though real Mojo also
+    times each test — we don't bother, since nothing downstream reads timings."""
+    def __init__(self, funcs, interpreter):
+        self.funcs = funcs
+        self.interpreter = interpreter
+        self.skipped_names = set()
+
+    @property
+    def skip(self):
+        runner = self
+        return _MojoTestSuiteRunnerSkipAccessor(runner)
+
+    def run(self, quiet=False, skip_all=False):
+        filename = self.interpreter.filename or '<input>'
+        if not quiet:
+            print(f"Running {len(self.funcs)} tests for {filename} ")
+        passed, failed, skipped = 0, 0, 0
+        for name, func in self.funcs:
+            if skip_all or name in self.skipped_names:
+                if not quiet:
+                    print(f"    SKIP [ 0.001 ] {name}")
+                skipped += 1
+                continue
+            try:
+                func(self.interpreter)
+                if not quiet:
+                    print(f"    PASS [ 0.001 ] {name}")
+                passed += 1
+            except Exception as e:
+                if not quiet:
+                    print(f"    FAIL [ 0.001 ] {name}: {e}")
+                failed += 1
+        if not quiet:
+            print("--------")
+            total = passed + failed + skipped
+            print(f"Summary [ 0.001 ] {total} tests run: {passed} passed , {failed} failed , {skipped} skipped ")
+        if failed:
+            raise AssertionError(f"{failed} test(s) failed")
+
+
+class _MojoTestSuiteRunnerSkipToken:
+    def __init__(self, runner, func):
+        self.runner = runner
+        self.func = func
+
+    def __call__(self):
+        runner = self.runner
+        func = self.func
+        name = None
+        for n, f in runner.funcs:
+            if f is func:
+                name = n
+                break
+        if name is None:
+            fn_name = getattr(func, 'name', str(func))
+            raise Exception(
+                f"trying to skip a test that is not registered in the suite: {fn_name}"
+            )
+        runner.skipped_names.add(name)
+
+
+class _MojoTestSuiteRunnerSkipAccessor:
+    def __init__(self, runner):
+        self.runner = runner
+
+    def __getitem__(self, func):
+        runner = self.runner
+        return _MojoTestSuiteRunnerSkipToken(runner, func)
+
+
+class _MojoTestSuiteDiscoverToken:
+    def __init__(self, funcs, interpreter):
+        self.funcs = funcs
+        self.interpreter = interpreter
+
+    def __call__(self, *args, **kwargs):
+        # Real Mojo's TestSuite() call site sometimes passes `cli_args=...`
+        # (for suites with their own argv handling) — irrelevant here.
+        return _MojoTestSuiteRunner(self.funcs, self.interpreter)
+
+
+class _MojoTestSuiteDiscover:
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+
+    def __getitem__(self, funcs):
+        test_funcs = [(n, f) for n, f in funcs if n.startswith('test_')]
+        interpreter = self.interpreter
+        return _MojoTestSuiteDiscoverToken(test_funcs, interpreter)
+
+
+class _MojoTestSuite:
+    """Stand-in for real Mojo's `testing.TestSuite`. `discover_tests` is
+    subscripted (`discover_tests[funcs]`), not called directly, mirroring the
+    real API's `discover_tests[__functions_in_module()]()` call shape."""
+    def __init__(self, interpreter):
+        self.interpreter = interpreter
+
+    def __call__(self):
+        return self
+
+    @property
+    def discover_tests(self):
+        interpreter = self.interpreter
+        return _MojoTestSuiteDiscover(interpreter)
+
+    @property
+    def test(self):
+        interpreter = self.interpreter
+        return _MojoTestSuiteFnAccessor(interpreter, run=True)
+
+    @property
+    def skip(self):
+        interpreter = self.interpreter
+        return _MojoTestSuiteFnAccessor(interpreter, run=False)
+
+
+class _MojoTestSuiteFnCall:
+    def __init__(self, func, interpreter, run):
+        self.func = func
+        self.interpreter = interpreter
+        self.run = run
+
+    def __call__(self):
+        if not self.run:
+            return None
+        interpreter = self.interpreter
+        func = self.func
+        return interpreter.invoke(func)
+
+
+class _MojoTestSuiteFnAccessor:
+    """Backs `suite.test[fn]()` (run `fn` immediately) and `suite.skip[fn]()`
+    (don't) — subscript with the test function, call with no arguments."""
+    def __init__(self, interpreter, run):
+        self.interpreter = interpreter
+        self.run = run
+
+    def __getitem__(self, func):
+        interpreter = self.interpreter
+        run = self.run
+        return _MojoTestSuiteFnCall(func, interpreter, run)
+
+
+def _mojo_unary_math(fn):
+    """Wrap a scalar math function so it also applies elementwise to a
+    `_MojoSIMD` operand — matching how real Mojo's `std.math` functions are
+    overloaded for both `Scalar[dtype]` and `SIMD[dtype, width]`."""
+    def wrapper(x, *args, **kwargs):
+        if isinstance(x, _MojoSIMD):
+            return _MojoSIMD(x.dtype, x.width, [fn(v, *args, **kwargs) for v in x.values])
+        return fn(x, *args, **kwargs)
+    return wrapper
+
+
+def _mojo_iota(buf, *args):
+    """`iota(buf)` / `iota(buf, offset)` / `iota(buf, length, offset)` — fill
+    (part of) a buffer in place with sequential values."""
+    if len(args) >= 2:
+        length, offset = args[0], args[1]
+    elif len(args) == 1:
+        offset = args[0]
+        length = len(buf)
+    else:
+        offset = 0
+        length = len(buf)
+    for i in range(length):
+        buf[i] = offset + i
+
+
+def _mojo_ceildiv(a, b):
+    return -(-a // b)
+
+
+def _build_math_shims():
+    """`from std.math import ...` — the real `std/math/math.mojo` is
+    parametric/generic-heavy like `std/testing`; hardcode plain Python `math`
+    equivalents for the handful of names stdlib test files actually import,
+    each also elementwise-applicable to a `_MojoSIMD` (see
+    _mojo_unary_math)."""
+    return {
+        'exp': _mojo_unary_math(math.exp),
+        'exp2': _mojo_unary_math(lambda x: 2.0 ** x),
+        'log': _mojo_unary_math(math.log),
+        'log2': _mojo_unary_math(math.log2),
+        'log10': _mojo_unary_math(math.log10),
+        'sqrt': _mojo_unary_math(math.sqrt),
+        'rsqrt': _mojo_unary_math(lambda x: 1.0 / math.sqrt(x)),
+        'recip': _mojo_unary_math(lambda x: 1.0 / x),
+        'sin': _mojo_unary_math(math.sin),
+        'cos': _mojo_unary_math(math.cos),
+        'tan': _mojo_unary_math(math.tan),
+        'sinh': _mojo_unary_math(math.sinh),
+        'cosh': _mojo_unary_math(math.cosh),
+        'tanh': _mojo_unary_math(math.tanh),
+        'asin': _mojo_unary_math(math.asin),
+        'acos': _mojo_unary_math(math.acos),
+        'atan': _mojo_unary_math(math.atan),
+        'atan2': math.atan2,
+        'erf': _mojo_unary_math(math.erf),
+        'floor': _mojo_unary_math(math.floor),
+        'ceil': _mojo_unary_math(math.ceil),
+        'trunc': _mojo_unary_math(math.trunc),
+        'isnan': _mojo_unary_math(math.isnan),
+        'isinf': _mojo_unary_math(math.isinf),
+        'isfinite': _mojo_unary_math(math.isfinite),
+        'gcd': math.gcd,
+        'lcm': math.lcm,
+        'ceildiv': _mojo_ceildiv,
+        'modf': math.modf,
+        'ldexp': math.ldexp,
+        'frexp': math.frexp,
+        'inf': math.inf,
+        'iota': _mojo_iota,
+    }
+
+
+def _build_testing_shims(interpreter):
+    """`from std.testing import ...` (or `testing`/`std.testing.testing`) can't
+    realistically run through the real stdlib source — it's full of generic
+    `fn foo[...]` parametrics our simple parser/interpreter doesn't support.
+    Hardcode the handful of names stdlib test files actually use instead, the
+    same way module_loader.py already hardcodes `_TESTING_EXPORTS` for the
+    compiled path."""
+    shims = {
+        'assert_equal': _mojo_assert_equal,
+        'assert_equal_pyobj': _mojo_assert_equal,
+        'assert_not_equal': _mojo_assert_not_equal,
+        'assert_true': _mojo_assert_true,
+        'assert_false': _mojo_assert_false,
+        'assert_almost_equal': _mojo_assert_almost_equal,
+        'assert_raises': _MojoAssertRaises,
+        'TestSuite': _MojoTestSuite(interpreter),
+    }
+    # `from std.testing import testing, TestSuite` imports the submodule
+    # itself as a namespace (`testing.assert_equal(...)`) — self-reference,
+    # one level deep (nothing in the corpus goes further than `testing.X`).
+    shims['testing'] = types.SimpleNamespace(**shims)
+    return shims
 
 
 class _SysProxy:
@@ -144,7 +1354,207 @@ class Interpreter:
         self.scope = Scope()
         self.filename = filename
         self.argv = argv if argv is not None else [filename or '<input>']
+        self._mojo_module_cache = {}
+        self._func_specs = {}
         self._setup_builtins()
+
+    def _load_mojo_sibling_module(self, module_name):
+        """Resolve `import`/`from import` of a sibling .mojo source file (as
+        opposed to a real importable Python module) by parsing and running it
+        in its own scope, then exposing its top-level bindings for attribute
+        access — the interpreter has no separate module-object representation,
+        so a lightweight namespace stands in for one."""
+        cache = self._mojo_module_cache
+
+        if module_name in ('testing', 'std.testing', 'std.testing.testing'):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(**_build_testing_shims(self))
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.math', 'std.math.math'):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(**_build_math_shims())
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.sys.defines',):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(
+                is_defined=_MojoIsDefinedFn(),
+                get_defined_string=_MojoGetDefinedFn(),
+                get_defined_bool=_MojoGetDefinedFn(),
+                get_defined_int=_MojoGetDefinedFn(),
+                MOJO_VERSION="0.0.0-interpreter",
+            )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.sys', 'std.sys.arg', 'std.sys.info'):
+            if module_name in cache:
+                return cache[module_name]
+            argv = self.argv
+            namespace = types.SimpleNamespace(
+                argv=lambda: argv,
+                size_of=self.scope.get('size_of'),
+                align_of=self.scope.get('align_of'),
+                bit_width_of=self.scope.get('bit_width_of'),
+                simd_width_of=self.scope.get('simd_width_of'),
+                CompilationTarget=self.scope.get('CompilationTarget'),
+                is_64bit=lambda: True,
+                DType=self.scope.get('DType'),
+                exit=sys.exit,
+                get_defined_bool=_MojoGetDefinedFn(),
+                get_defined_int=_MojoGetDefinedFn(),
+                # This interpreter has no accelerator/GPU backend at all.
+                is_gpu=lambda: False,
+                is_apple_gpu=lambda: False,
+                is_amd_gpu=lambda: False,
+                is_nvidia_gpu=lambda: False,
+                has_apple_gpu_accelerator=lambda: False,
+                has_amd_gpu_accelerator=lambda: False,
+                has_nvidia_gpu_accelerator=lambda: False,
+                _accelerator_arch=lambda: "cpu",
+                num_physical_cores=lambda: os.cpu_count() or 1,
+                num_logical_cores=lambda: os.cpu_count() or 1,
+            )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.gpu', 'std.gpu.host', 'std.gpu.host.info', 'std.gpu.id'):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(
+                DeviceContext=self.scope.get('DeviceContext'),
+                DeviceBuffer=self.scope.get('DeviceBuffer'),
+                HostBuffer=self.scope.get('DeviceBuffer'),
+                GPUInfo=self.scope.get('GPUInfo'),
+                AddressSpace=self.scope.get('AddressSpace'),
+                thread_idx=self.scope.get('thread_idx'),
+                block_idx=self.scope.get('block_idx'),
+                block_dim=self.scope.get('block_dim'),
+                grid_dim=self.scope.get('grid_dim'),
+                global_idx=self.scope.get('global_idx'),
+                lane_id=self.scope.get('lane_id'),
+                get_gpu_target=self.scope.get('get_gpu_target'),
+            )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.os', 'std.os.os'):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(
+                abort=self.scope.get('abort'),
+            )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name in ('std.runtime.tracing',):
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(
+                Trace=_MojoTrace,
+                TraceLevel=self.scope.get('TraceLevel'),
+            )
+            cache[module_name] = namespace
+            return namespace
+
+        if module_name == 'std' or module_name.startswith('std.'):
+            # Real `std.*` submodules beyond the hardcoded shims above are
+            # full of generics/MLIR our simple parser can't handle — walking
+            # up from the importing file's directory (needed below for
+            # test-only sibling packages like `test_utils`) would eventually
+            # reach the real stdlib root and start attempting to parse them,
+            # trading a graceful missing-import no-op for a hard crash deep
+            # in real stdlib internals. Keep the old graceful-degradation
+            # behavior for anything under `std.` that isn't shimmed.
+            return None
+
+        rel_path = module_name.replace('.', os.sep) + '.mojo'
+        rel_pkg_path = os.path.join(module_name.replace('.', os.sep), '__init__.mojo')
+        search_dirs = []
+        if self.filename:
+            # Walk upward too, not just the importing file's own directory —
+            # e.g. stdlib/test/memory/test_alloc.mojo imports the sibling
+            # package stdlib/test/test_utils/, which lives a level up from
+            # test_alloc.mojo's own directory, not next to it.
+            d = os.path.dirname(os.path.abspath(self.filename))
+            for _ in range(6):
+                search_dirs.append(d)
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
+        search_dirs.append(os.getcwd())
+        found = None
+        for d in search_dirs:
+            flat_candidate = os.path.join(d, rel_path)
+            pkg_candidate = os.path.join(d, rel_pkg_path)
+            if os.path.isfile(flat_candidate):
+                found = flat_candidate
+                break
+            if os.path.isfile(pkg_candidate):
+                found = pkg_candidate
+                break
+        if found is None:
+            return None
+
+        # Cache (and cycle-guard) by resolved absolute path, not `module_name`
+        # — a package's __init__.mojo commonly imports a same-named submodule
+        # from itself (e.g. test_utils/__init__.mojo importing from
+        # test_utils/test_utils.mojo, both reached via the string
+        # "test_utils"), and those are different files that must not collide
+        # on one cache key. Guard against circular sibling-module imports the
+        # same way: without marking the slot before recursing, each nested
+        # import would spin up a brand-new Interpreter with its own fresh,
+        # unshared cache and recurse forever instead of hitting a cache entry.
+        if found in cache:
+            return cache[found]
+        cache[found] = types.SimpleNamespace()
+
+        with open(found) as f:
+            src = f.read()
+        from mojo_compiler import py_tokenize, Parser
+        tokens = py_tokenize(src)
+        mod_stmts = Parser(tokens).parse_module()
+        mod_interp = Interpreter(filename=found, argv=self.argv)
+        mod_interp._mojo_module_cache = cache  # shared, so cycles hit the guard above
+        for stmt in mod_stmts:
+            mod_interp.execute(stmt)
+        namespace = types.SimpleNamespace(**mod_interp.scope.vars)
+        cache[found] = namespace
+        return namespace
+
+    def _bind_dotted_import(self, module_name, mod):
+        """`import std.sys` (no `as` alias) must bind the top-level name
+        `std` and make `std.sys` resolve via chained attribute access — same
+        as Python's own dotted-import binding rule. A flat bind of `std`
+        straight to the `std.sys` shim namespace (the previous behavior)
+        broke `std.sys.whatever`, since there was no intermediate `.sys`."""
+        parts = module_name.split('.')
+        top = parts[0]
+        if len(parts) == 1:
+            self.scope.define(top, mod)
+            return
+        try:
+            root = self.scope.get(top)
+        except NameError:
+            root = None
+        if not isinstance(root, types.SimpleNamespace):
+            root = types.SimpleNamespace()
+            self.scope.define(top, root)
+        obj = root
+        for p in parts[1:-1]:
+            nxt = getattr(obj, p, None)
+            if not isinstance(nxt, types.SimpleNamespace):
+                nxt = types.SimpleNamespace()
+                setattr(obj, p, nxt)
+            obj = nxt
+        setattr(obj, parts[-1], mod)
 
     def _is_instance(self, obj, class_name):
         """Check if obj is an instance of class_name from either ast_nodes or mojo_compiler."""
@@ -184,13 +1594,46 @@ class Interpreter:
         self.scope.define('type', type)
         self.scope.define('enumerate', enumerate)
         self.scope.define('zip', zip)
-        self.scope.define('max', max)
-        self.scope.define('min', min)
+        self.scope.define('max', _mojo_max)
+        self.scope.define('min', _mojo_min)
+        self.scope.define('SIMD', _MojoSIMDType())
         self.scope.define('sum', sum)
         self.scope.define('sorted', sorted)
         self.scope.define('reversed', reversed)
-        self.scope.define('map', map)
-        self.scope.define('filter', filter)
+        self.scope.define('map', _MojoParametricFn(map, self))
+        self.scope.define('filter', _MojoParametricFn(filter, self))
+        self.scope.define('repr', repr)
+        self.scope.define('all', all)
+        self.scope.define('any', any)
+        self.scope.define('abs', abs)
+        self.scope.define('round', round)
+        self.scope.define('hash', hash)
+        self.scope.define('id', id)
+        self.scope.define('chr', chr)
+        self.scope.define('ord', ord)
+        self.scope.define('divmod', divmod)
+        self.scope.define('next', next)
+        self.scope.define('index', operator.index)
+        self.scope.define('isnan', math.isnan)
+        self.scope.define('isinf', math.isinf)
+        self.scope.define('isfinite', math.isfinite)
+        # Mojo's StaticString/StringSlice are borrowed-string-view types;
+        # plain Python str already behaves like their value side.
+        self.scope.define('StaticString', MojoString)
+        self.scope.define('StringSlice', MojoString)
+        self.scope.define('InlineArray', _MojoGenericCtor(list))
+        def _mojo_deque_ctor(*args, **kwargs):
+            # Mojo's Deque(capacity=N) is a pre-allocation size *hint*, not a
+            # maxlen cap like collections.deque's own `maxlen=` — drop it.
+            iterable = args[0] if args else ()
+            return collections.deque(iterable)
+        self.scope.define('Deque', _MojoGenericCtor(_mojo_deque_ctor))
+        self.scope.define('BinaryHeap', _MojoGenericCtor(list))
+
+        def _debug_assert(cond, *args):
+            if not cond:
+                raise AssertionError("debug_assert failed" + (": " + str(args[0]) if args else ""))
+        self.scope.define('debug_assert', _debug_assert)
         self.scope.define('Exception', Exception)
         self.scope.define('BaseException', BaseException)
         self.scope.define('KeyboardInterrupt', KeyboardInterrupt)
@@ -199,6 +1642,124 @@ class Interpreter:
         self.scope.define('TypeError', TypeError)
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
+
+        # Mojo scalar-type constructors — plain Python bool/int/float/str
+        # already behave like Mojo's Bool/Int/Float64/String for arithmetic
+        # and dunder methods; these wrappers only add the `.MIN`/`.MAX` class
+        # attributes stdlib test files read directly off the type name.
+        self.scope.define('Bool', _MojoBoolType())
+        self.scope.define('Int', _MojoIntType())
+        self.scope.define('UInt', _MojoUIntType())
+        def _mojo_string_ctor(*args, **kwargs):
+            if 'unsafe_from_utf8' in kwargs:
+                # Avoid the `bytes()`/`bytearray()` builtins here — this
+                # project's self-hosting compiler (gimple_codegen.py, which
+                # must also compile myinterpreter.py itself) doesn't
+                # recognize them as callable. This is an approximation (one
+                # Python char per input byte, not a real UTF-8 multi-byte
+                # decode) — good enough for ASCII-range byte lists, wrong for
+                # genuine multi-byte UTF-8 sequences.
+                data = kwargs['unsafe_from_utf8']
+                return MojoString(''.join(chr(b) for b in data))
+            if len(args) > 1:
+                # Real Mojo's `String(a, b, c, ...)` concatenates the
+                # stringified arguments (print-style), unlike Python's own
+                # `str(object, encoding, errors)` 2-3 positional-arg
+                # constructor, which would otherwise swallow the 2nd
+                # argument as an `encoding` name.
+                return MojoString(''.join(str(a) for a in args))
+            return MojoString(*args)
+        self.scope.define('String', _mojo_string_ctor)
+        self.scope.define('List', _MojoGenericCtor(list))
+        self.scope.define('Dict', _MojoGenericCtor(dict))
+        self.scope.define('Set', _MojoGenericCtor(set))
+        self.scope.define('Tuple', _MojoGenericCtor(tuple))
+
+        int8, int16, int32, int64 = (
+            _MojoScalarType('Int8', 1), _MojoScalarType('Int16', 2),
+            _MojoScalarType('Int32', 4), _MojoScalarType('Int64', 8),
+        )
+        uint8, uint16, uint32, uint64 = (
+            _MojoScalarType('UInt8', 1), _MojoScalarType('UInt16', 2),
+            _MojoScalarType('UInt32', 4), _MojoScalarType('UInt64', 8),
+        )
+        float16 = _MojoScalarType('Float16', 2, is_float=True)
+        float32 = _MojoScalarType('Float32', 4, is_float=True)
+        float64 = _MojoScalarType('Float64', 8, is_float=True)
+        bfloat16 = _MojoScalarType('BFloat16', 2, is_float=True)
+        self.scope.define('Int8', int8)
+        self.scope.define('Int16', int16)
+        self.scope.define('Int32', int32)
+        self.scope.define('Int64', int64)
+        self.scope.define('UInt8', uint8)
+        self.scope.define('UInt16', uint16)
+        self.scope.define('UInt32', uint32)
+        self.scope.define('UInt64', uint64)
+        self.scope.define('Float16', float16)
+        self.scope.define('Float32', float32)
+        self.scope.define('Float64', float64)
+        self.scope.define('BFloat16', bfloat16)
+        self.scope.define('DType', types.SimpleNamespace(
+            int8=int8, int16=int16, int32=int32, int64=int64, index=int64, int=int64,
+            uint8=uint8, uint16=uint16, uint32=uint32, uint64=uint64,
+            float16=float16, float32=float32, float64=float64, bfloat16=bfloat16,
+            bool=_MojoScalarType('Bool', 1),
+        ))
+        self.scope.define('size_of', _MojoTypeInfoFn(_mojo_size_of))
+        self.scope.define('align_of', _MojoTypeInfoFn(_mojo_size_of))
+        self.scope.define('bit_width_of', _MojoTypeInfoFn(_mojo_bit_width_of))
+        self.scope.define('simd_width_of', _MojoTypeInfoFn(_mojo_simd_width_of))
+        self.scope.define('CompilationTarget', _MojoCompilationTarget())
+        unsafe_pointer_type = _MojoUnsafePointerType()
+        self.scope.define('UnsafePointer', unsafe_pointer_type)
+        self.scope.define('MutUnsafePointer', unsafe_pointer_type)
+        self.scope.define('ImmutUnsafePointer', unsafe_pointer_type)
+        self.scope.define('DeviceBuffer', unsafe_pointer_type)
+
+        # GPU/DeviceContext basics — no real GPU backend, kernels launched
+        # via enqueue_function just run serially on the CPU (see
+        # _MojoEnqueueFunctionCall). Good enough for exercising kernel logic
+        # and the launch/buffer/thread-index syntax and semantics; not a
+        # step towards real device dispatch.
+        def _device_context_ctor(device_id=0, api=None):
+            return _MojoDeviceContext(device_id, api, self)
+        self.scope.define('DeviceContext', _device_context_ctor)
+        self.scope.define('thread_idx', _MojoDim3())
+        self.scope.define('block_idx', _MojoDim3())
+        self.scope.define('block_dim', _MojoDim3(1, 1, 1))
+        self.scope.define('grid_dim', _MojoDim3(1, 1, 1))
+        self.scope.define('global_idx', _MojoDim3())
+        self.scope.define('GPUInfo', _MojoGPUInfoType())
+        self.scope.define('AddressSpace', _MojoAddressSpaceNS())
+        def _mojo_get_gpu_target(*args, **kwargs):
+            return "cpu"
+        self.scope.define('get_gpu_target', _mojo_get_gpu_target)
+
+        def _mojo_lane_id():
+            return 0
+        self.scope.define('lane_id', _mojo_lane_id)
+        self.scope.define('MutUntrackedOrigin', None)
+
+        def _origin_of(x, *args, **kwargs):
+            return x
+        self.scope.define('origin_of', _origin_of)
+
+        def _mojo_abort(*args):
+            msg = str(args[0]) if args else "abort() called"
+            raise RuntimeError(msg)
+        self.scope.define('abort', _mojo_abort)
+        self.scope.define('TraceLevel', types.SimpleNamespace(
+            DISABLED=0, DEFAULT=1, VERBOSE=2, RUNTIME=3,
+        ))
+
+        # `__functions_in_module()` backs the `TestSuite.discover_tests[...]`
+        # boilerplate at the end of most stdlib test files — see
+        # _build_testing_shims. Captures this interpreter's own top-level
+        # scope (module scope), since that's what real Mojo's builtin reflects.
+        module_scope = self.scope
+        def _functions_in_module():
+            return [(n, v) for n, v in module_scope.vars.items() if isinstance(v, MojoFunction)]
+        self.scope.define('__functions_in_module', _functions_in_module)
 
         # Standard library modules
         import os
@@ -256,9 +1817,12 @@ class Interpreter:
             result = self.execute(stmt)
         return result
 
-    def execute_FunctionDef(self, node: N.FunctionDef):
-        """Execute function definition."""
-        # Extract parameter names from various formats
+    @staticmethod
+    def _extract_param_names(node):
+        """Extract parameter names from a FunctionDef's various param formats.
+        Mojo's `*name`/`**name` prefixes (keyword-only marker / kwargs
+        catch-all — see mojo_compiler.py's param parsing) are stripped since
+        MojoFunction binds everything positional-or-keyword by plain name."""
         params = []
         if hasattr(node, 'params') and node.params:
             for p in node.params:
@@ -287,13 +1851,86 @@ class Interpreter:
                             params.append(p_str)
                     else:
                         params.append(p_str)
-        func = MojoFunction(node.name, params, node.body, self.scope)
-        self.scope.define(node.name, func)
+        return [p.lstrip('*') for p in params]
+
+    @staticmethod
+    def _classify_params(node):
+        """Classify a FunctionDef's parameters for overload-signature
+        matching: (required positional names, optional/defaulted positional
+        names, keyword-only names, has-**kwargs-catch-all).
+
+        Keyword-only names come from two places in mojo_compiler.py's parsed
+        params: a `*name` prefix (the `*args`-style variadic form), or plain
+        (unprefixed) names listed in `node.kwonly` — the far more common
+        `def f(x, *, y):` bare-`*,`-separator form leaves `y` looking
+        identical to a normal positional param in `node.params`, since the
+        parser only records "a bare `*` was seen" via that separate list,
+        not as a per-param marker."""
+        required, optional, kwonly = [], [], []
+        has_var_kwargs = False
+        has_default = getattr(node, 'param_has_default', None) or {}
+        explicit_kwonly = set(getattr(node, 'kwonly', None) or [])
+        for p in (getattr(node, 'params', None) or []):
+            if isinstance(p, tuple):
+                raw_name = p[0]
+            elif hasattr(p, 'name'):
+                raw_name = p.name
+            elif isinstance(p, dict) and 'name' in p:
+                raw_name = p['name']
+            else:
+                raw_name = str(p)
+            if raw_name.startswith('**'):
+                has_var_kwargs = True
+                continue
+            is_kwonly = raw_name.startswith('*')
+            name = raw_name.lstrip('*')
+            if is_kwonly or name in explicit_kwonly:
+                kwonly.append(name)
+            elif has_default.get(name):
+                optional.append(name)
+            else:
+                required.append(name)
+        return required, optional, kwonly, has_var_kwargs
+
+    def _register_function(self, container, name, func, spec):
+        """Bind `func` under `name` in `container` (a plain dict: Scope.vars
+        or a struct's methods dict), merging into a MojoOverloadSet if `name`
+        already names a function in this same container — repeat `def name`
+        in Mojo is an overload set, not a redefinition."""
+        self._func_specs[id(func)] = spec
+        existing = container.get(name)
+        if isinstance(existing, MojoOverloadSet):
+            existing.add(func, *spec)
+            return existing
+        if isinstance(existing, MojoFunction):
+            prev_spec = self._func_specs.get(id(existing), ([], [], [], False))
+            overload_set = MojoOverloadSet(name)
+            overload_set.add(existing, *prev_spec)
+            overload_set.add(func, *spec)
+            container[name] = overload_set
+            return overload_set
+        container[name] = func
         return func
+
+    def execute_FunctionDef(self, node: N.FunctionDef):
+        """Execute function definition."""
+        params = self._extract_param_names(node)
+        comptime_params = getattr(node, 'comptime_params', None)
+        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params)
+        spec = self._classify_params(node)
+        return self._register_function(self.scope.vars, node.name, func, spec)
 
     def execute_StructDef(self, node: N.StructDef):
         """Execute struct/class definition."""
-        cls = MojoClass(node.name, node.body)
+        methods = {}
+        for m in getattr(node, 'methods', None) or []:
+            params = self._extract_param_names(m)
+            comptime_params = getattr(m, 'comptime_params', None)
+            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
+            spec = self._classify_params(m)
+            self._register_function(methods, m.name, method_func, spec)
+        fields = getattr(node, 'fields', None) or []
+        cls = MojoClass(node.name, fields, methods, self)
         self.scope.define(node.name, cls)
         return cls
 
@@ -317,8 +1954,13 @@ class Interpreter:
         try:
             mod = importlib.import_module(node.module)
         except ModuleNotFoundError:
-            # Not a Python module — assume a sibling .mojo module the interpreter
-            # treats as pre-loaded; skip (the historical behavior).
+            mod = self._load_mojo_sibling_module(node.module)
+            if mod is None:
+                return None
+            if node.alias:
+                self.scope.define(node.alias, mod)
+            else:
+                self._bind_dotted_import(node.module, mod)
             return None
         if node.alias:
             self.scope.define(node.alias, mod)
@@ -334,12 +1976,21 @@ class Interpreter:
         # pull attributes off the real sys module.
         if node.module == 'sys':
             mod = self.scope.get('sys')
+        elif node.module.startswith('.'):
+            # Relative import (`from .compare_helpers import X`, inside a
+            # package's __init__.mojo) — real Python's importlib requires
+            # package context we don't have, and would never resolve a
+            # sibling .mojo file anyway. Resolve directly as a sibling module.
+            mod = self._load_mojo_sibling_module(node.module.lstrip('.'))
+            if mod is None:
+                return None
         else:
             try:
                 mod = importlib.import_module(node.module)
             except ModuleNotFoundError:
-                # Not a Python module — sibling .mojo module, treated as pre-loaded; skip.
-                return None
+                mod = self._load_mojo_sibling_module(node.module)
+                if mod is None:
+                    return None
         if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
@@ -367,9 +2018,40 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
+    _INT_TYPE_NAMES = {
+        'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128', 'Int256',
+        'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
+    }
+    _FLOAT_TYPE_NAMES = {'Float16', 'Float32', 'Float64', 'BFloat16'}
+
+    def _coerce_to_declared_type(self, value, type_ann):
+        """Coerce a var's initializer to its declared scalar type, mirroring
+        real Mojo's implicit-constructor conversion (e.g. `var x: Int = 84 / 2`
+        truncates the Float64 division result to an Int, it doesn't stay a float)."""
+        if not isinstance(type_ann, str):
+            return value
+        if type_ann in self._INT_TYPE_NAMES and isinstance(value, float):
+            return int(value)
+        if type_ann in self._FLOAT_TYPE_NAMES and isinstance(value, int) and not isinstance(value, bool):
+            return float(value)
+        if type_ann == 'Bool' and isinstance(value, int) and not isinstance(value, bool):
+            return bool(value)
+        return value
+
     def execute_VarDecl(self, node: N.VarDecl):
         """Execute variable declaration."""
         value = self.eval_expr(node.value)
+        # `var a, b = expr` (tuple unpacking) is parsed as a single VarDecl
+        # whose `name` is a comma-joined string ("a,b") — see
+        # mojo_compiler.py's `_parse_var_decl`. A plain single name never
+        # contains a comma, so this only fires for the unpacking case.
+        if ',' in node.name:
+            names = node.name.split(',')
+            values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
+            for name, v in zip(names, values):
+                self.scope.define(name, v)
+            return value
+        value = self._coerce_to_declared_type(value, getattr(node, 'type_ann', None))
         self.scope.define(node.name, value)
         return value
 
@@ -465,6 +2147,34 @@ class Interpreter:
                     self.execute(stmt)
         return None
 
+    def execute_ComptimeIfStmt(self, node):
+        """`comptime if cond: ... elif ...: ... else: ...` — the interpreter
+        doesn't do compile-time branch elimination, so this just evaluates
+        like a regular runtime if/elif/else."""
+        cond = self.eval_expr(node.condition)
+        if cond:
+            for stmt in node.then_body:
+                self.execute(stmt)
+        else:
+            if node.elifs:
+                for elif_cond, elif_body in node.elifs:
+                    if self.eval_expr(elif_cond):
+                        for stmt in elif_body:
+                            self.execute(stmt)
+                        return None
+            if node.else_body:
+                for stmt in node.else_body:
+                    self.execute(stmt)
+        return None
+
+    def execute_ComptimeVarStmt(self, node):
+        """`comptime NAME = expr` — a compile-time-constant variable. The
+        interpreter has no separate comptime evaluation phase, so this is
+        just a regular variable assignment."""
+        value = self.eval_expr(node.value)
+        self.scope.define(node.target, value)
+        return value
+
     def execute_WhileStmt(self, node: N.WhileStmt):
         """Execute while statement."""
         while self.eval_expr(node.condition):
@@ -523,6 +2233,14 @@ class Interpreter:
         """Execute pass statement."""
         return None
 
+    def execute_AssertStmt(self, node):
+        """Execute `assert cond` / `assert cond, msg`."""
+        cond = self.eval_expr(node.value)
+        if not cond:
+            msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
+            raise AssertionError(msg if msg is not None else "assert failed")
+        return None
+
     def execute_GlobalStmt(self, node):
         """Execute global statement."""
         if hasattr(node, 'names'):
@@ -550,16 +2268,22 @@ class Interpreter:
 
         item = node.items[0]  # Support single with item for now
         ctx = self.eval_expr(item.expr)
-        if hasattr(ctx, '__enter__'):
-            ctx.__enter__()
+        entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
         if item.alias:
-            self.scope.define(item.alias, ctx)
+            self.scope.define(item.alias, entered)
         try:
             for stmt in node.body:
                 self.execute(stmt)
-        finally:
-            if hasattr(ctx, '__exit__'):
-                ctx.__exit__(None, None, None)
+        except Exception as e:
+            # Standard context-manager protocol: __exit__ gets the exception
+            # and may suppress it by returning truthy (e.g. assert_raises's
+            # `with assert_raises(): raise ...` — the raise is expected and
+            # must not propagate as a test failure).
+            if hasattr(ctx, '__exit__') and ctx.__exit__(type(e), e, None):
+                return None
+            raise
+        if hasattr(ctx, '__exit__'):
+            ctx.__exit__(None, None, None)
         return None
 
     def execute_TryStmt(self, node: N.TryStmt):
@@ -653,9 +2377,19 @@ class Interpreter:
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
         value = expr.value
-        # Handle f-strings: if value starts with f" or f', evaluate it as f-string
-        if value.startswith('f"') or value.startswith("f'"):
+        is_fstring = value.startswith('f"') or value.startswith("f'")
+        # Mojo's `t"..."` template-string literal shares f-string's `{expr}`/
+        # `{{`-escape interpolation syntax (see mojo_compiler.py's
+        # _strip_string_prefix_and_quotes) — real Mojo turns it into a
+        # Template-like object, but every use we've seen immediately feeds it
+        # to `String(...)` anyway, so evaluating it as a plain f-string (via
+        # Python's own, unrelated PEP 750 t-strings would produce a
+        # string.templatelib.Template object instead of a str) gets the same
+        # final value without needing to model an intermediate Template type.
+        is_tstring = value.startswith('t"') or value.startswith("t'")
+        if is_fstring or is_tstring:
             try:
+                eval_src = ('f' + value[1:]) if is_tstring else value
                 # Convert to Python f-string and evaluate
                 # Create a scope with current variables
                 local_vars = {}
@@ -667,11 +2401,12 @@ class Interpreter:
                             local_vars[name] = scope.vars[name]
                     scope = scope.parent
                 # Evaluate the f-string
-                return eval(value, {"__builtins__": __builtins__}, local_vars)
+                result = eval(eval_src, {"__builtins__": __builtins__}, local_vars)
+                return MojoString(result) if isinstance(result, str) else result
             except Exception as e:
                 # If f-string evaluation fails, return the literal
-                return value
-        return value
+                return MojoString(value)
+        return MojoString(value)
 
     def eval_BoolLiteral(self, expr: N.BoolLiteral):
         """Evaluate boolean literal."""
@@ -700,19 +2435,48 @@ class Interpreter:
         """Evaluate tuple literal."""
         return tuple(self.eval_expr(e) for e in expr.elements)
 
+    @staticmethod
+    def _wrap_int(v):
+        """Mojo's Int is a fixed-width 64-bit signed integer (unlike Python's
+        arbitrary-precision int), so arithmetic on it wraps on overflow instead
+        of growing. Only ints (not bools, not floats) that come out of a
+        user-source BinaryOp/UnaryOp are Mojo Int values, so wrapping here
+        cannot affect interpreter-internal bookkeeping."""
+        if isinstance(v, int) and not isinstance(v, bool):
+            v &= 0xFFFFFFFFFFFFFFFF
+            if v >= 0x8000000000000000:
+                v -= 0x10000000000000000
+        return v
+
+    @staticmethod
+    def _resolve_ambiguous_empty_braces(left, right):
+        """Mojo's bare `{}` literal is polymorphic (empty Dict or empty Set,
+        inferred from context); this interpreter always parses it as an empty
+        dict (Python's default — see mojo_compiler.py's `{}` handling). When
+        one side of a set-algebra operator is already a real set, treat an
+        empty-dict operand as the empty set Mojo would have inferred, instead
+        of raising a TypeError Mojo code would never hit (`set() & {}`)."""
+        if isinstance(left, set) and isinstance(right, dict) and not right:
+            right = set()
+        elif isinstance(right, set) and isinstance(left, dict) and not left:
+            left = set()
+        return left, right
+
     def eval_BinaryOp(self, expr: N.BinaryOp):
         """Evaluate binary operation."""
         left = self.eval_expr(expr.left)
         right = self.eval_expr(expr.right)
 
         op = expr.op
-        if op == '+': return left + right
-        elif op == '-': return left - right
-        elif op == '*': return left * right
+        if op in ('&', '|', '^', '-'):
+            left, right = self._resolve_ambiguous_empty_braces(left, right)
+        if op == '+': return self._wrap_int(left + right)
+        elif op == '-': return self._wrap_int(left - right)
+        elif op == '*': return self._wrap_int(left * right)
         elif op == '/': return left / right
         elif op == '//': return left // right
         elif op == '%': return left % right
-        elif op == '**': return left ** right
+        elif op == '**': return self._wrap_int(left ** right)
         elif op == '==': return left == right
         elif op == '!=': return left != right
         elif op == '<': return left < right
@@ -724,10 +2488,10 @@ class Interpreter:
         elif op == 'in': return left in right
         elif op == 'is': return left is right
         elif op == 'is not': return left is not right
-        elif op == '&': return left & right
-        elif op == '|': return left | right
-        elif op == '^': return left ^ right
-        elif op == '<<': return left << right
+        elif op == '&': return self._wrap_int(left & right)
+        elif op == '|': return self._wrap_int(left | right)
+        elif op == '^': return self._wrap_int(left ^ right)
+        elif op == '<<': return self._wrap_int(left << right)
         elif op == '>>': return left >> right
         else:
             raise NotImplementedError(f"Binary operator {op!r} not implemented")
@@ -737,9 +2501,9 @@ class Interpreter:
         operand = self.eval_expr(expr.operand)
         op = expr.op
 
-        if op == '-': return -operand
+        if op == '-': return self._wrap_int(-operand)
         elif op == '+': return +operand
-        elif op == '~': return ~operand
+        elif op == '~': return self._wrap_int(~operand)
         elif op == 'not': return not operand
         else:
             raise NotImplementedError(f"Unary operator {op} not implemented")
@@ -759,7 +2523,14 @@ class Interpreter:
         if getattr(expr, 'kwargs', None):
             kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
 
-        if isinstance(func, MojoFunction):
+        return self.invoke(func, *args, **kwargs)
+
+    def invoke(self, func, *args, **kwargs):
+        """Call a value that may be a Mojo-defined function (which needs the
+        interpreter threaded through as its first argument) or a plain Python
+        callable — shared by eval_CallExpr and builtins like map[func] that
+        need to invoke a callee passed to them at runtime."""
+        if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
         else:
             return func(*args, **kwargs)
@@ -767,6 +2538,13 @@ class Interpreter:
     def eval_MemberExpr(self, expr: N.MemberExpr):
         """Evaluate member access."""
         obj = self.eval_expr(expr.obj)
+        if isinstance(obj, MojoInstance):
+            if expr.member in obj.__dict__:
+                return obj.__dict__[expr.member]
+            method = obj._mojo_class.methods.get(expr.member)
+            if method is not None:
+                return BoundMethod(method, obj, self)
+            raise AttributeError(f"'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):

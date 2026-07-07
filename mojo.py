@@ -53,13 +53,28 @@ def _extract_codegen_flags(args):
 
 def interpret_and_execute(src_code, filename=None, argv=None):
     try:
-        from mojo_compiler import py_tokenize, Parser
+        from mojo_compiler import py_tokenize, Parser, FunctionDef, ExprStmt, CallExpr, IdentExpr
         from myinterpreter import Interpreter
         tokens = py_tokenize(src_code)
         stmts = Parser(tokens).parse_module()
         interpreter = Interpreter(filename=filename, argv=argv)
         for stmt in stmts:
             interpreter.execute(stmt)
+
+        # Real Mojo programs don't call main() themselves — `def main():` is
+        # the entry point and gets invoked automatically (like C's main), the
+        # same way the compiled path (gimple_codegen) wires it up. Scripts
+        # written in the Python-style dialect (explicit `main()` call at file
+        # scope) already ran it above, so only auto-invoke when no top-level
+        # statement already called it.
+        has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
+        already_called = any(
+            isinstance(s, ExprStmt) and isinstance(s.value, CallExpr)
+            and isinstance(s.value.func, IdentExpr) and s.value.func.name == 'main'
+            for s in stmts
+        )
+        if has_main_def and not already_called:
+            interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback

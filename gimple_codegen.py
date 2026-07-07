@@ -4286,11 +4286,13 @@ class GimpleGen:
         # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
         if val.startswith('`') and val.endswith('`') and len(val) > 2:
             return self._lower_IdentExpr(IdentExpr(name=val))
-        # Detect and strip f/r/b/u prefix — only if followed by a quote character
-        # Regular strings have their quotes already stripped by the parser; f-strings keep prefix+quotes
+        # Detect and strip f/r/b/u/t prefix — only if followed by a quote character
+        # Regular strings have their quotes already stripped by the parser; f-strings
+        # and t-strings (template strings — same `{expr}` interpolation syntax,
+        # treated identically here) keep prefix+quotes.
         is_fstring = False
         prefix = ''
-        while val and val[0] in 'fFrRbBuU':
+        while val and val[0] in 'fFrRbBuUtT':
             prefix += val[0]
             val = val[1:]
         # If the remaining value starts with a quote, it still has quotes (f-string case)
@@ -4298,8 +4300,8 @@ class GimpleGen:
         if not val or val[0] not in ('"', "'"):
             val = prefix + val  # restore — these weren't string prefixes
         else:
-            # These were actual prefixes — check for f-string marker
-            is_fstring = any(c in 'fF' for c in prefix)
+            # These were actual prefixes — check for f-string/t-string marker
+            is_fstring = any(c in 'fFtT' for c in prefix)
         # Strip outer triple or single quotes
         if val.startswith('"""') and val.endswith('"""'):
             val = val[3:-3]
@@ -12192,16 +12194,36 @@ class GimpleGen:
             'params': 'MojoList *',
             'body': 'MojoList *',
             'closure_scope': 'Scope *',
+            'comptime_params': 'MojoList *',
+        }
+        self.struct_field_types['_MojoBoundComptimeFunction'] = {
+            'func': 'MojoFunction *',
+            'comptime_bindings': 'MojoDict *',
         }
         self.struct_field_types['MojoClass'] = {
             'name': 'char *',
-            'body': 'MojoList *',
+            'fields': 'MojoList *',
             'methods': 'MojoDict *',
+            'interpreter': 'Interpreter *',
+        }
+        self.struct_field_types['MojoInstance'] = {
+            '_mojo_class': 'MojoClass *',
+        }
+        self.struct_field_types['BoundMethod'] = {
+            'bound_func': 'MojoFunction *',
+            'instance': 'MojoInstance *',
+            'interpreter': 'Interpreter *',
+        }
+        self.struct_field_types['MojoOverloadSet'] = {
+            'name': 'char *',
+            'candidates': 'MojoList *',
         }
         self.struct_field_types['Interpreter'] = {
             'scope': 'Scope *',
             'filename': 'char *',
             'argv': 'MojoList *',
+            '_mojo_module_cache': 'MojoDict *',
+            '_func_specs': 'MojoDict *',
         }
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',

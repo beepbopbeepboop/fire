@@ -353,6 +353,8 @@ class FunctionDef:
     decorators: list = field(default_factory=list)
     param_convs: dict = field(default_factory=dict)  # name -> convention str|None
     param_has_default: dict = field(default_factory=dict)  # name -> True if a default value was given
+    kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
+    comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
     line: int = 0
     col: int = 0
 
@@ -1301,12 +1303,18 @@ class Parser:
             name = self._advance().value  # backtick identifier
         else:
             raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
-        # Skip generic type-param block [T: Trait, count: Int, //]
-        if self._peek().kind == "LBRACKET": self._skip_bracketed()
+        # Generic type-param block [T: Trait, count: Int, //] — capture the
+        # names (see _parse_generic_params_capture) so the interpreter can
+        # bind `f[Int32]()`'s subscript to them by position.
+        comptime_params = []
+        if self._peek().kind == "LBRACKET":
+            comptime_params = self._parse_generic_params_capture()
         self._expect("LPAREN")
         params = []
         param_convs = {}
         param_has_default = {}
+        kwonly = []
+        seen_bare_star = False
         while self._peek().kind != "RPAREN":
             # Skip newlines and indentation within parameter list
             while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
@@ -1368,6 +1376,7 @@ class Parser:
                     continue
                 # Otherwise it's a separator: skip following comma and check for end
                 elif self._peek().kind == "COMMA": self._advance()
+                seen_bare_star = True
                 if self._peek().kind == "RPAREN": break
                 # Continue to next parameter (convention keywords might follow)
                 continue
@@ -1390,6 +1399,7 @@ class Parser:
                 param_has_default[pname] = True
             params.append((pname, ptype))
             if conv is not None: param_convs[pname] = conv
+            if seen_bare_star: kwonly.append(pname)
             # Skip trailing comma and newlines
             if self._peek().kind == "COMMA": self._advance()
             while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
@@ -1466,7 +1476,9 @@ class Parser:
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
                            param_convs=param_convs,
-                           param_has_default=param_has_default)
+                           param_has_default=param_has_default,
+                           kwonly=kwonly,
+                           comptime_params=comptime_params)
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
@@ -1979,17 +1991,19 @@ class Parser:
 
     def _strip_string_prefix_and_quotes(self, raw: str) -> str:
         """A STRING token's value may carry a prefix (f/F/r/R/b/B/u/U/t/T,
-        0-2 chars) before the quotes. F-strings deliberately KEEP their
-        prefix+quotes in the StringLiteral value (gimple_codegen.py's
-        _lower_StringLiteral needs both, for f-string interpolation) but
-        every other prefixed string (r'...', b'...', rb'...', etc.) must
-        have BOTH the prefix and the quotes stripped — this previously only
-        stripped quotes when the raw token started with a quote character
-        directly, silently leaving any r/b/u prefix as literal text in the
-        StringLiteral's value for every non-f prefixed string. Found via
-        reflect.py's own `_PROTO_RE = re.compile(r'...')`: the compiled
-        StringLiteral's value was the literal text "r'...'" (prefix and
-        quotes included), not the real pattern text.
+        0-2 chars) before the quotes. F-strings and t-strings deliberately
+        KEEP their prefix+quotes in the StringLiteral value (both
+        gimple_codegen.py's _lower_StringLiteral and myinterpreter.py's
+        eval_StringLiteral need the prefix, to know interpolation is needed
+        and to tell the two apart) but every other prefixed string (r'...',
+        b'...', rb'...', etc.) must have BOTH the prefix and the quotes
+        stripped — this previously only stripped quotes when the raw token
+        started with a quote character directly, silently leaving any r/b/u
+        prefix as literal text in the StringLiteral's value for every non-f
+        prefixed string. Found via reflect.py's own
+        `_PROTO_RE = re.compile(r'...')`: the compiled StringLiteral's value
+        was the literal text "r'...'" (prefix and quotes included), not the
+        real pattern text.
         """
         # NOTE: this codegen's `and`/`or` always evaluate BOTH operands (no
         # real short-circuiting — see gimple_codegen.py's BinaryOp lowering),
@@ -2008,7 +2022,7 @@ class Parser:
                 has_quote_after_prefix = True
         if not has_quote_after_prefix:
             prefix, rest = '', raw  # no real prefix (nothing quote-like follows it)
-        if 'f' in prefix.lower():
+        if 'f' in prefix.lower() or 't' in prefix.lower():
             return raw
         if len(rest) >= 6:
             if rest.startswith('"""') and rest.endswith('"""'):
@@ -2307,6 +2321,36 @@ class Parser:
             elif t.kind == "RBRACKET":
                 depth -= 1
             elif t.kind == "EOF": break
+
+    def _parse_generic_params_capture(self):
+        """Consume a `def f[dtype: DType, width: SIMDSize, //, ...](...)`
+        generic/comptime parameter block like `_skip_bracketed`, but also
+        return just the parameter names in declaration order (ignoring
+        types, trait bounds, defaults, and the `//` comptime/runtime
+        separator) — enough for the interpreter to bind a call-site
+        subscript (`f[Int32]()`) to names by position, e.g. so the function
+        body can read `dtype` as a plain value."""
+        self._expect("LBRACKET")
+        names = []
+        depth = 1
+        expect_name = True
+        while depth > 0:
+            t = self._peek()
+            if t.kind == "LBRACKET":
+                self._advance(); depth += 1; continue
+            if t.kind == "RBRACKET":
+                self._advance(); depth -= 1; continue
+            if t.kind == "EOF":
+                break
+            if t.kind == "COMMA" and depth == 1:
+                self._advance(); expect_name = True; continue
+            if depth == 1 and expect_name and t.kind in ("NAME", "KW"):
+                names.append(t.value)
+                self._advance()
+                expect_name = False
+                continue
+            self._advance()
+        return names
 
     def _skip_fn_quals(self):
         """Skip function-type qualifiers between a parameter list and `->`:
