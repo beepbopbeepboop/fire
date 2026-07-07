@@ -2739,3 +2739,62 @@ class Interpreter:
     def eval_SetExpr(self, expr):
         """Evaluate set expression (mojo_compiler naming)."""
         return self.eval_SetLiteral(expr)
+
+    def _bind_comprehension_target(self, target_str, value):
+        """A comprehension/generator `for` clause's target is a plain string
+        (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
+        — see mojo_compiler.py's _parse_generator_target), not an Expr node.
+        Mirrors execute_VarDecl's handling of the same comma-joined-string
+        representation for `var a, b = ...`."""
+        name = target_str.strip()
+        if name.startswith('(') and name.endswith(')'):
+            name = name[1:-1].strip()
+        if ',' in name:
+            names = [n.strip() for n in name.split(',')]
+            values = (list(value) if hasattr(value, '__iter__')
+                      and not isinstance(value, (str, bytes)) else [value])
+            for n, v in zip(names, values):
+                self.scope.define(n, v)
+        else:
+            self.scope.define(name, value)
+
+    def eval_Comprehension(self, expr):
+        """List/set/dict comprehensions and parenthesized generator
+        expressions (`expr.kind` in 'list'/'set'/'dict'/'generator').
+
+        Real Python comprehensions get their own scope; this interpreter
+        evaluates them in the *current* scope instead (same simplification
+        execute_ForStmt already makes for a plain `for` loop) — loop
+        variables leak into the enclosing scope, a known minor fidelity
+        gap. A 'generator' expression is likewise returned as a plain list,
+        not a lazy generator — every real consumer seen here (sum(), any(),
+        list(), etc.) accepts any iterable, so the laziness itself is never
+        actually needed.
+
+        For a dict comprehension, mojo_compiler.py's parser stores the KEY
+        expression in `.element` and the VALUE expression in `.key` (yes,
+        swapped from what the names suggest — see _parse_dict_or_set)."""
+        results = []
+
+        def run(generators):
+            if not generators:
+                if expr.kind == 'dict':
+                    k = self.eval_expr(expr.element)
+                    v = self.eval_expr(expr.key)
+                    results.append((k, v))
+                else:
+                    results.append(self.eval_expr(expr.element))
+                return
+            gen = generators[0]
+            rest = generators[1:]
+            for item in self.eval_expr(gen.iterable):
+                self._bind_comprehension_target(gen.target, item)
+                if all(self.eval_expr(cond) for cond in gen.conditions):
+                    run(rest)
+
+        run(expr.generators)
+        if expr.kind == 'set':
+            return set(results)
+        if expr.kind == 'dict':
+            return dict(results)
+        return results
