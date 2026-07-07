@@ -116,6 +116,7 @@ char       *mojo_chr(int64_t code);
 
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
+char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
 MojoStr    *mojo_str_from_char(char c);
 MojoStr    *mojo_str_repeat(MojoStr *s, int64_t n);
 int64_t     mojo_str_to_int(MojoStr *s);
@@ -273,6 +274,7 @@ char *mojo_input(char *prompt);
 /* Python built-in functions for C strings */
 int mojo_isinstance(int obj, int type_id);
 int64_t mojo_read_type_tag(int64_t addr);
+int64_t mojo_read_type_tag_safe(int64_t addr);
 char *mojo_str(void *obj);  /* Flexible signature for both int and char* */
 char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);

@@ -510,6 +510,43 @@ MojoStr *mojo_str_concat(MojoStr *a, MojoStr *b)
 int64_t     mojo_str_len(MojoStr *s)  { return s->len; }
 char *mojo_str_data(MojoStr *s) { return s->data; }
 
+/* Slicing a plain NUL-terminated char* (the common case: gimple_codegen.py
+ * boxes an ordinary Python `str` as char*, not the MojoStr* wrapper struct —
+ * that has its own mojo_str_slice above) has no length field to bound the
+ * copy against, unlike MojoStr's `->len`. _lower_slice's previous fallback
+ * for a plain pointer just added `start` to the pointer and returned that —
+ * correct for `s[start:]` (a NUL-terminated string with the tail intact
+ * naturally reads correctly to its own end), but `s[:stop]`/`s[start:stop]`
+ * silently returned everything from `start` to the ORIGINAL string's real
+ * end, completely ignoring `stop` — no truncation ever happened, since nothing
+ * ever copied a shorter buffer or wrote a new NUL terminator. Found via
+ * mojo_compiler.py's own `_strip_inline_comment(s)` (`return s[:i]`) never
+ * actually removing anything, letting a `#`-comment's text — including
+ * `for`/`import`/etc keywords — flow straight into the token stream once
+ * self-hosted.
+ *
+ * `stop == -1` is _lower_slice's sentinel for "no stop given" (`s[start:]`)
+ * — mirrors mojo_str_slice's contract above for MojoStr, even though that
+ * makes a literal `s[:-1]` request (a real negative index, not "no bound")
+ * indistinguishable from "to the end"; matching the existing contract here
+ * for consistency rather than fixing that separately. */
+char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t len = (int64_t)strlen(s);
+    if (stop == -1) stop = len;
+    if (start < 0) start += len;
+    if (stop  < 0) stop  += len;
+    if (start < 0) start = 0;
+    if (stop > len) stop = len;
+    if (start >= stop) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t n = stop - start;
+    char *out = malloc((size_t)n + 1);
+    memcpy(out, s + start, (size_t)n);
+    out[n] = '\0';
+    return out;
+}
+
 MojoStr *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop)
 {
     if (start < 0) start = s->len + start;
@@ -1291,6 +1328,21 @@ int64_t mojo_read_type_tag(int64_t addr) {
     return *(int64_t *)(intptr_t)addr;
 }
 
+/* Like mojo_read_type_tag, but for callers that don't statically know
+ * whether `addr` is even a real pointer — e.g. the generic
+ * getattr()/setattr()/dataclasses.fields()/dataclasses.is_dataclass()
+ * dispatch (see gimple_codegen.py's emitted _mojo_dispatch_* functions),
+ * which run on a value boxed as int64_t that could just as easily be a
+ * small scalar (a line number, a boolean, 0/None) as a struct pointer.
+ * Dereferencing a small int as a pointer is UB; the same small-vs-real-
+ * pointer heuristic mojo_str() already uses (a real heap/stack address is
+ * never this small) turns that into a safe "not a tagged struct" instead
+ * of a crash. */
+int64_t mojo_read_type_tag_safe(int64_t addr) {
+    if (addr < 65536) return 0;
+    return *(int64_t *)(intptr_t)addr;
+}
+
 char *mojo_str(void *obj) {
     /* Flexible: handle both int (cast as pointer) and actual char* pointers */
     if (obj == NULL) {
@@ -1861,13 +1913,25 @@ MojoList *mojo_dict_values(MojoDict *d) {
 }
 
 MojoList *mojo_dict_items(MojoDict *d) {
-    /* Returns flat list of alternating key/value pairs (simplified) */
+    /* A list of (key, value) 2-element sub-lists — NOT a flat alternating
+     * key/value list (the previous shape here). gimple_codegen.py's
+     * `for k, v in d.items():` tuple-target lowering (_gen_for_list's
+     * is_tuple branch) already unconditionally expects each top-level
+     * element to itself be a MojoList* it can index into for k/v — the
+     * flat shape meant it read the KEY's own char* bytes as if they were a
+     * MojoList struct's internal fields, corrupting memory (crash: reading
+     * a struct-valued dict's value came out as garbage, since the "value"
+     * offset landed inside the key string's data instead of a real value
+     * slot — found via mojo_compiler.py's own `_parse_postfix`, whose
+     * `keywords: dict = {}` stores parsed expression nodes as values). */
     MojoList *out = mojo_list_new();
     if (!d) return out;
     for (int64_t i = 0; i < d->cap; i++) {
         if (d->slots[i].key) {
-            mojo_list_append_str(out, d->slots[i].key);
-            mojo_list_append_int(out, d->slots[i].val);
+            MojoList *pair = mojo_list_new();
+            mojo_list_append_str(pair, d->slots[i].key);
+            mojo_list_append_int(pair, d->slots[i].val);
+            mojo_list_append_int(out, (int64_t)(intptr_t)pair);
         }
     }
     return out;

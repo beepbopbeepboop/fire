@@ -293,7 +293,7 @@ def _term_discriminator(term, path):
     return ('LIT', node)
 
 
-def build_trie(rules):
+def build_trie(rules: list):
     root = TrieNode()
     for rule in rules:
         discs = []

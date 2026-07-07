@@ -104,38 +104,71 @@ stage2/mojo: stage1 $(RUNTIME_SRC) $(RUNTIME_HDR)
 	@echo "✓ stage2/mojo ready"
 
 # ── Stage 2: compiled binary drives itself ────────────────────────────────────
+# Runs every file's --dump (collect-all), but a per-file failure — a nonzero
+# exit from `mojo --dump`, or the runtime's `mojo_unsupported_iter` warning
+# (a real codegen gap that just doesn't SIGABRT the whole compiler, see
+# runtime/mojo_runtime.c) — is tracked and fails the target at the end, so
+# real problems can't silently pass as "✓ Stage 2 complete".
 stage2: stage2/mojo
 	@mkdir -p stage2
 	@echo "=== Stage 2: stage2/mojo → stage2/ ==="
-	cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump ../$(MOJO_MAIN)
-	@echo "--- Dumping all .mojo source files ---"
-	@for f in $(MOJO_FILES); do \
+	@FAILED=0; \
+	run_dump() { \
+	    out=$$(cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump "../$$1" 2>&1); \
+	    rc=$$?; \
+	    [ -n "$$out" ] && echo "$$out"; \
+	    if [ $$rc -ne 0 ] || echo "$$out" | grep -q "mojo_unsupported_iter"; then \
+	        echo "  FAILED: $$1"; \
+	        FAILED=1; \
+	    fi; \
+	}; \
+	run_dump $(MOJO_MAIN); \
+	echo "--- Dumping all .mojo source files ---"; \
+	for f in $(MOJO_FILES); do \
 	    echo "  dump $$f"; \
-	    cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "--- Dumping core .py source files ---"
-	@for f in $(PY_FILES); do \
+	    run_dump $$f; \
+	done; \
+	echo "--- Dumping core .py source files ---"; \
+	for f in $(PY_FILES); do \
 	    echo "  dump $$f"; \
-	    cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "✓ Stage 2 complete"
+	    run_dump $$f; \
+	done; \
+	if [ "$$FAILED" = "0" ]; then \
+	    echo "✓ Stage 2 complete"; \
+	else \
+	    echo "✗ Stage 2 had failures (see FAILED lines above)"; exit 1; \
+	fi
 
 # ── Stage 3: idempotency check (same binary, fresh output dir) ───────────────
 stage3: stage2/mojo stage2
 	@mkdir -p stage3
 	@echo "=== Stage 3: stage2/mojo → stage3/ (idempotency check) ==="
-	cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump ../$(MOJO_MAIN)
-	@echo "--- Dumping all .mojo source files ---"
-	@for f in $(MOJO_FILES); do \
+	@FAILED=0; \
+	run_dump() { \
+	    out=$$(cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump "../$$1" 2>&1); \
+	    rc=$$?; \
+	    [ -n "$$out" ] && echo "$$out"; \
+	    if [ $$rc -ne 0 ] || echo "$$out" | grep -q "mojo_unsupported_iter"; then \
+	        echo "  FAILED: $$1"; \
+	        FAILED=1; \
+	    fi; \
+	}; \
+	run_dump $(MOJO_MAIN); \
+	echo "--- Dumping all .mojo source files ---"; \
+	for f in $(MOJO_FILES); do \
 	    echo "  dump $$f"; \
-	    cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "--- Dumping core .py source files ---"
-	@for f in $(PY_FILES); do \
+	    run_dump $$f; \
+	done; \
+	echo "--- Dumping core .py source files ---"; \
+	for f in $(PY_FILES); do \
 	    echo "  dump $$f"; \
-	    cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump ../$$f && cd .. || cd ..; \
-	done
-	@echo "✓ Stage 3 complete"
+	    run_dump $$f; \
+	done; \
+	if [ "$$FAILED" = "0" ]; then \
+	    echo "✓ Stage 3 complete"; \
+	else \
+	    echo "✗ Stage 3 had failures (see FAILED lines above)"; exit 1; \
+	fi
 
 # ── verify: all three stages identical for every generated file ───────────────
 verify: stage3

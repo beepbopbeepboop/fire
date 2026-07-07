@@ -278,6 +278,14 @@ class AssignStmt:
     value: object
     line: int = 0
     col: int = 0
+    # Only set for `target: Type = value` (an explicit annotation alongside
+    # the value) — None for a bare `target = value`. Existing consumers that
+    # don't know about this field are unaffected (it defaults to None and
+    # AssignStmt's *meaning* — an executable assignment, always AssignStmt,
+    # never VarDecl — is unchanged); struct_field_types's field scanner uses
+    # it when present, since a dataclass field with a default is exactly the
+    # `name: Type = default` shape that reaches this branch.
+    type_ann: object = None
 
 @dataclass
 class AugAssignStmt:
@@ -408,6 +416,15 @@ class StructDef:
     bases: list = field(default_factory=list)  # base class/struct names, e.g. `struct Child(Base):`
     line: int = 0
     col: int = 0
+    # A "mark visited" flag set via plain attribute assignment (not passed to
+    # __init__) by _synthesize_fieldwise_inits — real Python dataclasses
+    # allow adding an attribute that was never declared as a field, but a
+    # compiled struct has a fixed C layout with no such field to write to.
+    # Must be a real declared field for the self-hosted compiled path to
+    # have anywhere to store it (found via an abort() in the reflection
+    # dispatch's fallback: `s._fieldwise_ctor_synthesized = True` on a
+    # StructDef with no such field in struct_field_types).
+    _fieldwise_ctor_synthesized: bool = False
 
 @dataclass
 class TraitDef:
@@ -655,7 +672,15 @@ def py_tokenize(src: str) -> list[Token]:
             placeholder = f"__MOJO_STR_{string_idx[0]}__"
             string_cache[placeholder] = m.group(0)
             string_idx[0] += 1
-            return placeholder
+            # Preserve the original newline count: collapsing a multi-line
+            # triple-quoted string (a docstring is the common case) to a
+            # single-line placeholder shifted every subsequent physical line
+            # number by (that string's line count - 1) — real bug, found via
+            # `for` loops later in this exact file (mojo.py has a top-of-file
+            # module docstring) reporting a diagnostic line number dozens of
+            # lines before the loop's actual location, off by roughly the
+            # cumulative length of every docstring/multi-line string above it.
+            return placeholder + '\n' * m.group(0).count('\n')
         # Build patterns without literal triple-quotes in source (avoids bootstrap self-match)
         _dq = '"' * 3
         _sq = "'" * 3
@@ -702,11 +727,11 @@ def py_tokenize(src: str) -> list[Token]:
             if stmt_idx == 0 and paren_depth == 0:
                 if indent > stack[-1]:
                     stack.append(indent)
-                    out.append(Token("INDENT", "", line=physical_line))
+                    out.append(Token("INDENT", "", line=physical_line, col=0))
                 else:
                     while indent < stack[-1]:
                         stack.pop()
-                        out.append(Token("DEDENT", "", line=physical_line))
+                        out.append(Token("DEDENT", "", line=physical_line, col=0))
             # Handle t-strings with nested braces before tokenization
             stmt_final = _process_nested_tstrings(stmt, string_cache, string_idx)
 
@@ -726,14 +751,14 @@ def py_tokenize(src: str) -> list[Token]:
                 out.append(Token(kind, val, line=physical_line, col=col))
             # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens)
             if paren_depth == 0:
-                out.append(Token("NEWLINE", "", line=physical_line))
+                out.append(Token("NEWLINE", "", line=physical_line, col=0))
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
     while len(stack) > 1:
         stack.pop()
-        out.append(Token("DEDENT", "", line=last_line))
-    out.append(Token("EOF", "", line=last_line))
+        out.append(Token("DEDENT", "", line=last_line, col=0))
+    out.append(Token("EOF", "", line=last_line, col=0))
     return out
 
 # ── Parser ─────────────────────────────────────────────────────────
@@ -815,29 +840,70 @@ class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0
+        self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
+
+    def with_filename(self, filename: str):
+        """Attach a source filename for `file:line:col:` diagnostics.
+        Kept as a separate setter (not an __init__ param) because the
+        self-hosted compiled path emits one fixed C signature per function —
+        callers passing 1 vs 2 constructor args would produce two conflicting
+        declarations for Parser___init__."""
+        self._filename = filename
+        return self
 
     def _peek(self, offset: int = 0) -> Token:
         i = self._pos + offset
         if i < len(self._tok):
             return self._tok[i]
         last_line = 0
+        last_col = 0
         if self._tok:
             last_tok = self._tok[-1]
             last_line = last_tok.line
-        return Token("EOF", "", line=last_line)
+            last_col = last_tok.col
+        # Pass every field explicitly (not relying on Token's `col: int = 0`
+        # dataclass default) — the self-hosted compiled path doesn't reliably
+        # apply Python default field values on a constructor call that omits
+        # them, so an implicit default can come back as an uninitialized/
+        # None-ish slot instead of 0 (seen as "file:line:None:" in a
+        # compiled-path diagnostic).
+        return Token("EOF", "", line=last_line, col=last_col)
 
     def _advance(self) -> Token:
         t = self._tok[self._pos]
         if self._pos < len(self._tok) - 1: self._pos += 1
         return t
 
+    def _loc(self, tok: Token) -> str:
+        """Format a gcc-style `file:line:col: ` prefix for a diagnostic.
+        Omits the filename segment when none was supplied to the Parser
+        (e.g. inline snippets compiled from a string with no source file).
+
+        `tok` is required (no default/None-fallback) — every call site
+        already has a concrete token in hand, and a `tok if tok is not
+        None else self._peek()` ternary here previously confused the
+        self-hosted compiled path's type inference: the phi'd local came
+        back typed int64_t instead of Token*, so `.col` silently read back
+        as garbage/None in compiled diagnostics (`.line` happened to still
+        work). Only ever called from *inside* an f-string interpolation at
+        each raise site (never via a `raise self._error(...)` indirection)
+        — the compiled path's raise-lowering (_gen_stmt_RaiseStmt) pattern-
+        matches the literal shape `raise ExcName(single_string_arg)` to
+        capture the exception's type tag and message; routing the raise
+        through a helper method call breaks that match silently (the
+        exception still fires, but with an empty message and no type tag,
+        since `val.func` is a MemberExpr instead of a bare IdentExpr)."""
+        if self._filename:
+            return f"{self._filename}:{tok.line}:{tok.col}: "
+        return f"{tok.line}:{tok.col}: "
+
     def _expect(self, kind: str, value: str = None) -> Token:
         t = self._peek()
         if t.kind != kind:
-            raise SyntaxError(f"Expected {kind} got {t.kind}({t.value!r})")
+            raise SyntaxError(f"{self._loc(t)}Expected {kind} got {t.kind}({t.value!r})")
         if value and t.value != value:
-            raise SyntaxError(f"Expected {value!r} got {t.value!r}")
+            raise SyntaxError(f"{self._loc(t)}Expected {value!r} got {t.value!r}")
         return self._advance()
 
     def _ident(self) -> str:
@@ -848,7 +914,7 @@ class Parser:
             return self._advance().value
         if t.kind == "STRING" and t.value.startswith("`"):
             return self._advance().value
-        raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+        raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
     def _skip_newlines(self):
         while self._peek().kind == "NEWLINE": self._advance()
@@ -1075,7 +1141,26 @@ class Parser:
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 val = self._parse_expr(0)
-                return AssignStmt(target=expr, value=val, line=line, col=col)
+                # `x: Type = value` previously silently discarded the
+                # annotation (AssignStmt has no type_ann field) — harmless
+                # for a local (type gets re-inferred from the value), but a
+                # real bug for a dataclass field with both an annotation AND
+                # a default (`x: list = field(default_factory=list)`, the
+                # normal shape for every trailing/optional field in this
+                # file's own AST-node dataclasses): the struct-field scanner
+                # that builds struct_field_types only recognized VarDecl (no
+                # value = pure declaration), so every such field was
+                # invisible to the self-hosted compiled path — found via
+                # StructDef's own _fieldwise_ctor_synthesized field aborting
+                # through the generic getattr fallback. Switching this whole
+                # branch to VarDecl (instead of adding type_ann to
+                # AssignStmt) turned out to have a much wider blast radius:
+                # every module-level `X: dict = {...}`-style global is
+                # driven by machinery keyed on `isinstance(stmt, AssignStmt)`
+                # (global C-storage boxing, _toplevel() statement collection)
+                # that doesn't know about VarDecl — so stick the annotation
+                # directly on AssignStmt instead, touching nothing else.
+                return AssignStmt(target=expr, value=val, type_ann=type_ann, line=line, col=col)
             else:
                 # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields.
                 # NOTE: this codegen's ternary always evaluates BOTH branches (no
@@ -1212,7 +1297,7 @@ class Parser:
         elif t.kind == "COLON":
             # Python-style field annotation: "var: type"  (var is the field name)
             name = "var"
-        else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
         # Check for tuple unpacking (var a, b, c = ...)
         if self._peek().kind == "COMMA":
             names = [name]
@@ -1322,7 +1407,7 @@ class Parser:
         # 'case' is also a soft keyword (NAME, not KW) — same as real Python.
         t = self._peek()
         if not (t.kind == "NAME" and t.value == "case"):
-            raise SyntaxError(f"Expected 'case' got {t.kind}({t.value!r})")
+            raise SyntaxError(f"{self._loc(t)}Expected 'case' got {t.kind}({t.value!r})")
         self._advance()
         # `case _:` (bare wildcard, an IdentExpr named '_') is recognized at
         # match time (interpreter/codegen), not specially here — parsing it
@@ -1343,6 +1428,7 @@ class Parser:
         return MatchCase(patterns=patterns, body=body, guard=guard)
 
     def _parse_for(self):
+        _for_tok = self._peek()
         self._expect("KW", "for")
         # Skip optional convention keyword (var, ref, mut, etc.)
         if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
@@ -1393,7 +1479,8 @@ class Parser:
         if self._is_kw("else"):
             self._advance(); self._expect("COLON")
             else_body = self._parse_block()
-        return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body)
+        return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body,
+                       line=_for_tok.line, col=_for_tok.col)
 
     # Ownership/convention keywords preserved in param_convs
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned'}
@@ -1408,7 +1495,7 @@ class Parser:
         elif t.kind == "STRING" and t.value.startswith("`"):
             name = self._advance().value  # backtick identifier
         else:
-            raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+            raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
         # Generic type-param block [T: Trait, count: Int, //] — capture the
         # names (see _parse_generic_params_capture) so the interpreter can
         # bind `f[Int32]()`'s subscript to them by position.
@@ -1493,7 +1580,7 @@ class Parser:
             t = self._peek()
             if t.kind == "NAME": pname = self._advance().value
             elif t.kind == "KW": pname = self._advance().value
-            else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+            else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
             ptype = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
@@ -1729,7 +1816,7 @@ class Parser:
                 rhs = self._skip_comptime_rhs()
                 return ComptimeVarStmt(target=name, value=rhs)
             return ExprStmt(IdentExpr(name))
-        raise SyntaxError(f"Unexpected token after comptime: {t.value!r}")
+        raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
 
     def _skip_comptime_rhs(self):
         """Parse RHS of comptime assignment, with fallback for complex types.
@@ -1848,12 +1935,12 @@ class Parser:
         return ContinueStmt()
 
     def _parse_assert(self):
-        self._expect("KW", 'assert')
+        t = self._expect("KW", 'assert')
         value = self._parse_expr(0)
         msg = None
         if self._peek().kind == "COMMA":
             self._advance(); msg = self._parse_expr(0)
-        return AssertStmt(value=value, msg=msg)
+        return AssertStmt(value=value, msg=msg, line=t.line, col=t.col)
 
     def _parse_global(self):
         t = self._peek()
@@ -2218,7 +2305,7 @@ class Parser:
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()
             return EllipsisLiteral(line=line, col=col)
-        raise SyntaxError(f"Unexpected {t.kind}({t.value!r})")
+        raise SyntaxError(f"{self._loc(t)}Unexpected {t.kind}({t.value!r})")
 
     def _parse_lambda(self):
         params = []
@@ -2580,7 +2667,7 @@ class Parser:
                     return prefix + f"def ... -> {return_type}"
                 return prefix + "def"
             name = prefix + kw_value
-        else: raise SyntaxError(f"Expected NAME or KW got {t.kind}({t.value!r})")
+        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
@@ -2867,9 +2954,9 @@ def emit(node, indent: int = 0) -> str:
     raise TypeError(f"Cannot emit {type(node).__name__}")
 
 # ── Driver ──────────────────────────────────────────────────────────
-def compile(src: str) -> str:
+def compile(src: str, filename: str = "") -> str:
     tokens = py_tokenize(src)
-    stmts  = Parser(tokens).parse_module()
+    stmts  = Parser(tokens).with_filename(filename).parse_module()
     return emit_module(stmts)
 
 def compile_with_interpreter(src: str, filename: str = "") -> str:
@@ -2880,5 +2967,10 @@ def compile_with_interpreter(src: str, filename: str = "") -> str:
 
 if __name__ == '__main__':
     import sys
-    src = sys.stdin.read() if len(sys.argv) < 2 else open(sys.argv[1]).read()
-    print(compile(src))
+    filename = sys.argv[1] if len(sys.argv) >= 2 else "<stdin>"
+    src = sys.stdin.read() if len(sys.argv) < 2 else open(filename).read()
+    try:
+        print(compile(src, filename=filename))
+    except SyntaxError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)

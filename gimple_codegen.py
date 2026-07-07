@@ -1490,6 +1490,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_eq':                'int',
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
+    'mojo_cstr_slice':            'char *',
     'mojo_str_from_char':         'MojoStr *',
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
@@ -2283,6 +2284,7 @@ class GimpleGen:
         self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result
         self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
+        self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
@@ -2514,6 +2516,7 @@ class GimpleGen:
                     temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
+                    temp_gen._struct_allocs_needed = self._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                     temp_gen._str_pool = self._str_pool
                     temp_gen._regex_patterns = self._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                     temp_gen._regex_progs = self._regex_progs        # share: bubble compiled regex data up to root preamble
@@ -2934,6 +2937,11 @@ class GimpleGen:
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
+        'mojo_read_type_tag_safe': ('int64_t',  ['int64_t']),
+        '_mojo_dispatch_getattr':    ('int64_t',   ['void *', 'char *']),
+        '_mojo_dispatch_setattr':    ('void',      ['void *', 'char *', 'int64_t']),
+        '_mojo_dispatch_fields':     ('MojoList *', ['void *']),
+        '_mojo_dispatch_is_dataclass': ('int',     ['void *']),
         'mojo_stdin_read':       ('char *',     []),
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
@@ -4370,12 +4378,30 @@ class GimpleGen:
         else:
             # These were actual prefixes — check for f-string/t-string marker
             is_fstring = any(c in 'fFtT' for c in prefix)
-        # Strip outer triple or single quotes
+        # Strip outer triple or single quotes. mojo_compiler.py's Parser
+        # already strips quotes from a plain (non-triple, non-f/t-string)
+        # StringLiteral's value at tokenize time — this defensive re-strip
+        # exists for values that DIDN'T go through that (f/t-strings keep
+        # their prefix+quotes per the comment above; triple-quoted strings
+        # come back from the placeholder cache still fully quoted). The
+        # `len(val) >= 2` guard matters: a bare single-character value that
+        # happens to BE a quote character (e.g. this file's own `'"'` /
+        # `"'"` literals — a StringLiteral literally containing just a
+        # double- or single-quote) both start AND end with that same
+        # character, indistinguishable from "an already-quoted empty
+        # string" to the naive check below without a length floor — an
+        # actually-quoted value needs at least the two delimiter
+        # characters. Without the guard, `'"'` silently became the empty
+        # string, and worse, collided in the string-interning pool with
+        # `"'"` (also emptied out) — found via mojo_compiler.py's own
+        # `_strip_inline_comment`'s `c in ('"', "'", '\`')` never matching
+        # a real `"` once self-hosted, letting a `#` inside an f-string
+        # call argument get misread as a real comment start.
         if val.startswith('"""') and val.endswith('"""'):
             val = val[3:-3]
         elif val.startswith("'''") and val.endswith("'''"):
             val = val[3:-3]
-        elif (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+        elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
             val = val[1:-1]
         if not is_fstring:
             escaped = _c_escape(val)
@@ -4745,6 +4771,14 @@ class GimpleGen:
                                                ('int', str(ctx['ngroups'])),
                                                ('int64_t *', ctx['gstart_var'])])
 
+        # `f.name` where f is a `for f in dataclasses.fields(x):` loop var —
+        # see _gen_for_iter's is_dataclass_fields_loop handling. `f` is
+        # already the field-name string (a real dataclasses.Field object
+        # is never materialized), so `.name` is just identity.
+        if (isinstance(node.obj, IdentExpr) and node.obj.name in self._dataclass_fields_vars
+                and node.member == 'name'):
+            return self.lower_expr(node.obj)
+
         # Check if obj is a simple identifier (module access)
         if isinstance(node.obj, IdentExpr):
             module_name = node.obj.name
@@ -4949,7 +4983,7 @@ class GimpleGen:
             if ot == 'int':
                 ov = self._new_val('int64_t', f'(int64_t){ov}')
             vp = self._new_val('void *', f'(void *){ov}')
-            return 'int64_t', self._call_expr('int64_t', 'mojo_obj_getattr',
+            return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr',
                             [('void *', vp), ('char *', f'"{node.member}"')])
         else:
             # Unknown struct field — fall back
@@ -5471,12 +5505,44 @@ class GimpleGen:
 
     def _lower_in_impl(self, node: BinaryOp, negate: bool) -> tuple[str, str]:
         xt, xv = self.lower_expr(node.left)
+        # Same boxed-pointer-mistyped-as-int64_t issue as the `rt` resolution
+        # below, but on the left operand: a local reassigned from a value
+        # whose static type inference lost track of it being a real char*
+        # (e.g. `val = m.group()` in a regex-scan loop) reads back xt as
+        # int64_t here even though xv is a valid char* value, so `val in
+        # _KEYWORDS` fell to the int64_t branch (mojo_set_contains_int)
+        # instead of the string one and could never match.
+        xt = self._get_actual_type(xt, xv)
+        # Same C-level-still-int64_t situation as rv below: the logical type
+        # is now correct, but the declared local is still int64_t at the C
+        # level, so callees expecting a real char*/pointer need an explicit
+        # cast, not just the corrected bookkeeping type.
+        if xt == 'char *' and self.var_types.get(xv) == 'int64_t':
+            xv = self._new_val('char *', f"(char *){xv}")
+        elif xt.endswith(' *') and xt != 'char *' and self.var_types.get(xv) == 'int64_t':
+            xv = self._new_val(xt, f"({xt}){xv}")
         if (isinstance(node.right, CallExpr) and
                 isinstance(node.right.func, IdentExpr) and
                 node.right.func.name == 'range'):
             return self._lower_in_range(xv, node.right.args, negate=negate)
 
         rt, rv = self.lower_expr(node.right)
+        # A module-level MojoList*/MojoDict*/MojoSet* global is boxed as
+        # int64_t at the static-type level (_lower_IdentExpr stashes the
+        # real type in _actual_types instead) — without resolving through
+        # it here, `rt` is always 'int64_t' for e.g. `x in SOME_GLOBAL_SET`,
+        # never matching any of the branches below, so membership against
+        # any top-level set/dict/list constant silently always returned
+        # False. Found via `val in _KEYWORDS` (mojo_compiler.py's own
+        # tokenizer) misclassifying every keyword as a plain NAME in the
+        # self-hosted compiled path. len()/iteration elsewhere already
+        # resolve through _get_actual_type; this call site didn't.
+        rt = self._get_actual_type(rt, rv)
+        # rv itself is still declared int64_t at the C level even after the
+        # logical-type resolution above (only the bookkeeping dict changed) —
+        # cast it to the real pointer type, same idiom as _gen_for_set/_gen_for_dict.
+        if rt.endswith(' *') and self.var_types.get(rv) == 'int64_t':
+            rv = self._new_val(rt, f"({rt}){rv}")
         ti = self._new_temp('int')
 
         if rt == 'MojoList *':
@@ -5622,6 +5688,27 @@ class GimpleGen:
                 return 'int64_t', ctx['mstart_var']
             if func.member == 'end':
                 return 'int64_t', ctx['mend_var']
+
+        # `dataclasses.fields(x)`/`dataclasses.is_dataclass(x)` on a value
+        # whose concrete struct type isn't known statically (e.g. any AST
+        # node walked generically by ast_rewriter.py) — dispatch on the
+        # runtime type tag via the _mojo_dispatch_* functions gen_module
+        # emits once per program from struct_field_types (see there for why).
+        # `fields()` returns a MojoList* of field-name strings rather than
+        # real dataclasses.Field objects (the loop var's only ever-used
+        # attribute in this codebase is `.name`; see the for-loop lowering's
+        # _dataclass_fields_vars handling for how `f.name` resolves back to
+        # `f` itself).
+        if (isinstance(func.obj, IdentExpr) and func.obj.name == 'dataclasses'
+                and func.member == 'fields' and len(node.args) == 1):
+            at, av = self.lower_expr(node.args[0])
+            vp = self._ensure_local(at, av)
+            return 'MojoList *', self._call_expr('MojoList *', '_mojo_dispatch_fields', [(at, vp)])
+        if (isinstance(func.obj, IdentExpr) and func.obj.name == 'dataclasses'
+                and func.member == 'is_dataclass' and len(node.args) == 1):
+            at, av = self.lower_expr(node.args[0])
+            vp = self._ensure_local(at, av)
+            return 'int', self._call_expr('int', '_mojo_dispatch_is_dataclass', [(at, vp)])
 
         # Int/scalar MLIR accessors are identity on our scalar representation:
         # `x._int_mlir_index()` / `x.__mlir_index__()` just yield the machine word.
@@ -7325,13 +7412,13 @@ class GimpleGen:
             return rt, self._call_expr(rt, fn, pairs)
         if fname_raw == 'getattr' and len(node.args) >= 2:
             pairs = [self.lower_expr(a) for a in node.args[:2]]  # drop optional default
-            return 'int64_t', self._call_expr('int64_t', 'mojo_obj_getattr', pairs)
+            return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         if fname_raw == 'type'    and len(node.args) == 1:
             _, av = self.lower_expr(node.args[0])
             return 'int', self._new_val('int', f'mojo_type ({av})')
         if fname_raw == 'setattr' and len(node.args) >= 3:
             pairs = [self.lower_expr(a) for a in node.args[:3]]
-            return self._void_call('mojo_setattr', pairs)
+            return self._void_call('_mojo_dispatch_setattr', pairs)
 
         # Struct constructors
         if fname_raw in self.struct_field_types:
@@ -8477,6 +8564,18 @@ class GimpleGen:
             self._emit(f"  {t}->_len = {new_len};")
             return 'Span *', t
 
+        if ot == 'char *':
+            # A plain (non-MojoStr-wrapped) Python str, boxed as char* — a
+            # NUL-terminated C string has no length field to bound a slice
+            # copy against, unlike MojoStr's `->len`. The generic "plain
+            # pointer" fallback below just adds `start` to the pointer,
+            # which happens to look right for `s[start:]` (the tail reads
+            # correctly to the string's own real end) but silently drops
+            # `stop` entirely for `s[:stop]`/`s[start:stop]` — no truncation
+            # ever happens. See mojo_cstr_slice in runtime/mojo_runtime.c.
+            t = self._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
+            return 'char *', t
+
         # Plain pointer: return pointer to start (no bounds check)
         # GIMPLE: no pointer+integer; cast pointer through int64_t; both operands
         # must be plain variables (no cast expressions in binary operands).
@@ -9329,9 +9428,19 @@ class GimpleGen:
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 # Record the dict's value type so later reads recover it (esp.
-                # pointer values: dict-of-dicts/lists/sets). Homogeneous assumption,
-                # matching list element-type tracking.
-                if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *'):
+                # pointer values: dict-of-dicts/lists/sets, or a plain struct
+                # instance). Homogeneous assumption, matching list element-type
+                # tracking. Originally only recognized the hardcoded container
+                # types, silently dropping any OTHER struct pointer (e.g.
+                # `d[k] = SomeStruct(...)`) — later reads then had no
+                # _dict_val_types entry and fell back to the char*-values
+                # default, misreading the boxed struct pointer as a raw C
+                # string and corrupting memory on the first `.attr` access.
+                # Found via mojo_compiler.py's own `_parse_postfix`'s
+                # `keywords: dict = {}` (populated with parsed expression AST
+                # nodes, then read back via `keywords.items()`) segfaulting
+                # once self-hosted.
+                if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *') or vtype.endswith(' *'):
                     self._dict_val_types[obj_v] = vtype
                 # dict[key] = val → mojo_dict_set_str_*
                 key_tmp = self._new_temp('char *')
@@ -10645,10 +10754,20 @@ class GimpleGen:
             return self._actual_types[val]
         return ctype
 
-    def _emit_unsupported_iter(self, it_type: str) -> None:
+    def _emit_unsupported_iter(self, it_type: str, node=None) -> None:
         """Abort at runtime instead of silently running a for-loop body zero
-        times — see mojo_unsupported_iter in runtime/mojo_runtime.c."""
-        name_lit = self._intern_string(it_type.replace('"', '\\"'))
+        times — see mojo_unsupported_iter in runtime/mojo_runtime.c.
+
+        Includes the source file:line of the offending `for` loop (when the
+        caller has it) — the runtime warning alone gives no way to tell
+        which of the (possibly many) unsupported loops in a build actually
+        fired without attaching a debugger, which isn't reliably possible
+        in every environment this runs in."""
+        loc = ''
+        if node is not None and getattr(node, 'line', 0):
+            fname = self._current_filename or '<unknown>'
+            loc = f'{fname}:{node.line}: '
+        name_lit = self._intern_string((loc + it_type).replace('"', '\\"'))
         # GIMPLE: a call argument must be a local register value, not a raw
         # global/static string-literal reference — load it into a temp first
         # (same requirement _call_expr/_ensure_local handle elsewhere).
@@ -10865,33 +10984,57 @@ class GimpleGen:
                 del self.decls[decls_mark:]
                 _debug_note('regex finditer lowering failed, falling back', e)
 
-        it_type, it_val = self.lower_expr(node.iterable)
         var = node.target if isinstance(node.target, str) else node.target.name
+        # `for f in dataclasses.fields(x): ... f.name ...` — _lower_method_call
+        # (see there) already turns dataclasses.fields(x) into a real
+        # MojoList* of field-name strings, so this flows through the normal
+        # MojoList* loop below with no special lowering of its own. The only
+        # thing that needs tracking here is that `f` in the loop body IS the
+        # name itself (a plain char*), not a real dataclasses.Field object —
+        # `_lower_MemberExpr`'s `.name` special-case (see there) checks this
+        # set to make `f.name` resolve to `f`.
+        is_dataclass_fields_loop = (
+            isinstance(it, CallExpr) and isinstance(it.func, MemberExpr)
+            and isinstance(it.func.obj, IdentExpr) and it.func.obj.name == 'dataclasses'
+            and it.func.member == 'fields')
+        if is_dataclass_fields_loop:
+            self._dataclass_fields_vars.add(var)
+
+        try:
+            it_type, it_val = self.lower_expr(node.iterable)
+        except Exception:
+            if is_dataclass_fields_loop:
+                self._dataclass_fields_vars.discard(var)
+            raise
 
         # Check if this is an int64_t-stored pointer (from method call returning pointer)
         it_type = self._get_actual_type(it_type, it_val)
 
-        if it_type == 'MojoList *':
-            self._gen_for_list(var, it_val, node.body)
-        elif it_type == 'MojoStr *':
-            self._gen_for_str(var, it_val, node.body)
-        elif it_type == 'MojoDict *':
-            self._gen_for_dict(var, it_val, node.body)
-        elif it_type == 'MojoSet *':
-            self._gen_for_set(var, it_val, node.body)
-        elif it_type.endswith(' *') or it_type.endswith('*'):
-            # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
-            base = _struct_name_of(it_type)
-            has_next = f"{base}___has_next__"
-            nxt      = f"{base}___next__"
-            if has_next in self.func_return_types or nxt in self.func_return_types:
-                self._gen_for_struct_iter(var, it_type, it_val, node.body)
+        try:
+            if it_type == 'MojoList *':
+                self._gen_for_list(var, it_val, node.body)
+            elif it_type == 'MojoStr *':
+                self._gen_for_str(var, it_val, node.body)
+            elif it_type == 'MojoDict *':
+                self._gen_for_dict(var, it_val, node.body)
+            elif it_type == 'MojoSet *':
+                self._gen_for_set(var, it_val, node.body)
+            elif it_type.endswith(' *') or it_type.endswith('*'):
+                # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
+                base = _struct_name_of(it_type)
+                has_next = f"{base}___has_next__"
+                nxt      = f"{base}___next__"
+                if has_next in self.func_return_types or nxt in self.func_return_types:
+                    self._gen_for_struct_iter(var, it_type, it_val, node.body)
+                else:
+                    _debug_note('for loop dropped (no iterator protocol)', it_type)
+                    self._emit_unsupported_iter(it_type, node)
             else:
-                _debug_note('for loop dropped (no iterator protocol)', it_type)
-                self._emit_unsupported_iter(it_type)
-        else:
-            _debug_note('for loop dropped (unsupported iterable)', it_type)
-            self._emit_unsupported_iter(it_type)
+                _debug_note('for loop dropped (unsupported iterable)', it_type)
+                self._emit_unsupported_iter(it_type, node)
+        finally:
+            if is_dataclass_fields_loop:
+                self._dataclass_fields_vars.discard(var)
 
     @staticmethod
     def _split_top_level_comma(s: str) -> list[str]:
@@ -12437,6 +12580,7 @@ class GimpleGen:
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
             '_pos': 'int64_t',
+            '_filename': 'char *',
             '_pending_decs': 'MojoList *',
         }
         self.struct_field_types['Scope'] = {
@@ -12523,13 +12667,28 @@ class GimpleGen:
                                 self._global_var_types[mangled] = 'int64_t'
                             else:
                                 self._global_var_types[mangled] = 'int64_t'
-                # Explicit field declarations
+                # Explicit field declarations. A dataclass field with a
+                # default (`x: Type = default`, the normal shape for every
+                # trailing/optional field — e.g. `decorators: list =
+                # field(default_factory=list)`) parses as an AssignStmt with
+                # its type_ann set (not a VarDecl, which is a bare `x: Type`
+                # declaration with no value) — see mojo_compiler.py's
+                # annotated-assignment parsing. Without this, such fields
+                # were invisible to struct_field_types entirely: found via
+                # StructDef's own _fieldwise_ctor_synthesized field aborting
+                # through the generic getattr fallback (struct_field_types
+                # only had StructDef's 3 no-default fields, missing all 6
+                # that have one).
                 for field in s.fields:
-                    if isinstance(field, VarDecl):
+                    _is_typed_assign = (isinstance(field, AssignStmt)
+                                         and isinstance(field.target, IdentExpr)
+                                         and field.type_ann is not None)
+                    if isinstance(field, VarDecl) or _is_typed_assign:
+                        f_name = field.name if isinstance(field, VarDecl) else field.target.name
                         # Don't overwrite hardcoded entries (e.g. BinaryOp.op)
-                        if field.name not in self.struct_field_types[s.name]:
+                        if f_name not in self.struct_field_types[s.name]:
                             ft = _mojo_type(field.type_ann)
-                            if field.name == 'value' and s.name == 'Generator':
+                            if f_name == 'value' and s.name == 'Generator':
                                 ft = 'int'  # boxed object field
                             # If the type resolved to a generic container pointer (MojoList *,
                             # MojoDict *, MojoSet *, or double-pointer like MojoDict * *)
@@ -12551,7 +12710,7 @@ class GimpleGen:
                                 elif ft.endswith(' *') and _outer_base in self.struct_field_types:
                                     # Direct: List[T] → List * (override MojoList *)
                                     ft = f'{_outer_base} *'
-                            self.struct_field_types[s.name][field.name] = ft
+                            self.struct_field_types[s.name][f_name] = ft
 
                 # Always scan ALL methods for self.x = ... to build complete field list
                 def _collect_self_assigns(body, param_types, found):
@@ -13337,16 +13496,34 @@ class GimpleGen:
                 if _scan_stmt.name not in self._global_to_module:
                     self._global_to_module[_scan_stmt.name] = _phase17_mod
                 if _scan_stmt.type_ann:
-                    self._global_var_types[_scan_stmt.name] = self._resolve_type(_scan_stmt.type_ann)
+                    _resolved = self._resolve_type(_scan_stmt.type_ann)
+                    self._global_var_types[_scan_stmt.name] = _resolved
+                    # Every pointer-typed global is boxed as int64_t at the C
+                    # storage level (see _lower_IdentExpr's unconditional
+                    # "Globals are stored at C level as int64_t" convention,
+                    # which every READ of a global goes through regardless
+                    # of what this dict says) — without this, an annotated
+                    # global (`X: dict = {...}`, now a VarDecl since the
+                    # parser fix that also fixed StructDef's dataclass-field
+                    # visibility — see mojo_compiler.py's annotated-
+                    # assignment parsing) got its struct field declared as
+                    # the real pointer type directly, mismatching every read
+                    # site's int64_t assumption: "assignment to 'int64_t'
+                    # from 'MojoDict *' without a cast".
+                    if _resolved.endswith(' *'):
+                        self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                 else:
                     # Infer type from value if present
                     if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
                         if isinstance(_scan_stmt.value, DictExpr):
                             self._global_var_types[_scan_stmt.name] = 'MojoDict *'
+                            self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                         elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
                             self._global_var_types[_scan_stmt.name] = 'MojoList *'
+                            self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                         elif isinstance(_scan_stmt.value, SetExpr):
                             self._global_var_types[_scan_stmt.name] = 'MojoSet *'
+                            self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                         elif isinstance(_scan_stmt.value, StringLiteral):
                             self._global_var_types[_scan_stmt.name] = 'char *'
                         elif isinstance(_scan_stmt.value, CallExpr):
@@ -13456,7 +13633,7 @@ class GimpleGen:
                            IfStmt, WhileStmt, ForStmt,
                            TryStmt, WithStmt, PassStmt,
                            BreakStmt, ContinueStmt, ReturnStmt,
-                           RaiseStmt, AssertStmt)
+                           RaiseStmt, AssertStmt, VarDecl)
         self._has_toplevel_code = any(isinstance(s, _toplevel_types) for s in stmts)
 
         for stmt in stmts:
@@ -13509,7 +13686,7 @@ class GimpleGen:
                                    IfStmt, WhileStmt, ForStmt,
                                    TryStmt, WithStmt, PassStmt,
                                    BreakStmt, ContinueStmt, ReturnStmt,
-                                   RaiseStmt, AssertStmt)):
+                                   RaiseStmt, AssertStmt, VarDecl)):
                 # Collect all executable statements for _toplevel()
                 toplevel_stmts.append(stmt)
             else:
@@ -14362,6 +14539,120 @@ class GimpleGen:
             )
             parts.append('')
 
+        # Generic reflection dispatch: getattr(x, name)/setattr(x, name, v)/
+        # dataclasses.fields(x)/dataclasses.is_dataclass(x) on a value whose
+        # static type is unknown (boxed as int64_t/void*) previously always
+        # routed to the runtime's mojo_obj_getattr/mojo_setattr stubs, which
+        # either abort() (a hard crash: e.g. ast_rewriter.py's generic
+        # AST-node walk doing `getattr(node, f.name)`) or silently no-op.
+        # Every codegen-emitted struct already carries a runtime type tag
+        # (__mojo_type_id, see mojo_read_type_tag in runtime/mojo_runtime.c)
+        # and this file already knows every struct's field names/types
+        # (struct_field_types) — so a real dispatch table can be built here,
+        # once per linked program, instead of leaving this permanently a stub.
+        # Plain (non-__GIMPLE) C: GIMPLE's SSA-only restrictions don't apply
+        # to functions without that marker (see _HELPERS above), so ordinary
+        # if/strcmp control flow is fine here.
+        if self.emit_struct_defs:
+            # Scoped to structs actually ALLOCATED in this specific program
+            # (not the full struct_field_types, which also carries every
+            # hardcoded self-hosting compiler class — Parser, Interpreter,
+            # Token, etc. — unconditionally, regardless of whether this
+            # program touches them). Emitting a getattr/setattr/fieldnames
+            # accessor per entry there bloated even a trivial unrelated
+            # client program's compiled size (module-cache's whole point is
+            # a client stays tiny because bodies live in the shared dylib —
+            # see test_module_cache.py's "client object is tiny" checks).
+            # _struct_allocs_needed itself used to only track the ROOT
+            # module's own allocations, missing structs (e.g. StructDef)
+            # only ever constructed inside an IMPORTED module's functions —
+            # now shared across temp_gen sub-compiles like _emitted_structs
+            # already was (see the do_imports module-compile setup above).
+            reflect_structs = sorted(set(self.struct_field_types.keys())
+                                      & self._emitted_structs & self._struct_allocs_needed)
+            refl_parts = []
+            for sn in reflect_structs:
+                fields = self.struct_field_types.get(sn, {})
+                if not fields:
+                    continue
+                get_lines = []
+                set_lines = []
+                name_lits = []
+                for fname, ftype in fields.items():
+                    if fname == '__mojo_type_id':
+                        continue
+                    safe_f = _safe_field(fname)
+                    if ftype.endswith(' *'):
+                        get_lines.append(
+                            f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
+                        set_lines.append(
+                            f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                    else:
+                        get_lines.append(
+                            f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
+                        set_lines.append(
+                            f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                    name_lits.append(f'"{fname}"')
+                refl_parts.append(
+                    f"static int64_t _mojo_getattr_{sn} ({sn} *obj, char *attr) {{\n"
+                    + "\n".join(get_lines) +
+                    f"\n  return mojo_obj_getattr((void *)obj, attr);\n}}\n"
+                    f"static void _mojo_setattr_{sn} ({sn} *obj, char *attr, int64_t val) {{\n"
+                    + "\n".join(set_lines) +
+                    f"\n  mojo_setattr((void *)obj, attr, val);\n}}\n"
+                    f"static MojoList * _mojo_fieldnames_{sn} (void) {{\n"
+                    f"  MojoList *_r = mojo_list_new();\n"
+                    + "".join(f'  mojo_list_append_str(_r, {nl});\n' for nl in name_lits) +
+                    f"  return _r;\n}}\n"
+                )
+            if True:
+                # Unconditional (even with refl_parts empty / reflect_structs
+                # empty): a forward declaration for these 4 names is always
+                # emitted (see "Always add forward decls for cross-module
+                # struct methods" below) so an importer calling getattr()/
+                # setattr()/dataclasses.fields()/is_dataclass() compiles —
+                # the definition must always exist too, or that forward
+                # declaration is a link-time dangling reference.
+                parts.append("/* Generic reflection dispatch (getattr/setattr/dataclasses.fields/is_dataclass) */")
+                parts.extend(refl_parts)
+                tag_cases_get = "\n".join(
+                    f'  if (_tag == {_struct_type_id(sn)}) return _mojo_getattr_{sn}(({sn} *)obj, attr);'
+                    for sn in reflect_structs if self.struct_field_types.get(sn))
+                tag_cases_set = "\n".join(
+                    f'  if (_tag == {_struct_type_id(sn)}) {{ _mojo_setattr_{sn}(({sn} *)obj, attr, val); return; }}'
+                    for sn in reflect_structs if self.struct_field_types.get(sn))
+                tag_cases_fields = "\n".join(
+                    f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
+                    for sn in reflect_structs if self.struct_field_types.get(sn))
+                tag_set_literal = ", ".join(
+                    str(_struct_type_id(sn)) for sn in reflect_structs if self.struct_field_types.get(sn)) or "0"
+                parts.append(
+                    "static int64_t _mojo_dispatch_getattr (void *obj, char *attr) {\n"
+                    "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+                    f"{tag_cases_get}\n"
+                    "  return mojo_obj_getattr(obj, attr);\n"
+                    "}\n"
+                    "static void _mojo_dispatch_setattr (void *obj, char *attr, int64_t val) {\n"
+                    "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+                    f"{tag_cases_set}\n"
+                    "  mojo_setattr(obj, attr, val);\n"
+                    "}\n"
+                    "static MojoList * _mojo_dispatch_fields (void *obj) {\n"
+                    "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+                    f"{tag_cases_fields}\n"
+                    "  return mojo_list_new();\n"
+                    "}\n"
+                    "static int _mojo_dispatch_is_dataclass (void *obj) {\n"
+                    "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+                    f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
+                    "  if (_tag == 0) return 0;\n"
+                    "  for (size_t _i = 0; _i < sizeof(_known)/sizeof(_known[0]); _i++)\n"
+                    "    if (_known[_i] == _tag) return 1;\n"
+                    "  return 0;\n"
+                    "}\n"
+                )
+                parts.append('')
+
         # Forward declaration for class-attr initializer (main module only)
         if self.emit_struct_defs:
             parts.append("static void _mojo_classattr_init (void);")
@@ -14605,6 +14896,18 @@ class GimpleGen:
         parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
         parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
         parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
+        # Forward decls for the generic reflection dispatch (see the
+        # "Generic reflection dispatch" block emitted earlier in this same
+        # gen_module call, near the struct alloc helpers) — that block's
+        # full definitions land textually AFTER function bodies compiled in
+        # an earlier phase (e.g. ast_rewriter.py's _ast_eq/_rewrite_node
+        # calling dataclasses.fields()/getattr()/setattr()), so without a
+        # declaration visible before those call sites, GCC treats the call
+        # as an implicit (and wrong-typed) int-returning declaration.
+        parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
+        parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
+        parts.append("static MojoList * _mojo_dispatch_fields (void *);")
+        parts.append("static int _mojo_dispatch_is_dataclass (void *);")
         parts.append('')
 
         # Forward declarations for lifted closures + env allocator helpers
@@ -14791,7 +15094,7 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     compile_to_gimple_linked — to avoid changing this ABI.)
     """
     tokens = py_tokenize(mojo_src)
-    stmts  = ast_rewriter.rewrite(Parser(tokens).parse_module())
+    stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
     return gen.gen_module(stmts)
@@ -14809,7 +15112,7 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     `import` recorded and the object files elaboration produced (generic
     instantiations). Returns (c_code, [dylib, ...], [object, ...])."""
     tokens = py_tokenize(mojo_src)
-    stmts  = ast_rewriter.rewrite(Parser(tokens).parse_module())
+    stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
     code = gen.gen_module(stmts)

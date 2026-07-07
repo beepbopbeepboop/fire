@@ -160,6 +160,13 @@ class _MojoBoundComptimeFunction:
         return self.func._invoke(interpreter, self.comptime_bindings, args, kwargs)
 
 
+class _NoOverloadMatch(TypeError):
+    """Raised by MojoOverloadSet.__call__ when no candidate's arity/keywords
+    match the call. A dedicated subclass (rather than a bare TypeError) so
+    eval_CallExpr can attach the call site's location without also catching
+    unrelated TypeErrors raised deeper inside whichever overload runs."""
+
+
 class MojoOverloadSet:
     """Multiple `def name(...)` definitions sharing a name are Mojo overloads,
     not redefinitions of the same function — real Mojo picks the candidate
@@ -198,7 +205,7 @@ class MojoOverloadSet:
             if self._matches(spec, args, kwargs):
                 func = spec[0]
                 return func(interpreter, *args, **kwargs)
-        raise TypeError(
+        raise _NoOverloadMatch(
             f"no overload of '{self.name}' matches {len(args)} positional "
             f"arg(s) and keyword(s) {sorted(kwargs.keys())}"
         )
@@ -1827,6 +1834,16 @@ class Interpreter:
         except ImportError:
             pass
 
+    def _loc(self, node: object = None) -> str:
+        """Format a gcc-style `file:line:col: ` prefix for a runtime diagnostic.
+        Omits the filename segment when the interpreter wasn't given one
+        (e.g. the REPL), matching mojo_compiler.Parser's `_loc`."""
+        line = getattr(node, 'line', 0) if node is not None else 0
+        col = getattr(node, 'col', 0) if node is not None else 0
+        if self.filename:
+            return f"{self.filename}:{line}:{col}: "
+        return f"{line}:{col}: "
+
     def execute(self, node: object) -> object:
         """Execute an AST node."""
         if node is None:
@@ -1836,7 +1853,7 @@ class Interpreter:
         method = getattr(self, method_name, None)
 
         if method is None:
-            raise NotImplementedError(f"No handler for {type(node).__name__}")
+            raise NotImplementedError(f"{self._loc(node)}No handler for {type(node).__name__}")
 
         return method(node)
 
@@ -2065,7 +2082,7 @@ class Interpreter:
             try:
                 value = getattr(mod, name)
             except AttributeError:
-                raise NameError(f"cannot import name '{name}' from '{node.module}'")
+                raise NameError(f"{self._loc(node)}cannot import name '{name}' from '{node.module}'")
             self.scope.define(alias or name, value)
         return None
 
@@ -2151,7 +2168,7 @@ class Interpreter:
         elif op == '>>':
             new_value = current >> rhs
         else:
-            raise NotImplementedError(f"Augmented operator {node.op} not implemented")
+            raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
         # Assign new value
         self._assign_target(node.target, new_value)
         return new_value
@@ -2181,11 +2198,11 @@ class Interpreter:
             values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
             elements = target.elements
             if len(values) != len(elements):
-                raise ValueError(f"Cannot unpack {len(values)} values into {len(elements)} targets")
+                raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
             for t, v in zip(elements, values):
                 self._assign_target(t, v)
         else:
-            raise NotImplementedError(f"Cannot assign to {type(target).__name__}")
+            raise NotImplementedError(f"{self._loc(target)}Cannot assign to {type(target).__name__}")
 
     def execute_ReturnStmt(self, node: N.ReturnStmt):
         """Execute return statement."""
@@ -2332,7 +2349,7 @@ class Interpreter:
         cond = self.eval_expr(node.value)
         if not cond:
             msg = self.eval_expr(node.msg) if getattr(node, 'msg', None) is not None else None
-            raise AssertionError(msg if msg is not None else "assert failed")
+            raise AssertionError(f"{self._loc(node)}{msg if msg is not None else 'assert failed'}")
         return None
 
     def execute_GlobalStmt(self, node):
@@ -2513,13 +2530,16 @@ class Interpreter:
         method = getattr(self, method_name, None)
 
         if method is None:
-            raise NotImplementedError(f"No handler for {type(expr).__name__}")
+            raise NotImplementedError(f"{self._loc(expr)}No handler for {type(expr).__name__}")
 
         return method(expr)
 
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
-        return self.scope.get(expr.name)
+        try:
+            return self.scope.get(expr.name)
+        except NameError:
+            raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
 
     def eval_IntLiteral(self, expr: N.IntLiteral):
         """Evaluate integer literal."""
@@ -2600,7 +2620,17 @@ class Interpreter:
         if isinstance(v, int) and not isinstance(v, bool):
             v &= 0xFFFFFFFFFFFFFFFF
             if v >= 0x8000000000000000:
-                v -= 0x10000000000000000
+                # 2**64 (0x10000000000000000) doesn't fit in any C integer
+                # type this self-hosts to, not even uint64_t (max is
+                # 2**64-1) — the existing large-int-literal fix (an explicit
+                # ULL suffix, see gimple_codegen.py's _lower_IntLiteral)
+                # only covers values up to UINT64_MAX, so this one still
+                # warned ("integer constant is too large for its type") once
+                # compiled. Split into two in-range subtractions of 2**63
+                # (already used, and already known to compile cleanly, a
+                # few lines up) instead — same net effect.
+                v -= 0x8000000000000000
+                v -= 0x8000000000000000
         return v
 
     @staticmethod
@@ -2663,7 +2693,7 @@ class Interpreter:
         elif op == '<<': return self._wrap_int(left << right)
         elif op == '>>': return left >> right
         else:
-            raise NotImplementedError(f"Binary operator {op!r} not implemented")
+            raise NotImplementedError(f"{self._loc(expr)}Binary operator {op!r} not implemented")
 
     def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""
@@ -2675,7 +2705,7 @@ class Interpreter:
         elif op == '~': return self._wrap_int(~operand)
         elif op == 'not': return not operand
         else:
-            raise NotImplementedError(f"Unary operator {op} not implemented")
+            raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
 
     def eval_CallExpr(self, expr: N.CallExpr):
         """Evaluate function call."""
@@ -2692,6 +2722,11 @@ class Interpreter:
         if getattr(expr, 'kwargs', None):
             kwargs = {k: self.eval_expr(v) for k, v in expr.kwargs}
 
+        if isinstance(func, MojoOverloadSet):
+            try:
+                return self.invoke(func, *args, **kwargs)
+            except _NoOverloadMatch as e:
+                raise TypeError(f"{self._loc(expr)}{e}")
         return self.invoke(func, *args, **kwargs)
 
     def invoke(self, func, *args, **kwargs):
@@ -2713,7 +2748,7 @@ class Interpreter:
             method = obj._mojo_class.methods.get(expr.member)
             if method is not None:
                 return BoundMethod(method, obj, self)
-            raise AttributeError(f"'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
+            raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):

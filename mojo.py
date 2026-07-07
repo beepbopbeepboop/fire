@@ -30,7 +30,7 @@ _IS_DARWIN = platform.system() == 'Darwin'
 from build_config import find_gcc
 _GCC_BIN = find_gcc()
 
-def _extract_codegen_flags(args):
+def _extract_codegen_flags(args: list):
     """Pull optimization (-O0/-O1/-O2/-O3/-Os/-Oz/-Og) and debug (-g/-g0../-g3)
     flags out of an argument list.
 
@@ -83,7 +83,7 @@ def interpret_and_execute(src_code, filename=None, argv=None):
         from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
         from myinterpreter import Interpreter
         tokens = py_tokenize(src_code)
-        stmts = Parser(tokens).parse_module()
+        stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
         interpreter = Interpreter(filename=filename, argv=argv)
         for stmt in stmts:
             interpreter.execute(stmt)
@@ -452,6 +452,14 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
     if dump:
         basename = os.path.splitext(os.path.basename(input_file))[0]
+        # Each artifact below is independently best-effort (one failing
+        # shouldn't stop the others from being generated), but a failure is
+        # a real bug, not just diagnostic noise — track it so the process
+        # exits nonzero instead of always reporting success. Callers that
+        # want to keep going across many files (e.g. the Makefile's stage2/
+        # stage3 dump loops) collect these failures across the whole run
+        # and fail at the end, rather than stopping after the first file.
+        any_failed = False
         try:
             import gimple_codegen
 
@@ -469,16 +477,18 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                     f.write("[" + ", ".join(formatted) + "]")
             except Exception as e:
                 print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
+                any_failed = True
 
             # Generate AST
             try:
                 from mojo_compiler import Parser, py_tokenize
                 tokens = py_tokenize(src)
-                ast = Parser(tokens).parse_module()
+                ast = Parser(tokens).with_filename(input_file).parse_module()
                 with open(f"{basename}.ast", "w") as f:
                     f.write(repr(ast))
             except Exception as e:
                 print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
+                any_failed = True
 
             # Generate C intermediate (with transitive imports)
             c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
@@ -493,6 +503,9 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             print(f"Error generating dump files: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+            any_failed = True
+        if any_failed:
+            sys.exit(1)
         return
 
     # `mojo run <file>`: force the interpreter, no compile attempt at all.
