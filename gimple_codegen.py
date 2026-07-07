@@ -1568,6 +1568,32 @@ def _merge_struct_inheritance(all_struct_defs):
             resolve(s)
 
 
+def _compute_exc_descendants(all_struct_defs):
+    """For each struct name, the set of all struct names that transitively
+    inherit from it (including itself) — used so a compiled `except
+    BaseError:` handler matches any raised subclass of BaseError, not just
+    an exact type-tag match (see _gen_stmt_TryStmt's typed-dispatch loop).
+    The interpreter gets the equivalent behavior by walking a MojoClass's
+    `.bases` chain at catch time (myinterpreter.py's _matches_exc_type);
+    the compiled path has no such runtime walk available (dispatch is
+    static int comparisons against a fixed tag), so this precomputes the
+    same answer once, at compile time, instead."""
+    by_name = {s.name: s for s in all_struct_defs if isinstance(s, StructDef)}
+    descendants = {name: {name} for name in by_name}
+    for name, s in by_name.items():
+        stack = list(getattr(s, 'bases', None) or [])
+        seen = set()
+        while stack:
+            base_name = stack.pop()
+            if base_name in seen:
+                continue
+            seen.add(base_name)
+            if base_name in by_name:
+                descendants.setdefault(base_name, {base_name}).add(name)
+                stack.extend(getattr(by_name[base_name], 'bases', None) or [])
+    return descendants
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'  # Default to 64-bit signed integer
@@ -2347,6 +2373,7 @@ class GimpleGen:
         # for "untyped" (a bare `raise` re-raising the live exception, or an
         # exception object with no statically-known class name).
         self._exc_type_ids: dict[str, int] = {}
+        self._exc_descendants: dict = {}
         self._reset_func()
 
     def _exc_type_id(self, name: str) -> int:
@@ -10183,11 +10210,26 @@ class GimpleGen:
             # *inside* a comparison (same two-step pattern _new_val uses).
             n_typed = len(typed)
             for i, h in enumerate(typed):
-                tid = self._exc_type_id(self._handler_exc_name(h))
-                tid_t = self._new_temp('int64_t')
-                self._emit(f"  {tid_t} = (int64_t){tid};")
-                is_match = self._new_temp('_Bool')
-                self._emit(f"  {is_match} = {exc_type_t} == {tid_t};")
+                # `except BaseError:` must also match a raised *subclass* of
+                # BaseError (struct/class inheritance — see
+                # _compute_exc_descendants), not just an exact tag match:
+                # OR the equality check across every known descendant's tag,
+                # not just the handler's own type.
+                handler_name = self._handler_exc_name(h)
+                descendant_names = self._exc_descendants.get(handler_name, {handler_name})
+                is_match = None
+                for dname in sorted(descendant_names):
+                    tid = self._exc_type_id(dname)
+                    tid_t = self._new_temp('int64_t')
+                    self._emit(f"  {tid_t} = (int64_t){tid};")
+                    one_match = self._new_temp('_Bool')
+                    self._emit(f"  {one_match} = {exc_type_t} == {tid_t};")
+                    if is_match is None:
+                        is_match = one_match
+                    else:
+                        combined = self._new_temp('_Bool')
+                        self._emit(f"  {combined} = {is_match} | {one_match};")
+                        is_match = combined
                 if i == 0:
                     # Untagged (0) is treated leniently and falls to the
                     # first typed handler — see the rationale above. Two
@@ -12390,6 +12432,7 @@ class GimpleGen:
             'argv': 'MojoList *',
             '_mojo_module_cache': 'MojoDict *',
             '_func_specs': 'MojoDict *',
+            '_raised_mojo_value': 'int64_t',
         }
         self.struct_field_types['Parser'] = {
             '_tok': 'MojoList *',
@@ -12437,6 +12480,7 @@ class GimpleGen:
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         _merge_struct_inheritance(all_struct_defs)
+        self._exc_descendants = _compute_exc_descendants(all_struct_defs)
         # Pre-register all struct names so cross-references in _collect_self_assigns work
         # regardless of definition order (e.g. DispatchSolver before FunctionCompilability).
         for _s in all_struct_defs:

@@ -42,6 +42,33 @@ class ContinueException(Exception):
     pass
 
 
+class MojoError(Exception):
+    """Real Mojo's builtin `Error` type — `raise Error("message")`. A real
+    Python Exception subclass (not MojoRaisedException-wrapped) so a plain
+    `except Exception:`/`except:` catches it via ordinary isinstance(),
+    same as any other real exception here. Calls `Exception.__init__`
+    directly rather than via `super()` — this file self-hosts, and the
+    self-hosting compiler doesn't know what to do with `super()` at all
+    (tries to call it as a plain undefined function named `_super`)."""
+    def __init__(self, *args):
+        Exception.__init__(self, ' '.join(str(a) for a in args))
+
+
+class MojoRaisedException(Exception):
+    """Marker exception for whatever value a Mojo `raise value` statement
+    raised (a bare string, or an instance of a user-defined exception
+    struct — see execute_RaiseStmt) that isn't already a real Python
+    exception. Deliberately carries no fields/payload of its own — the
+    self-hosting compiler (this file compiles itself) types an
+    `except X as e:` binding as either a known struct pointer or a plain
+    `char *` message string, never a generic boxed value, so an attribute
+    like `e.mojo_value` can't work once self-hosted. The actual raised
+    value instead goes through Interpreter._raised_mojo_value (an
+    ordinary, already-well-typed field on a well-known struct) — see
+    execute_RaiseStmt/_matches_exc_type."""
+    pass
+
+
 class Scope:
     """Manages variable and function scopes."""
     def __init__(self, parent=None):
@@ -1357,6 +1384,7 @@ class Interpreter:
         self.argv = argv if argv is not None else [filename or '<input>']
         self._mojo_module_cache = {}
         self._func_specs = {}
+        self._raised_mojo_value = None
         self._setup_builtins()
 
     def _load_mojo_sibling_module(self, module_name):
@@ -1643,6 +1671,7 @@ class Interpreter:
         self.scope.define('TypeError', TypeError)
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
+        self.scope.define('Error', MojoError)
 
         # Mojo scalar-type constructors — plain Python bool/int/float/str
         # already behave like Mojo's Bool/Int/Float64/String for arithmetic
@@ -2351,6 +2380,66 @@ class Interpreter:
             ctx.__exit__(None, None, None)
         return None
 
+    def execute_RaiseStmt(self, node):
+        """`raise value` / `raise` (bare re-raise, only valid inside an
+        already-active except handler — Python's own semantics apply).
+
+        `value` may be a bare string, an `Error(...)` (a real MojoError,
+        which *is* a real Python Exception subclass), or an instance of a
+        user-defined exception struct (a MojoInstance — not a real Python
+        exception type at all). Anything that isn't already a real
+        BaseException is stashed on self._raised_mojo_value and signaled via
+        the fieldless MojoRaisedException marker, so it still flows through
+        Python's real exception propagation; execute_TryStmt's
+        _matches_exc_type reads _raised_mojo_value back for matching (see
+        MojoRaisedException's docstring for why not a field on the
+        exception object itself)."""
+        if node.value is None:
+            raise
+        value = self.eval_expr(node.value)
+        if isinstance(value, BaseException):
+            raise value
+        self._raised_mojo_value = value
+        raise MojoRaisedException()
+
+    def _matches_exc_type(self, e, exc_class):
+        """Does exception `e` (as caught by execute_TryStmt's real Python
+        `except Exception as e:`) match an `except exc_class:` clause?
+
+        Python's own isinstance() already understands real exception-type
+        hierarchies (ValueError, our BreakException/ReturnValue/MojoError,
+        etc.) — used directly for those. It does *not* understand a
+        MojoClass (a user-defined `struct MyError(BaseError):` exception
+        type, itself just a MojoInstance, not a real Python type at all),
+        so that case walks the *raised value's own* class's `.bases` chain
+        instead, mirroring Python's subclass-catches-via-base semantics for
+        this interpreter's own class model rather than Python's. `except
+        Exception`/`except BaseException` must catch a
+        MojoRaisedException-wrapped custom struct too, even though the
+        wrapped value isn't a Python Exception instance itself — same
+        universal-catch special case as gimple_codegen.py's compiled-path
+        dispatch."""
+        raised_value = self._raised_mojo_value if isinstance(e, MojoRaisedException) else e
+        if isinstance(exc_class, MojoClass):
+            if isinstance(raised_value, MojoInstance):
+                stack = [raised_value._mojo_class]
+                seen = set()
+                while stack:
+                    c = stack.pop()
+                    if id(c) in seen:
+                        continue
+                    seen.add(id(c))
+                    if c is exc_class:
+                        return True
+                    stack.extend(c.bases)
+            return False
+        if exc_class in (Exception, BaseException):
+            return True
+        try:
+            return isinstance(raised_value, exc_class)
+        except TypeError:
+            return False
+
     def execute_TryStmt(self, node: N.TryStmt):
         """Execute try statement."""
         try:
@@ -2359,6 +2448,7 @@ class Interpreter:
         except Exception as e:
             if node.handlers:
                 handled = False
+                bound_value = self._raised_mojo_value if isinstance(e, MojoRaisedException) else e
                 for handler in node.handlers:
                     exc_type = handler.exc_type
                     handler_body = handler.body
@@ -2370,15 +2460,15 @@ class Interpreter:
                         # If exc_type is a string, look it up in the scope
                         try:
                             exc_class = self.scope.get(exc_type)
-                            should_handle = isinstance(e, exc_class)
-                        except:
+                            should_handle = self._matches_exc_type(e, exc_class)
+                        except NameError:
                             should_handle = False
                     else:
                         # Otherwise evaluate it as an expression
                         try:
                             exc_class = self.eval_expr(exc_type)
-                            should_handle = isinstance(e, exc_class)
-                        except:
+                            should_handle = self._matches_exc_type(e, exc_class)
+                        except NameError:
                             should_handle = False
 
                     if should_handle:
@@ -2388,7 +2478,7 @@ class Interpreter:
                             had_old = handler.name in self.scope.vars
                             if had_old:
                                 old_val = self.scope.vars[handler.name]
-                            self.scope.define(handler.name, e)
+                            self.scope.define(handler.name, bound_value)
 
                         for stmt in handler_body:
                             self.execute(stmt)
