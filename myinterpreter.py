@@ -273,12 +273,38 @@ class BoundMethod:
 
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
-    def __init__(self, name, fields, methods, interpreter, bases=None):
+    def __init__(self, name, fields, methods, interpreter, bases=None,
+                 comptime_aliases=None, static_methods=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
         self.interpreter = interpreter
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
+        # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
+        # once at struct-definition time and exposed as a class-level
+        # attribute (`TokenType.EOF_TOKEN`), same as a Python class constant.
+        self.comptime_aliases = comptime_aliases or {}
+        # Names of `@staticmethod` methods — looked up here so __getattr__
+        # can hand back the raw MojoFunction (no instance to bind) instead
+        # of wrapping it in a BoundMethod.
+        self.static_methods = static_methods or set()
+
+    def __getattr__(self, name):
+        # Only called when normal attribute lookup (real fields set in
+        # __init__) fails, so plain `self.comptime_aliases`/`self.methods`
+        # access here can't recurse — both are always set before this could
+        # ever fire. (Deliberately not `self.__dict__.get(...)`: the
+        # self-hosted compiled path has no Python-style __dict__.)
+        if name in self.comptime_aliases:
+            return self.comptime_aliases[name]
+        if name in self.methods:
+            # A method looked up on the class itself (StructType.method),
+            # not an instance — return the raw MojoFunction unbound.
+            # `@staticmethod`s are meant to be called this way; a regular
+            # method returned this way just requires the caller to pass
+            # `self` explicitly, matching Python's own unbound-method rule.
+            return self.methods[name]
+        raise AttributeError(f"'{self.name}' object has no attribute '{name}'")
 
     def __call__(self, *args, **kwargs):
         instance = MojoInstance(self)
@@ -1980,6 +2006,8 @@ class Interpreter:
         base_names = getattr(node, 'bases', None) or []
         base_classes = []
         merged_fields = []
+        comptime_aliases = {}
+        static_methods = set()
         for base_name in base_names:
             try:
                 base_cls = self.scope.get(base_name)
@@ -1989,14 +2017,23 @@ class Interpreter:
                 base_classes.append(base_cls)
                 merged_fields.extend(base_cls.fields)
                 methods.update(base_cls.methods)
+                comptime_aliases.update(base_cls.comptime_aliases)
+                static_methods.update(base_cls.static_methods)
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
             spec = self._classify_params(m)
             self._register_function(methods, m.name, method_func, spec)
+            if 'staticmethod' in (getattr(m, 'decorators', None) or []):
+                static_methods.add(m.name)
+        # `comptime NAME: Type = value` struct members — evaluated once,
+        # here, at struct-definition time, not lazily per access.
+        for alias_name, alias_expr in (getattr(node, 'comptime_aliases', None) or {}).items():
+            comptime_aliases[alias_name] = self.eval_expr(alias_expr)
         fields = merged_fields + (getattr(node, 'fields', None) or [])
-        cls = MojoClass(node.name, fields, methods, self, bases=base_classes)
+        cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
+                         comptime_aliases=comptime_aliases, static_methods=static_methods)
         self.scope.define(node.name, cls)
         return cls
 

@@ -12899,6 +12899,8 @@ class GimpleGen:
             'methods': 'MojoDict *',
             'interpreter': 'Interpreter *',
             'bases': 'MojoList *',
+            'comptime_aliases': 'MojoDict *',
+            'static_methods': 'MojoSet *',
         }
         self.struct_field_types['MojoInstance'] = {
             '_mojo_class': 'MojoClass *',

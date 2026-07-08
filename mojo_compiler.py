@@ -537,7 +537,7 @@ class ComptimeVarStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned'}
 
-_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 
 # ── T-string helpers: handle nested braces/interpolations ────────────────────────
@@ -867,18 +867,42 @@ def _synthesize_fieldwise_inits(stmts: list) -> list:
         if getattr(s, '_fieldwise_ctor_synthesized', False):
             continue
         s._fieldwise_ctor_synthesized = True
-        if 'fieldwise_init' not in (s.decorators or []):
+        decs = s.decorators or []
+        if 'fieldwise_init' not in decs and 'value' not in decs:
             continue
         field_decls = [f for f in s.fields if isinstance(f, VarDecl)]
         if not field_decls:
             continue
-        params = [('self', s.name)] + [(f.name, f.type_ann) for f in field_decls]
-        body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
-                            value=IdentExpr(name=f.name))
-                for f in field_decls]
-        s.methods.append(FunctionDef(
-            name='__init__', params=params, return_type=None, body=body,
-            param_convs={'self': 'out'}))
+        existing = {m.name for m in s.methods}
+        if '__init__' not in existing:
+            params = [('self', s.name)] + [(f.name, f.type_ann) for f in field_decls]
+            body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
+                                value=IdentExpr(name=f.name))
+                    for f in field_decls]
+            s.methods.append(FunctionDef(
+                name='__init__', params=params, return_type=None, body=body,
+                param_convs={'self': 'out'}))
+        if 'value' not in decs:
+            continue
+        # @value additionally synthesizes __copyinit__/__moveinit__ — a
+        # member-by-member copy of `existing` into `self` (this interpreter
+        # has no distinct move-vs-copy semantics, so both bodies match).
+        if '__copyinit__' not in existing:
+            params = [('self', s.name), ('existing', s.name)]
+            body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
+                                value=MemberExpr(obj=IdentExpr(name='existing'), member=f.name))
+                    for f in field_decls]
+            s.methods.append(FunctionDef(
+                name='__copyinit__', params=params, return_type=None, body=body,
+                param_convs={'self': 'out'}))
+        if '__moveinit__' not in existing:
+            params = [('self', s.name), ('existing', s.name)]
+            body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
+                                value=MemberExpr(obj=IdentExpr(name='existing'), member=f.name))
+                    for f in field_decls]
+            s.methods.append(FunctionDef(
+                name='__moveinit__', params=params, return_type=None, body=body,
+                param_convs={'self': 'out', 'existing': 'owned'}))
     return stmts
 
 class Parser:
@@ -2704,6 +2728,15 @@ class Parser:
                     elif t.kind == "EOF": break
 
     def _parse_type_ann(self) -> str:
+        """Parse a type annotation, including a trailing `?` optional-type suffix
+        (`Token?` == `Optional[Token]`)."""
+        name = self._parse_type_ann_inner()
+        if self._peek().kind == "OP" and self._peek().value == "?":
+            self._advance()
+            name = f"Optional[{name}]"
+        return name
+
+    def _parse_type_ann_inner(self) -> str:
         """Parse a type annotation: Name or Name[TypeArgs] or Name.Member.Type[Args] or `backtick_type`."""
         # Handle * prefix for variadic/unpacking types (*Ts)
         prefix = ""
