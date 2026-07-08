@@ -15,13 +15,43 @@ current stdlib transpilation status, what fails, and remaining gaps.
   monomorphization, comptime).
 - `make check` = gimple + runner + module-cache (all green). The self-hosting
   bootstrap (`make bootstrap`: stage1-3 + `validate-all`) is a **separate**
-  target, not gated into `check`. **Update 2026-07-06**: stage1/stage2/stage3/
-  `verify` now pass cleanly with zero crashes anywhere in the transitive
-  closure (the historical stage-2 segfault and a long chain of follow-on bugs
-  are fixed — see "Recent Work (2026-07)" below). `validate-all` still fails
-  its file-count check — a real but separate, pre-existing gap: the `stage1:`
-  Makefile target only ever dumps `mojo.py` itself, never loops over the
-  other ~40 test/core files the way `stage2`/`stage3` do.
+  target, not gated into `check`. **Update 2026-07-06**: stage1/stage2/stage3
+  compile/run/idempotency all pass cleanly with zero crashes anywhere in the
+  transitive closure (the historical stage-2 segfault and a long chain of
+  follow-on bugs are fixed — see "Recent Work (2026-07)" below). **Update
+  2026-07-07**: `verify`'s stage1-vs-stage2 `.tok`/`.ast` dump comparison —
+  previously untested by the crash-focused fixes above — turned out to still
+  fail broadly (dump-fidelity only; `.ci`/`.pyi` matched throughout, so
+  compiled-program correctness was never at risk during the investigation).
+  **`make bootstrap` now passes completely end to end** — `verify` reports
+  "PASSED: all 156 output files match across 3 stages", all 38 `.tok` and
+  all 38 `.ast` files match byte-for-byte, confirmed reproducible across
+  repeated from-scratch rebuilds. Root-caused and fixed 20 independent bugs
+  across three sessions to get there (UTF-8 codepoint offsets in compiled
+  regex; boxed `object`/`Any` fields printing as raw addresses; several
+  type-inference timing/ambiguity bugs; a stubbed `isinstance(x, (A, B))`;
+  comprehensions not resolving their real iterable type; a systemic
+  early-exit bug shared by all 6 comprehension-loop kinds, the single
+  highest-value fix; dict values/ordering not matching Python semantics;
+  quote-delimiter and float-formatting mismatches in generic `repr()`; a
+  missing `_TYPE_MAP` entry for bare `float`; a struct-constructor
+  type-inference bug that misread an opaque AST-node pointer through the
+  wrong struct's field layout; and a tokenizer quote-adjacency self-match
+  quirk). The final blocker — r-string/f-string/b-string prefix stripping,
+  rooted in a still-unfixed `_lower_in_impl` "`'in'` for `char *`" stub that
+  corrupts unrelated state whenever implemented directly (three independent
+  fix attempts across two sessions all hit this, never root-caused) — was
+  resolved by rewriting `Parser._strip_string_prefix_and_quotes`'s *source*
+  to avoid needing that operator at all (plain `==`/indexing, entirely
+  sidestepping the compiler bug rather than fixing it). That compiler bug
+  itself is still open; see [[bootstrap-verify-ast-dump-fixes-2026-07-07]]
+  memory note for the complete history, every individual fix, and the
+  `_lower_in_impl` root cause still worth investigating separately (it may
+  affect other, not-yet-discovered code using that operator shape).
+  `validate-all` still fails its file-count check — a real but separate,
+  pre-existing gap: the `stage1:` Makefile target only ever dumps `mojo.py`
+  itself, never loops over the other ~40 test/core files the way
+  `stage2`/`stage3` do.
 
 ---
 

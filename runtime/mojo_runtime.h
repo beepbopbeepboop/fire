@@ -83,6 +83,9 @@ typedef struct {
 } MojoList;
 
 MojoList *mojo_list_new(void);
+int mojo_is_registered_list(int64_t addr);
+void mojo_mark_as_tuple(MojoList *l);
+int mojo_is_tuple(MojoList *l);
 void      mojo_list_free(MojoList *l);
 
 void    mojo_list_append_int(MojoList *l, int64_t v);
@@ -151,6 +154,7 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
 char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);
 int64_t mojo_strlen(char *s);
+int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
@@ -178,16 +182,26 @@ char   *mojo_subprocess_stderr(MojoCompletedProcess *p);
 typedef struct {
     char    *key;   /* NULL = empty slot */
     int64_t  val;
+    int64_t  seq;   /* insertion order, assigned once when the key is first
+                     * added — lets generic repr() print keys in Python's
+                     * insertion-preserving order instead of raw hash-slot
+                     * order; see mojo_dict_order_indices(). Real iteration
+                     * (MojoDictIter, .keys()/.values()/.items()) is
+                     * unaffected and still walks slots in hash order. */
 } _DictSlot;
 
 typedef struct {
     _DictSlot *slots;
     int64_t    used;
     int64_t    cap;
+    int64_t    next_seq;
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
+int64_t    *mojo_dict_order_indices(MojoDict *d);
 void        mojo_dict_free(MojoDict *d);
+void        mojo_mark_dict_bool_values(MojoDict *d);
+int         mojo_is_bool_dict(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
@@ -226,10 +240,14 @@ int         mojo_dict_contains(MojoDict *d, char *key);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);
 
-/* Dict iterator — advance, then read key/value via accessor calls */
+/* Dict iterator — advance, then read key/value via accessor calls.
+ * Walks in insertion order (via `order`, from mojo_dict_order_indices()),
+ * matching Python's own dict iteration guarantee — NOT raw hash-slot order.
+ * `pos` indexes into `order`, not directly into dict->slots. */
 typedef struct {
     MojoDict *dict;
-    int64_t   pos;    /* current slot index (-1 = not yet started) */
+    int64_t   pos;      /* index into `order` (-1 = not yet started) */
+    int64_t  *order;    /* insertion-order slot indices; NULL if dict empty */
 } MojoDictIter;
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
@@ -302,6 +320,7 @@ int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
+char *mojo_int_literal_decimal(char *raw);
 char *mojo_path_join(char *base, char *name);
 char *mojo_cstr_repeat(char *s, int64_t n);
 

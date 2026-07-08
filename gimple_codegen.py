@@ -1410,6 +1410,15 @@ _TYPE_MAP: dict[str | None, str] = {
     'Float16': '__fp16',
     'Float32': 'float',
     'Float64': 'double',
+    # Bare Python `float` (e.g. FloatLiteral.value: float in mojo_compiler.py's
+    # own AST node) had no entry at all — only the Mojo-style Float16/32/64
+    # names above — so it silently fell through to the int64_t boxed-object
+    # default. That default type made generic repr() call mojo_repr_int()
+    # instead of mojo_repr_float() for a genuine float field, printing e.g.
+    # `0.0` as `0` (also losing the fractional part entirely for any
+    # non-whole float, since the double's bit pattern was reinterpreted as
+    # an int64_t instead of read back as a double).
+    'float':  'double',
     'Bool':   '_Bool',
     # Python-style `bool` flags cross the C ABI as `int` (e.g. compile_to_gimple's
     # do_imports — runtime header declares `int do_imports`). A flag is never a
@@ -2259,6 +2268,19 @@ class GimpleGen:
         self.module_name = module_name  # used to name _{module_name}_toplevel
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # struct name -> field names whose Python annotation is `object`/`Any`
+        # (or a Union naming a real class) — these collapse to ctype int64_t
+        # like a plain int field, but at runtime hold None(0)/int/boxed-pointer
+        # interchangeably, so generic repr() must disambiguate via
+        # _mojo_generic_elem_repr instead of printing the raw int64_t. See
+        # gen_module's field-type-inference scan and the per-struct
+        # _mojo_repr_<sn> codegen.
+        self.struct_boxed_fields: dict[str, set[str]] = {}
+        # struct name -> field names whose Python annotation is `bool` — these
+        # collapse to ctype 'int' (not '_Bool', see _TYPE_MAP), so generic
+        # repr() must still render them as "True"/"False" like real Python
+        # bools instead of falling into the plain-int branch and printing 0/1.
+        self.struct_bool_fields: dict[str, set[str]] = {}
         # struct name -> id() of the first StructDef AST node whose fields were
         # merged into struct_field_types[name] — see gen_module's struct-field
         # scan. Must be shared across every temp_gen sub-compile the same way
@@ -2536,6 +2558,8 @@ class GimpleGen:
                     temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
                     temp_gen._const_str_locals = self._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                     temp_gen.struct_field_types = self.struct_field_types
+                    temp_gen.struct_boxed_fields = self.struct_boxed_fields
+                    temp_gen.struct_bool_fields = self.struct_bool_fields
                     temp_gen._struct_name_owner = self._struct_name_owner  # share: cross-module same-name collision guard
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
@@ -2965,6 +2989,7 @@ class GimpleGen:
         'mojo_platform_system':  ('char *',     []),
         'mojo_print_stderr':     ('void',       ['char *']),
         'mojo_strlen':           ('int64_t',    ['char *']),
+        'mojo_utf8_codepoint_index': ('int64_t', ['char *', 'int64_t']),
         'mojo_platform_machine': ('char *',     []),
         'mojo_subprocess_run':        ('MojoCompletedProcess *', ['MojoList *', 'int64_t']),
         'mojo_subprocess_returncode': ('int64_t', ['MojoCompletedProcess *']),
@@ -4161,6 +4186,26 @@ class GimpleGen:
         """
         inferred = {}
 
+        # This pre-pass runs before self.var_types is populated for this
+        # function, so _quick_type(IdentExpr(param_name)) falls through to its
+        # int64_t default for every parameter reference — e.g. `prefix, rest =
+        # raw[:prefix_len], raw[prefix_len:]` (Parser._strip_string_prefix_and_
+        # quotes) inferred `rest` as int64_t instead of `char *` even though
+        # `raw: str` is explicitly annotated, because `_quick_type(SliceExpr)`
+        # resolves through `_quick_type(node.obj)` = `_quick_type(IdentExpr
+        # ('raw'))`, which found no var_types entry. `rest` then got compiled
+        # as a plain int64_t, so `rest[1:-1]` fell into _lower_slice's
+        # generic "raw pointer, no bounds check" fallback instead of calling
+        # mojo_cstr_slice — silently keeping every extra byte past the
+        # (ignored) stop bound. Seed the annotated parameter types into
+        # var_types just for this scan (saved/restored below) so identifier
+        # lookups inside it resolve correctly.
+        _saved_var_types = self.var_types
+        self.var_types = dict(_saved_var_types)
+        for pname, ptype in (func.params or []):
+            if pname not in self.var_types and ptype:
+                self.var_types[pname] = _mojo_type(ptype)
+
         def collect_assigned_types(nodes: list):
             """Recursively scan statements and collect types assigned to variables."""
             for node in nodes:
@@ -4209,7 +4254,10 @@ class GimpleGen:
                 elif isinstance(node, WithStmt):
                     collect_assigned_types(node.body)
 
-        collect_assigned_types(func.body)
+        try:
+            collect_assigned_types(func.body)
+        finally:
+            self.var_types = _saved_var_types
 
         # Join all types for each variable using TypeLattice
         result = {}
@@ -5653,6 +5701,35 @@ class GimpleGen:
                 self._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
         elif rt == 'MojoStr *':
             self._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
+        # NOTE: `x in "some string"` (rt == 'char *') is still a bare "TODO"
+        # stub below, hardcoding _t=0 (always False) — a real, confirmed
+        # foundational gap: `raw[i] not in 'fFrRbBuUtT'`
+        # (Parser._strip_string_prefix_and_quotes's own f/r/b/u-string
+        # prefix-length loop) always takes the "not in" branch immediately,
+        # so prefix_len never advances past 0 and every r-string/f-string/
+        # b-string prefix silently sticks around unstripped once compiled.
+        # Implementing it (both a `char in char*` branch via a dedicated
+        # mojo_char_in_str() helper, and a `char* in char*` branch via
+        # mojo_str_contains()) DOES fix the r-string case directly, but
+        # exposes a second, separate, confirmed bug: any string token
+        # processed by Parser._strip_string_prefix_and_quotes AFTER an
+        # f-string (which takes that function's early "return raw" branch)
+        # in the same compiled function comes back completely unstripped —
+        # e.g. `y = f"...{x}"` immediately followed by
+        # `["a"] + ["b"] + ['__init__.mojo']` compiles the latter three
+        # plain string literals with their quotes still attached. Confirmed
+        # via a 5-line minimal repro (an f-string assignment followed by a
+        # 3-element list-concat of plain string literals — every one of the
+        # three loses its stripping, but only when the f-string precedes
+        # them). Not yet root-caused: cross-call state shouldn't survive
+        # between separate invocations of the same function via ordinary C
+        # stack locals, so this points at either a GIMPLE basic-block/label
+        # bug specific to how the early-return path is compiled, or an
+        # unrelated global/registry side effect — needs its own focused
+        # investigation. Net effect of enabling these two branches was a
+        # regression (33/38 vs. 34/38 baseline `.ast` passing), so reverted;
+        # left as the original stub. See bootstrap-verify-ast-dump-fixes
+        # memory note before attempting this again.
         else:
             self._emit(f"  /* TODO: 'in' for {rt} */")
             self._emit(f"  {ti} = 0;")
@@ -5767,9 +5844,13 @@ class GimpleGen:
                                                    ('int64_t', ctx['mstart_var']),
                                                    ('int64_t', ctx['mend_var'])])
             if func.member == 'start':
-                return 'int64_t', ctx['mstart_var']
+                return 'int64_t', self._call_expr('int64_t', 'mojo_utf8_codepoint_index',
+                                                    [('char *', ctx['text_val']),
+                                                     ('int64_t', ctx['mstart_var'])])
             if func.member == 'end':
-                return 'int64_t', ctx['mend_var']
+                return 'int64_t', self._call_expr('int64_t', 'mojo_utf8_codepoint_index',
+                                                    [('char *', ctx['text_val']),
+                                                     ('int64_t', ctx['mend_var'])])
 
         # `dataclasses.fields(x)`/`dataclasses.is_dataclass(x)` on a value
         # whose concrete struct type isn't known statically (e.g. any AST
@@ -7630,54 +7711,80 @@ class GimpleGen:
             return 'int64_t', self._new_val('int64_t', f'mojo_list_len ({lp})')
         return 'int64_t', self._new_val('int64_t', f'(int64_t)0  /* len() on unsupported type {at} */')
 
+    def _isinstance_one_type(self, obj_type: str, obj_val: str, type_name: str) -> str:
+        """Emit the check for `isinstance(x, SingleType)` and return a _Bool
+        value name. Factored out of _lower_builtin_isinstance so `isinstance(x,
+        (A, B, ...))` (a tuple of types) can OR together one of these per
+        alternative instead of the previous always-False stub."""
+        if type_name == 'type':
+            return self._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+        if type_name in self.struct_field_types:
+            # A real user-defined struct/dataclass type: compare the
+            # object's runtime type tag (see mojo_read_type_tag in
+            # runtime/mojo_runtime.c, and the tag stamped by every
+            # _alloc_<StructName> helper) against this type's own
+            # deterministic hash — NOT the always-false mojo_isinstance()
+            # stub below, which only covers scalar builtins with no
+            # tagged runtime representation. Was a real, general bug:
+            # isinstance(node, AnyStructType) always took the "not this
+            # type" branch when compiled, found via find_imports() (used
+            # by `mojo --dump`'s own do_imports resolution) never
+            # recognizing an import statement nested in a function/if/try
+            # block once self-hosted.
+            target_id = _struct_type_id(type_name)
+            if obj_type.endswith(' *'):
+                ov_local = self._ensure_local(obj_type, obj_val)
+                vp = self._new_val('void *', f'(void *){ov_local}')
+                addr = self._new_val('int64_t', f'(int64_t){vp}')
+            elif obj_type == 'int64_t':
+                addr = obj_val
+            else:
+                addr = self._new_val('int64_t', f'(int64_t){obj_val}')
+            tag = self._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
+            target = self._new_val('int64_t', f'(int64_t){target_id}')
+            cmp_t = self._new_temp('_Bool')
+            self._emit(f'  {cmp_t} = {tag} == {target};')
+            return cmp_t
+        _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
+                     'list': '5', 'dict': '6', 'set': '7'}
+        type_id = _TYPE_IDS.get(type_name, '0')
+        res = self._new_temp('int')
+        if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
+            iv  = self._new_val('int64_t', f'(int64_t){obj_val}')
+            iv2 = self._new_val('int', f'(int){iv}')
+            self._emit(f'  {res} = mojo_isinstance ({iv2}, {type_id});')
+        else:
+            self._emit(f'  {res} = mojo_isinstance ({obj_val}, {type_id});')
+        return self._new_val('_Bool', f'(_Bool){res}')
+
     def _lower_builtin_isinstance(self, node: CallExpr) -> tuple[str, str]:
         obj_type, obj_val = self.lower_expr(node.args[0])
         type_arg = node.args[1]
         t = self._new_temp('int')
         if isinstance(type_arg, IdentExpr):
             type_name = type_arg.name
-            if type_name == 'type':
-                self._emit(f'  {t} = 0;  /* isinstance(x, type) always false in C */')
-            elif type_name in self.struct_field_types:
-                # A real user-defined struct/dataclass type: compare the
-                # object's runtime type tag (see mojo_read_type_tag in
-                # runtime/mojo_runtime.c, and the tag stamped by every
-                # _alloc_<StructName> helper) against this type's own
-                # deterministic hash — NOT the always-false mojo_isinstance()
-                # stub below, which only covers scalar builtins with no
-                # tagged runtime representation. Was a real, general bug:
-                # isinstance(node, AnyStructType) always took the "not this
-                # type" branch when compiled, found via find_imports() (used
-                # by `mojo --dump`'s own do_imports resolution) never
-                # recognizing an import statement nested in a function/if/try
-                # block once self-hosted.
-                target_id = _struct_type_id(type_name)
-                if obj_type.endswith(' *'):
-                    ov_local = self._ensure_local(obj_type, obj_val)
-                    vp = self._new_val('void *', f'(void *){ov_local}')
-                    addr = self._new_val('int64_t', f'(int64_t){vp}')
-                elif obj_type == 'int64_t':
-                    addr = obj_val
-                else:
-                    addr = self._new_val('int64_t', f'(int64_t){obj_val}')
-                tag = self._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
-                target = self._new_val('int64_t', f'(int64_t){target_id}')
-                cmp_t = self._new_temp('_Bool')
-                self._emit(f'  {cmp_t} = {tag} == {target};')
-                self._emit(f'  {t} = (int){cmp_t};')
-            else:
-                _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
-                             'list': '5', 'dict': '6', 'set': '7'}
-                type_id = _TYPE_IDS.get(type_name, '0')
-                if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
-                    iv  = self._new_val('int64_t', f'(int64_t){obj_val}')
-                    iv2 = self._new_val('int', f'(int){iv}')
-                    self._emit(f'  {t} = mojo_isinstance ({iv2}, {type_id});')
-                else:
-                    self._emit(f'  {t} = mojo_isinstance ({obj_val}, {type_id});')
+            cmp_t = self._isinstance_one_type(obj_type, obj_val, type_name)
+            self._emit(f'  {t} = (int){cmp_t};')
         elif isinstance(type_arg, TupleExpr):
-            _debug_note('isinstance with tuple of types stubbed to 0')
-            self._emit(f'  {t} = 0;  /* TODO: isinstance with tuple of types */')
+            # isinstance(x, (A, B, ...)) — OR together a per-alternative check
+            # (see _isinstance_one_type). Previously stubbed to always-False,
+            # which silently broke every `isinstance(s, (VarDecl, AssignStmt))`-
+            # style filter once compiled — e.g. Parser._parse_struct's own
+            # `[s for s in body if isinstance(s, (VarDecl, AssignStmt))]`
+            # always produced an empty struct field list.
+            acc = None
+            for alt in type_arg.elements:
+                if not isinstance(alt, IdentExpr):
+                    continue
+                one = self._isinstance_one_type(obj_type, obj_val, alt.name)
+                # `|` not `||`: GIMPLE rejects a raw `||` token in a plain
+                # assignment RHS ("not valid in GIMPLE") — only simple binary
+                # ops are allowed. Bitwise OR on two already-computed _Bool
+                # (0/1) values is equivalent and GIMPLE-legal.
+                acc = one if acc is None else self._new_val('_Bool', f'{acc} | {one}')
+            if acc is None:
+                acc = self._new_val('_Bool', '0')
+            self._emit(f'  {t} = (int){acc};')
         else:
             _debug_note('isinstance with complex type arg stubbed to 0')
             self._emit(f'  {t} = 0;  /* TODO: isinstance with complex type arg */')
@@ -8787,6 +8894,11 @@ class GimpleGen:
                     vv = vv_tmp
                 self._emit(f"  mojo_dict_set_str ({t}, {kv}, {vv});")
             else:
+                # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
+                # as any other int — vt alone can't distinguish a real bool
+                # literal from a genuine int, so check the AST node itself.
+                if isinstance(val_expr, BoolLiteral):
+                    self._emit(f"  mojo_mark_dict_bool_values ({t});")
                 vv64 = self._to_int64(vt, vv)
                 self._emit(f"  mojo_dict_set_int ({t}, {kv}, {vv64});")
         return 'MojoDict *', t
@@ -8814,6 +8926,11 @@ class GimpleGen:
         t    = self._new_temp('MojoList *')
         self._elem_types[t] = elem
         self._emit(f"  {t} = mojo_list_new ();")
+        # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
+        # over `[...]` — see mojo_mark_as_tuple's doc comment in
+        # runtime/mojo_runtime.c; there is otherwise no runtime distinction
+        # between the two, since both lower to the same MojoList.
+        self._emit(f"  mojo_mark_as_tuple ({t});")
         lowered = [(el, *self.lower_expr(el)) for el in node.elements]
         scalar_sufs = {TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
         # Any mix of suffixes (not just str-vs-other) needs per-element dispatch —
@@ -8867,6 +8984,34 @@ class GimpleGen:
         it_type = ''
         if not is_range:
             it_type, it_val = self.lower_expr(gen0.iterable)
+            # Resolve a pointer stored as int64_t (e.g. from a method call
+            # returning a list) to its real tracked type — mirrors
+            # _gen_for_iter's identical call, which this comprehension path
+            # was missing entirely. Without it, a heterogeneous MojoList*
+            # merely *typed* int64_t at this call site (its real type only
+            # recoverable via _actual_types) fell through every branch below
+            # to the unsupported-iterable fallback, silently producing zero
+            # elements — e.g. `[s for s in body if isinstance(s, (VarDecl,
+            # AssignStmt))]` in Parser._parse_struct always returned [].
+            _resolved_type = self._get_actual_type(it_type, it_val)
+            if _resolved_type != it_type and _resolved_type.endswith(' *'):
+                # it_val's C-declared storage is still int64_t even though we
+                # now know its real pointer type — cast it, mirroring
+                # _gen_for_list's identical `list_ptr = (MojoList *)it_val`
+                # pattern, or every mojo_list_len/mojo_list_get_int(it_val)
+                # call below passes a bare int64_t where a pointer is
+                # expected ("makes pointer from integer without a cast").
+                _old_it_val = it_val
+                it_val = self._new_val(_resolved_type, f'({_resolved_type}){it_val}')
+                # Preserve element-type tracking under the new temp's name —
+                # otherwise _elem_of(it_val) below misses it (only the OLD
+                # name was tracked), silently defaulting the loop variable to
+                # int64_t and corrupting any downstream string/struct access.
+                if _old_it_val in self._elem_types:
+                    self._elem_types[it_val] = self._elem_types[_old_it_val]
+                if _old_it_val in self._nested_elem_types:
+                    self._nested_elem_types[it_val] = self._nested_elem_types[_old_it_val]
+            it_type = _resolved_type
 
         if is_range:
             self._compr_range_loop(node, gen0, res, res_type)
@@ -8926,7 +9071,7 @@ class GimpleGen:
             cond_t = self._new_val('_Bool', f"{gen0.target} {cond_op} {stop_v}")
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         self._emit_label(bb_body)
-        self._gen_compr_append(node, gen0, res, res_type, bb_after)
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         st = self._new_val('int', f"{gen0.target} + {step_v}")
@@ -8959,7 +9104,7 @@ class GimpleGen:
                 sub_str = self._new_val('char *', f"mojo_list_get_str ({sub_list}, {i64})")
                 sub_val = self._new_val('int64_t', f"(int64_t){sub_str}")
                 self._emit(f"  {vn} = {sub_val};")
-            self._gen_compr_append(node, gen0, res, res_type, bb_after)
+            self._gen_compr_append(node, gen0, res, res_type, bb_post)
             self._emit(f"  goto {bb_post};")
             self._emit_label(bb_post)
             one64 = self._new_val('int64_t', "(int64_t)1")
@@ -8995,7 +9140,7 @@ class GimpleGen:
         else:
             raw64 = self._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
             self._emit(f"  {gen0.target} = ({elem}) {raw64};")
-        self._gen_compr_append(node, gen0, res, res_type, bb_after)
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         one64 = self._new_val('int64_t', "(int64_t)1")
@@ -9016,7 +9161,7 @@ class GimpleGen:
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         self._emit_label(bb_body)
         self._emit(f"  {gen0.target} = mojo_str_char_at ({it_val}, {idx64});")
-        self._gen_compr_append(node, gen0, res, res_type, bb_after)
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         one64 = self._new_val('int64_t', "(int64_t)1")
@@ -9045,7 +9190,7 @@ class GimpleGen:
             self._emit(f"  {tgt} = (int64_t)(uintptr_t) {key_tmp};")
         else:
             self._emit(f"  {tgt} = (char *) {key_tmp};")
-        self._gen_compr_append(node, gen0, res, res_type, bb_after)
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         self._emit(f"  goto {bb_cond};")
@@ -9066,7 +9211,7 @@ class GimpleGen:
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         self._emit_label(bb_body)
         self._emit(f"  {gen0.target} = mojo_set_iter_val_int ({iter_t});")
-        self._gen_compr_append(node, gen0, res, res_type, bb_after)
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         self._emit(f"  goto {bb_cond};")
@@ -9075,6 +9220,16 @@ class GimpleGen:
 
     def _gen_compr_append(self, node: Comprehension, gen0, res: str,
                           res_type: str, bb_skip: str):
+        """`bb_skip` must be the loop's bb_post (advance-index-and-continue
+        label), NOT bb_after (the loop-exit label) — every caller here used
+        to pass bb_after, so a filter condition failing on ANY element
+        jumped straight past the rest of the loop entirely instead of just
+        skipping that one element, silently truncating the whole
+        comprehension after its first non-matching item. E.g.
+        `[s for s in body if isinstance(s, FunctionDef)]` returned [] as
+        soon as body's FIRST entry wasn't a FunctionDef (a leading
+        docstring ExprStmt, in the reproducing case), even though later
+        entries would have matched."""
         if gen0.conditions:
             bb_append = self._new_bb()
             for cond_expr in gen0.conditions:
@@ -9124,6 +9279,10 @@ class GimpleGen:
                     vv = vv_tmp
                 self._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
             else:
+                # See the dict-literal case's identical comment: vt alone
+                # can't distinguish a real bool literal from a genuine int.
+                if isinstance(node.key, BoolLiteral):
+                    self._emit(f"  mojo_mark_dict_bool_values ({res});")
                 vv64 = self._to_int64(vt, vv)
                 self._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 
@@ -9549,7 +9708,18 @@ class GimpleGen:
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
-                # Opaque Python object: use mojo_setattr for attribute assignment
+                # Opaque Python object (e.g. `s.field = val` where `s`'s
+                # static type isn't narrowed past a runtime isinstance()
+                # check — this compiler doesn't track that): dispatch via
+                # _mojo_dispatch_setattr, which reads the runtime type tag
+                # and routes to the right struct's real setter. Calling the
+                # bare mojo_setattr() runtime stub directly (the previous
+                # behavior) silently did nothing at all — it's an
+                # intentional no-op fallback for values with NO type tag,
+                # not a real implementation; found via
+                # `s._fieldwise_ctor_synthesized = True` in
+                # _synthesize_fieldwise_inits (mojo_compiler.py) never taking
+                # effect once compiled.
                 member_str = node.target.member
                 key_slit = self._intern_string(_c_escape(member_str))
                 key_tmp = self._new_val('char *', f"{key_slit}")
@@ -9557,7 +9727,7 @@ class GimpleGen:
                 self._safe_coerce_emit(vtype, 'int64_t', v, v64)
                 obj64 = self._to_int64(ot, ov)
                 vp_tmp = self._new_val('void *', f"(void *){obj64}")
-                self._emit_call('void', '', 'mojo_setattr',
+                self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
                 op = '->' if '*' in ot else '.'
@@ -9596,6 +9766,11 @@ class GimpleGen:
                     self._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
                 else:
+                    # Mark so generic repr() prints True/False instead of 1/0
+                    # for this dict's values — see mojo_mark_dict_bool_values's
+                    # doc comment in runtime/mojo_runtime.c.
+                    if isinstance(node.value, BoolLiteral):
+                        self._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     self._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
@@ -9631,6 +9806,8 @@ class GimpleGen:
                         self._emit(f"  {dp} = (MojoDict *){ip};")
                         key_tmp2 = self._new_temp('char *')
                         self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                        if isinstance(node.value, BoolLiteral):
+                            self._emit(f"  mojo_mark_dict_bool_values ({dp});")
                         # Pass actual vtype so _emit_call can coerce pointers to int64_t
                         self._emit_call('void', '', 'mojo_dict_set_int',
                                         [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
@@ -9705,13 +9882,16 @@ class GimpleGen:
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
+                # See the AssignStmt MemberExpr branch above for why this
+                # calls _mojo_dispatch_setattr, not the bare mojo_setattr
+                # runtime stub (a no-op fallback, not a real implementation).
                 member_str = node.target.member
                 key_slit = self._intern_string(_c_escape(member_str))
                 key_tmp = self._new_val('char *', f"{key_slit}")
                 v64 = self._new_temp('int64_t')
                 self._safe_coerce_emit(vtype, 'int64_t', v, v64)
                 vp_tmp = self._new_val('void *', f"(void *){ov}")
-                self._emit_call('void', '', 'mojo_setattr',
+                self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
                 op = '->' if '*' in ot else '.'
@@ -9960,6 +10140,8 @@ class GimpleGen:
                 elif ot == 'MojoDict *':
                     key_tmp = self._new_temp('char *')
                     self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp)
+                    if isinstance(node.value, BoolLiteral):
+                        self._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                     self._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
                 elif ot in ('int', 'int64_t'):
@@ -9981,6 +10163,8 @@ class GimpleGen:
                         self._emit(f"  {dp} = (MojoDict *){ip};")
                         key_tmp2 = self._new_temp('char *')
                         self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp2)
+                        if isinstance(node.value, BoolLiteral):
+                            self._emit(f"  mojo_mark_dict_bool_values ({dp});")
                         self._emit_call('void', '', 'mojo_dict_set_int',
                                         [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
                 elif ot.endswith(' *') and _struct_name_of(ot) not in self.struct_field_types:
@@ -11334,10 +11518,20 @@ class GimpleGen:
             elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
             tuple_ptr = self._new_val('MojoList *', f"(MojoList *){elem64}")
             for i, vn in enumerate(var_names):
-                # mojo_list_get_str returns char*, but var is int64_t
+                # mojo_list_get_str returns char*, but vn's declared type may
+                # already be char* — e.g. it was first declared by an earlier,
+                # unrelated loop/comprehension over the same Python variable
+                # name in this function (`_declare_var` is first-decl-wins).
+                # Blindly boxing to int64_t here (the previous unconditional
+                # behavior) then assigned an int64_t value into an
+                # already-char*-declared variable — mirrors the same
+                # var/int64_t check the non-tuple branch below already does.
                 temp_str = self._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {i})")
-                int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
-                self._emit(f"  {vn} = {int_ptr};")
+                if self._type_of(vn) == 'char *':
+                    self._emit(f"  {vn} = {temp_str};")
+                else:
+                    int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
+                    self._emit(f"  {vn} = {int_ptr};")
         else:
             suf = TypeLattice.list_suffix(elem)
             if suf == 'double':
@@ -12770,6 +12964,17 @@ class GimpleGen:
             'obj': 'int64_t',
             'index': 'int64_t',
         }
+        # These hardcoded fields are boxed (Optional/Any-typed AST-node refs
+        # stored as int64_t) same as the annotation-scan-derived ones below —
+        # pre-populated here so they bypass that scan (see the `if f_name not
+        # in self.struct_field_types[s.name]` guard), so their boxed-ness must
+        # be recorded explicitly too or repr() prints raw pointers for them.
+        self.struct_boxed_fields['CallExpr'] = {'func'}
+        self.struct_boxed_fields['BinaryOp'] = {'left', 'right'}
+        self.struct_boxed_fields['UnaryOp'] = {'operand'}
+        self.struct_boxed_fields['TernaryExpr'] = {'condition', 'then_val', 'else_val'}
+        self.struct_boxed_fields['MemberExpr'] = {'obj'}
+        self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         _merge_struct_inheritance(all_struct_defs)
@@ -12866,6 +13071,14 @@ class GimpleGen:
                             ft = _mojo_type(field.type_ann)
                             if f_name == 'value' and s.name == 'Generator':
                                 ft = 'int'  # boxed object field
+                            _ann_bare = str(field.type_ann).strip() if field.type_ann else ''
+                            if _ann_bare in ('object', 'Any') or (
+                                    ' | ' in _ann_bare
+                                    and any(p.strip()[:1].isupper()
+                                            for p in _ann_bare.split(' | ') if p.strip() != 'None')):
+                                self.struct_boxed_fields.setdefault(s.name, set()).add(f_name)
+                            if _ann_bare == 'bool':
+                                self.struct_bool_fields.setdefault(s.name, set()).add(f_name)
                             # If the type resolved to a generic container pointer (MojoList *,
                             # MojoDict *, MojoSet *, or double-pointer like MojoDict * *)
                             # but there is a locally-defined struct, prefer the local struct.
@@ -14802,13 +15015,34 @@ class GimpleGen:
                 fields = self.struct_field_types.get(sn, {})
                 if not fields:
                     continue
+                boxed = self.struct_boxed_fields.get(sn, set())
+                bool_fields = self.struct_bool_fields.get(sn, set())
                 part_exprs = []
                 for fname, ftype in fields.items():
                     if fname == '__mojo_type_id':
                         continue
                     safe_f = _safe_field(fname)
                     fref = f'obj->{safe_f}'
-                    if ftype == 'char *':
+                    if sn == 'IntLiteral' and fname == 'value' and 'raw' in fields:
+                        # IntLiteral.value wraps to a 64-bit machine word for
+                        # real arithmetic, so a literal exceeding int64_t
+                        # range (e.g. 0xFFFFFFFFFFFFFFFF) can't dump as the
+                        # same decimal text Python's own arbitrary-precision
+                        # int repr would show. `raw` (the original source
+                        # token text) lets the dump reconstruct the exact
+                        # decimal value instead — see
+                        # mojo_int_literal_decimal's doc comment.
+                        raw_fref = f"obj->{_safe_field('raw')}"
+                        val_expr = (f'(({raw_fref} && {raw_fref}[0]) '
+                                    f'? mojo_int_literal_decimal({raw_fref}) '
+                                    f': mojo_repr_int((int64_t){fref}))')
+                    elif fname in bool_fields:
+                        val_expr = f'({fref} ? "True" : "False")'
+                    elif fname in boxed and ftype in (
+                            'int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+                        val_expr = f'_mojo_generic_elem_repr((int64_t){fref})'
+                    elif ftype == 'char *':
                         val_expr = f'({fref} ? mojo_repr_str({fref}) : "None")'
                     elif ftype == '_Bool':
                         val_expr = f'({fref} ? "True" : "False")'
@@ -14841,28 +15075,36 @@ class GimpleGen:
                     f"  return {cat_chain};\n"
                     f"}}\n"
                 )
+            # Forward-declare _mojo_dispatch_repr/_mojo_repr_list/
+            # _mojo_repr_dict/_mojo_generic_elem_repr UNCONDITIONALLY (not
+            # just when repr_fwd_decls is non-empty): _mojo_generic_elem_repr's
+            # own body (emitted below, unconditionally, as part of "Generic
+            # reflection dispatch") calls _mojo_repr_list directly (to
+            # recurse into a nested list/tuple element) regardless of whether
+            # any struct actually needs reflection — with zero reflect_structs
+            # (e.g. a trivial program with no structs at all), the old
+            # `if repr_fwd_decls:` guard skipped this block entirely, leaving
+            # _mojo_repr_list undeclared at its call site inside
+            # _mojo_generic_elem_repr and triggering GCC's old-style
+            # "implicit declaration" (defaults to int, "conflicting types"
+            # once the real definition appears later). Same class of ordering
+            # bug the repr_fwd_decls path itself was originally added to fix
+            # (see below) — just not covering the empty case.
+            parts.append("static char * _mojo_dispatch_repr (void *);")
+            parts.append("static char * _mojo_repr_list (MojoList *);")
+            parts.append("static char * _mojo_repr_dict (MojoDict *);")
+            parts.append("static char * _mojo_generic_elem_repr (int64_t);")
             if repr_fwd_decls:
                 # Must precede every _mojo_repr_<sn> body: AST-shaped structs
                 # reference each other directly by field type (e.g. FunctionDef
                 # has a StringLiteral-typed default, ExprStmt has a value: CallExpr
                 # field), so alphabetically-later structs called by an earlier
-                # one's body need to already be declared. Also forward-declare
-                # _mojo_dispatch_repr/_mojo_repr_list/_mojo_repr_dict here (not
-                # just in the later "Always add forward decls" block further
-                # down in this same function): those per-struct _mojo_repr_<sn>
-                # bodies just above call them for pointer/MojoList*/MojoDict*
-                # fields, and this reflection block — along with the dispatch
-                # functions' own bodies — is emitted well before that later
-                # block, which was too late once a struct actually needed
-                # reflection (found via compile_stdlib.py: _ListIter's
-                # generated repr called _mojo_dispatch_repr with no
-                # declaration in scope yet, "implicit declaration of
-                # function").
+                # one's body need to already be declared. Found via
+                # compile_stdlib.py: _ListIter's generated repr called
+                # _mojo_dispatch_repr with no declaration in scope yet,
+                # "implicit declaration of function".
                 parts.append("/* Forward decls for generic repr() (mutual struct references) */")
                 parts.append("\n".join(repr_fwd_decls))
-                parts.append("static char * _mojo_dispatch_repr (void *);")
-                parts.append("static char * _mojo_repr_list (MojoList *);")
-                parts.append("static char * _mojo_repr_dict (MojoDict *);")
                 parts.append('')
             if True:
                 # Unconditional (even with refl_parts empty / reflect_structs
@@ -14926,6 +15168,8 @@ class GimpleGen:
                     "static char * _mojo_generic_elem_repr (int64_t val) {\n"
                     "  if (val == 0) return \"None\";\n"
                     "  if (val > 65536) {\n"
+                    "    if (mojo_is_registered_list(val))\n"
+                    "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
                     "    int64_t _tag = mojo_read_type_tag_safe(val);\n"
                     f"{tag_cases_repr_elem}\n"
                     "    return mojo_repr_str((char *)(intptr_t)val);\n"
@@ -14933,28 +15177,33 @@ class GimpleGen:
                     "  return mojo_repr_int(val);\n"
                     "}\n"
                     "static char * _mojo_repr_list (MojoList *lst) {\n"
-                    "  if (!lst) return \"[]\";\n"
+                    "  int _is_tup = lst && mojo_is_tuple(lst);\n"
+                    "  if (!lst) return _is_tup ? \"()\" : \"[]\";\n"
                     "  int64_t _n = mojo_list_len(lst);\n"
-                    "  char *_buf = strdup(\"[\");\n"
+                    "  char *_buf = strdup(_is_tup ? \"(\" : \"[\");\n"
                     "  for (int64_t _i = 0; _i < _n; _i++) {\n"
                     "    if (_i > 0) _buf = mojo_str_cat(_buf, \", \");\n"
                     "    _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(mojo_list_get_int(lst, _i)));\n"
                     "  }\n"
-                    "  return mojo_str_cat(_buf, \"]\");\n"
+                    "  if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, \",\");\n"
+                    "  return mojo_str_cat(_buf, _is_tup ? \")\" : \"]\");\n"
                     "}\n"
                     "static char * _mojo_repr_dict (MojoDict *d) {\n"
                     "  if (!d) return \"{}\";\n"
+                    "  int _is_booldict = mojo_is_bool_dict(d);\n"
                     "  char *_buf = strdup(\"{\");\n"
-                    "  int _first = 1;\n"
-                    "  for (int64_t _i = 0; _i < d->cap; _i++) {\n"
-                    "    if (d->slots[_i].key) {\n"
-                    "      if (!_first) _buf = mojo_str_cat(_buf, \", \");\n"
-                    "      _first = 0;\n"
-                    "      _buf = mojo_str_cat(_buf, mojo_repr_str(d->slots[_i].key));\n"
-                    "      _buf = mojo_str_cat(_buf, \": \");\n"
+                    "  int64_t *_order = mojo_dict_order_indices(d);\n"
+                    "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
+                    "    int64_t _i = _order[_oi];\n"
+                    "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
+                    "    _buf = mojo_str_cat(_buf, mojo_repr_str(d->slots[_i].key));\n"
+                    "    _buf = mojo_str_cat(_buf, \": \");\n"
+                    "    if (_is_booldict)\n"
+                    "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
+                    "    else\n"
                     "      _buf = mojo_str_cat(_buf, _mojo_generic_elem_repr(d->slots[_i].val));\n"
-                    "    }\n"
                     "  }\n"
+                    "  free(_order);\n"
                     "  return mojo_str_cat(_buf, \"}\");\n"
                     "}\n"
                 )
@@ -15218,6 +15467,7 @@ class GimpleGen:
         parts.append("static char * _mojo_dispatch_repr (void *);")
         parts.append("static char * _mojo_repr_list (MojoList *);")
         parts.append("static char * _mojo_repr_dict (MojoDict *);")
+        parts.append("static char * _mojo_generic_elem_repr (int64_t);")
         parts.append('')
 
         # Forward declarations for lifted closures + env allocator helpers

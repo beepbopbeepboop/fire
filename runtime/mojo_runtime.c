@@ -331,12 +331,49 @@ struct MojoList {
     int64_t  cap;
 };
 
+/* Registry of every live MojoList* address, used only by generic repr()
+ * dispatch (_mojo_generic_elem_repr in gimple_codegen.py) to tell a boxed
+ * int64_t holding a nested list/tuple pointer apart from a boxed string
+ * pointer or a real large int — MojoList carries no type tag of its own
+ * (unlike a codegen-emitted struct's leading __mojo_type_id field), so
+ * without this a list-of-tuples field (e.g. FunctionDef.params) printed
+ * each tuple's raw pointer bytes reinterpreted as garbage text via
+ * mojo_repr_str. Lazily allocated via mojo_set_new() itself (not tracked
+ * in the registry — only MojoLists returned by mojo_list_new() are). */
+static MojoSet *_mojo_list_registry = NULL;
+
+int mojo_is_registered_list(int64_t addr) {
+    if (!_mojo_list_registry || addr < 65536) return 0;
+    return mojo_set_contains_int(_mojo_list_registry, addr);
+}
+
+/* A Python tuple literal lowers to the exact same MojoList as a list literal
+ * (see _lower_tuple_literal in gimple_codegen.py) — there is no runtime
+ * distinction between the two, so generic repr() always printed a tuple's
+ * contents with list brackets `[...]` instead of `(...)`. Marked explicitly
+ * by _lower_tuple_literal's emitted call to mojo_mark_as_tuple() right after
+ * mojo_list_new(); checked by _mojo_repr_list to choose the right brackets. */
+static MojoSet *_mojo_tuple_registry = NULL;
+
+void mojo_mark_as_tuple(MojoList *l) {
+    if (!l) return;
+    if (!_mojo_tuple_registry) _mojo_tuple_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
+}
+
+int mojo_is_tuple(MojoList *l) {
+    if (!l || !_mojo_tuple_registry) return 0;
+    return mojo_set_contains_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
+}
+
 MojoList *mojo_list_new(void)
 {
     MojoList *l = malloc(sizeof(MojoList));
     l->data = NULL;
     l->len  = 0;
     l->cap  = 0;
+    if (!_mojo_list_registry) _mojo_list_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_list_registry, (int64_t)(intptr_t)l);
     return l;
 }
 
@@ -729,6 +766,19 @@ int64_t mojo_strlen(char *s) {
     return s ? (int64_t)strlen(s) : 0;
 }
 
+/* Regex match.start()/.end() need Unicode-codepoint offsets to match
+ * Python's re.Match semantics (stage1, this codebase's documented ground
+ * truth per bootstrap-validate.mojo) — but mojo_regex_search scans `s` as a
+ * raw byte buffer, so its match positions are byte offsets. Convert by
+ * counting non-continuation bytes (those not matching 10xxxxxx) up to
+ * byte_offset. */
+int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < byte_offset; i++)
+        if ((s[i] & 0xC0) != 0x80) count++;
+    return count;
+}
+
 /* platform.system()/platform.machine(): resolved via preprocessor macros at
  * the C compiler's own build time (not Python's `platform` module — this
  * runtime is itself compiled by whatever gcc builds the self-hosted binary,
@@ -990,11 +1040,34 @@ static uint64_t _str_hash(char *s)
     return h;
 }
 
+/* A dict whose values are all Python bools (e.g. `flags[name] = True`) has
+ * no runtime marker distinguishing that from any other int64_t-valued dict
+ * — like the None/int and tuple/list ambiguities elsewhere in this runtime,
+ * generic repr() (_mojo_generic_elem_repr, via _mojo_repr_dict) can't tell a
+ * real boxed 0/1 boolean apart from a genuine small int, so it always
+ * printed 0/1 instead of False/True. Marked explicitly wherever codegen
+ * knows (from the RHS's static type) that a `dict[key] = True_or_False`
+ * assignment is storing a real bool; checked by _mojo_repr_dict to choose
+ * the right value formatting for the whole dict. */
+static MojoSet *_mojo_bool_dict_registry = NULL;
+
+void mojo_mark_dict_bool_values(MojoDict *d) {
+    if (!d) return;
+    if (!_mojo_bool_dict_registry) _mojo_bool_dict_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
+}
+
+int mojo_is_bool_dict(MojoDict *d) {
+    if (!d || !_mojo_bool_dict_registry) return 0;
+    return mojo_set_contains_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
+}
+
 MojoDict *mojo_dict_new(void)
 {
     MojoDict *d = malloc(sizeof(MojoDict));
-    d->cap   = 8;
-    d->used  = 0;
+    d->cap      = 8;
+    d->used     = 0;
+    d->next_seq = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
     return d;
 }
@@ -1020,15 +1093,25 @@ static _DictSlot *_dict_find(MojoDict *d, char *key)
 
 static void _dict_grow(MojoDict *d);
 
-static void _dict_set_raw(MojoDict *d, char *key, int64_t val)
+/* seq >= 0 preserves an already-assigned insertion sequence number (used
+ * only by _dict_grow's rehash, so a key's original insertion order survives
+ * moving to a new, bigger slot array); seq < 0 assigns a fresh one. */
+static void _dict_set_raw_seq(MojoDict *d, char *key, int64_t val, int64_t seq)
 {
     if (d->used * 2 >= d->cap) _dict_grow(d);
     _DictSlot *sl = _dict_find(d, key);
     if (!sl->key) {
         sl->key = strdup(key);
+        sl->seq = (seq >= 0) ? seq : d->next_seq++;
+        if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
         d->used++;
     }
     sl->val = val;
+}
+
+static void _dict_set_raw(MojoDict *d, char *key, int64_t val)
+{
+    _dict_set_raw_seq(d, key, val, -1);
 }
 
 static void _dict_grow(MojoDict *d)
@@ -1039,9 +1122,36 @@ static void _dict_grow(MojoDict *d)
     d->used  = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
     for (int64_t i = 0; i < old_cap; i++)
-        if (old[i].key) _dict_set_raw(d, old[i].key, old[i].val);
+        if (old[i].key) _dict_set_raw_seq(d, old[i].key, old[i].val, old[i].seq);
     for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
     free(old);
+}
+
+/* Slot indices for d->slots, in insertion order (ascending by _DictSlot.seq)
+ * — used only by generic repr()'s dict formatting (_mojo_repr_dict) so it
+ * matches Python's insertion-order-preserving dict printing instead of raw
+ * open-addressing hash-slot order. Real iteration (MojoDictIter,
+ * .keys()/.values()/.items()) is unaffected and still walks slots in hash
+ * order — deliberately scoped to the debug-dump path only, not a behavior
+ * change for compiled programs. Returns a malloc'd array of d->used
+ * entries (NULL if empty); caller must free() it. */
+static int _cmp_seqidx(const void *a, const void *b) {
+    int64_t sa = ((const int64_t *)a)[0];
+    int64_t sb = ((const int64_t *)b)[0];
+    return (sa > sb) - (sa < sb);
+}
+int64_t *mojo_dict_order_indices(MojoDict *d)
+{
+    if (!d || d->used == 0) return NULL;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)d->used);
+    int64_t n = 0;
+    for (int64_t i = 0; i < d->cap; i++)
+        if (d->slots[i].key) { tmp[n][0] = d->slots[i].seq; tmp[n][1] = i; n++; }
+    qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
+    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
+    free(tmp);
+    return out;
 }
 
 void mojo_dict_set_int(MojoDict *d, char *key, int64_t v)
@@ -1124,44 +1234,41 @@ struct MojoDictIter {
 MojoDictIter *mojo_dict_iter_new(MojoDict *d)
 {
     MojoDictIter *it = malloc(sizeof(MojoDictIter));
-    it->dict = d;
-    it->pos  = -1;
+    it->dict  = d;
+    it->pos   = -1;
+    it->order = mojo_dict_order_indices(d);
     return it;
 }
 
 int mojo_dict_iter_next(MojoDictIter *it)
 {
     it->pos++;
-    while (it->pos < it->dict->cap) {
-        if (it->dict->slots[it->pos].key) return 1;
-        it->pos++;
-    }
-    return 0;
+    return (it->dict && it->pos < it->dict->used) ? 1 : 0;
 }
 
 char *mojo_dict_iter_key(MojoDictIter *it)
 {
-    return it->dict->slots[it->pos].key;
+    return it->dict->slots[it->order[it->pos]].key;
 }
 
 int64_t mojo_dict_iter_val_int(MojoDictIter *it)
 {
-    return it->dict->slots[it->pos].val;
+    return it->dict->slots[it->order[it->pos]].val;
 }
 
 double mojo_dict_iter_val_double(MojoDictIter *it)
 {
     double v;
-    memcpy(&v, &it->dict->slots[it->pos].val, sizeof(v));
+    memcpy(&v, &it->dict->slots[it->order[it->pos]].val, sizeof(v));
     return v;
 }
 
 char *mojo_dict_iter_val_str(MojoDictIter *it)
 {
-    return (char *)(uintptr_t)it->dict->slots[it->pos].val;
+    return (char *)(uintptr_t)it->dict->slots[it->order[it->pos]].val;
 }
 
-void mojo_dict_iter_free(MojoDictIter *it) { free(it); }
+void mojo_dict_iter_free(MojoDictIter *it) { free(it->order); free(it); }
 
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoSet — hash set backed by the same open-addressing scheme
@@ -1461,28 +1568,57 @@ char *mojo_repr_str(char *s) {
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
      * than the raw byte -- needed for e.g. a compiled AST's StringLiteral
      * nodes whose value is itself a multi-line docstring. Minimal escaping
-     * (backslash, single-quote, \n \r \t) -- good enough for a debug dump,
-     * not a full Python string-literal round-trip. */
+     * (backslash, single-quote/double-quote as needed, \n \r \t) -- good
+     * enough for a debug dump, not a full Python string-literal round-trip.
+     *
+     * Quote-character choice mirrors Python's own repr() heuristic: prefer
+     * single quotes, UNLESS the string contains a single quote and no
+     * double quote, in which case use double quotes instead so the
+     * apostrophe needs no escaping -- e.g. Python's repr("it's") is the
+     * 6-character string `"it's"` (double-quote delimited, apostrophe
+     * unescaped), not `'it\'s'`. Found via a docstring containing
+     * `'foo/bar.mojo'`-style single-quoted examples: this always used
+     * single-quote delimiters with the inner quotes backslash-escaped
+     * instead -- value-preserving, but a real mismatch against CPython's
+     * own repr() once self-hosted-compiled and diffed against the
+     * interpreted stage1 dump. */
     if (!s) s = "";
+    int has_squote = 0, has_dquote = 0;
+    for (const char *c = s; *c; c++) {
+        if (*c == '\'') has_squote = 1;
+        else if (*c == '"') has_dquote = 1;
+    }
+    char quote = (has_squote && !has_dquote) ? '"' : '\'';
     size_t len = strlen(s);
     char *buf = malloc(len * 2 + 3);
     char *p = buf;
-    *p++ = '\'';
+    *p++ = quote;
     for (const char *c = s; *c; c++) {
-        if (*c == '\'' || *c == '\\') { *p++ = '\\'; *p++ = *c; }
+        if (*c == quote || *c == '\\') { *p++ = '\\'; *p++ = *c; }
         else if (*c == '\n') { *p++ = '\\'; *p++ = 'n'; }
         else if (*c == '\r') { *p++ = '\\'; *p++ = 'r'; }
         else if (*c == '\t') { *p++ = '\\'; *p++ = 't'; }
         else *p++ = *c;
     }
-    *p++ = '\'';
+    *p++ = quote;
     *p = '\0';
     return buf;
 }
 
 char *mojo_repr_float(double v) {
+    /* Python's repr()/str() of a float always shows it as a float — even a
+     * whole-number value like 0.0 or 2.0 keeps a trailing ".0" — so it can
+     * never be confused with an int at a glance. Plain "%g" doesn't do
+     * this: %g for 0.0 is just "0", indistinguishable from an int repr.
+     * Found via a compiled AST's FloatLiteral(value=0.0, ...) printing as
+     * value=0 once self-hosted. */
     static char buffer[64];
     snprintf(buffer, sizeof(buffer), "%g", v);
+    int has_marker = 0;
+    for (char *p = buffer; *p; p++) {
+        if (*p == '.' || *p == 'e' || *p == 'E' || *p == 'n' || *p == 'i') { has_marker = 1; break; }
+    }
+    if (!has_marker) strncat(buffer, ".0", sizeof(buffer) - strlen(buffer) - 1);
     return buffer;
 }
 
@@ -1980,20 +2116,25 @@ int64_t int_parse_module(int parser) {
 /* ── Additional dict/list/set runtime helpers ──────────────────────────── */
 
 MojoList *mojo_dict_keys(MojoDict *d) {
+    /* Walks in insertion order (mojo_dict_order_indices), matching Python's
+     * dict.keys() guarantee — not raw hash-slot order. */
     MojoList *out = mojo_list_new();
     if (!d) return out;
-    for (int64_t i = 0; i < d->cap; i++)
-        if (d->slots[i].key)
-            mojo_list_append_str(out, d->slots[i].key);
+    int64_t *order = mojo_dict_order_indices(d);
+    for (int64_t oi = 0; oi < d->used; oi++)
+        mojo_list_append_str(out, d->slots[order[oi]].key);
+    free(order);
     return out;
 }
 
 MojoList *mojo_dict_values(MojoDict *d) {
+    /* Insertion order — see mojo_dict_keys's identical note. */
     MojoList *out = mojo_list_new();
     if (!d) return out;
-    for (int64_t i = 0; i < d->cap; i++)
-        if (d->slots[i].key)
-            mojo_list_append_int(out, d->slots[i].val);
+    int64_t *order = mojo_dict_order_indices(d);
+    for (int64_t oi = 0; oi < d->used; oi++)
+        mojo_list_append_int(out, d->slots[order[oi]].val);
+    free(order);
     return out;
 }
 
@@ -2008,17 +2149,24 @@ MojoList *mojo_dict_items(MojoDict *d) {
      * a struct-valued dict's value came out as garbage, since the "value"
      * offset landed inside the key string's data instead of a real value
      * slot — found via mojo_compiler.py's own `_parse_postfix`, whose
-     * `keywords: dict = {}` stores parsed expression nodes as values). */
+     * `keywords: dict = {}` stores parsed expression nodes as values).
+     * Also walks in insertion order now (mojo_dict_order_indices) — a
+     * literal `Foo(**{k1: v1, k2: v2})`-style keyword-argument dict built
+     * via `[(k, v) for k, v in keywords.items()]` (mojo_compiler.py's own
+     * _parse_postfix) needs its arguments back in the order they were
+     * written, not raw hash-slot order, or a compiled AST dump reorders a
+     * call's own keyword arguments. */
     MojoList *out = mojo_list_new();
     if (!d) return out;
-    for (int64_t i = 0; i < d->cap; i++) {
-        if (d->slots[i].key) {
-            MojoList *pair = mojo_list_new();
-            mojo_list_append_str(pair, d->slots[i].key);
-            mojo_list_append_int(pair, d->slots[i].val);
-            mojo_list_append_int(out, (int64_t)(intptr_t)pair);
-        }
+    int64_t *order = mojo_dict_order_indices(d);
+    for (int64_t oi = 0; oi < d->used; oi++) {
+        int64_t i = order[oi];
+        MojoList *pair = mojo_list_new();
+        mojo_list_append_str(pair, d->slots[i].key);
+        mojo_list_append_int(pair, d->slots[i].val);
+        mojo_list_append_int(out, (int64_t)(intptr_t)pair);
     }
+    free(order);
     return out;
 }
 
@@ -2656,7 +2804,28 @@ int64_t mojo_min(void *args) {
 }
 
 /* ── String/Number conversion (used directly in compiled code) ─────── */
-int64_t mojo_make_int(char *s) { return s ? (int64_t)atoll(s) : 0; }
+/* Backs both bare `int(s)` and `int(s, 0)` (gimple_codegen.py's _lower_call
+ * drops the base argument entirely and always calls this) — so this must
+ * replicate Python's int(s, 0) auto-base-detection (0x/0X hex, 0o/0O octal,
+ * 0b/0B binary, else decimal) itself. The previous plain atoll() doesn't
+ * understand any of those prefixes; atoll("0x2545F4914F6CDD1D") stops
+ * parsing at 'x' and silently returns 0 — found via a source literal like
+ * `0xFFFFFFFFFFFFFFFF` parsing as IntLiteral(value=0) instead of the real
+ * value once self-hosted (mojo.py's own repr(ast) dump on test_simple.mojo's
+ * xorshift64star, which hashes with exactly this kind of hex mask
+ * constant). Uses strtoull (unsigned) then casts to int64_t: a hex literal
+ * with the sign bit set (e.g. the all-ones 64-bit mask above) is stored as
+ * the equivalent negative machine word, same as a real 64-bit register
+ * would hold it — this runtime has no bignum type to hold the literal
+ * value exactly the way Python's arbitrary-precision int does. */
+int64_t mojo_make_int(char *s) {
+    if (!s) return 0;
+    if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+        return (int64_t)strtoull(s + 2, NULL, 2);
+    if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O'))
+        return (int64_t)strtoull(s + 2, NULL, 8);
+    return (int64_t)strtoull(s, NULL, 0);  /* handles 0x/0X hex + decimal */
+}
 double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
 int mojo_make_bool(int val) { return val ? 1 : 0; }
 void *mojo_make_list(void) { return mojo_list_new(); }
@@ -2688,6 +2857,65 @@ char *mojo_str_from_int(int64_t v) {
     snprintf(buf, sizeof buf, "%lld", (long long)v);
     char *out = (char *)malloc(strlen(buf) + 1);
     strcpy(out, buf);
+    return out;
+}
+
+/* Arbitrary-precision digit-string -> decimal-string conversion, via
+ * schoolbook "multiply existing decimal digits by base, add next digit"
+ * (no division needed). Used ONLY so a compiled AST dump can print an
+ * IntLiteral's exact source value even when it doesn't fit in int64_t (e.g.
+ * the all-ones 64-bit mask 0xFFFFFFFFFFFFFFFF, which as int64_t wraps to
+ * -1) — matching Python's own arbitrary-precision int repr. Real compiled
+ * arithmetic still correctly uses the wrapped int64_t `value` field; this
+ * exists purely for dump-fidelity, not as general bignum support. 48
+ * decimal digits covers over 128 bits, comfortably more than any literal
+ * actually written in this codebase. */
+static char *_bignum_digits_to_decimal(const char *digits_str, int base) {
+    unsigned char digits[48] = {0};
+    int ndigits = 1;
+    for (const char *p = digits_str; *p; p++) {
+        char c = *p;
+        if (c == '_') continue;
+        int dv;
+        if (c >= '0' && c <= '9') dv = c - '0';
+        else if (c >= 'a' && c <= 'z') dv = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z') dv = c - 'A' + 10;
+        else continue;
+        if (dv >= base) continue;
+        int carry = dv;
+        for (int i = 0; i < ndigits; i++) {
+            int prod = digits[i] * base + carry;
+            digits[i] = (unsigned char)(prod % 10);
+            carry = prod / 10;
+        }
+        while (carry > 0 && ndigits < 48) {
+            digits[ndigits++] = (unsigned char)(carry % 10);
+            carry /= 10;
+        }
+    }
+    char *out = malloc((size_t)ndigits + 1);
+    for (int i = 0; i < ndigits; i++)
+        out[i] = (char)('0' + digits[ndigits - 1 - i]);
+    out[ndigits] = '\0';
+    return out;
+}
+
+char *mojo_int_literal_decimal(char *raw) {
+    if (!raw || !raw[0]) return strdup("0");
+    const char *p = raw;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    else if (*p == '+') { p++; }
+    int base = 10;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
+    else if (p[0] == '0' && (p[1] == 'o' || p[1] == 'O')) { base = 8; p += 2; }
+    else if (p[0] == '0' && (p[1] == 'b' || p[1] == 'B')) { base = 2; p += 2; }
+    char *dec = _bignum_digits_to_decimal(p, base);
+    if (!neg) return dec;
+    char *out = malloc(strlen(dec) + 2);
+    out[0] = '-';
+    strcpy(out + 1, dec);
+    free(dec);
     return out;
 }
 

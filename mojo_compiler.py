@@ -113,6 +113,15 @@ class IntLiteral:
     value: int
     line: int = 0
     col: int = 0
+    # Original source token text (e.g. "0xFFFFFFFFFFFFFFFF"), kept ONLY so a
+    # compiled AST dump can print the exact decimal value Python's own
+    # arbitrary-precision int would show — `value` itself still correctly
+    # wraps to a 64-bit machine word for real compiled arithmetic (this
+    # runtime has no bignum type), so a literal whose true value exceeds
+    # int64_t range (e.g. the all-ones 64-bit mask 0xFFFFFFFFFFFFFFFF) prints
+    # as -1 via `value` alone — a real, otherwise-unfixable mismatch against
+    # Python's own dump. See mojo_int_literal_decimal in mojo_runtime.c.
+    raw: str = ''
 
 @dataclass
 class FloatLiteral:
@@ -1952,7 +1961,22 @@ class Parser:
                 if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
                     break
                 elements.append(self._parse_expr(0))
-            expr = TupleExpr(elements=elements, line=expr.line, col=expr.col)
+            # A separate variable, not reassigning `expr` — `expr` is first
+            # assigned from self._parse_expr(0) (an opaque/boxed Expr
+            # subtype, compiled as generic int64_t), then would be
+            # reassigned here to a real TupleExpr(...) constructor call.
+            # Joining those two assignment sites' types made the compiled
+            # local's declared C type `TupleExpr *` (the type-join rule
+            # "one pointer, one non-pointer -> use the pointer type" doesn't
+            # know the "non-pointer" int64_t side is itself an opaquely
+            # boxed pointer of some OTHER concrete type) — but `expr.line`/
+            # `expr.col` just below read the ORIGINAL boxed value through
+            # that wrong, TupleExpr-shaped field layout, misreading garbage
+            # off whatever real struct (e.g. IdentExpr) `expr` actually
+            # held. Found via `def f(a, b): return a, b` compiling to
+            # TupleExpr(..., line=<garbage pointer>, ...) once self-hosted.
+            tuple_expr = TupleExpr(elements=elements, line=expr.line, col=expr.col)
+            return ReturnStmt(value=tuple_expr, line=t.line, col=t.col)
         return ReturnStmt(value=expr, line=t.line, col=t.col)
 
     def _parse_raise(self):
@@ -2257,24 +2281,74 @@ class Parser:
         # so every guard below must be a separate nested `if`, never
         # `cond and raw[i]`-style — otherwise the index/slice still runs
         # even when the guard is false and crashes on an empty string.
+        # Deliberately avoid `x in "somestring"`/`x in (a, b)`-style checks
+        # for the two guards below (prefix-char scan, f/t detection) — this
+        # codegen's compiled path has a confirmed, still-open bug where
+        # implementing that specific shape of the `in` operator corrupts
+        # unrelated state elsewhere (see BACKLOG-CODEGEN.md / the
+        # bootstrap-verify-ast-dump-fixes memory note). Explicit `==`
+        # comparisons on single characters are a proven-safe, already-used
+        # pattern elsewhere in this same function (see the `first == last`
+        # comment below) and sidestep that bug entirely.
         prefix_len = 0
         while prefix_len < len(raw) and prefix_len < 2:
-            if raw[prefix_len] not in 'fFrRbBuUtT':
+            _c = raw[prefix_len]
+            _is_prefix_char = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                                or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                                or _c == 't' or _c == 'T')
+            if not _is_prefix_char:
                 break
             prefix_len += 1
         prefix, rest = raw[:prefix_len], raw[prefix_len:]
         has_quote_after_prefix = False
         if len(rest) >= 1:
-            if rest[0] in ('"', "'"):
+            _rc = rest[0]
+            if _rc == '"' or _rc == "'":
                 has_quote_after_prefix = True
         if not has_quote_after_prefix:
             prefix, rest = '', raw  # no real prefix (nothing quote-like follows it)
-        if 'f' in prefix.lower() or 't' in prefix.lower():
+        # Compare both cases directly instead of calling .lower() on a raw
+        # indexed char (prefix[0]/[1]) — that routes to a runtime helper
+        # (char.lower()) this compiler doesn't implement for a bare char,
+        # an undefined-symbol link error ("_char_lower"), not a silent bug.
+        _has_ft = False
+        if len(prefix) >= 1:
+            _p0 = prefix[0]
+            if _p0 == 'f' or _p0 == 'F' or _p0 == 't' or _p0 == 'T':
+                _has_ft = True
+        if len(prefix) >= 2:
+            _p1 = prefix[1]
+            if _p1 == 'f' or _p1 == 'F' or _p1 == 't' or _p1 == 'T':
+                _has_ft = True
+        if _has_ft:
             return raw
+        # Built via concatenation, not written as literal 3-quote runs (see
+        # replace_multiline_strings's identical "avoids bootstrap self-match"
+        # comment for the same reasoning) — py_tokenize's own docstring
+        # placeholder pass has no notion of enclosing-quote context: it
+        # matches the FIRST literal triple-quote run it sees in the source
+        # and non-greedily extends to the NEXT one found anywhere later, on
+        # the assumption both delimit one real multi-line string. Two short,
+        # unrelated same-shape literals a few lines apart (a single quote
+        # wrapping three double-quote characters, and the mirror case) used
+        # to sit right here as literal source text, and that used to be
+        # exactly the trigger: self-hosted-compiling THIS function's own
+        # body swallowed everything between them as one bogus docstring
+        # placeholder, corrupting the compiled function so it always
+        # returned false here regardless of the real input — breaking every
+        # real triple-quoted docstring's quote-stripping for every
+        # self-hosted-compiled program, not just ones with adjacent literals
+        # of this shape. Found via bootstrap_test_single_expr.mojo's own
+        # plain, isolated docstring picking up two stray extra quote
+        # characters once self-hosted. NOTE: keep this whole comment block
+        # free of the literal quote-triple shapes described above too — the
+        # same self-match hazard applies to comment text, not just code.
+        _dq3 = '"' * 3
+        _sq3 = "'" * 3
         if len(rest) >= 6:
-            if rest.startswith('"""') and rest.endswith('"""'):
+            if rest.startswith(_dq3) and rest.endswith(_dq3):
                 return rest[3:-3]
-            if rest.startswith("'''") and rest.endswith("'''"):
+            if rest.startswith(_sq3) and rest.endswith(_sq3):
                 return rest[3:-3]
         if len(rest) >= 2:
             # Compare characters directly (`first == last`) rather than
@@ -2294,7 +2368,7 @@ class Parser:
         t = self._peek()
         line, col = t.line, t.col
         if t.kind == "INT":
-            self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col)
+            self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
             self._advance(); return FloatLiteral(float(t.value), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):
