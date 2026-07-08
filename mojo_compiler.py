@@ -2414,7 +2414,11 @@ class Parser:
             return first
         if t.kind in ("NAME", "KW"):
             self._advance()
-            if t.value == "lambda" and t.kind == "NAME":
+            if t.value == "lambda" and t.kind == "NAME" and (
+                self._peek().kind == "COLON"
+                or self._peek().kind == "NAME"
+                or (self._peek().kind == "OP" and self._peek().value in ("*", "**"))
+            ):
                 return self._parse_lambda()
             return IdentExpr(t.value, line=line, col=col)
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
