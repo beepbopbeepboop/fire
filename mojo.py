@@ -408,16 +408,6 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         print(f"Error reading {input_file}: {e}", file=sys.stderr)
         return
 
-    # Execute bootstrap-validate.mojo as Python (it contains Python code) —
-    # but only when actually asked to RUN it. This fired unconditionally
-    # before, including for `--dump`/`--dump-full`, so `mojo --dump
-    # bootstrap-validate.mojo` never generated its .tok/.ast/.ci/.pyi at
-    # all in any bootstrap stage — it ran the validator instead (which,
-    # invoked mid-stage1 before stage2/stage3 exist, also fails outright).
-    if 'bootstrap-validate' in input_file and not dump and not dump_full:
-        result = subprocess.run([sys.executable] + sys.argv[1:])
-        sys.exit(result.returncode)
-
     # If JIT requested, compile and execute
     if jit:
         jit_compile_and_execute(input_file, src, opt_flag, debug_flag)

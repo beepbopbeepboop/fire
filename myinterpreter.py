@@ -2563,25 +2563,216 @@ class Interpreter:
         # final value without needing to model an intermediate Template type.
         is_tstring = value.startswith('t"') or value.startswith("t'")
         if is_fstring or is_tstring:
+            body = value[1:]  # strip the leading f/t prefix
+            # Detect a triple-quoted body without ever writing a literal
+            # triple-quote substring in this file's own source: mojo_compiler's
+            # replace_multiline_strings does a whole-source, nesting-unaware
+            # sweep for opening/closing """ or ''' runs, so a literal '"""'
+            # constant here would itself get mistaken for the start of a new
+            # multi-line string and swallow everything up to the next triple-
+            # quote sequence found anywhere later in this file.
+            triple_quote_len = 3
+            is_triple = (len(body) >= triple_quote_len
+                         and body[0] == body[1] == body[2]
+                         and (body[0] == chr(34) or body[0] == chr(39)))
+            if is_triple:
+                body = body[3:-3]
+            else:
+                body = body[1:-1]
             try:
-                eval_src = ('f' + value[1:]) if is_tstring else value
-                # Convert to Python f-string and evaluate
-                # Create a scope with current variables
-                local_vars = {}
-                # Add all variables from current scope
-                scope = self.scope
-                while scope:
-                    for name in scope.vars:
-                        if name not in local_vars:
-                            local_vars[name] = scope.vars[name]
-                    scope = scope.parent
-                # Evaluate the f-string
-                result = eval(eval_src, {"__builtins__": __builtins__}, local_vars)
-                return MojoString(result) if isinstance(result, str) else result
-            except Exception as e:
-                # If f-string evaluation fails, return the literal
+                result = self._format_fstring_body(body)
+            except Exception:
+                # A malformed/unsupported {expr} shouldn't crash the whole
+                # program — fall back to the raw literal, same graceful-
+                # degradation behavior this already had.
                 return MojoString(value)
+            return MojoString(result)
         return MojoString(value)
+
+    def _format_fstring_body(self, body: str) -> str:
+        # Parse an f-string body (prefix/quotes already stripped) into its
+        # final string: literal text interspersed with {expr} groups, each
+        # parsed and evaluated through this interpreters own tokenizer and
+        # parser/eval_expr, not Pythons eval() on the whole f-string, which
+        # bypasses this interpreters own operator/dispatch semantics
+        # entirely. Handles {{ / }} escapes and !conversion / :format_spec
+        # suffixes the same way CPythons own f-strings do.
+        out = []
+        i, n = 0, len(body)
+        while i < n:
+            c = body[i]
+            if c == '{':
+                if i + 1 < n and body[i + 1] == '{':
+                    out.append('{')
+                    i += 2
+                    continue
+                j = self._find_fstring_field_end(body, i + 1)
+                out.append(self._eval_fstring_field(body[i + 1:j]))
+                i = j + 1
+            elif c == '}':
+                if i + 1 < n and body[i + 1] == '}':
+                    out.append('}')
+                    i += 2
+                    continue
+                out.append('}')  # stray '}' — permissive, don't raise
+                i += 1
+            else:
+                out.append(c)
+                i += 1
+        return ''.join(out)
+
+    def _find_fstring_field_end(self, body: str, start: int) -> int:
+        # Index of the closing brace for an f-string {expr} field that
+        # began at start (just past the opening brace), tracking nested
+        # brackets/parens/braces and quoted strings so a dict-subscript or
+        # nested-brace expression does not close early on an inner quote
+        # or brace.
+        depth = 1
+        in_str = None
+        j = start
+        n = len(body)
+        while j < n:
+            cj = body[j]
+            if in_str:
+                if cj == '\\':
+                    j += 2
+                    continue
+                if cj == in_str:
+                    in_str = None
+            elif cj == '"' or cj == "'":
+                in_str = cj
+            elif cj == '(' or cj == '[' or cj == '{':
+                depth += 1
+            elif cj == ')' or cj == ']' or cj == '}':
+                depth -= 1
+                if depth == 0:
+                    return j
+            j += 1
+        return n  # unterminated — treat the rest of the body as the field
+
+    def _split_fstring_field(self, field: str):
+        # Split a field's inner text into (expr_text, conversion, spec),
+        # scanning for the top-level conversion/spec markers CPythons own
+        # f-string grammar recognizes: top-level meaning outside any nested
+        # bracket/quote, so a slice colon or dict-literal colon is not
+        # mistaken for the format-spec separator. Mojo/Python has no
+        # general prefix-bang operator (not is used instead), so any bare
+        # bang in real expression text is always either part of a not-
+        # equal comparison or the f-string conversion flag; checking that
+        # the char after r/s/a is the field end or a colon distinguishes
+        # them.
+        depth = 0
+        in_str = None
+        i, n = 0, len(field)
+        while i < n:
+            c = field[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == in_str:
+                    in_str = None
+            elif c == '"' or c == "'":
+                in_str = c
+            elif c == '(' or c == '[' or c == '{':
+                depth += 1
+            elif c == ')' or c == ']' or c == '}':
+                depth -= 1
+            elif depth == 0 and c == '!' and i + 1 < n and field[i + 1] in ('r', 's', 'a'):
+                nxt = i + 2
+                if nxt == n or field[nxt] == ':':
+                    conv = field[i + 1]
+                    spec = field[nxt + 1:] if nxt < n else None
+                    return field[:i].strip(), conv, spec
+            elif depth == 0 and c == ':':
+                return field[:i].strip(), None, field[i + 1:]
+            i += 1
+        return field.strip(), None, None
+
+    def _eval_fstring_field(self, field: str) -> str:
+        # Evaluate one expr / expr!conv / expr:spec / expr!conv:spec field
+        # (raw text between the outer braces, not including them). Uses
+        # only repr/str plus this interpreters own string ops for the
+        # conversion/spec step, not the ascii()/format() builtins: those
+        # have no compiled-path runtime backing (undefined _ascii/_format
+        # symbols at link time when this method itself gets self-hosted-
+        # compiled), so they would work only under the Python interpreter
+        # and silently fail once compiled.
+        expr_text, conv, spec = self._split_fstring_field(field)
+        value = self._eval_fstring_expr(expr_text)
+        if conv == 'r' or conv == 'a':
+            text = repr(value)
+        else:
+            text = str(value)
+        if spec:
+            text = self._apply_fstring_format_spec(text, spec)
+        return text
+
+    def _apply_fstring_format_spec(self, text: str, spec: str) -> str:
+        # Minimal fill/align/width subset of the format-spec mini-language
+        # (e.g. ">10", "<5", "^8", "05"), operating on the already-
+        # stringified value rather than dispatching by numeric type -
+        # covers the common alignment/padding use case without needing a
+        # full numeric formatter.
+        fill = ' '
+        align = None
+        i = 0
+        if len(spec) >= 2 and (spec[1] == '<' or spec[1] == '>' or spec[1] == '^'):
+            fill = spec[0]
+            align = spec[1]
+            i = 2
+        elif len(spec) >= 1 and (spec[0] == '<' or spec[0] == '>' or spec[0] == '^'):
+            align = spec[0]
+            i = 1
+        elif len(spec) >= 1 and spec[0] == '0':
+            fill = '0'
+            align = '>'
+            i = 1
+        width_digits = ''
+        while i < len(spec) and spec[i] >= '0' and spec[i] <= '9':
+            width_digits = width_digits + spec[i]
+            i += 1
+        if not width_digits:
+            return text
+        width = int(width_digits)
+        pad = width - len(text)
+        if pad <= 0:
+            return text
+        padding = ''
+        p = 0
+        while p < pad:
+            padding = padding + fill
+            p += 1
+        if align == '<':
+            return text + padding
+        if align == '^':
+            left = pad // 2
+            right = pad - left
+            left_pad = ''
+            j = 0
+            while j < left:
+                left_pad = left_pad + fill
+                j += 1
+            right_pad = ''
+            j = 0
+            while j < right:
+                right_pad = right_pad + fill
+                j += 1
+            return left_pad + text + right_pad
+        return padding + text
+
+    def _eval_fstring_expr(self, expr_text: str):
+        # Parse and evaluate a single expression string through this
+        # interpreters own tokenizer/parser/eval_expr, used for f-string
+        # and t-string field interpolation. Deliberately not Pythons
+        # eval(): that would evaluate Mojo-flavored expression syntax
+        # using CPythons own operators/semantics directly, bypassing this
+        # interpreters own dispatch (eval_BinaryOp, eval_CallExpr, etc.)
+        # entirely.
+        from mojo_compiler import py_tokenize, Parser
+        tokens = py_tokenize(expr_text)
+        node = Parser(tokens)._parse_expr(0)
+        return self.eval_expr(node)
 
     def eval_BoolLiteral(self, expr: N.BoolLiteral):
         """Evaluate boolean literal."""

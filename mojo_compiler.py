@@ -837,6 +837,7 @@ _KW_PREC = {
     'not': 4,
     'in': 5,
     'is': 5,
+    'as': 13,
 }
 
 def _synthesize_fieldwise_inits(stmts: list) -> list:
@@ -1824,13 +1825,18 @@ class Parser:
     def _parse_with(self):
         self._expect("KW", "with")
         items = []
-        expr = self._parse_expr(0)
+        # `as` in a with-item's own `expr as alias` clause is NOT the binary
+        # cast operator (_KW_PREC['as']) — parse at one above its precedence
+        # so the operator loop stops before swallowing the alias as a
+        # BinaryOp(op='as', ...) right-hand side.
+        with_expr_prec = _KW_PREC['as'] + 1
+        expr = self._parse_expr(with_expr_prec)
         alias = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
         items.append(WithItem(expr=expr, alias=alias))
         while self._peek().kind == "COMMA":
-            self._advance(); expr = self._parse_expr(0); alias = None
+            self._advance(); expr = self._parse_expr(with_expr_prec); alias = None
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
             items.append(WithItem(expr=expr, alias=alias))

@@ -53,6 +53,41 @@ current stdlib transpilation status, what fails, and remaining gaps.
   itself, never loops over the other ~40 test/core files the way
   `stage2`/`stage3` do.
 
+  **Update 2026-07-08**: closed two genuine "cheats" flagged during an
+  integrity review — places where the self-hosted system silently
+  delegated to real CPython instead of doing its own work. (1)
+  `myinterpreter.py`'s f-string/t-string `{expr}` interpolation used raw
+  Python `eval()` on the whole literal; replaced with a real scanner
+  (`{{`/`}}` escapes, `!conv`/`:spec` splitting with bracket/quote-depth
+  tracking) that parses each `{expr}` through the interpreter's own
+  `mojo_compiler.py` tokenizer/parser and evaluates it via `self.eval_expr`
+  — the same dispatch any other Mojo expression goes through. `ascii()`/
+  `format()` have no compiled-path runtime backing, so the conversion/
+  format-spec step uses `repr`/`str` (already real-builtin-backed) plus a
+  small hand-rolled fill/align/width formatter instead. (2) `mojo.py` had a
+  hardcoded special case that re-exec'd itself as plain Python whenever the
+  input file was named `bootstrap-validate.mojo`, instead of genuinely
+  interpreting it; removed, and confirmed the interpreter handles the file
+  for real (`os.path`, `glob`, binary file reads, `sys.exit`) with identical
+  output. Found and fixed two more bugs along the way, exposed only once
+  this new code was self-hosted-compiled: `_parse_with`'s `expr as alias`
+  parsing broke after `'as'` was given a real binary-operator precedence
+  (needed elsewhere for Mojo's `expr as Type` cast syntax) — fixed by
+  parsing the with-item expression one precedence level above `as`'s. And
+  `replace_multiline_strings`' whole-source `""".*?"""` sweep isn't
+  quote-nesting-aware: a literal `'"""'` string constant (three double-quote
+  characters inside single quotes) gets misread as opening a new multi-line
+  string and swallows everything up to the next unrelated triple-quote
+  sequence later in the file — worked around by detecting triple-quoted
+  bodies via character comparison instead of a literal `'"""'`/`"'''"`
+  substring; the sweep itself is still unfixed and could resurface for
+  other files containing that pattern. The remaining, larger shortcut
+  (`gimple_codegen.compile_to_gimple` unconditionally subprocess-shells out
+  to real Python rather than using the self-hosted compiler backend) was
+  deliberately left alone — out of scope for this pass. `make check`
+  (159/17/53/1) and a from-scratch `make bootstrap` (156/156, including
+  `validate-all`) both pass after these changes.
+
 ---
 
 ## Recent Work (2026-06)
