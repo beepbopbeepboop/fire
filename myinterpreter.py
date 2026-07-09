@@ -75,17 +75,17 @@ class Scope:
         self.parent = parent
         self.vars = {}
 
-    def define(self, name, value):
+    def define(self, name: str, value):
         self.vars[name] = value
 
-    def get(self, name):
+    def get(self, name: str):
         if name in self.vars:
             return self.vars[name]
         if self.parent:
             return self.parent.get(name)
         raise NameError(f"name '{name}' is not defined")
 
-    def set(self, name, value):
+    def set(self, name: str, value):
         if name in self.vars:
             self.vars[name] = value
         elif self.parent:
@@ -1387,6 +1387,34 @@ def _build_testing_shims(interpreter):
     return shims
 
 
+class _MojoSuper:
+    """Proxy returned by `super` inside a struct method. `super.__init__(tag)`
+    resolves to the parent struct's `__init__` method bound to `self`, so the
+    call passes `self` as the first argument automatically.
+
+    Uses `__getattribute__` (not `__getattr__`) because `__init__` is a special
+    method name — Python finds it as a class attribute (the constructor) before
+    consulting `__getattr__`, so `super.__init__` would return the bound
+    constructor instead of the parent struct's `__init__`."""
+    def __init__(self, base_class, self_instance, interpreter):
+        object.__setattr__(self, '_base_class', base_class)
+        object.__setattr__(self, '_self', self_instance)
+        object.__setattr__(self, '_interpreter', interpreter)
+
+    def __getattribute__(self, name):
+        base_cls = object.__getattribute__(self, '_base_class')
+        if name in base_cls.methods:
+            return BoundMethod(
+                base_cls.methods[name],
+                object.__getattribute__(self, '_self'),
+                object.__getattribute__(self, '_interpreter'))
+        if name in ('_base_class', '_self', '_interpreter'):
+            return object.__getattribute__(self, name)
+        if name in base_cls.comptime_aliases:
+            return base_cls.comptime_aliases[name]
+        raise AttributeError(f"super object has no attribute '{name}'")
+
+
 class _SysProxy:
     """Presents the executed program's own argv (`[filename] + program_args`)
     while forwarding everything else to the real `sys` module. Without this,
@@ -2008,6 +2036,7 @@ class Interpreter:
         merged_fields = []
         comptime_aliases = {}
         static_methods = set()
+        from_base = set()
         for base_name in base_names:
             try:
                 base_cls = self.scope.get(base_name)
@@ -2019,12 +2048,17 @@ class Interpreter:
                 methods.update(base_cls.methods)
                 comptime_aliases.update(base_cls.comptime_aliases)
                 static_methods.update(base_cls.static_methods)
+                from_base.update(base_cls.methods.keys())
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
             spec = self._classify_params(m)
-            self._register_function(methods, m.name, method_func, spec)
+            if m.name in from_base:
+                from_base.discard(m.name)
+                methods[m.name] = method_func
+            else:
+                self._register_function(methods, m.name, method_func, spec)
             if 'staticmethod' in (getattr(m, 'decorators', None) or []):
                 static_methods.add(m.name)
         # `comptime NAME: Type = value` struct members — evaluated once,
@@ -2573,10 +2607,26 @@ class Interpreter:
 
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
+        if expr.name == 'super':
+            return self._eval_super(expr)
         try:
             return self.scope.get(expr.name)
         except NameError:
             raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
+
+    def _eval_super(self, expr: N.IdentExpr):
+        """Split out of eval_IdentExpr: returning a `_MojoSuper` instance
+        from the same function as the plain `self.scope.get(expr.name)`
+        path corrupted the self-hosted compiler's type inference for
+        `Scope.get` elsewhere (two incompatible return types out of one
+        function). Keeping the `_MojoSuper`-returning branch in its own
+        function avoids that."""
+        self_val = self.scope.get('self')
+        if isinstance(self_val, MojoInstance):
+            cls = self_val._mojo_class
+            if cls.bases:
+                return _MojoSuper(cls.bases[0], self_val, self)
+        raise NameError(f"{self._loc(expr)}'super' used outside of struct method with a base class")
 
     def eval_IntLiteral(self, expr: N.IntLiteral):
         """Evaluate integer literal."""
