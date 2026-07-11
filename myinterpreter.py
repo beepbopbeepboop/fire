@@ -2277,7 +2277,7 @@ class Interpreter:
 
     def execute_ReturnStmt(self, node: N.ReturnStmt):
         """Execute return statement."""
-        value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value else None
+        value = self.eval_expr(node.value) if hasattr(node, 'value') and node.value is not None else None
         raise ReturnValue(value)
 
     def execute_IfStmt(self, node: N.IfStmt):
@@ -2943,13 +2943,30 @@ class Interpreter:
         if op == 'or':
             left = self.eval_expr(expr.left)
             return left if left else self.eval_expr(expr.right)
+        # `x as T` — Mojo-style cast. This interpreter is dynamically typed,
+        # so there's no runtime conversion to perform: evaluate both sides
+        # (the type name must still resolve, same as real Mojo's
+        # type-checking would require) and hand back the original value.
+        if op == 'as':
+            left = self.eval_expr(expr.left)
+            self.eval_expr(expr.right)
+            return left
 
         left = self.eval_expr(expr.left)
         right = self.eval_expr(expr.right)
 
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
-        if op == '+': return self._wrap_int(left + right)
+        if op == '+':
+            # str.__add__ already concatenates fine on its own, but returns
+            # a plain `str`, losing MojoString's extra methods (see its
+            # docstring) — reclaim that only for the pure-string case; any
+            # other combination (e.g. a bare `str` + `Int`) still raises
+            # the same TypeError it always did, matching real Mojo requiring
+            # an explicit conversion instead of silently stringifying it.
+            if isinstance(left, str) and isinstance(right, str):
+                return MojoString(left + right)
+            return self._wrap_int(left + right)
         elif op == '-': return self._wrap_int(left - right)
         elif op == '*': return self._wrap_int(left * right)
         elif op == '/': return left / right

@@ -21,6 +21,7 @@ import subprocess
 import shutil
 import sysconfig
 import platform
+import threading
 
 # Set PATH to ensure tools like python3-config and gcc-15 can be found
 os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/X11/bin:/Library/Apple/usr/bin'
@@ -79,29 +80,68 @@ def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
 
 
 def interpret_and_execute(src_code, filename=None, argv=None):
-    try:
-        from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
-        from myinterpreter import Interpreter
-        tokens = py_tokenize(src_code)
-        stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
-        interpreter = Interpreter(filename=filename, argv=argv)
-        for stmt in stmts:
-            interpreter.execute(stmt)
+    """Runs the interpretation in a worker thread with a large native stack.
 
-        # Real Mojo programs don't call main() themselves — `def main():` is
-        # the entry point and gets invoked automatically (like C's main), the
-        # same way the compiled path (gimple_codegen) wires it up. Scripts
-        # written in the Python-style dialect (explicit `main()` call at file
-        # scope, or guarded by `if __name__ == '__main__':`) already ran it
-        # above, so only auto-invoke when nothing already called it.
-        has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
-        already_called = _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr)
-        if has_main_def and not already_called:
-            interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc(file=sys.stderr)
+    Deep *Mojo-level* recursion (e.g. a recursive-descent parser written in
+    Mojo, interpreted here) fans out into many nested Python frames per Mojo
+    call (eval_expr -> eval_CallExpr -> invoke -> _invoke -> execute -> ...),
+    so it exhausts the OS thread's real C stack well before any Python-level
+    counter does. Since CPython 3.12 that hard C-stack limit is enforced
+    independently of `sys.setrecursionlimit` (raising `RecursionError: Stack
+    overflow (used ... kB)` right at the OS stack's real ceiling) — so
+    raising the recursion limit alone, tried previously, did nothing; the
+    thread's actual stack has to be made bigger.
+    """
+    exit_code = []
+
+    def _run():
+        try:
+            from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
+            from myinterpreter import Interpreter
+            tokens = py_tokenize(src_code)
+            stmts = Parser(tokens).with_filename(filename or "<stdin>").parse_module()
+            interpreter = Interpreter(filename=filename, argv=argv)
+            for stmt in stmts:
+                interpreter.execute(stmt)
+
+            # Real Mojo programs don't call main() themselves — `def main():` is
+            # the entry point and gets invoked automatically (like C's main), the
+            # same way the compiled path (gimple_codegen) wires it up. Scripts
+            # written in the Python-style dialect (explicit `main()` call at file
+            # scope, or guarded by `if __name__ == '__main__':`) already ran it
+            # above, so only auto-invoke when nothing already called it.
+            has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
+            already_called = _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr)
+            if has_main_def and not already_called:
+                interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
+        except SystemExit as e:
+            # A worker thread swallows SystemExit silently instead of ending
+            # the process — a Mojo script's exit() builtin (mapped to
+            # sys.exit(), see myinterpreter.py's `exit=sys.exit`) needs its
+            # code carried back out to the main thread to actually exit.
+            # Goes through str(e) rather than e.code: this file is itself
+            # one of the self-hosted-compiled sources, and that compiler
+            # has no field table for builtin exception attributes (only
+            # for user-defined struct fields) — e.code fails to compile
+            # ("request for member 'code' in something not a structure or
+            # union"), while str(e)/.lstrip()/.isdigit() are ordinary
+            # string operations it already handles elsewhere in this file.
+            text = str(e)
+            exit_code.append(int(text) if text.lstrip('-').isdigit() else 0)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old_limit, 1_000_000))
+    threading.stack_size(1024 * 1024 * 1024)
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join()
+    sys.setrecursionlimit(old_limit)
+    if exit_code:
+        sys.exit(exit_code[0])
 
 def run_jit_repl(opt_flag=None, debug_flag=None):
     """Interactive REPL for Mojo code using JIT compilation."""
