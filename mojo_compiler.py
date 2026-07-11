@@ -874,7 +874,19 @@ def _synthesize_fieldwise_inits(stmts: list) -> list:
         if not field_decls:
             continue
         existing = {m.name for m in s.methods}
-        if '__init__' not in existing:
+        # A struct can hand-write its own __init__ (e.g. a no-arg one for
+        # Defaultable conformance) alongside @fieldwise_init's synthesized
+        # memberwise one — real Mojo overloads on arity, it doesn't let the
+        # hand-written one suppress the synthesized one. Comparing by name
+        # alone (as opposed to (name, arity)) treated any hand-written
+        # __init__ as "already have one" and dropped the fieldwise overload
+        # entirely, so `Person("John Smith", 42)` had no matching __init__
+        # to call even though the struct is @fieldwise_init.
+        target_arity = 1 + len(field_decls)  # self + one param per field
+        has_matching_init = any(
+            m.name == '__init__' and len(m.params) == target_arity
+            for m in s.methods)
+        if not has_matching_init:
             params = [('self', s.name)] + [(f.name, f.type_ann) for f in field_decls]
             body = [AssignStmt(target=MemberExpr(obj=IdentExpr(name='self'), member=f.name),
                                 value=IdentExpr(name=f.name))
@@ -2404,6 +2416,19 @@ class Parser:
         if t.kind == "KW" and t.value in ("True","False"):
             self._advance()
             return BoolLiteral(t.value == "True", line=line, col=col)
+        if t.kind == "STRING" and t.value.startswith("`"):
+            # Backtick-quoted identifier reference (e.g. `` `3` `` naming a
+            # comptime var whose spelling isn't a valid bare NAME token, or
+            # `` `6bit` ``-style names — see _parse_comptime/_parse_param's
+            # matching special-cases, which store the name INCLUDING its
+            # backticks). Without this, a reference (as opposed to a
+            # declaration site) fell through to the generic STRING branch
+            # below and became a StringLiteral whose value was the literal
+            # text "`3`", backticks and all — so e.g. `"mojo" * \`3\`` tried
+            # to multiply a str by a str instead of by the int the comptime
+            # var held.
+            self._advance()
+            return IdentExpr(t.value, line=line, col=col)
         if t.kind == "STRING":
             val = self._strip_string_prefix_and_quotes(self._advance().value)
             # Handle implicit string concatenation (adjacent strings)
