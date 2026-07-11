@@ -169,17 +169,10 @@ def _collect_stmts(entry_path, visited=None):
 
 def _compile_transitive_gimple(entry_path):
     """Compile entry_path and its full import closure to a single GIMPLE C string."""
-    from gimple_codegen import GimpleGen
-
-    ordered = _collect_stmts(entry_path)
-
-    # Merge all statements into one GimpleGen pass so the C preamble
-    # appears exactly once and all functions share one type-inference context.
-    all_stmts = []
-    for _path, stmts in ordered:
-        all_stmts.extend(stmts)
-
-    return GimpleGen().gen_module(all_stmts)
+    from gimple_codegen import compile_to_gimple_cached
+    with open(entry_path) as f:
+        src = f.read()
+    return compile_to_gimple_cached(src, do_imports=True, filename=entry_path)
 
 
 def _compile_transitive_interpreter(entry_path):

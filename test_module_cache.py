@@ -97,15 +97,18 @@ def test_stage2_3_dylib_and_cas(wd):
         cas.reset_stats()
         bsd.build([libpath], dylib, link_runtime=True)                      # warm
         warm = dict(cas.stats)
-        check("stage3: cold build is a miss", cold['misses'] == 1 and cold['hits'] == 0,
+        # Two cached stages per build: the module object AND the final dylib
+        # link (dylib-link/<hash>), so a cold build is exactly 2 misses and a
+        # warm one exactly 2 hits (no codegen, no link).
+        check("stage3: cold build is a miss", cold['misses'] == 2 and cold['hits'] == 0,
               str(cold))
-        check("stage3: warm build is a hit (no codegen)", warm['hits'] == 1 and warm['misses'] == 0,
+        check("stage3: warm build is a hit (no codegen)", warm['hits'] == 2 and warm['misses'] == 0,
               str(warm))
-        # edit source → must miss again
+        # edit source → must miss again (new object content ⇒ new link key too)
         cas.reset_stats()
         open(libpath, 'w').write(libsrc + "\nfn s2_extra() -> Int64:\n    return 0\n")
         bsd.build([libpath], dylib, link_runtime=True)
-        check("stage3: source edit invalidates (miss)", cas.stats['misses'] == 1, str(cas.stats))
+        check("stage3: source edit invalidates (miss)", cas.stats['misses'] == 2, str(cas.stats))
         # link a client against the dylib and run
         client = ("from s2lib import s2_add, s2_mul\n"
                   "fn main():\n"

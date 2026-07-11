@@ -259,7 +259,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
         # do_imports=True: inline transitive closure for a standalone binary
-        c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
+        c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -474,7 +474,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         basename = os.path.splitext(os.path.basename(input_file))[0]
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -526,7 +526,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                 any_failed = True
 
             # Generate C intermediate (with transitive imports)
-            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 

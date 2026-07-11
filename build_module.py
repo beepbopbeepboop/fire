@@ -8,7 +8,7 @@ import json
 import argparse
 from pathlib import Path
 
-from gimple_codegen import compile_to_gimple, GimpleGen
+from gimple_codegen import compile_to_gimple_cached, compile_to_gimple, GimpleGen
 from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
 from build_config import find_gcc
 
@@ -77,7 +77,7 @@ def build_module(input_file, output_so, output_symbols=None):
     symbols = extract_symbols(stmts)
 
     # Compile to GIMPLE
-    c_code = compile_to_gimple(source, do_imports=False)
+    c_code = compile_to_gimple_cached(source, do_imports=False)
 
     # Write temporary C file
     temp_c = output_so.replace('.so', '.c')

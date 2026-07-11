@@ -6072,8 +6072,12 @@ class GimpleGen:
                         self._emit(f'  {t} = mojo_re_sub_str ({pat_val}, {repl_val}, {src_val});')
                     return 'char *', t
 
-            if module_name == 'gimple_codegen' and method_name == 'compile_to_gimple':
+            if module_name == 'gimple_codegen' and method_name in (
+                    'compile_to_gimple', 'compile_to_gimple_cached'):
                 # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
+                # compile_to_gimple_cached lowers to the SAME shim: caching is a
+                # Python-process concern; the self-hosted binary's subprocess
+                # fallback just compiles (same output, uncached).
                 if len(node.args) >= 1:
                     src_type, src_val = self.lower_expr(node.args[0])
                     # Cast to char* if needed (legacy int-cast strings)
@@ -15697,6 +15701,97 @@ def compile_to_c(mojo_src: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+_compile_cache: dict = {}  # key -> str  (in-process L1 for compile_to_gimple_cached)
+
+_IMPORT_LINE_RE = re.compile(r'^\s*(?:from|import)\s+([.\w]+)', re.MULTILINE)
+
+
+def _dep_sources_digest(mojo_src: str, filename: str) -> str:
+    """Digest of every non-stdlib source this compile can read: the transitive
+    import closure of sibling modules resolved next to the entry file — both
+    .mojo and .py (mojo.py's own bootstrap dumps inline .py siblings like
+    myinterpreter.py). Mirrors how codegen finds them (imports.resolve_source,
+    then _resolve_test_relative_module's walk up the entry file's ancestors).
+    Stdlib sources are skipped: cas.stdlib_fingerprint() already covers every
+    stdlib file, and re-hashing the reachable stdlib per compile would turn a
+    cheap scan into a closure walk. Best-effort by design: an import the scan
+    can't resolve contributes nothing (codegen skips it too), and hashing a
+    file codegen never opens only over-invalidates, never goes stale."""
+    import cas
+    import imports as _imp
+    try:
+        from module_loader import STDLIB_PATH
+        stdlib_root = os.path.abspath(STDLIB_PATH) + os.sep if STDLIB_PATH else None
+    except Exception:
+        stdlib_root = None
+    seen = {}
+
+    def _resolve(mod: str, fdir: str):
+        try:
+            path = _imp.resolve_source(mod)
+        except Exception:
+            path = None
+        if path:
+            return path
+        rel = os.path.join(*mod.strip('.').split('.')) if mod.strip('.') else ''
+        d = fdir
+        while rel and d:
+            for ext in ('.mojo', '.py'):
+                cand = os.path.join(d, rel + ext)
+                if os.path.exists(cand):
+                    return cand
+            parent = os.path.dirname(d)
+            if parent == d:
+                break
+            d = parent
+        return None
+
+    def _scan(src: str, fdir: str):
+        for mod in _IMPORT_LINE_RE.findall(src):
+            path = _resolve(mod, fdir)
+            if not path:
+                continue
+            path = os.path.abspath(path)
+            if path in seen or (stdlib_root and path.startswith(stdlib_root)):
+                continue
+            try:
+                with open(path) as f:
+                    text = f.read()
+            except OSError:
+                continue
+            seen[path] = text
+            _scan(text, os.path.dirname(path))
+
+    _scan(mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else '')
+    if not seen:
+        return ''
+    return cas._hash(*(f'{p}\0{seen[p]}' for p in sorted(seen)))
+
+
+def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
+    """Like compile_to_gimple but CAS-cached (plus an in-process L1).
+
+    The full tokenize -> parse -> AST-rewrite -> gen_module pipeline is
+    content-addressed: the key covers everything it reads — the entry source,
+    mode, filename, the compiler + stdlib fingerprints, and the sibling-import
+    closure digest — so every caller (--dump, build_executable, build_mojo_cli,
+    build_module, Makefile dump loops) shares one cache line per unique input
+    set, and editing any transitively imported file invalidates it with no
+    manual versioning.
+
+    NOTE: the self-hosted compiler lowers calls to this function to the same
+    C shim as compile_to_gimple (see the gimple_codegen method special-case in
+    lower_method_call) — the compiled binary compiles uncached, which is
+    correct, just slower."""
+    import cas
+    key = cas.compile_key(mojo_src, do_imports, filename,
+                          deps_digest=_dep_sources_digest(mojo_src, filename))
+    return cas.get_or_build_text(
+        key, '.ci',
+        lambda: compile_to_gimple(mojo_src, do_imports, filename),
+        _compile_cache)
+
 
 def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
     """Parse Mojo source and return a C string with __GIMPLE annotations.

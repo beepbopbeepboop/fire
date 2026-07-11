@@ -179,6 +179,132 @@ def comptime_key(fn_src: str, fn_name: str, gcc: str, flags: tuple = ()) -> str:
                                     {'fn': fn_name}, None, gcc, flags)
 
 
+def file_digest(path: str) -> str:
+    """Content hash of a file (a linked artifact, an object on a link line, …)."""
+    with open(path, 'rb') as f:
+        return _hash(f.read())
+
+
+_stdlib_fp_cache = None
+
+
+def stdlib_fingerprint() -> str:
+    """Hash of every stdlib .mojo source — 'which stdlib was this compiled
+    against'. Codegen resolves imports against the stdlib even when it isn't
+    inlining them (extern signatures via load_module, generic definitions via
+    _parsed_import, struct layouts), so any stdlib edit must invalidate cached
+    codegen output. Deliberately coarse — one edit anywhere invalidates every
+    key that folds this in — because over-invalidation only costs a recompile
+    while under-invalidation serves wrong artifacts. Computed once per process."""
+    global _stdlib_fp_cache
+    if _stdlib_fp_cache is None:
+        h = hashlib.blake2b(digest_size=20)
+        try:
+            from module_loader import STDLIB_PATH
+            root = STDLIB_PATH if STDLIB_PATH and os.path.isdir(STDLIB_PATH) else None
+        except Exception:
+            root = None
+        if root:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                for fname in sorted(filenames):
+                    if fname.endswith('.mojo'):
+                        p = os.path.join(dirpath, fname)
+                        try:
+                            with open(p, 'rb') as f:
+                                h.update(os.path.relpath(p, root).encode())
+                                h.update(f.read())
+                        except OSError:
+                            h.update(b'\0unreadable:' + p.encode())
+        _stdlib_fp_cache = h.hexdigest()
+    return _stdlib_fp_cache
+
+
+def runtime_fingerprint() -> str:
+    """Hash of just the runtime sources (mojo_runtime.h/.c). For artifacts whose
+    only compiler-side input is the runtime — e.g. a gcc syntax check of already-
+    generated C, which #includes the header via -I — this is the right, narrow
+    fingerprint: folding in compiler_fingerprint() instead would needlessly
+    invalidate them on every codegen .py edit."""
+    parts = []
+    for name in _RUNTIME_SOURCES:
+        try:
+            with open(os.path.join(HERE, name), 'rb') as f:
+                parts += [name, f.read()]
+        except FileNotFoundError:
+            parts += [name, b'\0missing']
+    return _hash('mojo-runtime-fp-v1', *parts)
+
+
+# ── Compile-to-GIMPLE keys ─────────────────────────────────────────────
+
+def compile_key(source: str, do_imports: bool, filename: str = "",
+                deps_digest: str = "") -> str:
+    """Key (`compile/<hash>`) for caching compile_to_gimple output (.ci).
+
+    Folds in the entry source, do_imports mode, filename, ABI_VERSION, the
+    compiler fingerprint, and the stdlib fingerprint (imports are resolved
+    against stdlib sources even when not inlined). `deps_digest` must cover
+    every non-stdlib source the compile can read — the sibling-import closure
+    (see gimple_codegen._dep_sources_digest) — so editing an imported file
+    invalidates the cached .ci."""
+    return 'compile/' + _hash(
+        'mojo-compile-v1', ABI_VERSION, compiler_fingerprint(),
+        stdlib_fingerprint(), source, 't' if do_imports else 'f',
+        filename, deps_digest,
+    )
+
+
+def stdlib_compile_key(source: str, path: str, module_name: str) -> str:
+    """Key (`stdlib-compile/<hash>`) for caching compile_module_to_c output (.ci).
+
+    Covers the module source, its file path, its module name, the compiler
+    fingerprint, and the stdlib fingerprint — a stdlib module's generated C
+    depends on its imports' signatures/layouts, and those imports are
+    themselves stdlib modules, so the whole-stdlib fingerprint covers the
+    closure without tracing it."""
+    return 'stdlib-compile/' + _hash(
+        'mojo-stdlib-compile-v1', ABI_VERSION, compiler_fingerprint(),
+        stdlib_fingerprint(), source, path, module_name,
+    )
+
+
+def gcc_syntax_key(gcc_variant: str, flags: tuple, c_source: str) -> str:
+    """Key (`gcc-syntax/<hash>`) for caching gcc -fsyntax-only results.
+
+    Folds in the toolchain fingerprint (gcc version, platform, flags), the
+    runtime fingerprint (the C #includes mojo_runtime.h via -I), and the C
+    source — so a gcc upgrade or a runtime-header edit invalidates stale
+    syntax-check results."""
+    return 'gcc-syntax/' + _hash(
+        'mojo-gcc-syntax-v1',
+        toolchain_fingerprint(gcc_variant, flags),
+        runtime_fingerprint(),
+        c_source,
+    )
+
+
+def dylib_link_key(obj_paths: list, reflect_src: str,
+                   gcc: str, undefined: bool,
+                   extra_digest: str = '') -> str:
+    """Key (`dylib-link/<hash>`) for caching the final stdlib dylib link (.dylib).
+
+    Folds in the content digest of every .o on the link line, the reflection
+    table source, the toolchain, and the link-mode flag — so changing ANY
+    object or the link configuration invalidates the cached dylib.
+    `extra_digest` folds in content that is not in obj_paths (e.g. a
+    separately-linked runtime dylib)."""
+    obj_digests = '\0'.join(
+        f'{os.path.basename(p)}={file_digest(p)}'
+        for p in sorted(obj_paths)
+    )
+    return 'dylib-link/' + _hash(
+        'mojo-dylib-link-v1', ABI_VERSION, compiler_fingerprint(),
+        toolchain_fingerprint(gcc, ()), obj_digests, reflect_src,
+        'undef' if undefined else 'defined', extra_digest,
+    )
+
+
 def path_for(key: str, ext: str = '.o') -> str:
     return os.path.join(CAS_DIR, key + ext)
 
@@ -213,3 +339,24 @@ def get_or_build(key: str, ext: str, build_fn) -> tuple:
     stats['misses'] += 1
     data = build_fn()
     return publish(key, ext, data), False
+
+
+def get_or_build_text(key: str, ext: str, build_fn, l1: dict = None) -> str:
+    """Text-artifact variant of get_or_build: returns the artifact *content*
+    (str). On a miss, `build_fn()` must return the text; it is published
+    atomically. `l1` is an optional caller-owned in-process dict consulted
+    before the CAS, so repeated same-key calls in one process skip file I/O."""
+    if l1 is not None and key in l1:
+        return l1[key]
+    p = lookup(key, ext)
+    if p is not None:
+        stats['hits'] += 1
+        with open(p) as f:
+            text = f.read()
+    else:
+        stats['misses'] += 1
+        text = build_fn()
+        publish(key, ext, text.encode('utf-8'))
+    if l1 is not None:
+        l1[key] = text
+    return text

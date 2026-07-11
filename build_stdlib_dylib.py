@@ -15,6 +15,7 @@ Usage (manual):
 """
 import os
 import sys
+import shutil
 import platform
 import argparse
 import tempfile
@@ -107,6 +108,21 @@ def compile_module_to_c(src: str, path: str, module_name: str) -> str:
     return box['c']
 
 
+_stdlib_compile_cache: dict = {}  # in-process L1 for compile_module_to_c_cached
+
+
+def compile_module_to_c_cached(src: str, path: str, module_name: str) -> str:
+    """Like compile_module_to_c but CAS-cached under stdlib-compile/<hash>.
+
+    The key folds in the compiler fingerprint (a codegen change invalidates
+    every cached .ci) and the stdlib fingerprint (a module's C depends on its
+    stdlib imports' signatures/layouts, so any stdlib edit invalidates too)."""
+    key = cas.stdlib_compile_key(src, path, module_name)
+    return cas.get_or_build_text(
+        key, '.ci', lambda: compile_module_to_c(src, path, module_name),
+        _stdlib_compile_cache)
+
+
 def _imported_sigs(src: str) -> list:
     """The signatures this module is compiled against — part of its CAS key, so a
     dependency's signature change invalidates this module's cached object."""
@@ -160,7 +176,6 @@ def _localize_symbols(obj: str, syms: set, workdir: str, name: str) -> str:
     edited = os.path.join(workdir, name + '.local.o')
     with open(obj, 'rb') as fi, open(edited, 'wb') as fo:
         fo.write(fi.read())
-    import shutil
     objcopy = shutil.which('objcopy') or shutil.which('gobjcopy')
     if objcopy:
         cmd = [objcopy]
@@ -347,11 +362,31 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     if extra_exports:
         all_exports.extend(extra_exports)
 
+    # Reflection table source — deterministic given all_exports, so it can
+    # participate in the dylib link key before writing the file.
+    reflect_src = reflect.emit_table_c(all_exports)
+
+    # Compute dylib link key and check CAS.  The key folds in every .o on the
+    # link line (module objects + runtime .o or runtime dylib digest), the
+    # reflect table source, the toolchain, and the link mode — so changing any
+    # object or configuration invalidates the cached dylib.
+    extra_link_digest = cas.file_digest(rt_dylib) if link_runtime else ''
+    link_key = cas.dylib_link_key(
+        objs, reflect_src, gcc, undefined=not link_runtime,
+        extra_digest=extra_link_digest)
+    if use_cache:
+        cached_dylib = cas.lookup(link_key, '.dylib')
+        if cached_dylib:
+            cas.stats['hits'] += 1
+            shutil.copy(cached_dylib, out)
+            return out
+        cas.stats['misses'] += 1
+
     # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
     reflect_c = os.path.join(workdir, '_mojo_reflect.c')
     reflect_o = os.path.join(workdir, '_mojo_reflect.o')
     with open(reflect_c, 'w') as f:
-        f.write(reflect.emit_table_c(all_exports))
+        f.write(reflect_src)
     # -fno-builtin: the table forward-declares every exported symbol as
     # `extern void sym();` purely to take its address. Some exported names
     # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
@@ -368,6 +403,10 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # For production: cross-module references resolve at load time
         link = _dylink(gcc, out, objs, undefined=True)
     subprocess.run(link, check=True)
+    # Publish the linked dylib to the shared CAS so future builds skip the link
+    # (even on use_cache=False runs: the fresh link is the correct artifact).
+    with open(out, 'rb') as f:
+        cas.publish(link_key, '.dylib', f.read())
     return out
 
 

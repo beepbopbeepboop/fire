@@ -31,12 +31,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 
 
-def _file_sha(path):
-    """Content hash of a linked artifact (dylib or object)."""
-    with open(path, 'rb') as f:
-        return cas._hash(f.read())
-
-
 def _prog_key(c_code, link_files, gcc, flags):
     # Everything that shapes the linked binary is in the key: the client C
     # (which already encodes imported signatures), the toolchain, and the
@@ -48,7 +42,7 @@ def _prog_key(c_code, link_files, gcc, flags):
     return 'prog/' + cas._hash(
         'mojo-prog-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
         cas.toolchain_fingerprint(gcc, flags), c_code,
-        '\0'.join(f'{os.path.basename(p)}={_file_sha(p)}'
+        '\0'.join(f'{os.path.basename(p)}={cas.file_digest(p)}'
                   for p in sorted(link_files)))
 
 
