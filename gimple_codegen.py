@@ -2318,6 +2318,7 @@ class GimpleGen:
         self._regex_patterns: dict[str, str] = {}    # `X = re.compile("...")` var name → pattern source
         self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result
         self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
+        self._find_generic_visited: set = set()      # (module, name, kind) already visited by _find_generic_source (breaks import cycles)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
@@ -3092,6 +3093,7 @@ class GimpleGen:
         'mojo_reversed':         ('void *',     ['void *']),
         # POSIX / C stdlib functions with non-int64_t returns (util stubs table)
         'isdir':                 ('int',         ['char *']),
+        'int_isdir':             ('int',         ['int64_t', 'int64_t']),  # os.path.isdir(path)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),
@@ -4943,6 +4945,12 @@ class GimpleGen:
                 self._emit(f"  {t} = 0;  /* os.path module marker */")
                 return 'int', t
 
+            # os.sep / os.pathsep — this platform is always POSIX ('/').
+            if module_name == 'os' and node.member in ('sep', 'pathsep'):
+                sep = '/' if node.member == 'sep' else ':'
+                t = self._new_val('char *', self._intern_string(sep))
+                return 'char *', t
+
             # Class attribute access: ClassName.ATTR
             # Check if module_name is a known struct/class (not an instance variable)
             if module_name in self.struct_field_types and module_name not in self.var_types:
@@ -5958,6 +5966,10 @@ class GimpleGen:
                 elif outer_member == 'exists' and len(node.args) == 1:
                     arg_type, arg_val = self.lower_expr(node.args[0])
                     t = self._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
+                    return 'int', t
+                elif outer_member == 'isdir' and len(node.args) == 1:
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    t = self._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                     return 'int', t
 
         # Handle module method calls: module_name.function(args)
@@ -9394,7 +9406,9 @@ class GimpleGen:
             r = self._eval_const_int(node.right)
             if l is None or r is None: return None
             ops = {'+': l+r, '-': l-r, '*': l*r, '//': l//r if r else None,
-                   '%': l%r if r else None, '**': l**r}
+                   '%': l%r if r else None, '**': l**r,
+                   '==': int(l == r), '!=': int(l != r), '<': int(l < r),
+                   '<=': int(l <= r), '>': int(l > r), '>=': int(l >= r)}
             return ops.get(node.op)
         # comptime call to an imported function with constant args (slice 3):
         # run it at compile time as cached machine code via comptime.evaluate.
@@ -9413,24 +9427,52 @@ class GimpleGen:
                         _debug_note('comptime evaluation failed', node.func.name)
         return None
 
+    def _eval_const(self, node):
+        """Evaluate an expression as any compile-time constant (int, bool,
+        str, or a `comptime NAME: T = value` alias previously recorded by
+        _gen_stmt_ComptimeVarStmt into self._comptime_vals) — or None if it
+        isn't foldable. A superset of _eval_const_int/_eval_const_bool used
+        where the comptime value's own type (not just int/bool) matters,
+        e.g. a comptime `if` testing a comptime string alias."""
+        if isinstance(node, BoolLiteral): return node.value
+        if isinstance(node, IntLiteral):  return node.value
+        if isinstance(node, StringLiteral): return node.value
+        if isinstance(node, IdentExpr):
+            return getattr(self, '_comptime_vals', {}).get(node.name)
+        if isinstance(node, UnaryOp) and node.op == '-':
+            v = self._eval_const(node.operand)
+            return -v if isinstance(v, (int, bool)) else None
+        if isinstance(node, UnaryOp) and node.op == 'not':
+            v = self._eval_const(node.operand)
+            return not v if isinstance(v, (bool, int)) else None
+        if isinstance(node, BinaryOp):
+            l = self._eval_const(node.left)
+            r = self._eval_const(node.right)
+            if l is None or r is None: return None
+            op = node.op
+            if op == '+':   return l + r
+            if op == '-':   return l - r
+            if op == '*':   return l * r
+            if op == '/':   return l // r
+            if op == '==':  return l == r
+            if op == '!=':  return l != r
+            if op == '<':   return l < r
+            if op == '<=':  return l <= r
+            if op == '>':   return l > r
+            if op == '>=':  return l >= r
+            if op == 'and': return l and r
+            if op == 'or':  return l or r
+        return None
+
     def _eval_const_bool(self, node) -> bool | None:
         """Evaluate an expression as a compile-time bool, or return None."""
-        if isinstance(node, BoolLiteral): return node.value
-        if isinstance(node, IntLiteral):  return bool(node.value)
-        if isinstance(node, UnaryOp) and node.op == 'not':
-            v = self._eval_const_bool(node.operand)
-            return not v if v is not None else None
-        if isinstance(node, BinaryOp):
-            if node.op in ('and', 'or'):
-                l = self._eval_const_bool(node.left)
-                r = self._eval_const_bool(node.right)
-                if l is None or r is None: return None
-                return (l and r) if node.op == 'and' else (l or r)
-            l = self._eval_const_int(node.left)
-            r = self._eval_const_int(node.right)
-            if l is None or r is None: return None
-            ops = {'==': l==r, '!=': l!=r, '<': l<r, '<=': l<=r, '>': l>r, '>=': l>=r}
-            return ops.get(node.op)
+        v = self._eval_const(node)
+        if isinstance(v, (bool, int)):
+            return bool(v)
+        # Fallback: _eval_const_int handles CallExpr (comptime function calls),
+        # which _eval_const above does not.
+        result = self._eval_const_int(node)
+        return bool(result) if isinstance(result, (bool, int)) else None
         return None
 
     # ── Statement generation ───────────────────────────────────────────────
@@ -10952,7 +10994,15 @@ class GimpleGen:
         self._emit_label(bb_merge)
 
     def _gen_stmt_ComptimeVarStmt(self, node):
-        # Comptime variables are compile-time only and don't generate runtime code
+        # Comptime variables are compile-time only and don't generate runtime
+        # code, but a later comptime `if`/expression may reference this name
+        # (e.g. `comptime FOO = 1` then `if FOO == 1:`) — record the folded
+        # value so _eval_const's IdentExpr case can resolve it.
+        val = self._eval_const(node.value)
+        if val is not None:
+            if not hasattr(self, '_comptime_vals'):
+                self._comptime_vals = {}
+            self._comptime_vals[node.target] = val
         return
 
     def _gen_stmt_GlobalStmt(self, node):
@@ -12448,6 +12498,10 @@ class GimpleGen:
         function when kind='fn', a struct when kind='struct'), reachable from
         `module` by following `from X import (...)` re-export hops (e.g.
         std.os re-exports listdir from .os = os.mojo). None if not generic."""
+        key = (module, name, kind)
+        if key in self._find_generic_visited:
+            return None
+        self._find_generic_visited.add(key)
         if depth > 5 or not module:
             return None
         path, src, mod = self._parsed_import(module)
