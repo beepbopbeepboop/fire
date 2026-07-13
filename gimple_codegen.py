@@ -38,6 +38,17 @@ from generated_dispatch import (
     _STMT_DISPATCH, _EXPR_DISPATCH,
 )
 
+_SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Matches a literal `sys.path.insert(<int>, "<string>")` / `(..., '...')` call
+# in Mojo source text. This compiler never executes anything, so a runtime
+# `sys.path.insert` (the pattern myinterpreter.py's actual interpretation of
+# it honors — see BUG-2026-014) can only be honored by statically recognizing
+# this exact literal-argument shape and treating it as an extra module search
+# directory, same priority as the real interpreter gives it (checked first).
+_SYS_PATH_INSERT_RE = re.compile(
+    r'sys\s*\.\s*path\s*\.\s*insert\s*\(\s*\d+\s*,\s*["\']([^"\']+)["\']\s*\)')
+
 # _slit_ numbering starts here to avoid collisions with the mojo compiler's
 # own string-literal numbering when modules are linked together.
 STRING_POOL_BASE = 10000
@@ -2391,6 +2402,13 @@ class GimpleGen:
         self._imported_struct_names: set = set()
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
+        # Directories added via a literal `sys.path.insert(N, "literal")` seen
+        # anywhere in the transitive closure's source text — statically
+        # scanned (this compiler never executes anything), not interpreted.
+        # Checked with highest priority in _compile_imported_module: the user
+        # wrote this to say "look here first", same as myinterpreter.py
+        # actually mutating real sys.path at run time (see BUG-2026-014).
+        self._extra_search_paths: list = []
         # Imported generic struct name -> module source path (slice 5).
         self._imported_generic_structs: dict = {}
         # Imported overloaded function name -> module source path (slice 4).
@@ -2494,6 +2512,35 @@ class GimpleGen:
         # e.g. '_cas_toplevel', so current_func_name alone can't tell them apart).
         self._in_toplevel_gen: bool          = False
 
+    def _record_sys_path_inserts(self, source: str, base_dir: str = None) -> None:
+        """Statically scan `source` for literal sys.path.insert(N, "...") calls
+        and remember each target directory in self._extra_search_paths (highest
+        priority in _compile_imported_module). A relative literal is resolved
+        against `base_dir` (the file the source came from) — matching how the
+        interpreter's actual sys.path.insert call at run time would resolve a
+        relative path against the process CWD at that point, approximated here
+        at compile time by the importing file's own directory.
+
+        Deliberately `.findall()`, not `for m in PATTERN.finditer(source):
+        m.group(1)` — that shape (a `.finditer()` loop over a *named*
+        compile-time pattern, called from inside a class method with `self`
+        in scope) hits an unrelated, still-unfixed self-hosting codegen gap
+        in _gen_for_regex_iter/_gen_for_iter: gcc rejected the self-hosted
+        gimple_codegen.py's own compiled output with a parse error even for
+        a trivial empty loop body and even substituting an already-proven
+        pattern (_TOKEN_RE) — so the break isn't specific to this pattern or
+        this body, only to that (method-scope regex-finditer-loop) combination.
+        `.findall()` returns a plain list of the captured strings directly
+        and goes through ordinary list iteration instead, sidestepping the
+        gap entirely; `.group(n)` with an argument isn't self-host-supported
+        either way (see _gen_for_regex_iter's docstring), so `.findall()`
+        loses nothing here — this pattern only has the one capture group."""
+        for p in _SYS_PATH_INSERT_RE.findall(source):
+            if base_dir and not os.path.isabs(p):
+                p = os.path.join(base_dir, p)
+            if p not in self._extra_search_paths:
+                self._extra_search_paths.append(p)
+
     def _compile_imported_module(self, module_name: str) -> tuple:
         """Find and compile an imported .mojo module, extracting type information.
 
@@ -2502,18 +2549,55 @@ class GimpleGen:
         # Get the directory where gimple_codegen.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Look for module relative to script location.
-        # Try .py first (the working Python reference implementations),
-        # then .mojo (self-hosting versions).  Skip the mojo/ subdirectory
-        # (those .mojo files are stale and use syntax the parser can't handle).
+        # Look for module relative to the IMPORTING FILE's own directory and
+        # the CWD first; only fall back to script_dir (this repo's own
+        # top-level tool scripts — mojo_compiler.py, elaborate.py, lexer.py,
+        # parser.py, ast_nodes.py, ...) once neither has a match. This repo
+        # ships several very generically-named top-level modules — of all
+        # things, `parser.py` and `lexer.py` — because it IS a Mojo compiler.
+        # Any external project that is itself compiler-adjacent (e.g. a
+        # hand-written C++ parser in Mojo) is highly likely to define its own
+        # same-named sibling module. Checking script_dir FIRST meant that
+        # user module silently lost to this repo's unrelated same-named file
+        # with no error — the user's real struct/fn definitions were never
+        # even parsed, only whatever this repo's own file happened to define
+        # under that name (see BUG-2026-014: `from parser import Parser`
+        # resolved to gimple_codegen's own parser.py — which defines
+        # TokenStream, not Parser at all — instead of the sibling
+        # parser.mojo, and cross-module field access on the real Parser
+        # struct failed because its fields were never registered).
+        # Self-hosting the compiler on ITS OWN sources still works exactly as
+        # before: those entry files (mojo.py, gimple_codegen.py, ...) already
+        # live IN script_dir, so their "importing file's own directory" IS
+        # script_dir — it's just no longer checked ahead of a closer, more
+        # specific match for everyone else.
+        # Within one location, try .py first (the working Python reference
+        # implementations), then .mojo (self-hosting versions) — but LOCATION
+        # is the outer, primary priority: a real match in a closer/more
+        # specific directory must win over an unrelated same-named file
+        # merely because that one happens to be .py. Getting this backwards
+        # (extension as the outer loop) meant ANY .py match anywhere — even
+        # this repo's own unrelated script_dir/parser.py — was found before
+        # EVERY .mojo location was even attempted, script_dir included
+        # (BUG-2026-014).  Skip the mojo/ subdirectory (those .mojo files are
+        # stale and use syntax the parser can't handle).
         extensions = ['.py', '.mojo']
+        importer_dir = None
+        _importer = getattr(self, '_current_filename', None)
+        if _importer:
+            importer_dir = os.path.dirname(os.path.abspath(_importer))
+        # Explicit `sys.path.insert(...)` directories win outright — the user
+        # said "look here first" (see _record_sys_path_inserts) — then the
+        # importing file's own directory, then CWD and its parent, and only
+        # then this repo's own installation directory as a last resort.
+        search_dirs = list(self._extra_search_paths)
+        if importer_dir:
+            search_dirs.append(importer_dir)
+        search_dirs += ['.', '..', script_dir]
         mojo_paths = []
-        for ext in extensions:
-            mojo_paths += [
-                os.path.join(script_dir, f"{module_name}{ext}"),
-                f"./{module_name}{ext}",
-                f"../{module_name}{ext}",
-            ]
+        for d in search_dirs:
+            for ext in extensions:
+                mojo_paths.append(os.path.join(d, f"{module_name}{ext}"))
 
         # Cross the import/module boundary into the real stdlib: resolve std.* modules
         # to their .mojo source under STDLIB_PATH so we walk into (and compile) the
@@ -2537,6 +2621,9 @@ class GimpleGen:
                 try:
                     with open(path, 'r') as f:
                         source = f.read()
+                    # Any sys.path.insert(...) in THIS module's own source
+                    # extends the search path for modules IT imports too.
+                    self._record_sys_path_inserts(source, os.path.dirname(os.path.abspath(path)))
 
                     # Compile the module to get both code and type info
                     tokens = py_tokenize(source)
@@ -2569,6 +2656,7 @@ class GimpleGen:
                     temp_gen._global_inline_defs = self._global_inline_defs
                     temp_gen._emitted_allocs = self._emitted_allocs
                     temp_gen._module_stmts = self._module_stmts  # share: track all transitive stmts
+                    temp_gen._extra_search_paths = self._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                     temp_gen.func_return_types = self.func_return_types  # share across gens
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
                     temp_gen._module_globals = self._module_globals  # share module globals tracking
@@ -12917,124 +13005,164 @@ class GimpleGen:
         # lose structs from transitive imports (ModuleLoader, Layout, etc.)
         # that were added to the shared dict by nested temp_gens.
 
+        # These hardcoded field/param tables exist for exactly one reason:
+        # self-hosting this very compiler. When gimple_codegen.py compiles
+        # mojo.py's own transitive closure (mojo_compiler.py, myinterpreter.py,
+        # ...), those files' classes are plain Python `class Foo: def
+        # __init__(self): self.x = ...` — field-type inference from scanning
+        # `__init__` bodies (_collect_self_assigns) sometimes can't recover a
+        # field's real type, so these entries are a hand-maintained cheat
+        # sheet for THIS repo's own Scope/Token/Parser/Interpreter/MojoClass/
+        # CallExpr/BinaryOp/... classes specifically.
+        #
+        # They must NOT apply to an external project's unrelated same-named
+        # struct. A compiler-adjacent Mojo project (a hand-written parser,
+        # interpreter, or AST library — exactly the kind of thing someone
+        # writes in Mojo) is very likely to define its OWN Parser/Token/
+        # Scope/CallExpr/BinaryOp/... with completely different fields, and
+        # unconditionally seeding this dict before scanning the real
+        # StructDefs let those hardcoded phantom fields leak into that
+        # unrelated struct's C typedef, and (worse) the "don't overwrite an
+        # already-known field name" guard in the real-struct scan below meant
+        # the struct's ACTUAL matching field names were silently ignored too
+        # (see BUG-2026-014's fuller repro, test_cp_tree_final.mojo: a
+        # same-named `Parser` struct's real `errors: Int` field was invisible
+        # at codegen because 'errors' happened not to collide with any
+        # hardcoded name, but plenty of OTHER user structs — VarDecl, Parser
+        # itself for its other fields — silently got the wrong ones instead).
+        #
+        # Gate on whether we're compiling one of THIS repo's own files: only
+        # then can `s.name` genuinely be gimple_codegen.py's own bootstrap
+        # class rather than a coincidentally-same-named third-party struct.
         # Span / StringSlice — fat pointer {data, len}. Seeded so .unsafe_ptr()
-        # and .__len__()/len() lower to field reads even without walking span.mojo.
+        # and .__len__()/len() lower to field reads even without walking
+        # span.mojo. Unlike the self-host-only block below, this is a REAL
+        # stdlib type used broadly — NOT gated on _is_selfhost_file (an
+        # earlier version of this fix wrongly gated it too, which broke
+        # every ordinary stdlib compile referencing Span with "unknown type
+        # name 'Span'": compile_stdlib.py isn't compiling one of THIS repo's
+        # own files, so the gate was always False for it).
         self.struct_field_types['Span'] = {
             '_data': 'char *',
             '_len': 'int64_t',
         }
-        # Pre-populate known interpreter structs with their field types
-        # This handles cases where field type inference from method bodies fails
-        self.struct_field_types['Scope'] = {
-            'parent': 'Scope *',
-            'vars': 'MojoDict *',
-        }
-        self.struct_field_types['Token'] = {
-            'kind':  'char *',
-            'value': 'char *',
-            'line':  'int64_t',
-            'col':   'int64_t',
-        }
-        self.struct_field_types['ReturnValue'] = {
-            'value': 'int64_t',
-        }
-        self.struct_field_types['BreakException'] = {}
-        self.struct_field_types['ContinueException'] = {}
-        self.struct_field_types['MojoFunction'] = {
-            'name': 'char *',
-            'params': 'MojoList *',
-            'body': 'MojoList *',
-            'closure_scope': 'Scope *',
-            'comptime_params': 'MojoList *',
-        }
-        self.struct_field_types['_MojoBoundComptimeFunction'] = {
-            'func': 'MojoFunction *',
-            'comptime_bindings': 'MojoDict *',
-        }
-        self.struct_field_types['MojoClass'] = {
-            'name': 'char *',
-            'fields': 'MojoList *',
-            'methods': 'MojoDict *',
-            'interpreter': 'Interpreter *',
-            'bases': 'MojoList *',
-            'comptime_aliases': 'MojoDict *',
-            'static_methods': 'MojoSet *',
-        }
-        self.struct_field_types['MojoInstance'] = {
-            '_mojo_class': 'MojoClass *',
-        }
-        self.struct_field_types['BoundMethod'] = {
-            'bound_func': 'MojoFunction *',
-            'instance': 'MojoInstance *',
-            'interpreter': 'Interpreter *',
-        }
-        self.struct_field_types['MojoOverloadSet'] = {
-            'name': 'char *',
-            'candidates': 'MojoList *',
-        }
-        self.struct_field_types['Interpreter'] = {
-            'scope': 'Scope *',
-            'filename': 'char *',
-            'argv': 'MojoList *',
-            '_mojo_module_cache': 'MojoDict *',
-            '_func_specs': 'MojoDict *',
-            '_raised_mojo_value': 'int64_t',
-        }
-        self.struct_field_types['Parser'] = {
-            '_tok': 'MojoList *',
-            '_pos': 'int64_t',
-            '_filename': 'char *',
-            '_pending_decs': 'MojoList *',
-        }
-        self.struct_field_types['Scope'] = {
-            'parent': 'Scope *',
-            'vars': 'MojoDict *',
-        }
 
-        # Hardcode Scope method param types so 'name' is char* not int
-        self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int']
-        self.func_param_types['Scope_get']    = ['Scope *', 'char *']
-        self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
-        self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
+        _cur_file = getattr(self, '_current_filename', None)
+        _is_selfhost_file = bool(_cur_file) and os.path.commonpath(
+            [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR
+        if _is_selfhost_file:
+            # Pre-populate known interpreter structs with their field types
+            # This handles cases where field type inference from method bodies fails
+            self.struct_field_types['Scope'] = {
+                'parent': 'Scope *',
+                'vars': 'MojoDict *',
+            }
+            self.struct_field_types['Token'] = {
+                'kind':  'char *',
+                'value': 'char *',
+                'line':  'int64_t',
+                'col':   'int64_t',
+            }
+            self.struct_field_types['ReturnValue'] = {
+                'value': 'int64_t',
+            }
+            self.struct_field_types['BreakException'] = {}
+            self.struct_field_types['ContinueException'] = {}
+            self.struct_field_types['MojoFunction'] = {
+                'name': 'char *',
+                'params': 'MojoList *',
+                'body': 'MojoList *',
+                'closure_scope': 'Scope *',
+                'comptime_params': 'MojoList *',
+            }
+            self.struct_field_types['_MojoBoundComptimeFunction'] = {
+                'func': 'MojoFunction *',
+                'comptime_bindings': 'MojoDict *',
+            }
+            self.struct_field_types['MojoClass'] = {
+                'name': 'char *',
+                'fields': 'MojoList *',
+                'methods': 'MojoDict *',
+                'interpreter': 'Interpreter *',
+                'bases': 'MojoList *',
+                'comptime_aliases': 'MojoDict *',
+                'static_methods': 'MojoSet *',
+            }
+            self.struct_field_types['MojoInstance'] = {
+                '_mojo_class': 'MojoClass *',
+            }
+            self.struct_field_types['BoundMethod'] = {
+                'bound_func': 'MojoFunction *',
+                'instance': 'MojoInstance *',
+                'interpreter': 'Interpreter *',
+            }
+            self.struct_field_types['MojoOverloadSet'] = {
+                'name': 'char *',
+                'candidates': 'MojoList *',
+            }
+            self.struct_field_types['Interpreter'] = {
+                'scope': 'Scope *',
+                'filename': 'char *',
+                'argv': 'MojoList *',
+                '_mojo_module_cache': 'MojoDict *',
+                '_func_specs': 'MojoDict *',
+                '_raised_mojo_value': 'int64_t',
+            }
+            self.struct_field_types['Parser'] = {
+                '_tok': 'MojoList *',
+                '_pos': 'int64_t',
+                '_filename': 'char *',
+                '_pending_decs': 'MojoList *',
+            }
+            self.struct_field_types['Scope'] = {
+                'parent': 'Scope *',
+                'vars': 'MojoDict *',
+            }
 
-        # Pre-populate AST node struct fields
-        self.struct_field_types['CallExpr'] = {
-            'func': 'int64_t',
-            'args': 'MojoList *',
-        }
-        self.struct_field_types['BinaryOp'] = {
-            'op': 'char *',
-            'left': 'int64_t',
-            'right': 'int64_t',
-        }
-        self.struct_field_types['UnaryOp'] = {
-            'op': 'char *',
-            'operand': 'int64_t',
-        }
-        self.struct_field_types['TernaryExpr'] = {
-            'condition': 'int64_t',
-            'then_val': 'int64_t',
-            'else_val': 'int64_t',
-        }
-        self.struct_field_types['MemberExpr'] = {
-            'obj': 'int64_t',
-            'member': 'char *',
-        }
-        self.struct_field_types['SubscriptExpr'] = {
-            'obj': 'int64_t',
-            'index': 'int64_t',
-        }
-        # These hardcoded fields are boxed (Optional/Any-typed AST-node refs
-        # stored as int64_t) same as the annotation-scan-derived ones below —
-        # pre-populated here so they bypass that scan (see the `if f_name not
-        # in self.struct_field_types[s.name]` guard), so their boxed-ness must
-        # be recorded explicitly too or repr() prints raw pointers for them.
-        self.struct_boxed_fields['CallExpr'] = {'func'}
-        self.struct_boxed_fields['BinaryOp'] = {'left', 'right'}
-        self.struct_boxed_fields['UnaryOp'] = {'operand'}
-        self.struct_boxed_fields['TernaryExpr'] = {'condition', 'then_val', 'else_val'}
-        self.struct_boxed_fields['MemberExpr'] = {'obj'}
-        self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+            # Hardcode Scope method param types so 'name' is char* not int
+            self.func_param_types['Scope_define'] = ['Scope *', 'char *', 'int']
+            self.func_param_types['Scope_get']    = ['Scope *', 'char *']
+            self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
+            self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
+
+            # Pre-populate AST node struct fields
+            self.struct_field_types['CallExpr'] = {
+                'func': 'int64_t',
+                'args': 'MojoList *',
+            }
+            self.struct_field_types['BinaryOp'] = {
+                'op': 'char *',
+                'left': 'int64_t',
+                'right': 'int64_t',
+            }
+            self.struct_field_types['UnaryOp'] = {
+                'op': 'char *',
+                'operand': 'int64_t',
+            }
+            self.struct_field_types['TernaryExpr'] = {
+                'condition': 'int64_t',
+                'then_val': 'int64_t',
+                'else_val': 'int64_t',
+            }
+            self.struct_field_types['MemberExpr'] = {
+                'obj': 'int64_t',
+                'member': 'char *',
+            }
+            self.struct_field_types['SubscriptExpr'] = {
+                'obj': 'int64_t',
+                'index': 'int64_t',
+            }
+            # These hardcoded fields are boxed (Optional/Any-typed AST-node refs
+            # stored as int64_t) same as the annotation-scan-derived ones below —
+            # pre-populated here so they bypass that scan (see the `if f_name not
+            # in self.struct_field_types[s.name]` guard), so their boxed-ness must
+            # be recorded explicitly too or repr() prints raw pointers for them.
+            self.struct_boxed_fields['CallExpr'] = {'func'}
+            self.struct_boxed_fields['BinaryOp'] = {'left', 'right'}
+            self.struct_boxed_fields['UnaryOp'] = {'operand'}
+            self.struct_boxed_fields['TernaryExpr'] = {'condition', 'then_val', 'else_val'}
+            self.struct_boxed_fields['MemberExpr'] = {'obj'}
+            self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         _merge_struct_inheritance(all_struct_defs)
@@ -14462,7 +14590,12 @@ class GimpleGen:
         our_mod = self.module_name or "root"
         if not self.module_name and self._current_filename:
             # Infer module name from filename (e.g., "myinterpreter.py" → "myinterpreter")
-            import os
+            # (`os` is already imported at module level — a redundant local
+            # `import os` here used to shadow it for gen_module's ENTIRE body,
+            # since Python scopes a name as local to the whole function the
+            # moment it's assigned anywhere in that function, not just from
+            # the assignment point onward — any earlier `os.*` use in this
+            # same function raised UnboundLocalError.)
             our_mod = os.path.splitext(os.path.basename(self._current_filename))[0]
 
         all_modules_to_declare = set()
@@ -15505,13 +15638,25 @@ class GimpleGen:
         if func_defs or struct_defs:
             parts.append('')
 
-        # Always add forward decls for cross-module struct methods that may be called
-        # (e.g. Parser_parse_module from mojo_compiler, Interpreter from myinterpreter)
-        parts.append("MojoList * Parser_parse_module (Parser *);")
-        parts.append("void Parser___init__ (Parser *, MojoList *);")
-        parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
-        parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
-        parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
+        # Forward decls for cross-module struct methods that may be called —
+        # but ONLY for self-hosting compiles (see `_is_selfhost_file` above
+        # and BUG-2026-014): these reference gimple_codegen's OWN bootstrap
+        # `Parser`/`Interpreter` classes (e.g. Parser_parse_module from
+        # mojo_compiler, Interpreter from myinterpreter), whose typedef is
+        # only emitted when struct_field_types['Parser'/'Interpreter'] was
+        # seeded by that same self-host-only gate. Emitting these
+        # unconditionally for an external project with its own same-named
+        # (and differently-shaped) Parser/Interpreter struct is exactly the
+        # kind of leak that gate exists to prevent — the prototypes below
+        # would either reference a type gcc never saw a typedef for
+        # ("unknown type name 'Interpreter'") or, worse, silently collide
+        # with the external struct's OWN typedef.
+        if _is_selfhost_file:
+            parts.append("MojoList * Parser_parse_module (Parser *);")
+            parts.append("void Parser___init__ (Parser *, MojoList *);")
+            parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
+            parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
+            parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
         # Forward decls for the generic reflection dispatch (see the
         # "Generic reflection dispatch" block emitted earlier in this same
         # gen_module call, near the struct alloc helpers) — that block's
@@ -15808,6 +15953,9 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
+    if do_imports:
+        gen._record_sys_path_inserts(
+            mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
     return gen.gen_module(stmts)
 
 
