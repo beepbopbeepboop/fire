@@ -9569,10 +9569,21 @@ class GimpleGen:
 
     # ── Statement generation ───────────────────────────────────────────────
 
+    # Statement kinds whose handler recurses into gen_stmt for a nested body
+    # (their own nested statements already get their own correct #line via
+    # that recursive call) — excluded from the re-stamping below, which would
+    # otherwise overwrite a nested statement's correct line with the outer
+    # compound statement's line.
+    _COMPOUND_STMT_KINDS = frozenset((
+        'IfStmt', 'WhileStmt', 'ForStmt', 'TryStmt', 'WithStmt',
+        'FunctionDef', 'ComptimeIfStmt', 'ComptimeForStmt', 'MatchStmt',
+    ))
+
     def gen_stmt(self, node):
         # Emit #line directive to track source location. Critical for debugging:
         # optimizations intermix and reorder code from different lines and files.
         # Only emit if we haven't emitted this exact (filename, line) pair before.
+        node_kind = type(node).__name__
         if hasattr(node, 'line') and node.line and node.line > 0:
             filename = getattr(self, '_current_filename', '')
             emitted_pairs = getattr(self, '_emitted_line_pairs', set())
@@ -9589,12 +9600,42 @@ class GimpleGen:
                 emitted_pairs.add(pair_key)
                 self._emitted_line_pairs = emitted_pairs
 
-        handler_name = _STMT_DISPATCH.get(type(node).__name__)
+        # A single Mojo statement (e.g. an assignment whose RHS is a call)
+        # commonly lowers to SEVERAL physical C lines (one per temp var), but
+        # the #line directive above is only emitted once, before the first of
+        # them. GCC's own line-counting for a -fgimple diagnostic increments
+        # per PHYSICAL line since the last #line directive, not per logical
+        # Mojo statement — so an error on e.g. the 3rd physical line of a
+        # one-statement expansion gets reported 2 lines past the statement's
+        # real source line (see BUG-2026-016: a bad field assignment reported
+        # 2 lines below the assignment itself). Re-stamping every physical
+        # line of a LEAF statement's own expansion with the same #line
+        # directive eliminates that drift, since GCC resets its count at
+        # every directive. Restricted to leaf statement kinds — a compound
+        # statement (if/while/for/try/with/...) recurses into gen_stmt for
+        # its own nested body, which already got its own correct #line calls;
+        # blindly re-stamping its ENTIRE emitted range here would instead
+        # overwrite those nested statements' correct line numbers with the
+        # outer compound statement's line.
+        body_start = len(self.body_lines) if node_kind not in self._COMPOUND_STMT_KINDS else None
+
+        handler_name = _STMT_DISPATCH.get(node_kind)
         if handler_name:
             getattr(self, handler_name)(node)
         else:
-            _debug_note('unknown statement dropped', type(node).__name__)
-            self._emit(f"  /* TODO: {type(node).__name__} */")
+            _debug_note('unknown statement dropped', node_kind)
+            self._emit(f"  /* TODO: {node_kind} */")
+
+        if (body_start is not None and hasattr(node, 'line') and node.line and node.line > 0
+                and len(self.body_lines) - body_start > 1):
+            filename = getattr(self, '_current_filename', '')
+            directive = f"#line {node.line} \"{filename}\"" if filename else f"#line {node.line}"
+            # Skip the very first emitted line (already directly preceded by
+            # the directive above); re-stamp every one after it, from the end
+            # backwards so earlier insertions don't shift later indices.
+            for i in range(len(self.body_lines) - 1, body_start, -1):
+                if self.body_lines[i] != directive and not self.body_lines[i].lstrip().startswith('#line '):
+                    self.body_lines.insert(i, directive)
 
     # ── Statement handlers (one per AST node type) ────────────────────────
 
