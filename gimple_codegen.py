@@ -10242,7 +10242,16 @@ class GimpleGen:
             is_wildcard = any(
                 isinstance(p, IdentExpr) and p.name == '_' for p in match_case.patterns)
             if is_wildcard:
-                match_bool = self._new_temp('_Bool')
+                # A bare `_Bool x; x = 1;` is a "non-trivial conversion" under
+                # -fgimple's strict mode (an int constant assigned straight
+                # into a _Bool isn't automatically allowed, unlike normal C).
+                # `_lower_BoolLiteral` sidesteps this the same way: type the
+                # temp as plain `int` (a same-type, always-trivial `int = 1`
+                # assignment) rather than `_Bool` — used below only as an
+                # `if (...)` condition or combined via `_ensure_bool_cond`,
+                # both of which accept a plain int fine (see BUG-2026-017,
+                # found via cpp_parser's `match name: ... case _:` wildcard).
+                match_bool = self._new_temp('int')
                 self._emit(f"  {match_bool} = 1;")
             else:
                 match_bool = None
@@ -10258,6 +10267,12 @@ class GimpleGen:
             if match_case.guard is not None:
                 gt, gv = self.lower_expr(match_case.guard)
                 gv = self._ensure_bool_cond(gt, gv)
+                # match_bool is plain `int` for the wildcard branch above,
+                # `_Bool` otherwise — coerce before combining so `combined`
+                # (declared `_Bool`) is only ever assigned a real `_Bool`
+                # value, not a mixed int/_Bool bitwise-AND result (the same
+                # "non-trivial conversion" trap the wildcard fix addresses).
+                match_bool = self._ensure_bool_cond('int' if is_wildcard else '_Bool', match_bool)
                 combined = self._new_temp('_Bool')
                 self._emit(f"  {combined} = {match_bool} & {gv};")
                 match_bool = combined
