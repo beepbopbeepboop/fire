@@ -917,12 +917,41 @@ def _synthesize_fieldwise_inits(stmts: list) -> list:
                 param_convs={'self': 'out', 'existing': 'owned'}))
     return stmts
 
+# Built-in stdlib trait names — never declared via `trait X:` in the
+# source being parsed, so Parser._known_traits (a single forward pass over
+# the file's own tokens) can't discover them; hardcoded instead.
+_BUILTIN_TRAITS = {
+    'Movable', 'Copyable', 'ImplicitlyCopyable', 'Defaultable', 'AnyType',
+    'Hashable', 'Stringable', 'Sized', 'Boolable', 'Intable', 'Writable',
+    'KeyElement', 'CollectionElement', 'EqualityComparable', 'Representable',
+    'Comparable', 'Indexer', 'Absable', 'Powable', 'Roundable',
+}
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
         self._pos = 0
         self._filename = ""
         self._pending_decs = []  # decorators awaiting next struct/trait
+        # `struct Box[T: Movable]:` — a generic TYPE parameter bound by a
+        # trait, syntactically identical to `struct SIMD[width: Int]:`'s
+        # genuine comptime VALUE parameter (`name: Ident` either way). This
+        # parser has no type checker, so the only way to tell them apart is
+        # to know whether the name after the colon is a trait; a single
+        # forward scan of this file's own tokens for `trait NAME` finds every
+        # user-defined trait (traits are declared before use in this dialect,
+        # same assumption structs/functions already rely on), unioned with
+        # the built-in stdlib traits above that never appear as a `trait`
+        # declaration in user source. See _parse_struct_params_as_fields,
+        # which used to add every `T: Movable` as a real VarDecl field —
+        # corrupting @fieldwise_init's synthesized constructor arity for any
+        # generic struct with a trait-bounded type parameter.
+        self._known_traits = set(_BUILTIN_TRAITS)
+        for i, t in enumerate(tokens):
+            if t.kind == "KW" and t.value == "trait" and i + 1 < len(tokens):
+                nxt = tokens[i + 1]
+                if nxt.kind == "NAME":
+                    self._known_traits.add(nxt.value)
 
     def with_filename(self, filename: str):
         """Attach a source filename for `file:line:col:` diagnostics.
@@ -2682,7 +2711,14 @@ class Parser:
                                 break
                             else:
                                 self._advance()
-                    fields.append(VarDecl(name=name, type_ann=type_ann, value=None))
+                    # `name: TraitName` is a generic TYPE parameter (T conforms
+                    # to the trait), not a comptime VALUE parameter — it must
+                    # NOT become a real field, or @fieldwise_init's synthesized
+                    # constructor gets an extra phantom parameter (see
+                    # __init__'s _known_traits comment).
+                    bare_ann = type_ann.lstrip('*')
+                    if bare_ann not in self._known_traits:
+                        fields.append(VarDecl(name=name, type_ann=type_ann, value=None))
                 else:
                     # No colon — skip this token (could be a bare type name)
                     pass

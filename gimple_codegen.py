@@ -5042,9 +5042,25 @@ class GimpleGen:
             # Class attribute access: ClassName.ATTR
             # Check if module_name is a known struct/class (not an instance variable)
             if module_name in self.struct_field_types and module_name not in self.var_types:
-                # This is a class-level access like TypeLattice._FLOAT
+                # `comptime NAME: Type = value` struct member (e.g. IfStmt.KIND)
+                # accessed directly on the type name, not through an instance —
+                # expand to its defining expression, same mechanism
+                # _lower_MemberExpr's instance-typed path already uses below
+                # (see the `aliases = self._struct_comptime_aliases.get(...)`
+                # branch a few lines down, reached only when node.obj is an
+                # INSTANCE, not a bare type-name IdentExpr). This bare-name
+                # case used to fall through to a dummy "class attr" stub that
+                # always emitted the literal 0 regardless of the alias's real
+                # value — e.g. `IfStmt.KIND` printed 0 under --jit/--dump
+                # instead of its declared value under `mojo run`.
+                aliases = self._struct_comptime_aliases.get(module_name)
+                if aliases and node.member in aliases:
+                    return self.lower_expr(aliases[node.member])
+                # Not a comptime alias — a genuine class-level access this
+                # compiler doesn't yet resolve statically (unimplemented,
+                # not merely unreached); stub with a clearly-marked value.
                 t = self._new_temp('int')
-                self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} */")
+                self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} — UNRESOLVED, not a comptime alias */")
                 return 'int', t
 
         # If the object is a zero-arg function used in member-access context (e.g. block_idx.x),
@@ -6614,6 +6630,13 @@ class GimpleGen:
             if at == 'char *':
                 return 'int64_t', self._call_expr('int64_t', 'mojo_list_index_str', [('MojoList *', ov), ('char *', av)])
             return 'int64_t', self._call_expr('int64_t', 'mojo_list_index_int', [('MojoList *', ov), ('int64_t', av)])
+        if method == '__len__':
+            # The builtin `len(x)` call form already lowers to mojo_list_len
+            # (see the len() handling in _lower_call), but the dunder-method
+            # CALL form `x.__len__()` fell through to this function's dummy
+            # 0-stub with no dedicated case — e.g. `l.__len__() - 1` always
+            # computed `-1` regardless of the list's real length.
+            return 'int64_t', self._new_val('int64_t', f'mojo_list_len ({ov})')
         return 'int', self._new_val('int', '0')
 
     def _lower_set_method(self, ov: str, method: str, args: list) -> tuple:
@@ -13169,6 +13192,15 @@ class GimpleGen:
                 '_pos': 'int64_t',
                 '_filename': 'char *',
                 '_pending_decs': 'MojoList *',
+                # `set(_BUILTIN_TRAITS)` in Parser.__init__ (mojo_compiler.py)
+                # — a plain Python class field, no `var` declaration for the
+                # self-host type inferencer to consult, so an unlisted field
+                # here silently fell back to "assume it's a pointer to the
+                # containing struct" (Parser *), corrupting `x not in
+                # self._known_traits` under self-hosting. See the "self-host
+                # hardcoded struct tables" memory note: any new field added to
+                # a self-hosted Python class needs a matching entry here.
+                '_known_traits': 'MojoSet *',
             }
             self.struct_field_types['Scope'] = {
                 'parent': 'Scope *',
