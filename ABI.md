@@ -66,8 +66,45 @@ These cross the boundary as opaque pointers to the runtime types in
 
 - **Free function** `fn name(a: A, b: B) -> R` →
   `R name (A_abi a, B_abi b);` (C-keyword names get the documented `mojo_` prefix).
+  If `name` is overloaded (2+ definitions with the same name, different
+  signatures), the emitted symbol is `name` plus a 6-hex-digit suffix hashed
+  from the C parameter types (`_func_csym`/`overload_suffix_for` in
+  gimple_codegen.py) — e.g. `abs_a1b2c3`. Non-overloaded names, entry points,
+  `@export`-decorated functions, and libc names are never mangled this way.
 - **Struct method** `Struct.method(self, args…)` →
-  `R Struct_method (Struct *self, args…);` (self first, by pointer).
+  `R Struct_method (Struct *self, args…);` (self first, by pointer), plus the
+  same overload-hash suffix as above when the method is overloaded within its
+  struct (`_method_overload_id`).
+- **Module-qualified struct method symbols** (v2, this section supersedes the
+  bare form above whenever a real module identity applies): a struct's method
+  symbol is prefixed with its **home module's qualifier** —
+  `<module-qualifier>_Struct_method<overload-suffix>` — computed as
+  `module_loader.module_name_for_path(path)` on the struct's defining source
+  file (path-relative to `STDLIB_PATH`; falls back to the file's own basename
+  outside `STDLIB_PATH`, e.g. a test fixture). Example: `std/utils/_ansi.mojo`'s
+  `struct Color` and `std/gpu/host/_tracing.mojo`'s `struct Color` — both
+  compiled into one `libmojostdlib.dylib` — become `std_utils__ansi_Color_*`
+  and `std_gpu_host__tracing_Color_*` respectively, never colliding at the
+  linker regardless of how many unrelated modules define a same-named struct
+  (see STDLIB-BUGS.md and `GimpleGen._struct_method_qualifier`/
+  `_struct_method_csym`/`_struct_method_csym_static`).
+  - **No qualifier** (bare form) applies to: the root module of an ordinary
+    `mojo build`/`mojo run` invocation (never compiled alongside another
+    module in the same dylib, so no collision risk), and this compiler's own
+    self-hosting compiles of its `.py` sources (`gimple_codegen.py`,
+    `mojo_compiler.py`, `myinterpreter.py`, `module_loader.py`, …) — their
+    bootstrap structs (`Scope`, `Parser`, `Interpreter`, …) are exempt by a
+    dedicated file-identity gate (current file is a `.py` source under this
+    repo's own directory), independent of whether `module_name` happens to
+    be set for that particular compile.
+  - **Reflection table entries** (`__mojo_reflect`, Stage 4) advertise the
+    same qualified symbol the defining module actually emits
+    (`reflect.collect_exports`'s `module_prefix` parameter) — a cross-module
+    importer that only sees a struct via dylib reflection (no source
+    available) derives its home-module qualifier directly from the
+    already-qualified symbol string the reflection table provides,
+    guaranteeing the client's call site and the dylib's real definition
+    always agree.
 - **`external_call["sym", Ret](args…)`** → a direct call to the C symbol `sym`
   with `Ret`/arg C types as lowered; one `extern` prototype per symbol is emitted
   (libc names already in our headers are not re-declared). This is the escape

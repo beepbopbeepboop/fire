@@ -27,7 +27,7 @@ import reflect
 from build_config import find_gcc
 from gimple_codegen import GimpleGen, FromImportStmt
 from mojo_compiler import py_tokenize, Parser
-from module_loader import load_module, STDLIB_PATH
+from module_loader import load_module, STDLIB_PATH, module_name_for_path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -204,16 +204,13 @@ def _localize_symbols(obj: str, syms: set, workdir: str, name: str) -> str:
 
 
 def _module_name_for(path: str) -> str:
-    """Path-relative module name so __init__.mojo files from different
-    packages get unique symbol prefixes (std_os___init__ vs std___init__).
-    Falls back to basename for modules outside STDLIB_PATH (e.g. test
-    modules) — os.path.relpath would produce '../../../...' paths with dots
-    that are invalid in C identifiers and cause GCC to reject the generated
-    .c file."""
-    rel = os.path.relpath(path, STDLIB_PATH)
-    if rel.startswith('..'):
-        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
-    return os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+    """Thin re-export — the real logic now lives in module_loader.py
+    (module_name_for_path) so gimple_codegen.py's cross-module struct-method
+    qualification can call the EXACT same function on the exact same
+    resolved file path, guaranteeing both sides of a qualified symbol name
+    agree by construction. Kept here under the old name for callers within
+    this file / anyone else already importing it from build_stdlib_dylib."""
+    return module_name_for_path(path)
 
 
 def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str) -> bytes:
@@ -244,7 +241,10 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool):
     name = _module_name_for(path)
     src = open(path).read()
     try:
-        exports = reflect.collect_exports_src(src)
+        # module_prefix=name: the SAME identity GimpleGen(module_name=name)
+        # below uses when actually compiling this module, so the reflection
+        # table's advertised method symbols match what codegen emits.
+        exports = reflect.collect_exports_src(src, module_prefix=name)
     except Exception:
         exports = []
     hit = None

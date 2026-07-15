@@ -88,7 +88,7 @@ def _mt(ann, struct_names) -> str:
     return _mojo_type(ann)
 
 
-def collect_exports(stmts) -> list:
+def collect_exports(stmts, module_prefix: str = '') -> list:
     """Exported symbols of a module: top-level non-underscore functions, plus
     concrete (non-generic) struct types and their methods. Returns dicts
     {name, signature, kind}.
@@ -97,7 +97,20 @@ def collect_exports(stmts) -> list:
     entry per public method (`Struct.method`, signature with a leading `self`
     pointer). This is what lets the real-stdlib distribution path work: the
     importer reads the layout + method symbols from the table and links the
-    method bodies from the dylib — it never re-reads the type's source."""
+    method bodies from the dylib — it never re-reads the type's source.
+
+    `module_prefix` (e.g. 'std_utils__ansi', from
+    module_loader.module_name_for_path — the SAME value build_stdlib_dylib.py
+    passes as GimpleGen's module_name when compiling this same source) must
+    be the caller's own module identity, so a METHOD entry's advertised C
+    symbol matches what gimple_codegen._gen_struct_method actually emits for
+    THIS module (see GimpleGen._struct_method_csym_static). Two modules
+    defining a same-named struct with a same-named method now get distinct
+    qualified symbols; without this, both modules' reflection entries would
+    read identically ('Color_get_alpha'), and after the dylib build's
+    _localize_symbols demotes the second module's own definition to
+    file-local, that module's reflection entry would silently resolve to the
+    FIRST module's implementation instead of its own."""
     struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
     exports = []
     for s in stmts:
@@ -115,12 +128,11 @@ def collect_exports(stmts) -> list:
             })
             _moids = GimpleGen._struct_method_overload_ids(s)
             for m, _oid in zip(getattr(s, 'methods', []), _moids):
-                # Mangled C symbol is Struct_method (matches gimple_codegen),
-                # plus a hash suffix when the method is overloaded (same
-                # _struct_method_overload_ids the codegen itself uses to name
-                # the emitted symbol) — self is the first param, passed by
-                # pointer.
-                msym = f"{s.name}_{m.name}{_oid}"
+                # Mangled C symbol matches gimple_codegen's own
+                # _struct_method_csym (module-qualifier + Struct_method +
+                # overload-hash suffix when overloaded) — self is the first
+                # param, passed by pointer.
+                msym = GimpleGen._struct_method_csym_static(module_prefix, s.name, m.name, _oid)
                 cret = _mt(m.return_type, struct_names) if m.return_type else 'void'
                 cparams = [f"{s.name} *"] + [
                     _mt(t, struct_names) for n, t in m.params if n != 'self']
@@ -144,12 +156,13 @@ _CLIB_SYMS = frozenset({
 })
 
 
-def collect_exports_src(src: str) -> list:
+def collect_exports_src(src: str, module_prefix: str = '') -> list:
     """Exports of a module's source — minus generic templates. A `fn name[...]`
     is parametric: it has no single concrete symbol to put in the dylib, so it is
     NOT a reflection export. Instead, importers see it as a generic and elaborate
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
-    from the source text.)"""
+    from the source text.) `module_prefix` is passed straight through to
+    collect_exports — see its docstring."""
     generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
     # Generic struct templates (`struct Name[T]`) aren't a concrete type either —
     # they're instantiated per type-args at use sites (ELABORATION.md slice 5),
@@ -166,7 +179,7 @@ def collect_exports_src(src: str) -> list:
     # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
     # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
     # parametric on its own.
-    return [e for e in collect_exports(Parser(py_tokenize(src)).parse_module())
+    return [e for e in collect_exports(Parser(py_tokenize(src)).parse_module(), module_prefix)
             if e['name'].split('.', 1)[0] not in skip
             and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
 

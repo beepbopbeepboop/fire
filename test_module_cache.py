@@ -464,10 +464,17 @@ def test_reflected_struct_import(wd):
                   "            var ok = \"rs\\n\"\n"
                   "            var n = external_call[\"write\", Int64](1, ok, 3)\n")
         code, dylibs, _objs = compile_linked(client)
+        # The dylib compiled this module with a real module_name
+        # (module_loader.module_name_for_path on runtime/rs_cnt.mojo ->
+        # 'rs_cnt'), so its methods are module-qualified C symbols — the
+        # client's extern decl must reference that exact qualified name
+        # (see GimpleGen._struct_method_qualifier/_struct_method_csym and
+        # _register_reflected_struct, which reads the qualifier straight out
+        # of the dylib's own advertised reflection signature).
         check("reflect: client materializes the layout + method externs (no body)",
               'typedef struct Counter' in code
-              and 'extern int64_t Counter_increment (Counter *);' in code
-              and 'Counter_increment (Counter *self)' not in code
+              and 'extern int64_t rs_cnt_Counter_increment (Counter *);' in code
+              and 'rs_cnt_Counter_increment (Counter *self)' not in code
               and len(dylibs) == 1)
 
         cc = os.path.join(wd, 'rs.c'); open(cc, 'w').write(code)
@@ -489,6 +496,92 @@ def test_reflected_struct_import(wd):
               sz < 8192, f"{sz} bytes")
     finally:
         os.remove(libpath)
+
+
+# ── ABI: module-qualified struct method symbols (cross-module collision) ──
+def test_module_qualified_struct_symbols(wd):
+    """Two DIFFERENT modules define a same-named struct with a same-named
+    method (the real bug: std/utils/_ansi.mojo's `struct Color` and
+    std/gpu/host/_tracing.mojo's `struct Color`, both compiled into one
+    libmojostdlib.dylib — see STDLIB-BUGS.md and ABI.md's module-qualifier
+    section). Compiled together into ONE shared dylib via build_stdlib_dylib's
+    own build() (mirroring the real stdlib build, not imports.py's
+    one-dylib-per-module resolver, which never puts two modules in the same
+    dylib and so never exercises this collision), both structs' methods must
+    get DISTINCT, module-qualified C symbols — no _localize_symbols demotion,
+    and each struct's exported symbol independently callable with its own
+    correct behavior (not silently resolving to the other module's copy, the
+    confirmed-wrong reflection-table bug this whole change fixes)."""
+    src_a = ("struct Shape:\n"
+             "    var n: Int64\n"
+             "    fn __init__(out self, n: Int64):\n"
+             "        self.n = n\n"
+             "    fn area(self) -> Int64:\n"
+             "        return self.n * 10\n")
+    src_b = ("struct Shape:\n"
+             "    var n: Int64\n"
+             "    fn __init__(out self, n: Int64):\n"
+             "        self.n = n\n"
+             "    fn area(self) -> Int64:\n"
+             "        return self.n * 100\n")
+    path_a = os.path.join(wd, 'coll_a.mojo'); open(path_a, 'w').write(src_a)
+    path_b = os.path.join(wd, 'coll_b.mojo'); open(path_b, 'w').write(src_b)
+    dylib = os.path.join(wd, 'libcoll.dylib')
+    gcc = GCC
+    bsd.build([path_a, path_b], dylib, link_runtime=True, use_cache=False)
+    # nm reports raw linker symbols, which carry macOS's own leading
+    # underscore convention (e.g. '_coll_a_Shape_area') — strip it so the
+    # assertions read as plain C identifiers, matching what
+    # GimpleGen._struct_method_csym itself computes.
+    syms = {s.lstrip('_') if s.startswith('_') and not s.startswith('__') else s
+            for s in bsd._defined_symbols(gcc, dylib)}
+    check("abi: both modules' Shape.area get distinct qualified symbols",
+          'coll_a_Shape_area' in syms and 'coll_b_Shape_area' in syms
+          and 'Shape_area' not in syms,
+          str(sorted(s for s in syms if 'Shape' in s)))
+    check("abi: both modules' Shape.__init__ get distinct qualified symbols",
+          'coll_a_Shape___init__' in syms and 'coll_b_Shape___init__' in syms,
+          str(sorted(s for s in syms if 'Shape' in s)))
+
+    # Reflection table: each module's own METHOD entry must advertise ITS
+    # OWN qualified symbol, not silently point at the other module's (the
+    # confirmed-wrong bug emit_table_c's string-only dedup used to hide).
+    exps_a = {e['name']: e for e in reflect.collect_exports_src(src_a, module_prefix='coll_a')}
+    exps_b = {e['name']: e for e in reflect.collect_exports_src(src_b, module_prefix='coll_b')}
+    check("abi: reflection entries are independently qualified per module",
+          'coll_a_Shape_area' in exps_a['Shape.area']['signature']
+          and 'coll_b_Shape_area' in exps_b['Shape.area']['signature'])
+
+    # End-to-end: a client importing EACH module's Shape independently (no
+    # `as` alias — aliasing an imported struct is a separate, pre-existing
+    # gap where the client's call sites mangle against the ALIAS instead of
+    # the struct's real defining name, unrelated to this qualification fix)
+    # gets that module's own, correct, distinct behavior.
+    import imports
+    from gimple_codegen import compile_linked
+    for modname, expected in (('coll_a', 30), ('coll_b', 300)):
+        imports.reset_resolver(path=[wd])
+        client = (f"from {modname} import Shape\n"
+                  "fn main():\n"
+                  "    var s = Shape(3)\n"
+                  "    var r = s.area()\n"
+                  f"    if r == {expected}:\n"
+                  "        var ok = \"qc\\n\"\n"
+                  "        var n = external_call[\"write\", Int64](1, ok, 3)\n")
+        code, dylibs, _objs = compile_linked(client)
+        cc = os.path.join(wd, f'qc_{modname}.c'); open(cc, 'w').write(code)
+        co = os.path.join(wd, f'qc_{modname}.o')
+        subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
+        exe = os.path.join(wd, f'qc_{modname}')
+        rt = bsd.runtime_dylib()
+        link_cmd = [GCC, '-o', exe, co]
+        if rt:
+            link_cmd.extend([rt, f'-Wl,-rpath,{os.path.dirname(rt)}'])
+        link_cmd.extend(dylibs)
+        link_cmd.extend([f'-Wl,-rpath,{os.path.dirname(d)}' for d in dylibs])
+        subprocess.run(link_cmd, check=True)
+        check(f"abi: client calling {modname}'s Shape.area() gets its own correct value",
+              _run(exe).stdout.startswith('qc'))
 
 
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
@@ -556,6 +649,7 @@ def main():
         test_elaboration_overload(wd)
         test_elaboration_trait_conformance(wd)
         test_reflected_struct_import(wd)
+        test_module_qualified_struct_symbols(wd)
         test_review_fixes_monomorphize_overload(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)

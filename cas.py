@@ -48,7 +48,13 @@ GMOJO_HOME = os.environ.get('GMOJO_HOME') or os.path.expanduser('~/.gmojo')
 CAS_DIR = os.path.join(GMOJO_HOME, 'cas')
 
 # Bump when ABI.md (the boundary contract) changes incompatibly.
-ABI_VERSION = "1"
+# v2 (2026-07): struct method C symbols are module-qualified
+# (<module-qualifier>_Struct_method<overload-suffix>) instead of bare
+# Struct_method — see ABI.md's "Functions and methods" section and
+# STDLIB-BUGS.md. Every cached .ci/.o/dylib artifact under v1 is
+# automatically invalidated (compile_key/stdlib_compile_key/dylib_link_key
+# all fold in ABI_VERSION first), so no manual cache-clear step is needed.
+ABI_VERSION = "2"
 
 # Codegen sources whose content defines the compiler's output. Hashing these
 # means "the compiler changed" ⇒ new keys ⇒ recompile, with zero manual version

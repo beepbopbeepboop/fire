@@ -264,7 +264,16 @@ preflight:
 	@echo "✓ Preflight passed"
 
 # ── Dev build (non-bootstrap quick compile) ───────────────────────────────────
-mojo.ci: $(MOJO_MAIN)
+# FORCE (empty recipe, always-out-of-date) rather than an explicit file list:
+# mojo.ci is do_imports=True whole-program output of mojo.py's entire transitive
+# closure (gimple_codegen.py, module_loader.py, mojo_compiler.py, ...) — any of
+# those can change without mojo.py itself changing, and a stale mojo.ci built
+# before such a change silently gets reused otherwise (confirmed: caused a
+# bare-vs-qualified symbol mismatch after an unrelated codegen.py edit).
+.PHONY: FORCE
+FORCE:
+
+mojo.ci: $(MOJO_MAIN) FORCE
 	PYTHONPATH=. python3 mojo.py --dump $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: mojo.ci

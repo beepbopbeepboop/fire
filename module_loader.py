@@ -81,6 +81,33 @@ STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
 
 
+def module_name_for_path(path: str) -> str:
+    """Path-relative module name so __init__.mojo files from different
+    packages get unique symbol prefixes (std_os___init__ vs std___init__).
+    Falls back to basename for modules outside STDLIB_PATH (e.g. test
+    modules) — os.path.relpath would produce '../../../...' paths with dots
+    that are invalid in C identifiers and cause GCC to reject the generated
+    .c file.
+
+    Single source of truth for "which module owns this file", shared by
+    build_stdlib_dylib.py (compiling a module to its own .o) and
+    gimple_codegen.py (resolving an imported struct's home module at a
+    cross-module call site) — both MUST derive a struct's module-qualified
+    C symbol from the exact same function applied to the exact same
+    resolved file path, or the two sides can disagree (e.g. a naive
+    dotted-import-string transform like 'std.os'.replace('.', '_') gives
+    'std_os', but a struct physically defined in std/os/__init__.mojo needs
+    'std_os___init__' to match what this function returns when compiling
+    that file directly) — that divergence would turn "module qualification"
+    into a NEW class of undefined-symbol linker error. See ABI.md's
+    "Functions and methods" section and STDLIB-BUGS.md for the collision
+    class this fixes."""
+    rel = os.path.relpath(path, STDLIB_PATH)
+    if rel.startswith('..'):
+        return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
+    return os.path.splitext(rel)[0].replace(os.sep, '_').replace('-', '_')
+
+
 class ModuleLoader:
     """Loads and caches Mojo modules from stdlib."""
 

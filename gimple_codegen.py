@@ -2400,6 +2400,16 @@ class GimpleGen:
         # typing, keeping the blast radius tight).
         self._imported_typedef_structs: list = []
         self._imported_struct_names: set = set()
+        # Imported struct local name -> its home module's C-symbol qualifier
+        # (e.g. 'std_utils__ansi'), so a call site on that struct computes the
+        # SAME module-qualified method symbol its home module actually
+        # exports (see _struct_method_qualifier / _struct_method_csym).
+        # Populated by _register_imported_structs (source-visible imports,
+        # via module_loader.module_name_for_path on the resolved file) and by
+        # _register_reflected_struct (dylib-reflection-only imports, by
+        # extracting the qualifier already baked into the dylib's advertised
+        # symbol string — there's no local source file to derive it from).
+        self._imported_struct_home: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -2976,11 +2986,33 @@ class GimpleGen:
             if not msig:
                 continue
             mret, mptypes = parse_c_sig(msig)
-            # The C symbol is the function name inside the signature.
+            # The C symbol is the function name inside the signature — this is
+            # whatever the defining module's own compile actually emitted
+            # (see GimpleGen._struct_method_csym_static / reflect.py's
+            # collect_exports), i.e. already module-qualified if that module
+            # had a real module_name. Record the qualifier (if any) into
+            # _imported_struct_home so a CALL SITE on this struct
+            # (_struct_method_qualifier / _struct_method_csym) derives the
+            # exact same qualified symbol reflect.py already declared here —
+            # otherwise the call site would independently recompute an
+            # UNQUALIFIED name (Counter has no local source file to run
+            # module_name_for_path on) and reference a symbol the dylib never
+            # defines under that name.
+            method_name = ename.split('.', 1)[1]
+            _bare_prefix = f"{name}_{_safe_name(method_name)}"
             msym = msig.split('(', 1)[0].strip().split()[-1].lstrip('*')
+            if msym.startswith(_bare_prefix):
+                qualifier = ''
+            else:
+                qualifier, sep, _rest = msym.partition(f"_{_bare_prefix}")
+                if not sep:
+                    qualifier = ''  # unrecognized shape; assume unqualified
+            if qualifier:
+                self._imported_struct_home.setdefault(name, qualifier)
             self.func_return_types[msym] = mret
             self.func_param_types[msym] = mptypes
-            if msym == f"{name}___init__":
+            bare_init = f"{name}___init__"
+            if msym == bare_init or (qualifier and msym == f"{qualifier}_{bare_init}"):
                 self._struct_has_init.add(name)
                 # The C signature gives no param names; record positional
                 # placeholders so a kwarg ctor binds by source order (below).
@@ -6270,7 +6302,12 @@ class GimpleGen:
         # 'join' as a string method and corrupt the class ref.
         if ot == 'int' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
             struct_name = func.obj.name
-            mangled = f"{struct_name}_{_safe_name(method)}"
+            # _static_methods is keyed by the historical BARE mangled name
+            # (populated elsewhere from source, never module-qualified), so
+            # the membership check below must use that bare form even though
+            # the actual emitted call target is qualified.
+            bare_mangled = f"{struct_name}_{_safe_name(method)}"
+            mangled = self._struct_method_csym(struct_name, method, '')
             ret_type = self.func_return_types.get(f"{struct_name}_{method}", 'char *')
             actual_args = [self.lower_expr(a) for a in node.args]
             # Keyword arguments (e.g. TestReport.skipped(name=...)) are real
@@ -6279,7 +6316,7 @@ class GimpleGen:
             for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
                 actual_args.append(self.lower_expr(_kexpr))
             # @staticmethod methods take no implicit cls arg
-            if mangled in self._static_methods:
+            if bare_mangled in self._static_methods:
                 arg_pairs = actual_args
             else:
                 arg_pairs = [(ot, ov)] + actual_args
@@ -6872,14 +6909,21 @@ class GimpleGen:
             _chosen_method = self._resolve_overload(_method_candidates, node.args, node.kwargs)
             if _chosen_method is not None:
                 _method_overload_suffix = _chosen_method['overload_id']
-        mangled = f"{struct_name}_{_safe_name(method)}{_method_overload_suffix}"
+        mangled = self._struct_method_csym(struct_name, method, _method_overload_suffix)
         # Prefer the candidate's own precomputed return type (Pass 2b-bis) over
         # func_return_types[suffixed_key], which is only populated once THAT
         # overload's own body is emitted (Phase 2a, declaration order) — a call
         # from an earlier sibling overload's body would otherwise see nothing
         # yet and silently default to int64_t below.
+        # Check the actually-emitted (possibly module-qualified) name FIRST —
+        # a struct known only via dylib reflection (_register_reflected_struct)
+        # registers its return/param types ONLY under the qualified key, since
+        # that's the only symbol name that really exists; the bare fallback
+        # below still matters for in-file/same-module methods, whose entries
+        # are registered under the bare key by the earlier pre-pass.
         ret_type = _chosen_method['ret_type'] if _chosen_method is not None else \
-            self.func_return_types.get(f"{struct_name}_{method}{_method_overload_suffix}", None)
+            self.func_return_types.get(mangled,
+                self.func_return_types.get(f"{struct_name}_{method}{_method_overload_suffix}", None))
         if ret_type is None and mangled in self._KNOWN_SIGS:
             ret_type = self._KNOWN_SIGS[mangled][0]
         if (ret_type is None and method == 'copy'
@@ -6907,7 +6951,8 @@ class GimpleGen:
             arg_pairs = self._build_call_args_for_candidate(_chosen_method, node.args, node.kwargs)
         else:
             arg_pairs = [self.lower_expr(a) for a in node.args]
-        full_param_list = self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", [])
+        full_param_list = self.func_param_types.get(mangled,
+            self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
         if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
             is_class_ref = True
         expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
@@ -6923,6 +6968,7 @@ class GimpleGen:
         # since the suffixed key is only set when THAT overload's own
         # definition is emitted, which may happen later in emission order.
         if (mangled not in self._KNOWN_SIGS
+                and mangled not in self.func_return_types
                 and f'{struct_name}_{method}{_method_overload_suffix}' not in self.func_return_types
                 and f'{struct_name}_{method}' not in self.func_return_types
                 and mangled not in self._auto_stubbed):
@@ -8523,7 +8569,7 @@ class GimpleGen:
         if _init_candidates:
             _chosen = self._resolve_overload(_init_candidates, args, kwargs)
             if _chosen is not None:
-                init_fname = f"{struct_name}___init__{_chosen['overload_id']}"
+                init_fname = self._struct_method_csym(struct_name, '__init__', _chosen['overload_id'])
                 arg_pairs = [(f"{struct_name} *", t)] + \
                     self._build_call_args_for_candidate(_chosen, args, kwargs)
                 self._emit_call('void', '', init_fname, arg_pairs)
@@ -8540,7 +8586,7 @@ class GimpleGen:
 
         # If struct has __init__, call it with the provided arguments
         if struct_name in self._struct_has_init:
-            init_fname = f"{struct_name}___init__"
+            init_fname = self._struct_method_csym(struct_name, '__init__', '')
             arg_pairs = [(f"{struct_name} *", t)]  # self parameter
             for arg in args:
                 arg_pairs.append(self.lower_expr(arg))
@@ -10946,8 +10992,8 @@ class GimpleGen:
                 tmp = self._new_val(et, f"{ev}")
                 alias = tmp
             struct_name = _struct_name_of(et)
-            enter_fn    = f"{struct_name}___enter__"
-            if enter_fn in self.func_return_types:
+            enter_fn    = self._struct_method_csym(struct_name, '__enter__', '')
+            if enter_fn in self.func_return_types or f"{struct_name}___enter__" in self.func_return_types:
                 self._emit(f"  {enter_fn} ({alias});")
             else:
                 self._emit(f"  /* with: __enter__ ({struct_name}) */")
@@ -10955,14 +11001,16 @@ class GimpleGen:
 
         def _emit_exits():
             for al, sn in aliases:
-                exit_fn = f"{sn}___exit__"
-                if exit_fn in self.func_return_types:
+                exit_fn = self._struct_method_csym(sn, '__exit__', '')
+                if exit_fn in self.func_return_types or f"{sn}___exit__" in self.func_return_types:
                     self._emit(f"  {exit_fn} ({al});")
                 else:
                     self._emit(f"  /* with: __exit__ ({sn}) */")
 
-        has_exit = any(f"{sn}___exit__" in self.func_return_types
-                       for _, sn in aliases)
+        has_exit = any(
+            self._struct_method_csym(sn, '__exit__', '') in self.func_return_types
+            or f"{sn}___exit__" in self.func_return_types
+            for _, sn in aliases)
 
         if has_exit:
             sj_ret = self._new_temp('int')
@@ -12594,6 +12642,16 @@ class GimpleGen:
                 self._imported_struct_names.add(local)
                 self._imported_typedef_structs.append(
                     StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
+                # Record this struct's home module so cross-module call sites
+                # and extern decls can compute the SAME qualified C symbol the
+                # struct's home module actually emits when compiled directly
+                # (see build_stdlib_dylib.py / module_loader.module_name_for_path).
+                # _parsed_import is cached by module string (_imported_src_cache),
+                # so this is a cheap cache hit, not a re-parse.
+                _imp_path, _imp_src, _imp_mod = self._parsed_import(st.module)
+                if _imp_path:
+                    import module_loader as _mlmod
+                    self._imported_struct_home[local] = _mlmod.module_name_for_path(_imp_path)
 
     def _find_imported_struct(self, module: str, name: str):
         """The StructDef for `name` defined directly in `module`'s source, or None."""
@@ -12782,6 +12840,117 @@ class GimpleGen:
             ids.append(oid)
         return ids
 
+    def _struct_method_qualifier(self, struct_name: str) -> str:
+        """Home-module prefix for struct_name's method C symbols, or '' when
+        no real module identity should apply.
+
+        struct_name may be either a struct DEFINED in the module currently
+        being compiled (self.module_name — already correct and unique per
+        stdlib source file, see build_stdlib_dylib.py's use of
+        module_loader.module_name_for_path) or one reached via `from X
+        import Struct` and registered into _imported_struct_home (see the
+        import-registration block that populates _imported_typedef_structs,
+        and _register_reflected_struct for the dylib-reflection-only case).
+        The imported case is checked first since an imported name is by
+        definition not locally defined.
+
+        Self-hosting exemption: gated on the file CURRENTLY being compiled
+        being one of this repo's own .py sources, NOT on `self.module_name`
+        being empty — module_name is NOT reliably empty for a self-hosted
+        file: do_imports=True's _compile_imported_module recursion passes a
+        real dotted-module-name-derived module_name for EVERY imported
+        module, including when mojo.py's own self-hosting bootstrap pulls in
+        gimple_codegen.py/monomorphize.py/etc. as sibling imports of ITSELF
+        (confirmed regression: those nested compiles got
+        module_name='gimple_codegen'/'monomorphize', producing calls like
+        `gimple_codegen_Parser___init__` that the hardcoded self-host tables
+        — which assume bare names — don't recognize, breaking
+        `make check-selfhost`).
+
+        Deliberately narrower than the `_is_selfhost_file` path-only check
+        used elsewhere (~13130) for the hardcoded field/method tables: that
+        check alone (just "is this file under the repo directory") ALSO
+        matches ordinary .mojo test fixtures written into runtime/ by the
+        test suite (e.g. test_module_cache.py's rs_cnt.mojo, itself under
+        this same repo tree) — confirmed regression: it wrongly suppressed
+        qualification for a real user struct (Counter) with no connection to
+        the self-hosting bootstrap at all. The self-hosting bootstrap is
+        always this compiler's own Python implementation, always .py — no
+        .mojo source is ever part of it — so requiring a .py extension here
+        (in addition to the directory check) distinguishes the two exactly.
+
+        Synthetic cross-module ABI types exemption: `Span` is unconditionally
+        seeded into struct_field_types (gen_module, NOT gated on
+        _is_selfhost_file, unlike every other hardcoded entry there — see
+        that seed's own comment) as a compiler-synthesized fat-pointer
+        convenience type, not a real struct owned by any one module's
+        source. Its `.unsafe_ptr()`/`.__len__()` calls fall through to a
+        SEPARATE, older "utility stub" fallback-declaration mechanism (the
+        `_util_pairs` table, unrelated to this composer) that always
+        forward-declares a single, permanently bare `Span_unsafe_ptr(...)`
+        shared across every compile — confirmed regression: qualifying the
+        CALL SITE only (there's nothing to qualify on the definition side;
+        Span has no real source module) produced a call to
+        `<qualifier>_Span_unsafe_ptr` with no matching declaration anywhere,
+        since the stub table still (correctly, for this shared synthetic
+        type) emits the bare name. Exempt it the same way MojoList/MojoDict
+        (the other synthetic runtime-representation types) are naturally
+        exempt by never going through struct-method mangling at all."""
+        if struct_name == 'Span':
+            return ''
+        _cur_file = getattr(self, '_current_filename', None)
+        if (_cur_file and _cur_file.endswith('.py') and os.path.commonpath(
+                [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR):
+            return ''
+        home = getattr(self, '_imported_struct_home', None)
+        if home and struct_name in home:
+            return home[struct_name]
+        # Only apply THIS module's own qualifier to a struct genuinely
+        # declared in this file's own top-level stmts (see gen_module's
+        # _local_struct_names) — never as a guess for a name this compile
+        # doesn't recognize as either local or (registered-)imported. An
+        # imported struct _register_imported_structs' narrow registration
+        # gate missed must stay unqualified (the historical, safe behavior)
+        # rather than get mislabeled as belonging to this module.
+        if struct_name in getattr(self, '_local_struct_names', ()):
+            return self.module_name or ''
+        return ''
+
+    def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str) -> str:
+        """The one composer every struct-method symbol site should call:
+        {qualifier_}StructName_method{overload_id}, qualifier omitted when
+        the struct has no real module identity (see
+        _struct_method_qualifier). Mirrors _func_csym's existing shape/trick
+        for free functions (see gimple_codegen.py's _func_csym): mirrors
+        func_return_types/func_param_types from the bare (unqualified)
+        mangled key onto the newly-qualified key via setdefault, so any
+        lookup still keyed by the historical bare mangled string keeps
+        resolving — no call site needs a simultaneous flag-day rename."""
+        qualifier = self._struct_method_qualifier(struct_name)
+        bare = f"{struct_name}_{_safe_name(method_name)}{overload_id}"
+        if not qualifier:
+            return bare
+        qualified = f"{qualifier}_{bare}"
+        if bare in self.func_return_types:
+            self.func_return_types.setdefault(qualified, self.func_return_types[bare])
+        if bare in self.func_param_types:
+            self.func_param_types.setdefault(qualified, self.func_param_types[bare])
+        if hasattr(self, '_mangled_signature_ctypes') and bare in self._mangled_signature_ctypes:
+            self._mangled_signature_ctypes.setdefault(qualified, self._mangled_signature_ctypes[bare])
+        return qualified
+
+    @staticmethod
+    def _struct_method_csym_static(qualifier: str, struct_name: str, method_name: str, overload_id: str) -> str:
+        """Pure version of _struct_method_csym reflect.py can call with no
+        GimpleGen instance in hand — mirrors overload_suffix_for's existing
+        @staticmethod pattern (see gimple_codegen.py's overload_suffix_for),
+        used the same way _func_export_csym mirrors _func_csym for free
+        functions. No setdefault mirroring here: reflect.py only needs the
+        symbol STRING to embed in the reflection table, not a live lookup
+        table to maintain."""
+        bare = f"{struct_name}_{_safe_name(method_name)}{overload_id}"
+        return f"{qualifier}_{bare}" if qualifier else bare
+
     def _gen_struct_method(self, struct_name: str, node: FunctionDef, overload_id: str = '') -> str:
         self._reset_func()
         # Key by overload so overloaded methods don't share closure state (each
@@ -12910,7 +13079,7 @@ class GimpleGen:
             param_strs.append(f"{ctype} {safe_bare}")
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
-        mangled    = f"{struct_name}_{_safe_name(node.name)}{overload_id}"
+        mangled    = self._struct_method_csym(struct_name, node.name, overload_id)
 
         self._emit_label("bb_2")
         for stmt in node.body:
@@ -12932,6 +13101,20 @@ class GimpleGen:
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
+        # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
+        # imported, or referenced but never actually resolved as local or
+        # imported) — the only names _struct_method_qualifier may safely
+        # apply self.module_name to. See that method's docstring: a struct
+        # name this compile can't place in EITHER _imported_struct_home NOR
+        # here must fall back to the bare/unqualified form, not guess that
+        # it belongs to the module currently being compiled — confirmed
+        # regression otherwise (a cross-module call to an imported struct
+        # that _register_imported_structs' narrow parameter-type-annotation
+        # gate never registered, e.g. StridedSlice/TString/ContiguousSlice
+        # used only via untyped locals, got glued with THIS file's own
+        # module qualifier instead of either its real home module's or no
+        # qualifier at all).
+        self._local_struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
         # Overloaded top-level functions (same name, multiple defs) can't be
         # emitted as distinct C symbols. Drop them here — the elaborator selects
         # and instantiates the right overload per call site (slice 4). One filter
@@ -13690,8 +13873,12 @@ class GimpleGen:
             if not s.methods:
                 continue
             for _oid, m in zip(self._struct_method_overload_ids(s), s.methods):
-                mangled = f"{s.name}_{m.name}{_oid}"
-                param_ctypes = self._mangled_signature_ctypes.get(mangled)
+                bare_mangled = f"{s.name}_{m.name}{_oid}"
+                mangled = self._struct_method_csym(s.name, m.name, _oid)
+                # _mangled_signature_ctypes is keyed by the BARE form (Pass
+                # 2b-bis populates it before any qualifier is known) — look
+                # up under that key regardless of what mangled resolved to.
+                param_ctypes = self._mangled_signature_ctypes.get(bare_mangled)
                 if param_ctypes is None:
                     continue
                 # The suffixed func_return_types[mangled] key is only ever
@@ -13729,9 +13916,14 @@ class GimpleGen:
                 # too, mirroring the auto-stub pattern _lower_struct_method_call
                 # already uses elsewhere for genuinely-unknown methods.
                 if _oid:
-                    bare = f"{s.name}_{m.name}"
-                    bare_guard = f"_MOJO_STUB_{bare.upper()}"
-                    bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {bare} (...);\n#endif"
+                    # "bare" here means no OVERLOAD-HASH suffix (the call
+                    # site's own unresolved-overload fallback, per
+                    # _lower_struct_method_call's `self._struct_method_csym(
+                    # struct_name, method, '')`) — still module-qualified,
+                    # for the same reason every other decl in this loop is.
+                    no_oid = self._struct_method_csym(s.name, m.name, '')
+                    bare_guard = f"_MOJO_STUB_{no_oid.upper()}"
+                    bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {no_oid} (...);\n#endif"
                     if bare_decl not in self._elaborated_externs:
                         self._elaborated_externs.append(bare_decl)
 
@@ -15656,29 +15848,18 @@ class GimpleGen:
         if not self.do_imports:
             struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
         for sd in struct_defs:
-            # Track method counts to detect and handle overloads
-            method_counts = {}
-            for m in sd.methods:
-                method_counts[m.name] = method_counts.get(m.name, 0) + 1
-
-            # For each method, assign overload ID if there are multiple with same name
-            method_ids = {}
-            _seen_ids: dict[str, dict[str, int]] = {}  # method_name -> {id -> count}
-            for m in sd.methods:
-                if method_counts[m.name] > 1:
-                    oid = _method_overload_id(tuple(m.params or []), sd.name, m.name)
-                    seen = _seen_ids.setdefault(m.name, {})
-                    count = seen.get(oid, 0)
-                    seen[oid] = count + 1
-                    if count > 0:
-                        oid = f"{oid}_{count + 1}"
-                    method_ids[id(m)] = oid
-                else:
-                    method_ids[id(m)] = ''
+            # Overload-id per method, aligned with sd.methods — this used to
+            # be a second, hand-rolled copy of _struct_method_overload_ids'
+            # exact logic (a maintenance risk: the two copies could drift).
+            # Calling the shared @staticmethod instead guarantees this loop's
+            # forward-declared name always matches _gen_struct_method's own
+            # emitted symbol.
+            _moids = self._struct_method_overload_ids(sd)
+            method_ids = {id(m): oid for m, oid in zip(sd.methods, _moids)}
 
             for m in sd.methods:
                 overload_suffix = method_ids.get(id(m), '')
-                mangled_name = f"{sd.name}_{_safe_name(m.name)}{overload_suffix}"
+                mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
                 # Use per-overload key first; fall back to base name, then AST annotation
                 ret = (self.func_return_types.get(f"{sd.name}_{m.name}{overload_suffix}")
                        or self.func_return_types.get(f"{sd.name}_{m.name}")
@@ -15712,11 +15893,13 @@ class GimpleGen:
 
             # For overloaded methods, also emit a catch-all base-name decl so that
             # call sites that use the unmangled name (e.g. Slice___init__) don't fail
-            # with "implicit declaration of function".
+            # with "implicit declaration of function". Qualified the same way the
+            # real per-overload decls above are, so it's declaring the same
+            # (home-module-prefixed) symbol namespace, not a stray unqualified one.
             _emitted_base: set[str] = set()
             for m in sd.methods:
                 if method_ids.get(id(m), ''):  # has an overload suffix
-                    base_cname = f"{sd.name}_{_safe_name(m.name)}"
+                    base_cname = self._struct_method_csym(sd.name, m.name, '')
                     if base_cname not in _emitted_base:
                         base_ret = (self.func_return_types.get(f"{sd.name}_{m.name}")
                                     or self._resolve_type(m.return_type))
