@@ -1540,8 +1540,20 @@ class Parser:
     def _parse_for(self):
         _for_tok = self._peek()
         self._expect("KW", "for")
-        # Skip optional convention keyword (var, ref, mut, etc.)
-        if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+        # Skip optional convention keyword (var, ref, mut, etc.) — but only
+        # when it's genuinely a prefix, i.e. something that can start a
+        # target follows it (another name, or `(` for tuple unpacking).
+        # `var` is BOTH a convention keyword (`for var x in y:`, never
+        # actually used anywhere in this codebase — grepped) AND a
+        # perfectly ordinary Python identifier for the loop variable
+        # itself (`for var in (...):`, real code in imports.py). Without
+        # the peek(1) check, `for var in (...):` swallowed `var` as a
+        # bogus convention prefix, then swallowed `in` too (mistaking it
+        # for the loop-variable name), leaving the parser expecting `in`
+        # but finding the tuple's `(` instead — "Expected KW got LPAREN".
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"):
             self._advance()
 
         def _parse_for_target():
