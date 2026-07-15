@@ -2071,6 +2071,15 @@ class Interpreter:
         self.scope.define(node.name, cls)
         return cls
 
+    def execute_TraitDef(self, node: N.TraitDef):
+        """Traits are a compile-time/structural-typing construct (bound
+        generics, elaborate.py's conformance checks) with no runtime
+        counterpart here — the interpreter is dynamically typed and never
+        consults a trait object at execution time (confirmed: no other
+        TraitDef reference anywhere in this file). No-op, matching how
+        FunctionDef/StructDef would behave if they carried no members."""
+        return None
+
     def execute_ImportStmt(self, node: N.ImportStmt):
         """Execute `import mod` / `import mod as alias`.
 
@@ -2378,6 +2387,11 @@ class Interpreter:
         else:
             targets = [node.target]
 
+        if not hasattr(iterable, '__iter__') and not hasattr(iterable, '__getitem__'):
+            kind = type(iterable).__name__
+            if isinstance(iterable, MojoInstance):
+                kind = iterable._mojo_class.name
+            raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
         for value in iterable:
             # Bind loop variable(s)
             if len(targets) == 1:
@@ -3044,6 +3058,8 @@ class Interpreter:
             if method is not None:
                 return BoundMethod(method, obj, self)
             raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
+        if not hasattr(obj, expr.member):
+            raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
         return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):

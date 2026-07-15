@@ -132,6 +132,13 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             print(f"Error: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
+            # An uncaught interpreter exception is a failed run, not a
+            # successful one — without this, the worker thread finishes
+            # "normally" after swallowing the exception, exit_code stays
+            # empty, and the process below falls through to a bare return
+            # (exit 0) despite the traceback just printed to stderr. Callers
+            # (Makefiles checking $?, CI) saw a script crash reported as PASS.
+            exit_code.append(1)
 
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 1_000_000))
