@@ -51,11 +51,11 @@ This will:
 
 #### Verification Failures
 - stage1 and stage2 may produce different dumps
-- Indicates: transpilation bugs, determinism issues, or missing features
+- Indicates: compilation bugs, determinism issues, or missing features
 
 ## Branch Points
 
-### If gimple_codegen.mojo still has errors after transpiler fixes
+### If gimple_compile.mojo still has errors after compiler fixes
 - Consider alternative: implement gimple_codegen natively in Mojo (high effort)
 - Or: accept Python IR for now, defer full GIMPLE to future
 
@@ -65,8 +65,8 @@ This will:
 
 ### If stage1 and stage2 dumps differ
 - Debug which part of the compiler has non-determinism
-- Check transpilation of that module
-- May need iterative fixes to transpiler/generated code
+- Check compilation of that module
+- May need iterative fixes to compiler/generated code
 
 ## Success Criteria
 

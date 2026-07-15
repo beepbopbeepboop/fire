@@ -88,7 +88,7 @@ And now we can do all medium and hard todos from CODEGENPLAN.md, be
 
 
 Ok, now, for all the code you wrote in *.py, that is defined by *.md,
-   add support to the transpiler to instead write that code upon
+   add support to the compiler to instead write that code upon
    seeing the *.md files, and generate it that way instead. Audit all
    the missing bits in the *.md files that should be in the system
    already, but aren't and add those items to the PLAN.md file as TODO
