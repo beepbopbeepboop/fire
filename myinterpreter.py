@@ -2073,12 +2073,34 @@ class Interpreter:
 
     def execute_TraitDef(self, node: N.TraitDef):
         """Traits are a compile-time/structural-typing construct (bound
-        generics, elaborate.py's conformance checks) with no runtime
-        counterpart here — the interpreter is dynamically typed and never
-        consults a trait object at execution time (confirmed: no other
-        TraitDef reference anywhere in this file). No-op, matching how
-        FunctionDef/StructDef would behave if they carried no members."""
-        return None
+        generics, elaborate.py's conformance checks) with no conformance
+        enforcement here — this interpreter is dynamically typed and never
+        consults a trait object to check whether a struct satisfies it.
+
+        Still needs to define a real value in scope though (mojolib
+        BUG-2026-019): `struct Foo(SomeTrait):` looks `SomeTrait` up via
+        execute_StructDef's `self.scope.get(base_name)` before deciding
+        whether to merge anything in, and `from some_module import
+        SomeTrait` requires the name to exist in that module's top-level
+        scope afterwards — a bare `return None` (the original fix) leaves
+        the trait name undefined, so it just trades one crash (`No handler
+        for TraitDef`) for another (`cannot import name 'SomeTrait'`).
+        Represented as a MojoClass with no fields: any `fn` in the trait
+        body becomes a default/required-method stub a conforming struct's
+        own same-named method already overrides via execute_StructDef's
+        existing base-then-child merge order, exactly like struct
+        inheritance — traits have no fields to merge, only methods."""
+        methods = {}
+        for m in getattr(node, 'body', None) or []:
+            if isinstance(m, N.FunctionDef):
+                params = self._extract_param_names(m)
+                comptime_params = getattr(m, 'comptime_params', None)
+                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
+                spec = self._classify_params(m)
+                self._register_function(methods, m.name, method_func, spec)
+        cls = MojoClass(node.name, [], methods, self)
+        self.scope.define(node.name, cls)
+        return cls
 
     def execute_ImportStmt(self, node: N.ImportStmt):
         """Execute `import mod` / `import mod as alias`.
