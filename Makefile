@@ -88,7 +88,20 @@ stdlib:
 # ever produced those 4 outputs for mojo.py itself (and even then, only
 # .ci — --dump-full doesn't emit .tok/.ast/.pyi at all), so validate-all's
 # "154 mismatches" were never a real regression signal, just this asymmetry.
-stage1:
+#
+# `clean-bootstrap` prerequisite: `verify`'s stage1-vs-stage2-vs-stage3
+# comparison only looks at whatever files happen to be sitting in stage1/,
+# stage2/, stage3/ — it never checks those files still correspond to a
+# CURRENT *.mojo source. If the top-level *.mojo file set changes between
+# bootstrap runs (a scratch file added or removed) without the stage dirs
+# being wiped first, a stale generated artifact from the OLD file set is
+# still present in one stage dir but missing (or a fresh mismatch) in
+# another, and verify reports a false failure on a completely unrelated
+# file. `bootstrap` is a from-scratch full recompile regardless (every
+# source file is re-dumped every stage), so forcing a clean stage tree
+# here costs nothing and removes an entire class of stale-artifact false
+# failures for free.
+stage1: clean-bootstrap
 	@mkdir -p stage1
 	@echo "=== Stage 1: Python → stage1/ ==="
 	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
