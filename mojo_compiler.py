@@ -1026,6 +1026,14 @@ class Parser:
             return self._advance().value
         raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
+    def _parse_dotted_name(self) -> str:
+        """Consume a dotted name like `asyncio.CancelledError` and return it
+        as a single string. Used for exception types in `except` clauses."""
+        name = self._ident()
+        while self._peek().kind == "DOT":
+            self._advance(); name += "." + self._ident()
+        return name
+
     def _skip_newlines(self):
         while self._peek().kind == "NEWLINE": self._advance()
 
@@ -1297,6 +1305,16 @@ class Parser:
                     self._advance()
                     val = self._parse_expr(0)
                 return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
+            # Implicit (parenthesis-less) tuple RHS: `__slots__ = 'a', 'b', 'c'`
+            # — a bare comma-separated list on the right of `=` is a tuple.
+            if self._peek().kind == "COMMA":
+                rhs_elements = [val]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                        break
+                    rhs_elements.append(self._parse_expr(0))
+                val = TupleExpr(elements=rhs_elements)
             return AssignStmt(target=expr, value=val, line=line, col=col)
         if self._peek().kind == "AUGASSIGN":
             op = self._advance().value
@@ -1344,12 +1362,14 @@ class Parser:
         while self._peek().kind == "DOT":
             self._advance()
             module += "."
-        # If not just dots, parse the module name
-        if self._peek().kind == "NAME":
+        # If not just dots, parse the module name. Accept a keyword-named
+        # module (e.g. `from struct import pack` — `struct` lexes as KW), but
+        # never swallow the `import` keyword itself as the module name.
+        if self._peek().kind == "NAME" or (self._peek().kind == "KW" and not self._is_kw("import")):
             module += self._advance().value
             while self._peek().kind == "DOT":
                 self._advance()
-                module += "." + self._expect("NAME").value
+                module += "." + self._ident()
         elif not module:
             # No dots and no name: error
             self._expect("NAME")  # Will raise error
@@ -1370,7 +1390,9 @@ class Parser:
             # Empty parens: from x import ()
             self._advance()
             return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
-        name = self._expect("NAME").value
+        # `_ident()` (not `_expect("NAME")`): an imported name may collide with
+        # a Mojo keyword, e.g. `from weakref import ref` — `ref` lexes as KW.
+        name = self._ident()
         alias = None
         if self._is_kw("as"):
             self._advance(); alias = self._ident()
@@ -1390,7 +1412,7 @@ class Parser:
             if self._peek().kind == "RPAREN":
                 self._advance()
                 break
-            name = self._expect("NAME").value
+            name = self._ident()  # keyword-named imports (e.g. `ref`) allowed
             alias = None
             if self._is_kw("as"):
                 self._advance(); alias = self._ident()
@@ -1595,6 +1617,14 @@ class Parser:
                 target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")
         iterable = self._parse_expr(0)
+        # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`
+        if self._peek().kind == "COMMA":
+            elems = [iterable]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "COLON": break
+                elems.append(self._parse_expr(0))
+            iterable = TupleExpr(elements=elems)
         self._expect("COLON")
         body = self._parse_block()
         else_body = None
@@ -1882,11 +1912,32 @@ class Parser:
         handlers = []
         while self._is_kw("except"):
             self._advance()
+            # `except*` exception groups (PEP 654): the star is cosmetic for
+            # our tag-based dispatch — accept and ignore it.
+            if self._peek().kind == "OP" and self._peek().value == "*":
+                self._advance()
             exc_type, exc_name = None, None
-            if self._peek().kind == "NAME":
-                exc_type = self._advance().value
+            if self._peek().kind == "LPAREN":
+                # Parenthesized tuple of exception types:
+                #   except (ValueError, TypeError):
+                # Stored as a list of dotted-name strings; codegen ORs the
+                # tag match across every type in the tuple.
+                self._advance()
+                names = []
+                while self._peek().kind != "RPAREN":
+                    names.append(self._parse_dotted_name())
+                    if self._peek().kind == "COMMA": self._advance()
+                    else: break
+                self._expect("RPAREN")
+                exc_type = names
                 if self._is_kw("as"):
-                    self._advance(); exc_name = self._expect("NAME").value
+                    self._advance(); exc_name = self._ident()
+            elif self._peek().kind in ("NAME", "KW") and not self._is_kw("as"):
+                # A single (possibly dotted) exception type, e.g.
+                #   except ValueError:      except asyncio.CancelledError:
+                exc_type = self._parse_dotted_name()
+                if self._is_kw("as"):
+                    self._advance(); exc_name = self._ident()
             self._expect("COLON")
             handlers.append(ExceptHandler(exc_type=exc_type, name=exc_name,
                                            body=self._parse_block()))
@@ -2066,7 +2117,13 @@ class Parser:
         self._expect("KW", 'raise')
         if self._peek().kind in ("NEWLINE","EOF","DEDENT"):
             return RaiseStmt(value=None)
-        return RaiseStmt(value=self._parse_expr(0))
+        val = self._parse_expr(0)
+        # `raise X from Y` / `raise X from None` — exception-chaining
+        # suppression. The cause is not modeled by our tag-based exception
+        # runtime, but must be consumed so parsing continues past it.
+        if self._is_kw("from"):
+            self._advance(); self._parse_expr(0)
+        return RaiseStmt(value=val)
 
     def _parse_break(self):
         self._expect("KW", 'break')
@@ -2140,11 +2197,25 @@ class Parser:
 
     def _parse_unary(self):
         t = self._peek()
+        # `await expr` — `await` lexes as a plain NAME (not a keyword). Async
+        # semantics aren't modeled, so unwrap to the awaited expression. Guard
+        # on the next token starting an expression so a variable literally
+        # named `await` (`x = await`, `await.foo`) still reads as an identifier.
+        if (t.kind == "NAME" and t.value == "await"
+                and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
+                    "FLOAT", "LPAREN", "LBRACKET", "LBRACE")):
+            self._advance()
+            return self._parse_unary()
         if t.kind == "OP" and t.value in ("-", "+", "~"):
             self._advance()
             return UnaryOp(op=t.value, operand=self._parse_unary())
         # Boolean `not` is handled as a low-precedence prefix in _parse_expr.
-        # Spread/unpack: *expr or **expr (valid inside list/dict/call literals)
+        # Spread/unpack: *expr or **expr (valid inside list/dict/call literals).
+        # `**` lexes as a single OP token, so handle it directly — otherwise
+        # dict unpacking `{**a, **b}` hit the fallthrough "Unexpected OP('**')".
+        if t.kind == "OP" and t.value == "**":
+            self._advance()
+            return UnaryOp(op="**", operand=self._parse_unary())
         if t.kind == "OP" and t.value == "*":
             self._advance()
             # Check for **
@@ -2319,8 +2390,8 @@ class Parser:
                     else:
                         first = self._parse_expr(0)
                         if self._is_kw("for"):
-                            gen = self._parse_generator()
-                            args = [Comprehension(kind="generator", element=first, generators=[gen])]
+                            gens = self._parse_generators()  # allow chained for-clauses
+                            args = [Comprehension(kind="generator", element=first, generators=gens)]
                             continue
                         args.append(first)
                     if self._peek().kind == "COMMA": self._advance()
@@ -2489,9 +2560,12 @@ class Parser:
                 self._advance(); return TupleExpr(elements=[], line=line, col=col)
             first = self._parse_expr(0)
             if self._is_kw("for"):
-                gen = self._parse_generator()
+                # `_parse_generators` (plural) handles chained clauses:
+                # (x for row in rows for x in row) — a single `for` clause
+                # left the trailing `for` unconsumed → "Expected RPAREN got for".
+                gens = self._parse_generators()
                 self._expect("RPAREN")
-                return Comprehension(kind="generator", element=first, generators=[gen], line=line, col=col)
+                return Comprehension(kind="generator", element=first, generators=gens, line=line, col=col)
             if self._peek().kind == "COMMA":
                 elems = [first]
                 while self._peek().kind == "COMMA":
@@ -2634,6 +2708,12 @@ class Parser:
             sub = self._parse_generator_target()
             self._expect("RPAREN")
             target = f"({sub})"
+        elif t.kind == "LBRACKET":
+            # List-pattern unpacking target: `for [off] in ...`
+            self._advance()
+            sub = self._parse_generator_target()
+            self._expect("RBRACKET")
+            target = f"[{sub}]"
         elif t.kind in ("NAME", "KW"):
             target = self._advance().value
         else:
@@ -2825,6 +2905,10 @@ class Parser:
         # Handle backtick-quoted MLIR types (e.g., `!pop.scalar<bool>`)
         if self._peek().kind == "STRING" and self._peek().value.startswith("`"):
             return prefix + self._advance().value  # return the backtick string as-is
+        # Forward-reference string annotation: `-> "TermState"`, `x: "SomeType"`
+        # (PEP 484). Strip the quotes and treat the contents as the type name.
+        if self._peek().kind == "STRING":
+            return prefix + self._strip_string_prefix_and_quotes(self._advance().value)
         # Handle parenthesized types like () for unit type
         if self._peek().kind == "LPAREN":
             name = prefix + "("
@@ -3108,7 +3192,12 @@ def emit(node, indent: int = 0) -> str:
         out = [f"{pad}try:"]
         out += [emit(s,indent+1) for s in node.body]
         for h in node.handlers:
-            exc  = f" {h.exc_type}" if h.exc_type else ""
+            if isinstance(h.exc_type, list):
+                exc = " (" + ", ".join(h.exc_type) + ")"
+            elif h.exc_type:
+                exc = f" {h.exc_type}"
+            else:
+                exc = ""
             name = f" as {h.name}"  if h.name    else ""
             out.append(f"{pad}except{exc}{name}:")
             out += [emit(s,indent+1) for s in h.body]

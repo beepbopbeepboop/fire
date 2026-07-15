@@ -7001,7 +7001,12 @@ class GimpleGen:
         'scalbf',
         # POSIX fd/process calls our prelude headers don't pull in → emit the
         # extern ourselves (using the _LIBC_SIGS prototype) to avoid implicit decls.
-        'dup', 'pipe',
+        # fcntl confirmed missing here 2026-07-15: a generic (e.g. a comptime
+        # fcntl[Int]/fcntl[Int64] instantiation via monomorphize.py) compiled
+        # in isolation has no <fcntl.h> in its preamble and no other call
+        # site to inherit an extern from, so it hit "implicit declaration of
+        # function 'fcntl'" on every cold-CAS-cache stdlib build.
+        'dup', 'pipe', 'fcntl',
     })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
@@ -7337,7 +7342,21 @@ class GimpleGen:
         source = self._imported_overloads.get(g)
         if not source:
             return None
+        # Keyword-only calls (e.g. std.memory.memcpy(dest=.., src=.., count=..))
+        # were previously invisible here: only node.args was lowered, so a
+        # kwargs-only call always resolved with an EMPTY arg-type list, which
+        # overload resolution below either fails to disambiguate or matches
+        # against a wrong/empty-param candidate — either way, the argument
+        # values themselves were silently dropped, emitting a call the real
+        # signature can never accept (confirmed root cause of a spurious
+        # `memcpy();` — zero args — that broke a cold-CAS-cache stdlib build
+        # investigated 2026-07-15). Real call sites overwhelmingly write
+        # kwargs in the callee's own declaration order, so appending them
+        # after any positional args is the same best-effort convention used
+        # elsewhere in this file (_lower_call's general kwarg padding).
         arg_pairs = [self.lower_expr(a) for a in node.args]
+        for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
+            arg_pairs.append(self.lower_expr(_kexpr))
         try:
             module_src = open(source).read()
             import elaborate
@@ -8339,8 +8358,25 @@ class GimpleGen:
         if fname_raw == 'format_ast'  and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
         if fname_raw == 'emit_module' and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
 
-        # General kwarg padding when expected param count is known
+        # General kwarg padding when expected param count is known. A call
+        # compiled in isolation (e.g. monomorphize.py's instantiate(), which
+        # builds a brand-new GimpleGen per generic instantiation with none of
+        # the surrounding module's imports registered) never populates
+        # func_param_types for an imported function — but a C-stdlib-style
+        # function like `memcpy` still has its real arity in `_KNOWN_SIGS`.
+        # Falling back to that (rather than leaving expected_params empty)
+        # is what lets a keyword-only call like std.memory's
+        # `memcpy(dest=.., src=.., count=..)` still get its arguments bound
+        # here instead of silently emitting a bare, argument-less `memcpy()`
+        # — confirmed cause of a cascading, confusing GCC error that broke
+        # every cold-CAS-cache stdlib build (investigated 2026-07-15). Purely
+        # additive/narrower than dropping kwargs outright: a name with no
+        # entry in _KNOWN_SIGS either (e.g. a struct constructor like
+        # ARM64JIT, called with stale/vestigial kwargs its real 0-arg
+        # constructor ignores) is untouched, exactly as before.
         expected_params = self.func_param_types.get(fname_raw, [])
+        if not expected_params and fname_raw in self._KNOWN_SIGS:
+            expected_params = self._KNOWN_SIGS[fname_raw][1]
         if expected_params and len(arg_pairs) < len(expected_params):
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
             while len(arg_pairs) < len(expected_params):
@@ -10573,8 +10609,18 @@ class GimpleGen:
                 elif len(arg_pairs) < 2:
                     arg_pairs.append(('int', '0'))
 
-            # General: pad missing args with kwargs when expected param count is known
+            # General: pad missing args with kwargs when expected param count is
+            # known — see _lower_call's identical logic (this is the
+            # statement-level twin: a call whose return value is discarded,
+            # e.g. `memcpy(dest=.., src=.., count=..)` standing alone as its
+            # own statement, never reaches _lower_call at all). Falling back
+            # to `_KNOWN_SIGS`'s real arity when func_param_types has no entry
+            # is what fixed the memcpy-in-isolated-compile bug investigated
+            # 2026-07-15 without over-firing for a struct constructor called
+            # with stale/vestigial kwargs (not in _KNOWN_SIGS, so untouched).
             expected_params = self.func_param_types.get(raw_name, [])
+            if not expected_params and fname in self._KNOWN_SIGS:
+                expected_params = self._KNOWN_SIGS[fname][1]
             if expected_params and len(arg_pairs) < len(expected_params):
                 kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
                 while len(arg_pairs) < len(expected_params):
@@ -10673,11 +10719,29 @@ class GimpleGen:
     def _handler_exc_name(self, h):
         if h.exc_type is None:
             return None
+        # `except (A, B):` stores a list of type-name strings; use the first
+        # as the representative name (typed/bare classification, binding
+        # type). The full OR-match across all types is done via
+        # _handler_exc_all_names in the dispatch loop.
+        if isinstance(h.exc_type, list):
+            if len(h.exc_type) > 0:
+                return h.exc_type[0]
+            return None
         if hasattr(h.exc_type, 'name'):
             return h.exc_type.name
         if isinstance(h.exc_type, str):
             return h.exc_type
         return None
+
+    def _handler_exc_all_names(self, h):
+        """Every exception type name a handler catches. A single-type handler
+        yields one name; a parenthesized `except (A, B):` yields all of them."""
+        if isinstance(h.exc_type, list):
+            return h.exc_type
+        one = self._handler_exc_name(h)
+        if one is None:
+            return []
+        return [one]
 
     def _emit_except_handler(self, handler, node, bb_after):
         """Emit one except-handler's binding + body + finally + exit goto.
@@ -10915,7 +10979,11 @@ class GimpleGen:
                 # OR the equality check across every known descendant's tag,
                 # not just the handler's own type.
                 handler_name = self._handler_exc_name(h)
-                descendant_names = self._exc_descendants.get(handler_name, {handler_name})
+                descendant_names = set()
+                for _hn in self._handler_exc_all_names(h):
+                    descendant_names |= self._exc_descendants.get(_hn, {_hn})
+                if len(descendant_names) == 0:
+                    descendant_names = {handler_name}
                 is_match = None
                 for dname in sorted(descendant_names):
                     tid = self._exc_type_id(dname)
@@ -14623,13 +14691,41 @@ class GimpleGen:
             '#include <Python.h>',
             '#endif',
             '#include <mojo_runtime.h>',
-            '/* Disable security wrappers: sprintf/snprintf macros expand to nested',
-            '   __builtin___sprintf_chk calls which GIMPLE rejects. */',
+            '/* Disable security wrappers: sprintf/snprintf/memcpy/memmove/memset/',
+            '   strcpy/strncpy/strcat/strncat macros expand to nested',
+            '   __builtin___*_chk calls which GIMPLE rejects (confirmed for memcpy:',
+            '   a bare memcpy(dst, src, n) call expanded to',
+            '   __builtin___memcpy_chk(dst, src, n, __builtin_object_size(dst, 0))',
+            '   and broke every cold-CAS-cache stdlib build via List[T].extend,',
+            '   investigated 2026-07-15 — the other _FORTIFY_SOURCE-wrapped libc',
+            '   functions below are the same class of bug, pre-empted before they',
+            '   bite the same way). */',
             '#ifdef sprintf',
             '#undef sprintf',
             '#endif',
             '#ifdef snprintf',
             '#undef snprintf',
+            '#endif',
+            '#ifdef memcpy',
+            '#undef memcpy',
+            '#endif',
+            '#ifdef memmove',
+            '#undef memmove',
+            '#endif',
+            '#ifdef memset',
+            '#undef memset',
+            '#endif',
+            '#ifdef strcpy',
+            '#undef strcpy',
+            '#endif',
+            '#ifdef strncpy',
+            '#undef strncpy',
+            '#endif',
+            '#ifdef strcat',
+            '#undef strcat',
+            '#endif',
+            '#ifdef strncat',
+            '#undef strncat',
             '#endif',
             '/* Undefine exception-name macros from mojo_runtime.h that clash with',
             '   Mojo struct/class names in generated code. */',

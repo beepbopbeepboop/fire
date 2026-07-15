@@ -185,6 +185,11 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
 
 
 def _cstr(s: str) -> str:
+    # Collapse internal whitespace runs to single spaces: a signature string
+    # parsed from a multi-line C prototype (e.g. mojo_regex_search's wrapped
+    # declaration) carries embedded newlines, and a raw newline inside a C
+    # string literal is a syntax error ("missing terminating \" character").
+    s = ' '.join(s.split())
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
