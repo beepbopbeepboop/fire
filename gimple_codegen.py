@@ -2212,7 +2212,7 @@ static int64_t __mojo_floordiv (int64_t a, int64_t b)
 
 # ---------------------------------------------------------------------------
 # String constants for GIMPLE-compatible emit patterns
-# (defined at module level to avoid transpiler optimizing them to globals)
+# (defined at module level to avoid compiler optimizing them to globals)
 # ---------------------------------------------------------------------------
 
 _COMMENT_WALRUS_UNSUPPORTED = "  /* walrus: unsupported LHS */"
@@ -4565,6 +4565,22 @@ class GimpleGen:
         self._emit(f"  {t} = 0;  /* ... */")
         return 'int', t
 
+    @staticmethod
+    def _split_expr_format(src: str) -> str:
+        """Split off format spec and conversion from an f-string expression.
+
+        Only ':' and '!' at the top level (not inside brackets/parens/braces)
+        separate the expression from the format spec or conversion."""
+        depth = 0
+        for i, ch in enumerate(src):
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                depth -= 1
+            elif ch in ':!' and depth == 0:
+                return src[:i].strip()
+        return src.strip()
+
     def _parse_fstring_parts(self, inner):
         """Parse f-string body into [('lit',text) | ('expr',code)] parts."""
         parts = []
@@ -4587,7 +4603,7 @@ class GimpleGen:
                     if depth > 0:
                         expr_chars.append(ch)
                     i += 1
-                expr_src = ''.join(expr_chars).split('!')[0].split(':')[0].strip()
+                expr_src = self._split_expr_format(''.join(expr_chars))
                 parts.append(('expr', expr_src))
             elif c == '}' and i + 1 < len(inner) and inner[i+1] == '}':
                 buf.append('}'); i += 2
@@ -4703,7 +4719,8 @@ class GimpleGen:
                     # The interpolation can't be lowered.  Dropping it would
                     # silently corrupt the program's output, so warn and keep
                     # the source text visible in the produced string instead.
-                    print(f"mojo: warning: f-string interpolation "
+                    fname = self._current_filename or '<unknown>'
+                    print(f"{fname}: warning: f-string interpolation "
                           f"'{{{text}}}' could not be compiled; emitting it "
                           f"as literal text ({type(e).__name__}: {e})",
                           file=sys.stderr)
@@ -5161,7 +5178,7 @@ class GimpleGen:
         # to its underlying MLIR value — at the C level that is the scalar itself,
         # so pass the operand through unchanged. Only for already-scalar operands:
         # struct-typed values (Bool*, SIMD*) keep their existing member handling.
-        if node.member == '_mlir_value' and not (ot.endswith(' *') and _struct_name_of(ot)):
+        if node.member == '_mlir_value' and not (ot.endswith(' *') and _struct_name_of(ot) in self.struct_field_types):
             return ot, ov
 
         # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
@@ -6325,6 +6342,12 @@ class GimpleGen:
             t = self._call_expr(ret_type, mangled, arg_pairs)
             return ret_type, t
 
+        # ── .copy() on Copyable scalars is an identity operation ──────────────
+        # Must happen BEFORE the opaque-int→container coercion block, which
+        # would cast int64_t to char* and route through _lower_str_method.
+        if method == 'copy':
+            return ot, ov
+
         # ── Opaque int → coerce to appropriate container type FIRST ──────────
         # Must happen before container-type checks so the casted type is seen below.
         if ot in ('int', 'int64_t') and method in (
@@ -6921,6 +6944,9 @@ class GimpleGen:
         # that's the only symbol name that really exists; the bare fallback
         # below still matters for in-file/same-module methods, whose entries
         # are registered under the bare key by the earlier pre-pass.
+        # Fallback to func_return_types[mangled] for structs not covered by
+        # _struct_method_signatures (imported/reflected structs registered
+        # after Pass 2b-bis, notably via _register_imported_structs).
         ret_type = _chosen_method['ret_type'] if _chosen_method is not None else \
             self.func_return_types.get(mangled,
                 self.func_return_types.get(f"{struct_name}_{method}{_method_overload_suffix}", None))
@@ -7427,6 +7453,7 @@ class GimpleGen:
             t = self._new_temp('int')
             self._emit(f"  {t} = 0;  /* external_call with non-literal name */")
             return 'int', t
+        cname = ''.join('_' if not c.isalnum() and c != '_' else c for c in cname)
 
         ret_ct = 'void'
         if len(elems) >= 2:
@@ -7640,6 +7667,16 @@ class GimpleGen:
         return f"{ftype} *", t
 
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
+        # __get_address_as_owned_value(addr)  →  *(int64_t *)addr
+        # Mojo ownership intrinsic: load the value at a raw-pointer address.
+        if isinstance(node.func, IdentExpr) and node.func.name == '__get_address_as_owned_value' \
+                and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            ptr = self._new_temp('int64_t *')
+            self._safe_coerce_emit(at, 'int64_t *', av, ptr)
+            val = self._new_temp('int64_t')
+            self._emit(f"  {val} = *{ptr};")
+            return 'int64_t', val
         if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr) \
                 and node.func.obj.name in ('external_call', '_external_call_const'):
             return self._lower_external_call(node)
@@ -10125,6 +10162,17 @@ class GimpleGen:
                                 self._emit(f"  *{addr} = {v_cast};")
                         else:
                             self._emit(f"  {obj_v}[{idx_v}] = {v};")
+        elif isinstance(node.target, CallExpr) and isinstance(node.target.func, IdentExpr) \
+                and node.target.func.name == '__get_address_as_uninit_lvalue' \
+                and node.target.args:
+            # __get_address_as_uninit_lvalue(addr) = val  →  *(T *)addr = val
+            # addr is an int64_t holding raw pointer bits; val is the value to store.
+            addr_t, addr_v = self.lower_expr(node.target.args[0])
+            ptr_tmp = self._new_temp('int64_t *')
+            self._safe_coerce_emit(addr_t, 'int64_t *', addr_v, ptr_tmp)
+            val_tmp = self._new_temp(vtype)
+            self._safe_coerce_emit(vtype, vtype, v, val_tmp)
+            self._emit(f"  *{ptr_tmp} = {val_tmp};")
         else:
             pass
 
@@ -13072,9 +13120,23 @@ class GimpleGen:
         # Sync so forward declarations (Phase 2b) match Phase 2a inference.
         # Store BOTH the base name (for single-overload lookups) and the
         # per-overload keyed name (so multi-overload methods don't clobber each other).
-        self.func_return_types[f"{struct_name}_{node.name}"] = ret_type
+        bare_key = f"{struct_name}_{node.name}"
+        self.func_return_types[bare_key] = ret_type
         if overload_id:
-            self.func_return_types[f"{struct_name}_{node.name}{overload_id}"] = ret_type
+            self.func_return_types[f"{bare_key}{overload_id}"] = ret_type
+        # Also update the (possibly module-qualified) key so _emit_call's
+        # func_return_types lookup (which uses the qualified symbol name)
+        # sees the correct return type — Pass 1b set the bare key to the
+        # _resolve_type fallback (int64_t for unresolved generics), and
+        # _struct_method_csym's setdefault already copied that stale value
+        # into the qualified key; without this overwrite, _emit_call would
+        # create a result temp with the wrong type.
+        qualifier = self._struct_method_qualifier(struct_name)
+        if qualifier:
+            qualified_key = f"{qualifier}_{bare_key}"
+            self.func_return_types[qualified_key] = ret_type
+            if overload_id:
+                self.func_return_types[f"{qualifier}_{bare_key}{overload_id}"] = ret_type
 
         solver = LayoutSolver(self.struct_field_types)
         self._struct_layout = solver.solve(node.params, node.body)
