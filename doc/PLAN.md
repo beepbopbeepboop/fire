@@ -131,23 +131,34 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   genuinely not making full forward progress every iteration in the
   *compiled* form (confirmed a manual trace of the Python source proves it
   always should - every branch sets `i` to a value provably `> `the old
-  `i`, or exits the loop). This is now the single most concrete remaining
-  lead: something about how `i`'s updates (`i = end`, `i = j + 1 if ...
-  else j`, `i += 1`, the `continue` statements immediately after) get
-  lowered doesn't faithfully reproduce that guarantee once compiled - same
-  general flavor of bug as the `c * 3` fix earlier in this file, just not
-  yet pinned to a specific line. Next step: since direct Python-source
-  instrumentation of this closure crashes (see above) and manual GIMPLE
-  reading hasn't found it, try `dtrace`'s pid-provider on `mojo_list_new`'s
-  entry (available on this machine, not yet tried) to sample the call
-  *stack* (not just the leaf function) at high frequency and see whether
-  the immediate caller's PC/basic-block repeats suspiciously - or extend
-  `MOJO_PROFILE` with a counter that's cheap enough to call unconditionally
-  from `_mojo_at_char` (the character-access helper `_mojo_at_char(src, i)`
-  itself, called on essentially every loop pass) recording the raw `i`
-  value modulo a large prime into a histogram, to see whether the same
-  positions are visited far more than once without needing to modify
-  `mojo_compiler.py`'s Python source at all.
+  `i`, or exits the loop).
+
+  **ROOT CAUSE FOUND (2026-07-17, later the same day): it is not a loop-
+  lowering bug and not a 32x slowdown - it is a true infinite loop caused
+  by a silently dropped call argument.** `gimple_codegen.py`'s `find`
+  lowering (~line 7369) consumes only `arg_vals[0]`, so
+  `j = src.find('\n', i)` (mojo_compiler.py:766, the comment-skip branch)
+  compiles to `mojo_str_find(src, "\n")` - a search from position 0. Every
+  `#` encountered after the file's first newline therefore jumps the cursor
+  BACK to that first newline (mojo.py's line 1 is the shebang, so position
+  22), and the scanner cycles forever between position 22 and the first
+  `#` comment in the code. (The earlier "~900K characters / ~32x" framing
+  was wrong on both counts - mojo.py is 25,125 bytes and the iteration
+  count is unbounded, not a fixed multiple.) Verified three independent
+  ways: the call visibly missing its third argument in the generated
+  `.ci`; a minimal repro (`s.find("\n", 4)` compiles to the 2-arg call,
+  answering 2 where Python answers 5); and a simulation of the buggy
+  semantics against the real mojo.py that never passed position 802 in
+  5,000,000 iterations, resetting the cursor to position 22 exactly
+  42,017 times. Fix fully specified (new `mojo_str_find_from` runtime
+  helper + lowering change + signature-table entry + test plan) in
+  `bugs/CODEGEN_str_find_start_arg_dropped.md` - **not yet implemented**;
+  once landed, re-run the stage2 `--dump ../mojo.py` case and then full
+  `make bootstrap`. The interim fixes from this investigation (`c * 3`
+  repetition, `mojo_cstr_slice` strlen bound, `_set_slot_int` hash mixing,
+  `mojo_cstr_region_eq`, the `.tok`/`.ast` tokenize-once dedup) are all
+  real independent wins and stay. Once the fix lands, also strip the
+  temporary `MOJO_PROFILE` counters from `runtime/mojo_runtime.c`.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to
