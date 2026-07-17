@@ -582,7 +582,26 @@ char *mojo_str_data(MojoStr *s) { return s->data; }
 char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
 {
     if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
-    int64_t len = (int64_t)strlen(s);
+    int64_t len;
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        /* Negative indices / "no stop given" need the true length to
+         * resolve against. */
+        len = (int64_t)strlen(s);
+    } else {
+        /* Common case (e.g. a tight scanning loop doing
+         * mojo_cstr_slice(s, j, j+3) once per position while searching a
+         * large string): both bounds are already concrete non-negative
+         * indices, so all we need to know is whether `s` reaches `stop`
+         * bytes - a scan bounded by `stop`, not a full strlen(). Before
+         * this fix every call re-scanned the ENTIRE string just to pull
+         * out a few bytes near the front of it, turning any such loop
+         * quadratic - confirmed as the actual cause of a stage2-bootstrap
+         * runaway (mojo_compiler.py's own py_tokenize scanning for a
+         * closing triple-quote across mojo.py's ~900KB source, self-hosted,
+         * took 100% CPU and dozens of GB before this fix). */
+        len = 0;
+        while (len < stop && s[len]) len++;
+    }
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = len;
     if (start < 0) start += len;
     if (stop  < 0) stop  += len;
@@ -1298,6 +1317,21 @@ static void _set_grow(MojoSet *s);
 static int64_t _set_slot_int(MojoSet *s, int64_t v)
 {
     uint64_t h = (uint64_t)v * 2654435761ULL;
+    /* `% s->cap` (always a power of two) keeps only h's LOW bits - the
+     * weakest bits of a plain multiplicative hash. Values from
+     * mojo_set_add_int(registry, (int64_t)(intptr_t)ptr) (this runtime's
+     * only int-keyed-set use case: object-identity/type-tag registries
+     * keyed by heap pointer) are typically 16-byte aligned, i.e. always
+     * divisible by 16 - and since 2654435761 is odd, v's low 4 zero bits
+     * survive the multiply into h, so every such key collides on the same
+     * 1-in-16 slots instead of spreading across the table: a real
+     * clustering pathology that degrades this from O(1) amortized toward
+     * O(n) per insert as a registry accumulates many pointers, exactly the
+     * "self-hosted compiler processing its own large source" scenario that
+     * exposed it. Fold the high bits down before the modulo (matches the
+     * mixing step in xxhash/murmur's finalizers) so pointer alignment
+     * doesn't determine which slots ever get used as probe starts. */
+    h ^= h >> 32;
     for (int64_t i = 0; i < s->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)s->cap);
         _SetSlot *sl = &s->slots[idx];

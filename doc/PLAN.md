@@ -14,6 +14,50 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **Stage2 self-hosted `--dump` of a large file (mojo.py itself, ~900KB) is
+  still far too slow/memory-hungry to finish in reasonable time, even after
+  fixing two real, confirmed contributing bugs.** Investigated 2026-07-17
+  chasing what first looked like a stage2-bootstrap segfault (see the
+  `compile_to_gimple` entry below) but turned out, once that crash was
+  fixed, to actually hang/balloon in memory (traced live via `lldb attach`
+  + `ps` RSS sampling, not guessed): `stage2/mojo --dump ../mojo.py` grew to
+  89GB RSS at 100% CPU before being killed, entirely inside
+  `py_tokenize_replace_multiline_strings` (mojo_compiler.py's own
+  tokenizer, self-hosted) - no subprocess/child process involved, all
+  single-threaded in-process cost. Two real bugs found and fixed along the
+  way (both in `runtime/mojo_runtime.c`):
+  1. `mojo_cstr_slice(s, start, stop)` called `strlen(s)` on *every* call
+     regardless of how small `start`/`stop` were, so a tight scanning loop
+     that repeatedly slices a fixed 3-byte window out of a large string
+     (exactly what the triple-quote-close scan in `replace_multiline_strings`
+     does) was accidentally O(n^2) in the string length. Fixed: only fall
+     back to a full `strlen()` when negative indices or an omitted stop
+     actually require it; otherwise bound the scan by `stop`.
+  2. `_set_slot_int`'s hash (`v * 2654435761ULL`, then `% cap` for a
+     power-of-two `cap`) keeps only the hash's low bits, which are the
+     weakest bits of a plain multiplicative hash - and this function's only
+     real caller (`mojo_set_add_int` on the object-identity/type-tag
+     registries like `_mojo_list_registry`) keys by heap pointer, which on
+     this platform is 16-byte aligned, so every key collided on the same
+     1-in-16 slots instead of spreading out. Fixed by folding the high bits
+     down (`h ^= h >> 32`) before the modulo.
+  Each fix produced a real, measured improvement (89GB-and-still-climbing
+  with pegged CPU → a much slower, no-longer-exponential-looking linear
+  climb after fix #1; fix #2 was verified correct and kept but didn't
+  measurably change the trajectory for this specific case) - but the
+  process still hadn't finished after several minutes and tens of GB even
+  with both fixes applied, so at least one more contributing factor remains
+  unidentified. Candidates not yet ruled out: the per-outer-loop-iteration
+  fresh-tuple allocation in `replace_multiline_strings`'s
+  `if c in ('"', "'"):` check (creates and never frees a 2-element list/tuple
+  once per character scanned, not just once per quote) turning out to
+  dominate at a larger constant factor than estimated; or the effective
+  iteration count being much larger than the ~900K characters in mojo.py,
+  which would mean something is still being reprocessed more than once per
+  character even after fix #1. Needs a real allocation/call-count profile
+  (e.g. a temporary counter in `mojo_list_new`/`mojo_cstr_slice`, or `dtrace`)
+  rather than further manual reasoning about the generated code.
+
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to
   a `python3` subprocess instead of calling the compiled body natively.**
