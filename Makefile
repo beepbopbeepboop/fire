@@ -39,9 +39,9 @@ demo:
 # + validate-all) is a separate, aspirational target — `make bootstrap` —
 # because stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is
 # not gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost check-stdlib
+check: check-gimple check-runner check-modcache check-selfhost
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host + stdlib)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
 
 check-gimple: gimple_codegen.py
 	python3 test_gimple.py

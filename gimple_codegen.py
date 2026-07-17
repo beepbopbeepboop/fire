@@ -13466,6 +13466,7 @@ class GimpleGen:
                 'body': 'MojoList *',
                 'closure_scope': 'Scope *',
                 'comptime_params': 'MojoList *',
+                '_pd': 'MojoList *',
             }
             self.struct_field_types['_MojoBoundComptimeFunction'] = {
                 'func': 'MojoFunction *',

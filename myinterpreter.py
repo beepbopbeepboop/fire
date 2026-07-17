@@ -100,9 +100,10 @@ class MojoFunction:
         # Names from `def f[dtype: DType, ...](...)`'s bracketed generic
         # parameter list (see mojo_compiler.py's _parse_generic_params_capture)
         # — bound by `__getitem__` when the call site subscripts the
-        # function (`f[Int32](...)`), not passed as regular arguments.
+        # function (`f[Int32](...)`, not passed as regular arguments.
         self.comptime_params = comptime_params or []
-        self.param_defaults = param_defaults or {}
+        if param_defaults:
+            self._pd = param_defaults
 
     def __call__(self, interpreter, *args, **kwargs):
         return self._invoke(interpreter, {}, args, kwargs)
@@ -120,12 +121,16 @@ class MojoFunction:
             func_scope.define(name, value)
 
         # Bind comptime params that have defaults but weren't provided
+        _pdl = getattr(self, 'param_defaults', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
-                if cp_name in self.param_defaults:
-                    default_expr = self.param_defaults[cp_name]
-                    func_scope.define(cp_name, interpreter.eval_expr(default_expr))
-                elif cp_name not in func_scope.vars:
+                _found = False
+                if _pdl is not None:
+                    for _k, _v in _pdl:
+                        if _k == cp_name:
+                            func_scope.define(cp_name, interpreter.eval_expr(_v))
+                            _found = True; break
+                if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
         # Bind parameters to arguments
@@ -134,11 +139,15 @@ class MojoFunction:
                 func_scope.define(param, args[i])
             elif param in kwargs:
                 func_scope.define(param, kwargs[param])
-            elif param in self.param_defaults:
-                default_expr = self.param_defaults[param]
-                func_scope.define(param, interpreter.eval_expr(default_expr))
             else:
-                func_scope.define(param, None)
+                _found = False
+                if _pdl is not None:
+                    for _k, _v in _pdl:
+                        if _k == param:
+                            func_scope.define(param, interpreter.eval_expr(_v))
+                            _found = True; break
+                if not _found:
+                    func_scope.define(param, None)
 
 
         # Execute function body
@@ -315,20 +324,6 @@ class BoundMethod:
             return f(self.interpreter, self.instance, *args, **kwargs)
         finally:
             self.interpreter.scope = old_scope
-
-    def __getitem__(self, key):
-        return self
-
-
-class _CallableWrapper:
-    """Wrapper for plain Python callables (functions, lambdas) to support
-    subscripting for generic function specialization, e.g. `fn[Type]()`."""
-    def __init__(self, func, interpreter):
-        self._func = func
-        self._interpreter = interpreter
-
-    def __call__(self, *args, **kwargs):
-        return self._func(*args, **kwargs)
 
     def __getitem__(self, key):
         return self
@@ -1508,7 +1503,7 @@ class _AutoStubValue(int):
     it works as a drop-in for missing constants like ErrNo.EPERM, and
     when called like a function, it just returns 0."""
     def __new__(cls, val=0):
-        return super().__new__(cls, val)
+        return int.__new__(cls, val)
     def __call__(self, *args, **kwargs):
         return _AutoStubValue(_AUTO_STUB_VALUE)
     def __getattr__(self, name):
@@ -2165,8 +2160,11 @@ class Interpreter:
         """Execute function definition."""
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
-        param_defaults = getattr(node, 'param_defaults', None)
-        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults)
+        _pd = getattr(node, 'param_defaults', None)
+        _pdv = None
+        if _pd:
+            _pdv = [(k, self.eval_expr(v)) for k, v in _pd.items()]
+        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv)
         spec = self._classify_params(node)
         return self._register_function(self.scope.vars, node.name, func, spec)
 
@@ -2201,8 +2199,9 @@ class Interpreter:
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
-            param_defaults = getattr(m, 'param_defaults', None)
-            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults)
+            _pd = getattr(m, 'param_defaults', None)
+            _pdl = list(_pd.items()) if _pd else None
+            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -2272,8 +2271,9 @@ class Interpreter:
             if isinstance(m, N.FunctionDef):
                 params = self._extract_param_names(m)
                 comptime_params = getattr(m, 'comptime_params', None)
-                param_defaults = getattr(m, 'param_defaults', None)
-                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults)
+                _pd = getattr(m, 'param_defaults', None)
+                _pdl = list(_pd.items()) if _pd else None
+                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -3354,52 +3354,16 @@ class Interpreter:
             if expr.member in obj._mojo_class.comptime_aliases:
                 return obj._mojo_class.comptime_aliases[expr.member]
             raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
-        if expr.member == 'cast' and isinstance(obj, (int, float)):
-            class _CastWrapper:
-                def __getitem__(self, dtype):
-                    def cast_fn():
-                        return obj
-                    return cast_fn
-                def __call__(self, *args, **kwargs):
-                    return obj
-            return _CastWrapper()
-        if expr.member == 'to_int' and isinstance(obj, (int, float)):
-            return lambda: int(obj)
-        if expr.member == 'map_to_type' and isinstance(obj, type):
-            return lambda *a, **kw: obj
-        if expr.member == 'byte_length' and isinstance(obj, str):
-            return lambda: len(obj)
-        if expr.member == 'is_ascii_digit' and isinstance(obj, str):
-            return lambda: str.isascii(obj) and str.isdigit(obj)
-        if expr.member == 'is_ascii_printable' and isinstance(obj, str):
-            return lambda: str.isascii(obj) and all(32 <= ord(c) <= 126 for c in obj)
-        if expr.member == 'peek' and isinstance(obj, list):
-            return lambda: obj[-1] if obj else None
-        if expr.member == 'pop' and isinstance(obj, list):
-            return lambda: obj.pop() if obj else None
-        if obj is None:
-            if expr.member in ('value', 'unsafe_value', '__getitem__'):
-                raise MojoError("accessing value of None optional")
-            if expr.member == 'is_some':
-                return lambda: False
-            if expr.member == 'is_none':
-                return lambda: True
-            return None
         if not hasattr(obj, expr.member):
             raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
-        attr = getattr(obj, expr.member)
-        if callable(attr) and not hasattr(attr, '__getitem__') and type(attr) is not type and type(attr).__eq__ is object.__eq__:
-            return _CallableWrapper(attr, self)
-        if not callable(attr) and expr.member == 'copy' and isinstance(obj, (int, float, bool, str)):
-            return lambda: obj
-        return attr
+        return getattr(obj, expr.member)
 
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
         idx = self.eval_expr(expr.index)
         if not hasattr(obj, '__getitem__'):
-            if callable(obj):
+            if hasattr(obj, '__call__'):
                 return obj
             raise TypeError(f"{type(obj).__name__} object is not subscriptable")
         return obj[idx]
