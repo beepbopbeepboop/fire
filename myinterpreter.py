@@ -719,29 +719,6 @@ class _MojoCompileFunctionAccessor:
         return _MojoCompileFunctionCall(kernel, self._interpreter)
 
 
-class _AsyncTaskShim:
-    """Shim for `create_task[fn](args...)` in std.runtime.asyncrt.
-    Captures the function via subscript, then calls it with the provided args."""
-    def __init__(self, interpreter):
-        self._interpreter = interpreter
-    def __getitem__(self, fn):
-        return _AsyncTaskCall(fn, self._interpreter)
-    def __call__(self, *args, **kwargs):
-        return None
-
-class _AsyncTaskCall:
-    def __init__(self, fn, interpreter):
-        self._fn = fn
-        self._interpreter = interpreter
-    def __call__(self, *args, **kwargs):
-        if self._interpreter:
-            result = self._interpreter.invoke(self._fn, *args, **kwargs)
-        else:
-            result = self._fn(*args, **kwargs)
-        # Return a wrapper with .wait() so task.wait() works
-        return types.SimpleNamespace(wait=lambda: result)
-
-
 class _MojoDeviceContext:
     """Stand-in for real Mojo's `std.gpu.host.DeviceContext`. This
     interpreter has no GPU backend of any kind (simulated or otherwise) —
@@ -2033,15 +2010,7 @@ class Interpreter:
             if module_name in cache:
                 return cache[module_name]
             argv = self.argv
-            info_ns = types.SimpleNamespace(
-                _current_target=lambda: "cpu",
-                CompilationTarget=self.scope.get('CompilationTarget'),
-                _cdna_4_or_newer=lambda: False,
-                _is_amd_cdna=lambda: False,
-                _macos_version=lambda: '14.0',
-                stdlib_plugin=lambda: None,
-            )
-            sys_ns = types.SimpleNamespace(
+            namespace = types.SimpleNamespace(
                 argv=lambda: argv,
                 size_of=self.scope.get('size_of'),
                 align_of=self.scope.get('align_of'),
@@ -2053,7 +2022,6 @@ class Interpreter:
                 exit=sys.exit,
                 get_defined_bool=_MojoGetDefinedFn(),
                 get_defined_int=_MojoGetDefinedFn(),
-                get_defined_string=_MojoGetDefinedFn(),
                 is_gpu=lambda: False,
                 is_apple_gpu=lambda: False,
                 is_amd_gpu=lambda: False,
@@ -2069,33 +2037,17 @@ class Interpreter:
                 simd_bit_width=lambda: 128,
                 is_big_endian=lambda: False,
                 is_little_endian=lambda: True,
-                strided_load=lambda *a, **kw: 0,
-                masked_load=lambda *a, **kw: 0,
-                masked_store=lambda *a, **kw: None,
-                compressed_store=lambda *a, **kw: 0,
-                llvm_intrinsic=lambda intrin, *args, **kw: self._exec_llvm_intrinsic(intrin, args, kw),
                 stderr=sys.stderr,
                 stdout=sys.stdout,
                 stdin=sys.stdin,
             )
-            setattr(sys_ns, 'info', info_ns)
-            if module_name == 'std.sys.info':
-                cache[module_name] = info_ns
-                # std.sys.info re-exports everything from std.sys plus its own exports
-                for k in dir(sys_ns):
-                    if k != 'info':
-                        if not hasattr(info_ns, k):
-                            setattr(info_ns, k, getattr(sys_ns, k))
-                return info_ns
-            cache[module_name] = sys_ns
-            return sys_ns
+            cache[module_name] = namespace
+            return namespace
 
         if module_name in ('std.gpu', 'std.gpu.host', 'std.gpu.host.info', 'std.gpu.id'):
             if module_name in cache:
                 return cache[module_name]
-            def _stub_gpu_target(*args, **kwargs):
-                return "cpu"
-            host_ns = types.SimpleNamespace(
+            namespace = types.SimpleNamespace(
                 DeviceContext=self.scope.get('DeviceContext'),
                 DeviceBuffer=self.scope.get('DeviceBuffer'),
                 HostBuffer=self.scope.get('DeviceBuffer'),
@@ -2108,307 +2060,28 @@ class Interpreter:
                 global_idx=self.scope.get('global_idx'),
                 lane_id=self.scope.get('lane_id'),
                 get_gpu_target=self.scope.get('get_gpu_target'),
-                DevicePointer=lambda: None,
-                DeviceAttribute=lambda: None,
-                DeviceMulticastBuffer=lambda: None,
-                Dim=types.SimpleNamespace(x=0, y=0, z=0),
-                barrier=lambda: None,
-                Vendor=lambda: "cpu",
-                _end_metal_trace_capture=lambda: None,
             )
-            info_ns = types.SimpleNamespace(
-                get_gpu_target=_stub_gpu_target,
-                _get_a100_target=_stub_gpu_target,
-                _get_h100_target=_stub_gpu_target,
-                _get_metal_m1_target=_stub_gpu_target,
-                _get_mi300x_target=_stub_gpu_target,
-                A100=None,
-                Vendor=lambda: "cpu",
-            )
-            setattr(host_ns, 'info', info_ns)
-            if module_name == 'std.gpu.host.info' or module_name == 'std.gpu.id':
-                if module_name == 'std.gpu.host.info':
-                    cache[module_name] = info_ns
-                    for k in dir(host_ns):
-                        if k != 'info':
-                            if not hasattr(info_ns, k):
-                                setattr(info_ns, k, getattr(host_ns, k))
-                    return info_ns
-                else:
-                    cache[module_name] = info_ns
-                    return info_ns
-            cache[module_name] = host_ns
-            return host_ns
+            cache[module_name] = namespace
+            return namespace
 
         if module_name in ('std.os', 'std.os.os'):
             if module_name in cache:
                 return cache[module_name]
             namespace = types.SimpleNamespace(
                 abort=self.scope.get('abort'),
-                remove=os.remove,
-                getenv=os.getenv,
-                chdir=os.chdir,
-                listdir=os.listdir,
-                isatty=os.isatty,
-                stat=os.stat,
-                link=os.link,
-                symlink=os.symlink,
-                mkdir=os.mkdir,
-                rmdir=os.rmdir,
-                PathLike=os.PathLike,
-                Process=types.SimpleNamespace(run=lambda *a, **kw: 0, wait=lambda *a, **kw: 0),
-                unlink=os.unlink,
-                setenv=os.environ.__setitem__,
-                unsetenv=os.environ.__delitem__,
             )
             cache[module_name] = namespace
             return namespace
 
-        if module_name == 'std.runtime' or module_name.startswith('std.runtime.'):
+        if module_name in ('std.runtime.tracing',):
             if module_name in cache:
                 return cache[module_name]
-            asyncrt_ns = types.SimpleNamespace(
-                create_task=_AsyncTaskShim(self),
-                create_raising_task=_AsyncTaskShim(self),
-                _create_task=_AsyncTaskShim(self),
-                TaskGroup=lambda: None,
-                task_id_for_device=lambda *a, **kw: None,
-            )
             namespace = types.SimpleNamespace(
                 Trace=_MojoTrace,
                 TraceLevel=self.scope.get('TraceLevel'),
-                THREAD=0,
-                ALWAYS=1,
-                RUNTIME=3,
-                tracing=types.SimpleNamespace(
-                    Trace=_MojoTrace,
-                    TraceLevel=self.scope.get('TraceLevel'),
-                    THREAD=0,
-                    ALWAYS=1,
-                ),
-                asyncrt=asyncrt_ns,
-                create_task=lambda fn: fn(),
-                create_raising_task=lambda fn: fn(),
             )
             cache[module_name] = namespace
-            if module_name == 'std.runtime.asyncrt':
-                return asyncrt_ns
             return namespace
-
-        if module_name in ('std.benchmark', 'std.benchmark.bencher', 'std.benchmark.benchmark', 'std.benchmark.compiler', 'std.benchmark.memory', 'std.benchmark.quick_bench'):
-            if module_name in cache:
-                return cache[module_name]
-            class _BenchFunctionShim(types.SimpleNamespace):
-                def __call__(self, *args, **kwargs):
-                    return self
-                def __getitem__(self, key):
-                    return self
-            class _BenchShim(types.SimpleNamespace):
-                def __init__(self, *args, **kwargs):
-                    self.info_vec = []
-                def __call__(self, *args, **kwargs):
-                    return self
-                def __getitem__(self, key):
-                    return _BenchFunctionShim()
-                @property
-                def bench_function(self):
-                    return _BenchFunctionShim()
-                def bench_with_input(self, *args, **kwargs):
-                    return _BenchFunctionShim()
-                def dump_report(self, *args, **kwargs):
-                    pass
-            class _BenchConfig(types.SimpleNamespace):
-                def __call__(self, *args, **kwargs):
-                    return self
-                def __getitem__(self, key):
-                    return self
-            class _BenchId(types.SimpleNamespace):
-                def __call__(self, *args, **kwargs):
-                    return 'bench'
-                def __getitem__(self, key):
-                    return self
-            bench_ns = _BenchShim()
-            class _BencherShim(types.SimpleNamespace):
-                def __call__(self, *args, **kwargs):
-                    return self
-                def __getitem__(self, key):
-                    return _BenchFunctionShim()
-                def iter(self, *args, **kwargs):
-                    return _BenchFunctionShim()
-                def iter_custom(self, *args, **kwargs):
-                    return _BenchFunctionShim()
-            return types.SimpleNamespace(
-                Bench=bench_ns,
-                Bencher=_BencherShim(),
-                BenchConfig=_BenchConfig(),
-                BenchId=_BenchId(),
-                BenchMetric=types.SimpleNamespace(elements='elements', bytes='bytes', items='items'),
-                ThroughputMeasure=lambda *a, **kw: _BenchFunctionShim(),
-                Report=_SubscriptableNamespace(),
-                Batch=_SubscriptableNamespace(),
-                Unit=_SubscriptableNamespace(),
-                Format=_SubscriptableNamespace(),
-                run=lambda *a, **kw: None,
-                black_box=lambda x: x,
-                keep=lambda x: x,
-                clobber_memory=lambda: None,
-                QuickBench=_SubscriptableNamespace(),
-            )
-
-        if module_name in ('std.random', 'std.random.random', 'std.random._rng', 'std.random.philox'):
-            if module_name in cache:
-                return cache[module_name]
-            import random
-            import time
-            return types.SimpleNamespace(
-                seed=lambda x=None: random.seed(x if x is not None else time.time()),
-                rand=lambda: random.random(),
-                randint=lambda a, b: random.randint(int(a), int(b)),
-                randn=lambda *args, **kw: random.gauss(0, 1),
-                randn_float64=lambda *args, **kw: random.gauss(0, 1),
-                random_float64=lambda *args, **kw: random.uniform(*(float(a) for a in (args or (kw.get('min', 0.0), kw.get('max', 1.0))) if a is not None)),
-                random_si64=lambda *args, **kw: random.randint(*(int(a) for a in (args or (kw.get('min', 0), kw.get('max', (1<<63)-1))) if a is not None)),
-                random_ui64=lambda *args, **kw: random.randint(*(int(a) for a in (args or (kw.get('min', 0), kw.get('max', (1<<64)-1))) if a is not None)),
-                shuffle=lambda x: random.shuffle(x),
-                Random=lambda: types.SimpleNamespace(
-                    uniform=lambda self, a, b: random.uniform(a, b),
-                    normal=lambda self, mean=0, stddev=1: random.gauss(mean, stddev),
-                ),
-                NormalRandom=lambda: types.SimpleNamespace(),
-                _PhiloxWrapper=lambda: types.SimpleNamespace(),
-            )
-
-        if module_name in ('std.gpu.host._metal_capture',):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                _end_metal_trace_capture=lambda ctx: None,
-                _set_metal_gpu_print_enabled=lambda: None,
-                _start_metal_trace_capture=lambda ctx: None,
-            )
-
-        if module_name in ('std.builtin.sort', 'std.builtin'):
-            if module_name in cache:
-                return cache[module_name]
-            sort_ns = _build_sort_shims(interpreter=self)
-            if module_name == 'std.builtin.sort':
-                return types.SimpleNamespace(**sort_ns)
-            return types.SimpleNamespace(sort=types.SimpleNamespace(**sort_ns))
-
-        if module_name in ('std.ffi', 'std.ffi.ffi'):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                external_call=lambda *a, **kw: 0,
-                FFIValue=types.SimpleNamespace,
-                FFIStruct=types.SimpleNamespace,
-                c_char=int,
-                c_int=int,
-                c_long=int,
-                c_float=float,
-                c_double=float,
-                CStringSlice=lambda: None,
-                UnsafeUnion=lambda: None,
-                CPointer=lambda: None,
-                _CPointer=lambda: None,
-            )
-
-        if module_name in ('std.algorithm.functional', 'std.algorithm'):
-            if module_name in cache:
-                return cache[module_name]
-            func_ns = types.SimpleNamespace(
-                elementwise=lambda *a, **kw: None,
-                map=lambda *a, **kw: None,
-                parallelize=lambda *a, **kw: None,
-                sync_parallelize=lambda *a, **kw: None,
-                parallelize_over_rows=lambda *a, **kw: None,
-                stencil=lambda *a, **kw: None,
-                tile=lambda *a, **kw: None,
-                _get_start_indices_of_nth_subvolume=lambda *a, **kw: 0,
-            )
-            algo_ns = types.SimpleNamespace(
-                functional=func_ns,
-                map=lambda *a, **kw: None,
-                cumsum=lambda *a, **kw: None,
-                mean=lambda *a, **kw: 0.0,
-                stencil=lambda *a, **kw: None,
-                tile=lambda *a, **kw: None,
-                tile_and_unswitch=lambda *a, **kw: None,
-                vectorize=lambda *a, **kw: None,
-                parallelize=lambda *a, **kw: None,
-                sync_parallelize=lambda *a, **kw: None,
-                parallelize_over_rows=lambda *a, **kw: None,
-                elementwise=lambda *a, **kw: None,
-                _get_start_indices_of_nth_subvolume=lambda *a, **kw: 0,
-            )
-            if module_name == 'std.algorithm':
-                return algo_ns
-            return func_ns
-
-        if module_name in ('std.sys.intrinsics',):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                masked_load=lambda *a, **kw: 0,
-                strided_load=lambda *a, **kw: 0,
-                masked_store=lambda *a, **kw: None,
-                strided_store=lambda *a, **kw: None,
-            )
-
-        if module_name in ('std.utils.variant',):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                Variant=lambda *a, **kw: None,
-            )
-
-        if module_name in ('std.reflection.traits', 'std.reflection'):
-            if module_name in cache:
-                return cache[module_name]
-            refl_ns = types.SimpleNamespace(
-                Writable=types.SimpleNamespace,
-                call_location=self.scope.get('call_location'),
-                get_linkage_name=self.scope.get('get_linkage_name'),
-                Reflected=types.SimpleNamespace,
-                ReflectedFn=types.SimpleNamespace,
-                SourceLocation=types.SimpleNamespace(
-                    file_name='', line=0, column=0,
-                ),
-                source_location=lambda: types.SimpleNamespace(
-                    file_name='', line=0, column=0,
-                ),
-            )
-            if module_name == 'std.reflection':
-                import functools
-                from functools import wraps
-                # Create an auto-stubbing wrapper so missing names don't crash
-                class _ReflectionNS:
-                    def __getattr__(self, name):
-                        return getattr(refl_ns, name, lambda *a, **kw: None)
-                return _ReflectionNS()
-            return refl_ns
-
-        if module_name in ('std.complex',):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                ComplexFloat32=self.scope.get('ComplexFloat32'),
-                ComplexFloat64=self.scope.get('ComplexFloat64'),
-                ComplexScalar=lambda: None,
-                ComplexSIMD=lambda: None,
-            )
-
-        if module_name in ('std.memory', 'std.memory.memory'):
-            if module_name in cache:
-                return cache[module_name]
-            return types.SimpleNamespace(
-                alloc=self.scope.get('alloc'),
-                UnsafePointer=self.scope.get('UnsafePointer'),
-                Span=self.scope.get('Span'),
-                bitcast=lambda *a, **kw: None,
-                Layout=lambda: None,
-                layout_of=lambda: None,
-            )
 
         if module_name == 'std' or module_name.startswith('std.'):
             return _AutoStubNamespace()
