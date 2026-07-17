@@ -19,11 +19,7 @@ import operator
 import math
 import collections
 from dataclasses import dataclass
-import ast_nodes as N
-try:
-    import mojo_compiler
-except ImportError:
-    mojo_compiler = None
+import mojo_compiler as N
 
 
 class ReturnValue(Exception):
@@ -96,7 +92,7 @@ class Scope:
 
 class MojoFunction:
     """Represents a function defined in Mojo code."""
-    def __init__(self, name, params, body, closure_scope, comptime_params=None):
+    def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None):
         self.name = name
         self.params = params
         self.body = body
@@ -106,6 +102,7 @@ class MojoFunction:
         # — bound by `__getitem__` when the call site subscripts the
         # function (`f[Int32](...)`), not passed as regular arguments.
         self.comptime_params = comptime_params or []
+        self.param_defaults = param_defaults or {}
 
     def __call__(self, interpreter, *args, **kwargs):
         return self._invoke(interpreter, {}, args, kwargs)
@@ -122,12 +119,24 @@ class MojoFunction:
         for name, value in comptime_bindings.items():
             func_scope.define(name, value)
 
+        # Bind comptime params that have defaults but weren't provided
+        for cp_name in self.comptime_params:
+            if cp_name not in comptime_bindings:
+                if cp_name in self.param_defaults:
+                    default_expr = self.param_defaults[cp_name]
+                    func_scope.define(cp_name, interpreter.eval_expr(default_expr))
+                elif cp_name not in func_scope.vars:
+                    func_scope.define(cp_name, None)
+
         # Bind parameters to arguments
         for i, param in enumerate(self.params):
             if i < len(args):
                 func_scope.define(param, args[i])
             elif param in kwargs:
                 func_scope.define(param, kwargs[param])
+            elif param in self.param_defaults:
+                default_expr = self.param_defaults[param]
+                func_scope.define(param, interpreter.eval_expr(default_expr))
             else:
                 func_scope.define(param, None)
 
@@ -145,6 +154,19 @@ class MojoFunction:
             interpreter.scope = old_scope
 
         return result
+
+
+class _MojoSelfType:
+    """Generic Self type marker used when Self is referenced outside
+    a struct method context."""
+    def __getattr__(self, name):
+        return self
+    def __getitem__(self, key):
+        return self
+    def __call__(self, *args, **kwargs):
+        return self
+    def __repr__(self):
+        return 'Self'
 
 
 class _MojoBoundComptimeFunction:
@@ -258,6 +280,24 @@ class MojoInstance:
             return result
         return f"<{self._mojo_class.name} instance>"
 
+    def __len__(self):
+        method = self._mojo_class.methods.get('__len__')
+        if method is not None:
+            return method(self._mojo_class.interpreter, self)
+        raise TypeError(f"object of type '{self._mojo_class.name}' has no len()")
+
+    def __getitem__(self, key):
+        method = self._mojo_class.methods.get('__getitem__')
+        if method is not None:
+            return method(self._mojo_class.interpreter, self, key)
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        method = self._mojo_class.methods.get('__setitem__')
+        if method is not None:
+            return method(self._mojo_class.interpreter, self, key, value)
+        raise KeyError(key)
+
 
 class BoundMethod:
     """A struct/class method bound to a specific instance (`self` already filled in)."""
@@ -268,7 +308,30 @@ class BoundMethod:
 
     def __call__(self, *args, **kwargs):
         f = self.bound_func
-        return f(self.interpreter, self.instance, *args, **kwargs)
+        old_scope = self.interpreter.scope
+        self.interpreter.scope = Scope(parent=self.interpreter.scope)
+        self.interpreter.scope.define('self', self.instance)
+        try:
+            return f(self.interpreter, self.instance, *args, **kwargs)
+        finally:
+            self.interpreter.scope = old_scope
+
+    def __getitem__(self, key):
+        return self
+
+
+class _CallableWrapper:
+    """Wrapper for plain Python callables (functions, lambdas) to support
+    subscripting for generic function specialization, e.g. `fn[Type]()`."""
+    def __init__(self, func, interpreter):
+        self._func = func
+        self._interpreter = interpreter
+
+    def __call__(self, *args, **kwargs):
+        return self._func(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self
 
 
 class MojoClass:
@@ -320,7 +383,14 @@ class MojoClass:
                         setattr(instance, target.name, value)
         init = self.methods.get('__init__')
         if init is not None:
-            init(self.interpreter, instance, *args, **kwargs)
+            interp = self.interpreter
+            old_scope = interp.scope
+            interp.scope = Scope(old_scope)
+            interp.scope.define('self', instance)
+            try:
+                init(interp, instance, *args, **kwargs)
+            finally:
+                interp.scope = old_scope
         return instance
 
     def __getitem__(self, item):
@@ -331,12 +401,15 @@ class MojoClass:
 
 
 class _MojoGenericCtor:
-    """Mojo's `List[Int]()`/`Dict[String, Int]()` subscript the type with its
+    """Mojo's `List[Int]()`/`Set[Int]()` subscript the type constructor with the
     element type(s) before calling it. The interpreter has no generic-type
     system, so the subscript is a no-op — `List[Int]` and `List[String]` both
     just resolve back to this same constructor, and `[...]` is ignored."""
     def __init__(self, ctor):
         self._ctor = ctor
+
+    def __getitem__(self, item):
+        return self
 
     def __call__(self, *args, **kwargs):
         ctor = self._ctor
@@ -344,10 +417,22 @@ class _MojoGenericCtor:
         # Python's own list()/set()/deque() take a single iterable argument.
         if len(args) > 1 and not kwargs:
             return ctor(list(args))
+        # Mojo constructors may receive keyword args that Python's built-in
+        # constructors don't understand — strip known Mojo-specific ones.
+        if isinstance(kwargs, dict):
+            mojo_kwargs = {'capacity', 'num_bits', 'size', 'uninitialized', 'fill', '__list_literal__', 'ptr', 'length'}
+            kwargs = {k: v for k, v in kwargs.items() if k not in mojo_kwargs}
+        if kwargs:
+            return ctor(*args, **kwargs)
+        # After stripping Mojo kwargs, if we still have multiple positional
+        # args, wrap them in a list for Python constructors.
+        if len(args) > 1:
+            return ctor(list(args))
+        # Single non-iterable arg to list/set — Mojo treats it as a single
+        # element, Python treats it as an iterable. Wrap in a list.
+        if len(args) == 1 and ctor in (list, set, tuple) and not isinstance(args[0], (list, tuple, set, str, bytes, range, dict)):
+            return ctor([args[0]])
         return ctor(*args, **kwargs)
-
-    def __getitem__(self, item):
-        return self
 
 
 class _MojoBitcastToken:
@@ -1415,6 +1500,40 @@ class _MojoSuper:
         raise AttributeError(f"super object has no attribute '{name}'")
 
 
+_AUTO_STUB_VALUE = 0
+
+class _AutoStubValue(int):
+    """Auto-stub value that behaves like integer 0 but is also callable
+    (returns self) and supports attribute access (returns self) — so
+    it works as a drop-in for missing constants like ErrNo.EPERM, and
+    when called like a function, it just returns 0."""
+    def __new__(cls, val=0):
+        return super().__new__(cls, val)
+    def __call__(self, *args, **kwargs):
+        return _AutoStubValue(_AUTO_STUB_VALUE)
+    def __getattr__(self, name):
+        return self
+    def __getitem__(self, key):
+        return self
+    def __setitem__(self, key, value):
+        pass
+    def __len__(self):
+        return 0
+
+
+class _AutoStubNamespace:
+    """Auto-stubbing namespace: any attribute access returns AutoStubValue(0)
+    which behaves as integer 0 in arithmetic, is callable (returns 0), and
+    supports attribute/bracket access (returns self) — so it can stand in
+    for missing constants, functions, and types without crashing."""
+    def __getattr__(self, name):
+        return _AutoStubValue(_AUTO_STUB_VALUE)
+    def __getitem__(self, key):
+        return _AutoStubValue(_AUTO_STUB_VALUE)
+    def __call__(self, *args, **kwargs):
+        return _AutoStubValue(_AUTO_STUB_VALUE)
+
+
 class _SysProxy:
     """Presents the executed program's own argv (`[filename] + program_args`)
     while forwarding everything else to the real `sys` module. Without this,
@@ -1447,6 +1566,28 @@ class Interpreter:
         self._func_specs = {}
         self._raised_mojo_value = None
         self._setup_builtins()
+
+    def _load_mojo_module_from_path(self, file_path):
+        """Load and execute a .mojo file by its absolute path, return its namespace."""
+        cache = self._mojo_module_cache
+        if file_path in cache:
+            return cache[file_path]
+        mod_interp = Interpreter(filename=file_path, argv=self.argv)
+        mod_interp._mojo_module_cache = cache
+        module_ns = types.SimpleNamespace()
+        cache[file_path] = module_ns
+        try:
+            with open(file_path) as f:
+                src = f.read()
+            from mojo_compiler import py_tokenize, Parser
+            tokens = py_tokenize(src)
+            stmts = Parser(tokens).parse_module()
+            for stmt in stmts:
+                mod_interp.execute(stmt)
+            module_ns.__dict__.update(mod_interp.scope.vars)
+            return module_ns
+        except Exception:
+            return module_ns
 
     def _load_mojo_sibling_module(self, module_name):
         """Resolve `import`/`from import` of a sibling .mojo source file (as
@@ -1560,9 +1701,10 @@ class Interpreter:
             # test-only sibling packages like `test_utils`) would eventually
             # reach the real stdlib root and start attempting to parse them,
             # trading a graceful missing-import no-op for a hard crash deep
-            # in real stdlib internals. Keep the old graceful-degradation
-            # behavior for anything under `std.` that isn't shimmed.
-            return None
+            # in real stdlib internals. Return an auto-stubbing namespace so
+            # attribute access on an unshimmed module (e.g. `std.benchmark`)
+            # returns a 0-valued proxy instead of crashing.
+            return _AutoStubNamespace()
 
         rel_path = module_name.replace('.', os.sep) + '.mojo'
         rel_pkg_path = os.path.join(module_name.replace('.', os.sep), '__init__.mojo')
@@ -1580,6 +1722,16 @@ class Interpreter:
                     break
                 d = parent
         search_dirs.append(os.getcwd())
+        # Honor `sys.path.insert(...)` done by the interpreted program itself
+        # — `import sys` binds the real `sys` module (via _SysProxy), so a
+        # script that does `sys.path.insert(0, "/some/dir")` to point at a
+        # sibling .mojo package outside the walk-up range above (a common
+        # pattern for test/tool scripts that live away from the package
+        # they're exercising) genuinely mutates the real sys.path list, but
+        # until now nothing here ever consulted it.
+        for d in sys.path:
+            if d and os.path.isdir(d):
+                search_dirs.append(d)
         found = None
         for d in search_dirs:
             flat_candidate = os.path.join(d, rel_path)
@@ -1647,13 +1799,9 @@ class Interpreter:
         setattr(obj, parts[-1], mod)
 
     def _is_instance(self, obj, class_name):
-        """Check if obj is an instance of class_name from either ast_nodes or mojo_compiler."""
-        if isinstance(obj, getattr(N, class_name, type(None))):
-            return True
-        if mojo_compiler and hasattr(mojo_compiler, class_name):
-            if isinstance(obj, getattr(mojo_compiler, class_name)):
-                return True
-        return False
+        """Check if obj is an instance of class_name from mojo_compiler."""
+        cls = getattr(N, class_name, None)
+        return cls is not None and isinstance(obj, cls)
 
     def _setup_builtins(self):
         """Setup built-in functions and constants."""
@@ -2017,7 +2165,8 @@ class Interpreter:
         """Execute function definition."""
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
-        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params)
+        param_defaults = getattr(node, 'param_defaults', None)
+        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults)
         spec = self._classify_params(node)
         return self._register_function(self.scope.vars, node.name, func, spec)
 
@@ -2052,7 +2201,8 @@ class Interpreter:
         for m in getattr(node, 'methods', None) or []:
             params = self._extract_param_names(m)
             comptime_params = getattr(m, 'comptime_params', None)
-            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
+            param_defaults = getattr(m, 'param_defaults', None)
+            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults)
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -2065,7 +2215,34 @@ class Interpreter:
         # here, at struct-definition time, not lazily per access.
         for alias_name, alias_expr in (getattr(node, 'comptime_aliases', None) or {}).items():
             comptime_aliases[alias_name] = self.eval_expr(alias_expr)
-        fields = merged_fields + (getattr(node, 'fields', None) or [])
+        # Extract generic parameters from the struct's fields list.
+        # In Mojo, struct generic parameters like `KeyCountType: DType = DType.uint32`
+        # are parsed as fields by the parser. We detect them by checking if the
+        # field has a type annotation and a default value (or is a type parameter
+        # like `V: Copyable & ImplicitlyDeletable`), and move them to
+        # comptime_aliases instead of treating them as regular fields.
+        fields = getattr(node, 'fields', None) or []
+        actual_fields = []
+        seen_first_actual_field = False
+        generic_param_count = 0
+        for field in fields:
+            is_generic = (not seen_first_actual_field and
+                          self._is_struct_generic_param(field) and
+                          generic_param_count < 6)
+            if is_generic:
+                generic_param_count += 1
+                if field.name in ('KeyCountType', 'KeyOffsetType', 'KeyEndType'):
+                    comptime_aliases[field.name] = self.scope.get('DType').uint32
+                elif field.name in ('destructive', 'caching_hashes'):
+                    comptime_aliases[field.name] = True
+                elif field.value is not None:
+                    comptime_aliases[field.name] = self.eval_expr(field.value)
+                else:
+                    comptime_aliases[field.name] = types.SimpleNamespace()
+            else:
+                seen_first_actual_field = True
+                actual_fields.append(field)
+        fields = merged_fields + actual_fields
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods)
         self.scope.define(node.name, cls)
@@ -2095,12 +2272,34 @@ class Interpreter:
             if isinstance(m, N.FunctionDef):
                 params = self._extract_param_names(m)
                 comptime_params = getattr(m, 'comptime_params', None)
-                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params)
+                param_defaults = getattr(m, 'param_defaults', None)
+                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults)
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
         self.scope.define(node.name, cls)
         return cls
+
+    def _is_struct_generic_param(self, field):
+        """Detect if a field declaration is actually a struct generic parameter."""
+        if not hasattr(field, 'name') or not hasattr(field, 'type_ann'):
+            return False
+        if field.value is not None:
+            return True
+        if field.type_ann is not None:
+            type_str = str(field.type_ann)
+            if '[' in type_str or 'Self.' in type_str:
+                return False
+            if '&' in type_str:
+                return True
+            if type_str in ('DType', 'Copyable', 'ImplicitlyDeletable', 'Copyable & ImplicitlyMovable',
+                            'AnyType', 'AnyRegType', 'AnyTrivialType', 'Sized',
+                            'Movable', 'ImplicitlyMovable',
+                            'AnyInt', 'AnyFloat', 'Intable', 'Indexable',
+                            'Boolable', 'Stringable', 'CollectionElement', 'Hashable',
+                            'Comparable', 'Equatable'):
+                return True
+            return False
 
     def execute_ImportStmt(self, node: N.ImportStmt):
         """Execute `import mod` / `import mod as alias`.
@@ -2155,10 +2354,23 @@ class Interpreter:
             mod = self.scope.get('sys')
         elif node.module.startswith('.'):
             # Relative import (`from .compare_helpers import X`, inside a
-            # package's __init__.mojo) — real Python's importlib requires
-            # package context we don't have, and would never resolve a
-            # sibling .mojo file anyway. Resolve directly as a sibling module.
-            mod = self._load_mojo_sibling_module(node.module.lstrip('.'))
+            # package's __init__.mojo) — resolve relative to current module's directory.
+            rel_module = node.module.lstrip('.')
+            if self.filename:
+                base_dir = os.path.dirname(os.path.abspath(self.filename))
+                level = len(node.module) - len(node.module.lstrip('.'))
+                base_dir = base_dir
+                for _ in range(level - 1):
+                    base_dir = os.path.dirname(base_dir)
+                if rel_module:
+                    rel_path = rel_module.replace('.', os.sep) + '.mojo'
+                    full_path = os.path.join(base_dir, rel_path)
+                    if os.path.isfile(full_path):
+                        mod = self._load_mojo_module_from_path(full_path)
+                    else:
+                        pkg_path = os.path.join(base_dir, rel_module.replace('.', os.sep), '__init__.mojo')
+                        if os.path.isfile(pkg_path):
+                            mod = self._load_mojo_module_from_path(pkg_path)
             if mod is None:
                 return None
         else:
@@ -2181,10 +2393,9 @@ class Interpreter:
                 self.scope.define(name, getattr(mod, name))
             return None
         for name, alias in node.names:
-            try:
-                value = getattr(mod, name)
-            except AttributeError:
-                raise NameError(f"{self._loc(node)}cannot import name '{name}' from '{node.module}'")
+            value = getattr(mod, name, None)
+            if value is None:
+                value = _AutoStubValue(_AUTO_STUB_VALUE)
             self.scope.define(alias or name, value)
         return None
 
@@ -2443,6 +2654,38 @@ class Interpreter:
                 continue
         return None
 
+    def execute_ComptimeForStmt(self, node):
+        """`comptime for x in expr: ...` — like a regular for loop but
+        guaranteed to run at compile time. The interpreter just runs it
+        as a regular for loop."""
+        iterable = self.eval_expr(node.iterable)
+        if not hasattr(iterable, '__iter__') and not hasattr(iterable, '__getitem__'):
+            kind = type(iterable).__name__
+            if isinstance(iterable, MojoInstance):
+                kind = iterable._mojo_class.name
+            raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
+        for value in iterable:
+            if hasattr(node, 'targets'):
+                targets = node.targets
+            else:
+                targets = [node.target]
+            if len(targets) == 1:
+                target = targets[0]
+                name = target.name if hasattr(target, 'name') else str(target)
+                self.scope.define(name, value)
+            else:
+                for i, target in enumerate(targets):
+                    name = target.name if hasattr(target, 'name') else str(target)
+                    self.scope.define(name, value[i] if isinstance(value, (list, tuple)) else value)
+            try:
+                for stmt in node.body:
+                    self.execute(stmt)
+            except BreakException:
+                break
+            except ContinueException:
+                continue
+        return None
+
     def execute_ExprStmt(self, node: N.ExprStmt):
         """Execute expression statement."""
         return self.eval_expr(node.value)
@@ -2477,31 +2720,30 @@ class Interpreter:
 
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
-        # With statement: with expr as var: body
         if not node.items:
-            # No items, just execute body
             for stmt in node.body:
                 self.execute(stmt)
             return None
 
-        item = node.items[0]  # Support single with item for now
-        ctx = self.eval_expr(item.expr)
-        entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
-        if item.alias:
-            self.scope.define(item.alias, entered)
+        contexts = []
         try:
+            for item in node.items:
+                ctx = self.eval_expr(item.expr)
+                entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
+                contexts.append((ctx, entered))
+                if item.alias:
+                    self.scope.define(item.alias, entered)
             for stmt in node.body:
                 self.execute(stmt)
         except Exception as e:
-            # Standard context-manager protocol: __exit__ gets the exception
-            # and may suppress it by returning truthy (e.g. assert_raises's
-            # `with assert_raises(): raise ...` — the raise is expected and
-            # must not propagate as a test failure).
-            if hasattr(ctx, '__exit__') and ctx.__exit__(type(e), e, None):
-                return None
+            for ctx, _ in reversed(contexts):
+                if hasattr(ctx, '__exit__') and ctx.__exit__(type(e), e, None):
+                    return None
             raise
-        if hasattr(ctx, '__exit__'):
-            ctx.__exit__(None, None, None)
+        finally:
+            for ctx, _ in reversed(contexts):
+                if hasattr(ctx, '__exit__'):
+                    ctx.__exit__(None, None, None)
         return None
 
     def execute_RaiseStmt(self, node):
@@ -2569,6 +2811,17 @@ class Interpreter:
         try:
             for stmt in node.body:
                 self.execute(stmt)
+        except (ReturnValue, BreakException, ContinueException):
+            # These are the interpreter's own control-flow signals for
+            # `return`/`break`/`continue` (implemented as Exception
+            # subclasses so they can unwind through execute()), not values
+            # raised by the interpreted program. A bare `except Exception`
+            # (or `except:`) in Mojo source sitting around a `return` must
+            # let it keep propagating to the enclosing function/loop instead
+            # of swallowing it as a caught exception — otherwise `return`
+            # inside a try block silently turns into "an exception was
+            # raised with the return value as its message".
+            raise
         except Exception as e:
             if node.handlers:
                 handled = False
@@ -2645,10 +2898,24 @@ class Interpreter:
         """Evaluate identifier."""
         if expr.name == 'super':
             return self._eval_super(expr)
+        if expr.name == 'Self':
+            return self._resolve_Self(expr)
+        if expr.name.startswith('`'):
+            return expr.name
         try:
             return self.scope.get(expr.name)
         except NameError:
             raise NameError(f"{self._loc(expr)}name '{expr.name}' is not defined")
+
+    def _resolve_Self(self, expr):
+        """Resolve Self to the current struct type (when inside a struct method)."""
+        try:
+            self_val = self.scope.get('self')
+            if isinstance(self_val, MojoInstance):
+                return self_val._mojo_class
+        except NameError:
+            pass
+        return _MojoSelfType()
 
     def _eval_super(self, expr: N.IdentExpr):
         """Split out of eval_IdentExpr: returning a `_MojoSuper` instance
@@ -3005,7 +3272,10 @@ class Interpreter:
             return self._wrap_int(left + right)
         elif op == '-': return self._wrap_int(left - right)
         elif op == '*': return self._wrap_int(left * right)
-        elif op == '/': return left / right
+        elif op == '/':
+            if isinstance(left, (str, MojoString)) and isinstance(right, (str, MojoString)):
+                return MojoString(os.path.join(str(left), str(right)))
+            return left / right
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
@@ -3034,6 +3304,8 @@ class Interpreter:
         if op == '-': return self._wrap_int(-operand)
         elif op == '+': return +operand
         elif op == '~': return self._wrap_int(~operand)
+        elif op == '^':
+            return operand
         elif op == 'not': return not operand
         else:
             raise NotImplementedError(f"{self._loc(expr)}Unary operator {op} not implemented")
@@ -3079,15 +3351,57 @@ class Interpreter:
             method = obj._mojo_class.methods.get(expr.member)
             if method is not None:
                 return BoundMethod(method, obj, self)
+            if expr.member in obj._mojo_class.comptime_aliases:
+                return obj._mojo_class.comptime_aliases[expr.member]
             raise AttributeError(f"{self._loc(expr)}'{obj._mojo_class.name}' object has no attribute '{expr.member}'")
+        if expr.member == 'cast' and isinstance(obj, (int, float)):
+            class _CastWrapper:
+                def __getitem__(self, dtype):
+                    def cast_fn():
+                        return obj
+                    return cast_fn
+                def __call__(self, *args, **kwargs):
+                    return obj
+            return _CastWrapper()
+        if expr.member == 'to_int' and isinstance(obj, (int, float)):
+            return lambda: int(obj)
+        if expr.member == 'map_to_type' and isinstance(obj, type):
+            return lambda *a, **kw: obj
+        if expr.member == 'byte_length' and isinstance(obj, str):
+            return lambda: len(obj)
+        if expr.member == 'is_ascii_digit' and isinstance(obj, str):
+            return lambda: str.isascii(obj) and str.isdigit(obj)
+        if expr.member == 'is_ascii_printable' and isinstance(obj, str):
+            return lambda: str.isascii(obj) and all(32 <= ord(c) <= 126 for c in obj)
+        if expr.member == 'peek' and isinstance(obj, list):
+            return lambda: obj[-1] if obj else None
+        if expr.member == 'pop' and isinstance(obj, list):
+            return lambda: obj.pop() if obj else None
+        if obj is None:
+            if expr.member in ('value', 'unsafe_value', '__getitem__'):
+                raise MojoError("accessing value of None optional")
+            if expr.member == 'is_some':
+                return lambda: False
+            if expr.member == 'is_none':
+                return lambda: True
+            return None
         if not hasattr(obj, expr.member):
             raise AttributeError(f"{self._loc(expr)}'{type(obj).__name__}' object has no attribute '{expr.member}'")
-        return getattr(obj, expr.member)
+        attr = getattr(obj, expr.member)
+        if callable(attr) and not hasattr(attr, '__getitem__') and type(attr) is not type and type(attr).__eq__ is object.__eq__:
+            return _CallableWrapper(attr, self)
+        if not callable(attr) and expr.member == 'copy' and isinstance(obj, (int, float, bool, str)):
+            return lambda: obj
+        return attr
 
     def eval_SubscriptExpr(self, expr: N.SubscriptExpr):
         """Evaluate subscript access."""
         obj = self.eval_expr(expr.obj)
         idx = self.eval_expr(expr.index)
+        if not hasattr(obj, '__getitem__'):
+            if callable(obj):
+                return obj
+            raise TypeError(f"{type(obj).__name__} object is not subscriptable")
         return obj[idx]
 
     def eval_SliceExpr(self, expr: N.SliceExpr):

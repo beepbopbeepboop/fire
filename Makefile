@@ -1,4 +1,5 @@
 .PHONY: run demo check check-gimple check-runner check-gimple-runner check-modcache \
+        check-selfhost check-stdlib check-stdlib-interp check-stdlib-jit \
         clean clean-bootstrap stdlib bootstrap preflight \
         stage1 stage2 stage3 verify validate-all dump-all-stage1 dump-all-stage2 dump-all-stage3
 
@@ -32,14 +33,15 @@ PY_FILES   := mojo.py mojo_compiler.py myinterpreter.py \
 demo:
 	echo "3 + 42 + 0xFF" | python3 mojo_compiler.py
 
-# Everyday green gate: the GIMPLE unit suite, the execution runner, and the
-# module-cache end-to-end stages. The self-hosting bootstrap (stage1-3 +
-# validate-all) is a separate, aspirational target — `make bootstrap` — because
-# stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is not
-# gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost
+# Everyday green gate: the GIMPLE unit suite, the execution runner, the
+# module-cache end-to-end stages, the self-host compile guard, and the stdlib
+# test/benchmark suite (interpreter + JIT). The self-hosting bootstrap (stage1-3
+# + validate-all) is a separate, aspirational target — `make bootstrap` —
+# because stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is
+# not gated into `check` so `check` stays a meaningful pass/fail signal.
+check: check-gimple check-runner check-modcache check-selfhost check-stdlib
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + stdlib)"
 
 check-gimple: gimple_codegen.py
 	python3 test_gimple.py
@@ -58,6 +60,19 @@ check-modcache:
 # link cleanliness so it can't silently regress.
 check-selfhost: gimple_codegen.py mojo_compiler.py
 	python3 test_selfhost.py
+
+# Run all stdlib test and benchmark files through both the interpreter
+# (mojo.py run) and the JIT compiler (mojo.py --jit).
+check-stdlib: mojo_compiler.py
+	python3 test_stdlib.py
+
+# Run stdlib tests/benchmarks through interpreter only (mojo.py run).
+check-stdlib-interp: mojo_compiler.py
+	python3 test_stdlib.py --mode interp
+
+# Run stdlib tests/benchmarks through JIT compiler only (mojo.py --jit).
+check-stdlib-jit: mojo_compiler.py
+	python3 test_stdlib.py --mode jit
 
 check-gimple-runner:
 	python3 test_gimple_runner.py
