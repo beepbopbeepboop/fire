@@ -10,39 +10,6 @@
 #include <sys/wait.h>
 #include <errno.h>
 
-/* ── TEMPORARY profiling instrumentation (MOJO_PROFILE=1 env var) ─────────
- * Added to get a real allocation/call-count profile instead of reasoning
- * about generated GIMPLE - see doc/PLAN.md's stage2-bootstrap-blowup entry.
- * Remove once the remaining contributing factor is identified. */
-#include <time.h>
-static struct {
-    long list_new, cstr_slice, dict_new, set_add_int, list_append_str, mark_as_tuple;
-} _mojo_prof;
-static int _mojo_prof_on = -1;
-static double _mojo_prof_t0 = 0;
-static double _mojo_prof_now(void) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-static void _mojo_prof_tick(long *counter) {
-    if (_mojo_prof_on < 0) {
-        _mojo_prof_on = getenv("MOJO_PROFILE") ? 1 : 0;
-        _mojo_prof_t0 = _mojo_prof_now();
-    }
-    if (!_mojo_prof_on) return;
-    (*counter)++;
-    long total = _mojo_prof.list_new + _mojo_prof.cstr_slice + _mojo_prof.dict_new
-               + _mojo_prof.set_add_int + _mojo_prof.list_append_str + _mojo_prof.mark_as_tuple;
-    if (total % 2000000 == 0) {
-        fprintf(stderr,
-            "[mojo_prof] t=%.1fs list_new=%ld cstr_slice=%ld dict_new=%ld "
-            "set_add_int=%ld list_append_str=%ld mark_as_tuple=%ld\n",
-            _mojo_prof_now() - _mojo_prof_t0, _mojo_prof.list_new, _mojo_prof.cstr_slice,
-            _mojo_prof.dict_new, _mojo_prof.set_add_int, _mojo_prof.list_append_str,
-            _mojo_prof.mark_as_tuple);
-    }
-}
-
 #define USE_PYTHON 0
 
 #if USE_PYTHON
@@ -389,7 +356,6 @@ int mojo_is_registered_list(int64_t addr) {
 static MojoSet *_mojo_tuple_registry = NULL;
 
 void mojo_mark_as_tuple(MojoList *l) {
-    _mojo_prof_tick(&_mojo_prof.mark_as_tuple);
     if (!l) return;
     if (!_mojo_tuple_registry) _mojo_tuple_registry = mojo_set_new();
     mojo_set_add_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
@@ -402,7 +368,6 @@ int mojo_is_tuple(MojoList *l) {
 
 MojoList *mojo_list_new(void)
 {
-    _mojo_prof_tick(&_mojo_prof.list_new);
     MojoList *l = malloc(sizeof(MojoList));
     l->data = NULL;
     l->len  = 0;
@@ -440,7 +405,6 @@ void mojo_list_append_double(MojoList *l, double v)
 
 void mojo_list_append_str(MojoList *l, const char *v)
 {
-    _mojo_prof_tick(&_mojo_prof.list_append_str);
     mojo_list_append_int(l, (int64_t)(uintptr_t)v);
 }
 
@@ -617,7 +581,6 @@ char *mojo_str_data(MojoStr *s) { return s->data; }
  * character/element from every plain `x[start:]`. */
 char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
 {
-    _mojo_prof_tick(&_mojo_prof.cstr_slice);
     if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
     int64_t len;
     if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
@@ -822,6 +785,26 @@ int mojo_str_endswith_char(char *s, char c) {
 int64_t mojo_str_find(char *s, char *needle) {
     if (!s || !needle) return -1;
     char *found = strstr(s, needle);
+    if (!found) return -1;
+    return (int64_t)(found - s);
+}
+
+/* str.find(needle, start) with CPython semantics: negative start is relative
+ * to the end (clamped to 0 after adjustment); start beyond the string length
+ * is a guaranteed miss (-1); an empty needle matches at `start` itself, as
+ * long as start <= len (e.g. "ab".find("", 2) == 2 but "ab".find("", 3) ==
+ * -1). On a hit the returned index is absolute (relative to `s`, not to
+ * `s + start`). */
+int64_t mojo_str_find_from(char *s, char *needle, int64_t start) {
+    if (!s || !needle) return -1;
+    int64_t len = (int64_t)strlen(s);
+    if (start < 0) {
+        start += len;
+        if (start < 0) start = 0;
+    }
+    if (start > len) return -1;
+    if (!*needle) return start;
+    char *found = strstr(s + start, needle);
     if (!found) return -1;
     return (int64_t)(found - s);
 }
@@ -1153,7 +1136,6 @@ int mojo_is_bool_dict(MojoDict *d) {
 
 MojoDict *mojo_dict_new(void)
 {
-    _mojo_prof_tick(&_mojo_prof.dict_new);
     MojoDict *d = malloc(sizeof(MojoDict));
     d->cap      = 8;
     d->used     = 0;
@@ -1441,7 +1423,6 @@ static void _set_grow(MojoSet *s)
 
 void mojo_set_add_int(MojoSet *s, int64_t v)
 {
-    _mojo_prof_tick(&_mojo_prof.set_add_int);
     if (s->used * 2 >= s->cap) _set_grow(s);
     int64_t idx = _set_slot_int(s, v);
     if (idx < 0) { _set_grow(s); idx = _set_slot_int(s, v); }

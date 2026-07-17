@@ -150,15 +150,26 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   answering 2 where Python answers 5); and a simulation of the buggy
   semantics against the real mojo.py that never passed position 802 in
   5,000,000 iterations, resetting the cursor to position 22 exactly
-  42,017 times. Fix fully specified (new `mojo_str_find_from` runtime
-  helper + lowering change + signature-table entry + test plan) in
-  `bugs/CODEGEN_str_find_start_arg_dropped.md` - **not yet implemented**;
-  once landed, re-run the stage2 `--dump ../mojo.py` case and then full
-  `make bootstrap`. The interim fixes from this investigation (`c * 3`
-  repetition, `mojo_cstr_slice` strlen bound, `_set_slot_int` hash mixing,
-  `mojo_cstr_region_eq`, the `.tok`/`.ast` tokenize-once dedup) are all
-  real independent wins and stay. Once the fix lands, also strip the
-  temporary `MOJO_PROFILE` counters from `runtime/mojo_runtime.c`.
+  42,017 times. **FIXED same day** per the spec in
+  `bugs/CODEGEN_str_find_start_arg_dropped.md`: `mojo_str_find_from`
+  runtime helper (CPython find semantics), 2-arg `find` lowering in
+  `gimple_codegen.py`, signature-table entry, and a `test_gimple.py`
+  regression case locking both forms. Independently verified: `make check`
+  160/17/58/1 green, and the previously-infinite
+  `stage2/mojo --dump ../mojo.py` completes in ~5s (peak RSS ~38MB vs the
+  pre-fix 89GB), producing `.tok`/`.ast`/`.pyi` and the full 12MB
+  transitive-closure `.ci`. The temporary `MOJO_PROFILE` counters were
+  stripped from `runtime/mojo_runtime.c` as planned. The interim fixes
+  from this investigation (`c * 3` repetition, `mojo_cstr_slice` strlen
+  bound, `_set_slot_int` hash mixing, `mojo_cstr_region_eq`, the
+  `.tok`/`.ast` tokenize-once dedup) all stay.
+
+  **Still open after the fix:** `make bootstrap` now gets through stage 1
+  and most of stage 2 (all `.mojo` files plus `mojo.py` itself dump
+  cleanly), but stage2's `--dump` of `mojo_compiler.py` and
+  `myinterpreter.py` SIGSEGVs — consistent with the long-standing
+  "bootstrap run-failure is pre-existing" note, now the next concrete
+  blocker for a full green bootstrap. Separate bug, not yet root-caused.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to

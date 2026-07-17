@@ -1,8 +1,14 @@
 # CODEGEN: `str.find(needle, start)` silently drops the `start` argument → stage2 bootstrap infinite loop
 
-Status: **root-caused, fix specified, NOT yet implemented** (handing off for implementation + test)
+Status: **FIXED and verified** (2026-07-17, same day — implemented per the spec below; independently
+re-verified: `make check` 160/17/58/1 green, and the previously-infinite
+`stage2/mojo --dump ../mojo.py` now completes in ~5s producing all four
+artifacts including the 12MB transitive-closure `.ci`. `make bootstrap`
+progresses much further but still fails on a separate, pre-existing SIGSEGV
+when stage2 dumps `mojo_compiler.py`/`myinterpreter.py` — tracked in
+doc/PLAN.md, not this bug.)
 Found: 2026-07-17, closing out the stage2-bootstrap performance investigation (doc/PLAN.md)
-Severity: blocker — this is the actual root cause of the stage2 `--dump` "hang" / unbounded-memory blowup
+Severity: blocker — this was the actual root cause of the stage2 `--dump` "hang" / unbounded-memory blowup
 
 ## One-line summary
 

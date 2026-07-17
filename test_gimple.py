@@ -1573,6 +1573,33 @@ def main():
     return 0
 """)
 
+    # 159. str.find(needle, start) — the 2-arg form must lower to
+    #      mojo_str_find_from (not mojo_str_find, which silently drops the
+    #      start argument — see bugs/CODEGEN_str_find_start_arg_dropped.md).
+    #      Also locks in that the 1-arg form keeps calling mojo_str_find.
+    _find_src = """\
+def main():
+    var s: String = "ab\\ncd\\nef"
+    var j = s.find("\\n", 4)
+    var k = s.find("\\n")
+    return j
+"""
+    _find_ok, _find_c_src, _find_stderr = gimple_compiles(_find_src)
+    if (_find_ok
+            and 'mojo_str_find_from' in _find_c_src
+            and 'mojo_str_find (' in _find_c_src):
+        print("PASS  str_find_with_start_lowering"); _PASS += 1
+    else:
+        print("FAIL  str_find_with_start_lowering")
+        print("      --- generated C ---")
+        for i, line in enumerate(_find_c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _find_ok:
+            print("      --- gcc stderr ---")
+            for line in _find_stderr.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

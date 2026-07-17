@@ -3192,6 +3192,7 @@ class GimpleGen:
         'mojo_subprocess_stdout':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_subprocess_stderr':     ('char *',  ['MojoCompletedProcess *']),
         'mojo_str_find':         ('int64_t',   ['char *', 'char *']),
+        'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
         'mojo_repr_int':         ('char *',    ['int64_t']),
@@ -7367,6 +7368,11 @@ class GimpleGen:
             return 'int', t
         if method == 'find' and arg_vals:
             sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+            if len(arg_vals) >= 2:
+                start_type = arg_pairs[1][0] if len(arg_pairs) >= 2 else 'int64_t'
+                start_v = self._to_int64(start_type, arg_vals[1])
+                return 'int64_t', self._call_expr('int64_t', 'mojo_str_find_from',
+                    [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
             return 'int64_t', self._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
         if method == 'count' and arg_vals:
             sub_type = arg_pairs[0][0] if arg_pairs else 'char *'
