@@ -1508,7 +1508,7 @@ def write_bytes(s: Span) -> Int:
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
     test("libc_name_mangle_exit", """\
-fn exit(code: Int64):
+def exit(code: Int64):
     external_call["exit", NoneType](code)
 
 def main():

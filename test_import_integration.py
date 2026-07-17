@@ -71,10 +71,10 @@ def test_import_integration():
 
     # Define helper module
     helper_src = """\
-fn double_value(x: Int) -> Int:
+def double_value(x: Int) -> Int:
     return x * 2
 
-fn triple_value(x: Int) -> Int:
+def triple_value(x: Int) -> Int:
     return x * 3
 """
 

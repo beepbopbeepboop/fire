@@ -6,7 +6,7 @@ methods are thin wrappers over MLIR ops.  For example the real stdlib `Int` is::
     struct Int:
         var _mlir_value: __mlir_type.index
 
-        fn __add__(self, rhs) -> Int:
+        def __add__(self, rhs) -> Int:
             return __mlir_op.`index.add`(self._mlir_value, rhs._mlir_value)
 
 So to compile the *real* library we go all the way down to MLIR and replay the

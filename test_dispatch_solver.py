@@ -6,10 +6,10 @@ from gimple_codegen import DispatchSolver
 
 # Test case 1: Simple direct call graph
 test_direct_calls = """
-fn add(a: int, b: int) -> int:
+def add(a: int, b: int) -> int:
     return a + b
 
-fn main():
+def main():
     x = add(3, 4)
     return x
 """
@@ -38,7 +38,7 @@ _STMT_DISPATCH = {
     'Func': 'process_func',
 }
 
-fn dispatcher(stmt_type):
+def dispatcher(stmt_type):
     handler = _STMT_DISPATCH[stmt_type]
     return handler(stmt_type)
 """

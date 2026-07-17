@@ -26,7 +26,7 @@ sys.path.insert(0, 'mojo')
 from mojo.myinterpreter import Interpreter
 
 
-fn mojo_to_python(src: String) -> String:
+def mojo_to_python(src: String) -> String:
     """Convert Mojo syntax to Python-compatible syntax."""
     # Convert 'struct' to 'class'
     var src = re.sub(r'\bstruct\b', 'class', src)
@@ -42,7 +42,7 @@ fn mojo_to_python(src: String) -> String:
     return '\n'.join(result)
 
 
-fn load_interpreter_with_full_pipeline() -> AnyType:
+def load_interpreter_with_full_pipeline() -> AnyType:
     """Load interpreter with all phases for full compilation."""
     let interpreter = Interpreter()
 
@@ -109,7 +109,7 @@ fn load_interpreter_with_full_pipeline() -> AnyType:
     return interpreter
 
 
-fn stage2_compile(mojo_file: String) -> AnyType:
+def stage2_compile(mojo_file: String) -> AnyType:
     """Stage 2: Mojo interpreter compiles Mojo code to C."""
     let interpreter = load_interpreter_with_full_pipeline()
     if interpreter is None:
@@ -142,7 +142,7 @@ fn stage2_compile(mojo_file: String) -> AnyType:
         return None
 
 
-fn main():
+def main():
     if len(argv) < 2:
         print("/* Usage: mojo run stage2_mojo_interpreter.mojo <input.mojo> */")
         exit(1)
