@@ -258,6 +258,28 @@ class TupleExpr:
     line: int = 0
     col: int = 0
 
+# Aliases for compatibility with the legacy ast_nodes.py names
+# used by myinterpreter.py — the field layouts are identical.
+ListLiteral = ListExpr
+DictLiteral = DictExpr
+SetLiteral = SetExpr
+TupleLiteral = TupleExpr
+
+
+@dataclass
+class NoneLiteral:
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
+class Module:
+    body: list = field(default_factory=list)
+    filename: str = ""
+    line: int = 0
+    col: int = 0
+
+
 @dataclass
 class Comprehension:
     kind: str     # list / set / dict
@@ -370,6 +392,7 @@ class FunctionDef:
     decorators: list = field(default_factory=list)
     param_convs: dict = field(default_factory=dict)  # name -> convention str|None
     param_has_default: dict = field(default_factory=dict)  # name -> True if a default value was given
+    param_defaults: dict = field(default_factory=dict)  # name -> default value expression AST node
     kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
     comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
     line: int = 0
@@ -412,6 +435,7 @@ class GlobalStmt:
 class AssertStmt:
     value: object  # None if bare
     msg: object = None
+    is_comptime: bool = False
     line: int = 0
     col: int = 0
 
@@ -1658,6 +1682,7 @@ class Parser:
         params = []
         param_convs = {}
         param_has_default = {}
+        param_defaults = {}
         kwonly = []
         seen_bare_star = False
         while self._peek().kind != "RPAREN":
@@ -1711,8 +1736,10 @@ class Parser:
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     if self._peek().kind == "ASSIGN":
-                        self._advance(); self._parse_expr(0)
+                        self._advance()
+                        default_expr = self._parse_expr(0)
                         param_has_default[pname] = True
+                        param_defaults[pname] = default_expr
                     params.append(("*" + pname, ptype))
                     if conv is not None: param_convs[pname] = conv
                     if self._peek().kind == "COMMA": self._advance()
@@ -1736,12 +1763,13 @@ class Parser:
             ptype = None
             if self._peek().kind == "COLON":
                 self._advance(); ptype = self._parse_type_ann()
-            # Default value =expr: parsed and discarded (no comptime evaluator here),
-            # but its mere presence narrows this param's contribution to the
-            # function's minimum callable arity — needed for overload resolution.
+            # Default value =expr: parsed and stored for the interpreter to use
+            # when the argument is omitted.
             if self._peek().kind == "ASSIGN":
-                self._advance(); self._parse_expr(0)
+                self._advance()
+                default_expr = self._parse_expr(0)
                 param_has_default[pname] = True
+                param_defaults[pname] = default_expr
             params.append((pname, ptype))
             if conv is not None: param_convs[pname] = conv
             if seen_bare_star: kwonly.append(pname)
@@ -1822,6 +1850,7 @@ class Parser:
                            body=body, decorators=decorators,
                            param_convs=param_convs,
                            param_has_default=param_has_default,
+                           param_defaults=param_defaults,
                            kwonly=kwonly,
                            comptime_params=comptime_params)
 
@@ -1977,7 +2006,8 @@ class Parser:
         if t.value == "if":  return self._parse_comptime_if()
         if t.value == "for": return self._parse_comptime_for()
         # comptime assert expr[, msg]
-        if t.value == "assert": return self._parse_assert()
+        if t.value == "assert": 
+            return self._parse_assert(is_comptime=True)
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
@@ -2133,13 +2163,13 @@ class Parser:
         self._expect("KW", 'continue')
         return ContinueStmt()
 
-    def _parse_assert(self):
+    def _parse_assert(self, is_comptime=False):
         t = self._expect("KW", 'assert')
         value = self._parse_expr(0)
         msg = None
         if self._peek().kind == "COMMA":
             self._advance(); msg = self._parse_expr(0)
-        return AssertStmt(value=value, msg=msg, line=t.line, col=t.col)
+        return AssertStmt(value=value, msg=msg, is_comptime=is_comptime, line=t.line, col=t.col)
 
     def _parse_global(self):
         t = self._peek()

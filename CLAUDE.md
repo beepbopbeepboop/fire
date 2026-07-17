@@ -1,6 +1,11 @@
-# Testing
+# Project Conventions
 
-Beyond `make check`, three comprehensive quality gates:
-- `make bootstrap` — full self-host bootstrap. As of 2026-07-07, this fully passes end to end: stage1/2/3 (compile, run, idempotency re-run) all pass cleanly, and `verify`'s stage1-vs-stage2 `.tok`/`.ast` dump comparison also passes completely (38/38 + 38/38, reproducible across repeated from-scratch rebuilds) — see [[bootstrap-verify-ast-dump-fixes-2026-07-07]] memory note for the full history of ~19 bugs fixed to get there. The `validate-all` step still fails: it's a real gap, but a separate, pre-existing, unrelated one — the `stage1:` Makefile target only ever dumps `mojo.py` itself (`--dump-full`), never loops over the 40 test/core files the way `stage2`/`stage3` do, so `stage1/<file>.ci` etc. are legitimately missing for every other file. Judge everything except `validate-all`'s file-count mismatch, which is expected until that Makefile asymmetry is fixed.
-- `python3 compile_stdlib.py --roots std/_core,std/collections,std/io,std/math,std/os` — compiles the standard library and gcc-syntax-checks every module. (Roots are relative to the stdlib checkout root, e.g. `std/_core` not `_core` — everything now lives under `std/`; the old bare `_core,collections,io,math,os` form silently matches nothing.)
-- `python3 build_stdlib_dylib.py` — rebuilds `build/libmojostdlib.dylib`; the dylib is a compilation speed hack (comptime/elaboration introspection included) and MUST be rebuilt after compilation changes or it is stale and buggy.
+## Code Quality
+- Never pick the simple/quick fix. Always pick the production-quality approach.
+- Consolidate duplicates rather than maintaining parallel implementations.
+- If two files do the same thing, merge them — don't symlink, don't copy-paste.
+
+## AST Nodes
+- `mojo_compiler.py` is the single source of truth for all AST node definitions.
+- `myinterpreter.py` imports AST nodes as `import mojo_compiler as N`.
+- `ast_nodes.py` is dead and should not exist.
