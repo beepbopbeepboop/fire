@@ -14,6 +14,41 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
+  self-hosted — every call to them from already-compiled code shells out to
+  a `python3` subprocess instead of calling the compiled body natively.**
+  Confirmed 2026-07-17 while debugging a stage2-bootstrap segfault.
+  `gimple_codegen.py`'s call-lowering (~line 6314, the
+  `module_name == 'gimple_codegen' and method_name in ('compile_to_gimple',
+  'compile_to_gimple_cached')` branch) unconditionally lowers such calls to
+  the `gimple_codegen_compile_to_gimple` runtime shim
+  (`runtime/mojo_runtime.c` ~line 2007), which writes the source to a temp
+  file and runs `python3 -c "import gimple_codegen; ..."` via `popen()`,
+  with the comment "caching is a Python-process concern; the self-hosted
+  binary's subprocess fallback just compiles (same output, uncached)."
+  Bootstrap (`make bootstrap`) proves the compiler can compile *itself
+  once, top-to-bottom* — that's real self-hosting for that one operation —
+  but it never exercises a compiled program *recursively* invoking its own
+  compiler mid-execution (e.g. `module_loader.py` compiling an on-demand
+  import, or a JIT path), so that capability was never actually finished;
+  this shim is the acknowledged stand-in. Consequences: (1) fragile —
+  the shim's popen/buffer-growing read loop is a real crash surface (see
+  the stage2 segfault investigation this same session), and a `python3`
+  install is a hard runtime dependency for any compiled program that hits
+  this path, not just a build-time one; (2) `compile_to_gimple_cached`'s
+  whole point (the module cache in `cas.py`) is silently discarded on this
+  path — every recursive compile through the shim is uncached, even though
+  the surrounding Python-level infrastructure has a perfectly good cache.
+  A real fix means making `compile_to_gimple` safely re-entrant when called
+  from within already-compiled code: the self-hosted body needs to (a) not
+  rely on any Python-only global/module state that a nested invocation
+  would stomp on, (b) reach the module cache (`cas.py`'s
+  `module_key`/`get_or_build_text`) natively instead of losing caching
+  entirely, and (c) actually get called instead of being special-cased to
+  the shim in `gimple_codegen.py`'s call-lowering. Likely needs its own
+  bootstrap-style verification (recursive self-compile, not just the
+  current single top-level self-compile) before trusting it in place of
+  the subprocess fallback.
 - **`@` matmul defaults its result type to `int64_t`** when `__matmul__`'s
   return type is unknown (`_lower_matmul`, `gimple_codegen.py` ~line 5323).
 - **Typed `except` dispatch is impossible** — the runtime carries no
