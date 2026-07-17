@@ -134,6 +134,13 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+/* `s[start:stop] == needle` / `!= needle` without ever materializing the
+ * slice - see mojo_cstr_region_eq's comment in mojo_runtime.c for why this
+ * exists (a real, profiled hot path: mojo_compiler.py's own self-hosted
+ * tokenizer scanning for a closing triple-quote does exactly this, once per
+ * character scanned, and was spending ~90% of total runtime in
+ * mojo_cstr_slice's malloc+memcpy just to immediately strcmp-and-discard). */
+int         mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle);
 MojoStr    *mojo_str_from_char(char c);
 MojoStr    *mojo_str_repeat(MojoStr *s, int64_t n);
 int64_t     mojo_str_to_int(MojoStr *s);

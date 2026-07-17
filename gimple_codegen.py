@@ -1511,6 +1511,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_cstr_slice':            'char *',
+    'mojo_cstr_region_eq':        'int',
     'mojo_str_from_char':         'MojoStr *',
     'mojo_str_repeat':            'MojoStr *',
     'mojo_str_to_int':            'int64_t',
@@ -5462,6 +5463,36 @@ class GimpleGen:
             return field_type, t
     # ── Binary operator lowering ──────────────────────────────────────────
 
+    def _try_lower_slice_region_eq(self, slice_node, other_node, negate: bool):
+        """`slice_node == other_node` (or `!=` if negate) where slice_node is
+        a plain `s[a:b]` SliceExpr with no step - lowers to a direct
+        mojo_cstr_region_eq call with no intermediate slice allocation, if
+        the slice's source and the other operand are both plain `char *`.
+        Returns None (do nothing, let the caller fall through to the generic
+        lowering) if the shapes don't match closely enough to be safe."""
+        ot, ov = self.lower_expr(slice_node.obj)
+        if ot != 'char *':
+            return None
+        oth_t, oth_v = self.lower_expr(other_node)
+        if oth_t != 'char *':
+            return None
+        if slice_node.start is not None:
+            _, sv = self.lower_expr(slice_node.start)
+            start_v = self._to_int64(self._quick_type(slice_node.start), sv)
+        else:
+            start_v = '0'
+        if slice_node.stop is not None:
+            _, ev = self.lower_expr(slice_node.stop)
+            stop_v = self._to_int64(self._quick_type(slice_node.stop), ev)
+        else:
+            stop_v = 'MOJO_SLICE_STOP_OMITTED'
+        eq_t = self._call_expr('int', 'mojo_cstr_region_eq',
+                                [('char *', ov), ('int64_t', start_v), ('int64_t', stop_v), ('char *', oth_v)])
+        t = self._new_temp('_Bool')
+        cmp = '== 0' if negate else '!= 0'
+        self._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
     def _lower_binary(self, node: BinaryOp) -> tuple[str, str]:
         if node.op == ':=':
             vtype, vv = self.lower_expr(node.right)
@@ -5586,6 +5617,25 @@ class GimpleGen:
             self._emit(f"  goto {bb_merge};")
             self._emit_label(bb_merge)
             return res_type, result
+
+        # `s[a:b] == needle` / `!= needle` (either operand order): call
+        # mojo_cstr_region_eq directly instead of the generic
+        # slice-then-compare lowering, which would materialize the slice via
+        # mojo_cstr_slice (malloc + memcpy) just to immediately strcmp it
+        # away. Profiled as ~90% of ALL runtime in the exact scanning-loop
+        # shape (`while ... src[j:j+3] != quote3:`) that motivated this -
+        # see mojo_cstr_region_eq's comment in runtime/mojo_runtime.c.
+        # Scoped tightly (plain char* slice target, no step, other operand a
+        # plain char*) so it only ever fires for the shape it was measured
+        # against, not a broad speculative rewrite of slice comparisons.
+        if node.op in ('==', '!=') and isinstance(node.left, SliceExpr) and node.left.step is None:
+            fast = self._try_lower_slice_region_eq(node.left, node.right, negate=(node.op == '!='))
+            if fast is not None:
+                return fast
+        if node.op in ('==', '!=') and isinstance(node.right, SliceExpr) and node.right.step is None:
+            fast = self._try_lower_slice_region_eq(node.right, node.left, negate=(node.op == '!='))
+            if fast is not None:
+                return fast
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)

@@ -96,14 +96,58 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   unknown self-host crash (adding a local variable + a
   string-concatenation-heavy `print()` inside this specific nested-closure
   function), worth a fresh investigation on its own, but out of scope for
-  this session. Next step for the performance issue: retry the same
-  `i`-tracing idea but via a *runtime-level* counter/print (extending
-  `_mojo_prof`/`MOJO_PROFILE` in `runtime/mojo_runtime.c`, which has proven
-  safe so far) rather than adding new Python source inside the closure -
-  e.g. a counter that records the delta between successive `i` values seen
-  at each `mojo_cstr_slice`/`_mojo_at_char` call site, to catch a
-  non-advancing or backward-jumping cursor without touching
-  `mojo_compiler.py` itself.
+  this session.
+
+  **Follow-up (same day, continued investigation): used real profiling
+  tools instead of more manual counters/reasoning**, per direct feedback
+  that this class of bug "instantly lights up like a christmas tree" under
+  a sampler. macOS's built-in `sample <pid> <seconds>` (no recompilation,
+  no new crash risk, unlike the reverted Python-source instrumentation
+  above) immediately confirmed the theory with hard numbers instead of
+  inference: **~90% of ALL CPU time (3817/4254 samples) was inside
+  `mojo_cstr_slice`**, specifically the closing-triple-quote scan's
+  `while ... src[j:j+3] != quote3:` - materializing a heap-allocated
+  3-byte string via malloc+memcpy on every character scanned, purely to
+  immediately `strcmp` it away. Fixed properly: added
+  `mojo_cstr_region_eq(s, start, stop, needle)` to `runtime/mojo_runtime.c`
+  (bounded scan, no allocation, direct `memcmp`) and taught
+  `gimple_codegen.py`'s `_lower_binary` to recognize the AST shape
+  `<slice> == / != <string>` (either operand order, no step) and lower
+  directly to it instead of the generic slice-then-compare path - a
+  targeted fix, not a broad rewrite, verified correct against 5 edge
+  cases (both operand orders, non-match, wrong-length, and an empty-slice
+  edge case) and confirmed via a second profile: `cstr_slice` calls
+  dropped from 400M+ to ~490K for the same run.
+
+  **This did not fix the underlying hang** - it fixed the dominant *cost
+  per iteration*, but a second `sample` run afterward showed
+  `mojo_cstr_region_eq` still at ~67% of CPU time, simply because the
+  *iteration count* itself is still the real bug: `mojo_mark_as_tuple`/
+  `mojo_list_new` (one call per character in `replace_multiline_strings`'s
+  OUTER loop, from the `if c in ('"', "'"):` check) had already reached 29
+  million calls at ~112 seconds and was still climbing steadily, for a
+  ~900K-character file - roughly 32x too many outer-loop iterations, not
+  a cost-per-iteration problem. So the outer `while i < n:` loop is
+  genuinely not making full forward progress every iteration in the
+  *compiled* form (confirmed a manual trace of the Python source proves it
+  always should - every branch sets `i` to a value provably `> `the old
+  `i`, or exits the loop). This is now the single most concrete remaining
+  lead: something about how `i`'s updates (`i = end`, `i = j + 1 if ...
+  else j`, `i += 1`, the `continue` statements immediately after) get
+  lowered doesn't faithfully reproduce that guarantee once compiled - same
+  general flavor of bug as the `c * 3` fix earlier in this file, just not
+  yet pinned to a specific line. Next step: since direct Python-source
+  instrumentation of this closure crashes (see above) and manual GIMPLE
+  reading hasn't found it, try `dtrace`'s pid-provider on `mojo_list_new`'s
+  entry (available on this machine, not yet tried) to sample the call
+  *stack* (not just the leaf function) at high frequency and see whether
+  the immediate caller's PC/basic-block repeats suspiciously - or extend
+  `MOJO_PROFILE` with a counter that's cheap enough to call unconditionally
+  from `_mojo_at_char` (the character-access helper `_mojo_at_char(src, i)`
+  itself, called on essentially every loop pass) recording the raw `i`
+  value modulo a large prime into a histogram, to see whether the same
+  positions are visited far more than once without needing to modify
+  `mojo_compiler.py`'s Python source at all.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to

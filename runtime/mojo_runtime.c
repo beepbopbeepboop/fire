@@ -652,6 +652,39 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
     return out;
 }
 
+/* `s[start:stop] == needle` without ever calling mojo_cstr_slice - no
+ * malloc, no memcpy of the slice, no separate strcmp call. Added after a
+ * `sample`-based CPU profile (not guessed) showed ~90% of ALL runtime, in
+ * the exact stage2-bootstrap performance case this file's other fixes
+ * target, inside mojo_cstr_slice's malloc+memcpy, called from
+ * mojo_compiler.py's own self-hosted tokenizer doing
+ * `while ... src[j:j+3] != quote3:` once per character while scanning for
+ * a closing triple-quote: materializing a 3-byte heap string just to
+ * immediately strcmp-and-discard it, over and over. gimple_codegen.py's
+ * `_lower_binary` special-cases the AST shape `<slice> == / != <string>`
+ * to call this instead of the generic slice-then-compare lowering. */
+int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
+{
+    if (!s || !needle) return s == needle;
+    int64_t len;
+    if (start < 0 || stop < 0 || stop == MOJO_SLICE_STOP_OMITTED) {
+        len = (int64_t)strlen(s);
+        if (stop == MOJO_SLICE_STOP_OMITTED) stop = len;
+        if (start < 0) start += len;
+        if (stop  < 0) stop  += len;
+    } else {
+        len = 0;
+        while (len < stop && s[len]) len++;
+    }
+    if (start < 0) start = 0;
+    if (stop > len) stop = len;
+    if (start >= stop) return needle[0] == '\0';
+    int64_t region_len = stop - start;
+    size_t needle_len = strlen(needle);
+    if ((size_t)region_len != needle_len) return 0;
+    return memcmp(s + start, needle, needle_len) == 0;
+}
+
 MojoStr *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop)
 {
     /* See mojo_list_slice's identical fix: MOJO_SLICE_STOP_OMITTED (not a
