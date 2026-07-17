@@ -1755,6 +1755,18 @@ def _param_sig_str(params: tuple) -> str:
 # a C symbol like 'Bool___init___76baef' back to 'Bool.__init__(self:any)'.
 _overload_hash_registry: dict[str, str] = {}
 
+# Module-level (not per-GimpleGen-instance) because a fresh GimpleGen is
+# constructed once per file during whole-program/transitive-closure
+# flattening (--dump-full, mojo.py build), so an instance attribute would
+# reset for every file and never actually dedup anything. Tracks which
+# unresolved-import stub/definition C symbol names have already been
+# emitted into the CURRENT flattened output, so importing the same
+# never-defined name from multiple files (e.g. `from module_loader import
+# STDLIB_PATH` in imports.py/version.py/regex_compile.py) only emits ONE
+# definition instead of one per importing file - the latter is a hard
+# "redefinition of X" GCC error since it's all one translation unit.
+_emitted_unresolved_stub_syms: set[str] = set()
+
 def _method_overload_id(param_types: tuple, struct_name: str = '', method_name: str = '') -> str:
     """Generate a short stable hash ID for a method overload from its param types.
 
@@ -2342,6 +2354,12 @@ class GimpleGen:
         # from a fresh, empty "have I seen this name" view and merge its own
         # fields in regardless of what an earlier temp_gen already decided.
         self._struct_name_owner: dict[str, int] = {}
+        # struct name -> [base class names]; populated per gen_module call
+        # (see the struct-bases scan below). Default empty here so any method
+        # lookup that runs before that scan (or on a GimpleGen instance that
+        # never reaches it, e.g. a temp_gen used only for signature probing)
+        # sees "no bases" instead of raising AttributeError.
+        self._struct_bases: dict[str, list] = {}
         # struct name → {alias_name: value AST}; expanded at member access.
         self._struct_comptime_aliases: dict[str, dict] = {}
         # Bare names of user free functions whose C symbol is overload-mangled by
@@ -2350,6 +2368,25 @@ class GimpleGen:
         # every emission site routes the name through _func_csym for consistency.
         self._mangled_funcs: set[str] = set()
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
+        # Persists across every gen_module() call for this instance (once per
+        # file during whole-program/transitive-closure flattening) so an
+        # unresolved-import stub/definition for a given C symbol name is only
+        # ever emitted once, even when multiple modules independently import
+        # the same never-defined name (e.g. `from module_loader import
+        # STDLIB_PATH` in imports.py/version.py/regex_compile.py) - each
+        # re-encounters it as "unresolved" in its own imported_symbols pass,
+        # and without this guard each emits its own definition into the SAME
+        # flattened translation unit, a hard "redefinition of X" GCC error
+        # (the #ifndef {safe} wrapper around these does NOT guard against
+        # this: it only suppresses a collision with an actual #define'd C
+        # macro like SEEK_END, since a function/variable *definition* never
+        # #defines anything for a later #ifndef to see). This is intentionally
+        # a MODULE-LEVEL set (see its definition near _overload_hash_registry
+        # above), not an instance attribute: recursive import-inlining
+        # constructs nested GimpleGen instances (e.g. `temp_gen = GimpleGen(...)`
+        # elsewhere in this file) for imported modules, so a plain instance
+        # attribute here would reset per nested instance and never actually
+        # dedup across the files that make up one flattened program.
         self._all_closures: dict = {}   # populated by gen_module pre-pass
         self._lambda_outer_closures: dict = {}  # set during lambda body codegen
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
@@ -3855,15 +3892,43 @@ class GimpleGen:
             'str': 'int',
         }
 
+        # Methods that exist ONLY on Python str (never on list/dict/set), so a
+        # `param.method(...)` call using one of these unambiguously identifies
+        # `param` as a string even when it's also subscripted/sliced elsewhere
+        # in the same function (e.g. `src[i]`, `src[a:b]`) — which otherwise
+        # looks identical to list/sequence indexing to this analysis. Without
+        # this, any unannotated closure parameter that is both subscripted
+        # AND string-only-method-called (a very common shape for hand-rolled
+        # char-by-char scanners, e.g. mojo_compiler.py's own
+        # `replace_multiline_strings(src)`) was inferred as `MojoList *`
+        # instead of `char *`. That produced a compiled function whose `src`
+        # parameter was declared as a MojoList* while the caller actually
+        # passed a raw `char *` — every `src[i]` then lowered to
+        # `mojo_list_get_int(src, i)`, which dereferences the char* as if it
+        # were a MojoList struct pointer and reads garbage/crashes
+        # (EXC_BAD_ACCESS) on real input. Found via `stage2/mojo --dump`
+        # segfaulting in `mojo_list_get_int` called from
+        # `py_tokenize_replace_multiline_strings`, with the faulting address
+        # literally spelling out the first bytes of the source file's text —
+        # proof `src`'s raw string bytes were being read as a pointer.
+        STRING_ONLY_METHODS = {
+            'find', 'rfind', 'startswith', 'endswith', 'strip', 'lstrip',
+            'rstrip', 'split', 'rsplit', 'splitlines', 'replace', 'lower',
+            'upper', 'format', 'isalnum', 'isdigit', 'isspace', 'isupper',
+            'islower', 'isalpha', 'zfill', 'capitalize', 'title', 'join',
+            'partition', 'rpartition', 'swapcase', 'expandtabs', 'casefold',
+        }
+
         def analyze_param_usage(nodes: list, param_name: str):
             """Analyze how a parameter is used in a list of statements."""
             accessed_fields = set()
             function_calls = []  # List of (function_name, arg_index)
             is_subscripted = False  # Track if parameter is used with [...]
+            is_string_method = False  # Track if param.<str-only-method>(...) is called
 
             def scan_expr(expr):
                 """Recursively scan an expression."""
-                nonlocal is_subscripted
+                nonlocal is_subscripted, is_string_method
                 if isinstance(expr, SubscriptExpr):
                     # Check if the base (after unwrapping nested subscripts) is the parameter
                     base = expr.obj
@@ -3897,6 +3962,13 @@ class GimpleGen:
                             if isinstance(arg, IdentExpr) and arg.name == param_name:
                                 function_calls.append((func_name, i))
                     elif isinstance(expr.func, MemberExpr):
+                        # param.<str-only-method>(...) — see STRING_ONLY_METHODS
+                        # comment above: unambiguous evidence param is a string,
+                        # even if it's also subscripted elsewhere.
+                        if (isinstance(expr.func.obj, IdentExpr)
+                                and expr.func.obj.name == param_name
+                                and expr.func.member in STRING_ONLY_METHODS):
+                            is_string_method = True
                         # Handle re.sub(pattern, fn, src) → src (index 2) is char*
                         if (isinstance(expr.func.obj, IdentExpr)
                                 and expr.func.obj.name == 're'
@@ -3967,12 +4039,13 @@ class GimpleGen:
                             scan_nodes(node.finally_body)
 
             scan_nodes(nodes)
-            return accessed_fields, function_calls, is_subscripted
+            return accessed_fields, function_calls, is_subscripted, is_string_method
 
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                fields_accessed, function_calls, is_subscripted = analyze_param_usage(func.body, pname)
+                fields_accessed, function_calls, is_subscripted, is_string_method = \
+                    analyze_param_usage(func.body, pname)
 
                 # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
                 is_polymorphic = any(
@@ -3982,10 +4055,13 @@ class GimpleGen:
                 if is_polymorphic:
                     continue  # leave as int64_t (default for unannotated)
 
-                # If parameter is subscripted, it's indexable (list/dict/etc.)
-                # Check this FIRST to override generic function-call inference like len()
+                # If parameter is subscripted, it's indexable (list/dict/etc.) —
+                # UNLESS it's also called with a str-only method (STRING_ONLY_METHODS
+                # above), in which case indexing is char-by-char string scanning and
+                # the real type is char*, not MojoList*. Check subscript FIRST to
+                # override generic function-call inference like len() either way.
                 if is_subscripted:
-                    inferred[pname] = 'MojoList *'
+                    inferred[pname] = 'char *' if is_string_method else 'MojoList *'
 
                 # If not subscripted, try to infer from function calls
                 elif function_calls:
@@ -4650,11 +4726,39 @@ class GimpleGen:
             parts.append(('lit', ''.join(buf)))
         return parts
 
-    def _lower_StringLiteral(self, node):
-        val = node.value
-        # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
-        if val.startswith('`') and val.endswith('`') and len(val) > 2:
-            return self._lower_IdentExpr(IdentExpr(name=val))
+    def _repr_value(self, rat: str, rav: str) -> str:
+        """Convert an already-lowered (type, value) pair into a `char *` per
+        Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
+        string-formatting."""
+        if rat == 'char *':
+            return self._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
+        if rat == 'MojoList *':
+            return self._call_expr('char *', '_mojo_repr_list', [('MojoList *', rav)])
+        if rat == 'MojoDict *':
+            return self._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
+        if rat.endswith(' *') or rat == 'void *':
+            # Dispatch through the per-struct field-by-field reprs generated
+            # in gen_module (see reflect_structs) when the runtime type tag
+            # is one this program actually allocates — falls back to the
+            # address placeholder (mojo_repr_obj) for anything else, same
+            # as before. Real bug found via mojo.py's own `--dump`'s
+            # `repr(ast)` on a parsed AST list: every node printed as a
+            # meaningless `<object at 0x...>` instead of its real fields,
+            # since only mojo_repr_obj (no field-metadata table) existed.
+            rav_local = self._ensure_local(rat, rav)
+            vp = self._new_val('void *', f'(void *){rav_local}')
+            return self._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
+        if rat in ('double', 'float'):
+            rav_d = rav if rat == 'double' else self._new_val('double', f'(double){rav}')
+            return self._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
+        rav64 = rav if rat == 'int64_t' else self._new_val('int64_t', f'(int64_t){rav}')
+        return self._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
+
+    def _decode_str_literal_text(self, val: str) -> tuple[str, bool]:
+        """Strip a raw StringLiteral.value's f/r/b/u/t prefix and outer quotes,
+        returning (text, is_fstring). Shared by plain-string lowering, f-string
+        interpolation, and `%`-style string-formatting (which needs the format
+        string's literal text at codegen time, before any quoting/escaping)."""
         # Detect and strip f/r/b/u/t prefix — only if followed by a quote character
         # Regular strings have their quotes already stripped by the parser; f-strings
         # and t-strings (template strings — same `{expr}` interpolation syntax,
@@ -4696,6 +4800,35 @@ class GimpleGen:
             val = val[3:-3]
         elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
             val = val[1:-1]
+        return val, is_fstring
+
+    def _stringify_value(self, et: str, ev: str) -> str:
+        """Convert an already-lowered (type, value) pair into a `char *` per
+        Python `str()` semantics. Shared by f-string interpolation and `%`
+        string-formatting's `%s` conversion — both need "stringify this typed
+        value" and previously only f-strings had it inline."""
+        if et == 'char *':
+            return ev
+        if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
+                  'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
+            # Dispatch on the statically-known scalar type instead of
+            # mojo_str's generic `void *` heuristic, which can't tell
+            # a real int value of 0 apart from a NULL pointer and
+            # prints "None" for it — e.g. f"col={tok.col}" on a
+            # token at column 0 (see mojo_str's own comment).
+            nv = self._to_int64(et, ev)
+            return self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
+        if et in ('double', 'float'):
+            fv = ev if et == 'double' else self._new_val('double', f'(double){ev}')
+            return self._call_expr('char *', 'mojo_repr_float', [('double', fv)])
+        return self._call_expr('char *', 'mojo_str', [(et, ev)])
+
+    def _lower_StringLiteral(self, node):
+        val = node.value
+        # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
+        if val.startswith('`') and val.endswith('`') and len(val) > 2:
+            return self._lower_IdentExpr(IdentExpr(name=val))
+        val, is_fstring = self._decode_str_literal_text(val)
         if not is_fstring:
             escaped = _c_escape(val)
             # GIMPLE: char[] arrays can't be implicitly assigned to char* locals.
@@ -4735,23 +4868,7 @@ class GimpleGen:
                     # mojo_obj_getattr's stub instead of the real rewrite.
                     expr_node = ast_rewriter.rewrite_node(expr_node)
                     et, ev = self.lower_expr(expr_node)
-                    if et == 'char *':
-                        part_val = ev
-                    elif et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                                'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
-                        # Dispatch on the statically-known scalar type instead of
-                        # mojo_str's generic `void *` heuristic, which can't tell
-                        # a real int value of 0 apart from a NULL pointer and
-                        # prints "None" for it — e.g. f"col={tok.col}" on a
-                        # token at column 0 (see mojo_str's own comment).
-                        nv = self._to_int64(et, ev)
-                        part_val = self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-                    elif et in ('double', 'float'):
-                        fv = ev if et == 'double' else self._new_val('double', f'(double){ev}')
-                        part_val = self._call_expr('char *', 'mojo_repr_float', [('double', fv)])
-                    else:
-                        str_t = self._call_expr('char *', 'mojo_str', [(et, ev)])
-                        part_val = str_t
+                    part_val = self._stringify_value(et, ev)
                 except Exception as e:
                     # The interpolation can't be lowered.  Dropping it would
                     # silently corrupt the program's output, so warn and keep
@@ -5415,6 +5532,13 @@ class GimpleGen:
             return self._lower_floordiv(node)
         if node.op == '**':
             return self._lower_pow(node)
+        if node.op == '%':
+            _pct = self._lower_percent(node)
+            if _pct is not None:
+                return _pct
+            # else: not a statically-known string format -- ordinary
+            # numeric modulo; fall through to the generic path below,
+            # which already emits GIMPLE `%` for int/float operands.
         if node.op == '@':
             return self._lower_matmul(node)
         if node.op == 'in':
@@ -5659,6 +5783,26 @@ class GimpleGen:
         if node.op == '+' and lt == 'char *' and rt == 'char *':
             t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv)])
             return 'char *', t
+        # `<string> + <single char>` (or the reverse) — e.g. `prefix += val[0]`
+        # where `val[0]` (indexing a char* string) lowers to a bare C `char`,
+        # not `char *`. Neither this is `char* + char*` (mojo_str_cat above)
+        # nor is `char *` treated as a "raw pointer" by _is_raw_ptr below (it's
+        # in _KNOWN_PTRS), so without this branch execution fell through to the
+        # fully generic arithmetic emit further down, which emitted a bare
+        # `ptr + char` C expression — raw pointer arithmetic on a `char *`,
+        # which GIMPLE's frontend rejects outright ("internal compiler error
+        # in build2"). Route the char through mojo_char_to_str first so this
+        # becomes ordinary string concatenation. Found via mojo_compiler.py's
+        # own `_decode_str_literal_text`'s `prefix += val[0]` failing to
+        # self-compile with exactly that ICE.
+        if node.op == '+' and lt == 'char *' and rt == 'char':
+            rv_s = self._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
+            t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
+            return 'char *', t
+        if node.op == '+' and lt == 'char' and rt == 'char *':
+            lv_s = self._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
+            t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
+            return 'char *', t
         # Fallback: catch list concatenation that wasn't handled above
         if node.op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
             t = self._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
@@ -5782,10 +5926,174 @@ class GimpleGen:
         if c_op == '/' and res_type in ('double', 'float'):
             fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
             return res_type, self._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
+        # Floating-point modulo: plain GIMPLE `%` (trunc_mod_expr) is an
+        # integer-only operator in C -- gcc rejects `double % double` outright
+        # ("invalid operands to binary %"), the same class of error as the
+        # `char *` string-formatting case this method's caller special-cases,
+        # just for a different mismatched operand type. Found via `10.5 % 3.0`
+        # (real Mojo/Python float modulo) while testing the %-string-format
+        # fix. Python's float `%` is floor-based (result has the divisor's
+        # sign for mixed-sign operands), not C's truncating fmod() -- compute
+        # it the same way as `_lower_floordiv`'s float path: floor(x / y) * y
+        # subtracted from x. The division must go through the same
+        # mojo_div_double/float indirection as the '/' case just above
+        # (gcc -fgimple ICEs on an inline float/double '/' in a __GIMPLE body).
+        if c_op == '%' and res_type in ('double', 'float'):
+            fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
+            div_t = self._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
+            floor_t = self._new_val(res_type, f"__builtin_floor ({div_t})")
+            mul_t = self._new_val(res_type, f"{floor_t} * {rv}")
+            mod_t = self._new_val(res_type, f"{lv} - {mul_t}")
+            return res_type, mod_t
         t = self._new_val(res_type, f"{lv} {c_op} {rv}")
         return res_type, t
 
     # ── Operator helpers ──────────────────────────────────────────────────
+
+    def _lower_percent(self, node: BinaryOp):
+        """Python `%` is overloaded: Python's %-style string formatting when
+        the LHS is a string ("%s (%d)" % (a, b)), ordinary numeric modulo
+        otherwise. GCC's -fgimple back end has no such overload -- unconditional
+        fallthrough to a plain GIMPLE `%` (trunc_mod_expr) on a `char *` LHS
+        is exactly what produced the "invalid operands to binary %"/"invalid
+        types for 'trunc_mod_expr'" class of errors across ~130 real stdlib
+        files (colorsys.py's `h % 1.0` is the numeric case that must keep
+        working; re/_constants.py's `'%s (line %d, column %d)' % (msg,
+        self.lineno, self.colno)` is the string case that didn't).
+
+        Only a *literal* format string on the LHS is handled specially here
+        (the overwhelming majority of real `%`-formatting -- format
+        templates are almost always written as literals, never built up at
+        runtime). Anything else -- including a `char *` variable holding a
+        dynamic template -- falls through to the ordinary numeric-modulo
+        path below (pre-existing behavior, not made worse).
+        """
+        if isinstance(node.left, StringLiteral):
+            fmt_text, is_fstring = self._decode_str_literal_text(node.left.value)
+            if not is_fstring:
+                return self._lower_percent_format(node, fmt_text)
+        return None  # sentinel: caller falls through to generic numeric `%`
+
+    def _lower_percent_format(self, node: BinaryOp, fmt_text: str) -> tuple[str, str]:
+        """Lower literal `%`-format string formatting to a `char *` result.
+
+        Mirrors how f-string interpolation (_lower_StringLiteral's
+        is_fstring branch / _parse_fstring_parts) splits literal text from
+        `{expr}` parts and concatenates the pieces via mojo_str_cat: here
+        the equivalent of an `{expr}` part is "the next %-spec", matched
+        left-to-right against the RHS's operands (a tuple's elements for
+        `fmt % (a, b, ...)`, or the single RHS expression for `fmt % x`).
+        """
+        rhs_exprs = (list(node.right.elements) if isinstance(node.right, TupleExpr)
+                     else [node.right])
+
+        # Parse into ('lit', text) | ('spec', full_spec, conv) parts.
+        # `full_spec` keeps the flags/width/precision text (e.g. '%08.3f')
+        # so sprintf below reproduces them; only the conversion character
+        # needs any Python->C translation.
+        parts = []
+        buf = []
+        i, n = 0, len(fmt_text)
+        while i < n:
+            c = fmt_text[i]
+            if c != '%':
+                buf.append(c); i += 1
+                continue
+            if i + 1 < n and fmt_text[i + 1] == '%':
+                buf.append('%'); i += 2
+                continue
+            if buf:
+                parts.append(('lit', ''.join(buf))); buf = []
+            spec_start = i
+            i += 1
+            # Flags, width, precision. Dynamic width/precision ('%*d') isn't
+            # supported -- rare enough in practice to leave as a follow-up
+            # rather than block the common literal-width case.
+            while i < n and fmt_text[i] in '-+0 #.123456789':
+                i += 1
+            conv = fmt_text[i] if i < n else 's'
+            if i < n:
+                i += 1
+            parts.append(('spec', fmt_text[spec_start:i], conv))
+        if buf:
+            parts.append(('lit', ''.join(buf)))
+
+        n_specs = sum(1 for p in parts if p[0] == 'spec')
+        if n_specs != len(rhs_exprs):
+            # Can't safely map operands to specs (mismatched-arity source,
+            # or a '%' that wasn't really meant as a format template).
+            # Degrade to the literal text -- still evaluated the RHS for any
+            # side effects real Python would have had -- rather than emit a
+            # GIMPLE-invalid `char * % ...`.
+            for e in rhs_exprs:
+                self.lower_expr(e)
+            return 'char *', self._new_val('char *', self._intern_string(_c_escape(fmt_text)))
+
+        arg_i = 0
+        acc_val = None
+        for part in parts:
+            if part[0] == 'lit':
+                text = part[1]
+                if not text:
+                    continue
+                part_val = self._new_val('char *', self._intern_string(_c_escape(text)))
+            else:
+                _, full_spec, conv = part
+                et, ev = self.lower_expr(rhs_exprs[arg_i])
+                arg_i += 1
+                part_val = self._format_percent_spec(full_spec, conv, et, ev)
+            acc_val = part_val if acc_val is None else self._new_val(
+                'char *', f'mojo_str_cat ({acc_val}, {part_val})')
+        if acc_val is None:
+            acc_val = self._new_val('char *', self._intern_string(''))
+        return 'char *', acc_val
+
+    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str) -> str:
+        """Render one %-spec's operand to `char *`, applying any width or
+        precision in `full_spec` via a real C sprintf (see _sprintf_one)
+        rather than reimplementing printf-style padding by hand."""
+        if conv == 's':
+            sval = self._stringify_value(et, ev)
+            if full_spec == '%s':
+                return sval
+            return self._sprintf_one(full_spec[:-1] + 's', sval)
+        if conv == 'r':
+            rval = self._repr_value(et, ev)
+            if full_spec == '%r':
+                return rval
+            return self._sprintf_one(full_spec[:-1] + 's', rval)
+        if conv == 'c':
+            nv = self._to_int64(et, ev)
+            cv = self._new_val('char', f'(char){nv}')
+            return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+        if conv in 'diouxX':
+            nv = self._to_int64(et, ev)
+            # Insert a 64-bit length modifier: Python %-specs never carry one
+            # (Python ints have no fixed width), but this codebase's Int is a
+            # 64-bit int64_t -- sprintf-ing that through a bare "%d" is
+            # undefined behavior (only 32 bits of the varargs int64_t are
+            # consumed on most ABIs). "%5d" -> "%5lld", etc.
+            c_spec = full_spec[:-1] + 'll' + conv
+            return self._sprintf_one(c_spec, nv)
+        if conv in 'fFeEgG':
+            dv = ev if et == 'double' else self._new_val('double', f'(double){ev}')
+            return self._sprintf_one(full_spec, dv)
+        # Unknown/unsupported conversion (e.g. '%a') -- degrade to str().
+        return self._stringify_value(et, ev)
+
+    def _sprintf_one(self, c_spec: str, arg_val: str) -> str:
+        """sprintf a single value through a heap buffer into `char *`, using
+        a compile-time-known C format spec. Same malloc+sprintf shape
+        print() already uses for its non-string/list/dict operands (see
+        the print()-builtin lowering) -- factored out here since
+        %-formatting needs it once per spec rather than once per call."""
+        buf = self._new_temp('char *')
+        vp = self._new_temp('void *')
+        fmt_t = self._new_val('char *', self._intern_string(_c_escape(c_spec)))
+        self._emit(f'  {vp} = malloc (256);')
+        self._emit(f'  {buf} = (char *) {vp};')
+        self._emit(f'  sprintf ({buf}, {fmt_t}, {arg_val});')
+        return buf
 
     def _lower_floordiv(self, node: BinaryOp) -> tuple[str, str]:
         lt, lv = self.lower_expr(node.left)
@@ -6077,6 +6385,39 @@ class GimpleGen:
     def _lower_method_call(self, node: CallExpr) -> tuple[str, str]:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
+
+        # `super().method(args)` — resolve directly to the base struct's method
+        # rather than falling through to the generic obj.method() dispatch below,
+        # which would try to evaluate `super()` as an ordinary call to a bare
+        # function named `super` (undefined symbol at link time — see
+        # bugs/consolidated/COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md).
+        # Mirrors myinterpreter.py's eval_IdentExpr/_eval_super: `super()` means
+        # "the first base class of the struct the enclosing method belongs to".
+        if (isinstance(func.obj, CallExpr) and isinstance(func.obj.func, IdentExpr)
+                and func.obj.func.name == 'super' and not func.obj.args):
+            base_name = None
+            cur_struct = getattr(self, '_current_struct_name', None)
+            for b in (self._struct_bases.get(cur_struct) or []) if cur_struct else ():
+                # Only a base with an actual known definition (fields/methods
+                # registered in struct_field_types) has a real C function to
+                # call into. A base we never resolved a StructDef for — e.g.
+                # an external/unmodeled class like html.parser.HTMLParser —
+                # has no native method to link against.
+                if b in self.struct_field_types:
+                    base_name = b
+                    break
+            if base_name is None:
+                # No resolvable base: there is nothing to call. Still evaluate
+                # the arguments for side effects, then no-op — the same
+                # "can't fully support this construct, degrade gracefully"
+                # convention _stub_only_modules below uses for symbols with
+                # no native definition, rather than emitting an unresolvable call.
+                for a in node.args:
+                    self.lower_expr(a)
+                return 'int64_t', self._new_val('int64_t', '(int64_t)0')
+            self_type, self_val = self.lower_expr(IdentExpr(name='self', line=getattr(node, 'line', 0)))
+            fake_obj_type = f"{base_name} *"
+            return self._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
 
         # `m.group()`/`m.start()` where m is a regex-match for-loop variable
         # (see _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f).
@@ -7085,7 +7426,36 @@ class GimpleGen:
                 and f'{struct_name}_{method}' not in self.func_return_types
                 and mangled not in self._auto_stubbed):
             _stub_guard = f'_MOJO_STUB_{struct_name.upper()}_{method.upper()}'
-            _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
+            # A struct with at least one base class we couldn't resolve to a
+            # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`
+            # — an external/unmodeled class) may call inherited methods
+            # (`self.feed(...)`) that are genuinely never defined anywhere in
+            # this program — not now, not later in this TU, not in any other
+            # module. A bare forward declaration below (`int64_t X (...);`)
+            # is fine for the ordinary case this auto-stub exists for (a
+            # same-struct sibling method not yet emitted, which gets a real
+            # definition later), but here it just leaves an undefined symbol
+            # at link time (bugs/consolidated/
+            # COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md). Emit an
+            # actual (weak) definition instead, matching the existing
+            # "unavailable in compiled mode" convention _stub_only_modules
+            # uses just below for imports from unresolvable modules.
+            if struct_name in getattr(self, '_structs_with_unresolved_base', ()):
+                # The first parameter must match the real call site's actual
+                # receiver type (`{struct_name} *`, the same struct this
+                # method is being called on) — not int64_t. A bare int64_t
+                # here mismatched the real pointer argument every call site
+                # passes, producing a *new* `-Wint-conversion` "makes integer
+                # from pointer without a cast" hard error (a different entry
+                # in the same bugs/consolidated/ compile-fail catalog) in
+                # place of the undefined-symbol error this stub exists to fix.
+                _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                          f'__attribute__((weak)) int64_t {mangled} ({struct_name} *_self, ...) '
+                          f'{{ (void)_self; mojo_print ((char *)'
+                          f'"{struct_name}.{method}: unavailable in compiled mode '
+                          f'(inherited from an unmodeled base class)"); return (int64_t)0; }}\n#endif')
+            else:
+                _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {mangled} (...);\n#endif'
             if _stub not in self._elaborated_externs:
                 self._elaborated_externs.append(_stub)
             self._auto_stubbed.add(mangled)
@@ -7829,7 +8199,14 @@ class GimpleGen:
                 return self._lower_method_call(CallExpr(
                     func=_cm, args=node.args,
                     kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0)))
-        if fname_raw == 'main' and self.current_func_name != 'main':
+        # Only redirect to the synthesized entry point when 'main' really is
+        # this module's own entry-point function. `from foo import main;
+        # main()` (e.g. Lib/idlelib/idle.py) binds 'main' to an *imported*
+        # function with its own real signature — rewriting that call to
+        # _gimple_main/_lib_main mismatches the synthesized stub's signature
+        # and produces "conflicting types for '_gimple_main'".
+        if (fname_raw == 'main' and self.current_func_name != 'main'
+                and fname_raw not in self.imported_symbols):
             if self.emit_entry_points:
                 fname_raw = '_gimple_main'
             else:
@@ -7886,29 +8263,7 @@ class GimpleGen:
         # `repr(ast)` on a parsed AST list.
         if fname_raw == 'repr' and node.args:
             rat, rav = self.lower_expr(node.args[0])
-            if rat == 'char *':
-                return 'char *', self._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
-            if rat == 'MojoList *':
-                return 'char *', self._call_expr('char *', '_mojo_repr_list', [('MojoList *', rav)])
-            if rat == 'MojoDict *':
-                return 'char *', self._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
-            if rat.endswith(' *') or rat == 'void *':
-                # Dispatch through the per-struct field-by-field reprs generated
-                # in gen_module (see reflect_structs) when the runtime type tag
-                # is one this program actually allocates — falls back to the
-                # address placeholder (mojo_repr_obj) for anything else, same
-                # as before. Real bug found via mojo.py's own `--dump`'s
-                # `repr(ast)` on a parsed AST list: every node printed as a
-                # meaningless `<object at 0x...>` instead of its real fields,
-                # since only mojo_repr_obj (no field-metadata table) existed.
-                rav_local = self._ensure_local(rat, rav)
-                vp = self._new_val('void *', f'(void *){rav_local}')
-                return 'char *', self._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
-            if rat in ('double', 'float'):
-                rav_d = rav if rat == 'double' else self._new_val('double', f'(double){rav}')
-                return 'char *', self._call_expr('char *', 'mojo_repr_float', [('double', rav_d)])
-            rav64 = rav if rat == 'int64_t' else self._new_val('int64_t', f'(int64_t){rav}')
-            return 'char *', self._call_expr('char *', 'mojo_repr_int', [('int64_t', rav64)])
+            return 'char *', self._repr_value(rat, rav)
 
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {
@@ -10713,7 +11068,11 @@ class GimpleGen:
             if _var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
                 for a in node.value.args: self.lower_expr(a)
                 return
-            if raw_name == 'main' and self.current_func_name != 'main':
+            # Same guard as _lower_CallExpr: don't redirect an *imported*
+            # 'main' (e.g. `from foo import main; main()`) to the
+            # synthesized entry point — only this module's own main.
+            if (raw_name == 'main' and self.current_func_name != 'main'
+                    and raw_name not in self.imported_symbols):
                 if self.emit_entry_points:
                     fname = _safe_name('_gimple_main')
                 else:
@@ -13715,6 +14074,29 @@ class GimpleGen:
         self._selfhost_hardcoded_struct_names = frozenset(self.struct_field_types.keys())
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
+        # Captured before _merge_struct_inheritance runs (it only mutates
+        # .fields/.methods, never .bases, so ordering doesn't matter here) —
+        # used by _lower_method_call's `super().method(...)` handling to find
+        # the struct's base class name(s) at call-lowering time.
+        self._struct_bases = {s.name: list(getattr(s, 'bases', None) or [])
+                               for s in all_struct_defs if isinstance(s, StructDef)}
+        # Structs with at least one base name that isn't any StructDef this
+        # compilation unit knows about — e.g. `class IDGatherer
+        # (html.parser.HTMLParser)`, where the parser only captures the
+        # leading name token of a dotted base expression (see
+        # mojo_compiler.py's ClassDef/StructDef base-list parsing), so even
+        # `html` never resolves to a real struct. Used by
+        # _lower_struct_method_call's auto-stub path: a method call that
+        # can't be found on the struct's own/resolved-base methods, on one
+        # of these, is inherited from a base with no native definition
+        # anywhere — not a same-struct forward reference — so the auto-stub
+        # must be a real (weak) definition, not a bare declaration.
+        _all_struct_names = {s.name for s in all_struct_defs if isinstance(s, StructDef)}
+        self._structs_with_unresolved_base = {
+            s.name for s in all_struct_defs
+            if isinstance(s, StructDef)
+            and any(b not in _all_struct_names for b in (getattr(s, 'bases', None) or []))
+        }
         _merge_struct_inheritance(all_struct_defs)
         self._exc_descendants = _compute_exc_descendants(all_struct_defs)
         # Pre-register all struct names so cross-references in _collect_self_assigns work
@@ -13915,10 +14297,23 @@ class GimpleGen:
                 # representation ('int') already used for any field whose type can't
                 # be pinned down statically; runtime attribute access on it still goes
                 # through the normal dynamic dispatch machinery.
+                # `self.foo` walked generically by `_walk_ast` also matches the
+                # `.func` of a method CALL (`self.foo(...)`) — that is a read of
+                # the *method* `foo`, never a struct field, and must not be
+                # confused with one. Otherwise every ordinary method call inside
+                # the class's own methods (e.g. BufferedSubFile.close() calling
+                # `self.pushlines(...)`) synthesizes a spurious int-typed field
+                # named after the method, which then fights the method's real
+                # signature — the `non-trivial conversion`/`declared void`/
+                # `conflicting types` family of C errors on the generated
+                # struct's getattr/setattr/repr dispatch functions.
+                _method_names = {m.name for m in s.methods}
+
                 def _collect_self_reads(body, found):
                     for node in _walk_ast(body):
                         fn = _self_member(node)
-                        if fn is not None and fn not in found and not (fn.startswith('__') and fn.endswith('__')):
+                        if (fn is not None and fn not in found and fn not in _method_names
+                                and not (fn.startswith('__') and fn.endswith('__'))):
                             found[fn] = 'int'
 
                 already = set(self.struct_field_types[s.name].keys())
@@ -16164,9 +16559,12 @@ class GimpleGen:
             if module in _stub_only_modules:
                 # Provide a defined-but-unusable stub (plain C, like the _mojo_at_ helpers)
                 # so the symbol resolves at link time.
+                cname = _safe_name(sym_name)
+                if cname in _emitted_unresolved_stub_syms:
+                    continue
+                _emitted_unresolved_stub_syms.add(cname)
                 ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type and ret_type != 'unknown' else 'int'
-                cname = _safe_name(sym_name)
                 if ret_type == 'void':
                     body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
                 else:
@@ -16216,12 +16614,55 @@ class GimpleGen:
                     # accidentally redeclared (the macro would expand before gcc sees the decl).
                     parts.append(f"#ifndef {safe}\nextern {signature};  /* from {module} */\n#endif")
             else:
-                # Legacy format fallback: use pure variadic so callers can pass any args.
-                # GIMPLE mode treats () as "no params" (causing "too many args" errors),
-                # so we use (...) instead which accepts any number of arguments.
+                # No 'signature' was ever attached (see module_loader.py — that
+                # key is only set once a real definition is actually found,
+                # whether an inlined Mojo function, a compiled dylib symbol,
+                # or a reflected C signature). Reaching here means this name
+                # (typically `from some_module import name`, e.g. `from
+                # itertools import filterfalse`) was never resolved to any
+                # real implementation.
                 ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
-                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                if self.do_imports:
+                    # do_imports=True is `mojo.py build`'s standalone-binary
+                    # mode: every resolvable Mojo definition is inlined into
+                    # this same translation unit and would already have hit
+                    # the `inline_defined`/`struct_field_types` skips above.
+                    # So an unresolved name here is genuinely never defined
+                    # anywhere this build will link against (e.g. a real
+                    # Python stdlib module this project doesn't implement) —
+                    # a bare `extern` forward declaration would leave an
+                    # undefined symbol at link time (bugs/consolidated/
+                    # COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md).
+                    # Emit an actual (weak) definition instead, matching the
+                    # existing "unavailable in compiled mode" convention
+                    # _stub_only_modules above uses for the same situation.
+                    # Guard against re-emitting the SAME definition when
+                    # another module elsewhere in this flattened program also
+                    # imports the same never-resolved name (weak-symbol
+                    # linkage doesn't help here - this is one definition
+                    # showing up twice in one translation unit).
+                    if safe in _emitted_unresolved_stub_syms:
+                        continue
+                    _emitted_unresolved_stub_syms.add(safe)
+                    if ret_type == 'void':
+                        body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
+                    else:
+                        body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); return ({ret_type})0; }}'
+                    parts.append(f"#ifndef {safe}\n__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
+                else:
+                    # do_imports=False (e.g. build_module.py / compile_stdlib.py's
+                    # separately-compiled-module workflow): sibling modules are
+                    # compiled to their own .o and linked together afterward, so
+                    # an unresolved-here name may legitimately be defined in one
+                    # of those other translation units. Keep the historical
+                    # bare-extern behavior — turning this into a stub would
+                    # silently swallow real cross-module calls instead of
+                    # linking to their real definition.
+                    # Legacy format fallback: use pure variadic so callers can pass any args.
+                    # GIMPLE mode treats () as "no params" (causing "too many args" errors),
+                    # so we use (...) instead which accepts any number of arguments.
+                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
         if self.imported_symbols:
             parts.append('')
@@ -16642,6 +17083,14 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     matching forward declaration for it. Link mode is a separate entry point —
     compile_to_gimple_linked — to avoid changing this ABI.)
     """
+    # One call here = one independent output artifact (this project's own
+    # transitive-closure dumps included - the whole multi-file closure is one
+    # call). Reset cross-file dedup state so it can't leak stale "already
+    # emitted" markers between unrelated compiles that happen to share this
+    # process (e.g. compile_stdlib.py compiling many independent modules),
+    # while still deduping correctly *within* one call across every nested
+    # GimpleGen instance recursive import-inlining creates.
+    _emitted_unresolved_stub_syms.clear()
     tokens = py_tokenize(mojo_src)
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports)
