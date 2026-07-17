@@ -505,32 +505,47 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         try:
             import gimple_codegen
 
-            # Generate tokens
+            # Tokenize ONCE and reuse for both .tok and .ast: these used to
+            # call py_tokenize(src) independently, each re-running the full
+            # O(source length) tokenizer pass over the same source a second
+            # time for no reason (confirmed via a real call-count profile
+            # while chasing the stage2-bootstrap performance blowup - see
+            # doc/PLAN.md - self-hosted --dump of mojo.py itself was making
+            # tens of millions of calls into runtime allocators for a ~900KB
+            # file; this was one concrete, provable contributor, though not
+            # the whole story). Parsing (.ast) still gets its own try/except
+            # so a parse failure doesn't take .tok down with it.
             try:
                 from mojo_compiler import py_tokenize
                 tokens = py_tokenize(src)
-                # Format tokens for consistent output
-                def format_token(tok):
-                    kind_str = tok.kind
-                    val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
-                    return f"Token(kind={kind_str}, value={val_repr}, line={tok.line}, col={tok.col})"
-                formatted = [format_token(t) for t in tokens]
-                with open(f"{basename}.tok", "w") as f:
-                    f.write("[" + ", ".join(formatted) + "]")
             except Exception as e:
                 print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
-                any_failed = True
-
-            # Generate AST
-            try:
-                from mojo_compiler import Parser, py_tokenize
-                tokens = py_tokenize(src)
-                ast = Parser(tokens).with_filename(input_file).parse_module()
-                with open(f"{basename}.ast", "w") as f:
-                    f.write(repr(ast))
-            except Exception as e:
                 print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
                 any_failed = True
+                tokens = None
+
+            if tokens is not None:
+                try:
+                    # Format tokens for consistent output
+                    def format_token(tok):
+                        kind_str = tok.kind
+                        val_repr = "'" + tok.value.replace("'", "\\'").replace("\\", "\\\\") + "'"
+                        return f"Token(kind={kind_str}, value={val_repr}, line={tok.line}, col={tok.col})"
+                    formatted = [format_token(t) for t in tokens]
+                    with open(f"{basename}.tok", "w") as f:
+                        f.write("[" + ", ".join(formatted) + "]")
+                except Exception as e:
+                    print(f"Warning: Could not generate .tok: {e}", file=sys.stderr)
+                    any_failed = True
+
+                try:
+                    from mojo_compiler import Parser
+                    ast = Parser(tokens).with_filename(input_file).parse_module()
+                    with open(f"{basename}.ast", "w") as f:
+                        f.write(repr(ast))
+                except Exception as e:
+                    print(f"Warning: Could not generate .ast: {e}", file=sys.stderr)
+                    any_failed = True
 
             # Generate C intermediate (with transitive imports)
             c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)

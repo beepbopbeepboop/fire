@@ -46,17 +46,64 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   climb after fix #1; fix #2 was verified correct and kept but didn't
   measurably change the trajectory for this specific case) - but the
   process still hadn't finished after several minutes and tens of GB even
-  with both fixes applied, so at least one more contributing factor remains
-  unidentified. Candidates not yet ruled out: the per-outer-loop-iteration
-  fresh-tuple allocation in `replace_multiline_strings`'s
-  `if c in ('"', "'"):` check (creates and never frees a 2-element list/tuple
-  once per character scanned, not just once per quote) turning out to
-  dominate at a larger constant factor than estimated; or the effective
-  iteration count being much larger than the ~900K characters in mojo.py,
-  which would mean something is still being reprocessed more than once per
-  character even after fix #1. Needs a real allocation/call-count profile
-  (e.g. a temporary counter in `mojo_list_new`/`mojo_cstr_slice`, or `dtrace`)
-  rather than further manual reasoning about the generated code.
+  with both fixes applied.
+
+  Got a real call-count profile (temporary counters in
+  `runtime/mojo_runtime.c`, gated behind `MOJO_PROFILE=1` so they're zero-
+  cost when unset - `_mojo_prof_tick`/`_mojo_prof` near the top of the file,
+  currently still in place; strip once this is fully resolved) instead of
+  further manual reasoning about the generated code, per the instruction
+  above. Result: for mojo.py's ~900K-character source, `mojo_list_new`/
+  `mojo_mark_as_tuple` reached **70+ million calls at 306 seconds and still
+  climbing at a steady, non-decaying rate** (no plateau) - roughly **78x**
+  the character count, not the small fixed multiple (~3-4x) you'd expect
+  from `mojo.py`'s `--dump` handler independently calling `py_tokenize(src)`
+  once each for `.tok` and `.ast` plus once more inside
+  `compile_to_gimple_cached` for `.ci`. `mojo_dict_new` stayed flat at 49
+  the entire time (ruling out a dict-related blowup). Fixed the one
+  concretely-provable piece of that redundancy: `mojo.py`'s own `--dump`
+  handler tokenized `src` twice, completely independently, for `.tok` and
+  `.ast`; now tokenizes once and reuses the tokens for both (parsing still
+  has its own try/except so a parse failure doesn't take `.tok` down with
+  it). That's a real, worthwhile fix, but it only accounts for a 2x-ish
+  slice of a ~78x (and still growing) problem - **the dominant remaining
+  cause is still open**. `mojo_dict_new` staying flat at 49 for the whole
+  run is actually a useful clue here: `replace_multiline_strings`'s own
+  per-call `string_cache = {}` should contribute one dict creation per
+  `py_tokenize` invocation, and 49 total dict creations across the *entire*
+  self-hosted toolchain's execution (tokenizer + parser + ast_rewriter +
+  gimple_codegen, all compiled and running) is far too small a number for
+  `py_tokenize` to have been entered anywhere near 78 times - so the
+  leading theory going into the next session is that `py_tokenize` is only
+  called a handful of times (consistent with `.tok`/`.ast`/`.ci`), and the
+  ~20x-per-call amplification is happening *inside* a single call's own
+  loop - i.e. `replace_multiline_strings`'s outer `while i < n:` cursor is
+  not making full forward progress every iteration in the *compiled* form,
+  even though a manual trace of the Python source proves it always should
+  (every branch sets `i` to a value `> `the old `i`, or exits) - a mismatch
+  between the source's guaranteed semantics and the compiled behavior,
+  same flavor of bug as the `c * 3` fix above.
+
+  Attempted to confirm this directly by adding a temporary print of `i`
+  every 100,000 loop iterations inside `replace_multiline_strings` (source
+  instrumentation, not a runtime-level counter) - this immediately
+  **segfaulted the self-hosted binary** rather than producing data (`make
+  check`, including `check-selfhost`, was and is still green - this only
+  broke when the instrumented source was itself compiled and *run* to
+  process a real file, a gap `check-selfhost`'s compile+link-only guard
+  doesn't cover). Reverted immediately rather than chase a second bug
+  mid-investigation. This is itself a real, reproducible, previously-
+  unknown self-host crash (adding a local variable + a
+  string-concatenation-heavy `print()` inside this specific nested-closure
+  function), worth a fresh investigation on its own, but out of scope for
+  this session. Next step for the performance issue: retry the same
+  `i`-tracing idea but via a *runtime-level* counter/print (extending
+  `_mojo_prof`/`MOJO_PROFILE` in `runtime/mojo_runtime.c`, which has proven
+  safe so far) rather than adding new Python source inside the closure -
+  e.g. a counter that records the delta between successive `i` values seen
+  at each `mojo_cstr_slice`/`_mojo_at_char` call site, to catch a
+  non-advancing or backward-jumping cursor without touching
+  `mojo_compiler.py` itself.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to
