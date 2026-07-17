@@ -563,6 +563,44 @@ class _MojoUnsafePointerType:
     def __call__(self, to=None, **kwargs):
         return _MojoPointer([to])
 
+
+class _MojoListType:
+    """`List[T]` (subscript ignored - no generic-type system).
+
+    BUG-2026-028 (mojolib): `from std.collections import List` used to fall
+    through to the generic `std.*` auto-stub namespace (real list.mojo is
+    full of generics/MLIR-level memory primitives - alloc/Layout/
+    ThinAllocation/uninit_move_n - our simple parser can't handle), so
+    `List[Int]()` silently returned an `_AutoStubValue`: every method call
+    on it (`.append`, `._realloc`, even a nonexistent method name) "succeeded"
+    with no error and no effect, and `__len__()` always returned the
+    hardcoded stub value 0, while direct field writes like `items._len = 5`
+    looked like they worked (plain attribute set on the stub's own __dict__,
+    unrelated to any real list state) - a convincing but entirely fake list.
+
+    Rather than attempt to interpret real list.mojo's low-level memory code
+    (the exact crash the auto-stub fallback was added to avoid), this backs
+    `List[T]()` with a plain Python `list` - the SAME representation
+    `eval_ListLiteral` already uses for `[1, 2, 3]` literals, so a
+    std.collections.List and a list literal are fully interchangeable
+    everywhere else in the interpreter that already expects a Python list,
+    and real list operations (append, __len__, indexing, iteration) all
+    just work via Python's own list semantics instead of needing bespoke
+    reimplementation here."""
+    def __getitem__(self, item):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        if 'copy' in kwargs:
+            return list(kwargs['copy'])
+        if 'capacity' in kwargs or 'unsafe_uninit_length' in kwargs:
+            return []
+        # `List(1, 2, 3, __list_literal__=NoneType())` - real Mojo's
+        # list-literal-desugaring init; drop the marker kwarg, keep the
+        # positional values as the initial contents. Plain `List[Int]()`
+        # (no positional args) falls through the same path to `[]`.
+        return list(args)
+
     def alloc(self, count, *args, **kwargs):
         return _MojoPointer([None] * count)
 
@@ -1689,6 +1727,18 @@ class Interpreter:
             cache[module_name] = namespace
             return namespace
 
+        if module_name in ('std.collections', 'std.collections.list'):
+            # BUG-2026-028: was falling through to the generic std.* auto-stub
+            # namespace below (real list.mojo's generics/low-level memory
+            # primitives are beyond this parser), so `List[Int]()` silently
+            # returned a fake auto-stub value instead of a real list - see
+            # _MojoListType's docstring for the full failure chain.
+            if module_name in cache:
+                return cache[module_name]
+            namespace = types.SimpleNamespace(List=self.scope.get('List'))
+            cache[module_name] = namespace
+            return namespace
+
         if module_name == 'std' or module_name.startswith('std.'):
             # Real `std.*` submodules beyond the hardcoded shims above are
             # full of generics/MLIR our simple parser can't handle — walking
@@ -1949,6 +1999,7 @@ class Interpreter:
         self.scope.define('MutUnsafePointer', unsafe_pointer_type)
         self.scope.define('ImmutUnsafePointer', unsafe_pointer_type)
         self.scope.define('DeviceBuffer', unsafe_pointer_type)
+        self.scope.define('List', _MojoListType())
 
         # GPU/DeviceContext basics — no real GPU backend, kernels launched
         # via enqueue_function just run serially on the CPU (see

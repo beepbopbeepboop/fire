@@ -5708,6 +5708,33 @@ class GimpleGen:
             self._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv});")
             return 'char *', t
 
+        # bare `char` * int → string repetition, e.g. `c * 3` where c is a
+        # single Python character (str of length 1, represented as a raw C
+        # `char` rather than `char *` for cheap comparisons elsewhere).
+        # Python has no numeric-char type distinct from a length-1 str, so
+        # every `char` here originates from string indexing/slicing and
+        # `char * int` always means repetition, never arithmetic - without
+        # this case it silently fell through to plain numeric multiplication
+        # (treating the char as its byte value), producing a nonsense result
+        # (confirmed: mojo_compiler.py's own py_tokenize's
+        # replace_multiline_strings does `quote3 = c * 3` to build '"""'/
+        # "'''" for triple-quote detection; miscompiling this as arithmetic
+        # meant triple-quoted strings/docstrings were never recognized at
+        # all when this file compiles itself, cascading into a severe
+        # performance blowup during self-hosted `--dump-full` of mojo.py).
+        if node.op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t'):
+            sv = self._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
+            t = self._new_temp('char *')
+            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {rv});")
+            return 'char *', t
+
+        # int * bare `char` → string repetition (flipped order)
+        if node.op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char':
+            sv = self._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
+            t = self._new_temp('char *')
+            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {lv});")
+            return 'char *', t
+
         # MojoList * * int → list repetition (e.g., [0] * n)
         if node.op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
             cnt = self._new_val('int64_t', f"(int64_t){rv}")
