@@ -226,6 +226,13 @@ def stdlib_fingerprint() -> str:
     return _stdlib_fp_cache
 
 
+def hash_parts(*parts) -> str:
+    """Public wrapper around the internal length-prefixed hash, for callers
+    outside this module that need a CAS-consistent key (e.g. checked_run.py's
+    make-check result cache) without duplicating the hashing scheme."""
+    return _hash(*parts)
+
+
 def runtime_fingerprint() -> str:
     """Hash of just the runtime sources (mojo_runtime.h/.c). For artifacts whose
     only compiler-side input is the runtime — e.g. a gcc syntax check of already-

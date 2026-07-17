@@ -43,23 +43,38 @@ check: check-gimple check-runner check-modcache check-selfhost
 	@echo ""
 	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
 
-check-gimple: gimple_codegen.py
-	python3 test_gimple.py
+# Every check-* target is wrapped in checked_run.py: a check's outcome is a
+# pure function of the compiler sources + toolchain + whatever extra files it
+# actually exercises (the test script itself, myinterpreter.py, the runtime,
+# ...), so once a given input hash has produced a result, replay it instead
+# of re-running the check - a hit is exact (same exit code, same stdout/
+# stderr), not an approximation. See checked_run.py's docstring.
+
+check-gimple: gimple_codegen.py test_gimple.py
+	python3 checked_run.py check-gimple --extra test_gimple.py -- python3 test_gimple.py
 
 # test_runner.py only existence-checks the prebuilt `build/mojo`, doesn't require it
 # to be up-to-date. We build it here to ensure it exists for the test.
-check-runner: build/mojo
-	python3 test_runner.py
+check-runner: build/mojo test_runner.py myinterpreter.py mojo.py mojo_main.py $(RUNTIME_SRC) $(RUNTIME_HDR)
+	python3 checked_run.py check-runner \
+		--extra test_runner.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		--extra $(RUNTIME_SRC) --extra $(RUNTIME_HDR) \
+		-- python3 test_runner.py
 
-check-modcache:
-	python3 test_module_cache.py
+check-modcache: test_module_cache.py myinterpreter.py mojo.py mojo_main.py
+	python3 checked_run.py check-modcache \
+		--extra test_module_cache.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		-- python3 test_module_cache.py
 
 # Self-host compile guard: mojo.py must compile itself to a linked binary with
 # zero GCC errors / ICEs / undefined symbols (the --jit mojo.py path, minus
 # execution — the runtime still SIGSEGVs, a separate frontier). Locks compile+
 # link cleanliness so it can't silently regress.
-check-selfhost: gimple_codegen.py mojo_compiler.py
-	python3 test_selfhost.py
+check-selfhost: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py mojo_main.py test_selfhost.py
+	python3 checked_run.py check-selfhost \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
+		--extra test_selfhost.py \
+		-- python3 test_selfhost.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).

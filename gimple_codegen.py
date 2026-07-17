@@ -1837,6 +1837,31 @@ def _safe_field(name: str) -> str:
         return f'_kw_{name}'
     return name
 
+def _walk_ast(node):
+    """Recursively yield every AST node (statement or expression) reachable
+    from `node`, generically — walks every dataclasses.field of a dataclass
+    node and every element of a list/tuple, rather than a hand-maintained
+    per-node-type attribute list. Used where struct-field inference needs to
+    see *every* `self.x` reference regardless of which statement kind it's
+    nested under (elif bodies, try/except handlers, finally blocks, match
+    cases, with-bodies, ...) — the previous hand-rolled traversals in this
+    file each covered only a handful of body-bearing attribute names and
+    silently missed the rest, which is exactly how fields assigned only
+    inside e.g. a `try:`/`except:` or `elif:` branch went unregistered and
+    produced 'no member named ...' errors from the C compiler on the
+    generated struct."""
+    if node is None:
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _walk_ast(item)
+        return
+    yield node
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            yield from _walk_ast(getattr(node, f.name))
+
+
 def _struct_name_of(ctype: str) -> str:
     """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
     s = ctype
@@ -1974,9 +1999,21 @@ def _safe_name(name: str) -> str:
 
 def _c_field_name(name: str) -> str:
     """Convert a Mojo variable/module name to a valid C struct field name.
-    Dots in module paths (e.g. 'std.sys') become underscores ('std__sys')."""
+    Dots in module paths (e.g. 'std.sys') become underscores ('std__sys').
+
+    Also renames names that collide with C preprocessor macros (e.g. a Mojo
+    global named `SEEK_CUR`) or C keywords, mirroring the rename `_declare_var`
+    already does for local variables. Without this, the field name is emitted
+    verbatim into the generated struct (e.g. `int SEEK_CUR;` / `.SEEK_CUR = 1,`)
+    and the *textual* macro substitution from <stdio.h> (`SEEK_CUR` -> `1`)
+    turns it into invalid C (`int 1;`) before GCC ever parses it."""
     import re as _re
-    return _re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    if safe in _C_PARAM_EXTRA_KEYWORDS or safe in _C_MACRO_NAMES:
+        return f"_kw_{safe}"
+    if safe in _C_KEYWORDS:
+        return f"_{safe}"
+    return safe
 
 
 def _c_escape(s: str) -> str:
@@ -5210,6 +5247,27 @@ class GimpleGen:
         if node.member == '__dict__' and ot == 'int':
             return self._stub_result('int', '0', '__dict__ stub')
 
+        # `x.__class__` used as a plain value (not the `is`/`is not` pattern
+        # `_lower_binary` special-cases before ever reaching here — see there
+        # for why that pattern needs its own early intercept). E.g.
+        # `_pyrepl/completing_reader.py`'s `r.last_command_is(self.__class__)`
+        # passes it as a normal argument. `__class__` isn't a real field —
+        # falling through to the generic struct-field lookup below would
+        # either register a bogus phantom field or hit the "unknown field"
+        # fallback and emit an invalid raw `->__class__` C access. Lower it
+        # to the object's runtime type tag (see mojo_read_type_tag in
+        # runtime/mojo_runtime.c and _struct_type_id above) — the same
+        # value identity comparisons against a class name already use, so
+        # code that stores/compares `__class__` values (not just `is`
+        # against a literal class name) keeps working.
+        if node.member == '__class__':
+            if ot == 'int64_t':
+                addr = ov
+            else:
+                addr = self._new_val('int64_t', f'(int64_t){ov}')
+            tag = self._call_expr('int64_t', 'mojo_read_type_tag', [('int64_t', addr)])
+            return 'int64_t', tag
+
         op = '->' if '*' in ot else '.'
         struct_name = _struct_name_of(ot)
         # Span/StringSlice's `mut` bracket-parameter isn't a real field of the
@@ -5325,6 +5383,34 @@ class GimpleGen:
                 return vtype, vv
             # Skip emitting comment to avoid GIMPLE global-passing issues
             return vtype, vv
+
+        # `x.__class__ is SomeClass` / `is not` (e.g. _markupbase.ParserBase's
+        # `if self.__class__ is ParserBase: raise ...` abstract-base guard).
+        # `__class__` isn't a real field — evaluating it as one would either
+        # register a bogus struct field or hit the generic "unknown field"
+        # fallback and emit an invalid raw `->__class__` C access. Recognize
+        # the pattern here, before either operand is lowered normally, and
+        # rewrite it to the runtime type-tag comparison _isinstance_one_type
+        # already uses for `isinstance()` — exact-type equality (not a
+        # subclass-inclusive check), which is exactly `is`/`is not` semantics
+        # on `__class__`.
+        if node.op in ('is', 'is not'):
+            def _class_member_and_name(a, b):
+                if (isinstance(a, MemberExpr) and a.member == '__class__'
+                        and isinstance(b, IdentExpr) and b.name in self.struct_field_types):
+                    return a.obj, b.name
+                return None
+            pair = (_class_member_and_name(node.left, node.right)
+                    or _class_member_and_name(node.right, node.left))
+            if pair is not None:
+                obj_expr, type_name = pair
+                obj_type, obj_val = self.lower_expr(obj_expr)
+                eq = self._isinstance_one_type(obj_type, obj_val, type_name)
+                if node.op == 'is not':
+                    neg = self._new_val('_Bool', f'!{eq}')
+                    return '_Bool', neg
+                return '_Bool', eq
+
         if node.op == '//':
             return self._lower_floordiv(node)
         if node.op == '**':
@@ -10470,7 +10556,20 @@ class GimpleGen:
             elif isinstance(target, MemberExpr):
                 ot, ov = self.lower_expr(target.obj)
                 op = '->' if '*' in ot else '.'
-                self._emit(f"  {ov}{op}{_safe_field(target.member)} = {v};")
+                # Coerce to the field's real declared C type (mirrors
+                # _gen_stmt_AssignStmt's single-target MemberExpr branch just
+                # above) instead of emitting a raw, uncoerced `->field = v`.
+                # A chained assign to a struct field whose declared type
+                # differs from the RHS's type (e.g. `self.k = self.ck =
+                # compile_keymap(...)` where the field is boxed as a
+                # generic 'int' but the call result is int64_t/a pointer)
+                # otherwise produces a direct type-mismatched store that
+                # gcc's -fgimple frontend rejects outright ("invalid
+                # conversion in gimple call"/assignment) — not merely a
+                # warning, a hard compile failure.
+                sn = _struct_name_of(ot)
+                field_type = self.struct_field_types.get(sn, {}).get(target.member, vtype)
+                self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(target.member)}")
             elif isinstance(target, SubscriptExpr):
                 ot, obj_v = self.lower_expr(target.obj)
                 it2, idx_v = self.lower_expr(target.index)
@@ -13518,6 +13617,14 @@ class GimpleGen:
                 '_mojo_module_cache': 'MojoDict *',
                 '_func_specs': 'MojoDict *',
                 '_raised_mojo_value': 'int64_t',
+                # `_INT_TYPE_NAMES`/`_FLOAT_TYPE_NAMES` are class-level `set`
+                # literals on Interpreter (myinterpreter.py, used by
+                # `_coerce_to_declared_type`) — plain Python class attributes
+                # with no `var` declaration, so like Parser._known_traits
+                # below they need an explicit entry here or codegen silently
+                # infers 'int' and self-host miscompiles.
+                '_INT_TYPE_NAMES': 'MojoSet *',
+                '_FLOAT_TYPE_NAMES': 'MojoSet *',
             }
             self.struct_field_types['Parser'] = {
                 '_tok': 'MojoList *',
@@ -13533,6 +13640,11 @@ class GimpleGen:
                 # hardcoded struct tables" memory note: any new field added to
                 # a self-hosted Python class needs a matching entry here.
                 '_known_traits': 'MojoSet *',
+                # `_CONV_KWS` is a class-level `set` literal (mojo_compiler.py,
+                # used by the `ref`/`out`/`mut`/... soft-keyword handling in
+                # _parse_for/_parse_funcdef/_parse_primary) — same class-field
+                # gap as `_known_traits` above.
+                '_CONV_KWS': 'MojoSet *',
             }
             self.struct_field_types['Scope'] = {
                 'parent': 'Scope *',
@@ -13583,6 +13695,24 @@ class GimpleGen:
             self.struct_boxed_fields['TernaryExpr'] = {'condition', 'then_val', 'else_val'}
             self.struct_boxed_fields['MemberExpr'] = {'obj'}
             self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+
+        # Snapshot of every struct name whose field list is already known at
+        # this point — either a real stdlib type seeded just above (Span) or,
+        # when `_is_selfhost_file`, one of this repo's own hand-maintained
+        # cheat-sheet entries (Scope/Token/Parser/Interpreter/_AutoStubValue/...).
+        # The completeness passes further down (which auto-discover extra
+        # fields by scanning method bodies for `self.x`/annotated-local reads
+        # not caught by the normal `__init__`-assignment scan — the general
+        # fix for stdlib files failing with "has no member named ...") must
+        # never ADD to one of these: `_AutoStubValue = {}` above is a real,
+        # deliberately empty field list (it's compiled as a bare scalar int
+        # with dynamic getattr, not a real struct) — found via check-selfhost
+        # regressing when a read-scan pass walked unrelated code elsewhere in
+        # this same file that calls `_AutoStubValue(...)` and accesses an
+        # attribute on the result (resolved dynamically via `__getattr__` in
+        # real Python), and added that attribute as a phantom field here,
+        # corrupting the intentionally-scalar C representation.
+        self._selfhost_hardcoded_struct_names = frozenset(self.struct_field_types.keys())
 
         all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
         _merge_struct_inheritance(all_struct_defs)
@@ -13709,53 +13839,87 @@ class GimpleGen:
                                     ft = f'{_outer_base} *'
                             self.struct_field_types[s.name][f_name] = ft
 
-                # Always scan ALL methods for self.x = ... to build complete field list
+                # Always scan ALL methods for self.x = ... to build complete field list.
+                # Uses the generic _walk_ast walker (module-level, above) rather than
+                # a hand-rolled list of body-bearing attribute names, so assignments
+                # nested inside elif/try-except/finally/with/match bodies are seen too
+                # (a real, previously-missed gap: fields only ever assigned inside such
+                # a branch were absent from struct_field_types and the generated C
+                # struct never declared them at all — not merely mistyped).
+                def _self_member(expr):
+                    """MemberExpr's `.member` name iff its object is bare `self`."""
+                    if (isinstance(expr, MemberExpr) and isinstance(expr.obj, IdentExpr)
+                            and expr.obj.name == 'self'):
+                        return expr.member
+                    return None
+
                 def _collect_self_assigns(body, param_types, found):
-                    for stmt in body:
-                        if isinstance(stmt, AssignStmt) and isinstance(stmt.target, MemberExpr):
-                            t = stmt.target
-                            if isinstance(t.obj, IdentExpr) and t.obj.name == 'self':
-                                fn = t.member
-                                if fn not in found:
-                                    v = stmt.value
-                                    if isinstance(v, IdentExpr):
-                                        ft = param_types.get(v.name, 'int64_t')
-                                    elif isinstance(v, IntLiteral):
-                                        ft = 'int64_t'
-                                    elif isinstance(v, StringLiteral):
-                                        ft = 'char *'
-                                    elif isinstance(v, BoolLiteral):
-                                        ft = '_Bool'
-                                    elif isinstance(v, DictExpr):
-                                        ft = 'MojoDict *'
-                                    elif isinstance(v, (ListExpr, TupleExpr)):
+                    for node in _walk_ast(body):
+                        if isinstance(node, AssignStmt):
+                            fn = _self_member(node.target)
+                            if fn is not None and fn not in found:
+                                v = node.value
+                                if isinstance(v, IdentExpr):
+                                    ft = param_types.get(v.name, 'int64_t')
+                                elif isinstance(v, IntLiteral):
+                                    ft = 'int64_t'
+                                elif isinstance(v, StringLiteral):
+                                    ft = 'char *'
+                                elif isinstance(v, BoolLiteral):
+                                    ft = '_Bool'
+                                elif isinstance(v, DictExpr):
+                                    ft = 'MojoDict *'
+                                elif isinstance(v, (ListExpr, TupleExpr)):
+                                    ft = 'MojoList *'
+                                elif isinstance(v, SetExpr):
+                                    ft = 'MojoSet *'
+                                elif isinstance(v, CallExpr):
+                                    cfn = v.func
+                                    cn = cfn.name if isinstance(cfn, IdentExpr) else ''
+                                    if cn in ('list', 'DynamicVector', 'mojo_list_new'):
                                         ft = 'MojoList *'
-                                    elif isinstance(v, SetExpr):
+                                    elif cn in ('dict', 'Dict', 'mojo_dict_new'):
+                                        ft = 'MojoDict *'
+                                    elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
                                         ft = 'MojoSet *'
-                                    elif isinstance(v, CallExpr):
-                                        cfn = v.func
-                                        cn = cfn.name if isinstance(cfn, IdentExpr) else ''
-                                        if cn in ('list', 'DynamicVector', 'mojo_list_new'):
-                                            ft = 'MojoList *'
-                                        elif cn in ('dict', 'Dict', 'mojo_dict_new'):
-                                            ft = 'MojoDict *'
-                                        elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
-                                            ft = 'MojoSet *'
-                                        elif cn.startswith('_alloc_'):
-                                            # _alloc_StructName() returns StructName *
-                                            sname = cn[len('_alloc_'):]
-                                            ft = sname + ' *'
-                                        elif cn in self.struct_field_types:
-                                            ft = cn + ' *'
-                                        else:
-                                            ft = 'int'
+                                    elif cn.startswith('_alloc_'):
+                                        # _alloc_StructName() returns StructName *
+                                        sname = cn[len('_alloc_'):]
+                                        ft = sname + ' *'
+                                    elif cn in self.struct_field_types:
+                                        ft = cn + ' *'
                                     else:
                                         ft = 'int'
-                                    found[fn] = ft
-                        for attr in ('then_body', 'body', 'else_body'):
-                            sub = getattr(stmt, attr, None)
-                            if isinstance(sub, list):
-                                _collect_self_assigns(sub, param_types, found)
+                                else:
+                                    ft = 'int'
+                                found[fn] = ft
+                        elif isinstance(node, MultiAssignStmt):
+                            for tgt in node.targets:
+                                fn = _self_member(tgt)
+                                if fn is not None and fn not in found:
+                                    found[fn] = 'int'
+                        elif isinstance(node, AugAssignStmt):
+                            fn = _self_member(node.target)
+                            if fn is not None and fn not in found:
+                                found[fn] = 'int64_t'
+
+                # Second pass: fields that are only ever *read* via `self.x` and never
+                # assigned anywhere in this class's own methods (e.g. a field a real
+                # subclass, possibly in another module, is responsible for setting —
+                # `_markupbase.ParserBase.rawdata`/`updatepos` is the canonical example:
+                # every method reads `self.rawdata` but only a subclass like
+                # `html.parser.HTMLParser` ever assigns it). Compiling this class
+                # standalone can't see that subclass, but the C struct still must
+                # declare the field or every read is a hard 'has no member named'
+                # compiler error — so register it with the same generic boxed-object
+                # representation ('int') already used for any field whose type can't
+                # be pinned down statically; runtime attribute access on it still goes
+                # through the normal dynamic dispatch machinery.
+                def _collect_self_reads(body, found):
+                    for node in _walk_ast(body):
+                        fn = _self_member(node)
+                        if fn is not None and fn not in found and not (fn.startswith('__') and fn.endswith('__')):
+                            found[fn] = 'int'
 
                 already = set(self.struct_field_types[s.name].keys())
                 for method in s.methods:
@@ -13782,6 +13946,87 @@ class GimpleGen:
                             if fn not in already:
                                 s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                                 already.add(fn)
+                if s.name in self._selfhost_hardcoded_struct_names:
+                    # Authoritative hand-maintained field list (see the
+                    # snapshot comment above) — never auto-extend it.
+                    continue
+                for method in s.methods:
+                    read_fields = {}
+                    _collect_self_reads(method.body, read_fields)
+                    for fn, ft in read_fields.items():
+                        if fn not in self.struct_field_types[s.name]:
+                            self.struct_field_types[s.name][fn] = ft
+                            if fn not in already:
+                                s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                                already.add(fn)
+
+        # Fourth completeness pass: fields accessed only through a *locally
+        # annotated* variable of a known struct type, not through `self`
+        # directly. E.g. _pyrepl/completing_reader.py's `complete.do()`:
+        #   r: CompletingReader
+        #   r = self.reader
+        #   r.msg = "..."
+        # `r`'s own class (`complete`, a Command) is unrelated to
+        # CompletingReader — the field belongs on CompletingReader, a
+        # *different* struct than the one whose method we're scanning, so
+        # this can't be folded into the per-`s` passes above (each of those
+        # only ever registers fields on `s.name` itself). Runs after every
+        # struct's own fields are known so `local_types` below can recognize
+        # any struct name regardless of definition order.
+        # This also covers a plain free function's local variable, not just a
+        # method's (e.g. asyncio/__main__.py's `repl_thread = REPLThread(...)`
+        # / later `repl_thread.daemon = True`, both inside a module-level
+        # function, no class involved at all).
+        _struct_by_name = {st.name: st for st in all_struct_defs
+                            if isinstance(st, StructDef)
+                            and self._struct_name_owner.get(st.name) == id(st)}
+
+        def _scan_body_for_local_field_access(body, own_struct_name):
+            local_types = {}
+            for node in _walk_ast(body):
+                if isinstance(node, VarDecl) and node.type_ann:
+                    ann = str(node.type_ann).strip()
+                    if (ann in self.struct_field_types and ann != own_struct_name
+                            and ann not in self._selfhost_hardcoded_struct_names):
+                        local_types[node.name] = ann
+                # `x = SomeStruct(...)` — no explicit annotation, but the
+                # constructor call itself pins the type just as well.
+                elif (isinstance(node, AssignStmt) and isinstance(node.target, IdentExpr)
+                      and isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr)
+                      and node.value.func.name in self.struct_field_types
+                      and node.value.func.name != own_struct_name
+                      and node.value.func.name not in self._selfhost_hardcoded_struct_names):
+                    local_types[node.target.name] = node.value.func.name
+            if not local_types:
+                return
+            for node in _walk_ast(body):
+                if not (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)):
+                    continue
+                target_struct = local_types.get(node.obj.name)
+                if target_struct is None:
+                    continue
+                fn = node.member
+                if fn.startswith('__') and fn.endswith('__'):
+                    continue
+                if fn in self.struct_field_types[target_struct]:
+                    continue
+                self.struct_field_types[target_struct][fn] = 'int'
+                target_def = _struct_by_name.get(target_struct)
+                if target_def is not None and not any(
+                        isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
+                    target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+
+        # `_walk_ast` already recurses into every nested FunctionDef/StructDef
+        # method/if/try/loop body reachable from a statement list, so a single
+        # call over the whole module's top-level statements also reaches every
+        # function body AND every class method body in one pass — no need to
+        # separately iterate `s.methods` vs. free `FunctionDef`s vs. bare
+        # module-level code (e.g. asyncio/__main__.py's `repl_thread = REPLThread(...)`
+        # sits directly under an `if __name__ == "__main__":` at module scope,
+        # not inside any function or class at all).
+        _scan_body_for_local_field_access(stmts, None)
+        if self.do_imports:
+            _scan_body_for_local_field_access(imported_stmts, None)
 
         # Register struct constructors as functions returning T *
         # Include both current module and imported module structs

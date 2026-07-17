@@ -736,25 +736,87 @@ def py_tokenize(src: str) -> list[Token]:
     string_cache = {}
     string_idx = [0]
     def replace_multiline_strings(src):
-        def repl(m):
-            placeholder = f"__MOJO_STR_{string_idx[0]}__"
-            string_cache[placeholder] = m.group(0)
-            string_idx[0] += 1
-            # Preserve the original newline count: collapsing a multi-line
-            # triple-quoted string (a docstring is the common case) to a
-            # single-line placeholder shifted every subsequent physical line
-            # number by (that string's line count - 1) — real bug, found via
-            # `for` loops later in this exact file (mojo.py has a top-of-file
-            # module docstring) reporting a diagnostic line number dozens of
-            # lines before the loop's actual location, off by roughly the
-            # cumulative length of every docstring/multi-line string above it.
-            return placeholder + '\n' * m.group(0).count('\n')
-        # Build patterns without literal triple-quotes in source (avoids bootstrap self-match)
-        _dq = '"' * 3
-        _sq = "'" * 3
-        src = re.sub(r'[fFrRbBuU]{0,2}' + _dq + r'[\s\S]*?' + _dq, repl, src)
-        src = re.sub(r'[fFrRbBuU]{0,2}' + _sq + r'[\s\S]*?' + _sq, repl, src)
-        return src
+        # A single-pass, quote-nesting-aware scan — NOT a blind regex search
+        # for the next `"""`/`'''` triple. A naive `re.sub` (the previous
+        # approach here) matches the *literal 3-char run* anywhere in the
+        # source, including inside an ordinary '...'/"..." string whose
+        # *contents* happen to spell out three quote characters, e.g.
+        # `_MULTI_QUOTES = ('"""', "'''")` (real CPython stdlib code,
+        # _ast_unparse.py). That single-quoted string's embedded `"""` was
+        # matched as a triple-quote *opener*, and the regex's non-greedy
+        # `[\s\S]*?` then swallowed everything up to the *next* literal
+        # `"""` it could find — which was the unrelated docstring of the
+        # very next class — corrupting both. Scanning char-by-char and
+        # skipping ordinary quoted strings as opaque units (matching their
+        # own close quote, honoring backslash escapes) avoids ever treating
+        # a quote character *inside* another string as a triple-quote
+        # delimiter.
+        out = []
+        n = len(src)
+        i = 0
+        last = 0
+        while i < n:
+            c = src[i]
+            if c == _CMT_CHAR:
+                # A '#' can't start a comment while inside a string — and
+                # strings are always skipped as whole units below — so
+                # reaching here means we're in plain code. Comments can
+                # contain stray quote characters (e.g. `# say "hi"`) that
+                # must not be mistaken for string delimiters.
+                j = src.find('\n', i)
+                i = n if j == -1 else j
+                continue
+            if c in ('"', "'"):
+                # Recognize an optional string prefix (f/r/b/u/t, up to two
+                # letters) immediately before this quote, but only if those
+                # letters form a standalone token — not the tail of a
+                # longer identifier like `self` before `.format("...")`.
+                k = i
+                letters = 0
+                while k > 0 and src[k - 1] in 'fFrRbBuUtT' and letters < 2:
+                    k -= 1; letters += 1
+                prev = src[k - 1] if k > 0 else ''
+                start = k if letters and not (prev.isalnum() or prev == '_') else i
+                quote3 = c * 3
+                if src[i:i + 3] == quote3:
+                    j = i + 3
+                    while j < n and src[j:j + 3] != quote3:
+                        j += 2 if src[j] == '\\' and j + 1 < n else 1
+                    end = j + 3 if j < n else n
+                    out.append(src[last:start])
+                    literal = src[start:end]
+                    placeholder = f"__MOJO_STR_{string_idx[0]}__"
+                    string_cache[placeholder] = literal
+                    string_idx[0] += 1
+                    # Preserve the original newline count: collapsing a
+                    # multi-line triple-quoted string (a docstring is the
+                    # common case) to a single-line placeholder shifted
+                    # every subsequent physical line number by (that
+                    # string's line count - 1) — real bug, found via `for`
+                    # loops later in this exact file (mojo.py has a
+                    # top-of-file module docstring) reporting a diagnostic
+                    # line number dozens of lines before the loop's actual
+                    # location, off by roughly the cumulative length of
+                    # every docstring/multi-line string above it.
+                    out.append(placeholder + '\n' * literal.count('\n'))
+                    i = end
+                    last = i
+                    continue
+                else:
+                    # An ordinary (non-triple) quoted string: skip it as one
+                    # opaque unit so its contents can never be misread as a
+                    # triple-quote delimiter. Left in the output untouched —
+                    # only real triple-quoted spans get placeholder-ed.
+                    j = i + 1
+                    while j < n and src[j] != c:
+                        if src[j] == '\\' and j + 1 < n: j += 2
+                        elif src[j] == '\n': break
+                        else: j += 1
+                    i = j + 1 if j < n and src[j] == c else j
+                    continue
+            i += 1
+        out.append(src[last:i])
+        return ''.join(out)
 
     src = replace_multiline_strings(src)
     raw_lines = src.splitlines()
@@ -2702,6 +2764,11 @@ class Parser:
             if self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                 self._advance(); continue
             if self._peek().kind == "RPAREN": break
+            if self._peek().kind == "OP" and self._peek().value == "/":
+                # Positional-only parameter separator (PEP 570), also valid in lambdas.
+                self._advance()
+                if self._peek().kind == "COMMA": self._advance()
+                continue
             if self._peek().kind == "OP" and self._peek().value == "*":
                 self._advance()
                 if self._peek().kind in ("NAME", "KW"):
@@ -2719,6 +2786,11 @@ class Parser:
                     self._advance()
                     default = self._parse_expr(0)
                 params.append((pname, default))
+            elif self._peek().kind == "COMMA":
+                pass
+            else:
+                t = self._peek()
+                raise SyntaxError(f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in lambda parameter list")
             if self._peek().kind == "COMMA": self._advance()
         self._expect("COLON")
         body = self._parse_expr(0)
