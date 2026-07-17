@@ -559,7 +559,7 @@ class ComptimeVarStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -1151,6 +1151,7 @@ class Parser:
                 else:
                     self._advance(); return self._parse_funcdef([])
             if t.value in ("struct", "class"): return self._parse_struct()
+            if t.value == "enum": return self._parse_enum()
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
@@ -1232,6 +1233,9 @@ class Parser:
             if kw.kind == "KW" and kw.value in ("struct", "class"):
                 self._pending_decs = decs
                 return self._parse_struct()
+            if kw.kind == "KW" and kw.value == "enum":
+                self._pending_decs = decs
+                return self._parse_enum()
             if kw.kind == "KW" and kw.value == "trait":
                 self._pending_decs = decs
                 return self._parse_trait()
@@ -1910,6 +1914,78 @@ class Parser:
         self._pending_decs = []
         return StructDef(name=name, fields=fields, methods=methods, decorators=decs,
                          comptime_aliases=aliases, bases=bases)
+
+    def _parse_enum(self):
+        # `enum Name: member1, member2, ...` — not real Mojo syntax (the real
+        # Mojo compiler has no `enum` keyword; the language idiom is a
+        # `struct` with `comptime NAME = value` aliases, e.g. `MojoTypeKind`
+        # in mojolib's own ast_nodes.mojo). This is a deliberate extension:
+        # sugar that desugars straight into that same StructDef shape (fields
+        # + methods empty, one comptime alias per member, auto-numbered from
+        # 0 unless given an explicit `= value`), reusing execute_StructDef's
+        # class-registration/comptime_aliases machinery unchanged. Member
+        # names are read as raw tokens (NAME or KW) rather than parsed as
+        # expressions, since a member is allowed to shadow a keyword (e.g.
+        # `class,`/`enum,` as member names, both seen in the wild).
+        self._expect("KW", "enum")
+        name = self._expect("NAME").value
+        # Skip an optional Python-style base list: `enum Name(SomeBase):`
+        if self._peek().kind == "LPAREN":
+            self._advance()
+            depth = 1
+            while depth > 0:
+                t = self._advance()
+                if t.kind == "LPAREN": depth += 1
+                elif t.kind == "RPAREN": depth -= 1
+                elif t.kind == "EOF": break
+        self._expect("COLON")
+        decs = getattr(self, "_pending_decs", [])
+        self._pending_decs = []
+        members = []
+        if self._peek().kind != "NEWLINE":
+            # Inline single-line body: `enum Name: a, b, c`
+            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                members.append(self._parse_enum_member())
+                if self._peek().kind == "COMMA": self._advance()
+                else: break
+            return self._build_enum_struct(name, members, decs)
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        if self._peek().kind in ("DEDENT", "EOF"):
+            return self._build_enum_struct(name, members, decs)
+        self._expect("INDENT")
+        self._skip_newlines()
+        while self._peek().kind not in ("DEDENT", "EOF"):
+            members.append(self._parse_enum_member())
+            if self._peek().kind == "COMMA": self._advance()
+            self._skip_newlines()
+        self._expect("DEDENT")
+        return self._build_enum_struct(name, members, decs)
+
+    def _parse_enum_member(self):
+        # Member name: a bare NAME, or a keyword used as a bare identifier
+        # (Mojo doesn't allow that in general, but enum members are
+        # deliberately more permissive — see _parse_enum's docstring).
+        t = self._advance()
+        value = None
+        if self._peek().kind == "ASSIGN":
+            self._advance()
+            value = self._parse_expr()
+        return (t.value, value)
+
+    def _build_enum_struct(self, name, members, decs):
+        aliases = {}
+        next_auto = 0
+        for member_name, value_expr in members:
+            if value_expr is not None:
+                aliases[member_name] = value_expr
+                if isinstance(value_expr, IntLiteral):
+                    next_auto = value_expr.value + 1
+            else:
+                aliases[member_name] = IntLiteral(next_auto)
+                next_auto += 1
+        return StructDef(name=name, fields=[], methods=[], decorators=decs,
+                         comptime_aliases=aliases)
 
     def _parse_trait(self):
         self._expect("KW", "trait")
