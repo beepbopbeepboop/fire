@@ -13468,6 +13468,24 @@ class GimpleGen:
                 'comptime_params': 'MojoList *',
                 '_pd': 'MojoList *',
             }
+            self.struct_field_types['_MojoSortFn'] = {
+                '_impl': 'int64_t',
+                '_interpreter': 'Interpreter *',
+            }
+            self.struct_field_types['_MojoSortPartial'] = {
+                '_impl': 'int64_t',
+                '_cmp_fn': 'int64_t',
+            }
+            self.struct_field_types['_ComplexFloat'] = {
+                'bits': 'int64_t',
+            }
+            self.struct_field_types['_MojoComplex'] = {
+                '_r': 'double',
+                '_i': 'double',
+            }
+            self.struct_field_types['_AutoStubValue'] = {}
+            self.struct_field_types['_AutoStubNamespace'] = {}
+            self.struct_field_types['_AutoStubCheckNamespace'] = {}
             self.struct_field_types['_MojoBoundComptimeFunction'] = {
                 'func': 'MojoFunction *',
                 'comptime_bindings': 'MojoDict *',

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Interpreter Mode Fix Plan</title>
+    <style>
+        body { font-family: monospace; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        h1 { color: #2c3e50; }
+        h2 { color: #34495e; border-bottom: 2px solid #3498db; padding-bottom: 5px; }
+        h3 { color: #2980b9; }
+        .phase { background: #ecf0f1; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .task { background: white; padding: 10px; margin: 5px 0; border-left: 4px solid #3498db; }
+        .task.done { border-left-color: #27ae60; background: #e8f8f5; }
+        .task.blocked { border-left-color: #e74c3c; background: #fdf2f2; }
+        .task.active { border-left-color: #f39c12; background: #fef9e7; }
+        .deps { color: #7f8c8d; font-size: 0.9em; }
+        code { background: #f4f4f4; padding: 2px 4px; border-radius: 3px; }
+        .priority { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; font-weight: bold; }
+        .p1 { background: #e74c3c; color: white; }
+        .p2 { background: #f39c12; color: white; }
+        .p3 { background: #3498db; color: white; }
+        .count { font-weight: bold; }
+        .pass { color: #27ae60; }
+        .fail { color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <h1>Interpreter Mode Fix Plan - Mojo stdlib Benchmarks + Tests</h1>
+    
+    <h2>Current State</h2>
+    <ul>
+        <li><strong>JIT mode</strong>: <span class="pass">345/345 pass</span> (20 benchmarks + 325 tests)</li>
+        <li><strong>Interpreter mode (run)</strong>: <span class="pass">20/20 benchmarks pass</span>, <span class="fail">34/325 tests pass</span></li>
+        <li><strong>Goal</strong>: Make interpreter mode match JIT mode (345/345)</li>
+    </ul>
+
+    <h2>Phase 1: Core Module Loading &amp; Import System</h2>
+    <div class="phase">
+        <div class="task done">
+            <strong>Fix Import Resolution for stdlib</strong> <span class="priority p1">P1</span>
+            <p>std.* modules now load from STDLIB_PATH; try real file execution, catch exceptions, fall back to hardcoded shims.</p>
+        </div>
+        <div class="task done">
+            <strong>Handle circular imports in package __init__.mojo</strong> <span class="priority p1">P1</span>
+            <p>Module object cached BEFORE execution to break cycles (e.g. std.memory __init__ &lt;-&gt; .memory submodule).</p>
+        </div>
+    </div>
+
+    <h2>Phase 2: Stdlib Shim Implementations</h2>
+    <div class="phase">
+        <p>Hardcoded shim namespaces for modules the interpreter can't execute (MLIR intrinsics, complex generics).</p>
+        <div class="task done"><strong>std.bit</strong>: pop_count, bit_width, count_leading_zeros, count_trailing_zeros, log2_floor, bit_reverse, rotate_left, rotate_right, byte_swap <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.math</strong>: exp, log, sqrt, sin, cos, tan, floor, ceil, trunc, gcd, lcm, align_down, align_up, fma, atanh, inf, iota, ... <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.memory</strong>: alloc, dealloc, unsafe_memcpy, memset_zero <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.benchmark</strong>: Bench, BenchConfig, BenchId, BenchMetric, ThroughputMeasure, Format, bench_function, bench_with_input, dump_report, black_box, keep <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.random</strong>: seed, rand, randint, random_ui64, random_si64, random_f64, shuffle <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.hashlib</strong>: AHasher (with metaclass __getitem__), Fnv1a <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.sys</strong>: llvm_intrinsic, stderr, stdout, stdin, get_defined_string, num_physical_cores, num_logical_cores <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.gpu.host</strong>: DeviceContext, DeviceBuffer, HostBuffer, GPUInfo, AddressSpace, thread_idx, block_idx, block_dim, grid_dim, lane_id, barrier <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.os</strong>: abort, remove, getenv, chdir, listdir, isatty, stat, link, symlink, mkdir, rmdir, PathLike, Process <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>std.runtime</strong>: Trace, TraceLevel, tracing <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>Builtins added</strong>: pop_count, fma, align_down, align_up, alloc, unsafe_memcpy, memset_zero, Scalar, hash()+cast, type_of, enumerate-&gt;_MojoInt, _to_string_list, StringDict, DictEntry, H, AHasher, Fnv1a <span class="priority p1">P1</span></div>
+    </div>
+
+    <h2>Phase 3: Interpreter Core Fixes</h2>
+    <div class="phase">
+        <div class="task done"><strong>llvm_intrinsic execution</strong>: ctpop, ctlz, cttz, bitreverse, bswap, fshl, fshr - mapped to Python <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>Self type resolution</strong>: Self.KeyCountType, Self.KeyOffsetType, Self.KeyEndType, Self.caching_hashes, Self.destructive, Self.V resolve via struct comptime_aliases <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>Generic param extraction</strong>: Struct generic params (KeyCountType: DType = DType.uint32) extracted from fields into comptime_aliases <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>Self binding in methods</strong>: BoundMethod.__call__ and MojoClass.__call__ bind `self` in scope <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>_MojoScalarType.__eq__</strong>: Proper comparison by name (UInt32 == UInt32 works) <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>eval_SubscriptExpr</strong>: Handle subscripting plain Python functions/callables (fn[Type]()) <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>eval_MemberExpr</strong>: Wrap callables in _CallableWrapper, avoid wrapping _MojoScalarType <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>Tuple destructuring in for loops</strong>: for i, key in enumerate(keys) <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>String path join (str / str)</strong>: os.path.join for string division <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>_MojoInt / _MojoUInt</strong>: int subclasses with .copy() method <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>_wrap_int → _MojoInt</strong>: All arithmetic results wrapped in _MojoInt <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>_AllocFn._Allocation</strong>: Pointer shim with .load(), .store(), .free() <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>MojoInstance.__len__, __getitem__, __setitem__</strong>: Delegate to struct methods <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>MojoString extensions</strong>: read_text, splitlines-&gt;MojoString[], unsafe_ptr <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>_MojoGenericCtor</strong>: Remove duplicate class definition, fix __init__ <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>ComptimeIfStmt</strong>: comptime for/if/assert handling <span class="priority p1">P1</span></div>
+        <div class="task done"><strong>AST consolidation</strong>: ast_nodes.py removed, mojo_compiler.py is single source of truth <span class="priority p1">P1</span></div>
+    </div>
+
+    <h2>Phase 4: Test Suite (<span class="count"><span class="pass">34</span>/<span class="count">325</span></span> passing)</h2>
+    <div class="phase">
+        <div class="task active">
+            <strong>Run interpreter on all test/ files</strong> <span class="priority p1">P1</span>
+            <p>Current: 34/325 pass. 291 fail with various issues.</p>
+            <p>Approach: Batch-run failures, categorize by error type, fix systematically.</p>
+        </div>
+    </div>
+
+    <h2>Phase 5: Failure Categories (291 remaining)</h2>
+    <div class="phase">
+        <h3>Category A: Missing stdlib module shims (~80 tests)</h3>
+        <div class="task">
+            <strong>std.math expansions</strong>: missing _Expable, atanh, max — need to add to _build_math_shims()
+        </div>
+        <div class="task">
+            <strong>std.gpu.host.info</strong>: missing _get_a100_target, _get_h100_target, Vendor, A100
+        </div>
+        <div class="task">
+            <strong>std.os expansions</strong>: missing remove, getenv, chdir, listdir, isatty, stat, link, symlink, PathLike, Process
+        </div>
+        <div class="task">
+            <strong>std.sys expansions</strong>: missing get_defined_string, simd_bit_width, is_big_endian, num_performance_cores, compressed_store, _current_target
+        </div>
+        <div class="task">
+            <strong>std.collections</strong>: missing OptionalReg, LinkedList, Span
+        </div>
+        <div class="task">
+            <strong>std.gpu.host</strong>: missing Dim, DevicePointer, DeviceAttribute, DeviceMulticastBuffer, Vendor
+        </div>
+        <div class="task">
+            <strong>std.random._rng</strong>: missing _PhiloxWrapper
+        </div>
+        <div class="task">
+            <strong>std.collections.string.string_slice</strong>: missing _split, _get_kgen_string
+        </div>
+
+        <h3>Category B: Missing builtins (~60 tests)</h3>
+        <div class="task">
+            <strong>FloatLiteral</strong>: NaN, infinity, nan(), infinity()
+        </div>
+        <div class="task">
+            <strong>__mlir_attr, __mlir_type</strong>: MLIR type/attr constructs used by tests
+        </div>
+        <div class="task">
+            <strong>Span</strong>: memory Span type
+        </div>
+        <div class="task">
+            <strong>Callable</strong>: call_location, compile_info, get_linkage_name
+        </div>
+        <div class="task">
+            <strong>debug_assert</strong>: needs proper formatted messages
+        </div>
+        <div class="task">
+            <strong>UInt128, Int128</strong>: 128-bit integer types
+        </div>
+        <div class="task">
+            <strong>c_long</strong>, ErrNo, SanitizeAddress
+        </div>
+
+        <h3>Category C: Interpreter core gaps (~60 tests)</h3>
+        <div class="task">
+            <strong>ComptimeVarStmt with complex types</strong>: _comptime_expr sentinel
+        </div>
+        <div class="task">
+            <strong>GPU async operations</strong>: enqueue_fill, enqueue_function, compile_function, DevicePointer
+        </div>
+        <div class="task">
+            <strong>Kernel launch</strong>: in0_host/in1_host/out_host variable capture
+        </div>
+        <div class="task">
+            <strong>Pointer bitcast</strong>: _Allocation.bitcast()
+        </div>
+        <div class="task">
+            <strong>assert_equal/functions_in_module</strong>: test framework shims
+        </div>
+
+        <h3>Category D: Infinite loops / timeouts (~30 tests)</h3>
+        <div class="task">
+            <strong>test_asyncrt/*, test_gpu/*</strong>: likely infinite loops or deadlocks
+        </div>
+
+        <h3>Category E: _load_mojo_module_from_path missing (~50 tests)</h3>
+        <div class="task">
+            <strong>Relative imports</strong>: The _load_mojo_module_from_path method was referenced but not added
+        </div>
+    </div>
+
+    <h2>Key Files to Modify</h2>
+    <ul>
+        <li><code>myinterpreter.py</code> — _setup_builtins, _load_mojo_sibling_module, eval_X methods, MojoString, MojoInstance, _MojoPointer</li>
+        <li><code>mojo_compiler.py</code> — already single source of truth for AST nodes</li>
+        <li><code>CLAUDE.md</code> — conventions documented</li>
+    </ul>
+</body>
+</html>

@@ -2006,7 +2006,7 @@ class Parser:
         if t.value == "if":  return self._parse_comptime_if()
         if t.value == "for": return self._parse_comptime_for()
         # comptime assert expr[, msg]
-        if t.value == "assert":
+        if t.value == "assert": 
             return self._parse_assert(is_comptime=True)
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
