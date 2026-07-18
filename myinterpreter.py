@@ -2984,6 +2984,24 @@ class Interpreter:
                             should_handle = self._matches_exc_type(e, exc_class)
                         except NameError:
                             should_handle = False
+                    elif isinstance(exc_type, list):
+                        # `except (A, B):` — mojo_compiler.py's _parse_try
+                        # stores a parenthesized exception tuple as a plain
+                        # list of dotted-name strings, not an AST node (see
+                        # its own comment: "codegen ORs the tag match across
+                        # every type in the tuple"). Falling through to the
+                        # `eval_expr` branch below tried to dispatch on a raw
+                        # Python list, raising "No handler for list" — hit by
+                        # any `except (ImportError, Exception):`-style
+                        # handler (mojolib BUG-2026-032).
+                        for name in exc_type:
+                            try:
+                                exc_class = self.scope.get(name)
+                            except NameError:
+                                continue
+                            if self._matches_exc_type(e, exc_class):
+                                should_handle = True
+                                break
                     else:
                         # Otherwise evaluate it as an expression
                         try:
