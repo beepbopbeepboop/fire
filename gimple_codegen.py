@@ -16278,6 +16278,46 @@ class GimpleGen:
             if sn in self._emitted_allocs:
                 continue  # already emitted by an imported module
             self._emitted_allocs.add(sn)
+            # Class-level attributes that are ALSO modeled as instance struct
+            # fields (see struct_field_types['Parser']['_CONV_KWS'] etc. and
+            # the "self-host hardcoded struct tables" memory note) need their
+            # instance slot seeded from the class-level global right here.
+            # Member-READ lowering (_lower_MemberExpr) checks struct_field_types
+            # BEFORE _class_attrs, so once a name is in both tables (needed so
+            # the field gets the right C type / doesn't corrupt self-host
+            # GIMPLE type inference), `self.X` reads the INSTANCE field, not
+            # the class global - and _alloc_{sn} used to leave every field but
+            # __mojo_type_id as raw malloc garbage. A class attribute like
+            # `_CONV_KWS = {...}` is never assigned inside __init__ (Python's
+            # own attribute-lookup fallback to the class dict is exactly why
+            # the source never needs to), so nothing else ever initializes
+            # that instance slot - `self._peek().value in self._CONV_KWS`
+            # dereferenced garbage as a MojoSet*, segfaulting the first time
+            # a self-hosted Parser actually exercised the ref/out/mut
+            # soft-keyword path (found debugging make bootstrap's stage2
+            # SIGSEGV on mojo_compiler.py). Seeding from the class global here
+            # mirrors real Python semantics (a fresh instance's attribute
+            # starts as the class value until something assigns over it) and
+            # composes correctly with any later `self.X = ...` in __init__/
+            # methods, which still just overwrites this same instance field.
+            class_attrs = getattr(self, '_class_attrs', {}).get(sn, {})
+            field_map = self.struct_field_types.get(sn, {})
+            # Only seed when the instance field's declared type actually
+            # matches the global's: some class attributes (e.g.
+            # LayoutSolver.STACK/HEAP, plain string constants with no `var`
+            # annotation) have an unrelated, pre-existing type-inference gap
+            # in struct_field_types (defaulting to the wrong C type) that was
+            # previously harmless because nothing ever wrote into that
+            # instance slot - introducing a write here would turn that latent
+            # gap into a new compile error. Skip those; they're no worse off
+            # than before this fix (still uninitialized instance-field
+            # garbage if ever read that way, same as pre-existing behavior).
+            attr_inits = ''.join(
+                f"  _p->{_safe_field(aname)} = {gname};\n"
+                for aname, gname in sorted(class_attrs.items())
+                if aname in field_map
+                and field_map[aname] == self._global_var_types.get(gname, field_map[aname])
+            )
             parts.append(
                 # static: each module that needs it emits its own copy; the
                 # monolithic stdlib dylib compiles modules independently, so an
@@ -16296,6 +16336,7 @@ class GimpleGen:
                 f"  _p = ({sn} *) _vp;\n"
                 f"  _tag = (int64_t){_struct_type_id(sn)};\n"
                 f"  _p->__mojo_type_id = _tag;\n"
+                f"{attr_inits}"
                 f"  return _p;\n"
                 f"}}"
             )

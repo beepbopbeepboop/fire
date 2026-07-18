@@ -164,12 +164,79 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   bound, `_set_slot_int` hash mixing, `mojo_cstr_region_eq`, the
   `.tok`/`.ast` tokenize-once dedup) all stay.
 
-  **Still open after the fix:** `make bootstrap` now gets through stage 1
-  and most of stage 2 (all `.mojo` files plus `mojo.py` itself dump
-  cleanly), but stage2's `--dump` of `mojo_compiler.py` and
-  `myinterpreter.py` SIGSEGVs — consistent with the long-standing
-  "bootstrap run-failure is pre-existing" note, now the next concrete
-  blocker for a full green bootstrap. Separate bug, not yet root-caused.
+  **Follow-up (2026-07-17, resumed later the same day): that SIGSEGV is
+  root-caused and FIXED.** `_alloc_{sn}` (`gimple_codegen.py` ~line 16277,
+  every self-hosted struct's constructor) did a raw `malloc` and set only
+  `__mojo_type_id`, leaving every other field as uninitialized garbage.
+  `_lower_MemberExpr` checks `struct_field_types` (real instance fields)
+  *before* `_class_attrs` (class-level globals) - so once a name is in
+  both (needed for `_CONV_KWS`/`_known_traits`/etc. to get the right C
+  type at all, per the hardcoded self-host table above), `self.X` reads
+  the never-initialized instance field instead of the correctly-populated
+  class-level global. `_CONV_KWS = {'ref', 'out', 'mut', ...}` (a class
+  attribute, never assigned inside `__init__` - Python's own attribute
+  fallback to the class dict is exactly why the source never needs to)
+  therefore dereferenced garbage as a `MojoSet *` the first time a
+  self-hosted `Parser` actually hit the `ref`/`out`/`mut` soft-keyword
+  path while parsing `mojo_compiler.py`. Confirmed via `lldb` (`_set_slot_str`
+  null-ish deref inside `mojo_set_contains_str`, called from
+  `Parser__parse_primary`) and by tracing the generated `.ci`'s
+  `_mojo_classattr_init()` (correctly populates the class-level global) vs.
+  `_alloc_Parser()` (never copies it into the instance). Fix: seed the
+  instance field from the class-level global inside `_alloc_{sn}` itself,
+  for every name present in both `_class_attrs[sn]` and
+  `struct_field_types[sn]` *with matching declared types* (the type-match
+  guard matters: `LayoutSolver.STACK`/`HEAP` hit the same
+  `_class_attrs`/`struct_field_types` overlap but with an unrelated,
+  pre-existing wrong-type gap in `struct_field_types` that was harmless
+  until this fix tried to write into it - skipped, no worse off than
+  before). This mirrors real Python semantics (a fresh instance's
+  attribute starts as the class value until something assigns over it) and
+  composes correctly with any later per-instance `self.X = ...`. Verified:
+  `make check` green, and both `mojo_compiler.py` and `myinterpreter.py`
+  now dump cleanly under stage2 (previously SIGSEGV, exit 139). Full
+  `make bootstrap` (stage1+2+3+verify) now reaches the verify step and
+  passes **150/152** checks - every `.mojo` test file and every core `.py`
+  file (`mojo_compiler`, `myinterpreter`, `module_loader`, `mojo_main`,
+  `generated_dispatch`) matches byte-for-byte across all three stages.
+
+  **The last 2/152: `mojo.tok`/`mojo.ast` still diverge (stage1 vs stage2
+  only)**, root-caused to the exact same `'in' for char*'` gap flagged
+  above, at a second call site: `replace_multiline_strings`'s own prefix-
+  detection loop (`while k > 0 and src[k-1] in 'fFrRbBuUtT' and letters < 2`,
+  `mojo_compiler.py` ~line 776) still uses the vulnerable pattern - unlike
+  `Parser._strip_string_prefix_and_quotes`, which was already rewritten
+  with explicit `==` comparisons specifically because of this bug (see its
+  docstring). Symptom: an f-string at mojo.py's own line 174
+  (`f"""def _repl_expr(): ..."""`) never has its `f` prefix recognized, so
+  the placeholder ends up glued onto the leftover `f` as one run-on NAME
+  token (`f__MOJO_STR_5__`) instead of a real STRING token - confirmed via
+  a byte-level diff of stage1 vs stage2's `mojo.tok`.
+
+  **Two fix attempts made and reverted, both reproducing the historically-
+  documented regression** (see the `_lower_in_impl` comment): rewriting the
+  loop with explicit `==` comparisons (mirroring
+  `_strip_string_prefix_and_quotes`'s already-proven-safe pattern exactly)
+  made the full `--dump ../mojo.py` SIGSEGV instead of just mistokenizing -
+  confirmed via `lldb`: `mojo_cstr_cmp` crashes on a null-ish pointer
+  inside `py_tokenize_replace_multiline_strings`, traced to the generated
+  `.ci` for the new `_pc == 'f'`-style comparisons - each one lowers to
+  `mojo_char_to_str(_pc)` + `mojo_cstr_cmp(...)` (a **string** comparison,
+  not a direct scalar `char` equality check), and the right-hand operand is
+  wrong/missing at that specific call site. A second attempt renamed every
+  new local (`_pc`/`_is_prefix_char` → `_rmls_pc`/`_rmls_is_prefix_char`) to
+  rule out a cross-function name collision with
+  `_strip_string_prefix_and_quotes`'s identically-named locals - same
+  crash, same offset, ruling that theory out. **New, more specific lead for
+  next time**: the identical `_c == 'f' or ...` comparison chain already
+  works correctly in `_strip_string_prefix_and_quotes`, a `Parser`
+  *method* - it only breaks inside `replace_multiline_strings`, a nested
+  *closure* (defined inside `py_tokenize`, not a class method). That
+  points at a closure-scoping bug specific to how char-literal comparisons
+  resolve their literal-pool operand, not at `in`/`or` short-circuiting
+  itself. Both attempts were cleanly reverted; `mojo_compiler.py` is
+  unchanged from before this investigation. 150/152 with a known, narrow,
+  well-isolated failure mode is a reasonable place to pause.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to
