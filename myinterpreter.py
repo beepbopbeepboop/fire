@@ -89,6 +89,14 @@ class Scope:
         else:
             self.vars[name] = value
 
+    def delete(self, name: str):
+        if name in self.vars:
+            del self.vars[name]
+        elif self.parent:
+            self.parent.delete(name)
+        else:
+            raise NameError(f"name '{name}' is not defined")
+
 
 class MojoFunction:
     """Represents a function defined in Mojo code."""
@@ -2547,6 +2555,25 @@ class Interpreter:
         for target in node.targets:
             self._assign_target(target, value)
         return value
+
+    def execute_DelStmt(self, node: N.DelStmt):
+        """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` (was "name
+        'del' is not defined" — hit by compression/bz2.py, lzma.py,
+        gzip.py, zlib.py, which all do `del <modname>` after a
+        try/except shim-cleanup import)."""
+        for target in node.targets:
+            if self._is_instance(target, 'IdentExpr'):
+                self.scope.delete(target.name)
+            elif self._is_instance(target, 'MemberExpr'):
+                obj = self.eval_expr(target.obj)
+                delattr(obj, target.member)
+            elif self._is_instance(target, 'SubscriptExpr'):
+                obj = self.eval_expr(target.obj)
+                idx = self.eval_expr(target.index)
+                del obj[idx]
+            else:
+                raise NotImplementedError(f"{self._loc(target)}Cannot delete {type(target).__name__}")
+        return None
 
     _INT_TYPE_NAMES = {
         'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128', 'Int256',

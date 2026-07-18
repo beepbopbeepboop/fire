@@ -432,6 +432,15 @@ class GlobalStmt:
     col: int = 0
 
 @dataclass
+class DelStmt:
+    """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` — one AST node
+    per comma-separated target, each an arbitrary expression (IdentExpr,
+    IndexExpr, or MemberExpr) to be deleted."""
+    targets: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class AssertStmt:
     value: object  # None if bare
     msg: object = None
@@ -559,7 +568,7 @@ class ComptimeVarStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del'}
 
 _TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -1247,6 +1256,7 @@ class Parser:
             if t.value == 'continue': return self._parse_continue()
             if t.value == 'assert': return self._parse_assert()
             if t.value == 'global': return self._parse_global()
+            if t.value == 'del': return self._parse_del()
         # Handle __mlir_attr and other MLIR/special forms as opaque no-ops.
         # NOT __mlir_region (handled below) and NOT __mlir_op: a bare __mlir_op
         # statement is a real side-effecting op (e.g. `pop.store`, ownership
@@ -2342,6 +2352,19 @@ class Parser:
                 break
             names.append(self._expect("NAME").value)
         return GlobalStmt(names=names, line=t.line, col=t.col)
+
+    def _parse_del(self):
+        """`del a`, `del a, b`, `del d["k"]`, `del obj.attr` — each
+        comma-separated target is an arbitrary expression, not just a name."""
+        t = self._peek()
+        self._expect("KW", 'del')
+        targets = [self._parse_expr(0)]
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                break
+            targets.append(self._parse_expr(0))
+        return DelStmt(targets=targets, line=t.line, col=t.col)
 
     # ── Expressions ──────────────────────────────────────────────────
     def _parse_expr(self, min_prec: int):
