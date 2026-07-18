@@ -372,10 +372,15 @@ class MojoClass:
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
+                # AssignStmt has a single `.target`, not a `.targets` list
+                # (mojo_compiler.py's AssignStmt dataclass) — this branch
+                # raised "'AssignStmt' object has no attribute 'targets'"
+                # on any instantiation of a class with a bare `NAME = value`
+                # class-body attribute (e.g. `class Foo: count = 0`).
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
-                for target in f.targets:
-                    if self.interpreter._is_instance(target, 'IdentExpr'):
-                        setattr(instance, target.name, value)
+                target = f.target
+                if self.interpreter._is_instance(target, 'IdentExpr'):
+                    setattr(instance, target.name, value)
         init = self.methods.get('__init__')
         if init is not None:
             interp = self.interpreter
@@ -1855,6 +1860,11 @@ class Interpreter:
         self.scope.define('False', False)
         self.scope.define('__name__', '__main__')
         self.scope.define('__file__', self.filename or '<input>')
+        # Real Python sets this to '' for a script run directly (not
+        # imported as part of a package) — asyncio/log.py's module-scope
+        # `logging.getLogger(__package__)` raised "name '__package__' is
+        # not defined" since mojo.py always runs files this way.
+        self.scope.define('__package__', '')
 
         # Built-in functions
         self.scope.define('len', len)
@@ -2345,6 +2355,20 @@ class Interpreter:
             else:
                 seen_first_actual_field = True
                 actual_fields.append(field)
+                # A bare `NAME = value` in a class body (no `var`/`comptime`)
+                # is a Python-style class attribute, not a per-instance
+                # field declaration — hoist it into comptime_aliases too so
+                # `ClassName.NAME` resolves without instantiating first.
+                # Needed for `class Color(enum.Enum): RED = 1` style code
+                # (py_compile.py's PycInvalidationMode.TIMESTAMP raised
+                # "'MojoClass' object has no attribute 'TIMESTAMP'").
+                if self._is_instance(field, 'AssignStmt') and field.value is not None:
+                    target = field.target
+                    if self._is_instance(target, 'IdentExpr'):
+                        try:
+                            comptime_aliases[target.name] = self.eval_expr(field.value)
+                        except Exception:
+                            pass
         fields = merged_fields + actual_fields
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
                          comptime_aliases=comptime_aliases, static_methods=static_methods)
