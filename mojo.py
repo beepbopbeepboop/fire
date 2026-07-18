@@ -93,9 +93,19 @@ def interpret_and_execute(src_code, filename=None, argv=None):
     thread's actual stack has to be made bigger.
     """
     exit_code = []
+    # Real Python modules the interpreted script imports (argparse, etc.)
+    # read the real sys.argv directly, bypassing myinterpreter.py's
+    # _SysProxy (which only intercepts the script's own `sys` binding).
+    # Left unpatched, real sys.argv still holds mojo.py's own leftover
+    # CLI state (e.g. after popping the "run" subcommand it looks like
+    # [mojo.py, <script path>]), so argparse.parse_args() would bind
+    # the script's own path to the first declared positional instead of
+    # correctly erroring out on a missing required argument.
+    old_argv = sys.argv
 
     def _run():
         try:
+            sys.argv = argv if argv is not None else [filename or "<stdin>"]
             from mojo_compiler import py_tokenize, Parser, FunctionDef, IfStmt, ExprStmt, CallExpr, IdentExpr
             from myinterpreter import Interpreter
             tokens = py_tokenize(src_code)
@@ -139,6 +149,8 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             # (exit 0) despite the traceback just printed to stderr. Callers
             # (Makefiles checking $?, CI) saw a script crash reported as PASS.
             exit_code.append(1)
+        finally:
+            sys.argv = old_argv
 
     old_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(max(old_limit, 1_000_000))

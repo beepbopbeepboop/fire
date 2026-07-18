@@ -370,6 +370,13 @@ class MojoClass:
             # method returned this way just requires the caller to pass
             # `self` explicitly, matching Python's own unbound-method rule.
             return self.methods[name]
+        if name == '__name__':
+            # Real Python classes carry their own name here; a MojoClass
+            # instance passed into a real Python function (e.g. ctypes'
+            # POINTER(cls), which does `cls.__name__`) needs the same —
+            # ctypes/wintypes.py's `PFILETIME = POINTER(FILETIME)` raised
+            # "'FILETIME' object has no attribute '__name__'".
+            return self.name
         raise AttributeError(f"'{self.name}' object has no attribute '{name}'")
 
     def __call__(self, *args, **kwargs):
