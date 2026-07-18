@@ -14,6 +14,27 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **A struct/class named after a C keyword — most importantly `auto`
+  (`enum.auto`) — emits invalid C (`typedef struct auto {…} auto;`, `auto *`)
+  and fails to compile.** Elevated priority (2026-07-17): a fresh corpus
+  scan after the day's fixes showed this blocks `typing.py`, `argparse.py`,
+  `_pydecimal.py`, and — because `import enum` inlines `class auto` under
+  `do_imports=True` — likely a large fraction of the remaining ~1169
+  COMPILE_FAILs (all fast, clean `expected '{' before 'auto'` failures, not
+  timeouts; the scan's 113 "timeouts" were 20-worker contention, verified
+  fast solo). An emission-site patch was attempted and **reverted**: struct
+  names flow into both C emission (needs `_kw_auto`) and internal
+  bookkeeping keyed on the *logical* name (`auto` in `struct_field_types`),
+  and `_resolve_type` produces the string used for both — so translating at
+  emit sites either misses sites or desyncs the two (a silent miscompile
+  risk, the worst outcome). Recommended fix: a pre-codegen **AST-level
+  rename** of any struct/class whose name is a C keyword (and all
+  references — constructor `CallExpr`/`IdentExpr`, base lists, type
+  annotations) to a safe name (`_kw_auto`), so the logical name is C-safe
+  from the start and emit == bookkeeping with no dual-requirement conflict.
+  Verify with an enum-using compile + full `make bootstrap` + a corpus
+  re-scan (should move a big chunk of COMPILE_FAIL → PASS).
+
 - **✅ RESOLVED 2026-07-17 — cluster of string/codegen bugs found along the
   way, all fixed with minimal repros + `make check` + full `make bootstrap`
   green:** (1) `char → char *` coercion in `_safe_coerce_emit` stuffed a
