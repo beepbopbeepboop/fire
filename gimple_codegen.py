@@ -1844,6 +1844,22 @@ _C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
 # causes the preprocessor to replace them before GCC sees the code (e.g. 'true' → '1').
 _C_MACRO_NAMES = frozenset({'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END'})
 
+# Python pseudo-attributes provided by the runtime/type machinery, NOT real
+# instance fields — excluded from the "read-only field" struct inference so
+# they aren't synthesized as garbage int fields (`__class__` is handled
+# specially in _lower_MemberExpr; the rest are class/type metadata this
+# codegen doesn't model per-instance). Genuine instance-attribute dunders that
+# happen to be named with underscores — most importantly `__args__`/
+# `__origin__`/`__parameters__`, which typing's generic aliases set as real
+# attributes and read in subclasses like _CallableGenericAlias — are NOT
+# listed here, so they DO register as fields (previously the read-scan
+# excluded every `__x__` name, so those reads compiled to "has no member").
+_PSEUDO_DUNDER_ATTRS = frozenset({
+    '__class__', '__dict__', '__module__', '__name__', '__qualname__',
+    '__doc__', '__bases__', '__base__', '__mro__', '__annotations__',
+    '__slots__', '__weakref__', '__flags__', '__basicsize__', '__dictoffset__',
+})
+
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords."""
     if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS:
@@ -14487,7 +14503,7 @@ class GimpleGen:
                     for node in _walk_ast(body):
                         fn = _self_member(node)
                         if (fn is not None and fn not in found and fn not in _method_names
-                                and not (fn.startswith('__') and fn.endswith('__'))):
+                                and fn not in _PSEUDO_DUNDER_ATTRS):
                             found[fn] = 'int'
 
                 already = set(self.struct_field_types[s.name].keys())
