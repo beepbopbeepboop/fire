@@ -3195,6 +3195,13 @@ class GimpleGen:
         'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
+        'mojo_str_isalnum':      ('int',       ['char *']),
+        'mojo_str_isdigit':      ('int',       ['char *']),
+        'mojo_str_isalpha':      ('int',       ['char *']),
+        'mojo_str_isspace':      ('int',       ['char *']),
+        'mojo_str_isupper':      ('int',       ['char *']),
+        'mojo_str_islower':      ('int',       ['char *']),
+        'mojo_bool_to_str':      ('char *',    ['int']),
         'mojo_repr_int':         ('char *',    ['int64_t']),
         'mojo_repr_str':         ('char *',    ['char *']),
         'mojo_repr_obj':         ('char *',    ['int64_t']),
@@ -4832,8 +4839,12 @@ class GimpleGen:
         value" and previously only f-strings had it inline."""
         if et == 'char *':
             return ev
+        if et == '_Bool':
+            # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
+            # the int path below would produce.
+            return self._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
         if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
-                  'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t', '_Bool'):
+                  'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
             # Dispatch on the statically-known scalar type instead of
             # mojo_str's generic `void *` heuristic, which can't tell
             # a real int value of 0 apart from a NULL pointer and
@@ -7423,6 +7434,18 @@ class GimpleGen:
             self._emit_call('int64_t', t, '_char_replace_impl',
                              [('char *', cstr_ov), (arg0_type, arg_vals[0]), (arg1_type, arg_vals[1])])
             return 'char *', self._new_val('char *', f"(char *){t}")
+        # Character-class predicates (str.isalnum/isdigit/...) — real runtime
+        # helpers, previously hardcoded-0 stubs (always False), which broke
+        # e.g. mojo_compiler.py's own `raw[i].isdigit()` / `prev.isalnum()`.
+        _STR_PREDICATES = {
+            'isalnum': 'mojo_str_isalnum', 'isdigit': 'mojo_str_isdigit',
+            'isalpha': 'mojo_str_isalpha', 'isspace': 'mojo_str_isspace',
+            'isupper': 'mojo_str_isupper', 'islower': 'mojo_str_islower',
+        }
+        if method in _STR_PREDICATES and not arg_vals:
+            t = self._new_temp('int')
+            self._emit_call('int', t, _STR_PREDICATES[method], [('char *', cstr_ov)])
+            return '_Bool', self._new_val('_Bool', f'{t} != 0')
         if method in ('encode', 'decode', 'format'):
             return self._stub_result('char *', cstr_ov, f'TODO: {method}')
         # Unknown method on char* — stub
@@ -8374,6 +8397,12 @@ class GimpleGen:
         # _stringify_value's fallthrough, unchanged.)
         if fname_raw == 'str' and len(node.args) == 1:
             et, ev = self.lower_expr(node.args[0])
+            # A bare True/False literal lowers with ctype 'int' (not '_Bool' —
+            # _lower_BoolLiteral does this deliberately; other sites depend on
+            # it), so str(True) would take the int path → "1". Recover the
+            # bool intent from the AST so it stringifies as "True"/"False".
+            if isinstance(node.args[0], BoolLiteral):
+                et = '_Bool'
             return 'char *', self._stringify_value(et, ev)
 
         # Trivial builtins: lower_expr all args, call runtime fn

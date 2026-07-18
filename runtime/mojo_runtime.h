@@ -148,6 +148,12 @@ double      mojo_str_to_float(MojoStr *s);
 
 /* String method operations on char* */
 int mojo_str_startswith(char *s, char *prefix);
+int mojo_str_isalnum(char *s);
+int mojo_str_isdigit(char *s);
+int mojo_str_isalpha(char *s);
+int mojo_str_isspace(char *s);
+int mojo_str_isupper(char *s);
+int mojo_str_islower(char *s);
 int mojo_str_endswith(char *s, char *suffix);
 int mojo_str_startswith_char(char *s, char c);
 int mojo_str_endswith_char(char *s, char c);
@@ -322,6 +328,7 @@ char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
+char *mojo_bool_to_str(int b);
 int mojo_type(int obj);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);

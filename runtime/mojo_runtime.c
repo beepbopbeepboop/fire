@@ -763,6 +763,57 @@ int mojo_str_startswith(char *s, char *prefix) {
     return 1;
 }
 
+/* Python str character-class predicates. All require at least one character
+ * (empty string → False), and every character must satisfy the class. Used
+ * to be codegen stubs hardcoded to 0 (always False) — e.g.
+ * `raw[i].isdigit()` / `prev.isalnum()` in mojo_compiler.py's own tokenizer.
+ * ctype's is* take an int and misbehave on negative (signed-char) input, so
+ * cast through unsigned char. */
+int mojo_str_isalnum(char *s) {
+    if (!s || !*s) return 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (!isalnum(*p)) return 0;
+    return 1;
+}
+int mojo_str_isdigit(char *s) {
+    if (!s || !*s) return 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (!isdigit(*p)) return 0;
+    return 1;
+}
+int mojo_str_isalpha(char *s) {
+    if (!s || !*s) return 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (!isalpha(*p)) return 0;
+    return 1;
+}
+int mojo_str_isspace(char *s) {
+    if (!s || !*s) return 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++)
+        if (!isspace(*p)) return 0;
+    return 1;
+}
+/* isupper/islower: every CASED character matches, and there is at least one
+ * cased character (Python semantics — "A1" is upper, "1" is not, "ABC" is). */
+int mojo_str_isupper(char *s) {
+    if (!s) return 0;
+    int has_cased = 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++) {
+        if (islower(*p)) return 0;
+        if (isupper(*p)) has_cased = 1;
+    }
+    return has_cased;
+}
+int mojo_str_islower(char *s) {
+    if (!s) return 0;
+    int has_cased = 0;
+    for (unsigned char *p = (unsigned char *)s; *p; p++) {
+        if (isupper(*p)) return 0;
+        if (islower(*p)) has_cased = 1;
+    }
+    return has_cased;
+}
+
 int mojo_str_endswith(char *s, char *suffix) {
     if (!s || !suffix) return 0;
     int slen = strlen(s);
@@ -1690,6 +1741,14 @@ char *mojo_repr_str(char *s) {
     *p++ = quote;
     *p = '\0';
     return buf;
+}
+
+/* Python str(True)/str(False) → "True"/"False", not "1"/"0". str()/f-string
+ * lowering routes a statically-_Bool value here instead of the int path. */
+char *mojo_bool_to_str(int b) {
+    static char t[] = "True";
+    static char f[] = "False";
+    return b ? t : f;
 }
 
 char *mojo_repr_float(double v) {
