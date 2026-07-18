@@ -3828,6 +3828,27 @@ class GimpleGen:
                     self._emit(f'  {dest} = {ip};')
                 else:
                     self._emit(f'  {dest} = (int){ip};')
+            elif d == 'char *' and s == 'char':
+                # A Python str of length 1 (a bare `char` in this codegen)
+                # coerced into a `char *` STRING slot — e.g. the `char`
+                # branch of a mixed-type ternary like `s[k-1] if k>0 else ''`
+                # (one branch a single char, the other a real string), or a
+                # char stored into a char*-typed field/variable. Build a real
+                # 1-char heap string via mojo_char_to_str. The `(char *){v}`
+                # cast the generic narrow-scalar branch below would apply
+                # instead reinterprets the char's BYTE VALUE as a pointer
+                # address (e.g. '_' → (char *)0x5f), which then segfaults the
+                # instant anything dereferences it (strcmp/mojo_cstr_cmp/...).
+                # Found via mojo_compiler.py's own
+                # `prev = src[k-1] if k>0 else ''` followed by `prev == '_'`
+                # crashing the self-hosted `--dump` — the last 2/152
+                # mojo.tok/.ast divergence in `make bootstrap` (a real
+                # SIGSEGV, not just a mistokenization, once the surrounding
+                # prefix-scan loop actually advanced far enough to reach a
+                # non-empty `prev`).
+                v = self._ensure_local(s, v)
+                sv = self._call_expr('char *', 'mojo_char_to_str', [('char', v)])
+                self._emit(f'  {dest} = {sv};')
             elif d.endswith(' *') and s in ('int', 'int64_t', 'char'):
                 # 'char' here too: a narrower-than-pointer scalar (e.g. a
                 # single dereferenced byte from an unresolved generic

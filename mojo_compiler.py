@@ -771,10 +771,32 @@ def py_tokenize(src: str) -> list[Token]:
                 # letters) immediately before this quote, but only if those
                 # letters form a standalone token — not the tail of a
                 # longer identifier like `self` before `.format("...")`.
+                # Deliberately avoid `src[k-1] in 'fFrRbBuUtT'` here: this
+                # codegen's compiled `in`-for-char* path is a documented stub
+                # (always returns False), so under self-hosting this loop
+                # never advanced and every string prefix (f/r/b/...) went
+                # undetected — the sole remaining cause of make bootstrap's
+                # mojo.tok/.ast divergence (an f-string at mojo.py's own line
+                # 174 tokenized as one run-on NAME instead of a STRING).
+                # Explicit `==` comparisons are the same proven-safe pattern
+                # Parser._strip_string_prefix_and_quotes already uses for this
+                # identical check. Also: no `k > 0 and ...` combined guard —
+                # this codegen's `and`/`or` evaluate BOTH operands (no
+                # short-circuit), so the `k > 0` bounds check must be its own
+                # `if`, never ANDed with the index it guards.
                 k = i
                 letters = 0
-                while k > 0 and src[k - 1] in 'fFrRbBuUtT' and letters < 2:
-                    k -= 1; letters += 1
+                while letters < 2:
+                    if k <= 0:
+                        break
+                    _pfx_c = src[k - 1]
+                    _is_pfx = (_pfx_c == 'f' or _pfx_c == 'F' or _pfx_c == 'r' or _pfx_c == 'R'
+                               or _pfx_c == 'b' or _pfx_c == 'B' or _pfx_c == 'u' or _pfx_c == 'U'
+                               or _pfx_c == 't' or _pfx_c == 'T')
+                    if not _is_pfx:
+                        break
+                    k -= 1
+                    letters += 1
                 prev = src[k - 1] if k > 0 else ''
                 start = k if letters and not (prev.isalnum() or prev == '_') else i
                 quote3 = c * 3

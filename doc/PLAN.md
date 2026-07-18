@@ -14,6 +14,39 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **✅ RESOLVED 2026-07-17 — `make bootstrap` is now fully green (all 3
+  stages verified, 0 failures).** The long investigation log below is kept
+  for its diagnostic trail, but the headline: the final 2/152
+  `mojo.tok`/`.ast` divergences were fixed by two changes landing together.
+  (1) The *root cause* was a codegen bug, not the `in`-operator gap the log
+  spent most of its length on: `_safe_coerce_emit` (`gimple_codegen.py`)
+  coerced a bare `char` into a `char *` slot with a raw `(char *)` cast,
+  reinterpreting the char's BYTE VALUE as a pointer address (`'_'` →
+  `(char *)0x5f`), which then segfaulted the instant anything dereferenced
+  it. Reproduced in a **6-line** file — `prev = s[k-1] if k>0 else ''` (a
+  mixed-type ternary: `char` branch vs `char *` branch) followed by
+  `prev == '_'` — no closures, no big function, no `in` involved. Fixed by
+  converting `char → char *` via `mojo_char_to_str` (a real 1-char string),
+  matching Python's "a str of length 1" semantics; other narrow-scalar →
+  pointer coercions (genuine boxing) are unchanged. THIS is what made the
+  two earlier `==`-rewrite attempts crash (they advanced the prefix loop
+  far enough to reach a non-empty `prev`, tripping the latent ternary bug) —
+  the "closure vs method / temp-aliasing" theories in the log below were
+  both wrong; the lldb `x0=0x28` / `x1="'_'"` evidence was pointing at the
+  `prev == '_'` comparison the whole time. (2) With that unblocked, the
+  actual mistokenization fix: `replace_multiline_strings`'s prefix-scan loop
+  (`mojo_compiler.py`) switched from `src[k-1] in 'fFrRbBuUtT'` (the
+  documented always-False `in`-for-char* stub, which made self-hosted prefix
+  detection never fire) to explicit `==` comparisons, the same proven-safe
+  pattern `_strip_string_prefix_and_quotes` already uses. `make check`
+  green, `make bootstrap` fully verified.
+
+  Separate pre-existing bug spotted in passing (NOT chased — orthogonal,
+  reproduces in a 4-line file): `str(0)` prints `None`/empty instead of
+  `"0"` in the compiled path. `str(5)` works. File as its own bug.
+
+  _Original investigation log (kept for the diagnostic trail):_
+
 - **Stage2 self-hosted `--dump` of a large file (mojo.py itself, ~900KB) is
   still far too slow/memory-hungry to finish in reasonable time, even after
   fixing two real, confirmed contributing bugs.** Investigated 2026-07-17
