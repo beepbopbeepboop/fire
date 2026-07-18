@@ -14,6 +14,35 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **Three enum.py-chain bugs (surfaced once the `auto` fix unblocked deeper
+  stages), status 2026-07-17:** (1) **`'Error' redeclared as different kind
+  of symbol`** — FIXED: the builtin type-constructor stub `int64_t Error(...)`
+  collided with the opaque `typedef … Error;`; ctor stubs now guard on
+  `#ifndef _MOJO_STUB_<NAME>` (emitted by the struct-typedef paths).
+  (2) **`'X' has no member named '__args__'`** — FIXED: the read-only
+  struct-field inference excluded ALL `__dunder__` names; narrowed to a
+  denylist of true pseudo-attributes so genuine instance dunders
+  (`__args__`/`__origin__`/typing generic aliases) register. A separate,
+  niche sibling remains OPEN: `ABCMeta.__module__ = 'abc'` (abc.py:90) is a
+  metaclass attribute *write* on a type object — `request for member
+  '__module__' in something not a structure` — needs class-object metadata
+  this codegen doesn't model; low value. (3) **`Expected RBRACKET got
+  NAME('__notes__')`** (traceback.py) — OPEN: PEP 701 f-string with the same
+  quote reused inside a `{…}` field (`f'… {f(e, '__notes__', repr)}'`). The
+  tokenizer matches strings with a regex that can't do balanced-brace
+  scanning, so the inner `'` closes the f-string early. Needs a brace-aware
+  f-string scanner in the (self-host-sensitive) tokenizer — a real parse
+  feature, deferred.
+
+- **`variable or field 'X' declared void`** (~18 files) — OPEN, root-caused
+  2026-07-17: member access on a `void *` (an unresolved object, e.g.
+  `cdll.msvcrt` in ctypes/util.py) lowers to `_tN = *_ptr`, and
+  dereferencing `void *` yields a `void`-typed temp (`void _tN;`, invalid C).
+  The explicit unary-`*` path already maps `void` element type → `int64_t`;
+  the member-access deref path needs the same guard. Emission site not yet
+  pinned down (the deref isn't in the obvious _lower_MemberExpr fallback);
+  mostly niche/platform-specific call sites.
+
 - **✅ RESOLVED 2026-07-17 (commit after the writeup below).** Fixed via the
   recommended AST-rename design: `gen_module` renames any keyword-named
   StructDef to `_kw_<name>` in place (shared `_c_kw_struct_renames` dict),
