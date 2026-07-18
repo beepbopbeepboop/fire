@@ -3354,6 +3354,18 @@ class Interpreter:
             # an explicit conversion instead of silently stringifying it.
             if isinstance(left, str) and isinstance(right, str):
                 return MojoString(left + right)
+            # An _AutoStubValue is the interpreter's graceful stand-in for an
+            # unresolved symbol (missing/unshimmed import, unknown attribute).
+            # It subclasses int, so `str + stub` would raise TypeError (can
+            # only concatenate str, not "_AutoStubValue") — mojolib BUG-2026-029,
+            # hit when the transpiler concatenates an unresolved value into a
+            # string. Degrade gracefully instead, matching _AutoStubValue's
+            # whole design: treat the unresolved operand as an empty string in
+            # a string-concatenation context so the program keeps running.
+            if isinstance(left, str) and isinstance(right, _AutoStubValue):
+                return MojoString(left)
+            if isinstance(left, _AutoStubValue) and isinstance(right, str):
+                return MojoString(right)
             return self._wrap_int(left + right)
         elif op == '-': return self._wrap_int(left - right)
         elif op == '*': return self._wrap_int(left * right)
