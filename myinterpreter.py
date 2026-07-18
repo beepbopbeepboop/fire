@@ -2727,11 +2727,6 @@ class Interpreter:
     def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
         iterable = self.eval_expr(node.iterable)
-        # Handle both 'targets' (list) and 'target' (single) for compatibility
-        if hasattr(node, 'targets'):
-            targets = node.targets
-        else:
-            targets = [node.target]
 
         if not hasattr(iterable, '__iter__') and not hasattr(iterable, '__getitem__'):
             kind = type(iterable).__name__
@@ -2739,24 +2734,13 @@ class Interpreter:
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
         for value in iterable:
-            # Bind loop variable(s)
-            if len(targets) == 1:
-                # Extract name from target if it's an object
-                target_name = targets[0]
-                if hasattr(target_name, 'name'):
-                    target_name = target_name.name
-                elif not isinstance(target_name, str):
-                    target_name = str(target_name)
-                self.scope.define(target_name, value)
-            else:
-                # Unpacking
-                for i, target in enumerate(targets):
-                    target_name = target
-                    if hasattr(target_name, 'name'):
-                        target_name = target_name.name
-                    elif not isinstance(target_name, str):
-                        target_name = str(target_name)
-                    self.scope.define(target_name, value[i] if isinstance(value, (list, tuple)) else value)
+            # node.target is always a plain string from mojo_compiler.py's
+            # _parse_for (possibly comma-joined for tuple unpacking, e.g.
+            # "op, i" or "(op, i)"), never an Expr node or list — was
+            # binding the literal string "(op, i)" as a variable name
+            # instead of unpacking op/i separately (opcode.py's
+            # `for op, i in m.items():` -> "name 'op' is not defined").
+            self._bind_comprehension_target(node.target, value)
 
             try:
                 for stmt in node.body:
@@ -2778,18 +2762,7 @@ class Interpreter:
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
         for value in iterable:
-            if hasattr(node, 'targets'):
-                targets = node.targets
-            else:
-                targets = [node.target]
-            if len(targets) == 1:
-                target = targets[0]
-                name = target.name if hasattr(target, 'name') else str(target)
-                self.scope.define(name, value)
-            else:
-                for i, target in enumerate(targets):
-                    name = target.name if hasattr(target, 'name') else str(target)
-                    self.scope.define(name, value[i] if isinstance(value, (list, tuple)) else value)
+            self._bind_comprehension_target(node.target, value)
             try:
                 for stmt in node.body:
                     self.execute(stmt)
