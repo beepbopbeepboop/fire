@@ -2491,6 +2491,17 @@ class GimpleGen:
         # Object files the program must link, recorded by elaboration as it
         # instantiates generics on demand (ELABORATION.md). Deduped.
         self._link_objects: list = []
+        # Modules imported (for a plain, non-generic struct) in link mode that
+        # couldn't be resolved via imports.py's MOJO_PATH-based dylib resolver
+        # or module_loader's std/test-only loader — e.g. an ordinary sibling
+        # .mojo file in a project that isn't itself laid out under
+        # MOJO_PATH/PYTHONPATH/the stdlib root (mojolib's cpp_parser/, which
+        # has no dylib-building infrastructure of its own; BUG-2026-032).
+        # _register_link_imports records the module name here; gen_module
+        # then runs the same _compile_imported_module pass a do_imports=True
+        # build already uses (real body generation, not just field-type
+        # registration), since there's no dylib to link its methods from.
+        self._link_inline_modules: set = set()
         # Imported names that are generic templates (not concrete exports):
         # name -> the module source path, used to instantiate at call sites.
         self._imported_generics: dict = {}
@@ -2759,6 +2770,17 @@ class GimpleGen:
                     temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
                     temp_gen._const_str_locals = self._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                     temp_gen.struct_field_types = self.struct_field_types
+                    # share: a struct's home-module qualifier (_struct_method_qualifier)
+                    # must be visible to every ancestor gen's call sites, not just the
+                    # one that happened to first compile the struct's defining module —
+                    # a 3-level-deep import chain (root -> A -> B, where B defines the
+                    # struct and A merely re-uses it) previously registered the
+                    # qualifier only into the A-compiling temp_gen's own (unshared)
+                    # dict, so the root's own call sites on that struct independently
+                    # recomputed an unqualified symbol the defining module never
+                    # exports under (BUG-2026-032's arena.mojo/ast_nodes.mojo chain,
+                    # discovered once the direct 2-level case above was fixed).
+                    temp_gen._imported_struct_home = self._imported_struct_home
                     temp_gen._c_kw_struct_renames = self._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                     temp_gen.struct_boxed_fields = self.struct_boxed_fields
                     temp_gen.struct_bool_fields = self.struct_bool_fields
@@ -2969,11 +2991,21 @@ class GimpleGen:
                     return entry.exports, True, entry.source
             except Exception as e:
                 _debug_note(f'imports.resolve({module!r}) failed; falling back to load_module', e)
+            # `source` was previously hardcoded to None on both fallback returns
+            # below, which starved the caller's source-text-based generic/
+            # overload detection (and, before this fix, the plain-struct case
+            # entirely) of any source to read for modules imports.py's
+            # MOJO_PATH-based resolver can't find — e.g. an ordinary sibling
+            # .mojo file in a project with no dylib-building setup of its own
+            # (mojolib's cpp_parser/, BUG-2026-032). _parsed_import already
+            # does this resolution correctly (walking up from the current
+            # file, same as _find_imported_struct/_resolve_test_relative_module).
+            _sib_path = self._parsed_import(module)[0]
             try:
-                return load_module(module), False, None
+                return load_module(module), False, _sib_path
             except Exception as e:
                 _debug_note(f'load_module({module!r}) failed; treating module as empty', e)
-                return {}, False, None
+                return {}, False, _sib_path
 
         def scan(stmt_list):
             for stmt in stmt_list:
@@ -3002,6 +3034,22 @@ class GimpleGen:
                                     self._imported_generics.setdefault(sym, source)
                                 elif len(re.findall(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(', msrc)) > 1:
                                     self._imported_overloads.setdefault(sym, source)
+                                elif re.search(rf'\bstruct\s+{re.escape(name)}\s*(\(|:)', msrc):
+                                    # A plain (non-generic) struct with no dylib
+                                    # to reflect off of — the whole module needs
+                                    # to be compiled and inlined the same way a
+                                    # do_imports=True build inlines everything,
+                                    # since there's no dylib to link its methods
+                                    # from. Queue the MODULE (not just this one
+                                    # struct) for a real _compile_imported_module
+                                    # pass in gen_module below — that's what
+                                    # actually generates method bodies, not just
+                                    # field-type registration. See BUG-2026-032:
+                                    # mojolib's cpp_parser/arena.mojo importing
+                                    # plain structs (IfStmt, IntegerLiteral, ...)
+                                    # from its sibling ast_nodes.mojo, neither on
+                                    # MOJO_PATH nor buildable as a dylib.
+                                    self._link_inline_modules.add(stmt.module)
                             continue
                         if sym in seen:
                             continue
@@ -14056,6 +14104,27 @@ class GimpleGen:
                                 for _m in _ms.methods:
                                     self._global_inline_defs.add(_m.name)
                                     self._global_inline_defs.add(f"{_ms.name}_{_m.name}")
+                                # _compile_imported_module's nested temp_gen
+                                # compiled with module_name=module_name, so
+                                # every one of its own locally-defined
+                                # structs' method symbols got qualified with
+                                # that prefix. A call site in THIS module (or
+                                # a shallower ancestor, imported_struct_home
+                                # is shared down the whole nested-temp_gen
+                                # chain) on that struct needs to derive the
+                                # identical qualified symbol — see
+                                # _struct_method_qualifier. Previously
+                                # unregistered here: harmless for a direct
+                                # (root -> leaf) import, since the struct's
+                                # OWN compile pass registers types into the
+                                # shared struct_field_types dict either way,
+                                # but a 3-level-deep chain (root -> A -> B,
+                                # B defines the struct, A merely re-uses it)
+                                # left the root's own call sites on that
+                                # struct recomputing an unqualified symbol
+                                # the defining module never exports under
+                                # (BUG-2026-032's arena.mojo/ast_nodes.mojo).
+                                self._imported_struct_home.setdefault(_ms.name, module_name)
                     self._compiled_modules.add(module_name)
 
             # Also collect stmts from transitively compiled modules (compiled by sub-temp-gens).
@@ -14069,6 +14138,48 @@ class GimpleGen:
                         already_in_stmts.add(id(s))
 
             # Imported types are now in self._imported_func_types and struct_field_types
+
+        # Link mode's fallback for plain structs with no dylib to reflect off
+        # of (_register_link_imports, above) records the MODULE name here —
+        # compile it for real (body generation, not just field-type
+        # registration) the same way do_imports=True's Phase 0 above compiles
+        # each transitively-imported module, since there's no dylib to link
+        # its methods from. Kept separate from the `if self.do_imports:`
+        # block above: that block additionally tries to fully compile+inline
+        # EVERY transitively-imported module (Phase 0's find_imports), which
+        # would be a large, unwanted behavior change for link mode (defeats
+        # per-import dylib caching for every OTHER, dylib-resolvable import
+        # in the program) — this only compiles modules that already proved
+        # unresolvable any other way.
+        if self.link_imports:
+            for module_name in sorted(self._link_inline_modules):
+                if module_name not in self._compiled_modules:
+                    self._compiled_modules.add(module_name)
+                    code, module_stmts = self._compile_imported_module(module_name)
+                    if code:
+                        imported_code.append(f"/* ─── Imported module (link-mode fallback): {module_name} ───────────────────── */")
+                        imported_code.append(code)
+                        imported_code.append('')
+                        imported_stmts.extend(module_stmts)
+                        for _ms in module_stmts:
+                            if isinstance(_ms, FunctionDef):
+                                self._global_inline_defs.add(_ms.name)
+                            elif isinstance(_ms, StructDef):
+                                for _m in _ms.methods:
+                                    self._global_inline_defs.add(_m.name)
+                                    self._global_inline_defs.add(f"{_ms.name}_{_m.name}")
+                                # _compile_imported_module's nested temp_gen
+                                # compiles with module_name=module_name, so
+                                # _struct_method_qualifier qualified every one
+                                # of its own locally-defined structs' method
+                                # symbols with that same prefix (e.g.
+                                # ast_nodes_IfStmt___init__). THIS module's own
+                                # call sites on that struct (imported by bare
+                                # name, e.g. `from ast_nodes import IfStmt`)
+                                # need to derive the identical qualified
+                                # symbol — _struct_method_qualifier checks
+                                # _imported_struct_home for exactly that.
+                                self._imported_struct_home.setdefault(_ms.name, module_name)
 
         # ── Phase 1: build complete type tables (pre-pass) ────────────────
 
@@ -14297,7 +14408,7 @@ class GimpleGen:
         # corrupting the intentionally-scalar C representation.
         self._selfhost_hardcoded_struct_names = frozenset(self.struct_field_types.keys())
 
-        all_struct_defs = stmts + (imported_stmts if self.do_imports else [])
+        all_struct_defs = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         # Captured before _merge_struct_inheritance runs (it only mutates
         # .fields/.methods, never .bases, so ordering doesn't matter here) —
         # used by _lower_method_call's `super().method(...)` handling to find
@@ -14644,7 +14755,7 @@ class GimpleGen:
         # sits directly under an `if __name__ == "__main__":` at module scope,
         # not inside any function or class at all).
         _scan_body_for_local_field_access(stmts, None)
-        if self.do_imports:
+        if self.do_imports or self.link_imports:
             _scan_body_for_local_field_access(imported_stmts, None)
 
         # Register struct constructors as functions returning T *
@@ -14655,7 +14766,7 @@ class GimpleGen:
         _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
         self.func_return_types = dict(_RUNTIME_FUNCS)
         self.func_return_types.update(_phase0_func_types)   # Phase 0 types win over defaults
-        all_struct_defs_for_types = stmts + (imported_stmts if self.do_imports else [])
+        all_struct_defs_for_types = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for s in all_struct_defs_for_types:
             if isinstance(s, StructDef):
                 self.func_return_types[s.name] = f"{s.name} *"
@@ -14697,7 +14808,7 @@ class GimpleGen:
 
         # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
-        all_functions = stmts + (imported_stmts if self.do_imports else [])
+        all_functions = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for s in all_functions:
             if isinstance(s, FunctionDef) and s.return_type is not None:
                 self.func_return_types[s.name] = self._resolve_type(s.return_type)
@@ -14717,7 +14828,7 @@ class GimpleGen:
             if isinstance(s, FunctionDef) and 'export' in (getattr(s, 'decorators', None) or []):
                 self._extra_no_mangle.add(s.name)
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
-        all_structs_for_methods = (stmts + (imported_stmts if self.do_imports else [])
+        all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                     + self._imported_typedef_structs)
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
@@ -15082,7 +15193,7 @@ class GimpleGen:
         # dispatch instead of dynamic getattr/dict lookups.
         if self.emit_struct_defs:  # Only main module does dispatch solving
             self._dispatch_solver = DispatchSolver(self.struct_field_types, self.func_return_types)
-            all_stmts_for_dispatch = stmts + (imported_stmts if self.do_imports else [])
+            all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
             self._dispatch_solver.analyze(all_stmts_for_dispatch)
             self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
 
@@ -15296,7 +15407,7 @@ class GimpleGen:
         # Must run before Phase 2a so _lower_IdentExpr can find globals.
         _pre_declared_globals = set()
         _phase17_mod = self.module_name or "root"  # module name for _global_to_module mapping
-        for _scan_stmt in stmts + (imported_stmts if self.do_imports else []):
+        for _scan_stmt in stmts + (imported_stmts if (self.do_imports or self.link_imports) else []):
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
                 # Track `X = re.compile("literal pattern")` so a later
@@ -15439,7 +15550,7 @@ class GimpleGen:
                     _scan_try_imports(_s.then_body or [])
                     if isinstance(_s.else_body, list):
                         _scan_try_imports(_s.else_body)
-        _scan_try_imports(stmts + (imported_stmts if self.do_imports else []))
+        _scan_try_imports(stmts + (imported_stmts if (self.do_imports or self.link_imports) else []))
 
         # Pre-populate _global_c_decl_types from _global_var_types so Phase 2a
         # generates correct loads for globals whose C type is a pointer (not boxed int64_t).
@@ -15941,7 +16052,7 @@ class GimpleGen:
         # fail to compile need an extern incomplete-struct forward declaration
         # so references like `_build_stdlib_dylib_globals.x` don't get "undeclared".
         # Use the module name (not alias) since generated C accesses _module_globals not _alias_globals.
-        all_scan_for_mods = stmts + (imported_stmts if self.do_imports else [])
+        all_scan_for_mods = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for _ms in all_scan_for_mods:
             if isinstance(_ms, ImportStmt):
                 _mn = _ms.module  # module name, not alias (globals struct uses module name)
@@ -16083,7 +16194,7 @@ class GimpleGen:
         _dispatch_set_names = {'_CMP_OPS'}
         _dispatch_names = _dispatch_dict_names | _dispatch_set_names
         _declared_globals = set()
-        all_scan = stmts + (imported_stmts if self.do_imports else [])
+        all_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for stmt in all_scan:
             if isinstance(stmt, FromImportStmt):
                 for alias in stmt.names:
@@ -16124,7 +16235,7 @@ class GimpleGen:
                     yield from _collect_global_stmts(_gs.then_body or [])
                     yield from _collect_global_stmts(_gs.else_body or [])
 
-        all_global_scan = stmts + (imported_stmts if self.do_imports else [])
+        all_global_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for stmt in _collect_global_stmts(all_global_scan):
             if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
                 gname = stmt.target.name
@@ -16362,7 +16473,7 @@ class GimpleGen:
         if self.emit_struct_defs:
             track_best = {}
             for s in (stmts + self._imported_typedef_structs
-                      + (imported_stmts if self.do_imports else [])):
+                      + (imported_stmts if (self.do_imports or self.link_imports) else [])):
                 if isinstance(s, StructDef):
                     field_count = len([f for f in s.fields if isinstance(f, VarDecl)])
                     if s.name not in track_best or field_count > track_best[s.name][1]:
@@ -16789,8 +16900,10 @@ class GimpleGen:
             'int_write', 'int_parse_module', 'py_tokenize', 'Parser', 'Interpreter'
         }
         # When do_imports=True, imported module code is inlined — functions will
-        # have actual definitions, so extern stubs would conflict.
-        if self.do_imports:
+        # have actual definitions, so extern stubs would conflict. Same for
+        # link mode's own inlined-fallback modules (self._link_inline_modules,
+        # compiled into imported_stmts above) — those have no dylib either.
+        if self.do_imports or self.link_imports:
             inline_defined = set()
             for stmt in (imported_stmts or []):
                 if isinstance(stmt, FunctionDef):
