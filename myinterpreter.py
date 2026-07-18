@@ -1926,6 +1926,59 @@ class Interpreter:
         self.scope.define('RuntimeError', RuntimeError)
         self.scope.define('StopIteration', StopIteration)
         self.scope.define('Error', MojoError)
+        # More standard builtins + exceptions that real stdlib files reference
+        # at module scope (found via fault_tolerance.py comparing `mojo run`
+        # to CPython — e.g. keyword.py's frozenset, _pyrepl/types.py's object,
+        # dbm/__init__.py's OSError all raised "name X is not defined").
+        # Plain Python builtins, same pattern as set/zip/Exception above.
+        # (bytes/bytearray deliberately omitted — the self-hosting codegen
+        # doesn't recognize them as callable; see the String ctor note below.)
+        self.scope.define('frozenset', frozenset)
+        self.scope.define('object', object)
+        self.scope.define('complex', complex)
+        self.scope.define('slice', slice)
+        self.scope.define('callable', callable)
+        self.scope.define('iter', iter)
+        self.scope.define('format', format)
+        self.scope.define('hex', hex)
+        self.scope.define('oct', oct)
+        self.scope.define('bin', bin)
+        self.scope.define('pow', pow)
+        self.scope.define('OSError', OSError)
+        self.scope.define('IOError', IOError)
+        self.scope.define('IndexError', IndexError)
+        self.scope.define('KeyError', KeyError)
+        self.scope.define('AttributeError', AttributeError)
+        self.scope.define('NotImplementedError', NotImplementedError)
+        self.scope.define('OverflowError', OverflowError)
+        self.scope.define('ZeroDivisionError', ZeroDivisionError)
+        self.scope.define('ArithmeticError', ArithmeticError)
+        self.scope.define('LookupError', LookupError)
+        self.scope.define('AssertionError', AssertionError)
+        self.scope.define('NameError', NameError)
+        self.scope.define('ImportError', ImportError)
+        self.scope.define('ModuleNotFoundError', ModuleNotFoundError)
+        self.scope.define('FileNotFoundError', FileNotFoundError)
+        self.scope.define('FileExistsError', FileExistsError)
+        self.scope.define('PermissionError', PermissionError)
+        self.scope.define('NotADirectoryError', NotADirectoryError)
+        self.scope.define('IsADirectoryError', IsADirectoryError)
+        self.scope.define('UnicodeError', UnicodeError)
+        self.scope.define('UnicodeDecodeError', UnicodeDecodeError)
+        self.scope.define('UnicodeEncodeError', UnicodeEncodeError)
+        self.scope.define('RecursionError', RecursionError)
+        self.scope.define('MemoryError', MemoryError)
+        self.scope.define('SystemError', SystemError)
+        self.scope.define('SystemExit', SystemExit)
+        self.scope.define('GeneratorExit', GeneratorExit)
+        self.scope.define('StopAsyncIteration', StopAsyncIteration)
+        self.scope.define('ConnectionError', ConnectionError)
+        self.scope.define('TimeoutError', TimeoutError)
+        self.scope.define('Warning', Warning)
+        self.scope.define('DeprecationWarning', DeprecationWarning)
+        self.scope.define('UserWarning', UserWarning)
+        self.scope.define('RuntimeWarning', RuntimeWarning)
+        self.scope.define('NotImplemented', NotImplemented)
 
         # Mojo scalar-type constructors — plain Python bool/int/float/str
         # already behave like Mojo's Bool/Int/Float64/String for arithmetic
@@ -2462,6 +2515,15 @@ class Interpreter:
             self._assign_target(target, value)
         return value
 
+    def execute_MultiAssignStmt(self, node: N.MultiAssignStmt):
+        """Chained assignment `a = b = c = expr`: evaluate the RHS once and
+        bind every target to it (was "No handler for MultiAssignStmt" — hit by
+        ctypes/wintypes.py, tkinter/constants.py)."""
+        value = self.eval_expr(node.value)
+        for target in node.targets:
+            self._assign_target(target, value)
+        return value
+
     _INT_TYPE_NAMES = {
         'Int', 'Int8', 'Int16', 'Int32', 'Int64', 'Int128', 'Int256',
         'UInt', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'UInt128', 'UInt256',
@@ -2944,6 +3006,19 @@ class Interpreter:
             raise NotImplementedError(f"{self._loc(expr)}No handler for {type(expr).__name__}")
 
         return method(expr)
+
+    def eval_WalrusExpr(self, expr: N.WalrusExpr):
+        """Walrus `(name := value)`: evaluate value, bind name in the current
+        scope, and return the value (was "No handler for WalrusExpr" — hit by
+        _pyrepl/trace.py)."""
+        value = self.eval_expr(expr.value)
+        self.scope.define(expr.name, value)
+        return value
+
+    def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
+        """The `...` literal — Python's Ellipsis singleton (was "No handler for
+        EllipsisLiteral" — hit by tomllib/_types.py)."""
+        return Ellipsis
 
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
