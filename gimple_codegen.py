@@ -10843,20 +10843,54 @@ class GimpleGen:
                 self._emit(f"  {ov}{op}{_safe_field(node.target.member)} = {v};")
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
-            _, idx_v  = self.lower_expr(node.target.index)
+            it, idx_v  = self.lower_expr(node.target.index)
             if ot == 'MojoList *':
                 elem = self._elem_of(obj_v)
                 suf  = TypeLattice.list_suffix(elem)
                 idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
                 self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {v});")
+            elif ot == 'MojoDict *':
+                # `d[k] += val` etc. — mirrors _gen_stmt_AssignStmt's MojoDict*
+                # branch (this one had no dict case at all: any dict-subscript
+                # augmented assignment fell through to the raw-pointer/MojoList
+                # branches below, e.g. `_mojo_at_MojoDict` array-offset codegen
+                # on a dict pointer — invalid GIMPLE, "non-register as LHS of
+                # unary operation". Found via mojolib BUG-2026-031: a closure
+                # capturing an outer dict and doing `counts[key] += 1` inside it.
+                key_tmp = self._new_temp('char *')
+                self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
+                if vtype == 'char *':
+                    self._emit_call('void', '', 'mojo_dict_set_str',
+                                    [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
+                else:
+                    self._emit_call('void', '', 'mojo_dict_set_int',
+                                    [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
-                # Opaque int/int64_t used as subscript target — treat as MojoList write
-                ip = self._new_val('int64_t', f"(int64_t){obj_v}")
-                lp = self._new_val('MojoList *', f"(MojoList *){ip}")
-                elem = self._elem_of(obj_v)
-                suf = TypeLattice.list_suffix(elem)
-                idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
-                self._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {v});")
+                # Opaque int/int64_t used as subscript target — could be a
+                # list OR a dict (e.g. a closure-captured env field, whose
+                # static type isn't tracked); check like _gen_stmt_AssignStmt
+                # does rather than always assuming MojoList.
+                actual_type = self._get_actual_type(ot, obj_v)
+                if actual_type == 'MojoDict *':
+                    ip = self._new_temp('int64_t')
+                    dp = self._new_temp('MojoDict *')
+                    self._emit(f"  {ip} = (int64_t){obj_v};")
+                    self._emit(f"  {dp} = (MojoDict *){ip};")
+                    key_tmp2 = self._new_temp('char *')
+                    self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                    if vtype == 'char *':
+                        self._emit_call('void', '', 'mojo_dict_set_str',
+                                        [('MojoDict *', dp), ('char *', key_tmp2), ('char *', v)])
+                    else:
+                        self._emit_call('void', '', 'mojo_dict_set_int',
+                                        [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
+                else:
+                    ip = self._new_val('int64_t', f"(int64_t){obj_v}")
+                    lp = self._new_val('MojoList *', f"(MojoList *){ip}")
+                    elem = self._elem_of(obj_v)
+                    suf = TypeLattice.list_suffix(elem)
+                    idx64 = self._new_val('int64_t', f"(int64_t) {idx_v}")
+                    self._emit(f"  mojo_list_set_{suf} ({lp}, {idx64}, {v});")
             elif ot.endswith(' *') and _struct_name_of(ot) not in self.struct_field_types:
                 # Raw C pointer: use _mojo_at_ helper (GIMPLE doesn't allow ptr arithmetic)
                 if not self._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
