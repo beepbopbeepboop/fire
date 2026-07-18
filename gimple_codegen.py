@@ -2329,6 +2329,18 @@ class GimpleGen:
         self.module_name = module_name  # used to name _{module_name}_toplevel
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # Logical struct/class name -> C-safe name, for structs named after a C
+        # keyword (`auto` from enum.auto being the important one — inlined into
+        # every module that imports enum). The struct is renamed to the safe
+        # name at gen_module's top pre-pass so it registers/emits uniformly
+        # under that name (no emit-vs-bookkeeping split); name→struct LOOKUP
+        # sites map through this dict. Shared across the nested GimpleGen
+        # instances that recursive import-inlining creates (like
+        # struct_field_types), so a struct defined in one module and used in
+        # another agree on the renamed name. Only ever contains names that
+        # were ACTUALLY defined as a struct, so builtins like int()/float()
+        # (also C keywords) are never affected.
+        self._c_kw_struct_renames: dict[str, str] = {}
         # struct name -> field names whose Python annotation is `object`/`Any`
         # (or a Union naming a real class) — these collapse to ctype int64_t
         # like a plain int field, but at runtime hold None(0)/int/boxed-pointer
@@ -2731,6 +2743,7 @@ class GimpleGen:
                     temp_gen._regex_progs_defined = self._regex_progs_defined  # share: avoid duplicate emission across recursive paths
                     temp_gen._const_str_locals = self._const_str_locals  # share: re.sub() compile-time pattern folding (see _try_const_fold_str)
                     temp_gen.struct_field_types = self.struct_field_types
+                    temp_gen._c_kw_struct_renames = self._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                     temp_gen.struct_boxed_fields = self.struct_boxed_fields
                     temp_gen.struct_bool_fields = self.struct_bool_fields
                     temp_gen._struct_name_owner = self._struct_name_owner  # share: cross-module same-name collision guard
@@ -3882,6 +3895,10 @@ class GimpleGen:
         return TypeLattice.coerce(src, dst, val)
 
     def _resolve_type(self, ann: str | None) -> str:
+        # Map a C-keyword struct name (`auto`) to its renamed form so a bare
+        # `auto` annotation resolves to the struct registered under `_kw_auto`.
+        if isinstance(ann, str):
+            ann = self._c_kw_struct_renames.get(ann, ann)
         if ann in self.struct_field_types:
             return f"{ann} *"
         # _mojo_type is a stateless module-level function with no access to
@@ -3894,6 +3911,7 @@ class GimpleGen:
             base = base.strip()
             if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
                 elem_ann = _split_top_level_commas(rest.rstrip(']').strip())[0].strip()
+                elem_ann = self._c_kw_struct_renames.get(elem_ann, elem_ann)
                 # Scalar newtypes (Int, UInt8, Bool, ...) ARE real `struct
                 # X(...)` definitions in the stdlib and so CAN end up
                 # registered in struct_field_types, but the codegen
@@ -8425,9 +8443,11 @@ class GimpleGen:
             pairs = [self.lower_expr(a) for a in node.args[:3]]
             return self._void_call('_mojo_dispatch_setattr', pairs)
 
-        # Struct constructors
-        if fname_raw in self.struct_field_types:
-            return self._lower_struct_constructor(fname_raw, node.args, getattr(node, 'kwargs', None))
+        # Struct constructors. Map a C-keyword struct name (`auto()`) to its
+        # renamed registration (`_kw_auto`) so the constructor resolves.
+        _fname_ctor = self._c_kw_struct_renames.get(fname_raw, fname_raw)
+        if _fname_ctor in self.struct_field_types:
+            return self._lower_struct_constructor(_fname_ctor, node.args, getattr(node, 'kwargs', None))
         if self.func_return_types.get(fname_raw) == f'{fname_raw} *':
             return self._lower_imported_struct_ctor(fname_raw, node)
 
@@ -13842,6 +13862,20 @@ class GimpleGen:
         # used only via untyped locals, got glued with THIS file's own
         # module qualifier instead of either its real home module's or no
         # qualifier at all).
+        # Rename any struct/class named after a C keyword (`auto`, ...) to a
+        # C-safe name BEFORE anything reads sd.name — so registration, typedef
+        # emission, method symbols, alloc, etc. all use the safe name uniformly
+        # (the logical name IS the safe name from here on, avoiding the
+        # emit-vs-bookkeeping split that made a pure emission-site patch
+        # unworkable). Mutates sd.name in place and records the mapping in the
+        # shared _c_kw_struct_renames; reference sites (constructor calls, type
+        # annotations) map through it at lookup time. Idempotent: a safe name
+        # like `_kw_auto` isn't a keyword, so re-running is a no-op.
+        for _s in stmts:
+            if isinstance(_s, StructDef) and _s.name in _C_KEYWORDS:
+                _safe = f'_kw_{_s.name}'
+                self._c_kw_struct_renames[_s.name] = _safe
+                _s.name = _safe
         self._local_struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
         # Overloaded top-level functions (same name, multiple defs) can't be
         # emitted as distinct C symbols. Drop them here — the elaborator selects
