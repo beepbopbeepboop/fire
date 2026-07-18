@@ -15686,7 +15686,16 @@ class GimpleGen:
         ]
         def _guarded_ctor(name, decl):
             guard = f'_MOJO_CTOR_{name.upper()}'
-            return f'#ifndef {guard}\n#define {guard}\n{decl}\n#endif'
+            # Also suppress this ctor-function stub if the same name was emitted
+            # as a struct typedef: `typedef … Error;` (a type) and `int64_t
+            # Error(...)` (a function) collide as "Error redeclared as a
+            # different kind of symbol". The struct-typedef paths #define
+            # _MOJO_STUB_<NAME> right after the typedef and are emitted earlier
+            # in the file, so this #ifndef sees it. Hit by `Error` (Mojo's
+            # builtin error type) when a module in the closure registers it as
+            # an opaque struct — e.g. any enum-importing file (types.py).
+            stub_guard = f'_MOJO_STUB_{name.upper()}'
+            return f'#ifndef {stub_guard}\n#ifndef {guard}\n#define {guard}\n{decl}\n#endif\n#endif'
         _ctor_lines = [_guarded_ctor(name, decl) for name, decl in _builtin_ctors if name not in _skip_ctors]
         if _ctor_lines:
             parts.append('/* Mojo built-in type constructors */')
@@ -16338,6 +16347,10 @@ class GimpleGen:
                                 safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
                                 parts.append(f"  {field_type} {safe_fn};")
                     parts.append(f"}} {sd.name};")
+                    # Suppress any builtin-ctor function stub of the same name in
+                    # this or another module (a `typedef … Name;` type collides
+                    # with an `int64_t Name(...)` function) — see _guarded_ctor.
+                    parts.append(f"#define _MOJO_STUB_{sd.name.upper()}")
                     parts.append('')
                     self._emitted_structs.add(sd.name)
 
