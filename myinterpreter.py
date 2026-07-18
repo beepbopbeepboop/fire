@@ -3028,7 +3028,41 @@ class Interpreter:
                 # degradation behavior this already had.
                 return MojoString(value)
             return MojoString(result)
-        return MojoString(value)
+        return MojoString(self._decode_c_escapes(value))
+
+    @staticmethod
+    def _decode_c_escapes(s: str) -> str:
+        r"""Decode C-style backslash escapes (\n, \t, \\, \xHH, ...) the same
+        way the compiled path does. The parser strips a string literal's outer
+        quotes but leaves escape sequences as raw two-character runs (backslash
+        + letter), so `"ab\ncd"` reached here as the 6-char text `ab\ncd`
+        (backslash-n literal) — the interpreter then reported len 6 and wrong
+        indices, while `mojo build` reported 5 (the C compiler decodes the
+        escape in the emitted C literal). This realigns the two: same escape
+        set as gimple_codegen._c_escape passes through to C. Note the compiled
+        path does not preserve raw (r"...") strings either — that's a shared,
+        pre-existing limitation, so decoding here removes an interp-vs-compiled
+        divergence rather than introducing a new one."""
+        if '\\' not in s:
+            return s
+        simple = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"',
+                  "'": "'", '0': '\0', 'a': '\a', 'b': '\b', 'f': '\f', 'v': '\v'}
+        out = []
+        i, n = 0, len(s)
+        while i < n:
+            c = s[i]
+            if c == '\\' and i + 1 < n:
+                nxt = s[i + 1]
+                if nxt in simple:
+                    out.append(simple[nxt]); i += 2; continue
+                if nxt == 'x' and i + 3 < n and s[i + 2] in '0123456789abcdefABCDEF' \
+                        and s[i + 3] in '0123456789abcdefABCDEF':
+                    out.append(chr(int(s[i + 2:i + 4], 16))); i += 4; continue
+                # Unknown escape — leave the backslash as-is (Python's own
+                # behavior for e.g. `"\d"`), matching _c_escape's `\\` passthrough.
+                out.append(c); i += 1; continue
+            out.append(c); i += 1
+        return ''.join(out)
 
     def _format_fstring_body(self, body: str) -> str:
         # Parse an f-string body (prefix/quotes already stripped) into its

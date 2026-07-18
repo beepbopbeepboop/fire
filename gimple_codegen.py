@@ -6355,35 +6355,30 @@ class GimpleGen:
                 self._emit_call('int', ti, 'mojo_set_contains_int', [('MojoSet *', rv), ('int64_t', xv64)])
         elif rt == 'MojoStr *':
             self._emit_call('int', ti, 'mojo_str_contains', [('MojoStr *', rv), ('char *', xv)])
-        # NOTE: `x in "some string"` (rt == 'char *') is still a bare "TODO"
-        # stub below, hardcoding _t=0 (always False) — a real, confirmed
-        # foundational gap: `raw[i] not in 'fFrRbBuUtT'`
-        # (Parser._strip_string_prefix_and_quotes's own f/r/b/u-string
-        # prefix-length loop) always takes the "not in" branch immediately,
-        # so prefix_len never advances past 0 and every r-string/f-string/
-        # b-string prefix silently sticks around unstripped once compiled.
-        # Implementing it (both a `char in char*` branch via a dedicated
-        # mojo_char_in_str() helper, and a `char* in char*` branch via
-        # mojo_str_contains()) DOES fix the r-string case directly, but
-        # exposes a second, separate, confirmed bug: any string token
-        # processed by Parser._strip_string_prefix_and_quotes AFTER an
-        # f-string (which takes that function's early "return raw" branch)
-        # in the same compiled function comes back completely unstripped —
-        # e.g. `y = f"...{x}"` immediately followed by
-        # `["a"] + ["b"] + ['__init__.mojo']` compiles the latter three
-        # plain string literals with their quotes still attached. Confirmed
-        # via a 5-line minimal repro (an f-string assignment followed by a
-        # 3-element list-concat of plain string literals — every one of the
-        # three loses its stripping, but only when the f-string precedes
-        # them). Not yet root-caused: cross-call state shouldn't survive
-        # between separate invocations of the same function via ordinary C
-        # stack locals, so this points at either a GIMPLE basic-block/label
-        # bug specific to how the early-return path is compiled, or an
-        # unrelated global/registry side effect — needs its own focused
-        # investigation. Net effect of enabling these two branches was a
-        # regression (33/38 vs. 34/38 baseline `.ast` passing), so reverted;
-        # left as the original stub. See bootstrap-verify-ast-dump-fixes
-        # memory note before attempting this again.
+        elif rt == 'char *':
+            # `x in some_string` — substring/char membership via strstr
+            # (mojo_str_contains). The left operand is the needle: a bare
+            # `char` (e.g. `raw[i] in 'fFrRbBuUtT'`, a single indexed char)
+            # must be turned into a real 1-char string first — a raw
+            # `(char *)` reinterpret of its byte value would be a garbage
+            # pointer (same class of bug as the char→char* coercion fix in
+            # _safe_coerce_emit). Was a hardcoded always-False stub: the
+            # documented historical regression from enabling this
+            # ("plain string literals after an f-string come back unstripped")
+            # was a downstream symptom of that same char→char* coercion bug,
+            # now fixed — a full `make bootstrap` (which exercises
+            # Parser._strip_string_prefix_and_quotes's `raw[i] in 'frbu...'`
+            # heavily) stays green with this enabled.
+            if xt == 'char':
+                needle = self._call_expr('char *', 'mojo_char_to_str', [('char', xv)])
+            elif xt == 'char *':
+                needle = xv
+            elif xt.endswith(' *'):
+                needle = self._new_val('char *', f'(char *){xv}')
+            else:
+                cv = self._new_val('char', f'(char){xv}')
+                needle = self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+            self._emit_call('int', ti, 'mojo_str_contains', [('char *', rv), ('char *', needle)])
         else:
             self._emit(f"  /* TODO: 'in' for {rt} */")
             self._emit(f"  {ti} = 0;")
@@ -8368,6 +8363,18 @@ class GimpleGen:
         if fname_raw == 'repr' and node.args:
             rat, rav = self.lower_expr(node.args[0])
             return 'char *', self._repr_value(rat, rav)
+
+        # str(x): dispatch on the argument's static type via _stringify_value
+        # (int → mojo_str_from_int, float → mojo_repr_float, ...) rather than
+        # the generic mojo_str(void *), which can't tell a real int value of 0
+        # apart from a NULL pointer and returns "None" for it — `str(0)`,
+        # `str(x)` where x==0, etc. all printed None. Same dispatch f-strings
+        # and %-formatting already use; this just routes the bare builtin
+        # through it too. (char*/unknown-pointer args still reach mojo_str via
+        # _stringify_value's fallthrough, unchanged.)
+        if fname_raw == 'str' and len(node.args) == 1:
+            et, ev = self.lower_expr(node.args[0])
+            return 'char *', self._stringify_value(et, ev)
 
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {
