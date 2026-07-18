@@ -227,16 +227,41 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   new local (`_pc`/`_is_prefix_char` → `_rmls_pc`/`_rmls_is_prefix_char`) to
   rule out a cross-function name collision with
   `_strip_string_prefix_and_quotes`'s identically-named locals - same
-  crash, same offset, ruling that theory out. **New, more specific lead for
-  next time**: the identical `_c == 'f' or ...` comparison chain already
-  works correctly in `_strip_string_prefix_and_quotes`, a `Parser`
-  *method* - it only breaks inside `replace_multiline_strings`, a nested
-  *closure* (defined inside `py_tokenize`, not a class method). That
-  points at a closure-scoping bug specific to how char-literal comparisons
-  resolve their literal-pool operand, not at `in`/`or` short-circuiting
-  itself. Both attempts were cleanly reverted; `mojo_compiler.py` is
-  unchanged from before this investigation. 150/152 with a known, narrow,
-  well-isolated failure mode is a reasonable place to pause.
+  crash, same offset, ruling that theory out.
+
+  **Follow-up (resumed again the same day): went one level deeper with
+  `lldb` register inspection** (`frame select 0` +
+  `register read x0 x1` at the `strcmp` crash frame) instead of more
+  static reasoning about the generated `.ci`. Result superseded the
+  "closure-scoping" theory: `x0 = 0x28` - a small integer, not a null or
+  wild *pointer* in the usual sense - while `x1` pointed at valid-looking
+  memory containing the bytes `"'_'"` (quote, underscore, quote). Tracing
+  the static `.ci` in isolation had shown a *plausible-looking*,
+  correctly-wired call (`_t36 = mojo_char_to_str(_rmls_pc)`, compared
+  against `_slit_10171 = "f"`, a real, correctly-initialized static
+  global) - so the static picture and the live register picture disagree
+  with each other. That mismatch, plus `x1`'s content looking like it
+  belongs to a *different* comparison entirely (`prev == '_'`, a few lines
+  further down in the same source function, not the `'f'` prefix check),
+  points at a temp-variable (SSA slot) reuse/aliasing bug specific to this
+  one large, already-complex function once a new local is added to it -
+  not a fundamental problem with char-literal comparisons or closures in
+  general (plenty of both already work correctly elsewhere in this exact
+  file). Root cause still not pinned down further; would need the
+  generated `.ci` for the *exact* binary that crashed cross-referenced
+  against `lldb`'s disassembly address-by-address (harder than it sounds
+  without proper debug info surviving `-fgimple`'s `-Og` build - see the
+  "`debug map object file ... does not exist`" `frame variable` failures
+  in both attempts) to confirm which temp got aliased and why.
+
+  Both attempts were cleanly reverted; `mojo_compiler.py` is unchanged
+  from before this investigation. 150/152 with a known, narrow,
+  well-isolated, now reasonably-well-characterized failure mode is a
+  sensible place to pause - two independent fix attempts (different
+  implementations, different variable names) both triggered a crash
+  keyed to this exact function's size/complexity rather than to any
+  single line changed, which is a real signal to be more cautious here,
+  not less, before a third attempt.
 
 - **`compile_to_gimple`/`compile_to_gimple_cached` are not recursively
   self-hosted — every call to them from already-compiled code shells out to
