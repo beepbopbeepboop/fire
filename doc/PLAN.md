@@ -14,6 +14,16 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **✅ RESOLVED 2026-07-17 (commit after the writeup below).** Fixed via the
+  recommended AST-rename design: `gen_module` renames any keyword-named
+  StructDef to `_kw_<name>` in place (shared `_c_kw_struct_renames` dict),
+  and the name→struct lookup sites (`_resolve_type`, struct-constructor call)
+  map through it. `struct auto` minimal repro compiles+runs; enum.py's `auto`
+  error class is gone; `make check` + full `make bootstrap` green. Unblocked
+  deeper stages in typing.py/enum.py (now hitting the separate `'Error'
+  redeclared` bug and generic-alias member access, not `auto`). Original
+  writeup kept below for context.
+
 - **A struct/class named after a C keyword — most importantly `auto`
   (`enum.auto`) — emits invalid C (`typedef struct auto {…} auto;`, `auto *`)
   and fails to compile.** Elevated priority (2026-07-17): a fresh corpus
