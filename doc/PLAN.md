@@ -14,6 +14,20 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
 
 ## Known bugs (verified, real, still open)
 
+- **✅ RESOLVED 2026-07-17 — cluster of string/codegen bugs found along the
+  way, all fixed with minimal repros + `make check` + full `make bootstrap`
+  green:** (1) `char → char *` coercion in `_safe_coerce_emit` stuffed a
+  char's byte value into a pointer slot (the segfault root cause — see the
+  bootstrap entry below); (2) `str(0)` → `"None"`; (3) interpreter didn't
+  decode `\n`/`\t`/… escapes (`len`/`find` disagreed with the compiled
+  path); (4) `x in "string"` was a hardcoded always-False stub (its
+  historically-documented "unstrips strings after an f-string" regression
+  turned out to be a downstream symptom of bug #1, now gone); (5)
+  `str.isalnum/isdigit/isalpha/isspace/isupper/islower` on `char*` were
+  always-False stubs; (6) `str(True)`/`str(False)`/`str(<bool>)` printed
+  `1`/`0` instead of `True`/`False`. All in `gimple_codegen.py` /
+  `runtime/mojo_runtime.{c,h}` / `myinterpreter.py`.
+
 - **✅ RESOLVED 2026-07-17 — `make bootstrap` is now fully green (all 3
   stages verified, 0 failures).** The long investigation log below is kept
   for its diagnostic trail, but the headline: the final 2/152
@@ -41,9 +55,13 @@ comments still reference its old section numbers (`§4d`, `§4f`, etc.).
   pattern `_strip_string_prefix_and_quotes` already uses. `make check`
   green, `make bootstrap` fully verified.
 
-  Separate pre-existing bug spotted in passing (NOT chased — orthogonal,
-  reproduces in a 4-line file): `str(0)` prints `None`/empty instead of
-  `"0"` in the compiled path. `str(5)` works. File as its own bug.
+  Separate pre-existing bug spotted in passing — **now FIXED**: `str(0)`
+  printed `None`/empty instead of `"0"` in the compiled path (`str(5)`
+  worked). Cause: the bare `str()` builtin lowered to `mojo_str(void *)`,
+  whose `obj==NULL → "None"` heuristic can't tell integer 0 from a null
+  pointer. Now routes through `_stringify_value` (type-dispatched), same as
+  f-strings/`%`. Fixed together with a cluster of related string bugs found
+  while closing this out — see below.
 
   _Original investigation log (kept for the diagnostic trail):_
 
