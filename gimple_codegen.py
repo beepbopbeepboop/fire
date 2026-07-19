@@ -49,6 +49,22 @@ _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 _SYS_PATH_INSERT_RE = re.compile(
     r'sys\s*\.\s*path\s*\.\s*insert\s*\(\s*\d+\s*,\s*["\']([^"\']+)["\']\s*\)')
 
+# The other common real-world shape: `sys.path.insert(0,
+# os.path.join(os.path.dirname(__file__), "<relative>"))` — "insert my own
+# directory (or a path relative to it)", computed rather than a literal
+# string. `__file__` at compile time is exactly the currently-compiled
+# file's own path, so `os.path.dirname(__file__)` is resolvable statically
+# too — see _record_sys_path_inserts, which treats a bare "." result (empty
+# capture) as `base_dir` itself. Found via mojolib BUG-2026-032:
+# transpiler.mojo's `import os; sys.path.insert(0,
+# os.path.join(os.path.dirname(__file__), ".."))` inside a function body,
+# to reach its sibling parser_core.mojo/lexer.mojo/arena.mojo one directory
+# up — invisible to the plain-literal regex above.
+_SYS_PATH_INSERT_DIRNAME_RE = re.compile(
+    r'sys\s*\.\s*path\s*\.\s*insert\s*\(\s*\d+\s*,\s*os\s*\.\s*path\s*\.\s*join\s*\(\s*'
+    r'os\s*\.\s*path\s*\.\s*dirname\s*\(\s*__file__\s*\)\s*'
+    r'(?:,\s*["\']([^"\']*)["\']\s*)?\)\s*\)')
+
 # _slit_ numbering starts here to avoid collisions with the mojo compiler's
 # own string-literal numbering when modules are linked together.
 STRING_POOL_BASE = 10000
@@ -2664,6 +2680,15 @@ class GimpleGen:
                 p = os.path.join(base_dir, p)
             if p not in self._extra_search_paths:
                 self._extra_search_paths.append(p)
+        # The os.path.dirname(__file__) shape: `__file__` at compile time IS
+        # `base_dir`'s file, so os.path.dirname(__file__) == base_dir itself;
+        # a trailing relative literal (e.g. "..") joins onto that. No literal
+        # at all (bare `os.path.dirname(__file__)`) means base_dir unchanged.
+        if base_dir:
+            for rel in _SYS_PATH_INSERT_DIRNAME_RE.findall(source):
+                p = os.path.normpath(os.path.join(base_dir, rel)) if rel else base_dir
+                if p not in self._extra_search_paths:
+                    self._extra_search_paths.append(p)
 
     def _compile_imported_module(self, module_name: str) -> tuple:
         """Find and compile an imported .mojo module, extracting type information.
@@ -8416,6 +8441,31 @@ class GimpleGen:
             else:
                 _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
                 fname_raw = f"_{_mod_id}_main" if _mod_id else '_lib_main'
+            # _lower_named_call's missing-arg padding (below, via
+            # self.func_param_types.get(fname_raw, [])) looks up the
+            # RENAMED symbol, but _collect_function_param_types registered
+            # main's arity under its original name 'main' — so a call with
+            # fewer args than main declares (relying on a default, e.g.
+            # `def main(args=None): ...` called as bare `main()`) found no
+            # expected_params here and never got padded, unlike the exact
+            # same call written as a bare top-level statement (a separate,
+            # unaffected code path). Only reachable as a *nested* call
+            # (`sys.exit(main())`, `identity(main())`, ...) — found via
+            # mojolib BUG-2026-032's transpiler.mojo. Mirror the arity under
+            # the new key too, so the lookup below succeeds either way.
+            if 'main' in self.func_param_types and fname_raw not in self.func_param_types:
+                self.func_param_types[fname_raw] = self.func_param_types['main']
+            # Same problem one step further down _lower_named_call: its
+            # "completely unknown name" auto-stub check
+            # (fname_raw not in self.func_return_types and ...) also looks
+            # up the renamed symbol, found nothing (func_return_types has
+            # 'main', not '_gimple_main'), and treated the call as an
+            # opaque external function — emitting a variadic
+            # `int64_t _gimple_main (...);` stub that conflicts with the
+            # real, concretely-typed definition ("conflicting types for
+            # '_gimple_main'; have 'int64_t(int64_t)'").
+            if 'main' in self.func_return_types and fname_raw not in self.func_return_types:
+                self.func_return_types[fname_raw] = self.func_return_types['main']
 
         # Builtin dispatch
         if fname_raw == 'strided_load' and node.args:
@@ -12627,34 +12677,42 @@ class GimpleGen:
                 # behavior) then assigned an int64_t value into an
                 # already-char*-declared variable — mirrors the same
                 # var/int64_t check the non-tuple branch below already does.
+                # `self._cname(vn)` (not bare vn): vn may be a C keyword, e.g.
+                # `for op, case in pairs:` — _declare_var already renamed its
+                # OWN declaration to `_case`, but every emit here still wrote
+                # the literal, un-renamed identifier ("expected expression
+                # before 'case'"). Found via mojolib BUG-2026-032:
+                # transpiler.mojo's `for case in cases:`.
+                cvn = self._cname(vn)
                 temp_str = self._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {i})")
                 if self._type_of(vn) == 'char *':
-                    self._emit(f"  {vn} = {temp_str};")
+                    self._emit(f"  {cvn} = {temp_str};")
                 else:
                     int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
-                    self._emit(f"  {vn} = {int_ptr};")
+                    self._emit(f"  {cvn} = {int_ptr};")
         else:
+            cvar = self._cname(var)
             suf = TypeLattice.list_suffix(elem)
             if suf == 'double':
-                self._emit(f"  {var} = mojo_list_get_double ({list_ptr}, {idx_t});")
+                self._emit(f"  {cvar} = mojo_list_get_double ({list_ptr}, {idx_t});")
             elif suf == 'str':
                 # mojo_list_get_str returns char*, but var might be int64_t
                 # Use a temp to handle the conversion
                 temp_str = self._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
                 # If var is int64_t, cast the char* to it; otherwise assign directly
                 if self._type_of(var) == 'char *':
-                    self._emit(f"  {var} = {temp_str};")
+                    self._emit(f"  {cvar} = {temp_str};")
                 else:
                     # Cast char* to int64_t (opaque pointer storage)
                     int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
-                    self._emit(f"  {var} = {int_ptr};")
+                    self._emit(f"  {cvar} = {int_ptr};")
             else:
                 elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
                 var_type = self._type_of(var)
                 if var_type != 'int64_t':
-                    self._safe_coerce_emit('int64_t', var_type, elem64, var)
+                    self._safe_coerce_emit('int64_t', var_type, elem64, cvar)
                 else:
-                    self._emit(f"  {var} = ({elem}) {elem64};")
+                    self._emit(f"  {cvar} = ({elem}) {elem64};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -13302,7 +13360,22 @@ class GimpleGen:
                 lines.append(f"  _toplevel ();")
                 lines.append(f"  {ret_type} result = 0;")
             else:
-                lines.append(f"  {ret_type} result = {safe} ();")
+                # `def main(args=None):` (a legitimate, common pattern — the
+                # file's own `if __name__ == '__main__': sys.exit(main())`
+                # calls it with no args, relying on the default) declares
+                # {safe} with real C params (params_str, above), but this
+                # process-level C `main()` always called `{safe} ()` with
+                # zero arguments regardless — "too few arguments to function
+                # '_gimple_main'; expected 1, have 0". Every one of main's
+                # own params is necessarily defaulted for a bare `main()`
+                # call to even be valid Mojo/Python, so pass each default's
+                # boxed-zero equivalent (`0`/NULL for every C type this
+                # compiler uses — int64_t, char*, MojoList*, ... are all
+                # represented as 0) rather than omitting the argument.
+                # Found via mojolib BUG-2026-032: transpiler.mojo's
+                # `def main(args=None):`.
+                call_args = ', '.join(['0'] * len(param_strs))
+                lines.append(f"  {ret_type} result = {safe} ({call_args});")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Finalize ();")
             lines.append(f"#endif")
@@ -17507,6 +17580,16 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
+    # compile_to_gimple_cached's do_imports=True path already does this for
+    # the root file being compiled — link mode never did, so a
+    # sys.path.insert(...) in the *main* file itself (not a nested import)
+    # was only ever honored for imports resolved from inside an already-
+    # inlined module, never for the root's own imports. See
+    # BUG-2026-032: transpiler.mojo's own top-level `import sys` +
+    # function-body `sys.path.insert(...)` to reach cpp_parser/'s sibling
+    # modules one directory up from cpp_parser/transpiler/.
+    if filename:
+        gen._record_sys_path_inserts(mojo_src, os.path.dirname(os.path.abspath(filename)))
     code = gen.gen_module(stmts)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
