@@ -81,6 +81,13 @@ class Scope:
             return self.parent.get(name)
         raise NameError(f"name '{name}' is not defined")
 
+    def has(self, name: str) -> bool:
+        if name in self.vars:
+            return True
+        if self.parent:
+            return self.parent.has(name)
+        return False
+
     def set(self, name: str, value):
         if name in self.vars:
             self.vars[name] = value
@@ -2728,6 +2735,27 @@ class Interpreter:
             matched = False
             for pattern in match_case.patterns:
                 if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                    matched = True
+                    break
+                if self._is_instance(pattern, 'IdentExpr') and not self.scope.has(pattern.name):
+                    # Bare name that isn't an already-defined constant: a
+                    # PEP 634 capture pattern, not a switch-style equality
+                    # comparison (see MatchStmt's docstring in
+                    # mojo_compiler.py — every *other* real use here is
+                    # `case SOME_CONSTANT:`, which stays equality-dispatch
+                    # via the eval_expr branch below since that name IS
+                    # already bound). A capture always matches and binds
+                    # the subject's value into scope, so a guard clause
+                    # (`case n if n > 0:`) can reference it.
+                    # define() (writes into *this* scope only) rather than
+                    # set() (which walks up to whichever ancestor scope
+                    # already has the name, or the outermost/global scope
+                    # if none do) — set() here would leak the capture into
+                    # the global scope after the first call, then have
+                    # every subsequent call's has() check above see it as
+                    # a pre-existing constant and wrongly fall through to
+                    # equality-dispatch instead of re-capturing.
+                    self.scope.define(pattern.name, subject)
                     matched = True
                     break
                 if self.eval_expr(pattern) == subject:

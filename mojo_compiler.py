@@ -513,15 +513,22 @@ class MatchStmt:
     Deliberately implemented as switch-style equality dispatch (evaluate
     each case's pattern(s) as plain expressions, compare with `==` against
     the subject) rather than full PEP 634 structural pattern matching
-    (capture patterns, class patterns, sequence/mapping patterns, `as`
-    bindings). Real Python match statements treat a bare lowercase name in a
-    pattern as an *irrefutable capture* that always matches and rebinds the
-    name — but every real use of `match`/`case` seen in practice here uses
-    bare names as references to already-defined constants (e.g.
-    `case NODE_FUNCTION_DECL:`) expecting a value comparison, not a capture.
-    Switch-style dispatch matches that intent; true capture-pattern
-    semantics would make those cases match unconditionally on the first
-    case, which is never what's wanted here."""
+    (class patterns, sequence/mapping patterns, `as` bindings). Real Python
+    match statements treat a bare lowercase name in a pattern as an
+    *irrefutable capture* that always matches and rebinds the name — but
+    every real use of `match`/`case` seen in practice here uses bare names
+    as references to already-defined constants (e.g. `case
+    NODE_FUNCTION_DECL:`) expecting a value comparison, not a capture.
+    Switch-style dispatch matches that intent for those.
+
+    One exception: a bare name that is NOT already bound anywhere in scope
+    (myinterpreter.py's `execute_MatchStmt` checks `Scope.has`) is treated
+    as a genuine PEP 634 capture — it always matches and binds the
+    subject's value into the current (innermost, non-global) scope, mainly
+    so a guard clause (`case n if n > 0:`, see `MatchCase.guard`) has
+    something to test. Since every pre-existing use already refers to a
+    bound constant, this is purely additive and doesn't change dispatch
+    for any name that was already meaningful as an equality comparison."""
     subject: object
     cases: list
     line: int = 0
@@ -1678,12 +1685,19 @@ class Parser:
         # match time (interpreter/codegen), not specially here — parsing it
         # as a plain expression pattern keeps this parser simple, and lets
         # `_` combine with an or-pattern list the same as any other pattern.
-        patterns = [self._parse_expr(0)]
+        # Patterns are parsed at min_prec=1 (the same trick comprehension
+        # `for`/`if` clauses use below) so a top-level `if` here is left
+        # untouched for the guard-clause check below instead of being
+        # swallowed by _parse_expr's ternary-conditional-expression handling
+        # (`X if COND else Y`), which only fires at min_prec==0. Without
+        # this, `case n if n > 0:` fails trying to parse `if n > 0:` as a
+        # ternary expecting a matching `else`.
+        patterns = [self._parse_expr(1)]
         while self._peek().kind == "COMMA":
             self._advance()
             if self._peek().kind == "COLON" or self._is_kw("if"):
                 break  # trailing comma before guard/colon
-            patterns.append(self._parse_expr(0))
+            patterns.append(self._parse_expr(1))
         guard = None
         if self._is_kw("if"):
             self._advance()
