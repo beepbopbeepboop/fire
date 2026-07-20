@@ -1357,30 +1357,54 @@ class Parser:
             self._expect("KW", "def or fn")
             return self._parse_funcdef(decs)
         expr = self._parse_expr(0)
-        # Check for tuple unpacking in assignment (a, b = ...)
+        # Collect a comma-separated group starting with `expr` — this is
+        # either a tuple-unpacking target (if followed by `=`) or a bare
+        # comma/tuple expression statement (if not).
         if self._peek().kind == "COMMA":
-            targets = [expr]
+            first_group = [expr]
             while self._peek().kind == "COMMA":
                 self._advance()
                 if self._peek().kind == "ASSIGN": break
-                targets.append(self._parse_expr(0))
-            # Check if this is actually an assignment
-            if self._peek().kind == "ASSIGN":
+                first_group.append(self._parse_expr(0))
+        else:
+            first_group = [expr]
+
+        # Chained assignment where ANY link (including the first) may itself
+        # be a comma-separated tuple-unpacking target list, e.g.
+        # `a, b = x = pair` (unpack AND keep the whole value bound to `x`,
+        # matching CPython's difflib.py / platform.py idiom) as well as the
+        # simpler `x = y = expr` and `a, b = expr` cases. Was: the
+        # tuple-target branch (above) and the chained-assignment loop
+        # (formerly below) were mutually exclusive passes, so a tuple target
+        # followed by another `= target` link hit "Unexpected ASSIGN".
+        if self._peek().kind == "ASSIGN":
+            groups = [first_group]
+            while self._peek().kind == "ASSIGN":
                 self._advance()
-                val = self._parse_expr(0)
-                # Check for tuple RHS: a, b = x, y
-                if self._peek().kind == "COMMA":
-                    rhs_elements = [val]
-                    while self._peek().kind == "COMMA":
-                        self._advance()
-                        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
-                            break
-                        rhs_elements.append(self._parse_expr(0))
-                    val = TupleExpr(elements=rhs_elements)
-                tuple_target = TupleExpr(elements=targets)
-                return AssignStmt(target=tuple_target, value=val)
+                val_expr = self._parse_expr(0)
+                group = [val_expr]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "ASSIGN"):
+                        break
+                    group.append(self._parse_expr(0))
+                groups.append(group)
+            # The last group parsed is the real RHS; every group before it
+            # (starting with `first_group`) is a target in the chain — a
+            # single-element group is a plain target, a multi-element group
+            # is a tuple-unpacking target.
+            def _group_to_expr(g):
+                return g[0] if len(g) == 1 else TupleExpr(elements=g)
+            val = _group_to_expr(groups[-1])
+            targets = [_group_to_expr(g) for g in groups[:-1]]
+            if len(targets) == 1:
+                return AssignStmt(target=targets[0], value=val, line=line, col=col)
+            return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
+
+        if len(first_group) > 1:
             # Not an assignment, treat as expression statement with comma operator
-            return ExprStmt(TupleExpr(elements=targets), line=line, col=col)
+            return ExprStmt(TupleExpr(elements=first_group), line=line, col=col)
+        expr = first_group[0]
         # Annotated assignment: target: Type [= value]
         if self._peek().kind == "COLON":
             self._advance()
@@ -1422,29 +1446,8 @@ class Parser:
                 if name:
                     return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
                 return ExprStmt(expr, line=line, col=col)
-        # Assignment / augmented assignment
-        if self._peek().kind == "ASSIGN":
-            self._advance()
-            val = self._parse_expr(0)
-            if self._peek().kind == "ASSIGN":
-                targets = [expr]
-                while True:
-                    if self._peek().kind != "ASSIGN": break
-                    targets.append(val)
-                    self._advance()
-                    val = self._parse_expr(0)
-                return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
-            # Implicit (parenthesis-less) tuple RHS: `__slots__ = 'a', 'b', 'c'`
-            # — a bare comma-separated list on the right of `=` is a tuple.
-            if self._peek().kind == "COMMA":
-                rhs_elements = [val]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
-                        break
-                    rhs_elements.append(self._parse_expr(0))
-                val = TupleExpr(elements=rhs_elements)
-            return AssignStmt(target=expr, value=val, line=line, col=col)
+        # Augmented assignment (`=`/chained-assignment/tuple-unpacking are
+        # all handled uniformly above, before the COLON-annotation check).
         if self._peek().kind == "AUGASSIGN":
             op = self._advance().value
             val = self._parse_expr(0)
