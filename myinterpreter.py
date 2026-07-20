@@ -3726,7 +3726,12 @@ class Interpreter:
         "*rest, a, b" — see mojo_compiler.py's _parse_for_target), matching
         Python's extended-unpacking-in-for-target semantics: the starred
         name collects whatever's left over after the non-starred names on
-        either side of it have each claimed one value."""
+        either side of it have each claimed one value.
+
+        One element may also be a dotted attribute-access expression
+        (e.g. "st.lineno", possibly chained "a.b.c" — see mojo_compiler.py's
+        _parse_for_target), which SETS an existing object's attribute each
+        iteration instead of binding a fresh local; see _bind_single_target."""
         name = target_str.strip()
         if name.startswith('(') and name.endswith(')'):
             name = name[1:-1].strip()
@@ -3746,7 +3751,7 @@ class Interpreter:
                     break
             if star_idx is None:
                 for n, v in zip(names, values):
-                    self.scope.define(n, v)
+                    self._bind_single_target(n, v)
             else:
                 before, after = names[:star_idx], names[star_idx + 1:]
                 star_name = names[star_idx][1:]
@@ -3756,10 +3761,28 @@ class Interpreter:
                         f"Cannot unpack {len(values)} values into {len(names)} "
                         f"targets (starred target needs at least {n_before + n_after})")
                 for n, v in zip(before, values[:n_before]):
-                    self.scope.define(n, v)
+                    self._bind_single_target(n, v)
                 self.scope.define(star_name, values[n_before:len(values) - n_after])
                 for n, v in zip(after, values[len(values) - n_after:]):
-                    self.scope.define(n, v)
+                    self._bind_single_target(n, v)
+        else:
+            self._bind_single_target(name, value)
+
+    def _bind_single_target(self, name, value):
+        """Bind one non-starred element of a for-loop/comprehension target
+        string to `value`. A plain name (no dot) binds a fresh local via
+        scope.define(), same as always. A dotted name (e.g. "st.lineno" or
+        chained "a.b.c") is an attribute-SET on an existing object instead:
+        build the equivalent IdentExpr/MemberExpr AST and route through
+        _assign_target, the same mechanism plain `obj.attr = value`
+        assignment statements already use — no new attribute-set logic."""
+        if '.' in name:
+            parts = name.split('.')
+            target_expr = N.IdentExpr(name=parts[0])
+            for part in parts[1:-1]:
+                target_expr = N.MemberExpr(obj=target_expr, member=part)
+            target_expr = N.MemberExpr(obj=target_expr, member=parts[-1])
+            self._assign_target(target_expr, value)
         else:
             self.scope.define(name, value)
 

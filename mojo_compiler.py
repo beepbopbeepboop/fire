@@ -1733,7 +1733,18 @@ class Parser:
             and a single starred element within a comma-list (`a, *rest`),
             matching Python's extended-unpacking grammar. The starred form
             is represented as "*rest" in the comma-joined string target
-            that myinterpreter.py's _bind_comprehension_target consumes."""
+            that myinterpreter.py's _bind_comprehension_target consumes.
+
+            A target element may also be a dotted attribute-access
+            expression (`st.lineno`, possibly chained `a.b.c`), e.g.
+            `for st.lineno, line in items:` — real-world code (CPython's
+            configparser.py) mutates an existing object's attribute
+            directly in the loop instead of binding a fresh local. This is
+            kept as literal text ("st.lineno") within the comma-joined
+            string, the same way a starred name is kept as literal text
+            ("*rest"); myinterpreter.py's _bind_comprehension_target
+            recognizes the embedded "." and performs a real attribute SET
+            (reusing _assign_target) instead of a scope.define()."""
             if self._peek().kind == "LPAREN":
                 self._advance()
                 parts = []
@@ -1750,7 +1761,13 @@ class Parser:
             else:
                 # Accept KW tokens (e.g. "fn", "var") as variable names
                 tok = self._advance()
-                return tok.value
+                name = tok.value
+                # Dotted attribute target: st.lineno, or chained a.b.c
+                while self._peek().kind == "DOT":
+                    self._advance()
+                    attr_tok = self._advance()
+                    name += "." + attr_tok.value
+                return name
 
         # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
         # for a, *rest in ... (single starred element anywhere in the list).
