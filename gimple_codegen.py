@@ -2884,7 +2884,7 @@ class GimpleGen:
             'sin', 'sinf', 'cos', 'cosf', 'tan', 'tanf',
             'exp', 'expf', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f',
             'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf',
-            'fabs', 'fabsf', 'fmod', 'fmodf',
+            'abs', 'fabs', 'fabsf', 'fmod', 'fmodf',
             'malloc', 'free', 'realloc', 'calloc',
             'pclose', 'popen', 'dlclose', 'dlopen', 'dlsym', 'dlerror',
             'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'sscanf',
@@ -5234,8 +5234,25 @@ class GimpleGen:
         if node.op == '^':
             return ot, ov
         # Spread/unpack operators (* and **) — just pass the value through;
-        # the list/call context handles iteration
-        if node.op in ('*', '**') and ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'int'):
+        # the list/call context handles iteration. `**` has no other meaning
+        # in this codebase (no real double-pointer dereference use), so it's
+        # always a spread marker regardless of operand type. A bare `*` is
+        # ambiguous with real pointer dereference (mojo_compiler.py's parser
+        # produces the identical UnaryOp(op='*', ...) node shape for both
+        # `*ptr` and a spread `*args`), so treat it as a spread pass-through
+        # when the operand is one of the boxed container types a spread
+        # always operates on (MojoList*/MojoDict*/MojoSet* — e.g.
+        # `os.path.join(*path_parts)`'s single-MojoList-arg special case a
+        # few hundred lines down relies on getting the bare 'MojoList *'
+        # type/value here, not a dereferenced-once type) OR isn't a pointer
+        # at all — dereferencing a non-pointer value was never valid codegen
+        # anyway and used to fall through to the generic operator-emission
+        # code below, which for op='**' literally emitted invalid C like
+        # "**some_int64_var" (GCC: "invalid type argument of unary '*'") —
+        # found via self-hosting myinterpreter.py's own
+        # `SimpleNamespace(**_build_testing_shims(self))` call.
+        if node.op == '**' or (node.op == '*' and (
+                ot in ('MojoList *', 'MojoDict *', 'MojoSet *') or not ot.endswith(' *'))):
             return ot, ov
         # Pointer dereference * on a known pointer type
         if node.op == '*':

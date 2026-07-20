@@ -3706,7 +3706,16 @@ class Interpreter:
             names = [n.strip() for n in name.split(',')]
             values = (list(value) if hasattr(value, '__iter__')
                       and not isinstance(value, (str, bytes)) else [value])
-            star_idx = next((i for i, n in enumerate(names) if n.startswith('*')), None)
+            # Plain loop, not next()+genexpr: this file is itself compiled by
+            # this project's self-hosting gimple_codegen.py, which has no
+            # runtime `next()` builtin -- that emitted an undefined-symbol
+            # link error ("_next", referenced from Interpreter__bind_
+            # comprehension_target) rather than a compile-time diagnostic.
+            star_idx = None
+            for i, n in enumerate(names):
+                if n.startswith('*'):
+                    star_idx = i
+                    break
             if star_idx is None:
                 for n, v in zip(names, values):
                     self.scope.define(n, v)

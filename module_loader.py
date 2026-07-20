@@ -244,6 +244,16 @@ class ModuleLoader:
                         else:
                             bare_type = ptype
                         c_type = self._mojo_type_to_c(bare_type)
+                        # A named parameter can never be typed 'void' in C
+                        # (only the sole, unnamed '(void)' no-args marker is
+                        # legal) -- e.g. a parameter annotated `: None`
+                        # resolves to 'void' via _mojo_type since that's the
+                        # correct RETURN-type mapping for NoneType, but is
+                        # invalid here. Box it the same way gimple_codegen.py's
+                        # own _param_ctype already does for the exact same
+                        # case ("A named PARAMETER can never be typed void").
+                        if c_type == 'void':
+                            c_type = 'int64_t'
                         c_params.append(f"{c_type} {pname}")
 
                     if name in exports:
@@ -356,6 +366,23 @@ class ModuleLoader:
         # occurrence would otherwise silently fall to its int64_t catch-all
         # default instead of a pointer type.
         if mojo_type == 'UnsafePointer':
+            return 'int64_t *'
+        # Span/StringSlice: _mojo_type correctly resolves these to 'Span *'
+        # (the fat-pointer struct GimpleGen seeds into struct_field_types
+        # and typedefs into the preamble of a module IT is compiling), but
+        # this call site emits a bare `extern <type> sym(...);` declaration
+        # into a DIFFERENT file's translation unit that has no reason to
+        # have that typedef too -- "unknown type name 'Span'". Unlike
+        # MojoList/MojoDict/MojoSet (always available via mojo_runtime.h,
+        # included everywhere), Span has no globally-available typedef, so
+        # box it to the same opaque-handle convention every other
+        # not-locally-declared struct type already uses in this codebase
+        # (see gimple_codegen.py's _lower_UnaryOp: "Struct types: return
+        # int64_t (opaque handle) -- can't cast struct to int64_t in
+        # GIMPLE"). Found via build_stdlib_dylib.py regressing to 12 skipped
+        # modules ("unknown type name 'Span'") the same day this method
+        # started delegating to _mojo_type.
+        if mojo_type.split('[', 1)[0].strip() in ('Span', 'StringSlice'):
             return 'int64_t *'
         return _mojo_type(mojo_type)
 
