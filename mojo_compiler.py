@@ -1712,7 +1712,11 @@ class Parser:
             self._advance()
 
         def _parse_for_target():
-            """Parse a for-loop target, supporting nested tuples: (a, (b, c))."""
+            """Parse a for-loop target, supporting nested tuples: (a, (b, c))
+            and a single starred element within a comma-list (`a, *rest`),
+            matching Python's extended-unpacking grammar. The starred form
+            is represented as "*rest" in the comma-joined string target
+            that myinterpreter.py's _bind_comprehension_target consumes."""
             if self._peek().kind == "LPAREN":
                 self._advance()
                 parts = []
@@ -1722,32 +1726,24 @@ class Parser:
                         self._advance()
                 self._expect("RPAREN")
                 return "(" + ", ".join(parts) + ")"
+            elif self._peek().kind == "OP" and self._peek().value == "*":
+                self._advance()
+                tok = self._advance()
+                return "*" + tok.value
             else:
+                # Accept KW tokens (e.g. "fn", "var") as variable names
                 tok = self._advance()
                 return tok.value
 
-        # Handle tuple unpacking: for (a, b) in ... or for a, b in ...
-        if self._peek().kind == "LPAREN":
-            target = _parse_for_target()
-            # Handle (a, b), c in ...
-            if self._peek().kind == "COMMA":
-                names = [target]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    names.append(_parse_for_target())
-                target = "(" + ", ".join(names) + ")"
-        else:
-            # Accept KW tokens (e.g. "fn", "var") as variable names
-            tok = self._advance()
-            target = tok.value
-            # Handle bare tuple: for a, b in ...
-            if self._peek().kind == "COMMA":
-                names = [target]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    names.append(_parse_for_target())
-                target = "(" + ", ".join(names) + ")"
-                target = "(" + ", ".join(names) + ")"
+        # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
+        # for a, *rest in ... (single starred element anywhere in the list).
+        target = _parse_for_target()
+        if self._peek().kind == "COMMA":
+            names = [target]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                names.append(_parse_for_target())
+            target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")
         iterable = self._parse_expr(0)
         # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`

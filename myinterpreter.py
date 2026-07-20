@@ -3692,7 +3692,13 @@ class Interpreter:
         (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
         — see mojo_compiler.py's _parse_generator_target), not an Expr node.
         Mirrors execute_VarDecl's handling of the same comma-joined-string
-        representation for `var a, b = ...`."""
+        representation for `var a, b = ...`.
+
+        One element of the comma-list may be starred (e.g. "a, *rest" or
+        "*rest, a, b" — see mojo_compiler.py's _parse_for_target), matching
+        Python's extended-unpacking-in-for-target semantics: the starred
+        name collects whatever's left over after the non-starred names on
+        either side of it have each claimed one value."""
         name = target_str.strip()
         if name.startswith('(') and name.endswith(')'):
             name = name[1:-1].strip()
@@ -3700,8 +3706,23 @@ class Interpreter:
             names = [n.strip() for n in name.split(',')]
             values = (list(value) if hasattr(value, '__iter__')
                       and not isinstance(value, (str, bytes)) else [value])
-            for n, v in zip(names, values):
-                self.scope.define(n, v)
+            star_idx = next((i for i, n in enumerate(names) if n.startswith('*')), None)
+            if star_idx is None:
+                for n, v in zip(names, values):
+                    self.scope.define(n, v)
+            else:
+                before, after = names[:star_idx], names[star_idx + 1:]
+                star_name = names[star_idx][1:]
+                n_before, n_after = len(before), len(after)
+                if len(values) < n_before + n_after:
+                    raise ValueError(
+                        f"Cannot unpack {len(values)} values into {len(names)} "
+                        f"targets (starred target needs at least {n_before + n_after})")
+                for n, v in zip(before, values[:n_before]):
+                    self.scope.define(n, v)
+                self.scope.define(star_name, values[n_before:len(values) - n_after])
+                for n, v in zip(after, values[len(values) - n_after:]):
+                    self.scope.define(n, v)
         else:
             self.scope.define(name, value)
 
