@@ -1244,10 +1244,31 @@ class Parser:
             if t.value == 'while': return self._parse_while()
             if t.value == 'for': return self._parse_for()
             if t.value in ("def", "fn"):
-                # fn(  →  variable named "fn" being called; treat as expression
-                # fn =  →  variable named "fn" being assigned; treat as expression
-                if t.value == "fn" and self._peek(1).kind in ("LPAREN", "ASSIGN", "AUGASSIGN", "DOT"):
-                    pass  # fall through to expression statement
+                # `fn` is ambiguous: it's both this dialect's function-def
+                # keyword AND a legal plain identifier in real Python code
+                # (e.g. `fn, lno, func, sinfo = self.findCaller(...)` in
+                # CPython's logging/__init__.py). Only commit to the
+                # function-definition parse when the token shape that
+                # follows could actually BE a function signature: `fn`
+                # immediately followed by a name (the function's name,
+                # which per _parse_funcdef may itself be NAME/KW/backtick)
+                # and then either `(` (no generics) or `[` (generic params
+                # before the `(`). Anything else — `fn,` (tuple-unpacking
+                # target), `fn =`/`fn +=` (assignment), `fn.attr`
+                # (attribute access), `fn == x`, `fn[0]` used as a subscript
+                # target, `fn` alone, etc. — means `fn` is being used as an
+                # ordinary identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                if t.value == "fn":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_funcdef = name_like and nxt2.kind in ("LPAREN", "LBRACKET")
+                    if not looks_like_funcdef:
+                        pass  # fall through to expression statement
+                    else:
+                        self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
             if t.value in ("struct", "class"): return self._parse_struct()
