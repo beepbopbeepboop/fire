@@ -3658,7 +3658,8 @@ class Interpreter:
         obj = self.eval_expr(expr.obj)
         start = self.eval_expr(expr.start) if expr.start else None
         stop = self.eval_expr(expr.stop) if expr.stop else None
-        return obj[start:stop]
+        step = self.eval_expr(expr.step) if expr.step else None
+        return obj[start:stop:step]
 
     def eval_TernaryExpr(self, expr: N.TernaryExpr):
         """Evaluate ternary conditional."""
