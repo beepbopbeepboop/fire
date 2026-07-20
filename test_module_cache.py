@@ -626,6 +626,72 @@ def test_def_overload_not_dangling_export(wd):
     check("def-overload: dylib with a dropped def-overload still dlopen()s", True)
 
 
+def test_cross_module_free_func_mangling_agrees(wd):
+    """BUG-2026-036's deeper blocker: a leading-underscore free function
+    (never a reflect.py export — `collect_exports_src` excludes any
+    underscore-prefixed name) taking a parameter of a type neither the
+    definer's own file nor a same-batch sibling can resolve to anything
+    concrete used to get TWO DIFFERENT overload-mangled C symbols depending
+    on which file's codegen computed it.
+
+    build_stdlib_dylib.build() compiles every module "fully independent —
+    no shared state" (its own docstring): the DEFINING module resolves the
+    unresolved parameter type through gimple_codegen's own canonical
+    `_mojo_type` (unknown-type default: 'int64_t'), while an IMPORTING
+    module can't reflect off a dylib for a leading-underscore symbol (none
+    was ever exported) and falls back to module_loader.py's `load_module` —
+    which used to carry its OWN separate, independently-wrong type-to-C
+    converter (unknown-type default: 'int', a 32-bit C int) instead of
+    reusing the codegen's. Two different default C types for the exact same
+    unresolved parameter ⇒ two different md5 hashes ⇒ two different mangled
+    symbols for what is, at the C level, one single function.
+
+    Confirmed real repro: std/builtin/coroutine.mojo's
+    `_coro_destroy_fn(handle: AnyCoroutine)` compiled standalone to
+    `_coro_destroy_fn_0c85c9` (int64_t default), while
+    std/gpu/host/device_context.mojo's import of it (passed as a bare
+    function-pointer value, never called — exercising gimple_codegen.py's
+    Name-lowering "C function name used as a value" path, ~line 5151, which
+    calls `_func_csym`/`_overload_suffix`) expected `_coro_destroy_fn_fa7153`
+    instead — an orphaned reference that crashed `dlopen` on EVERY mojo.py
+    invocation, not just ones that use coroutines.
+
+    This is the minimal shape of that same bug: `corolike.mojo` (placed
+    under runtime/ so module_loader resolves the bare module name, matching
+    how a leading-underscore symbol with no dylib yet actually gets looked
+    up) defines a leading-underscore function taking a never-declared type
+    name (`Widget` — nothing anywhere makes it a real struct, mirroring how
+    `AnyCoroutine` never resolves to a concrete C type either); a sibling
+    module imports it and merely references it as a value. Both are compiled
+    in the SAME build() batch (so neither has a dylib to reflect off of yet,
+    same as the real stdlib build), then linked into one dylib. Asserts the
+    two files agree on exactly one mangled symbol and the dylib dlopen()s."""
+    def_src = ("def _touch(h: Widget):\n"
+               "    pass\n"
+               "def _touch_sibling(x: Int64) -> Int64:\n"
+               "    return x + 1\n")
+    def_path = _write_runtime_module('corolike', def_src)
+    use_src = ("from corolike import _touch\n\n"
+               "def call_it() -> Int64:\n"
+               "    external_call[\"puts\", Int64](_touch)\n"
+               "    return 0\n")
+    use_path = os.path.join(wd, 'use_corolike.mojo')
+    open(use_path, 'w').write(use_src)
+    try:
+        dylib = os.path.join(wd, 'libcorolike.dylib')
+        bsd.build([def_path, use_path], dylib, link_runtime=True, use_cache=False)
+        syms = bsd._defined_symbols(GCC, dylib)
+        touch_syms = sorted(s for s in syms if 'touch' in s and 'sibling' not in s)
+        check("cross-module mangling: exactly one _touch symbol is defined",
+              len(touch_syms) == 1, str(touch_syms))
+        import ctypes
+        ctypes.CDLL(dylib)
+        check("cross-module mangling: dylib with a cross-file reference to "
+              "an underscore-prefixed free function still dlopen()s", True)
+    finally:
+        os.remove(def_path)
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -694,6 +760,7 @@ def main():
         test_module_qualified_struct_symbols(wd)
         test_review_fixes_monomorphize_overload(wd)
         test_def_overload_not_dangling_export(wd)
+        test_cross_module_free_func_mangling_agrees(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

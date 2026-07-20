@@ -54,22 +54,65 @@ previously known, and NOT all handled by the collision-dedup stopgap:**
   instance of this bug degrades to "that function falls back to source"
   instead of crashing dlopen — but it does not fix the underlying
   same-module-overload/no-elaboration gap.
-- `std/builtin/coroutine.mojo`'s `_coro_destroy_fn` — a genuinely different
-  flavor: not overloaded (one `def`), not exported (leading underscore), but
-  its mangled symbol differs depending on which file computes it
-  (`coro_destroy_fn_0c85c9` when `coroutine.mojo` compiles it standalone vs.
-  `coro_destroy_fn_fa7153` expected by at least one other module's call
-  site) — the two files' independently-boxed views of `AnyCoroutine`'s C
-  type disagree. This is a **call-site** reference baked into a compiled
-  function body, not a reflection-table entry, so the safety net above
-  cannot catch or drop it; it still crashes `dlopen` today. Confirms the
-  `mojo_abs` diagnosis generalizes beyond same-signature collisions to
-  cross-file mangling *disagreement* — the real fix is the same one already
-  called for above (canonical Mojo-source-type or module-qualified
-  mangling), not yet attempted (large surface: touches every
-  `_func_csym`/`overload_suffix_for` call site in gimple_codegen.py and its
-  reflect.py mirror; needs a full self-host + stdlib-build verification
-  pass before landing).
+- `std/builtin/coroutine.mojo`'s `_coro_destroy_fn` — **FIXED 2026-07-20.** A
+  genuinely different flavor from `CUDA`: not overloaded (one `def`), not
+  exported (leading underscore), but its mangled symbol differed depending
+  on which file computed it (`coro_destroy_fn_0c85c9` when `coroutine.mojo`
+  compiles it standalone vs. `coro_destroy_fn_fa7153` expected by
+  `device_context.mojo`'s reference to it — passed as a bare function
+  pointer to `external_call`, never invoked directly). This was a
+  **call-site** reference baked into a compiled function body, not a
+  reflection-table entry, so the safety net above couldn't catch or drop
+  it — it crashed `dlopen` unconditionally.
+
+  Root cause, traced to source: `AnyCoroutine` is a `comptime` MLIR-type
+  alias that `_mojo_type` (gimple_codegen.py) does not special-case by
+  name, so both files' codegen treats it as an unresolved annotation and
+  falls to `_mojo_type`'s catch-all default, `'int64_t'` — *when the codegen
+  itself resolves it*. But `_coro_destroy_fn`'s leading underscore means
+  `device_context.mojo`'s import of it never had a dylib reflection entry
+  to read a signature from (reflect.py never exports underscore-prefixed
+  names — by design, matching real Mojo's visibility rules), so it fell
+  back to `module_loader.py`'s `ModuleLoader.load_module` — a second,
+  independent, source-regex-based signature extractor with its **own**,
+  differently-defaulted `_mojo_type_to_c` (unknown-type default: plain
+  `'int'`, a 32-bit C int, not `int64_t`). `hashlib.md5(','.join(['int64_t'])...)[:6]`
+  = `0c85c9`; `hashlib.md5(','.join(['int'])...)[:6]` = `fa7153` — exactly
+  the two observed symbols, confirming the divergence was entirely this one
+  inconsistent default between two parallel type-mapping implementations,
+  not a deeper structural cross-module-resolution problem.
+
+  Fix (per CLAUDE.md's "consolidate duplicates, don't maintain parallel
+  implementations"): `module_loader.py`'s `_mojo_type_to_c` now delegates to
+  gimple_codegen's own canonical `_mojo_type` (the same function reflect.py's
+  `_c_signature` already reuses for the dylib-reflection import path) instead
+  of maintaining a second, drifted-out-of-sync copy. A handful of shapes
+  `_mojo_type` doesn't see from this call site (an already-C-shaped `'...*'`
+  string, the runtime's bare `MojoList`/`MojoDict`/`MojoSet` spelling, a
+  bare un-bracketed `UnsafePointer`) are still special-cased locally before
+  delegating. Verified: fresh from-scratch `libmojostdlib.dylib` build,
+  `nm -u` on the dylib no longer references any `coro_destroy_fn_*` symbol,
+  and `python3 mojo.py hello.mojo` runs end-to-end with no dyld error.
+  Regression test: `test_module_cache.py`'s
+  `test_cross_module_free_func_mangling_agrees` recreates the same shape
+  (an underscore-prefixed function taking an unresolvable-type parameter,
+  defined in one module and referenced by value from a sibling that must
+  fall back to `module_loader.py`) and asserts the two files agree on one
+  mangled symbol; reverting the `module_loader.py` fix makes it fail with
+  the real linker error (undefined symbol), confirming it actually exercises
+  this bug.
+
+  **Not fixed by this change** (different root cause — see `mojo_abs` above):
+  a case where the SAME file's own codegen genuinely produces the same C
+  parameter-type hash for two truly different Mojo source types (e.g. SIMD
+  vs Complex both boxing to `int64_t`) still collides; that needs
+  Mojo-source-type-aware or module-qualified mangling, which is a much
+  larger, more invasive rework (touching `_func_csym`/`overload_suffix_for`
+  at every emission site in gimple_codegen.py and its reflect.py mirror) and
+  was deliberately not attempted here — this fix only closed the *narrower*,
+  concretely-diagnosed "two parallel type-mapping implementations disagree
+  on their unknown-type default" gap that was actually blocking every
+  interpreter invocation.
 - Roughly **35 more exports** across many stdlib modules (`mojo_max`,
   `mojo_min`, `mojo_sum`, `MojoList_append`, `tuple`, `any`, several
   `Parser`/`Interpreter` methods, …) were found to have zero compiled

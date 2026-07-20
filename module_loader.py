@@ -295,55 +295,69 @@ class ModuleLoader:
     def _mojo_type_to_c(mojo_type: str) -> str:
         """Convert Mojo type annotation to C type.
 
-        Examples:
-            'Int' → 'int'
-            'Int64' → 'int64_t'
-            'Float64' → 'double'
-            'Bool' → '_Bool'
+        This used to maintain its own small type_map (a second, independent
+        implementation of the same job gimple_codegen.py's `_mojo_type` does)
+        with subtly different defaults — most importantly 'Int' → 'int' (a
+        32-bit C int) here vs 'int64_t' (Mojo's real 64-bit Int) there, and
+        an unknown/unresolved annotation (e.g. a cross-module struct this
+        source-only text scan can't see the definition of, like
+        `AnyCoroutine`) defaulting to 'int' here vs 'int64_t' there.
+
+        That divergence is not cosmetic: this fallback path's C parameter
+        types feed straight into GimpleGen.overload_suffix_for's md5-based
+        free-function overload mangling (see gimple_codegen.py's _func_csym).
+        A module compiled standalone by build_stdlib_dylib.py (which goes
+        through the real GimpleGen/_mojo_type resolver and its int64_t
+        default) and a second module that only *imports* the same function
+        without a dylib to reflect off of (falling back to this loader,
+        module_loader.load_module, for a leading-underscore/unexported name)
+        used to compute two DIFFERENT mangled C symbols for the exact same
+        function — confirmed root cause of BUG-2026-036's `_coro_destroy_fn`
+        dyld crash: coroutine.mojo's own compile emitted
+        `_coro_destroy_fn_0c85c9` (int64_t, gimple_codegen's default) while
+        device_context.mojo's import of it (routed through this method,
+        since `_coro_destroy_fn` starts with `_` and reflect.py never
+        exports underscore-prefixed names) computed `int` for the same
+        unresolved `AnyCoroutine` parameter and expected
+        `_coro_destroy_fn_fa7153` instead — two files disagreeing about one
+        function's own C symbol, which crashes `dlopen` regardless of which
+        Mojo program is actually run.
+
+        Per CLAUDE.md ("consolidate duplicates ... don't maintain parallel
+        implementations"), this delegates to gimple_codegen._mojo_type — the
+        codegen's own canonical Mojo-annotation → C-type resolver, already
+        reused as-is by reflect.py's `_c_signature` for the dylib-reflection
+        import path. Deferred (function-local) import: gimple_codegen.py
+        imports `load_module`/`get_symbol_type` from this module at its own
+        top level, so a top-level import here would be a circular partial-
+        init failure; by the time `load_module` is actually called at
+        runtime both modules are fully loaded.
         """
+        from gimple_codegen import _mojo_type
         mojo_type = mojo_type.strip()
 
-        # Mapping of Mojo types to C types
-        type_map = {
-            'Int': 'int',
-            'Int8': 'int8_t',
-            'Int16': 'int16_t',
-            'Int32': 'int32_t',
-            'Int64': 'int64_t',
-            'UInt': 'unsigned int',
-            'UInt8': 'uint8_t',
-            'UInt16': 'uint16_t',
-            'UInt32': 'uint32_t',
-            'UInt64': 'uint64_t',
-            'Float': 'float',
-            'Float32': 'float',
-            'Float64': 'double',
-            'Bool': '_Bool',
-            'String': 'char *',
-        }
-
-        # Check for direct mapping
-        if mojo_type in type_map:
-            return type_map[mojo_type]
-
-        # Handle pointers and generic types
+        # A few shapes this text-only extractor can hand in that aren't a
+        # bare Mojo source annotation `_mojo_type` expects — e.g. a type
+        # string that already carries a trailing '*' (from a prior C
+        # signature re-parse) or the runtime's own boxed-container spelling.
+        # Pass everything else straight through to the canonical resolver.
         if mojo_type.endswith('*'):
             base_type = mojo_type[:-1].strip()
-            c_base = type_map.get(base_type, base_type)
+            c_base = _mojo_type(base_type)
             return f"{c_base} *"
-
-        # Handle generic types like MojoList, UnsafePointer[T]
         if mojo_type.startswith('MojoList'):
             return 'MojoList *'
         if mojo_type.startswith('MojoDict'):
             return 'MojoDict *'
         if mojo_type.startswith('MojoSet'):
             return 'MojoSet *'
-        if mojo_type.startswith('UnsafePointer'):
-            return 'int64_t *'  # Pointer to 64-bit value
-
-        # Default: unknown type as int
-        return 'int'
+        # Bare (unparameterized) `UnsafePointer` with no `[T]` — _mojo_type's
+        # bracket handling only fires when it sees '[', so an un-bracketed
+        # occurrence would otherwise silently fall to its int64_t catch-all
+        # default instead of a pointer type.
+        if mojo_type == 'UnsafePointer':
+            return 'int64_t *'
+        return _mojo_type(mojo_type)
 
     def get_symbol_type(self, module_name: str, symbol_name: str) -> str:
         """Get the type of an imported symbol."""
