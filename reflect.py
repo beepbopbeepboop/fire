@@ -163,7 +163,23 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
     from the source text.) `module_prefix` is passed straight through to
     collect_exports — see its docstring."""
-    generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
+    # Mojo functions may be declared `fn` or `def` — both forms must be
+    # detected here, or an `def`-declared overload/generic slips past this
+    # filter as a normal single export while gimple_codegen (whose own
+    # equivalent scans use `(?:fn|def)`, e.g. the local-generics regex a few
+    # hundred lines into gen_module) silently drops it from the compiled
+    # object (overloaded top-level functions aren't emitted — see
+    # gen_module's "Overloaded top-level functions ... can't be emitted as
+    # distinct C symbols. Drop them here" pass). The mismatch produced a real
+    # bug (BUG-2026-036): std/gpu/host/_nvidia_cuda.mojo's two `def CUDA(...)`
+    # overloads were still advertised as one export, so the reflection table
+    # forward-declared and took the address of a symbol with zero definitions
+    # in the dylib — `extern void CUDA_0c85c9();` with nothing behind it —
+    # which crashed EVERY interpreter/compiler invocation at dlopen with
+    # "symbol not found in flat namespace '_CUDA_0c85c9'" the moment the
+    # stdlib dylib (loaded unconditionally by driver.py's compile_program) is
+    # bound, regardless of what Mojo file was actually being run.
+    generic = set(re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', src))
     # Generic struct templates (`struct Name[T]`) aren't a concrete type either —
     # they're instantiated per type-args at use sites (ELABORATION.md slice 5),
     # not a single layout in the dylib. Only concrete structs become TYPE entries.
@@ -171,7 +187,7 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     # Overloaded names (same name, multiple non-generic defs) aren't a single
     # concrete symbol either — they're selected + instantiated per call site.
     counts = {}
-    for n in re.findall(r'\bfn\s+(\w+)\s*\(', src):
+    for n in re.findall(r'\b(?:fn|def)\s+(\w+)\s*\(', src):
         counts[n] = counts.get(n, 0) + 1
     overloaded = {n for n, c in counts.items() if c > 1}
     skip = generic | overloaded
@@ -193,6 +209,18 @@ def _cstr(s: str) -> str:
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def export_csym(e: dict) -> str:
+    """The C symbol an export entry's `(void *)` table address points at.
+    SYM_FUNCTION free functions are overload-mangled by the codegen; methods
+    already carry their mangled name inside the signature. Shared by
+    emit_table_c (to forward-declare/address it) and build_stdlib_dylib.py
+    (to verify, via `nm`, that the compiled object actually defines it before
+    trusting the export — see that module's `build()`)."""
+    if e['kind'] == SYM_FUNCTION:
+        return _func_export_csym(e['name'], e['signature'])
+    return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+
+
 def emit_table_c(exports: list) -> str:
     """Emit the C translation unit defining `__mojo_reflect` for these exports.
     Compiled into the dylib alongside the module objects."""
@@ -209,17 +237,11 @@ def emit_table_c(exports: list) -> str:
     # carry a NULL address and are never forward-declared. The C symbol of a
     # METHOD entry is the name inside its signature, not the lookup key
     # (`Struct.method`), so we extract it.
-    def _csym(e):
-        # SYM_FUNCTION free functions are overload-mangled by the codegen; methods
-        # already carry their mangled name inside the signature.
-        if e['kind'] == SYM_FUNCTION:
-            return _func_export_csym(e['name'], e['signature'])
-        return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
     seen = set()
     for e in exports:
         if e['kind'] == SYM_TYPE:
             continue
-        sym = _csym(e)
+        sym = export_csym(e)
         if sym not in seen:
             seen.add(sym)
             # Unprototyped extern avoids referencing struct types that may not
@@ -231,7 +253,7 @@ def emit_table_c(exports: list) -> str:
         if e['kind'] == SYM_TYPE:
             addr = '0'
         else:
-            sym = _csym(e)
+            sym = export_csym(e)
             addr = '(void *)' + sym
         L.append(f"  {{ {_cstr(e['name'])}, {_cstr(e['signature'])}, "
                  f"{addr}, {e['kind']} }},")

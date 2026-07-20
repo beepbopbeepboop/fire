@@ -37,6 +37,50 @@ excluded; the dylib still links):
   (elaboration), not parameter-type mangling — a zero-arg erased generic has no
   parameters to hash.
 
+**More instances found 2026-07-20 (BUG-2026-036 investigation) — broader than
+previously known, and NOT all handled by the collision-dedup stopgap:**
+
+- `std/gpu/host/_nvidia_cuda.mojo`'s `CUDA(DeviceContext)` /
+  `CUDA(DeviceStream)` — a **same-module** (not cross-module) overload
+  collision; `gen_module`'s own "overloaded top-level functions ... drop
+  them here" pass never compiles a body for it at all (it relies on
+  elaboration at a call site, which never happens when
+  `build_stdlib_dylib.py` compiles each module standalone). Was crashing
+  **every** `mojo.py` invocation at `dlopen` because `reflect.py`'s mirror
+  of that drop condition had a separate bug (only matched `fn`, not `def`
+  — fixed) and kept advertising it as an export anyway. `build_stdlib_dylib.py`'s
+  `build()` now has a general safety net that drops any export whose
+  mangled symbol has no compiled definition, so a *reflection-table*
+  instance of this bug degrades to "that function falls back to source"
+  instead of crashing dlopen — but it does not fix the underlying
+  same-module-overload/no-elaboration gap.
+- `std/builtin/coroutine.mojo`'s `_coro_destroy_fn` — a genuinely different
+  flavor: not overloaded (one `def`), not exported (leading underscore), but
+  its mangled symbol differs depending on which file computes it
+  (`coro_destroy_fn_0c85c9` when `coroutine.mojo` compiles it standalone vs.
+  `coro_destroy_fn_fa7153` expected by at least one other module's call
+  site) — the two files' independently-boxed views of `AnyCoroutine`'s C
+  type disagree. This is a **call-site** reference baked into a compiled
+  function body, not a reflection-table entry, so the safety net above
+  cannot catch or drop it; it still crashes `dlopen` today. Confirms the
+  `mojo_abs` diagnosis generalizes beyond same-signature collisions to
+  cross-file mangling *disagreement* — the real fix is the same one already
+  called for above (canonical Mojo-source-type or module-qualified
+  mangling), not yet attempted (large surface: touches every
+  `_func_csym`/`overload_suffix_for` call site in gimple_codegen.py and its
+  reflect.py mirror; needs a full self-host + stdlib-build verification
+  pass before landing).
+- Roughly **35 more exports** across many stdlib modules (`mojo_max`,
+  `mojo_min`, `mojo_sum`, `MojoList_append`, `tuple`, `any`, several
+  `Parser`/`Interpreter` methods, …) were found to have zero compiled
+  definitions anywhere in a from-scratch dylib build — presumably more
+  unresolved-cross-module-struct-collapses-to-`int64_t` collisions like
+  `mojo_abs`, just never previously visible because `dlopen` aborts the
+  whole process on the *first* unresolved symbol it binds, and `CUDA`
+  happened to be first. Now silently dropped from the reflection table by
+  the safety net (source-fallback instead of a crash) rather than
+  individually root-caused.
+
 ---
 
 ## SB-2 — Per-OS modules define the same symbols (FIXED at build level)

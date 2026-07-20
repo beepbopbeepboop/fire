@@ -362,6 +362,37 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     if extra_exports:
         all_exports.extend(extra_exports)
 
+    # Safety net: an export entry (from reflect.collect_exports_src's source
+    # scan, or from extra_exports/collect_runtime_exports_h's header scan)
+    # can drift out of sync with what actually got a compiled body — e.g.
+    # BUG-2026-036, where a same-file overloaded free function (`def
+    # CUDA(...)` declared twice in std/gpu/host/_nvidia_cuda.mojo) was still
+    # advertised as a normal export even though gen_module's own "overloaded
+    # top-level functions ... can't be emitted as distinct C symbols, drop
+    # them here" pass never compiled a body for it, or a stale prototype in
+    # mojo_runtime.h (e.g. MojoList__write_to) was never actually defined in
+    # mojo_runtime.c. Either way the reflection table would forward-declare
+    # and take the address of a symbol with zero definitions anywhere in the
+    # dylib — `extern void sym();` with nothing behind it — which links fine
+    # (production dylibs use `-undefined dynamic_lookup`) but crashes EVERY
+    # dlopen of the dylib at runtime with "symbol not found in flat
+    # namespace", not just uses of the broken function. Cross-check every
+    # non-TYPE export's expected C symbol against what `nm` says the actual
+    # object set defines, and drop anything orphaned instead of shipping a
+    # dylib that can't even be loaded.
+    all_defs = set()
+    for o in objs:
+        all_defs |= _defined_symbols(gcc, o)
+    _kept = []
+    for e in all_exports:
+        if e['kind'] == reflect.SYM_TYPE or ('_' + reflect.export_csym(e)) in all_defs:
+            _kept.append(e)
+        else:
+            print(f"  drop stale export {e['name']!r}: "
+                  f"{reflect.export_csym(e)} has no definition in the built objects",
+                  file=sys.stderr)
+    all_exports = _kept
+
     # Reflection table source — deterministic given all_exports, so it can
     # participate in the dylib link key before writing the file.
     reflect_src = reflect.emit_table_c(all_exports)

@@ -1600,6 +1600,25 @@ def main():
                 print(f"      {line}")
         _FAIL += 1
 
+    # BUG-2026-033: id() builtin on a struct instance must compile in --jit
+    # mode, not just the interpreter. (Root cause turned out to be a cascade
+    # from an unrelated Parser-import failure earlier in the same file, per
+    # BUG-2026-032 — id() itself already lowers to a real function via the
+    # `'id': ('int64_t', ['int64_t'])` signature table entry. This test pins
+    # the standalone case so a regression here is caught directly instead of
+    # being misdiagnosed as "id() unsupported" again.)
+    test("id_builtin_on_struct", """\
+struct Foo:
+    var x: Int
+    def __init__(out self):
+        self.x = 42
+
+def test():
+    var f = Foo()
+    var key = id(f)
+    print(key)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

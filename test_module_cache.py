@@ -584,6 +584,48 @@ def test_module_qualified_struct_symbols(wd):
               _run(exe).stdout.startswith('qc'))
 
 
+def test_def_overload_not_dangling_export(wd):
+    """BUG-2026-036: a same-file overloaded free function declared with `def`
+    (not `fn`) used to still get advertised as a normal reflection export,
+    even though gen_module's own "overloaded top-level functions ... can't be
+    emitted as distinct C symbols, drop them here" pass (gimple_codegen.py's
+    gen_module) never compiles a body for it. reflect.collect_exports_src's
+    own mirror of that same drop condition only matched `fn`, not `def` — so
+    the two forms disagreed, and the reflection table forward-declared +
+    took the address of a symbol with zero definitions anywhere in the dylib
+    (`extern void CUDA_0c85c9();` with nothing behind it). That's harmless at
+    static link time (production dylibs use `-undefined dynamic_lookup`) but
+    crashes EVERY dlopen of the dylib at runtime — real repro was
+    std/gpu/host/_nvidia_cuda.mojo's two `def CUDA(...)` overloads, which made
+    every single `mojo.py` interpreter/compiler invocation crash at startup
+    (dyld: symbol not found in flat namespace), regardless of the input file."""
+    src = ("def CUDA(x: Int64) -> Int64:\n"
+           "    return x + 1\n"
+           "def CUDA(x: Float64) -> Float64:\n"
+           "    return x + 2.0\n"
+           "def CUDA_single(x: Int64) -> Int64:\n"
+           "    return x + 3\n")
+    exports = {e['name'] for e in reflect.collect_exports_src(src)}
+    check("def-overload: both CUDA overloads are excluded from exports",
+          'CUDA' not in exports, str(exports))
+    check("def-overload: the non-overloaded sibling function still exports",
+          'CUDA_single' in exports, str(exports))
+
+    path = os.path.join(wd, 'cuda_like.mojo'); open(path, 'w').write(src)
+    dylib = os.path.join(wd, 'libcudalike.dylib')
+    bsd.build([path], dylib, link_runtime=True, use_cache=False)
+    syms = bsd._defined_symbols(GCC, dylib)
+    check("def-overload: no CUDA_<hash> extern/address survives into the dylib",
+          not any(s.lstrip('_').startswith('CUDA_0') or s.lstrip('_') == 'CUDA'
+                  for s in syms if 'CUDA_single' not in s),
+          str(sorted(s for s in syms if 'CUDA' in s)))
+    # Loadable — the actual regression: a stale export used to abort dlopen
+    # for every user of the dylib, not just callers of the broken function.
+    import ctypes
+    ctypes.CDLL(dylib)
+    check("def-overload: dylib with a dropped def-overload still dlopen()s", True)
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -651,6 +693,7 @@ def main():
         test_reflected_struct_import(wd)
         test_module_qualified_struct_symbols(wd)
         test_review_fixes_monomorphize_overload(wd)
+        test_def_overload_not_dangling_export(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()
