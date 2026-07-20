@@ -3381,24 +3381,72 @@ class Interpreter:
         """Evaluate None literal."""
         return None
 
+    @staticmethod
+    def _spread_operand(node, op):
+        """If `node` is a `*expr`/`**expr` spread marker (a UnaryOp with the
+        given op, produced by `_parse_unary` for spreads inside collection
+        displays — see mojo_compiler.py's `_parse_unary` and
+        `_parse_dict_or_set`/`_parse_dict_entry`), return the spread
+        operand AST node; otherwise return None. Spreading isn't a real
+        unary operation — there's no single value `*x` evaluates to outside
+        a collection display — so the collection-literal evaluators below
+        recognize and expand it directly rather than routing it through
+        eval_UnaryOp (which correctly still errors on a bare `*x`/`**x`)."""
+        if isinstance(node, N.UnaryOp) and node.op == op:
+            return node.operand
+        return None
+
     def eval_ListLiteral(self, expr: N.ListLiteral):
-        """Evaluate list literal."""
-        return [self.eval_expr(e) for e in expr.elements]
+        """Evaluate list literal, expanding any `*expr` spread elements
+        (PEP 448 iterable unpacking, e.g. `[*a, *b]`) in place."""
+        result = []
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.extend(self.eval_expr(spread))
+            else:
+                result.append(self.eval_expr(e))
+        return result
 
     def eval_DictLiteral(self, expr: N.DictLiteral):
-        """Evaluate dict literal."""
+        """Evaluate dict literal, expanding any `**expr` spread pairs (PEP
+        448 mapping unpacking, e.g. `{**a, **b}`). A spread pair is
+        represented as `(UnaryOp(op='**', operand=<mapping expr>), None)` by
+        the parser (see mojo_compiler.py). Pairs are applied in source
+        order, matching Python: a later spread or key overwrites an earlier
+        one on key collision."""
         result = {}
         for key, value in expr.pairs:
-            result[self.eval_expr(key)] = self.eval_expr(value)
+            spread = self._spread_operand(key, "**") if value is None else None
+            if spread is not None:
+                result.update(self.eval_expr(spread))
+            else:
+                result[self.eval_expr(key)] = self.eval_expr(value)
         return result
 
     def eval_SetLiteral(self, expr: N.SetLiteral):
-        """Evaluate set literal."""
-        return {self.eval_expr(e) for e in expr.elements}
+        """Evaluate set literal, expanding any `*expr` spread elements
+        (e.g. `{*a, *b}`) as a union into the resulting set."""
+        result = set()
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.update(self.eval_expr(spread))
+            else:
+                result.add(self.eval_expr(e))
+        return result
 
     def eval_TupleLiteral(self, expr: N.TupleLiteral):
-        """Evaluate tuple literal."""
-        return tuple(self.eval_expr(e) for e in expr.elements)
+        """Evaluate tuple literal, expanding any `*expr` spread elements
+        (e.g. `(*a, *b)`) in place."""
+        result = []
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.extend(self.eval_expr(spread))
+            else:
+                result.append(self.eval_expr(e))
+        return tuple(result)
 
     @staticmethod
     def _wrap_int(v):
@@ -3605,8 +3653,9 @@ class Interpreter:
             return self.eval_expr(expr.else_val)
 
     def eval_TupleExpr(self, expr):
-        """Evaluate tuple expression."""
-        return tuple(self.eval_expr(e) for e in expr.elements)
+        """Evaluate tuple expression (mojo_compiler naming; TupleExpr is
+        TupleLiteral — see mojo_compiler.py's `TupleLiteral = TupleExpr`)."""
+        return self.eval_TupleLiteral(expr)
 
     # Aliases for mojo_compiler node types (ListExpr, DictExpr, SetExpr)
     def eval_ListExpr(self, expr):

@@ -2858,6 +2858,16 @@ class Parser:
         self._expect("RBRACKET")
         return ListExpr(elements=elems)
 
+    def _parse_dict_entry(self):
+        """Parse one entry after the first in a `{...}` dict literal: either
+        a `**expr` unpack spread (returned as `(UnaryOp, None)`, mirroring
+        how the first-entry spread case represents it — see
+        `_parse_dict_or_set`) or an ordinary `key: value` pair."""
+        if self._peek().kind == "OP" and self._peek().value == "**":
+            return (self._parse_expr(0), None)
+        k = self._parse_expr(0); self._expect("COLON"); v = self._parse_expr(0)
+        return (k, v)
+
     def _parse_dict_or_set(self):
         self._expect("LBRACE")
         if self._peek().kind == "RBRACE":
@@ -2888,8 +2898,22 @@ class Parser:
             while self._peek().kind == "COMMA":
                 self._advance()
                 if self._peek().kind == "RBRACE": break
-                k = self._parse_expr(0); self._expect("COLON"); v = self._parse_expr(0)
-                pairs.append((k, v))
+                pairs.append(self._parse_dict_entry())
+            self._expect("RBRACE")
+            return DictExpr(pairs=pairs)
+        # Dict-unpack spread as the first entry: `{**a, **b}` (PEP 448). `**`
+        # never carries a COLON (there's no key expression to its left), so
+        # this must be checked before falling through to the set-literal
+        # path below — otherwise `{**a, **b}` gets misclassified as a set of
+        # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
+        # instead of building a dict (see
+        # bugs/INTERP_dict_double_star_unpack_runtime.md).
+        if isinstance(first, UnaryOp) and first.op == "**":
+            pairs = [(first, None)]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "RBRACE": break
+                pairs.append(self._parse_dict_entry())
             self._expect("RBRACE")
             return DictExpr(pairs=pairs)
         if self._is_kw("for"):
@@ -3334,7 +3358,15 @@ def emit(node, indent: int = 0) -> str:
             return body
         return f"{emit(node.obj, 0)}[{body}]"
     if isinstance(node,ListExpr): return "[" + ", ".join(emit(e, 0) for e in node.elements) + "]"
-    if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k, 0)}: {emit(v, 0)}" for k,v in node.pairs) + "}"
+    if isinstance(node,DictExpr):
+        # A `**expr` unpack spread pair is stored as (UnaryOp(op='**', ...),
+        # None) — see `_parse_dict_or_set`/`_parse_dict_entry` — so it emits
+        # as just the spread itself, not a bogus "(** x): None" pair.
+        def _emit_pair(k, v):
+            if v is None and isinstance(k, UnaryOp) and k.op == "**":
+                return emit(k, 0)
+            return f"{emit(k, 0)}: {emit(v, 0)}"
+        return "{" + ", ".join(_emit_pair(k, v) for k, v in node.pairs) + "}"
     if isinstance(node,SetExpr): return "{" + ", ".join(emit(e, 0) for e in node.elements) + "}"
     if isinstance(node,TupleExpr):
         if not node.elements: return "()"
