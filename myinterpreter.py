@@ -3582,8 +3582,24 @@ class Interpreter:
     def eval_CallExpr(self, expr: N.CallExpr):
         """Evaluate function call."""
         func = self.eval_expr(expr.func)
-        args = [self.eval_expr(arg) for arg in expr.args]
+        # Call-site unpacking: `g(*args)` / `g(**opts)`. mojo_compiler.py's
+        # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
+        # expression in UnaryOp(op='*'/'**', operand=...) instead of
+        # consuming the star itself, so the marker survives into the AST.
+        # Without this, the starred expression's *value* (e.g. the whole
+        # list) got appended as a single ordinary positional argument,
+        # silently binding to just the callee's first parameter and leaving
+        # the rest unbound instead of splicing the iterable's elements (or
+        # the mapping's items) into the flat args/kwargs actually passed.
+        args = []
         kwargs = {}
+        for arg in expr.args:
+            if isinstance(arg, N.UnaryOp) and arg.op == '*':
+                args.extend(self.eval_expr(arg.operand))
+            elif isinstance(arg, N.UnaryOp) and arg.op == '**':
+                kwargs.update(self.eval_expr(arg.operand))
+            else:
+                args.append(self.eval_expr(arg))
 
         # Evaluate keyword arguments. CallExpr stores these as `kwargs`, a
         # list of (name, expr) tuples (see mojo_compiler.py's CallExpr and

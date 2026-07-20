@@ -2587,14 +2587,17 @@ class Parser:
                 args = []
                 keywords = {}
                 while self._peek().kind != "RPAREN":
-                    # Handle dictionary unpacking (**expr)
-                    if self._peek().kind == "OP" and self._peek().value == "**":
-                        self._advance()  # skip **
-                        args.append(self._parse_expr(0))  # parse unpacked kwargs
-                    # Handle unpacking (*expr)
-                    elif self._peek().kind == "OP" and self._peek().value == "*":
-                        self._advance()  # skip *
-                        args.append(self._parse_expr(0))  # parse unpacked value
+                    # Handle unpacking (*expr / **expr). Don't consume the
+                    # star(s) here — let _parse_expr (via _parse_unary) wrap
+                    # the operand in UnaryOp(op='*'/'**', operand=...) so the
+                    # marker survives into the AST. The interpreter's call
+                    # evaluation (myinterpreter.py) detects that wrapper and
+                    # splices the iterable's elements/mapping's items into
+                    # the flat arg/kwargs lists at call time, instead of
+                    # treating the whole expression as one ordinary
+                    # positional argument value.
+                    if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
+                        args.append(self._parse_expr(0))
                     # Handle keyword arguments (name=value) — name can be NAME or KW token
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                         keyword_name = self._advance().value  # get keyword name
