@@ -1585,6 +1585,17 @@ class Parser:
         value = None
         if self._peek().kind == "ASSIGN":
             self._advance(); value = self._parse_expr(0)
+            # Implicit (parenthesis-less) tuple RHS: `var name = 'a', 'b', 'c'`
+            # — a bare comma-separated list on the right of `=` is a tuple.
+            # Mirrors the plain-assignment handling in the AssignStmt path above.
+            if self._peek().kind == "COMMA":
+                rhs_elements = [value]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                        break
+                    rhs_elements.append(self._parse_expr(0))
+                value = TupleExpr(elements=rhs_elements)
         return VarDecl(name=name, type_ann=type_ann, value=value)
 
     def _parse_if(self):
