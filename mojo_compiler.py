@@ -1487,7 +1487,28 @@ class Parser:
                     # else: fall through to expression statement
                 else:
                     return self._parse_struct()
-            if t.value == "enum": return self._parse_enum()
+            if t.value == "enum":
+                # `enum` is ambiguous the same way `fn`/`struct` are (see the
+                # carve-outs above): real Python has no `enum` keyword — it's
+                # a common plain identifier/module name (e.g. `import enum`
+                # then `enum = SomeEnum`, or a local var named `enum`). Only
+                # commit to the enum-definition parse when the shape that
+                # follows could actually BE one: `enum` immediately followed
+                # by a name-like token (per _parse_enum's name read) and then
+                # one of `(` (optional base-class list) or `:` (straight into
+                # the body). Anything else — `enum.attr` (attribute access),
+                # `enum(...)` used as a call, `enum =` (assignment), `enum`
+                # alone, etc. — means `enum` is being used as an ordinary
+                # identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                nxt, nxt2 = self._peek(1), self._peek(2)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_enumdef = name_like and nxt2.kind in ("LPAREN", "COLON")
+                if looks_like_enumdef:
+                    return self._parse_enum()
+                # else: fall through to expression statement
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
@@ -2276,7 +2297,11 @@ class Parser:
         # expressions, since a member is allowed to shadow a keyword (e.g.
         # `class,`/`enum,` as member names, both seen in the wild).
         self._expect("KW", "enum")
-        name = self._expect("NAME").value
+        # Read the enum's own name via `_ident()` (NAME/KW/backtick), not a
+        # strict NAME-only `_expect`, so an enum can itself be named after
+        # another keyword (e.g. `enum struct:`), mirroring the
+        # `struct super:` fix for `_parse_struct`'s own name read.
+        name = self._ident()
         # Skip an optional Python-style base list: `enum Name(SomeBase):`
         if self._peek().kind == "LPAREN":
             self._advance()
