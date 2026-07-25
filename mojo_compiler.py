@@ -798,6 +798,23 @@ def py_tokenize(src: str) -> list[Token]:
         n = len(src)
         i = 0
         last = 0
+        # Newlines "owed" to keep later physical-line numbers in sync after
+        # collapsing a multi-line literal to one placeholder token. Flushed
+        # at the next REAL newline actually appended to `out`, not
+        # immediately after the placeholder — emitting them right away
+        # pushed any postfix/binary continuation on the literal's own
+        # closing line (e.g. `.strip()` or `%` right after the closing
+        # `"""`) onto an artificial blank line of its own, which made the
+        # line-based tokenizer end the statement early and left the `.`/`%`
+        # to start a new, primary-less statement (`Unexpected DOT('.')`/
+        # `Unexpected OP('%')` — found via real stdlib code like
+        # `"""...""".strip()` and `"""...""" % (args)`). Deliberately
+        # inlined at both flush points below rather than factored into a
+        # nested closure: a closure-based version was behaviorally
+        # identical but broke `make check-selfhost` (gimple_codegen.py
+        # miscompiling unrelated code elsewhere once this file gained a
+        # nested closure with mutated captured state at this scope depth).
+        pending_pad = 0
         while i < n:
             c = src[i]
             if c == _CMT_CHAR:
@@ -848,7 +865,15 @@ def py_tokenize(src: str) -> list[Token]:
                     while j < n and src[j:j + 3] != quote3:
                         j += 2 if src[j] == '\\' and j + 1 < n else 1
                     end = j + 3 if j < n else n
-                    out.append(src[last:start])
+                    seg = src[last:start]
+                    if pending_pad and '\n' in seg:
+                        nl_idx = seg.index('\n')
+                        out.append(seg[:nl_idx + 1])
+                        out.append('\n' * pending_pad)
+                        pending_pad = 0
+                        out.append(seg[nl_idx + 1:])
+                    else:
+                        out.append(seg)
                     literal = src[start:end]
                     placeholder = f"__MOJO_STR_{string_idx[0]}__"
                     string_cache[placeholder] = literal
@@ -862,8 +887,10 @@ def py_tokenize(src: str) -> list[Token]:
                     # top-of-file module docstring) reporting a diagnostic
                     # line number dozens of lines before the loop's actual
                     # location, off by roughly the cumulative length of
-                    # every docstring/multi-line string above it.
-                    out.append(placeholder + '\n' * literal.count('\n'))
+                    # every docstring/multi-line string above it. The pad is
+                    # NOT appended here — see `pending_pad`'s comment above.
+                    out.append(placeholder)
+                    pending_pad += literal.count('\n')
                     i = end
                     last = i
                     continue
@@ -880,7 +907,17 @@ def py_tokenize(src: str) -> list[Token]:
                     i = j + 1 if j < n and src[j] == c else j
                     continue
             i += 1
-        out.append(src[last:i])
+        tail = src[last:i]
+        if pending_pad and '\n' in tail:
+            nl_idx = tail.index('\n')
+            out.append(tail[:nl_idx + 1])
+            out.append('\n' * pending_pad)
+            pending_pad = 0
+            out.append(tail[nl_idx + 1:])
+        else:
+            out.append(tail)
+            if pending_pad:
+                out.append('\n' * pending_pad)
         return ''.join(out)
 
     src = replace_multiline_strings(src)
