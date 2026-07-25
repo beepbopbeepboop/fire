@@ -60,6 +60,28 @@ def test(name: str, mojo_src: str):
         _FAIL += 1
 
 
+def test_raises(name: str, mojo_src: str, expected_substr: str):
+    """Assert compile_to_gimple honestly refuses this input (raises with a
+    message containing expected_substr) instead of either crashing gcc on
+    broken generated C or silently emitting wrong code. Used for shapes this
+    codegen deliberately does not (yet) support — see
+    bugs/CODEGEN_conditional_toplevel_def_name_collision.md."""
+    global _PASS, _FAIL
+    try:
+        compile_to_gimple(mojo_src)
+    except Exception as e:
+        if expected_substr in str(e):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: wrong error: {e}")
+            _FAIL += 1
+        return
+    print(f"FAIL  {name}: expected an exception containing {expected_substr!r}, "
+          f"compile_to_gimple succeeded instead")
+    _FAIL += 1
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -1910,6 +1932,33 @@ def f(x: x | (1).__class__, y: (1).__class__):
     pass
 print("ok")
 """)
+
+    # 176. Two top-level `def NAME(...):` statements with the SAME name,
+    # nested in mutually-exclusive if/else branches at module scope (a
+    # common platform-conditional idiom, e.g. multiprocessing/connection.py's
+    # `def wait(...)` under `if sys.platform == 'win32': ... else: ...`).
+    # This codegen compiles every top-level def into a single, unmangled C
+    # symbol regardless of which branch it's nested in, so both bodies
+    # previously collided (or, worse, neither was compiled at all and the
+    # call site fell back to an extern declaration that happened to collide
+    # with libc's own `wait(int *)` from <sys/wait.h> — a confusing error
+    # unrelated to the real problem). Since there's no runtime-dispatch
+    # mechanism to represent "whichever branch executes wins" as distinct C
+    # symbols, this must be refused honestly rather than silently miscompiled
+    # — see bugs/CODEGEN_conditional_toplevel_def_name_collision.md.
+    test_raises("conditional_toplevel_def_name_collision", """\
+import sys
+if sys.platform == 'win32':
+    def wait(x):
+        return x + 1
+else:
+    def wait(x):
+        return x + 2
+
+def f():
+    print(wait(5))
+f()
+""", "defined more than once across mutually-exclusive if/elif/else branches")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

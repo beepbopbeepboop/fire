@@ -14345,6 +14345,78 @@ class GimpleGen:
             stmts = [s for s in stmts
                      if not (isinstance(s, FunctionDef) and s.name in _overloaded)]
 
+        # Two (or more) top-level `def NAME(...):` statements with the SAME
+        # name, nested in mutually-exclusive `if`/`elif`/`else` branches at
+        # module scope (a common platform-conditional idiom — e.g.
+        # `if sys.platform == 'win32': def wait(...): ...` /
+        # `else: def wait(...): ...`, as seen for real in
+        # multiprocessing/connection.py) cannot be compiled as distinct C
+        # functions: both bodies would want the same unmangled top-level
+        # symbol. Worse, unlike the plain-top-level `_overloaded` case just
+        # above, nested-in-conditional defs are not even recognized as
+        # ordinary top-level functions anywhere else in this pass (the
+        # module-level closure scan a few hundred lines down only walks
+        # *direct* top-level FunctionDef entries in `stmts`, never into
+        # IfStmt branches) — so they silently fall through as unregistered
+        # "closures", emit no body at all, and leave call sites to guess an
+        # extern declaration for the bare name. That previously surfaced as a
+        # confusing conflict with an unrelated same-named libc symbol (e.g.
+        # `wait` vs. <sys/wait.h>'s `pid_t wait(int *)`) instead of an honest
+        # diagnostic pointing at the real problem.
+        #
+        # Detect the shape here and fail this module's compile clearly and
+        # immediately. Every caller of gen_module (_compile_imported_module,
+        # build_stdlib_dylib.py's per-module compile job, compile_stdlib.py,
+        # and mojo.py's own build_executable) already treats an exception
+        # raised from codegen as "this module/file can't be compiled natively"
+        # and reacts accordingly — an import falls back to being resolved via
+        # dylib/extern/interpreted-source instead of inlined C, and a directly
+        # built file gets a clear compiler error — both are honest outcomes,
+        # unlike silently emitting broken code or guessing which branch's
+        # definition should win.
+        # Iterative worklist, not a self-recursive nested helper: a nested
+        # function calling itself does not survive self-host closure-lifting
+        # (see _register_imported_structs's _collect, a few hundred lines
+        # up, for the same gotcha spelled out in full) — this exact shape
+        # broke `make check-selfhost` (undefined symbol
+        # `__collect_conditional_toplevel_defs`) the first time this was
+        # written as `def _collect_conditional_toplevel_defs(...): ...
+        # _collect_conditional_toplevel_defs(...)`.
+        _cond_fn_counts: dict = {}
+        _cond_worklist = [s for s in stmts if isinstance(s, IfStmt)]
+        while _cond_worklist:
+            _wi = _cond_worklist.pop()
+            for _s in (_wi.then_body or []):
+                if isinstance(_s, FunctionDef):
+                    _cond_fn_counts[_s.name] = _cond_fn_counts.get(_s.name, 0) + 1
+                elif isinstance(_s, IfStmt):
+                    _cond_worklist.append(_s)
+            for _cond, _elif_body in (getattr(_wi, 'elifs', None) or []):
+                for _s in (_elif_body or []):
+                    if isinstance(_s, FunctionDef):
+                        _cond_fn_counts[_s.name] = _cond_fn_counts.get(_s.name, 0) + 1
+                    elif isinstance(_s, IfStmt):
+                        _cond_worklist.append(_s)
+            if _wi.else_body:
+                for _s in _wi.else_body:
+                    if isinstance(_s, FunctionDef):
+                        _cond_fn_counts[_s.name] = _cond_fn_counts.get(_s.name, 0) + 1
+                    elif isinstance(_s, IfStmt):
+                        _cond_worklist.append(_s)
+        _cond_collisions = {n for n, c in _cond_fn_counts.items() if c > 1}
+        if _cond_collisions:
+            raise RuntimeError(
+                "cannot compile module: top-level function(s) "
+                f"{', '.join(sorted(_cond_collisions))} are each defined more "
+                "than once across mutually-exclusive if/elif/else branches at "
+                "module scope (a platform-conditional `def NAME(...):` idiom) "
+                "— this codegen compiles every top-level def into a single, "
+                "unmangled C symbol regardless of which branch runs, so "
+                "multiple same-named conditional defs cannot be represented "
+                "as distinct C functions without runtime dispatch, which is "
+                "not yet implemented; falling back to interpreting this "
+                "module from source instead of emitting wrong or broken code")
+
         # Local generic free functions: the parser drops the `[T]` type params, so
         # detect them from the source text. Register each (with this module's own
         # source) so call sites elaborate a concrete CAS-cached instantiation
