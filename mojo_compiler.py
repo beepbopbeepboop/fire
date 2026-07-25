@@ -612,6 +612,51 @@ _INDENT_SIZE    = 4
 #   t"L1: {t'L2: {t"L3: {val}"}'}"}
 # So we replace them with placeholders before tokenization.
 
+def _string_prefix_start(source: str, quote_pos: int) -> int:
+    """Scan backward from a quote character to find the start of any
+    legitimate 0-2 letter string prefix (f/F/r/R/b/B/u/U/t/T) immediately
+    preceding it.
+
+    Returns `quote_pos` itself if there's no such prefix — either because
+    there are no prefix-shaped letters right before the quote, or because
+    those letters are actually the tail of a longer identifier (e.g. the
+    `r` in `self.attr"..."`) rather than a standalone prefix token; that
+    distinction is made by checking that the character before the
+    letter-run isn't itself alphanumeric/underscore.
+
+    Shared by `_process_nested_tstrings` (which needs to know whether an
+    ordinary string has a prefix in order to skip the whole thing as one
+    opaque unit) and `py_tokenize`'s `replace_multiline_strings` (which
+    needs the same prefix boundary for triple-quoted strings). Extracted
+    here instead of duplicated per CLAUDE.md's "consolidate duplicates"
+    rule — see bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    """
+    # Explicit `==` comparisons, not `c in 'fFrRbBuUtT'`: this codegen's
+    # compiled `in`-for-char* path is a documented stub (always returns
+    # False), so under self-hosting an `in`-based check here would never
+    # advance and every string prefix would go undetected (the exact
+    # regression `replace_multiline_strings`'s own prefix scan — the code
+    # this helper replaces — was already written to avoid; see its
+    # history/comments above its former inline copy of this logic).
+    k = quote_pos
+    letters = 0
+    while letters < 2:
+        if k <= 0:
+            break
+        c = source[k - 1]
+        is_pfx = (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+                  or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+                  or c == 't' or c == 'T')
+        if not is_pfx:
+            break
+        k -= 1
+        letters += 1
+    if letters == 0:
+        return quote_pos
+    prev = source[k - 1] if k > 0 else ''
+    return k if not (prev.isalnum() or prev == '_') else quote_pos
+
+
 def _find_tstring_closing_quote(source: str, quote_pos: int, quote_ch: str) -> int:
     """Find closing quote of a t-string, handling nested braces with interpolations.
 
@@ -663,55 +708,78 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
     result = []
     i = 0
     while i < len(stmt):
-        # An ordinary (non-t-prefixed) string literal, e.g. `'t"'`, must be
-        # skipped as one whole unit once its opening quote is reached —
-        # otherwise the t-prefix regex below gets applied to its *contents*
-        # too, on the next loop iteration(s), and a value that merely starts
-        # with the two characters "t\"" (a completely ordinary string, not a
-        # t-string) gets misdetected as one. Found via myinterpreter.py's own
-        # `value.startswith('t"')`: `'t"'`'s content ('t' immediately
-        # followed by '"') triggered exactly this false-positive prefix
-        # match, corrupting the literal into a dangling placeholder.
+        # Any quoted string — with or without a prefix (`r"..."`, `f"..."`,
+        # `rb"..."`, a bare `"..."`, etc.) — must be recognized and consumed
+        # as ONE unit right when its opening quote is reached. Any prefix
+        # letters immediately before the quote were already appended to
+        # `result` one character at a time by the plain fallback below (they
+        # aren't distinguishable from ordinary code until we reach the quote
+        # that follows them), so they're removed from `result` here and
+        # folded back into whichever unit — ordinary string or t/f-string —
+        # this turns out to be.
         #
-        # Deliberately NOT _find_tstring_closing_quote here: its brace-depth
-        # tracking exists for real t-string interpolation, where `{`/`}` are
-        # guaranteed balanced — applying that same assumption to an ordinary
-        # string's literal content (e.g. mojo.py's own C-code-snippet string
-        # literals, full of unbalanced `{`/`}` as plain text) scans past the
-        # real closing quote entirely, misreading unrelated later source as
-        # part of this "string" — a real, more severe regression than the
-        # bug being fixed here. A plain string only ever ends at its own
-        # closing quote, so a simple backslash-escape-aware scan is correct
-        # and sufficient.
-        if stmt[i] in ('"', "'") and (i == 0 or stmt[i-1] not in
-                'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'):
+        # This dispatch is deliberately keyed off the QUOTE character (using
+        # a backward scan for any prefix, via `_string_prefix_start`) rather
+        # than off the prefix letter scanning forward for a quote: the
+        # latter (the previous implementation) had no notion of "already
+        # inside a string", so it could misfire on a `t`/`T` letter that was
+        # actually part of another string's own escape sequence (e.g. the
+        # `t` in `r"\t"`'s `\t`), treating the *original* string's own
+        # closing quote as the *opening* quote of a brand-new bogus t-string
+        # and scanning for the next unrelated quote later in the statement.
+        # See bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+        if stmt[i] in ('"', "'"):
             qch = stmt[i]
-            j = i + 1
-            while j < len(stmt):
-                if stmt[j] == '\\' and j + 1 < len(stmt):
-                    j += 2
-                    continue
-                if stmt[j] == qch:
-                    break
-                j += 1
-            if j < len(stmt):
-                result.append(stmt[i:j + 1])
-                i = j + 1
-                continue
-        m = re.match(r'[rRfFbBuU]*[tT]{1}[rRfFbBuU]*', stmt[i:])
-        if m:
-            prefix_end = i + len(m.group())
-            is_prefix = i == 0 or stmt[i-1] not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
-
-            if is_prefix and prefix_end < len(stmt) and stmt[prefix_end] in ('"', "'"):
-                close = _find_tstring_closing_quote(stmt, prefix_end, stmt[prefix_end])
+            pstart = _string_prefix_start(stmt, i)
+            prefix = stmt[pstart:i]
+            has_t = any(c in ('t', 'T') for c in prefix)
+            if has_t:
+                # A real t/f-string prefix: use the brace-depth-aware scan
+                # so nested `{}` interpolations are handled correctly.
+                close = _find_tstring_closing_quote(stmt, i, qch)
                 if close != -1:
-                    ts = stmt[i:close + 1]
+                    if prefix:
+                        del result[-len(prefix):]
+                    ts = stmt[pstart:close + 1]
                     ph = f"__MOJO_STR_{idx_list[0]}__"
                     cache[ph] = ts
                     idx_list[0] += 1
                     result.append(ph)
                     i = close + 1
+                    continue
+                # No closing quote found for this "t-string" reading — fall
+                # through to the plain single-char fallback below, exactly
+                # as before.
+            else:
+                # An ordinary (non-t/f) string literal, e.g. `'t"'` or
+                # `r"\t"`: skip it as one whole unit so its contents (which
+                # may coincidentally look like a t-string prefix, e.g. a
+                # literal `t"` inside, or an escape like `\t` right before
+                # the closing quote) are never re-scanned char-by-char.
+                #
+                # Deliberately NOT _find_tstring_closing_quote here: its
+                # brace-depth tracking exists for real t-string
+                # interpolation, where `{`/`}` are guaranteed balanced —
+                # applying that same assumption to an ordinary string's
+                # literal content (e.g. mojo.py's own C-code-snippet string
+                # literals, full of unbalanced `{`/`}` as plain text) scans
+                # past the real closing quote entirely, misreading unrelated
+                # later source as part of this "string". A plain string
+                # only ever ends at its own closing quote, so a simple
+                # backslash-escape-aware scan is correct and sufficient.
+                j = i + 1
+                while j < len(stmt):
+                    if stmt[j] == '\\' and j + 1 < len(stmt):
+                        j += 2
+                        continue
+                    if stmt[j] == qch:
+                        break
+                    j += 1
+                if j < len(stmt):
+                    if prefix:
+                        del result[-len(prefix):]
+                    result.append(stmt[pstart:j + 1])
+                    i = j + 1
                     continue
         result.append(stmt[i])
         i += 1
@@ -844,21 +912,12 @@ def py_tokenize(src: str) -> list[Token]:
                 # this codegen's `and`/`or` evaluate BOTH operands (no
                 # short-circuit), so the `k > 0` bounds check must be its own
                 # `if`, never ANDed with the index it guards.
-                k = i
-                letters = 0
-                while letters < 2:
-                    if k <= 0:
-                        break
-                    _pfx_c = src[k - 1]
-                    _is_pfx = (_pfx_c == 'f' or _pfx_c == 'F' or _pfx_c == 'r' or _pfx_c == 'R'
-                               or _pfx_c == 'b' or _pfx_c == 'B' or _pfx_c == 'u' or _pfx_c == 'U'
-                               or _pfx_c == 't' or _pfx_c == 'T')
-                    if not _is_pfx:
-                        break
-                    k -= 1
-                    letters += 1
-                prev = src[k - 1] if k > 0 else ''
-                start = k if letters and not (prev.isalnum() or prev == '_') else i
+                #
+                # Shared with _process_nested_tstrings via
+                # `_string_prefix_start` (module-level helper) rather than
+                # duplicated here — see
+                # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+                start = _string_prefix_start(src, i)
                 quote3 = c * 3
                 if src[i:i + 3] == quote3:
                     j = i + 3

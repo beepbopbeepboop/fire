@@ -104,3 +104,77 @@ forward-looking check, so a `r"..."` (or any prefixed) string is always
 recognized and skipped as one opaque unit up front, and the t/f-string
 nested-brace detection only ever looks at strings that weren't already
 consumed by the ordinary-string fast path.
+
+## Status
+**Fixed**
+
+`mojo_compiler.py`:
+
+- Added a new module-level helper `_string_prefix_start(source, quote_pos)`
+  (~line 618, right before `_find_tstring_closing_quote`) that scans
+  *backward* from a quote character for up to 2 legitimate string-prefix
+  letters (`f`/`F`/`r`/`R`/`b`/`B`/`u`/`U`/`t`/`T`), returning the prefix's
+  true start position, or `quote_pos` itself if there's no real prefix
+  (correctly distinguishing a standalone prefix like `r"` from the tail of
+  a longer identifier, e.g. the `r` in `self.attr"`). This consolidates the
+  backward-scan logic that used to be duplicated inline inside
+  `replace_multiline_strings` (~line 847 previously) — that function now
+  just calls `_string_prefix_start(src, i)` instead of reimplementing the
+  scan (per CLAUDE.md's "consolidate duplicates" rule). The helper uses
+  explicit `==` character comparisons rather than `c in 'fFrRbBuUtT'`,
+  matching the pattern `replace_multiline_strings` already used deliberately
+  to avoid this codegen's compiled `in`-for-`char*` stub (documented inline
+  at the call site) — an `in`-on-string check here would silently break
+  under `make check-selfhost` even though ordinary Python tests wouldn't
+  catch it.
+
+- Rewrote `_process_nested_tstrings` (~line 697) to key its ordinary-string
+  vs. t/f-string dispatch off the QUOTE character (via
+  `_string_prefix_start`, scanning backward) instead of the old two-part
+  scheme: an ordinary-string guard that only skipped a string as one unit
+  when the character immediately before its quote was non-alphanumeric
+  (so `r"..."`'s `r` defeated it), plus a separate forward-looking
+  prefix-letter regex with no notion of "already inside a string" (so a
+  `t`/`T` letter that was actually part of another string's own escape
+  sequence, e.g. the `t` in `r"\t"`, could be misdetected as a bare
+  t-string's opening prefix). The new version determines, right at the
+  quote, whether any real prefix before it contains `t`/`T`: if so, it uses
+  the existing brace-depth-aware `_find_tstring_closing_quote` scan (for
+  real t/f-string interpolation); otherwise it does a simple
+  backslash-escape-aware scan to that string's own closing quote and
+  treats the whole thing (prefix + quoted content) as one opaque unit.
+  Prefix letters already appended to `result` character-by-character by
+  the loop's fallback (before the dispatch recognizes them as part of a
+  string) are removed via `del result[-len(prefix):]` and folded back in
+  as part of the placeholder/ordinary-string unit.
+
+Both prefix-detection implementations are now unified behind the one
+shared `_string_prefix_start` helper — no duplicate heuristic remains.
+
+### Quality gate results
+
+- `python3 test_gimple.py`: 173 passed, 0 failed (added tests 170
+  `raw_string_backslash_t_escape_then_another_string` and 171
+  `tstring_nested_braces_still_works`, confirming both the fix and that
+  legitimate nested-brace t/f-strings still work).
+- `python3 test_module_cache.py`: 64 passed, 0 failed.
+- `make check-selfhost`: passes (`mojo.py` compiling its own source, 1/1).
+- From-scratch stdlib dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+  `build_stdlib_dylib.build_stdlib(jobs=8)`): 0 `skip <module>:` lines
+  both before (stashed baseline) and after the fix — no regression, stdlib
+  still compiles 100% clean.
+
+### Manual verification
+
+- Minimal repro (`ESCAPES = {r"\t": (1, ord("\t"))}`) via `python3 mojo.py
+  run`: now runs and prints `{'\t': (1, 9)}` instead of raising
+  `SyntaxError: ... Expected COLON got RPAREN`.
+- `python3 mojo.py run /Users/mrs/net/Python-3.14.6/Lib/re/_parser.py`: the
+  original `SyntaxError` from this bug is gone (confirmed directly via
+  `mojo_compiler.py_tokenize` on the full file: tokenizes cleanly, 7638
+  tokens, no exception). Running the file end-to-end now proceeds past
+  parsing/tokenizing into interpretation and hits a distinct, unrelated,
+  pre-existing interpreter bug (`UnboundLocalError: cannot access local
+  variable 'mod' where it is not associated with a value` in
+  `myinterpreter.py`'s `execute_FromImportStmt`, ~line 2638) — out of scope
+  for this fix.

@@ -1776,6 +1776,38 @@ def main():
         print(x)
 """)
 
+    # 170. A raw string containing a `\t` escape (or any prefixed ordinary
+    # string whose content happens to look like a t-string prefix run
+    # ending right before its own closing quote), followed later in the
+    # same statement by another quoted string, must not corrupt the token
+    # stream — see
+    # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    # `_process_nested_tstrings`'s ordinary-string-skip guard used to check
+    # only the single character immediately before a quote for
+    # alphanumeric-ness, so `r"..."` (prefix letter `r` IS alphanumeric)
+    # was never skipped as one opaque unit; the scan then walked into the
+    # raw string's own escaped content and, on reaching the literal `t` in
+    # `\t`, misdetected the string's own closing quote as the *opening*
+    # quote of a brand-new bogus bare t-string, swallowing everything up
+    # to the next unrelated quote later in the statement.
+    test("raw_string_backslash_t_escape_then_another_string", """\
+def main():
+    d = {r"\\t": 1}
+    print(d[r"\\t"], ord("\\t"))
+""")
+
+    # 171. The legitimate t/f-string-with-nested-braces case
+    # `_process_nested_tstrings` exists for must still work after the fix
+    # above (dispatch now keyed off the quote character via a backward
+    # prefix scan, rather than a forward prefix-letter-then-quote regex).
+    test("tstring_nested_braces_still_works", """\
+def main():
+    a = 1
+    b = 2
+    s = t"L1: {t'L2: {a + b}'}"
+    print(s)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
