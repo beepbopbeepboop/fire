@@ -2677,6 +2677,12 @@ class GimpleGen:
         # would mis-type a same-named temp in the next (e.g. an open() file handle
         # read as a leftover MojoSet*, emitting MojoSet_read).
         self._actual_types:    dict[str, str]   = {}
+        # MojoBoundMethod* var/temp name -> the bound method's real return
+        # type, so a later call through the value (_lower_bound_method_call)
+        # narrows the result correctly instead of always assuming int64_t.
+        # Reset per function for the same reason _actual_types is: temp
+        # names (_tN) recycle across functions. See _lower_bound_method_value.
+        self._bound_method_ret_types: dict[str, str] = {}
         # Pre-seed known global dicts with their value types so .get() uses the right function.
         self._dict_val_types:  dict[str, str]   = {
             '_BIN_OPS': 'char *', '_GD_BIN_OPS': 'char *',
@@ -3320,6 +3326,12 @@ class GimpleGen:
     # Known runtime function signatures: fname -> (ret_type, [arg_types])
     # Used by _emit_call to ensure GIMPLE-valid argument types.
     _KNOWN_SIGS: dict = {
+        'mojo_bound_method_new':    ('MojoBoundMethod *', ['void *', 'void *']),
+        'mojo_bound_method_call_0': ('int64_t', ['MojoBoundMethod *']),
+        'mojo_bound_method_call_1': ('int64_t', ['MojoBoundMethod *', 'int64_t']),
+        'mojo_bound_method_call_2': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t']),
+        'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'conforms_to':           ('_Bool',      ['int64_t', 'int64_t']),
         'llabs':                 ('int64_t',   ['int64_t']),
         'labs':                  ('int64_t',   ['int64_t']),
@@ -5653,6 +5665,21 @@ class GimpleGen:
             field_type = field_map[node.member]
             t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
+        # A method referenced as a plain VALUE (not called here) — `f =
+        # self.b`, `readline.set_completer(self.complete)` — rather than a
+        # data field. _lower_struct_method_call already resolves `node.member`
+        # fine when it's the callee of a CallExpr (`self.b(...)`); reaching
+        # here means this MemberExpr is being lowered as an ordinary
+        # expression VALUE instead, and `node.member` genuinely isn't a
+        # field — falling through to the generic "unknown struct field"
+        # handling below used to blindly emit an invalid `{ov}->{member}`
+        # access (`'C' has no member named 'b'` from the C compiler; see
+        # bugs/CODEGEN_bound_method_as_value_not_resolved.md). Recognize the
+        # method case first and produce a real bound-method value instead.
+        if struct_name in self.struct_field_types and (
+                f"{struct_name}_{node.member}" in self.func_return_types
+                or (struct_name, node.member) in self._struct_method_signatures):
+            return self._lower_bound_method_value(struct_name, node.member, ot, ov)
         # Struct-level comptime alias (e.g. BitSet._words_size): not a physical
         # field — expand its defining expression with `Self`/the struct name
         # rebound to the accessed object, then lower that.
@@ -5707,6 +5734,84 @@ class GimpleGen:
                 field_type = 'int64_t'
             t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
+
+    def _lower_bound_method_value(self, struct_name: str, method: str,
+                                   self_type: str, self_val: str) -> tuple[str, str]:
+        """Lower a method referenced as a plain value (not called at this
+        site): `f = self.b`, `readline.set_completer(self.complete)`.
+
+        Produces a `MojoBoundMethod *` (runtime/mojo_runtime.h) pairing the
+        method's real C function pointer with the already-lowered `self`
+        receiver, reusing the same static-void*-var mechanism `_lower_
+        IdentExpr` already uses to take the address of a free function used
+        as a value (GIMPLE forbids `&func_name` as an rvalue) — see the
+        `func_return_types`/`BUILTIN_VALUE_MAP` branches above. A later call
+        through the resulting value (`f(...)`) is lowered by
+        _lower_bound_method_call, which re-supplies `self` as the method's
+        implicit first argument.
+
+        No call-site args exist yet at a bare-reference site, so overload
+        resolution can't pick among candidates by arity/type — only the
+        unambiguous case (a single overload) is resolved to its exact
+        mangled symbol; anything else falls back to _struct_method_csym's
+        own unsuffixed-name convention (matches its behavior for any other
+        caller that has no candidate list to resolve against).
+        """
+        candidates = self._struct_method_signatures.get((struct_name, method))
+        overload_id = ''
+        if candidates and len(candidates) == 1:
+            overload_id = candidates[0].get('overload_id', '') or ''
+        mangled = self._struct_method_csym(struct_name, method, overload_id)
+        ret_type = self.func_return_types.get(
+            mangled, self.func_return_types.get(f"{struct_name}_{method}", 'int64_t'))
+        self._funcptr_builtins_needed.add(mangled)
+        static_name = f'_funcptr_{mangled}'
+        fn_ptr = self._new_val('void *', static_name)
+        self_void = self_val if self_type == 'void *' else self._new_val('void *', f'(void *){self_val}')
+        t = self._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
+                             [('void *', fn_ptr), ('void *', self_void)])
+        self._bound_method_ret_types[t] = ret_type
+        return 'MojoBoundMethod *', t
+
+    def _lower_bound_method_call(self, fname_raw: str, node: CallExpr,
+                                  stored_ctype: str = 'MojoBoundMethod *') -> tuple[str, str]:
+        """Call a `MojoBoundMethod *` value (see _lower_bound_method_value):
+        `f = self.b; ...; f()`. Mirrors _lower_fnptr_call's runtime-helper
+        indirection (GIMPLE can't cast-and-call in one expression), but
+        through mojo_bound_method_call_N, which re-supplies the bound `self`
+        as the method's implicit first argument.
+
+        `stored_ctype` is `fname_raw`'s own declared C type — usually
+        `MojoBoundMethod *` directly, but the var-type-inference pre-pass can
+        default an assigned-from variable to `int64_t` (boxing the pointer,
+        same convention every other unfamiliar struct pointer gets in this
+        codegen); recover the real pointer through the same int64_t->void*->
+        real-type cast dance `_lower_MemberExpr`'s object-lowering path uses
+        for the identical situation.
+        """
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        n = len(arg_pairs)
+        bm_raw = self._c_names.get(fname_raw, fname_raw)
+        if stored_ctype == 'MojoBoundMethod *':
+            bm = bm_raw
+        else:
+            ip = self._ensure_local(stored_ctype, bm_raw)
+            vp = self._new_val('void *', f'(void *){ip}')
+            bm = self._new_val('MojoBoundMethod *', f'(MojoBoundMethod *){vp}')
+        widened = []
+        for at, av in arg_pairs:
+            widened.append(av if at == 'int64_t' else self._new_val('int64_t', f'(int64_t){av}'))
+        helper = f'mojo_bound_method_call_{min(n, 4)}'
+        ret_type = self._bound_method_ret_types.get(fname_raw, 'int64_t')
+        raw_t = self._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
+                                 [('int64_t', w) for w in widened[:4]])
+        if ret_type in ('int64_t', 'int'):
+            return ret_type, raw_t
+        if ret_type == 'void':
+            return 'int', self._new_val('int', '0')
+        t = self._new_val(ret_type, f'({ret_type}){raw_t}')
+        return ret_type, t
+
     # ── Binary operator lowering ──────────────────────────────────────────
 
     def _try_lower_slice_region_eq(self, slice_node, other_node, negate: bool):
@@ -8820,9 +8925,24 @@ class GimpleGen:
                 and fname_raw not in self.BUILTIN_VALUE_MAP):
             return self._lower_opaque_ctor(fname_raw, node)
 
+        # Local variable holding a bound-method value (`f = self.b; ...; f()`
+        # — see _lower_bound_method_value/bugs/
+        # CODEGEN_bound_method_as_value_not_resolved.md). Must be checked
+        # before the plain-function-pointer case just below: a
+        # `MojoBoundMethod *` also needs `self` re-supplied as the implicit
+        # first argument, which a bare fn-ptr call has no way to do. The var
+        # may be declared as a real `MojoBoundMethod *` OR boxed through
+        # `int64_t` — the general-purpose var-type-inference pre-pass has no
+        # idea about this new pointer type and can default an assigned-from
+        # variable to int64_t, same as it does for every other unfamiliar
+        # struct pointer; _get_actual_type resolves that the same way
+        # _lower_MemberExpr's own object-lowering path already does.
+        _fname_var_ctype = self.var_types.get(fname_raw, '')
+        if self._get_actual_type(_fname_var_ctype, fname_raw) == 'MojoBoundMethod *':
+            return self._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
+
         # Local variable (or captured variable) holding a function pointer.
         # Emit a proper function-pointer call via a C cast.
-        _fname_var_ctype = self.var_types.get(fname_raw, '')
         if _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
             return self._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
 
@@ -11020,6 +11140,12 @@ class GimpleGen:
                     self._elem_types[tname] = self._elem_types[v]
                 if v in self._dict_val_types:
                     self._dict_val_types[tname] = self._dict_val_types[v]
+            # `f = self.b` (a bound-method value, see _lower_bound_method_value):
+            # carry the method's real return type along with the variable so a
+            # later `f()` (_lower_bound_method_call) narrows the result
+            # correctly instead of assuming int64_t.
+            if dst == 'MojoBoundMethod *' and v in self._bound_method_ret_types:
+                self._bound_method_ret_types[tname] = self._bound_method_ret_types[v]
             self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):

@@ -1960,6 +1960,29 @@ def f():
 f()
 """, "defined more than once across mutually-exclusive if/elif/else branches")
 
+    # 177. A bound method referenced as a plain VALUE (not called
+    # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
+    # method directly (`self.b()`) already worked; a bare method reference
+    # used to fall through to the generic struct-field lookup and emit an
+    # invalid `self->b` field access (`'C' has no member named 'b'` from the
+    # C compiler, since `b` is a method, not a data field) — see
+    # bugs/CODEGEN_bound_method_as_value_not_resolved.md. Real stdlib
+    # trigger: Lib/cmd.py's `readline.set_completer(self.complete)` passes a
+    # bound method as a callback value the same way.
+    test("bound_method_as_value", """\
+class C:
+    def b(self):
+        return 42
+    def a(self):
+        f = self.b
+        return f()
+
+def main():
+    c = C()
+    print(c.a())
+main()
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

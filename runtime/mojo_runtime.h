@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <setjmp.h>
+#include <stdlib.h>  /* malloc — mojo_bound_method_new below; mojo_runtime.c includes this
+                       * header before its own <stdlib.h>, so the header must self-provide it. */
 
 /* Mojo type aliases */
 typedef int mojo_int;
@@ -46,6 +48,43 @@ static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t 
 }
 static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
+/* ── Bound method values ──────────────────────────────────────────────────
+ * A method referenced as a plain VALUE (not called immediately) — `f =
+ * self.b`, `readline.set_completer(self.complete)` — needs to carry both
+ * the method's C function pointer AND the bound `self` receiver as a single
+ * first-class value; a bare function pointer alone (mojo_fnptr_call_N above,
+ * used for FREE functions stored as values) has nowhere to keep `self`.
+ * gimple_codegen.py's _lower_bound_method_value allocates one of these
+ * (fn = the method's real, statically-known C symbol; self = the receiver
+ * object pointer already in hand at the reference site) and a later call
+ * through the stored value goes through mojo_bound_method_call_N, which
+ * re-supplies `self` as the method's implicit first argument — the same
+ * "self, then N ordinary args" convention every compiled struct method
+ * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
+typedef struct { void *fn; void *self; } MojoBoundMethod;
+
+static inline MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
+    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
+    bm->fn = fn;
+    bm->self = self;
+    return bm;
+}
+static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
+    return ((int64_t (*)(void *))bm->fn)(bm->self);
+}
+static inline int64_t mojo_bound_method_call_1(MojoBoundMethod *bm, int64_t a) {
+    return ((int64_t (*)(void *, int64_t))bm->fn)(bm->self, a);
+}
+static inline int64_t mojo_bound_method_call_2(MojoBoundMethod *bm, int64_t a, int64_t b) {
+    return ((int64_t (*)(void *, int64_t, int64_t))bm->fn)(bm->self, a, b);
+}
+static inline int64_t mojo_bound_method_call_3(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c);
+}
+static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
 }
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────

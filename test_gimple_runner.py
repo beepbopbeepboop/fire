@@ -199,6 +199,28 @@ def main() -> Int:
     # For now, test that the @ operator parses and compiles
     # (full implementation requires struct __matmul__ method binding)
 
+    # 10. A bound method referenced as a plain VALUE (not called
+    # immediately) — `f = self.b` — then invoked later via `f()`. Compiling
+    # this used to fail outright (a C compiler error, not just a wrong
+    # answer — see bugs/CODEGEN_bound_method_as_value_not_resolved.md), so
+    # this is a real behavioral round-trip check, not just "it compiles":
+    # confirms the stored value actually calls back into the right method
+    # WITH the right `self`, not merely that gcc accepts the generated C
+    # (the same "compiles but produces the wrong answer" class of bug the
+    # set()/list() ctor fix hit).
+    test_gimple_execution("gimple_bound_method_as_value", """\
+class C:
+    def b(self) -> Int:
+        return 42
+    def a(self) -> Int:
+        f = self.b
+        return f()
+
+def main() -> Int:
+    var c: C = C()
+    return c.a()
+""", expected_return=42)
+
 
 def main():
     gcc = find_gcc()
