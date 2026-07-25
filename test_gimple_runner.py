@@ -221,6 +221,24 @@ def main() -> Int:
     return c.a()
 """, expected_return=42)
 
+    # 11. An f-string whose nested `{...}` interpolation contains a string
+    # literal reusing the SAME quote character as the f-string's own
+    # delimiter (legal since PEP 701 / Python 3.12) — this used to truncate
+    # the f-string at the first reused quote (see
+    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md), producing a "could not
+    # be compiled" warning (falling back to mangled literal text). This is
+    # a real behavioral round-trip check (VALUE, not just "it compiles"):
+    # `len('ab')` interpolates to `2`, and the surrounding f-string text
+    # ("value: ") must have survived intact around the reused-quote call,
+    # so `len(x)` on the final string confirms both the interpolated value
+    # AND the literal text boundaries are correct, not just that some
+    # string got produced.
+    test_gimple_execution("gimple_fstring_same_quote_reused", """\
+def main() -> Int:
+    x = f'value: {len('ab')}'
+    return len(x)
+""", expected_return=len("value: 2"))
+
 
 def main():
     gcc = find_gcc()

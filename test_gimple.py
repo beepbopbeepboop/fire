@@ -1849,6 +1849,36 @@ def main():
     print(s)
 """)
 
+    # 171b/171c. An f-string whose nested `{...}` interpolation contains a
+    # string literal that reuses the SAME quote character as the f-string's
+    # own delimiter (legal since PEP 701 / Python 3.12, e.g.
+    # `f'...{g('a')}...'`). `_process_nested_tstrings` used to gate its
+    # brace-depth-aware closing-quote scan on a literal `t`/`T` in the
+    # prefix only (meant for Mojo's own `t"..."` template strings), so a
+    # plain `f`-prefixed string (no `t`/`T`) fell into the plain
+    # simple-scan-to-matching-quote branch, which has no `{...}` awareness
+    # and truncated the string at the first reused quote inside the braces.
+    # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md. Covers both quote
+    # characters, since the bug was quote-character-specific in the sense
+    # that a DIFFERENT nested quote already worked.
+    test("fstring_nested_same_single_quote_reused", """\
+def g(a, b):
+    return a + b
+
+def main():
+    x = f'result: {g('a', 'b')}'
+    print(x)
+""")
+
+    test("fstring_nested_same_double_quote_reused", """\
+def g(a, b):
+    return a + b
+
+def main():
+    x = f"result: {g("a", "b")}"
+    print(x)
+""")
+
     # 172. `_parse_type_ann_inner`'s trailing-operator gap: a type-shaped
     # annotation prefix (a real NAME) followed by a TRAILING operator that
     # continues an arbitrary (non-type) expression, e.g. `gamma: some < obj`.

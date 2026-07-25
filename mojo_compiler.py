@@ -732,8 +732,17 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
             qch = stmt[i]
             pstart = _string_prefix_start(stmt, i)
             prefix = stmt[pstart:i]
-            has_t = any(c in ('t', 'T') for c in prefix)
-            if has_t:
+            # Both t-strings (t"...") and f-strings (f"...") use the same
+            # `{expr}` interpolation syntax, so both need the brace-depth-
+            # aware, quote-reuse-safe closing-quote scan below — an
+            # f-string whose nested `{...}` expression contains a string
+            # literal reusing the SAME quote character as the f-string's
+            # own delimiter (legal since PEP 701 / Python 3.12, e.g.
+            # `f'result: {g('a', 'b')}'`) would otherwise be truncated at
+            # the first reused quote by the plain simple-scan branch below.
+            # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md.
+            needs_brace_aware_scan = any(c in ('t', 'T', 'f', 'F') for c in prefix)
+            if needs_brace_aware_scan:
                 # A real t/f-string prefix: use the brace-depth-aware scan
                 # so nested `{}` interpolations are handled correctly.
                 close = _find_tstring_closing_quote(stmt, i, qch)
