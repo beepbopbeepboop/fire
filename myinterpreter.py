@@ -2548,13 +2548,14 @@ class Interpreter:
                 return True
             return False
 
-    def execute_ImportStmt(self, node: N.ImportStmt):
-        """Execute `import mod` / `import mod as alias`.
+    def _bind_one_import(self, module: str, alias):
+        """Resolve and bind a single `import module [as alias]` target.
 
-        The interpreter runs the AST as Python, so we resolve through Python's
-        real import machinery and bind the resulting module object into scope.
-        Failing loudly (rather than the old silent skip) is the point: a skipped
-        import surfaces later as a baffling "name '...' is not defined".
+        Shared by execute_ImportStmt for both the primary `module`/`alias`
+        and every extra `(module, alias)` pair from a comma-separated
+        `import a, b, c` so all targets get identical resolution logic
+        (sys special-case, sibling .mojo preference, real importlib
+        fallback) instead of only the first being handled.
         """
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
@@ -2562,9 +2563,9 @@ class Interpreter:
         # what turned `mojo run mojo.py help` into unbounded recursion — the
         # nested interpretation of mojo.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
-        if node.module == 'sys' or node.module.split('.')[0] == 'sys':
-            self.scope.define(node.alias or 'sys', self.scope.get('sys'))
-            return None
+        if module == 'sys' or module.split('.')[0] == 'sys':
+            self.scope.define(alias or 'sys', self.scope.get('sys'))
+            return
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -2574,23 +2575,39 @@ class Interpreter:
         # instead of a clean import. A .mojo file sitting right next to the
         # importing source is a much stronger signal of intent than a
         # name collision with an installed/local Python module.
-        mod = self._load_mojo_sibling_module(node.module)
+        mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            if node.alias:
-                self.scope.define(node.alias, mod)
+            if alias:
+                self.scope.define(alias, mod)
             else:
-                self._bind_dotted_import(node.module, mod)
-            return None
+                self._bind_dotted_import(module, mod)
+            return
         try:
-            mod = importlib.import_module(node.module)
+            mod = importlib.import_module(module)
         except ModuleNotFoundError:
-            return None
-        if node.alias:
-            self.scope.define(node.alias, mod)
+            return
+        if alias:
+            self.scope.define(alias, mod)
         else:
             # `import a.b` binds the top-level package name `a`.
-            top = node.module.split('.')[0]
+            top = module.split('.')[0]
             self.scope.define(top, importlib.import_module(top))
+
+    def execute_ImportStmt(self, node: N.ImportStmt):
+        """Execute `import mod` / `import mod as alias` / `import a, b, c`.
+
+        The interpreter runs the AST as Python, so we resolve through Python's
+        real import machinery and bind the resulting module object into scope.
+        Failing loudly (rather than the old silent skip) is the point: a skipped
+        import surfaces later as a baffling "name '...' is not defined".
+
+        `node.extra` holds any additional comma-separated `(module, alias)`
+        targets past the first (`import a, b, c`) — each gets the same
+        resolution as the primary target via _bind_one_import.
+        """
+        self._bind_one_import(node.module, node.alias)
+        for extra_module, extra_alias in (node.extra or []):
+            self._bind_one_import(extra_module, extra_alias)
         return None
 
     def execute_FromImportStmt(self, node: N.FromImportStmt):

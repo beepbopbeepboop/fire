@@ -2075,6 +2075,16 @@ def _c_field_name(name: str) -> str:
     return safe
 
 
+def _import_targets(node) -> list:
+    """All `(module, alias)` targets of an ImportStmt: the primary
+    `node.module`/`node.alias` plus every extra comma-separated target from
+    `import a, b, c` (`node.extra`). Every ImportStmt consumer that binds/
+    declares a name must walk this full list, not just the primary target —
+    shared here instead of re-deriving `[(module, alias)] + extra` at each
+    call site."""
+    return [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
+
+
 def _c_escape(s: str) -> str:
     """Escape a Mojo string-literal's content for the body of a C string literal.
 
@@ -12168,8 +12178,7 @@ class GimpleGen:
     def _gen_stmt_ImportStmt(self, node):
         # import module [as alias][, module2 [as alias2], ...] — handle every
         # target in a comma-separated list (node.extra), not just the first.
-        targets = [(node.module, node.alias)] + list(getattr(node, 'extra', None) or [])
-        for module, alias in targets:
+        for module, alias in _import_targets(node):
             # `import a.b.c` (no alias) binds the top-level package name `a` in
             # scope (Python semantics) — not the invalid C identifier "a.b.c".
             local_name = alias if alias else module.split('.')[0]
@@ -14317,8 +14326,7 @@ class GimpleGen:
                     if isinstance(stmt, FromImportStmt):
                         modules_to_compile.add(stmt.module)
                     elif isinstance(stmt, ImportStmt):
-                        for _m, _a in ([(stmt.module, stmt.alias)]
-                                       + list(getattr(stmt, 'extra', None) or [])):
+                        for _m, _a in _import_targets(stmt):
                             modules_to_compile.add(_m)
                     elif isinstance(stmt, FunctionDef):
                         find_imports(stmt.body)
@@ -15787,12 +15795,13 @@ class GimpleGen:
         def _scan_try_imports(stmt_list):
             for _s in stmt_list:
                 if isinstance(_s, ImportStmt):
-                    _local = _s.alias if _s.alias else _s.module
-                    if _local not in self._global_var_types:
-                        self._global_var_types[_local] = 'int64_t'
-                        self._global_c_decl_types[_local] = 'int64_t'
-                        if _local not in self._global_to_module:
-                            self._global_to_module[_local] = _phase17_mod
+                    for _tm, _ta in _import_targets(_s):
+                        _local = _ta if _ta else _tm
+                        if _local not in self._global_var_types:
+                            self._global_var_types[_local] = 'int64_t'
+                            self._global_c_decl_types[_local] = 'int64_t'
+                            if _local not in self._global_to_module:
+                                self._global_to_module[_local] = _phase17_mod
                 elif isinstance(_s, TryStmt):
                     _scan_try_imports(_s.body or [])
                     for _h in (_s.handlers or []):
@@ -16306,9 +16315,11 @@ class GimpleGen:
         all_scan_for_mods = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for _ms in all_scan_for_mods:
             if isinstance(_ms, ImportStmt):
-                _mn = _ms.module  # module name, not alias (globals struct uses module name)
-                if _mn and not _mn.startswith('_'):
-                    all_modules_to_declare.add(_mn)
+                # module name, not alias (globals struct uses module name) — every
+                # comma-separated target (`import a, b, c`), not just the first.
+                for _mn, _ in _import_targets(_ms):
+                    if _mn and not _mn.startswith('_'):
+                        all_modules_to_declare.add(_mn)
             elif isinstance(_ms, FromImportStmt):
                 _mn = _ms.module
                 if _mn and not _mn.startswith('_') and '.' not in _mn:
@@ -16463,13 +16474,14 @@ class GimpleGen:
                             self._global_c_decl_types[check_name] = 'MojoSet *'
                             self._global_var_types[check_name] = 'MojoSet *'
             elif isinstance(stmt, ImportStmt):
-                local_name = stmt.alias if stmt.alias else stmt.module
-                if local_name not in _declared_globals:
-                    global_decls.append(f"int64_t {local_name};")
-                    _declared_globals.add(local_name)
-                    self._global_var_types[local_name] = 'int64_t'
-                    if local_name not in self._global_to_module:
-                        self._global_to_module[local_name] = current_mod_name
+                for _tm, _ta in _import_targets(stmt):
+                    local_name = _ta if _ta else _tm
+                    if local_name not in _declared_globals:
+                        global_decls.append(f"int64_t {local_name};")
+                        _declared_globals.add(local_name)
+                        self._global_var_types[local_name] = 'int64_t'
+                        if local_name not in self._global_to_module:
+                            self._global_to_module[local_name] = current_mod_name
         # Scan current module + imported stmts for module-level variable declarations.
         # Also recurse into TryStmt/IfStmt/ForStmt bodies at module level since Python
         # allows module-level assignments inside try/except (e.g. mojo_compiler = None).
@@ -16612,7 +16624,8 @@ class GimpleGen:
                     if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr) and stmt.target.name == gname:
                         init_code = _extract_init_expr(stmt.value)
                         break
-                    elif isinstance(stmt, ImportStmt) and (stmt.alias if stmt.alias else stmt.module) == gname:
+                    elif isinstance(stmt, ImportStmt) and gname in (
+                            (_ta if _ta else _tm) for _tm, _ta in _import_targets(stmt)):
                         init_code = '0'
                         break
                 if (gname, c_type, g_mtype) not in self._module_globals[current_mod_name]:

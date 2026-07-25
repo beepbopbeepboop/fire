@@ -1619,6 +1619,21 @@ def test():
     print(key)
 """)
 
+    # 160. Multi-name import `import a, b, c` must bind *every* name, not
+    # just the first (bugs/INTERP_multi_name_import_only_binds_first.md).
+    # gimple_codegen.py's ImportStmt lowering used to declare a module-marker
+    # global only for node.module/node.alias; any comma-separated target
+    # past the first (node.extra) was undeclared, so referencing it here
+    # would fail to compile as an unknown identifier.
+    test("multi_name_import_binds_all", """\
+import sys, os, difflib
+
+def main():
+    var a = sys
+    var b = os
+    var c = difflib
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
