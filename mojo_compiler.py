@@ -3807,6 +3807,21 @@ class Parser:
                 else: parts.append(tok.value)
             parts.append("}")
             return self._consume_trailing_annotation_ops(prefix + "".join(parts))
+        elif t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
+            # `...` (Ellipsis) in annotation position, e.g. `g: ...` or
+            # `-> ...`. The tokenizer produces THREE separate DOT tokens for
+            # `...` (there's no single ELLIPSIS token kind) — mirrors
+            # _parse_primary's identical three-DOT lookahead for Ellipsis as
+            # an ordinary expression. Without this case, DOT falls to the
+            # generic catch-all below, which consumes only the first dot and
+            # leaves the other two dangling for the parameter-list parser to
+            # choke on. Annotation text is never semantically type-checked
+            # downstream, so the literal string "..." is a safe, sufficient
+            # representation. Also route through _consume_trailing_annotation_ops
+            # for consistency with every other branch (e.g. `g: ... | None`).
+            # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+            self._advance(); self._advance(); self._advance()
+            return self._consume_trailing_annotation_ops(prefix + "...")
         else:
             # Last-resort fallback: some other single token occupies the
             # annotation position (e.g. a bare operator or literal). Consume

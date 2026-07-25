@@ -1847,6 +1847,24 @@ def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rm
 print("ok")
 """)
 
+    # 174. `_parse_type_ann_inner` had no case for `...` (Ellipsis) in
+    # annotation position. The tokenizer produces THREE separate DOT tokens
+    # for `...` (no single ELLIPSIS token kind), and the dispatch's
+    # NAME/KW/STRING/LPAREN/LBRACKET/LBRACE branches don't match a DOT, so it
+    # fell to the generic catch-all single-token fallback, which consumed
+    # only the FIRST dot and left the other two dangling for the
+    # parameter-list parser to choke on with a confusing "Expected NAME or KW
+    # got DOT" error. Mirrors CPython's own Lib/test/test_annotationlib.py
+    # test_literals, which exercises a battery of literal annotations
+    # (NUMBER, STRING, bytes, bool, None, Ellipsis, complex) in one
+    # signature — `g: ...` is the Ellipsis case.
+    # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+    test("annotation_literals_battery", """\
+def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
+    pass
+print("ok")
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

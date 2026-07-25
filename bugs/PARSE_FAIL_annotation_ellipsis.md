@@ -72,3 +72,36 @@ semantically type-checked downstream (per the tracing already done in
 `6ee8291`), returning the literal string `"..."` is a safe, sufficient
 representation — no need to model a real `EllipsisLiteral` type-annotation
 node.
+
+## Status
+**Fixed**
+
+Added an explicit three-DOT-lookahead branch to `_parse_type_ann_inner`
+(`mojo_compiler.py`), placed right before the generic single-token
+catch-all fallback: if the current token and the next two are all `DOT`,
+consume all three and treat `"..."` as the annotation text, mirroring
+`_parse_primary`'s existing identical lookahead used for Ellipsis as an
+ordinary expression. Wired the result through `_consume_trailing_annotation_ops`
+too, for consistency with every other branch (handles `g: ... | None`-shaped
+trailing operators, same as `bb28e80`'s fix did for its own branches).
+
+Added `test_gimple.py`'s `annotation_literals_battery` (test #174), covering
+CPython's full `test_literals` battery in one signature (`a: 1, b: 1.0,
+c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j`), alongside the
+pre-existing `annotation_trailing_binary_op_battery` (#172) and
+`annotation_leading_literal_trailing_op_battery` (#173) from the two prior
+fixes in this chain.
+
+Quality gate (see CLAUDE.md): `test_gimple.py` 176/176 passed,
+`test_module_cache.py` 64/64 passed, `make check-selfhost` clean, and a
+from-scratch stdlib dylib rebuild stayed at 0 skipped modules before and
+after the fix (baseline via `git stash`, both builds 0 `skip <module>:`
+lines).
+
+Manually re-ran the minimal repro (`def f(g: ...): pass`) — now parses and
+runs cleanly, printing `ok`. Re-ran `mojo.py run` against the real
+`Lib/test/test_annotationlib.py`: parsing now progresses past
+`test_literals` (line 447), stopping at a new, unrelated issue in
+`test_shenanigans` (line 540): `y: (1).__class__` — a parenthesized-literal
+`.__class__` attribute-access expression in annotation position. That's a
+separate, out-of-scope parsing gap, not covered by this fix.
