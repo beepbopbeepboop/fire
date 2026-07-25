@@ -2309,7 +2309,7 @@ class Parser:
                 exc_type = names
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
-            elif self._peek().kind in ("NAME", "KW") and not self._is_kw("as"):
+            elif self._peek().kind != "COLON" and not self._is_kw("as"):
                 # The common case is a single (possibly dotted) exception
                 # type, e.g. `except ValueError:` / `except
                 # asyncio.CancelledError:`. Try that fast path first (it's
@@ -2325,12 +2325,22 @@ class Parser:
                 # general expression, using the same "expr but don't
                 # swallow a following `as`" precedence trick _parse_with
                 # uses for `with EXPR as alias:`.
-                saved = self._pos
-                name = self._parse_dotted_name()
-                if self._peek().kind == "COLON" or self._is_kw("as"):
-                    exc_type = name
+                #
+                # The dotted-name fast path only makes sense when the type
+                # position actually starts with a NAME/KW token; anything
+                # else (INT/FLOAT/STRING literals, etc. — not unambiguously
+                # "no type here", but not name-shaped either, e.g. a
+                # malformed `except 42:`) has no dotted-name shape to try at
+                # all, so go straight to the general expression parse.
+                if self._peek().kind in ("NAME", "KW"):
+                    saved = self._pos
+                    name = self._parse_dotted_name()
+                    if self._peek().kind == "COLON" or self._is_kw("as"):
+                        exc_type = name
+                    else:
+                        self._pos = saved
+                        exc_type = self._parse_expr(_KW_PREC['as'] + 1)
                 else:
-                    self._pos = saved
                     exc_type = self._parse_expr(_KW_PREC['as'] + 1)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
