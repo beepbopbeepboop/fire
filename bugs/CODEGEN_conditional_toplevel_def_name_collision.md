@@ -178,3 +178,5 @@ fails at link time with "Undefined symbols ... _greet", not a compile error.
   `bugs/COMPILE_FAIL_multiprocessing_connection.md`, e.g. `invalid operands
   to binary %`; those are not addressed here and are no longer even reached
   since this new check now fails fast).
+
+Commit: 2577b4f (see `git log`).
