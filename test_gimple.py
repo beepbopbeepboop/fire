@@ -556,6 +556,25 @@ def set_missing(x: Int) -> Int:
     return 0
 """)
 
+    # 56b. set(iterable) constructor — see
+    # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md: this used to
+    # silently produce an EMPTY set (the constructor arg's value was
+    # discarded). Behavioral (len/iteration) coverage is in
+    # test_gimple_runner.py; this just checks it compiles.
+    test("set_ctor_from_list", """\
+def make_set_from_list() -> Int:
+    var s: Set = set([1, 2, 3, 3])
+    return len(s)
+""")
+
+    # 56c. list(iterable) constructor — same bug, `_lower_builtin_list`
+    # never even looked at its argument.
+    test("list_ctor_from_list", """\
+def make_list_from_list() -> Int:
+    var l: List = list([1, 2, 3])
+    return len(l)
+""")
+
     # ── Multi-target assignment ──────────────────────────────────────────
 
     # 57. a = b = expr

@@ -170,6 +170,30 @@ def main() -> Int:
     return x
 """, expected_return=22)
 
+    # 10. set(iterable) / list(iterable) constructors actually populate the
+    # collection from the argument, instead of silently producing an empty
+    # one — see bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md. This is
+    # a genuine behavioral check (len() + a sum over the iterated elements),
+    # not just "does it compile": the bug compiled clean and returned 0 for
+    # everything below before the fix.
+    test_gimple_execution("gimple_set_ctor_from_list", """\
+def main() -> Int:
+    var s: Set = set([1, 2, 3, 3])
+    var total: Int = 0
+    for x in s:
+        total = total + x
+    return len(s) * 10 + total
+""", expected_return=36)  # len == 3 (deduped), elements sum to 1+2+3 == 6
+
+    test_gimple_execution("gimple_list_ctor_from_list", """\
+def main() -> Int:
+    var l: List = list([1, 2, 3])
+    var total: Int = 0
+    for x in l:
+        total = total + x
+    return len(l) * 10 + total
+""", expected_return=36)  # len == 3, elements sum to 1+2+3 == 6
+
     # 9. Matrix multiply operator (simple test with scalar multiplication)
     # TODO: Full matrix multiply example with actual 2D arrays once struct literals work
     # For now, test that the @ operator parses and compiles

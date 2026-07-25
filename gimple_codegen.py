@@ -2514,6 +2514,29 @@ class GimpleGen:
         self._emitted_dispatch_typedefs: set[str] = set()  # Track typedef names already emitted
         self._emitted_dispatch_tables: set[str] = set()    # Track table names already emitted
         self._funcptr_builtins_needed: set[str] = set()    # builtin C names needing static void* vars
+        # Tracks which of the above have already had their `static void *
+        # _funcptr_X = (void *)X;` declaration emitted SOMEWHERE in the final
+        # .ci — shared with every _compile_imported_module temp_gen (see
+        # there) the same way _emitted_ptr_helpers/_emitted_structs/etc.
+        # already are. Without this, each imported module compiles through
+        # its OWN throwaway GimpleGen instance with its own unshared
+        # _funcptr_builtins_needed set; if two different modules' source each
+        # independently use the same builtin name as a bare value (e.g. both
+        # reference plain `dict`/`list`/`set`, not called), each module's own
+        # emitted code carries its own top-level `static void *
+        # _funcptr_mojo_make_dict = ...` declaration, and since all modules'
+        # generated code is textually concatenated into one translation unit
+        # for the self-hosted build, gcc rejects the duplicate top-level
+        # static as a redefinition. See
+        # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md's quality-gate
+        # notes: fixing set()/list() to actually walk their iterable argument
+        # (reusing the comprehension iteration machinery) let previously
+        # mid-lowering-abandoned functions in myinterpreter.py/
+        # build_stdlib_dylib.py compile all the way through for the first
+        # time, which is what newly exposed this latent cross-module
+        # collision (only regex_compile.py used to reach a bare `dict`
+        # reference at all).
+        self._emitted_funcptr_builtins: set[str] = set()
         self._auto_stubbed: set[str] = set()               # function names auto-stubbed in _emit_call
         self._current_filename: str = ""  # filename for #line directives
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
@@ -2841,6 +2864,12 @@ class GimpleGen:
                     temp_gen._global_var_types = self._global_var_types
                     temp_gen._global_c_decl_types = self._global_c_decl_types
                     temp_gen._emitted_ptr_helpers = self._emitted_ptr_helpers
+                    # share: a builtin-as-bare-value static (`_funcptr_mojo_make_dict`
+                    # etc.) must be declared at most once across the WHOLE transitive
+                    # closure, not once per submodule's own throwaway GimpleGen — see
+                    # _emitted_funcptr_builtins's docstring at its declaration.
+                    temp_gen._funcptr_builtins_needed = self._funcptr_builtins_needed
+                    temp_gen._emitted_funcptr_builtins = self._emitted_funcptr_builtins
                     temp_gen._external_protos = self._external_protos  # share: bubble extern protos up to root preamble
                     temp_gen._global_inline_defs = self._global_inline_defs
                     temp_gen._emitted_allocs = self._emitted_allocs
@@ -8962,10 +8991,30 @@ class GimpleGen:
         for a in node.args: self.lower_expr(a)
         return 'int', self._new_val('int', '0  /* __import__ stubbed */')
 
+    def _lower_ctor_from_iterable(self, kind: str, node: CallExpr) -> tuple[str, str]:
+        """Shared `set(iterable)` / `list(iterable)` lowering: build a
+        synthetic `{x for x in <arg>}` / `[x for x in <arg>]` Comprehension
+        node and hand it to `_lower_comprehension`, so `set(...)`/`list(...)`
+        get the exact same generic-iterable handling (range/MojoList*/
+        MojoStr*/MojoDict*(keys)/MojoSet*, plus the int64_t-boxed-pointer
+        resolution `_lower_comprehension` already does) as real
+        comprehensions and `for x in <iterable>:` loops, instead of a third,
+        narrower iteration scheme. See bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md.
+        """
+        if not node.args:
+            new_fn = 'mojo_set_new' if kind == 'set' else 'mojo_list_new'
+            res_type = 'MojoSet *' if kind == 'set' else 'MojoList *'
+            return res_type, self._new_val(res_type, f'{new_fn} ()')
+        self.temp_counter += 1
+        var = f"_ctor_elem{self.temp_counter}"
+        gen = Generator(target=var, iterable=node.args[0], conditions=[],
+                         line=node.line, col=node.col)
+        compr = Comprehension(kind=kind, element=IdentExpr(var, node.line, node.col),
+                               generators=[gen], line=node.line, col=node.col)
+        return self._lower_comprehension(compr)
+
     def _lower_builtin_set(self, node: CallExpr) -> tuple[str, str]:
-        t = self._new_val('MojoSet *', 'mojo_set_new ()')
-        for a in node.args: self.lower_expr(a)
-        return 'MojoSet *', t
+        return self._lower_ctor_from_iterable('set', node)
 
     def _lower_builtin_dict(self, node: CallExpr) -> tuple[str, str]:
         if not node.args:
@@ -8982,7 +9031,7 @@ class GimpleGen:
         return 'MojoDict *', t
 
     def _lower_builtin_list(self, node: CallExpr) -> tuple[str, str]:
-        return 'MojoList *', self._new_val('MojoList *', 'mojo_list_new ()')
+        return self._lower_ctor_from_iterable('list', node)
 
     def _lower_builtin_open(self, node: CallExpr) -> tuple[str, str]:
         # open(path) — read mode
@@ -17560,12 +17609,23 @@ class GimpleGen:
             parts.append('')
 
         # ── Static function pointer vars for builtins (avoids &func in GIMPLE) ──
+        # `_funcptr_builtins_needed`/`_emitted_funcptr_builtins` are shared across
+        # every _compile_imported_module temp_gen for the same reason
+        # _emitted_ptr_helpers/_emitted_structs are: all modules' generated code
+        # is textually concatenated into one translation unit for the self-hosted
+        # build, so declaring the SAME `static void * _funcptr_X` twice (once per
+        # module that happens to reference builtin X as a bare value) is a real
+        # gcc redefinition error, not just wasted output — skip any name this run
+        # (or an earlier sub-gen sharing the same sets) already emitted.
         if self._funcptr_builtins_needed:
-            for c_name in sorted(self._funcptr_builtins_needed):
-                # Sanitize name to be valid C identifier (skip casts like ((int)0))
-                if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
-                    parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
-            parts.append('')
+            _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
+            if _new_names:
+                for c_name in _new_names:
+                    # Sanitize name to be valid C identifier (skip casts like ((int)0))
+                    if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
+                        parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
+                    self._emitted_funcptr_builtins.add(c_name)
+                parts.append('')
 
         # ── Dispatch table initializations (from Phase C) ──────────────────
         # Emit static const initializations for all planned dispatch tables
