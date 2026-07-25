@@ -130,6 +130,17 @@ class FloatLiteral:
     col: int = 0
 
 @dataclass
+class ImagLiteral:
+    """Python-style imaginary-number literal (`0j`, `1.5j`, `3J`). `value`
+    is the magnitude BEFORE multiplying by i — i.e. the digits that preceded
+    the `j`/`J` suffix, parsed exactly like a FloatLiteral's mantissa — not
+    the resulting complex number itself; `myinterpreter.py`'s
+    `eval_ImagLiteral` is what turns it into a MojoComplex(0.0, value)."""
+    value: float
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class StringLiteral:
     value: str
     line: int = 0
@@ -593,7 +604,7 @@ class ComptimeVarStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del'}
 
-_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 
 # ── T-string helpers: handle nested braces/interpolations ────────────────────────
@@ -2553,7 +2564,7 @@ class Parser:
         # named `await` (`x = await`, `await.foo`) still reads as an identifier.
         if (t.kind == "NAME" and t.value == "await"
                 and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
-                    "FLOAT", "LPAREN", "LBRACKET", "LBRACE")):
+                    "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE")):
             self._advance()
             return self._parse_unary()
         if t.kind == "OP" and t.value in ("-", "+", "~"):
@@ -2878,6 +2889,8 @@ class Parser:
             self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
             self._advance(); return FloatLiteral(float(t.value), line=line, col=col)
+        if t.kind == "IMAG":
+            self._advance(); return ImagLiteral(float(t.value[:-1]), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):
             self._advance()
             return BoolLiteral(t.value == "True", line=line, col=col)
@@ -3467,6 +3480,7 @@ def emit(node, indent: int = 0) -> str:
     pad = "    " * indent
     if isinstance(node,IntLiteral): return str(node.value)
     if isinstance(node,FloatLiteral): return repr(node.value)
+    if isinstance(node,ImagLiteral): return repr(node.value) + "j"
     if isinstance(node,BoolLiteral): return str(node.value)
     if isinstance(node,StringLiteral): return node.value
     if isinstance(node,EllipsisLiteral): return "..."

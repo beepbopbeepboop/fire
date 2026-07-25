@@ -668,6 +668,97 @@ def _mojo_as_dim3(d):
     return (getattr(d, 'x', 1), getattr(d, 'y', 1), getattr(d, 'z', 1))
 
 
+class MojoComplex:
+    """Minimal runtime representation of Python's `j`/`J`-suffixed imaginary
+    literal (`0j`, `1.5j`, `3J` — see mojo_compiler.py's `ImagLiteral`) and
+    the complex values that result from combining one with a real number via
+    `+`/`-`. This deliberately does NOT implement the full Python `complex`
+    API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
+    bugs/PARSE_FAIL_complex_number_literal.md's scope guidance, construction
+    + printing + `+`/`-` against int/float/other MojoComplex is enough to
+    cover the two real stdlib patterns that motivated this (a complex value
+    sitting in a set/list literal, never used in further arithmetic).
+    `__add__`/`__sub__`/`__radd__`/`__rsub__` are all that's needed for
+    `left + right`/`left - right` in eval_BinaryOp to "just work" via
+    Python's own operator dispatch — no changes to eval_BinaryOp itself."""
+    __slots__ = ('real', 'imag')
+
+    def __init__(self, real=0.0, imag=0.0):
+        self.real = float(real)
+        self.imag = float(imag)
+
+    @staticmethod
+    def _coerce(other):
+        if isinstance(other, MojoComplex):
+            return other.real, other.imag
+        if isinstance(other, (int, float)) and not isinstance(other, bool):
+            return float(other), 0.0
+        return None
+
+    def __add__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(self.real + c[0], self.imag + c[1])
+
+    def __radd__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(c[0] + self.real, c[1] + self.imag)
+
+    def __sub__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(self.real - c[0], self.imag - c[1])
+
+    def __rsub__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(c[0] - self.real, c[1] - self.imag)
+
+    def __eq__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return self.real == c[0] and self.imag == c[1]
+
+    def __hash__(self):
+        # Deliberately id(self)-based, like `_MojoDeviceContext.__hash__`
+        # above (a pre-existing example in this same file of the same
+        # eq-by-value/hash-by-identity tradeoff) — NOT `hash((self.real,
+        # self.imag))`: the self-hosted compiler (gimple_codegen.py) only
+        # declares Python's `hash()` builtin as an unimplemented extern stub
+        # ("undefined symbol _hash" at link time), and a `int(float_expr)`
+        # replacement hit an unrelated existing gimple_codegen miscompile
+        # (int() return type inferred as `char *` in this context). Per
+        # bugs/PARSE_FAIL_complex_number_literal.md's scope guidance this
+        # class isn't meant to support full value-equality hashing (e.g.
+        # collapsing `{1, 1+0j}` into `{1}` the way real Python's `complex`
+        # does) — just construct/print/`+`/`-` without crashing.
+        return id(self)
+
+    @staticmethod
+    def _fmt(x: float) -> str:
+        """Match Python complex repr's per-part float formatting: same
+        shortest-round-trip digits as float repr, but WITHOUT the trailing
+        `.0` float repr always adds to a whole number (e.g. `1.0` -> `1`,
+        matching `repr(1+0j) == '(1+0j)'`, not `'(1.0+0j)'`)."""
+        s = repr(x)
+        if s.endswith('.0'):
+            s = s[:-2]
+        return s
+
+    def __repr__(self):
+        # A pure-imaginary value (real part is exactly positive zero) prints
+        # as just "Nj", matching Python (`repr(3j) == '3j'`); everything
+        # else, including negative-zero real parts, prints in full
+        # "(a+bj)"/"(a-bj)" form (`repr(-0j) == '(-0-0j)'`).
+        if self.real == 0.0 and math.copysign(1.0, self.real) == 1.0:
+            return f"{self._fmt(self.imag)}j"
+        sign = '-' if math.copysign(1.0, self.imag) < 0 else '+'
+        return f"({self._fmt(self.real)}{sign}{self._fmt(abs(self.imag))}j)"
+
+    __str__ = __repr__
+
+
 class _MojoEnqueueFunctionCall:
     """`ctx.enqueue_function[kernel](*args, grid_dim=.., block_dim=..)` —
     there's no real GPU to dispatch to, so this "launches" the kernel by
@@ -3147,6 +3238,13 @@ class Interpreter:
     def eval_FloatLiteral(self, expr: N.FloatLiteral):
         """Evaluate float literal."""
         return expr.value
+
+    def eval_ImagLiteral(self, expr: N.ImagLiteral):
+        """Evaluate a Python-style imaginary-number literal (`0j`, `1.5j`).
+        `expr.value` is the magnitude before the implicit multiply-by-i
+        (e.g. 2.5 for `2.5j`), so the literal itself is purely imaginary:
+        `2.5j` -> MojoComplex(real=0.0, imag=2.5)."""
+        return MojoComplex(0.0, expr.value)
 
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
