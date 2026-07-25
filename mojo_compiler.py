@@ -2277,9 +2277,28 @@ class Parser:
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
             elif self._peek().kind in ("NAME", "KW") and not self._is_kw("as"):
-                # A single (possibly dotted) exception type, e.g.
-                #   except ValueError:      except asyncio.CancelledError:
-                exc_type = self._parse_dotted_name()
+                # The common case is a single (possibly dotted) exception
+                # type, e.g. `except ValueError:` / `except
+                # asyncio.CancelledError:`. Try that fast path first (it's
+                # stored as a plain string, which the interpreter's and
+                # gimple_codegen's per-type tag dispatch special-case for
+                # speed). But real Python's `except` clause actually takes a
+                # full *expression* — a bare name is just the common
+                # special case of that — evaluated once and checked against
+                # the raised exception. So if what follows the dotted name
+                # isn't the end of the clause (COLON or `as`), it wasn't a
+                # plain dotted name after all (e.g. a function call like
+                # `except get_error_types():`) — rewind and reparse it as a
+                # general expression, using the same "expr but don't
+                # swallow a following `as`" precedence trick _parse_with
+                # uses for `with EXPR as alias:`.
+                saved = self._pos
+                name = self._parse_dotted_name()
+                if self._peek().kind == "COLON" or self._is_kw("as"):
+                    exc_type = name
+                else:
+                    self._pos = saved
+                    exc_type = self._parse_expr(_KW_PREC['as'] + 1)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
             self._expect("COLON")
