@@ -430,6 +430,10 @@ char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
+/* shlex.join(iterable): space-join, POSIX-quoting each element like CPython's
+ * shlex.quote() (a distinct helper from mojo_str_join since shlex.join takes
+ * no separator argument at all — see gimple_codegen.py's shlex.join dispatch). */
+char *mojo_shlex_join(MojoList *parts);
 
 /* ── SIMD select helper ──────────────────────────────────────────────────
  * Lowers SIMD[_Bool,N].select(a, b) → cond ? a : b for scalar path.   */

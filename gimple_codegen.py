@@ -3325,6 +3325,17 @@ class GimpleGen:
         'mojo_str_find_from':    ('int64_t',   ['char *', 'char *', 'int64_t']),
         'mojo_str_cat':          ('char *',    ['char *', 'char *']),
         'mojo_str':              ('char *',    ['void *']),
+        # mojo_map/mojo_filter (runtime/mojo_runtime.{h,c}): `void *mojo_map(void
+        # *func, void *iterable)` is a pointer-returning passthrough shim (it
+        # just hands back `iterable` today — no actual per-element mapping is
+        # performed at the runtime-helper level). Without this entry, the temp
+        # holding the call result defaulted to int64_t (this dict's absence is
+        # exactly what BUG-2026 CODEGEN_map_over_untyped_param_arg's "assignment
+        # ... from void * makes integer from pointer" GCC error came from) —
+        # see bugs/CODEGEN_map_over_untyped_param_arg.md.
+        'mojo_map':              ('void *',    ['void *', 'void *']),
+        'mojo_filter':           ('void *',    ['void *', 'void *']),
+        'mojo_shlex_join':       ('char *',    ['MojoList *']),
         'mojo_str_isalnum':      ('int',       ['char *']),
         'mojo_str_isdigit':      ('int',       ['char *']),
         'mojo_str_isalpha':      ('int',       ['char *']),
@@ -4249,6 +4260,17 @@ class GimpleGen:
                         # For first argument (index 0) of known functions, use known types
                         if arg_index == 0 and func_name in BUILTIN_PARAM_TYPES:
                             inferred[pname] = BUILTIN_PARAM_TYPES[func_name]
+                            break
+                        # map(fn, iterable) — the iterable is arg index 1 (not 0,
+                        # unlike list()/sorted()/len() above), and it must come out
+                        # pointer-shaped (MojoList *) so it round-trips through
+                        # mojo_map's `void *` iterable parameter/return instead of
+                        # defaulting to int64_t, which produces a real GCC
+                        # -Wint-conversion error at the mojo_map call site (passing
+                        # an int64_t where mojo_map expects void*) — see
+                        # bugs/CODEGEN_map_over_untyped_param_arg.md.
+                        if func_name == 'map' and arg_index == 1:
+                            inferred[pname] = 'MojoList *'
                             break
 
                 # If no type inferred from functions, try from struct member accesses
@@ -7006,6 +7028,28 @@ class GimpleGen:
                         self._emit(f'  {t} = mojo_re_sub_str ({pat_val}, {repl_val}, {src_val});')
                     return 'char *', t
 
+            # shlex.join(iterable) — a *module-level* function (one arg: the
+            # iterable), not a string method. Without this, `func.obj` being
+            # the opaque, unresolved `shlex` module reference (an untyped
+            # global that defaults to 0/NULL) fell through to the generic
+            # char*.join() dispatch below, treating the module reference
+            # itself as the separator string — `mojo_str_join(NULL, parts)`
+            # returns "" unconditionally regardless of `parts`, silently
+            # dropping every element. See
+            # bugs/CODEGEN_map_over_untyped_param_arg.md (the `shlex.join(map(str,
+            # args))` repro this surfaced in) — mojo_shlex_join is a real
+            # runtime helper (space-joins its parts, POSIX-quoting each one
+            # via shlex.quote's own rule) rather than reusing str.join's
+            # separator-based mojo_str_join with a wrong/absent separator.
+            if module_name == 'shlex' and method_name == 'join' and len(node.args) == 1:
+                arg_type, arg_val = self.lower_expr(node.args[0])
+                if arg_type != 'MojoList *':
+                    if arg_type in ('int', 'char'):
+                        arg_val = self._new_val('int64_t', f'(int64_t){arg_val}')
+                    arg_val = self._new_val('MojoList *', f'(MojoList *){arg_val}')
+                t = self._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
+                return 'char *', t
+
             if module_name == 'gimple_codegen' and method_name in (
                     'compile_to_gimple', 'compile_to_gimple_cached'):
                 # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
@@ -7580,7 +7624,15 @@ class GimpleGen:
 
     def _lower_str_method(self, ov: str, method: str, args: list) -> tuple:
         """Lower char * string method calls."""
-        arg_pairs = [(self.lower_expr(a)[0], self.lower_expr(a)[1]) for a in args]
+        # Lower each argument exactly once. Calling self.lower_expr(a) twice
+        # per argument (once for [0], once for [1]) used to re-run codegen for
+        # the SAME subexpression, emitting it twice into the function body —
+        # harmless for a pure literal, but for something with real codegen
+        # side effects (e.g. `map(str, args)` inside `sep.join(map(str, args))`)
+        # this duplicated the entire mojo_map(...) call and left the first,
+        # unused copy's temp with a mismatched/dead type. See
+        # bugs/CODEGEN_map_over_untyped_param_arg.md.
+        arg_pairs = [self.lower_expr(a) for a in args]
         loaded_args = []
         for at, av in arg_pairs:
             if av.startswith('_slit_') or av in self._str_pool.values():

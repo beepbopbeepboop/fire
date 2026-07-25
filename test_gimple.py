@@ -1634,6 +1634,35 @@ def main():
     var c = difflib
 """)
 
+    # 161. map(str, param) over a plain/unannotated parameter, used inside
+    # another expression (str.join(...)) — bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # Before the fix this failed to even compile (GCC -Wint-conversion: `args`
+    # defaulted to int64_t instead of MojoList*, and the temp holding
+    # mojo_map(...)'s pointer result was declared int64_t too), AND the
+    # `map(str, args)` sub-expression was silently lowered/emitted twice
+    # (once into a dead, unused temp) by a `_lower_str_method` bug that called
+    # `self.lower_expr(a)` twice per join() argument. Assert both: it compiles
+    # AND mojo_map appears exactly once in the generated C.
+    _map_src = """\
+def join_strs(args) -> String:
+    return ", ".join(map(str, args))
+"""
+    _map_ok, _map_c_src, _map_stderr = gimple_compiles(_map_src)
+    _map_call_count = _map_c_src.count('mojo_map (')
+    if _map_ok and _map_call_count == 1:
+        print("PASS  map_over_untyped_param_arg"); _PASS += 1
+    else:
+        print("FAIL  map_over_untyped_param_arg")
+        print(f"      mojo_map(...) call count = {_map_call_count} (expected 1)")
+        print("      --- generated C ---")
+        for i, line in enumerate(_map_c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _map_ok:
+            print("      --- gcc stderr ---")
+            for line in _map_stderr.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

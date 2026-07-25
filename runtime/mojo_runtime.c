@@ -2084,6 +2084,78 @@ char *mojo_str_join(char *sep, MojoList *parts) {
     return out;
 }
 
+/* Is `c` safe to leave unquoted in a shell word, per CPython shlex.quote's
+ * _find_unsafe = re.compile(r'[^\w@%+=:,./-]', re.ASCII) ? */
+static int _mojo_shlex_char_safe(char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    switch (c) {
+        case '_': case '@': case '%': case '+': case '=':
+        case ':': case ',': case '.': case '/': case '-':
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* POSIX-quote one element like CPython's shlex.quote(): empty string -> '',
+ * a string with only "safe" characters is returned unchanged, otherwise
+ * wrapped in single quotes with any embedded "'" replaced by '"'"'. */
+static char *_mojo_shlex_quote_one(const char *s) {
+    if (!s || s[0] == '\0') return "''";
+    int needs_quoting = 0;
+    for (const char *p = s; *p; p++) {
+        if (!_mojo_shlex_char_safe(*p)) { needs_quoting = 1; break; }
+    }
+    if (!needs_quoting) return (char *)s;
+    size_t len = strlen(s);
+    size_t cap = len * 4 + 3; /* worst case: every char is a quote */
+    char *out = (char *)malloc(cap);
+    if (!out) return (char *)s;
+    char *p = out;
+    *p++ = '\'';
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\'') {
+            /* close quote, escaped literal quote, reopen quote */
+            *p++ = '\''; *p++ = '"'; *p++ = '\''; *p++ = '"'; *p++ = '\'';
+        } else {
+            *p++ = s[i];
+        }
+    }
+    *p++ = '\'';
+    *p = '\0';
+    return out;
+}
+
+/* shlex.join(iterable): CPython's shlex.join is `" ".join(quote(s) for s in
+ * split_command)` — a fixed space separator plus per-element POSIX quoting,
+ * unlike str.join(iterable)'s arbitrary caller-supplied separator. */
+char *mojo_shlex_join(MojoList *parts) {
+    if (!parts || parts->len == 0) return "";
+    size_t total = 0;
+    char **quoted = (char **)malloc(sizeof(char *) * (size_t)parts->len);
+    if (!quoted) return "";
+    for (int64_t i = 0; i < parts->len; i++) {
+        char *s = mojo_list_get_str(parts, i);
+        char *q = _mojo_shlex_quote_one(s);
+        quoted[i] = q;
+        total += strlen(q);
+        if (i < parts->len - 1) total += 1; /* space separator */
+    }
+    char *out = (char *)malloc(total + 1);
+    if (!out) { free(quoted); return ""; }
+    char *p = out;
+    for (int64_t i = 0; i < parts->len; i++) {
+        size_t n = strlen(quoted[i]);
+        memcpy(p, quoted[i], n);
+        p += n;
+        if (i < parts->len - 1) *p++ = ' ';
+    }
+    *p = '\0';
+    free(quoted);
+    return out;
+}
+
 char *string_lower(char *str) {
     if (!str) return str;
 
