@@ -1865,6 +1865,33 @@ def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
 print("ok")
 """)
 
+    # 175. `_parse_type_ann_inner`'s `LPAREN` branch (a parenthesized-
+    # expression-shaped annotation like `(1)`) returned its opaquely-captured
+    # text immediately, unlike the LBRACKET/LBRACE/catch-all branches (fixed
+    # in bb28e80 to route through `_consume_trailing_annotation_ops`) — so a
+    # trailing `.attr` member-access continuation after the parens, e.g.
+    # `y: (1).__class__`, left `.__class__` dangling for the parameter-list
+    # parser to choke on with "Expected NAME or KW got DOT". Worse than the
+    # three branches fixed in bb28e80: even routing through
+    # `_consume_trailing_annotation_ops` alone wouldn't suffice, since that
+    # helper only continues `OP`-kind tokens (`|`, `&`, ...), not a `DOT`
+    # chain. Fixed by introducing `_finish_type_ann_tail`, a single shared
+    # continuation tail (dotted-name loop + call-parens + subscript loop +
+    # trailing-op consumption) that EVERY branch of `_parse_type_ann_inner`
+    # (NAME/KW, LPAREN, LBRACKET, LBRACE, ellipsis, catch-all) now routes
+    # through, instead of each branch needing its own early-return special
+    # case — this was the fourth follow-on bug in this exact function in one
+    # session (6ee8291 -> 6e6020f -> bb28e80 -> c2933a7 -> this one), so a
+    # structural fix was chosen over a fifth narrow patch. Mirrors CPython's
+    # own Lib/test/test_annotationlib.py test_shenanigans.
+    # See bugs/PARSE_FAIL_annotation_paren_then_dot.md.
+    test("annotation_paren_then_dot_battery", """\
+x = 1
+def f(x: x | (1).__class__, y: (1).__class__):
+    pass
+print("ok")
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

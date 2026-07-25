@@ -3705,7 +3705,14 @@ class Parser:
         # (PEP 484). Strip the quotes and treat the contents as the type name.
         if self._peek().kind == "STRING":
             return prefix + self._strip_string_prefix_and_quotes(self._advance().value)
-        # Handle parenthesized types like () for unit type
+        # Handle parenthesized types like () for unit type, e.g. `y: (1).__class__`
+        # (a parenthesized-expression-shaped annotation, PEP 649-legal but not a
+        # real type). Captured as opaque text and then, same as every other
+        # branch below, falls through to the shared continuation tail (dotted-
+        # name loop / call-parens / subscript loop / trailing-op consumption)
+        # instead of returning immediately — see
+        # bugs/PARSE_FAIL_annotation_paren_then_dot.md for why an early return
+        # here left a trailing `.attr`/`|`/`&` continuation dangling.
         if self._peek().kind == "LPAREN":
             name = prefix + "("
             self._advance()
@@ -3724,7 +3731,7 @@ class Parser:
                 else:
                     name += t.value
             name += ")"
-            return name
+            return self._finish_type_ann_tail(name)
         # Allow KW tokens as type names (e.g., "let", "var", "if")
         t = self._peek()
         if t.kind == "NAME": name = prefix + self._advance().value
@@ -3785,7 +3792,7 @@ class Parser:
             # gimple_codegen.py's `_mojo_type`/`_resolve_type` harmlessly
             # fall through to the int64_t default for unrecognized text —
             # so this is safe to leave un-type-checked.
-            return self._consume_trailing_annotation_ops(prefix + "[" + self._capture_bracketed_text() + "]")
+            return self._finish_type_ann_tail(prefix + "[" + self._capture_bracketed_text() + "]")
         elif t.kind == "LBRACE":
             # An annotation position occupied by a dict/set-literal-shaped
             # thing, e.g. `-> {}:` (an empty dict literal used, legally but
@@ -3806,7 +3813,7 @@ class Parser:
                 elif tok.kind == "EOF": break
                 else: parts.append(tok.value)
             parts.append("}")
-            return self._consume_trailing_annotation_ops(prefix + "".join(parts))
+            return self._finish_type_ann_tail(prefix + "".join(parts))
         elif t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             # `...` (Ellipsis) in annotation position, e.g. `g: ...` or
             # `-> ...`. The tokenizer produces THREE separate DOT tokens for
@@ -3817,11 +3824,11 @@ class Parser:
             # leaves the other two dangling for the parameter-list parser to
             # choke on. Annotation text is never semantically type-checked
             # downstream, so the literal string "..." is a safe, sufficient
-            # representation. Also route through _consume_trailing_annotation_ops
+            # representation. Also route through _finish_type_ann_tail
             # for consistency with every other branch (e.g. `g: ... | None`).
             # See bugs/PARSE_FAIL_annotation_ellipsis.md.
             self._advance(); self._advance(); self._advance()
-            return self._consume_trailing_annotation_ops(prefix + "...")
+            return self._finish_type_ann_tail(prefix + "...")
         else:
             # Last-resort fallback: some other single token occupies the
             # annotation position (e.g. a bare operator or literal). Consume
@@ -3831,7 +3838,36 @@ class Parser:
             # expression (e.g. `radd: 1 + a` — a NUMBER-shaped prefix followed
             # by a binary op; see
             # bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md).
-            return self._consume_trailing_annotation_ops(prefix + self._advance().value)
+            return self._finish_type_ann_tail(prefix + self._advance().value)
+        return self._finish_type_ann_tail(name)
+
+    def _finish_type_ann_tail(self, name: str) -> str:
+        """Shared continuation tail for `_parse_type_ann_inner`: given an
+        already-captured type-shaped prefix `name` (from ANY of that
+        function's branches — NAME/KW, LPAREN, LBRACKET, LBRACE, the
+        three-DOT ellipsis case, or the single-token catch-all), consume
+        every further continuation the token stream might hold — a dotted
+        `.member` chain, a call-parens application `(...)`, chained
+        `[...]`/`.attr`/`(...)` subscript/call combinations, and finally any
+        trailing PEP 604 union/intersection or other stray operator via
+        `_consume_trailing_annotation_ops` — and return the fully-extended
+        text.
+
+        Every branch of `_parse_type_ann_inner` now routes through here
+        instead of returning its own opaquely-captured text directly. This
+        was added as the fix for the fourth in a chain of annotation-parsing
+        gaps found in one session (see
+        bugs/PARSE_FAIL_annotation_paren_then_dot.md): each earlier fix
+        (6ee8291, 6e6020f, bb28e80, c2933a7) patched exactly one branch to
+        handle exactly one missing continuation shape (a trailing binary
+        op, then specifically `|`/`&`, then LPAREN/LBRACKET/LBRACE routing
+        through the op-continuation helper) — but none of those handled a
+        trailing `.attr` DOT-chain after a non-NAME-shaped prefix, e.g.
+        `y: (1).__class__`. Rather than patch the LPAREN branch a fifth
+        time and leave LBRACKET/LBRACE/ellipsis/catch-all with the same
+        latent gap for a sixth, this single shared tail is now the ONE place
+        that knows how to consume a continuation, and every branch supplies
+        it with its own already-parsed prefix."""
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
