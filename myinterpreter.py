@@ -3203,7 +3203,19 @@ class Interpreter:
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
         if expr.name == 'super':
-            return self._eval_super(expr)
+            # `super` is only real Python-style base-class magic when
+            # nothing in scope actually shadows it. Real Python gives
+            # `super` no keyword status at all, so a user-defined struct
+            # literally named `super` (see CPython's own test_super.py,
+            # which does exactly this) must resolve to that ordinary
+            # binding instead — matching real Python's name-shadowing
+            # semantics rather than this dialect's `super()` base-class
+            # sugar. Only fall back to the magic behavior when `super`
+            # isn't bound to anything in the current scope chain.
+            try:
+                return self.scope.get(expr.name)
+            except NameError:
+                return self._eval_super(expr)
         if expr.name == 'Self':
             return self._resolve_Self(expr)
         if expr.name.startswith('`'):

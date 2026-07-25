@@ -1408,9 +1408,12 @@ class Parser:
                 #
                 # Only commit to the struct-definition parse when the shape
                 # that follows could actually BE one: `struct` immediately
-                # followed by a NAME (per _parse_struct's `self._expect
-                # ("NAME")`, struct names are NAME-only, unlike function
-                # names which also accept KW/backtick) and then one of `[`
+                # followed by a name-like token (per _parse_struct's name
+                # read via `self._ident()`, struct names may be NAME/KW/
+                # backtick-quoted, just like function names — a struct can
+                # itself be named after another keyword, e.g. `struct
+                # super:`, mirroring CPython's own test_super.py which
+                # defines a class named `super`) and then one of `[`
                 # (struct param block), `(` (base-class list), or `:`
                 # (straight into the body). Anything else — `struct.attr`
                 # (attribute access), `struct(...)` used as a call, `struct
@@ -1420,7 +1423,9 @@ class Parser:
                 # KW tokens as identifiers via _parse_primary).
                 if t.value == "struct":
                     nxt, nxt2 = self._peek(1), self._peek(2)
-                    looks_like_structdef = nxt.kind == "NAME" and nxt2.kind in (
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_structdef = name_like and nxt2.kind in (
                         "LBRACKET", "LPAREN", "COLON")
                     if looks_like_structdef:
                         return self._parse_struct()
@@ -2153,7 +2158,7 @@ class Parser:
             self._advance()
         else:
             self._expect("KW", "struct")
-        name = self._expect("NAME").value
+        name = self._ident()
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
         if self._peek().kind == "LBRACKET":
