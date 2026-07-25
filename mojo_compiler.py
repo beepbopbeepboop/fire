@@ -1536,11 +1536,23 @@ class Parser:
         # Collect a comma-separated group starting with `expr` — this is
         # either a tuple-unpacking target (if followed by `=`) or a bare
         # comma/tuple expression statement (if not).
-        if self._peek().kind == "COMMA":
+        saw_comma = self._peek().kind == "COMMA"
+        if saw_comma:
             first_group = [expr]
             while self._peek().kind == "COMMA":
                 self._advance()
                 if self._peek().kind == "ASSIGN": break
+                # A trailing comma with nothing meaningful after it (e.g.
+                # `print(1),` as its own statement, or `a, b,` — a plain
+                # expression statement, not a tuple-unpacking target) —
+                # matches the terminator check the chained-assignment RHS
+                # loop below already does. Without this, `expr,` at
+                # statement end tried to parse another expression starting
+                # at NEWLINE/DEDENT/EOF and blew up with "Unexpected
+                # NEWLINE". Leave the comma consumed; first_group already
+                # has everything that came before it.
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                    break
                 first_group.append(self._parse_expr(0))
         else:
             first_group = [expr]
@@ -1577,8 +1589,12 @@ class Parser:
                 return AssignStmt(target=targets[0], value=val, line=line, col=col)
             return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
 
-        if len(first_group) > 1:
-            # Not an assignment, treat as expression statement with comma operator
+        if saw_comma:
+            # Not an assignment, treat as expression statement with comma
+            # operator — a 1-element `first_group` here means a single
+            # trailing comma (`EXPR,`), which is still a 1-element tuple
+            # literal in Python, just like `len(first_group) > 1` (`EXPR1,
+            # EXPR2,` etc.) is a multi-element one.
             return ExprStmt(TupleExpr(elements=first_group), line=line, col=col)
         expr = first_group[0]
         # Annotated assignment: target: Type [= value]
