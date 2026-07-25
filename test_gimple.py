@@ -1693,6 +1693,52 @@ def main():
     print(x, y)
 """)
 
+    # 164. `var` used as a plain identifier (Python compat: real Python has
+    # no `var` keyword) followed by member access/assignment, a method
+    # call, or as one of several tuple-unpack targets must NOT be misparsed
+    # as a var declaration — see bugs/PARSE_FAIL_var_as_identifier_member_access.md.
+    # The statement-level `_parse_stmt` dispatch for `var` only special-cased
+    # the `var = expr` shape; anything else (`.`, `,`, etc. right after
+    # `var`) unconditionally committed to `_parse_var_decl()` and crashed on
+    # the unexpected next token.
+    test("var_as_plain_ident_member_access", """\
+struct C:
+    var x: Int
+    fn __init__(out self):
+        self.x = 0
+    fn bump(mut self):
+        self.x = self.x + 1
+
+def main():
+    var = C()
+    var.x = 5
+    var.bump()
+    print(var.x)
+""")
+
+    # 165. `var` as one of several plain tuple-unpack targets (`var, x = ...`)
+    # must fall through to ordinary assignment parsing, not var-decl parsing.
+    test("var_as_plain_ident_tuple_unpack_target", """\
+def get_pair() -> (Int, Int):
+    return (1, 2)
+
+def main():
+    var, x = get_pair()
+    print(var, x)
+""")
+
+    # 166. Legitimate var-declaration forms must still work after the fix
+    # above: bare declaration, type-annotated declaration, and declaration
+    # with an initializer.
+    test("var_decl_forms_still_work", """\
+def main():
+    var a: Int
+    a = 1
+    var b: Int = 2
+    var c = 3
+    print(a, b, c)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

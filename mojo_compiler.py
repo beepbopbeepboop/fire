@@ -1411,12 +1411,38 @@ class Parser:
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
             if t.value == 'var':
-                # "var = expr" means 'var' is used as a plain identifier (Python compat)
-                # "var name" or "var name:" is a proper var declaration
-                if self._peek(1).kind == "ASSIGN":
-                    pass  # fall through to expression/assignment handling below
-                else:
+                # `var` is ambiguous, same as `fn`/`struct`: it's both this
+                # dialect's declaration keyword AND a perfectly ordinary
+                # Python identifier (arguably more common as a plain name
+                # than `fn`/`struct`/`enum` ever are). Only commit to
+                # _parse_var_decl() when the shape that follows could
+                # actually BE a declaration. Per _parse_var_decl itself, a
+                # real declaration is `var` followed by either:
+                #   - a name-like token (NAME/KW/backtick-STRING) that then
+                #     becomes the declared name (optionally followed by
+                #     `,` more names, `:` a type annotation, `=` a value,
+                #     or nothing — a bare uninitialized `var x`), or
+                #   - `:` directly, meaning `var` itself is the field name
+                #     being annotated (`var: Type`) — this shape parses
+                #     identically whether `var` is "the keyword declaring a
+                #     field named var" or "the identifier var being
+                #     annotated", so there's no actual ambiguity to resolve
+                #     there.
+                # Anything else — `var.attr` (member access), `var.method()`
+                # (call), `var,` where var is itself one of several plain
+                # tuple-unpack targets (`var, x = ...`), `var == y`,
+                # `var[0]`, `var =`/`var +=` (assignment), bare `var` alone,
+                # etc. — means `var` is being used as an ordinary identifier
+                # here, so fall through to ordinary expression/assignment
+                # parsing (which already accepts KW tokens as identifiers
+                # via _parse_primary).
+                nxt = self._peek(1)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_vardecl = name_like or nxt.kind == "COLON"
+                if looks_like_vardecl:
                     return self._parse_var_decl()
+                # else: fall through to expression/assignment handling below
             if t.value == 'if': return self._parse_if()
             if t.value == 'while': return self._parse_while()
             if t.value == 'for': return self._parse_for()
