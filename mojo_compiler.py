@@ -182,6 +182,22 @@ class BinaryOp:
     col: int = 0
 
 @dataclass
+class CompareChain:
+    """Python-style chained comparison: `a < b < c` (or any length/mix of
+    comparison operators, e.g. `a < b == c > d`). NOT the same as nested
+    BinaryOp: each of `operands` is evaluated exactly once, left-to-right,
+    and the whole chain short-circuits to False as soon as one
+    `operands[i] ops[i] operands[i+1]` link fails, without ever feeding a
+    comparison's boolean RESULT into the next comparison as an operand
+    (that was the original bug this node exists to avoid — see
+    bugs/CHAINED_COMPARISON_WRONG_RESULT.md). `len(operands) ==
+    len(ops) + 1`."""
+    operands: list
+    ops: list
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class UnaryOp:
     op: str
     operand: object
@@ -963,6 +979,17 @@ _KW_PREC = {
     'is': 5,
     'as': 13,
 }
+
+# Precedence level shared by every operator that can participate in a
+# Python-style chained comparison (`a < b <= c != d`): the OP-form operators
+# in _PREC ('==','!=','<','<=','>','>=') and the KW-form ones in _KW_PREC
+# ('in', 'is', plus the two-token 'not in'/'is not' forms). All chain at the
+# SAME precedence in real Python regardless of which of these forms is used
+# — 'not in' is deliberately treated as this same level here (not
+# _KW_PREC['not']'s lower value 4, which only governs the unrelated prefix
+# `not expr` operator) so `a in b not in c` chains correctly.
+_COMPARE_CHAIN_PREC = 5
+_COMPARE_OPS = {'==', '!=', '<', '<=', '>', '>='}
 
 def _synthesize_fieldwise_inits(stmts: list) -> list:
     """Mojo's @fieldwise_init decorator synthesizes a memberwise
@@ -2429,6 +2456,36 @@ class Parser:
         return DelStmt(targets=targets, line=t.line, col=t.col)
 
     # ── Expressions ──────────────────────────────────────────────────
+    def _at_compare_op(self) -> bool:
+        """True if the current token begins a comparison-chain operator:
+        one of the OP-form comparisons, or the KW-form 'in'/'is', or the
+        two-token 'not in' (only when 'not' is actually followed by 'in' —
+        a bare 'not' is the unrelated prefix operator, handled elsewhere)."""
+        t = self._peek()
+        if t.kind == "OP":
+            return t.value in _COMPARE_OPS
+        if t.kind == "KW":
+            if t.value in ("in", "is"):
+                return True
+            if t.value == "not" and self._peek(1).kind == "KW" and self._peek(1).value == "in":
+                return True
+        return False
+
+    def _consume_compare_op(self) -> str:
+        """Consume and return the canonical operator string for a
+        comparison-chain link. Assumes _at_compare_op() was already checked."""
+        t = self._peek()
+        if t.kind == "OP":
+            return self._advance().value
+        kw = self._advance().value  # 'in', 'is', or 'not' (of 'not in')
+        if kw == "is" and self._is_kw("not"):
+            self._advance()
+            return "is not"
+        if kw == "not":
+            self._advance()  # consume the 'in' that _at_compare_op() confirmed follows
+            return "not in"
+        return kw  # 'in', or plain 'is'
+
     def _parse_expr(self, min_prec: int):
         # Boolean `not` is a low-precedence prefix operator (binds looser than
         # comparison/`in`, tighter than `and`): `not a in b` == `not (a in b)`.
@@ -2441,6 +2498,28 @@ class Parser:
             left = self._parse_unary()
         while True:
             t = self._peek()
+            # Comparison-chain operators (==, !=, <, <=, >, >=, in, is, not
+            # in, is not) all bind at _COMPARE_CHAIN_PREC and, unlike every
+            # other binary operator, DON'T simply nest left-to-right into
+            # BinaryOp(BinaryOp(...), ...) — real Python (and this parser)
+            # treats `a < b < c` as one chained comparison `(a < b) and (b <
+            # c)`, not `(a < b) < c`. A single link (the overwhelmingly
+            # common case, e.g. plain `a < b`) still produces exactly the
+            # same BinaryOp node as before this existed; only an actual
+            # 2+-link chain produces a CompareChain, appended to
+            # incrementally as more links are found.
+            if self._at_compare_op():
+                if _COMPARE_CHAIN_PREC < min_prec: break
+                op = self._consume_compare_op()
+                right = self._parse_expr(_COMPARE_CHAIN_PREC + 1)
+                if isinstance(left, CompareChain):
+                    left.operands.append(right)
+                    left.ops.append(op)
+                elif self._at_compare_op():
+                    left = CompareChain(operands=[left, right], ops=[op])
+                else:
+                    left = BinaryOp(op=op, left=left, right=right)
+                continue
             if t.kind == "OP":
                 prec = _PREC.get(t.value, -1)
                 if prec < min_prec: break
@@ -2454,10 +2533,6 @@ class Parser:
                 prec = _KW_PREC[t.value]
                 if prec < min_prec: break
                 op = self._advance().value
-                if op == "not" and self._is_kw("in"):
-                    self._advance(); op = "not in"
-                elif op == "is" and self._is_kw("not"):
-                    self._advance(); op = "is not"
                 right = self._parse_expr(prec + 1)
                 left = BinaryOp(op=op, left=left, right=right)
             elif t.kind == "KW" and t.value == "if" and min_prec == 0:
@@ -3401,6 +3476,11 @@ def emit(node, indent: int = 0) -> str:
         args = ", ".join(emit(a, 0) for a in node.args)
         return f"{f}({args})"
     if isinstance(node,BinaryOp): return f"({emit(node.left, 0)} {node.op} {emit(node.right, 0)})"
+    if isinstance(node,CompareChain):
+        parts = [emit(node.operands[0], 0)]
+        for op, operand in zip(node.ops, node.operands[1:]):
+            parts.append(f"{op} {emit(operand, 0)}")
+        return "(" + " ".join(parts) + ")"
     if isinstance(node,UnaryOp):  return f"({node.op} {emit(node.operand, 0)})"
     if isinstance(node,TernaryExpr): return f"({emit(node.then_val, 0)} if {emit(node.condition, 0)} else {emit(node.else_val, 0)})"
     if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value, 0)})"

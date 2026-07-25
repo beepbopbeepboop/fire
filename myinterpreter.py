@@ -21,6 +21,12 @@ import collections
 from dataclasses import dataclass
 import mojo_compiler as N
 
+# Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
+# (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
+# chained comparisons, `a < b < c`) dispatch through this same set/method
+# rather than duplicating the operator table.
+_COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'}
+
 
 class ReturnValue(Exception):
     """Exception used to implement return statements."""
@@ -3576,15 +3582,7 @@ class Interpreter:
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
-        elif op == '==': return left == right
-        elif op == '!=': return left != right
-        elif op == '<': return left < right
-        elif op == '>': return left > right
-        elif op == '<=': return left <= right
-        elif op == '>=': return left >= right
-        elif op == 'in': return left in right
-        elif op == 'is': return left is right
-        elif op == 'is not': return left is not right
+        elif op in _COMPARE_OPS: return self._apply_compare_op(op, left, right)
         elif op == '&': return self._wrap_int(left & right)
         elif op == '|': return self._wrap_int(left | right)
         elif op == '^': return self._wrap_int(left ^ right)
@@ -3592,6 +3590,42 @@ class Interpreter:
         elif op == '>>': return left >> right
         else:
             raise NotImplementedError(f"{self._loc(expr)}Binary operator {op!r} not implemented")
+
+    def _apply_compare_op(self, op: str, left, right):
+        """Apply a single comparison-family operator to two already-evaluated
+        operands. Factored out of eval_BinaryOp so eval_CompareChain (Python
+        chained comparisons, `a < b < c`) can reuse the identical per-link
+        semantics instead of re-deriving them — this is also where 'not in'
+        got added: eval_BinaryOp's own operator table never had a case for
+        it (only 'in'/'is'/'is not'), so a plain `x not in y` outside any
+        chain silently raised NotImplementedError before this."""
+        if op == '==': return left == right
+        elif op == '!=': return left != right
+        elif op == '<': return left < right
+        elif op == '>': return left > right
+        elif op == '<=': return left <= right
+        elif op == '>=': return left >= right
+        elif op == 'in': return left in right
+        elif op == 'not in': return left not in right
+        elif op == 'is': return left is right
+        elif op == 'is not': return left is not right
+        else:
+            raise NotImplementedError(f"Comparison operator {op!r} not implemented")
+
+    def eval_CompareChain(self, expr: N.CompareChain):
+        """Python-style chained comparison `a < b < c`: each operand is
+        evaluated exactly once, left-to-right; the whole expression
+        short-circuits to False (without evaluating any remaining operands)
+        the moment one `operands[i] ops[i] operands[i+1]` link fails, and is
+        True only if every link holds — `(a < b) and (b < c)`, never `(a <
+        b) < c`. See bugs/CHAINED_COMPARISON_WRONG_RESULT.md."""
+        left = self.eval_expr(expr.operands[0])
+        for op, operand_expr in zip(expr.ops, expr.operands[1:]):
+            right = self.eval_expr(operand_expr)
+            if not self._apply_compare_op(op, left, right):
+                return False
+            left = right
+        return True
 
     def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""

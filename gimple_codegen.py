@@ -14,7 +14,7 @@ import dataclasses
 
 from mojo_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, EllipsisLiteral,
-    IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr,
+    IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
     ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator,
     VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt,
@@ -236,6 +236,10 @@ def _find_idents(node) -> set:
     """Recursively find all identifiers in an AST node."""
     if isinstance(node, IdentExpr):           return {node.name}
     if isinstance(node, BinaryOp):            return _find_idents(node.left) | _find_idents(node.right)
+    if isinstance(node, CompareChain):
+        r = set()
+        for o in node.operands: r |= _find_idents(o)
+        return r
     if isinstance(node, UnaryOp):             return _find_idents(node.operand)
     if isinstance(node, CallExpr):
         r = set()
@@ -346,6 +350,10 @@ class EscapeAnalyzer:
     def _idents(self, node) -> set:
         if isinstance(node, IdentExpr):           return {node.name}
         if isinstance(node, BinaryOp):            return self._idents(node.left) | self._idents(node.right)
+        if isinstance(node, CompareChain):
+            r = set()
+            for o in node.operands: r |= self._idents(o)
+            return r
         if isinstance(node, UnaryOp):             return self._idents(node.operand)
         if isinstance(node, CallExpr):
             r = set()
@@ -779,6 +787,9 @@ class DispatchSolver:
         if isinstance(expr, BinaryOp):
             yield from self._walk_expr(expr.left)
             yield from self._walk_expr(expr.right)
+        elif isinstance(expr, CompareChain):
+            for o in expr.operands:
+                yield from self._walk_expr(o)
         elif isinstance(expr, UnaryOp):
             yield from self._walk_expr(expr.operand)
         elif isinstance(expr, CallExpr):
@@ -1283,6 +1294,9 @@ class FunctionCompilability:
         elif isinstance(expr, BinaryOp):
             yield from self._walk_expr_nodes(expr.left)
             yield from self._walk_expr_nodes(expr.right)
+        elif isinstance(expr, CompareChain):
+            for o in expr.operands:
+                yield from self._walk_expr_nodes(o)
         elif isinstance(expr, TernaryExpr):
             yield from self._walk_expr_nodes(expr.condition)
             yield from self._walk_expr_nodes(expr.then_val)
@@ -2142,6 +2156,10 @@ def _used_idents_node(node) -> set:
     if isinstance(node, IdentExpr):         return {node.name}
     if isinstance(node, FunctionDef):        return set()
     if isinstance(node, BinaryOp):           return _used_idents_node(node.left) | _used_idents_node(node.right)
+    if isinstance(node, CompareChain):
+        r = set()
+        for o in node.operands: r |= _used_idents_node(o)
+        return r
     if isinstance(node, UnaryOp):            return _used_idents_node(node.operand)
     if isinstance(node, CallExpr):
         r = _used_idents_node(node.func)
@@ -4089,6 +4107,8 @@ class GimpleGen:
                 elif isinstance(expr, BinaryOp):
                     scan_expr(expr.left)
                     scan_expr(expr.right)
+                elif isinstance(expr, CompareChain):
+                    for o in expr.operands: scan_expr(o)
                 elif isinstance(expr, UnaryOp):
                     scan_expr(expr.operand)
                 elif isinstance(expr, CallExpr):
@@ -4329,6 +4349,11 @@ class GimpleGen:
             lt = self._quick_type(node.left)
             rt = self._quick_type(node.right)
             return TypeLattice.join(lt, rt)
+        if isinstance(node, CompareChain):
+            # Same as any single comparison above: a chained comparison
+            # (`a < b < c`) always yields a bool, regardless of the operand
+            # types being compared.
+            return '_Bool'
         if isinstance(node, UnaryOp):
             if node.op == 'not': return '_Bool'
             return self._quick_type(node.operand)
@@ -4653,6 +4678,9 @@ class GimpleGen:
                 self._collect_calls(kv, out)
         elif isinstance(expr, BinaryOp):
             self._collect_calls(expr.left, out); self._collect_calls(expr.right, out)
+        elif isinstance(expr, CompareChain):
+            for o in expr.operands:
+                self._collect_calls(o, out)
         elif isinstance(expr, UnaryOp):
             self._collect_calls(expr.operand, out)
         elif isinstance(expr, SubscriptExpr):
@@ -5796,13 +5824,26 @@ class GimpleGen:
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
+        return self._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
+    def _lower_binary_tail(self, op: str, left_node, lt: str, lv: str,
+                            right_node, rt: str, rv: str) -> tuple[str, str]:
+        """The rest of BinaryOp lowering once both operands are already
+        evaluated (lt/lv, rt/rv). Every case below dispatches purely on
+        `op` and the two operand (type, value) pairs — left_node/right_node
+        are used only for isinstance() shape-sniffing (e.g. "is this
+        operand a string literal"), never to re-evaluate them. Split out of
+        _lower_binary so _lower_compare_chain (Python chained comparisons,
+        `a < b < c`) can reuse this exact per-link comparison logic while
+        still guaranteeing each shared operand is evaluated exactly once —
+        re-lowering left_node/right_node here would break that guarantee
+        for a side-effecting comparand shared between two links."""
         # A list local may be boxed as int64_t (the slice pre-pass hint is the
         # machine word when the sliced object's type isn't yet known); _actual_types
         # records the real MojoList*. Resolve through it so list+list still concats.
         alt = self._actual_types.get(lv, self.var_types.get(lv, lt))
         art = self._actual_types.get(rv, self.var_types.get(rv, rt))
-        if node.op == '+' and alt == 'MojoList *' and art == 'MojoList *':
+        if op == '+' and alt == 'MojoList *' and art == 'MojoList *':
             lcast = lv if lt == 'MojoList *' else self._new_temp('MojoList *')
             if lt != 'MojoList *': self._emit(f"  {lcast} = (MojoList *){lv};")
             rcast = rv if rt == 'MojoList *' else self._new_temp('MojoList *')
@@ -5813,14 +5854,14 @@ class GimpleGen:
             return 'MojoList *', t
 
         # MojoList + MojoList → mojo_list_concat
-        if node.op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+        if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
             t = self._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
             if lv in self._elem_types:
                 self._elem_types[t] = self._elem_types[lv]
             return 'MojoList *', t
 
         # MojoList * + int/int64_t → identity (DynamicVector not supported; treat as no-op)
-        if node.op == '+' and lt == 'MojoList *' and rt in ('int', 'int64_t'):
+        if op == '+' and lt == 'MojoList *' and rt in ('int', 'int64_t'):
             return 'MojoList *', lv
 
         # MojoList * + <pointer-ish> → mojo_list_concat after casting the RHS to
@@ -5830,7 +5871,7 @@ class GimpleGen:
         # concat is the correct lowering; without this we emit `MojoList * + char *`,
         # which gcc rejects. (Salvaged from the bootstrap bug-hunt; it advances the
         # self-host build past mojo_compiler.py's emit().)
-        if node.op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
+        if op == '+' and lt == 'MojoList *' and rt.endswith(' *'):
             rcast = rv
             if rt != 'MojoList *':
                 rcast = self._new_val('MojoList *', f"(MojoList *){rv}")
@@ -5840,7 +5881,7 @@ class GimpleGen:
             return 'MojoList *', t
 
         # MojoStr + MojoStr → mojo_str_concat
-        if node.op == '+' and lt == 'MojoStr *' and rt == 'MojoStr *':
+        if op == '+' and lt == 'MojoStr *' and rt == 'MojoStr *':
             t = self._new_val('MojoStr *', f"mojo_str_concat ({lv}, {rv})")
             return 'MojoStr *', t
 
@@ -5863,10 +5904,10 @@ class GimpleGen:
                 self._emit(f"  {cp} = (char *){ip};")
                 return 'char *', cp
             return typ, val
-        if node.op == '+':
+        if op == '+':
             # Check if the OTHER operand is a string literal - helps identify string concatenation
-            right_is_lit = isinstance(node.right, StringLiteral)
-            left_is_lit = isinstance(node.left, StringLiteral)
+            right_is_lit = isinstance(right_node, StringLiteral)
+            left_is_lit = isinstance(left_node, StringLiteral)
             lt2, lv2 = _as_charptr(lt, lv, is_string_literal=right_is_lit)
             rt2, rv2 = _as_charptr(rt, rv, is_string_literal=left_is_lit)
             if lt2 == 'char *' and rt2 == 'char *':
@@ -5902,14 +5943,14 @@ class GimpleGen:
                 return 'char *', self._call_expr('char *', 'mojo_str_cat', [('char *', sv), ('char *', rv2)])
 
         # char * * int → string repetition (e.g., "  " * 3)
-        if node.op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
+        if op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
             t = self._new_temp('char *')
             lv_local = self._ensure_local(lt, lv)
             self._emit(f"  {t} = mojo_cstr_repeat ({lv_local}, {rv});")
             return 'char *', t
 
         # int * char * → string repetition (flipped order)
-        if node.op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char *':
+        if op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char *':
             t = self._new_temp('char *')
             rv_local = self._ensure_local(rt, rv)
             self._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv});")
@@ -5929,37 +5970,37 @@ class GimpleGen:
         # meant triple-quoted strings/docstrings were never recognized at
         # all when this file compiles itself, cascading into a severe
         # performance blowup during self-hosted `--dump-full` of mojo.py).
-        if node.op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t'):
+        if op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t'):
             sv = self._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
             t = self._new_temp('char *')
             self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {rv});")
             return 'char *', t
 
         # int * bare `char` → string repetition (flipped order)
-        if node.op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char':
+        if op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char':
             sv = self._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
             t = self._new_temp('char *')
             self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {lv});")
             return 'char *', t
 
         # MojoList * * int → list repetition (e.g., [0] * n)
-        if node.op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
+        if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
             cnt = self._new_val('int64_t', f"(int64_t){rv}")
             t = self._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
             return 'MojoList *', t
 
         # MojoStr == / != → mojo_str_eq
-        if node.op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
+        if op in ('==', '!=') and lt == 'MojoStr *' and rt == 'MojoStr *':
             eq_t = self._new_val('int', f"mojo_str_eq ({lv}, {rv})")
             t = self._new_temp('_Bool')
-            cmp = '!= 0' if node.op == '==' else '== 0'
+            cmp = '!= 0' if op == '==' else '== 0'
             self._emit(f"  {t} = {eq_t} {cmp};")
             return '_Bool', t
 
         # String equality: char*, int64_t-stored-char*, or string literals → strcmp
-        rv_is_str_lit = isinstance(node.right, StringLiteral)
-        lv_is_str_lit = isinstance(node.left, StringLiteral)
-        if node.op in ('==', '!='):
+        rv_is_str_lit = isinstance(right_node, StringLiteral)
+        lv_is_str_lit = isinstance(left_node, StringLiteral)
+        if op in ('==', '!='):
             uses_str = (lt == 'char *' or rt == 'char *' or rv_is_str_lit or lv_is_str_lit or
                         (lt == 'int64_t' and (rv_is_str_lit or rt == 'char *')) or
                         (rt == 'int64_t' and (lv_is_str_lit or lt == 'char *')))
@@ -5986,14 +6027,14 @@ class GimpleGen:
                 rs = _to_char_star(rt, rv)
                 eq_t = self._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
                 t = self._new_temp('_Bool')
-                cmp = '== 0' if node.op == '==' else '!= 0'
+                cmp = '== 0' if op == '==' else '!= 0'
                 self._emit(f'  {t} = {eq_t} {cmp};')
                 return '_Bool', t
 
 
         # is / is not → pointer identity
-        if node.op in ('is', 'is not'):
-            c_op = '==' if node.op == 'is' else '!='
+        if op in ('is', 'is not'):
+            c_op = '==' if op == 'is' else '!='
             t = self._new_temp('_Bool')
             if '*' in lt or '*' in rt:
                 p1 = self._new_temp('int64_t')
@@ -6014,7 +6055,7 @@ class GimpleGen:
             return '_Bool', t
 
         # Fallback: catch string concatenation that wasn't handled above
-        if node.op == '+' and lt == 'char *' and rt == 'char *':
+        if op == '+' and lt == 'char *' and rt == 'char *':
             t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv)])
             return 'char *', t
         # `<string> + <single char>` (or the reverse) — e.g. `prefix += val[0]`
@@ -6029,16 +6070,16 @@ class GimpleGen:
         # becomes ordinary string concatenation. Found via mojo_compiler.py's
         # own `_decode_str_literal_text`'s `prefix += val[0]` failing to
         # self-compile with exactly that ICE.
-        if node.op == '+' and lt == 'char *' and rt == 'char':
+        if op == '+' and lt == 'char *' and rt == 'char':
             rv_s = self._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
             t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
             return 'char *', t
-        if node.op == '+' and lt == 'char' and rt == 'char *':
+        if op == '+' and lt == 'char' and rt == 'char *':
             lv_s = self._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
             t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
             return 'char *', t
         # Fallback: catch list concatenation that wasn't handled above
-        if node.op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+        if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
             t = self._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
             if lv in self._elem_types:
                 self._elem_types[t] = self._elem_types[lv]
@@ -6046,7 +6087,7 @@ class GimpleGen:
 
         # Path joining: Mojo uses `/` as the path-join operator (Path.__truediv__).
         # When we see int64_t/char* or char*/char* with op='/', dispatch to mojo_path_join.
-        if node.op == '/' and rt == 'char *':
+        if op == '/' and rt == 'char *':
             t = self._new_temp('char *')
             lv_str = lv
             if lt != 'char *':
@@ -6078,16 +6119,16 @@ class GimpleGen:
         def _is_raw_ptr(t: str) -> bool:
             return (t.endswith(' *') and t not in _KNOWN_PTRS
                     and _struct_name_of(t) not in self.struct_field_types)
-        if node.op in ('+', '-'):
+        if op in ('+', '-'):
             if _is_raw_ptr(lt) and not rt.endswith(' *'):
                 elem = _elem_type(lt)
                 cn = _c_id(elem)
                 self._ptr_helpers_needed.add(elem)
                 rv64 = rv if rt == 'int64_t' else self._new_val('int64_t', f"(int64_t){rv}")
-                off = rv64 if node.op == '+' else self._new_val('int64_t', f"-{rv64}")
+                off = rv64 if op == '+' else self._new_val('int64_t', f"-{rv64}")
                 pt = self._new_val(lt, f"_mojo_at_{cn} ({lv}, {off})")
                 return lt, pt
-            if node.op == '+' and _is_raw_ptr(rt) and not lt.endswith(' *'):
+            if op == '+' and _is_raw_ptr(rt) and not lt.endswith(' *'):
                 elem = _elem_type(rt)
                 cn = _c_id(elem)
                 self._ptr_helpers_needed.add(elem)
@@ -6098,15 +6139,15 @@ class GimpleGen:
         # Cast struct pointer operands through int64_t so C arithmetic is valid.
         # e.g., `self * -1` inside Int.__neg__ where self: Int * → (int64_t)self * -1.
         # Must happen before res_type is computed to avoid declaring result as struct ptr.
-        if lt.endswith(' *') and lt not in _KNOWN_PTRS and node.op not in ('==', '!=', 'is', 'is not'):
+        if lt.endswith(' *') and lt not in _KNOWN_PTRS and op not in ('==', '!=', 'is', 'is not'):
             ip = self._new_val('int64_t', f'(int64_t){lv}')
             lt = 'int64_t'; lv = ip
-        if rt.endswith(' *') and rt not in _KNOWN_PTRS and node.op not in ('==', '!=', 'is', 'is not'):
+        if rt.endswith(' *') and rt not in _KNOWN_PTRS and op not in ('==', '!=', 'is', 'is not'):
             ip = self._new_val('int64_t', f'(int64_t){rv}')
             rt = 'int64_t'; rv = ip
 
-        c_op      = _BIN_OPS.get(node.op, node.op)
-        res_type  = '_Bool' if node.op in _CMP_OPS else TypeLattice.join(lt, rt)
+        c_op      = _BIN_OPS.get(op, op)
+        res_type  = '_Bool' if op in _CMP_OPS else TypeLattice.join(lt, rt)
 
         # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
         # For | on set/list/dict pointer types, use runtime union, not C bitwise |.
@@ -6116,20 +6157,20 @@ class GimpleGen:
             if t == 'MojoSet *':
                 return v
             return self._new_val('MojoSet *', f'(MojoSet *){self._ensure_local(t, v)}')
-        if node.op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
+        if op == '|' and (lt.endswith(' *') or rt.endswith(' *')):
             return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_union',
                                                 [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
         # For - on set types, use runtime difference, not C subtraction
-        if node.op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
+        if op == '-' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
             return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_difference',
                                                 [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
         # For & on set types, use runtime intersection, not C bitwise &
-        if node.op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
+        if op == '&' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
             return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_intersection',
                                                 [('MojoSet *', _as_set(lt, lv)), ('MojoSet *', _as_set(rt, rv))])
         # For ^ on set types, symmetric difference = (a - b) | (b - a).
         # No dedicated runtime entry; compose from difference + union.
-        if node.op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
+        if op == '^' and (lt == 'MojoSet *' or rt == 'MojoSet *'):
             a, b = _as_set(lt, lv), _as_set(rt, rv)
             ab = self._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', a), ('MojoSet *', b)])
             ba = self._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
@@ -6145,7 +6186,7 @@ class GimpleGen:
             ct = self._new_temp(arith_type)
             self._safe_coerce_emit(rt, arith_type, rv, ct)
             rv = ct
-        if node.op in ('==', '!=', '<', '>', '<=', '>=') and lt.endswith(' *') != rt.endswith(' *'):
+        if op in ('==', '!=', '<', '>', '<=', '>=') and lt.endswith(' *') != rt.endswith(' *'):
             ip_l = self._new_temp('int64_t')
             ip_r = self._new_temp('int64_t')
             self._emit(f'  {ip_l} = (int64_t){lv};')
@@ -6181,6 +6222,59 @@ class GimpleGen:
             return res_type, mod_t
         t = self._new_val(res_type, f"{lv} {c_op} {rv}")
         return res_type, t
+
+    def _lower_compare_chain(self, node: CompareChain) -> tuple[str, str]:
+        """Python-style chained comparison `a < b < c` (any length, any mix
+        of comparison operators — `a < b == c > d` is valid Python). Each
+        operand is evaluated exactly once, left-to-right, and the whole
+        chain short-circuits to `_Bool` False the instant one
+        `operands[i] ops[i] operands[i+1]` link fails, via real branching
+        (not both/all links unconditionally evaluated then and-ed together)
+        — mirrors eval_CompareChain in myinterpreter.py and the `and`/`or`
+        real-branching lowering above. Reuses _lower_binary_tail /
+        _lower_in_dispatch for the actual per-link comparison so string/
+        pointer/is-not/membership semantics stay identical to what a plain
+        two-operand BinaryOp of the same operator would produce."""
+        result = self._new_temp('_Bool')
+        false_bb = self._new_bb()
+        merge_bb = self._new_bb()
+        left_node = node.operands[0]
+        lt, lv = self.lower_expr(left_node)
+        n = len(node.ops)
+        for i, op in enumerate(node.ops):
+            right_node = node.operands[i + 1]
+            rt, rv = self.lower_expr(right_node)
+            if op in ('in', 'not in'):
+                cmp_type, cmp_val = self._lower_in_dispatch(lt, lv, rt, rv, negate=(op == 'not in'))
+            else:
+                cmp_type, cmp_val = self._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
+            cond = self._ensure_bool_cond(cmp_type, cmp_val)
+            if i == n - 1:
+                # Last link: truthy -> the whole chain held, every earlier
+                # goto already confirmed -> result True.
+                true_bb = self._new_bb()
+                self._emit(f"  if ({cond}) goto {true_bb}; else goto {false_bb};")
+                self._emit_label(true_bb)
+                # GIMPLE strictness: a bare integer_cst assigned straight
+                # into a `_Bool` lvalue ("non-trivial conversion in
+                # 'integer_cst'") is rejected — an explicit `(_Bool)` cast
+                # on the literal is required (mirrors BoolLiteral/
+                # _safe_coerce_emit elsewhere; found compiling base64.mojo's
+                # `` `A` <= c <= `Z` ``, which -fgimple only flags once the
+                # surrounding function is large enough to hit the strict
+                # low-level GIMPLE path — a minimal repro compiled "fine").
+                self._emit(f"  {result} = (_Bool)1;")
+                self._emit(f"  goto {merge_bb};")
+            else:
+                next_bb = self._new_bb()
+                self._emit(f"  if ({cond}) goto {next_bb}; else goto {false_bb};")
+                self._emit_label(next_bb)
+            left_node, lt, lv = right_node, rt, rv
+        self._emit_label(false_bb)
+        self._emit(f"  {result} = (_Bool)0;")
+        self._emit(f"  goto {merge_bb};")
+        self._emit_label(merge_bb)
+        return '_Bool', result
 
     # ── Operator helpers ──────────────────────────────────────────────────
 
@@ -6440,12 +6534,33 @@ class GimpleGen:
             xv = self._new_val('char *', f"(char *){xv}")
         elif xt.endswith(' *') and xt != 'char *' and self.var_types.get(xv) == 'int64_t':
             xv = self._new_val(xt, f"({xt}){xv}")
-        if (isinstance(node.right, CallExpr) and
-                isinstance(node.right.func, IdentExpr) and
-                node.right.func.name == 'range'):
-            return self._lower_in_range(xv, node.right.args, negate=negate)
+        return self._lower_in_impl_values(xt, xv, node.right, negate)
 
-        rt, rv = self.lower_expr(node.right)
+    def _lower_in_impl_values(self, xt: str, xv: str, right_node, negate: bool) -> tuple[str, str]:
+        """The rest of `in`/`not in` lowering, taking the already-lowered
+        left operand (xt, xv) instead of re-lowering it from an AST node.
+        Split out of _lower_in_impl so a CompareChain link (`a in b < c`,
+        however rare) can reuse this without evaluating the shared operand
+        `a` (or, for a middle link, the previous link's right-hand operand)
+        a second time — see _lower_compare_chain."""
+        if (isinstance(right_node, CallExpr) and
+                isinstance(right_node.func, IdentExpr) and
+                right_node.func.name == 'range'):
+            return self._lower_in_range(xv, right_node.args, negate=negate)
+
+        rt, rv = self.lower_expr(right_node)
+        return self._lower_in_dispatch(xt, xv, rt, rv, negate)
+
+    def _lower_in_dispatch(self, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
+        """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
+        given both operands already lowered. Split out of
+        _lower_in_impl_values so _lower_compare_chain's 'in'/'not in' links
+        can reuse it directly with their own pre-lowered right operand —
+        the range()-literal fast path (_lower_in_range) isn't reachable
+        from here since that needs the RAW range(...) call args, not an
+        already-evaluated value; a chained `x in range(...)` link falls
+        through to ordinary CallExpr lowering of range() instead, same as
+        any other non-'in' use of a bare range() value already would."""
         # A module-level MojoList*/MojoDict*/MojoSet* global is boxed as
         # int64_t at the static-type level (_lower_IdentExpr stashes the
         # real type in _actual_types instead) — without resolving through
@@ -10376,6 +10491,20 @@ class GimpleGen:
                    '==': int(l == r), '!=': int(l != r), '<': int(l < r),
                    '<=': int(l <= r), '>': int(l > r), '>=': int(l >= r)}
             return ops.get(node.op)
+        if isinstance(node, CompareChain):
+            # Same short-circuit chained-comparison semantics as
+            # eval_CompareChain (myinterpreter.py) / _lower_compare_chain,
+            # just over compile-time constants instead of runtime values.
+            left = self._eval_const_int(node.operands[0])
+            if left is None: return None
+            for op, operand in zip(node.ops, node.operands[1:]):
+                right = self._eval_const_int(operand)
+                if right is None: return None
+                link = self._eval_const_compare_op(op, left, right)
+                if link is None: return None
+                if not link: return 0
+                left = right
+            return 1
         # comptime call to an imported function with constant args (slice 3):
         # run it at compile time as cached machine code via comptime.evaluate.
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
@@ -10391,6 +10520,23 @@ class GimpleGen:
                             return int(comptime.evaluate(fn_src, node.func.name, argvals))
                     except Exception:
                         _debug_note('comptime evaluation failed', node.func.name)
+        return None
+
+    def _eval_const_compare_op(self, op: str, left, right):
+        """Apply one comparison-chain link's operator to two already
+        compile-time-folded operands (used by _eval_const_int/_eval_const's
+        CompareChain cases). A plain if/elif chain, not a dict of lambdas —
+        self-hosting gimple_codegen.py couldn't link a dict-of-lambdas here
+        (undefined `_GimpleGen__eval_const_lambda_N` symbols at self-host
+        link time; this codegen's own closure-lowering doesn't support
+        several small same-scope lambdas bound into one dict literal).
+        Returns None for an unrecognized op, distinct from a real False."""
+        if op == '==': return left == right
+        if op == '!=': return left != right
+        if op == '<':  return left < right
+        if op == '<=': return left <= right
+        if op == '>':  return left > right
+        if op == '>=': return left >= right
         return None
 
     def _eval_const(self, node):
@@ -10428,6 +10574,17 @@ class GimpleGen:
             if op == '>=':  return l >= r
             if op == 'and': return l and r
             if op == 'or':  return l or r
+        if isinstance(node, CompareChain):
+            left = self._eval_const(node.operands[0])
+            if left is None: return None
+            for op, operand in zip(node.ops, node.operands[1:]):
+                right = self._eval_const(operand)
+                if right is None: return None
+                link = self._eval_const_compare_op(op, left, right)
+                if link is None: return None
+                if not link: return False
+                left = right
+            return True
         return None
 
     def _eval_const_bool(self, node) -> bool | None:
@@ -14450,6 +14607,10 @@ class GimpleGen:
                 'op': 'char *',
                 'left': 'int64_t',
                 'right': 'int64_t',
+            }
+            self.struct_field_types['CompareChain'] = {
+                'operands': 'MojoList *',
+                'ops': 'MojoList *',
             }
             self.struct_field_types['UnaryOp'] = {
                 'op': 'char *',

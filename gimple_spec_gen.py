@@ -139,6 +139,7 @@ class GimpleSpecGenerator:
         ('IdentExpr',       '_lower_IdentExpr'),
         ('WalrusExpr',      '_lower_WalrusExpr'),
         ('BinaryOp',        '_lower_binary'),
+        ('CompareChain',    '_lower_compare_chain'),
         ('UnaryOp',         '_lower_UnaryOp'),
         ('CallExpr',        '_lower_call'),
         ('TernaryExpr',     '_lower_TernaryExpr'),
