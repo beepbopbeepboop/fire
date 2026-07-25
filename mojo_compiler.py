@@ -1188,6 +1188,53 @@ class Parser:
             return self._advance().value
         raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
+    def _parse_unpack_target(self):
+        """Parse a single unpacking-target element, supporting nested tuples:
+        (a, (b, c)) and a single starred element within a comma-list
+        (`a, *rest`), matching Python's extended-unpacking grammar. The
+        starred form is represented as "*rest" in the comma-joined string
+        target that myinterpreter.py's _bind_comprehension_target consumes.
+
+        A target element may also be a dotted attribute-access expression
+        (`st.lineno`, possibly chained `a.b.c`), e.g. `for st.lineno, line
+        in items:` — real-world code (CPython's configparser.py) mutates an
+        existing object's attribute directly in the loop instead of binding
+        a fresh local. This is kept as literal text ("st.lineno") within
+        the comma-joined string, the same way a starred name is kept as
+        literal text ("*rest"); myinterpreter.py's _bind_comprehension_target
+        recognizes the embedded "." and performs a real attribute SET
+        (reusing _assign_target) instead of a scope.define().
+
+        Shared by `for`-loop targets and `with ... as (a, b):` targets — one
+        representation, one parser, reused everywhere a comma-joined
+        unpacking-target string is needed (per this project's consolidation
+        convention). (Chained-assignment tuple targets use a separate
+        Expr-based TupleExpr representation, not this string form — see
+        _parse_stmt's ASSIGN handling.)"""
+        if self._peek().kind == "LPAREN":
+            self._advance()
+            parts = []
+            while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
+                parts.append(self._parse_unpack_target())
+                if self._peek().kind == "COMMA":
+                    self._advance()
+            self._expect("RPAREN")
+            return "(" + ", ".join(parts) + ")"
+        elif self._peek().kind == "OP" and self._peek().value == "*":
+            self._advance()
+            tok = self._advance()
+            return "*" + tok.value
+        else:
+            # Accept KW tokens (e.g. "fn", "var") as variable names
+            tok = self._advance()
+            name = tok.value
+            # Dotted attribute target: st.lineno, or chained a.b.c
+            while self._peek().kind == "DOT":
+                self._advance()
+                attr_tok = self._advance()
+                name += "." + attr_tok.value
+            return name
+
     def _parse_dotted_name(self) -> str:
         """Consume a dotted name like `asyncio.CancelledError` and return it
         as a single string. Used for exception types in `except` clauses."""
@@ -1787,55 +1834,16 @@ class Parser:
                 and self._peek(1).kind != "COLON"):
             self._advance()
 
-        def _parse_for_target():
-            """Parse a for-loop target, supporting nested tuples: (a, (b, c))
-            and a single starred element within a comma-list (`a, *rest`),
-            matching Python's extended-unpacking grammar. The starred form
-            is represented as "*rest" in the comma-joined string target
-            that myinterpreter.py's _bind_comprehension_target consumes.
-
-            A target element may also be a dotted attribute-access
-            expression (`st.lineno`, possibly chained `a.b.c`), e.g.
-            `for st.lineno, line in items:` — real-world code (CPython's
-            configparser.py) mutates an existing object's attribute
-            directly in the loop instead of binding a fresh local. This is
-            kept as literal text ("st.lineno") within the comma-joined
-            string, the same way a starred name is kept as literal text
-            ("*rest"); myinterpreter.py's _bind_comprehension_target
-            recognizes the embedded "." and performs a real attribute SET
-            (reusing _assign_target) instead of a scope.define()."""
-            if self._peek().kind == "LPAREN":
-                self._advance()
-                parts = []
-                while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
-                    parts.append(_parse_for_target())
-                    if self._peek().kind == "COMMA":
-                        self._advance()
-                self._expect("RPAREN")
-                return "(" + ", ".join(parts) + ")"
-            elif self._peek().kind == "OP" and self._peek().value == "*":
-                self._advance()
-                tok = self._advance()
-                return "*" + tok.value
-            else:
-                # Accept KW tokens (e.g. "fn", "var") as variable names
-                tok = self._advance()
-                name = tok.value
-                # Dotted attribute target: st.lineno, or chained a.b.c
-                while self._peek().kind == "DOT":
-                    self._advance()
-                    attr_tok = self._advance()
-                    name += "." + attr_tok.value
-                return name
-
         # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
         # for a, *rest in ... (single starred element anywhere in the list).
-        target = _parse_for_target()
+        # _parse_unpack_target is the shared unpacking-target-element parser
+        # (also used by `with ... as (a, b):`) — see its docstring.
+        target = self._parse_unpack_target()
         if self._peek().kind == "COMMA":
             names = [target]
             while self._peek().kind == "COMMA":
                 self._advance()
-                names.append(_parse_for_target())
+                names.append(self._parse_unpack_target())
             target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")
         iterable = self._parse_expr(0)
@@ -2260,12 +2268,21 @@ class Parser:
         expr = self._parse_expr(with_expr_prec)
         alias = None
         if self._is_kw("as"):
-            self._advance(); alias = self._ident()
+            # alias may be a bare NAME (the common case) or a parenthesized
+            # tuple-unpacking target, `with EXPR as (a, b):` — real Python
+            # requires the parens here (unlike a for-target), since a bare
+            # comma after `as` instead means a SECOND with-item (`with a()
+            # as x, b() as y:`, handled by the COMMA loop below). Reuse the
+            # same unpacking-target-element parser/representation as
+            # for-loop targets (_parse_unpack_target) rather than inventing
+            # a separate with-specific tuple-target parser.
+            self._advance(); alias = self._parse_unpack_target()
         items.append(WithItem(expr=expr, alias=alias))
         while self._peek().kind == "COMMA":
             self._advance(); expr = self._parse_expr(with_expr_prec); alias = None
             if self._is_kw("as"):
-                self._advance(); alias = self._ident()
+                # see the parenthesized-tuple-target note above.
+                self._advance(); alias = self._parse_unpack_target()
             items.append(WithItem(expr=expr, alias=alias))
         self._expect("COLON")
         return WithStmt(items=items, body=self._parse_block())

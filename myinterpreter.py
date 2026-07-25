@@ -3001,7 +3001,13 @@ class Interpreter:
                 entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
                 contexts.append((ctx, entered))
                 if item.alias:
-                    self.scope.define(item.alias, entered)
+                    # item.alias is the same comma-joined unpacking-target
+                    # string mojo_compiler.py's _parse_unpack_target
+                    # produces for for-loop targets (a bare name, or a
+                    # parenthesized tuple like "(a, b)") — bind it through
+                    # the same shared helper for-loop/comprehension targets
+                    # use, rather than a with-specific unpacking path.
+                    self._bind_comprehension_target(item.alias, entered)
             for stmt in node.body:
                 self.execute(stmt)
         except Exception as e:
