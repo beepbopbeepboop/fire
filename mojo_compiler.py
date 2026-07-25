@@ -2022,9 +2022,17 @@ class Parser:
         # bogus convention prefix, then swallowed `in` too (mistaking it
         # for the loop-variable name), leaving the parser expecting `in`
         # but finding the tuple's `(` instead — "Expected KW got LPAREN".
+        # `peek(1) != COMMA` guards the same collision for a plain
+        # tuple-unpack target starting with the identifier `var`/etc.,
+        # e.g. `for var, other_var in pairs:`
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
+        # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
+        # neither existing exclusion), leaving `_parse_unpack_target()` to
+        # start from the comma itself and misparse everything after.
         if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
                 and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
-                and self._peek(1).kind != "COLON"):
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
             self._advance()
 
         # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
@@ -2603,8 +2611,19 @@ class Parser:
 
     def _parse_comptime_for(self):
         self._expect("KW","for")
-        # Optional convention keyword (var, ref, ...) before the target
-        if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+        # Optional convention keyword (var, ref, ...) before the target —
+        # same disambiguation as _parse_for's sibling guard just above:
+        # `var`/etc. is also a perfectly ordinary identifier, so only treat
+        # it as a convention prefix when it's genuinely followed by a
+        # separate target, not when it IS the target itself (i.e. peek(1)
+        # is `in`, `:`, or `,`). This site previously had no guard at all —
+        # it unconditionally swallowed any _CONV_KWS token, misparsing
+        # `comptime for var in ...` and `comptime for var, j in ...`
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md).
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
             self._advance()
         # Support tuple targets: comptime for i, j in product(...)
         target = self._ident()

@@ -1739,6 +1739,43 @@ def main():
     print(a, b, c)
 """)
 
+    # 167. `var`/etc. as the FIRST element of a plain tuple-unpack for-loop
+    # target (`for var, other_var in pairs:`) must NOT be misparsed as a
+    # bogus convention-keyword prefix — see
+    # bugs/PARSE_FAIL_var_as_for_loop_target_comma.md. `_parse_for`'s
+    # convention-keyword carve-out already excluded peek(1) == KW('in') and
+    # peek(1) == COLON, but not COMMA, so this real-stdlib shape
+    # (Tools/cases_generator/stack.py:606) swallowed `var` as a bogus prefix
+    # and then choked on the unpack target.
+    test("var_as_for_loop_target_comma", """\
+def main():
+    pairs = [(1, 2), (3, 4)]
+    for var, other_var in pairs:
+        print(var, other_var)
+""")
+
+    # 168. The `comptime for` sibling of test 167 above — `_parse_comptime_for`
+    # had the exact same bug in a worse form: no guard at all, so it
+    # unconditionally swallowed any leading _CONV_KWS token regardless of
+    # what followed.
+    test("var_as_comptime_for_loop_target_comma", """\
+def main():
+    comptime for var, j in [(1, 2), (3, 4)]:
+        print(var, j)
+""")
+
+    # 169. Legitimate convention-prefixed for-loop targets (`for ref x in
+    # y:`, `for var x in y:`) must still parse correctly after tightening
+    # the exclusion list in tests 167/168 above — these shapes have peek(1)
+    # be a plain NAME, which none of the new/existing exclusions (KW('in'),
+    # COLON, COMMA) match, so the convention keyword is still consumed.
+    test("conv_kw_prefix_for_loop_target_still_works", """\
+def main():
+    items = [1, 2, 3]
+    for ref x in items:
+        print(x)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
