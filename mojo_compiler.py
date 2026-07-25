@@ -3136,8 +3136,20 @@ class Parser:
             self._advance()
             # Allow an ownership/convention prefix inside a parenthesized binding
             # target, e.g. tuple unpacking `(var x), (ref y) = ...`.
+            # Disambiguation: real Python has no `var`/`ref`/etc. keyword, so
+            # any of _CONV_KWS is also a perfectly ordinary identifier (e.g. a
+            # parameter named `var`). A genuine parenthesized binding target
+            # is always exactly `(CONV_KW name)` -- the keyword, one name-like
+            # token, then the closing RPAREN -- so also require peek(2) to be
+            # RPAREN before committing to the convention-prefix reading.
+            # Without this, `(var not in lst)` (bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md)
+            # wrongly swallowed `var` as a bogus prefix (peek(1)=KW('not')
+            # satisfied the old NAME-or-KW check), leaving `not in lst`
+            # dangling and eventually failing with "Expected RPAREN got
+            # NAME('lst')".
             if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
-                    and self._peek(1).kind in ("NAME", "KW")):
+                    and self._peek(1).kind in ("NAME", "KW")
+                    and self._peek(2).kind == "RPAREN"):
                 self._advance()
             if self._peek().kind == "RPAREN":
                 self._advance(); return TupleExpr(elements=[], line=line, col=col)

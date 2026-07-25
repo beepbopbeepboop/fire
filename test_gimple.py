@@ -1663,6 +1663,36 @@ def join_strs(args) -> String:
                 print(f"      {line}")
         _FAIL += 1
 
+    # 162. A convention/ownership keyword (`var`, `ref`, `read`, etc.) used
+    # as a plain parameter name inside `assert(x not in y)` must NOT be
+    # misparsed as a parenthesized ownership-prefix binding target — see
+    # bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md. Real Python
+    # has no such keywords, so they're common ordinary identifiers; the old
+    # `_parse_primary` LPAREN carve-out for `(var x), (ref y) = ...` only
+    # checked that the token after the keyword was NAME/KW-shaped, which
+    # `not` (a KW) also satisfies, so `(var not in lst)` wrongly swallowed
+    # `var` as a bogus prefix and failed with "Expected RPAREN got NAME".
+    test("conv_kw_as_plain_ident_not_in", """\
+def f(var: Int, lst: Int) -> Bool:
+    return not (var == lst)
+
+def g(read: Int, seen: Int) -> Bool:
+    return not (read == seen)
+""")
+
+    # 163. The legitimate parenthesized ownership-prefix binding target this
+    # carve-out exists for, `(var x), (ref y) = ...`, must still parse and
+    # compile correctly after tightening the disambiguation (peek(2) must be
+    # RPAREN) in test 162 above.
+    test("conv_kw_prefix_tuple_unpack_still_works", """\
+def get_pair() -> (Int, Int):
+    return (1, 2)
+
+def main():
+    (var x), (var y) = get_pair()
+    print(x, y)
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
