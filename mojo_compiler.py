@@ -1284,6 +1284,69 @@ class Parser:
             return self._advance().value
         raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
+    def _capture_opaque_annotation_tail(self) -> str:
+        """Consume the remainder of an arbitrary (non-type) expression that
+        continues past a type-shaped annotation prefix, e.g. the `obj)` in
+        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
+        Python's grammar permits any expression in an annotation position
+        with zero semantic type-checking, and nothing downstream re-parses
+        the annotation string assuming real type syntax (traced in commit
+        6ee8291), so the tail is captured as opaque raw text rather than
+        raised as a SyntaxError.
+
+        Bracket-depth-aware (nested `(`/`[`/`{` don't prematurely trip a
+        terminator check) and stops BEFORE consuming whichever terminator
+        token the various `_parse_type_ann` call sites rely on to know the
+        annotation is done: COMMA/RPAREN for parameter lists, COLON/ASSIGN
+        for return types and var-decls, ARROW, NEWLINE/EOF, INDENT/DEDENT.
+        An unmatched closing `)`/`]`/`}` (depth back to 0) is left for the
+        caller the same way; only a still-open nested bracket's closer is
+        consumed as part of the opaque text."""
+        STOP_KINDS = ("COMMA", "COLON", "ASSIGN", "ARROW", "NEWLINE", "EOF", "INDENT", "DEDENT")
+        depth = 0
+        parts = []
+        while True:
+            t = self._peek()
+            if depth == 0 and t.kind in STOP_KINDS:
+                break
+            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
+                if depth == 0:
+                    break
+                depth -= 1
+                parts.append(self._advance().value)
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
+    def _consume_trailing_annotation_ops(self, name: str) -> str:
+        """After a type-shaped annotation prefix (`name`) is fully parsed,
+        consume any trailing operator that continues the expression:
+        1. PEP 604 union (`|`) / trait intersection (`&`) — real Mojo type
+           syntax, recursively parsing a real nested type annotation as the
+           RHS (pre-existing behavior).
+        2. Any OTHER trailing operator (`<`, `>`, `==`, binary `+`/`-`, etc.)
+           — not real type syntax, but Python's grammar syntactically
+           permits an arbitrary expression in an annotation position (PEP
+           649), so the operator and its RHS are captured as opaque text via
+           `_capture_opaque_annotation_tail` instead of raising. See
+           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
+           deliberately excluded here — it's the optional-type suffix
+           handled by the caller, `_parse_type_ann`."""
+        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
+            op = self._advance().value
+            rhs = self._parse_type_ann()
+            name = name + f" {op} " + rhs
+        if self._peek().kind == "OP" and self._peek().value != "?":
+            op = self._advance().value
+            tail = self._capture_opaque_annotation_tail()
+            name = name + " " + op + (" " + tail if tail else "")
+        return name
+
     def _capture_bracketed_text(self) -> str:
         """Consume a balanced `[...]` (tracking nested bracket depth so an
         inner comma, e.g. `d[a, b]`'s tuple key, is correctly treated as
@@ -3789,12 +3852,10 @@ class Parser:
                 else:
                     name += "." + self._expect("NAME").value
         if self._peek().kind != "LBRACKET":
-            # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
-            while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
-                op = self._advance().value
-                rhs = self._parse_type_ann()
-                name = name + f" {op} " + rhs
-            return name
+            # Handle PEP 604 union types (X | Y | Z), trait intersections
+            # (X & Y & Z), and any other trailing operator continuing an
+            # arbitrary (non-type) expression in this annotation position.
+            return self._consume_trailing_annotation_ops(name)
         # Consume [TypeArgs] and any chained subscripts, .member accesses, or
         # comptime-call applications, e.g. `_field_types_of[Self.T]()[idx]`.
         parts = [name]
@@ -3838,12 +3899,10 @@ class Parser:
                     else: parts.append(t.value)
                 parts.append("]")
         result = "".join(parts)
-        # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
-        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
-            op = self._advance().value
-            rhs = self._parse_type_ann()
-            result = result + f" {op} " + rhs
-        return result
+        # Handle PEP 604 union types (X | Y | Z), trait intersections
+        # (X & Y & Z), and any other trailing operator continuing an
+        # arbitrary (non-type) expression in this annotation position.
+        return self._consume_trailing_annotation_ops(result)
 
 # ── Code generator ─────────────────────────────────────────────────
 def emit_module(stmts: list, indent: int = 0) -> str:

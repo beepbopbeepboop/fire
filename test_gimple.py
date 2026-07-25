@@ -1808,6 +1808,27 @@ def main():
     print(s)
 """)
 
+    # 172. `_parse_type_ann_inner`'s trailing-operator gap: a type-shaped
+    # annotation prefix (a real NAME) followed by a TRAILING operator that
+    # continues an arbitrary (non-type) expression, e.g. `gamma: some < obj`.
+    # Only `|`/`&` (real PEP 604 union/intersection syntax) were consumed as
+    # trailing operators before; any other operator (`<`, `>`, `==`, binary
+    # `+`/`-`, etc.) was left dangling for the caller to choke on. This
+    # mirrors CPython's own Lib/test/test_annotationlib.py
+    # test_nonexistent_attribute, which deliberately exercises a whole
+    # battery of nonsensical-but-syntactically-legal annotation expressions
+    # on function parameters (PEP 649: annotations accept an arbitrary
+    # expression, never semantically type-checked). All of these EXCEPT
+    # `gamma` already worked; this test covers the whole battery in one
+    # signature so a fix to `gamma` can't regress a sibling shape.
+    test("annotation_trailing_binary_op_battery", """\
+some = 1
+obj = 2
+module = 3
+def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta: +some, gamma: some < obj, delta: some | {obj: module}, epsilon: some | {obj}, zeta: some | [obj, module], eta: some | ()):
+    pass
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
