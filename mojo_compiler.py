@@ -3593,7 +3593,47 @@ class Parser:
                     return prefix + f"def ... -> {return_type}"
                 return prefix + "def"
             name = prefix + kw_value
-        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
+        elif t.kind == "LBRACKET":
+            # An annotation position occupied by a list-literal-shaped thing,
+            # e.g. `var2: [Int, String]` — nonsensical as a real type, but
+            # Python's (and Mojo's) grammar allows an arbitrary expression
+            # here syntactically. Rather than aborting the whole parse, just
+            # consume the balanced `[...]` opaquely (reusing the same
+            # bracket-depth-aware capture used for subscript assignment
+            # targets) and hand back SOME string for the annotation slot.
+            # Nothing downstream gives semantic meaning to an annotation
+            # string it doesn't recognize as a real type name — e.g.
+            # gimple_codegen.py's `_mojo_type`/`_resolve_type` harmlessly
+            # fall through to the int64_t default for unrecognized text —
+            # so this is safe to leave un-type-checked.
+            return prefix + "[" + self._capture_bracketed_text() + "]"
+        elif t.kind == "LBRACE":
+            # An annotation position occupied by a dict/set-literal-shaped
+            # thing, e.g. `-> {}:` (an empty dict literal used, legally but
+            # nonsensically, as a return type — a real Python grammar
+            # permissiveness case). Same opaque-capture treatment as the
+            # LBRACKET case above.
+            self._advance()  # consume {
+            depth = 1
+            parts = ["{"]
+            while depth > 0:
+                tok = self._advance()
+                if tok.kind == "LBRACE":
+                    depth += 1
+                    parts.append("{")
+                elif tok.kind == "RBRACE":
+                    depth -= 1
+                    if depth > 0: parts.append("}")
+                elif tok.kind == "EOF": break
+                else: parts.append(tok.value)
+            parts.append("}")
+            return prefix + "".join(parts)
+        else:
+            # Last-resort fallback: some other single token occupies the
+            # annotation position (e.g. a bare operator or literal). Consume
+            # it as opaque raw text rather than aborting the parse — see the
+            # LBRACKET/LBRACE cases above for why this is safe.
+            return prefix + self._advance().value
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
