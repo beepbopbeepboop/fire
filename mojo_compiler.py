@@ -1393,7 +1393,40 @@ class Parser:
                         self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
-            if t.value in ("struct", "class"): return self._parse_struct()
+            if t.value in ("struct", "class"):
+                # `struct` is ambiguous the same way `fn` is (see the `fn`
+                # carve-out above): it's both this dialect's struct-def
+                # keyword AND a legal plain identifier/module name in real
+                # Python code (e.g. `struct.pack_into(...)` using the
+                # stdlib `struct` module, from CPython's
+                # multiprocessing/shared_memory.py). Real Python has no
+                # `struct` keyword at all, so this collision is real.
+                # `class`, by contrast, IS a hard keyword in real Python —
+                # a variable literally named `class` is invalid Python — so
+                # it has no realistic identifier-collision risk and is left
+                # unconditionally routed to _parse_struct.
+                #
+                # Only commit to the struct-definition parse when the shape
+                # that follows could actually BE one: `struct` immediately
+                # followed by a NAME (per _parse_struct's `self._expect
+                # ("NAME")`, struct names are NAME-only, unlike function
+                # names which also accept KW/backtick) and then one of `[`
+                # (struct param block), `(` (base-class list), or `:`
+                # (straight into the body). Anything else — `struct.attr`
+                # (attribute access), `struct(...)` used as a call, `struct
+                # =` (assignment), `struct` alone, etc. — means `struct` is
+                # being used as an ordinary identifier here, so fall through
+                # to ordinary expression/assignment parsing (which accepts
+                # KW tokens as identifiers via _parse_primary).
+                if t.value == "struct":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    looks_like_structdef = nxt.kind == "NAME" and nxt2.kind in (
+                        "LBRACKET", "LPAREN", "COLON")
+                    if looks_like_structdef:
+                        return self._parse_struct()
+                    # else: fall through to expression statement
+                else:
+                    return self._parse_struct()
             if t.value == "enum": return self._parse_enum()
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
@@ -1453,14 +1486,14 @@ class Parser:
             decs = []
             while self._peek().kind == "OP" and self._peek().value == "@":
                 self._advance()
-                # str(): Token.value is typed `object`, so without this the
-                # self-hosted codegen infers dec_name as int64_t and the dotted
-                # concat below becomes int64_t + char* (a GCC build2 ICE).
-                dec_name = str(self._expect("NAME").value)
-                # Dotted decorator name: @functools.lru_cache, @a.b.c
-                while self._peek().kind == "DOT":
-                    self._advance()  # consume '.'
-                    dec_name = dec_name + "." + str(self._expect("NAME").value)
+                # Decorator name may be dotted (@functools.lru_cache, @a.b.c)
+                # and each component may lex as a Mojo keyword while still
+                # being an ordinary Python identifier (e.g. `@enum.global_enum`,
+                # `@ref(...)`) — use _parse_dotted_name(), the same
+                # keyword-accepting helper used for `except mod.Error:` and
+                # the earlier `from X import ref` fix, instead of
+                # _expect("NAME") which only accepts a real NAME token.
+                dec_name = self._parse_dotted_name()
                 # Handle decorator with arguments: @decorator(args)
                 if self._peek().kind == "LPAREN":
                     self._advance()  # skip LPAREN
