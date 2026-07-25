@@ -14403,6 +14403,32 @@ class GimpleGen:
                         _cond_fn_counts[_s.name] = _cond_fn_counts.get(_s.name, 0) + 1
                     elif isinstance(_s, IfStmt):
                         _cond_worklist.append(_s)
+        # TODO(real fix, not this refusal): this and the broader
+        # bugs/CODEGEN_conditional_toplevel_def_never_compiled.md gap share
+        # one root cause — gen_module's top-level-function discovery never
+        # walks into IfStmt bodies at all, so a def nested there isn't
+        # registered as a real top-level function even when its name is
+        # unique. A durable fix needs to, for every FunctionDef found inside
+        # a module-level if/elif/else chain:
+        #   1. Register it in the same pre-pass structures (closure scan,
+        #      gen_func loop) that direct top-level FunctionDefs go through
+        #      a few hundred lines down, instead of leaving it to fall
+        #      through to _gen_stmt_FunctionDef's closure path with no
+        #      pre-pass ClosureInfo.
+        #   2. Give same-named defs from sibling branches distinct mangled C
+        #      symbols (e.g. suffix by branch index), rather than the single
+        #      unmangled name every direct top-level def gets.
+        #   3. Make each call site to that name dispatch at runtime between
+        #      the mangled per-branch symbols, re-evaluating the same
+        #      condition the def was originally guarded by (or, if the
+        #      guarding condition is one this compiler can already resolve
+        #      statically — e.g. a literal `sys.platform` check, if that's
+        #      special-cased anywhere else already — pick the matching
+        #      branch's mangled symbol directly at compile time instead of
+        #      emitting a runtime check).
+        # Until that exists, raising here (rather than silently emitting a
+        # dangling extern or picking an arbitrary branch) is the honest
+        # option, not the complete one.
         _cond_collisions = {n for n, c in _cond_fn_counts.items() if c > 1}
         if _cond_collisions:
             raise RuntimeError(
