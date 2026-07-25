@@ -1225,6 +1225,38 @@ class Parser:
             return self._advance().value
         raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
+    def _capture_bracketed_text(self) -> str:
+        """Consume a balanced `[...]` (tracking nested bracket depth so an
+        inner comma, e.g. `d[a, b]`'s tuple key, is correctly treated as
+        part of the subscript rather than ending the block early) and
+        return its contents — WITHOUT the enclosing brackets — reconstructed
+        as source text by joining consumed tokens' raw values. Every token's
+        `.value` is the exact matched source substring (see the tokenizer's
+        `_TOKEN_RE`, including STRING tokens which keep their quotes), so
+        joining them with spaces reconstructs syntactically valid Mojo
+        source that myinterpreter.py can re-tokenize/re-parse later via its
+        own `py_tokenize`/`Parser` (the same approach already used for
+        f-string field interpolation)."""
+        self._expect("LBRACKET")
+        depth = 1
+        parts = []
+        while depth > 0:
+            t = self._peek()
+            if t.kind == "LBRACKET":
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind == "RBRACKET":
+                depth -= 1
+                self._advance()
+                if depth == 0:
+                    break
+                parts.append("]")
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
     def _parse_unpack_target(self):
         """Parse a single unpacking-target element, supporting nested tuples:
         (a, (b, c)) and a single starred element within a comma-list
@@ -1241,6 +1273,26 @@ class Parser:
         literal text ("*rest"); myinterpreter.py's _bind_comprehension_target
         recognizes the embedded "." and performs a real attribute SET
         (reusing _assign_target) instead of a scope.define().
+
+        A target element may also be a subscript expression (`d["k"]`,
+        possibly chained `d[1][0]`), e.g. `for d["k"] in items:` or
+        `with EXPR as targets[1][0]:` (the latter straight from CPython's
+        own `Lib/test/test_with.py`). Same "keep as literal text" scheme:
+        the bracket and its contents are captured verbatim (via
+        `_capture_bracketed_text`) and appended to the target string
+        ("d[\"k\"]"); myinterpreter.py's `_bind_single_target` recognizes
+        the embedded "[" and performs a real subscript SET (again reusing
+        `_assign_target`, via a re-parsed `SubscriptExpr`). NOTE: because a
+        subscript's contents are an arbitrary expression that could itself
+        contain a top-level comma (`d[a, b]`, a tuple key) — which would be
+        ambiguous with this SAME comma used to separate elements of the
+        outer target list — the outer comma-list join above only splits on
+        commas it consumes as its own token stream (safe), but
+        myinterpreter.py's later `str.split(',')` re-parse of the joined
+        target string is NOT bracket-depth-aware. A comma-containing
+        subscript key as a for/with target is therefore not supported; the
+        real-world motivating case (`targets[1][0]`) and this bug's own
+        repro (`d["k"]`) both use comma-free keys and work correctly.
 
         Shared by `for`-loop targets and `with ... as (a, b):` targets — one
         representation, one parser, reused everywhere a comma-joined
@@ -1270,6 +1322,9 @@ class Parser:
                 self._advance()
                 attr_tok = self._advance()
                 name += "." + attr_tok.value
+            # Subscript target: d["k"], or chained d[1][0]
+            while self._peek().kind == "LBRACKET":
+                name += "[" + self._capture_bracketed_text() + "]"
             return name
 
     def _parse_dotted_name(self) -> str:

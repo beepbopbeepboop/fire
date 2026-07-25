@@ -3920,21 +3920,93 @@ class Interpreter:
 
     def _bind_single_target(self, name, value):
         """Bind one non-starred element of a for-loop/comprehension target
-        string to `value`. A plain name (no dot) binds a fresh local via
-        scope.define(), same as always. A dotted name (e.g. "st.lineno" or
-        chained "a.b.c") is an attribute-SET on an existing object instead:
-        build the equivalent IdentExpr/MemberExpr AST and route through
-        _assign_target, the same mechanism plain `obj.attr = value`
-        assignment statements already use — no new attribute-set logic."""
-        if '.' in name:
-            parts = name.split('.')
-            target_expr = N.IdentExpr(name=parts[0])
-            for part in parts[1:-1]:
-                target_expr = N.MemberExpr(obj=target_expr, member=part)
-            target_expr = N.MemberExpr(obj=target_expr, member=parts[-1])
-            self._assign_target(target_expr, value)
-        else:
+        string to `value`. A plain name (no dot, no bracket) binds a fresh
+        local via scope.define(), same as always. A name containing a "."
+        and/or a "[" (e.g. "st.lineno", chained "a.b.c", "d[\"k\"]", or
+        chained "targets[1][0]") is an attribute/subscript SET on an
+        existing object instead: reconstruct the equivalent
+        IdentExpr/MemberExpr/SubscriptExpr AST — walking the string
+        left-to-right so attribute and subscript access can be freely mixed
+        in the same target path — and route through _assign_target, the
+        same mechanism plain `obj.attr = value` / `obj[idx] = value`
+        assignment statements already use, rather than writing new
+        attribute/subscript-set logic specific to for/with targets. A
+        subscript's `[...]` contents are an arbitrary expression (not just
+        a bare name like an attribute), so they're re-parsed as real Mojo
+        source through this interpreter's own tokenizer/parser — the same
+        approach _eval_fstring_expr already uses for f-string field
+        interpolation — rather than special-casing simple literal keys."""
+        if '.' not in name and '[' not in name:
             self.scope.define(name, value)
+            return
+        target_expr = self._parse_target_path(name)
+        self._assign_target(target_expr, value)
+
+    def _parse_target_path(self, name: str):
+        """Parse a for/with target-string path like "st.lineno",
+        "d[\"k\"]", or a chained/mixed "targets[1][0]" / "a.b[0].c" into
+        the equivalent IdentExpr/MemberExpr/SubscriptExpr AST, for
+        _bind_single_target to hand to _assign_target. See
+        mojo_compiler.py's _parse_unpack_target docstring for the string
+        representation this consumes (bracket contents are literal,
+        re-parseable Mojo source text; the whole string is never itself
+        re-tokenized as one expression because a bare leading NAME
+        followed by "[" would otherwise parse as a subscript of an
+        as-yet-undefined variable rather than the intended target path)."""
+        from mojo_compiler import py_tokenize, Parser
+        i = 0
+        n = len(name)
+        # Leading identifier (the base name). Deliberately NOT `name[i].isalnum()`
+        # (a bare single-`char` method call): gimple_codegen.py's compiled
+        # path has no lowering for method calls on a bare `char` (only on
+        # `char *`/string receivers, via _lower_str_method) — `isalnum` is
+        # also in _C_RESERVED_FUNCS, so it silently mangles to an
+        # undefined-at-link-time `char_mojo_isalnum` symbol instead of
+        # raising a compile-time error. Range comparisons on the char are
+        # well-supported (see mojo_compiler.py's own `_pfx_c == 'f'`-style
+        # single-char comparisons in its multiline-string-prefix scanner)
+        # and avoid the gap entirely.
+        start = i
+        while i < n and self._is_ident_char(name[i]):
+            i += 1
+        expr = N.IdentExpr(name=name[start:i])
+        while i < n:
+            if name[i] == '.':
+                i += 1
+                start = i
+                while i < n and self._is_ident_char(name[i]):
+                    i += 1
+                expr = N.MemberExpr(obj=expr, member=name[start:i])
+            elif name[i] == '[':
+                depth = 1
+                start = i + 1
+                i += 1
+                while i < n and depth > 0:
+                    if name[i] == '[':
+                        depth += 1
+                    elif name[i] == ']':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                index_text = name[start:i]
+                i += 1  # consume the closing ']'
+                index_tokens = py_tokenize(index_text)
+                index_expr = Parser(index_tokens)._parse_expr(0)
+                expr = N.SubscriptExpr(obj=expr, index=index_expr)
+            else:
+                raise SyntaxError(f"Cannot parse for/with target path {name!r}")
+        return expr
+
+    @staticmethod
+    def _is_ident_char(ch: str) -> bool:
+        """True if `ch` (a single character) can appear in a Mojo
+        identifier: letters, digits, or underscore. Written with explicit
+        range comparisons rather than `ch.isalnum()` — see
+        _parse_target_path's docstring for why a bare-`char` method call
+        can't be used here."""
+        return (('a' <= ch and ch <= 'z') or ('A' <= ch and ch <= 'Z')
+                or ('0' <= ch and ch <= '9') or ch == '_')
 
     def eval_Comprehension(self, expr):
         """List/set/dict comprehensions and parenthesized generator
