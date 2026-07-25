@@ -3785,7 +3785,7 @@ class Parser:
             # gimple_codegen.py's `_mojo_type`/`_resolve_type` harmlessly
             # fall through to the int64_t default for unrecognized text —
             # so this is safe to leave un-type-checked.
-            return prefix + "[" + self._capture_bracketed_text() + "]"
+            return self._consume_trailing_annotation_ops(prefix + "[" + self._capture_bracketed_text() + "]")
         elif t.kind == "LBRACE":
             # An annotation position occupied by a dict/set-literal-shaped
             # thing, e.g. `-> {}:` (an empty dict literal used, legally but
@@ -3806,13 +3806,17 @@ class Parser:
                 elif tok.kind == "EOF": break
                 else: parts.append(tok.value)
             parts.append("}")
-            return prefix + "".join(parts)
+            return self._consume_trailing_annotation_ops(prefix + "".join(parts))
         else:
             # Last-resort fallback: some other single token occupies the
             # annotation position (e.g. a bare operator or literal). Consume
             # it as opaque raw text rather than aborting the parse — see the
-            # LBRACKET/LBRACE cases above for why this is safe.
-            return prefix + self._advance().value
+            # LBRACKET/LBRACE cases above for why this is safe. Then, same as
+            # the NAME/KW path, consume any trailing operator continuing the
+            # expression (e.g. `radd: 1 + a` — a NUMBER-shaped prefix followed
+            # by a binary op; see
+            # bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md).
+            return self._consume_trailing_annotation_ops(prefix + self._advance().value)
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot

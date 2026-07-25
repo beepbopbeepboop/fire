@@ -1829,6 +1829,24 @@ def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta:
     pass
 """)
 
+    # 173. `_parse_type_ann_inner`'s trailing-operator gap, the OTHER half:
+    # an annotation whose FIRST token is already non-name-shaped (a literal),
+    # hitting the catch-all single-token fallback branch (added by 6ee8291)
+    # instead of the NAME/KW path. That branch returned immediately without
+    # ever calling `_consume_trailing_annotation_ops` (unlike the NAME/KW
+    # path, fixed by 6e6020f for `gamma: some < obj` above), so `radd: 1 + a`
+    # left `+ a` dangling for the parameter-list parser to choke on. This
+    # mirrors CPython's own Lib/test/test_annotationlib.py test_reverse_ops,
+    # which exercises a whole battery of reverse-dunder-shaped binary-op
+    # annotations (all NUMBER-literal prefixes) in one signature.
+    # See bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md.
+    test("annotation_leading_literal_trailing_op_battery", """\
+a = 1
+def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rmod: 1 % a, rlshift: 1 << a, rrshift: 1 >> a, ror: 1 | a, rxor: 1 ^ a, rand: 1 & a, rfloordiv: 1 // a, rpow: 1**a):
+    pass
+print("ok")
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

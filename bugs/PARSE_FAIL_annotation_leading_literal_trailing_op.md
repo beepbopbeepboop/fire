@@ -51,3 +51,36 @@ making sure the helper's terminator-detection still behaves correctly when
 called from these different entry shapes (verify by testing all of
 `test_reverse_ops`'s / `test_nonexistent_attribute`'s annotation shapes
 together, not just `radd: 1 + a` in isolation).
+
+## Status
+**Fixed**
+
+Wired `_consume_trailing_annotation_ops(...)` into all three previously-bare
+`return` sites in `_parse_type_ann_inner` (`mojo_compiler.py`):
+the `LBRACKET` opaque-capture branch, the `LBRACE` opaque-capture branch,
+and the final catch-all single-token fallback (the one that fires for
+`radd: 1 + a`'s leading `1` NUMBER token). Each now wraps its captured text
+through the shared helper before returning, exactly like the NAME/KW path
+already did since `6e6020f`.
+
+Added `test_gimple.py`'s `annotation_leading_literal_trailing_op_battery`
+(test #173), covering CPython's `test_reverse_ops`'s full battery of
+NUMBER-literal-prefixed annotations in one signature (`radd`, `rsub`,
+`rmul`, `rmatmul`, `rtruediv`, `rmod`, `rlshift`, `rrshift`, `ror`, `rxor`,
+`rand`, `rfloordiv`, `rpow`), alongside the pre-existing
+`annotation_trailing_binary_op_battery` (test #172, `6e6020f`'s
+`test_nonexistent_attribute` battery) to guard against regressing either
+sibling shape.
+
+Quality gate (see CLAUDE.md): `test_gimple.py` 175/175 passed,
+`test_module_cache.py` 64/64 passed, `make check-selfhost` clean, and a
+from-scratch stdlib dylib rebuild stayed at 0 skipped modules before and
+after (baseline and after-fix both 0 `skip <module>:` lines).
+
+Manually re-ran `mojo.py run` against the real
+`Lib/test/test_annotationlib.py`: parsing now progresses past both
+`test_nonexistent_attribute` (~line 115) and `test_reverse_ops` (~line
+334), stopping at a new, unrelated issue in `test_literals` (line 447):
+`g: ...,` — an Ellipsis (`...`) literal in annotation position isn't
+handled by the tokenizer/parser. That's a separate, out-of-scope bug, not
+covered by this fix.
