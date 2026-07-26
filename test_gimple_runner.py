@@ -61,6 +61,16 @@ def run_executable(exe_path: str) -> int:
     return result.returncode
 
 
+def run_executable_stdout(exe_path: str) -> str:
+    """Execute the program and return its captured stdout, decoded."""
+    result = subprocess.run(
+        [exe_path],
+        capture_output=True,
+        timeout=10
+    )
+    return result.stdout.decode('utf-8', errors='replace')
+
+
 def test_gimple_execution(name: str, mojo_src: str, expected_return: int = 0):
     """Test that mojo code compiles to GIMPLE and executes with expected return code."""
     global _PASS, _FAIL
@@ -73,6 +83,35 @@ def test_gimple_execution(name: str, mojo_src: str, expected_return: int = 0):
             _PASS += 1
         else:
             print(f"FAIL  {name}: expected return {expected_return}, got {result}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
+def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
+    """Test that mojo code compiles to GIMPLE, executes, and prints exactly
+    `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
+    verifies the ACTUAL printed value — needed for bugs where the compiled
+    binary runs fine and exits 0 but prints a wrong/garbage value (e.g. a
+    raw pointer reinterpreted as an integer instead of the real string), a
+    class of bug an exit-code-only check can't detect at all."""
+    global _PASS, _FAIL
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        out = run_executable_stdout(exe_path)
+        if out == expected_stdout:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
             _FAIL += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
@@ -238,6 +277,50 @@ def main() -> Int:
     x = f'value: {len('ab')}'
     return len(x)
 """, expected_return=len("value: 2"))
+
+    # 12. Untyped-parameter identity function called with a string argument
+    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # body-usage evidence at all (just returned unchanged), so the
+    # parameter and the function's inferred return type used to default to
+    # int64_t; the real char* argument was silently reinterpreted as an
+    # integer and printed as a garbage large number. A pure "does it
+    # compile"/exit-code check can't catch this at all (the binary built
+    # and exited 0 both before and after the fix) — must check stdout.
+    test_gimple_stdout("gimple_untyped_param_string_passthrough", """\
+def g(a):
+    return a
+print(g("ab"))
+""", "ab\n")
+
+    # 13. Same bug, explicitly-annotated sibling — confirms the fix to the
+    # UNANNOTATED-parameter inference path didn't disturb the already-correct
+    # annotated path.
+    test_gimple_stdout("gimple_typed_param_string_passthrough_still_works", """\
+def g(a: str) -> str:
+    return a
+print(g("ab"))
+""", "ab\n")
+
+    # 14. Two-untyped-parameter shape (`a + b`, both strings) — the shape
+    # that originally surfaced via an f-string interpolating a run-time-
+    # computed string value from a function just like this one (see
+    # bugs/PARSE_FAIL_fstring_same_quote_reuse.md's verification pass).
+    test_gimple_stdout("gimple_untyped_param_string_concat_passthrough", """\
+def g(a, b):
+    return a + b
+y = g("a", "b")
+print(y)
+""", "ab\n")
+
+    # 15. Same two-param concat shape, but the result is read back through an
+    # f-string interpolation (`{y}`) rather than a plain print(y) — the exact
+    # surrounding shape that originally surfaced this bug class.
+    test_gimple_stdout("gimple_untyped_param_string_concat_fstring", """\
+def g(a, b):
+    return a + b
+y = g("a", "b")
+print(f"result: {y}")
+""", "result: ab\n")
 
 
 def main():

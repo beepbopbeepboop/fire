@@ -2013,6 +2013,66 @@ def main():
 main()
 """)
 
+    # 178. Untyped-parameter identity function called with a string argument
+    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # body-usage evidence at all (just returned unchanged), so the parameter
+    # and the function's inferred return type used to default to int64_t;
+    # the real char* argument then got silently truncated/reinterpreted as
+    # an integer at the call site and the call's result. Assert the param
+    # and the generated function both compile as real pointers, not just
+    # that gcc accepts the file (a wrong-but-gimple-legal int64_t version
+    # would also pass a bare compile check).
+    _ok, _c, _err = gimple_compiles("""\
+def g(a):
+    return a
+print(g("ab"))
+""")
+    if _ok and 'char * g_' in _c and 'int64_t g_' not in _c:
+        print("PASS  untyped_param_string_passthrough"); _PASS += 1
+    else:
+        print("FAIL  untyped_param_string_passthrough")
+        print(f"      ok={_ok}")
+        print("      --- generated C ---")
+        for i, line in enumerate(_c.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _ok:
+            print("      --- gcc stderr ---")
+            for line in _err.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 179. Same bug, two-untyped-parameter shape (`a + b`, both strings) —
+    # the shape that originally surfaced via an f-string interpolating a
+    # run-time-computed string value from a function just like this one.
+    _ok, _c, _err = gimple_compiles("""\
+def g(a, b):
+    return a + b
+y = g("a", "b")
+print(y)
+""")
+    if _ok and 'char * g_' in _c and 'int64_t g_' not in _c:
+        print("PASS  untyped_param_string_concat_passthrough"); _PASS += 1
+    else:
+        print("FAIL  untyped_param_string_concat_passthrough")
+        print(f"      ok={_ok}")
+        print("      --- generated C ---")
+        for i, line in enumerate(_c.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _ok:
+            print("      --- gcc stderr ---")
+            for line in _err.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 180. Explicitly annotated identity function — must keep working exactly
+    # as before (this path never went through the unannotated-parameter
+    # inference this fix touches).
+    test("typed_param_string_passthrough_still_works", """\
+def g(a: str) -> str:
+    return a
+print(g("ab"))
+""")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

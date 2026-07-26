@@ -11127,6 +11127,20 @@ class GimpleGen:
                 # .get()/subscript dispatches on the right container.
                 if ctype == 'int' and vtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     ctype = vtype
+                # Same "trust ground truth" principle, generalized to ANY pointer
+                # type (not just Mojo containers) — this pre-pass hint
+                # (_inferred_var_types, Pass 1.3b) runs BEFORE Pass 1.3d's
+                # cross-call parameter-type propagation corrects an unannotated
+                # callee's real return type, so a local assigned straight from
+                # such a call (`y = g("a", "b")` where g's inferred return type
+                # only became char* once Pass 1.3d saw g's string call sites) can
+                # still carry a stale int64_t/int hint here even though the
+                # actual value just lowered is a real pointer. Declaring `y` as
+                # int64_t against that pointer value would truncate/reinterpret
+                # it as an integer at the coercion below. See
+                # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
+                if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
+                    ctype = vtype
                 self._declare_var(tname, ctype)
             dst = self.var_types[tname]
 
@@ -15711,24 +15725,47 @@ class GimpleGen:
         # dt=0.01 -> 0 froze the sim). Observe each call argument's scalar type and
         # propagate a unanimous concrete one (double) onto the callee's param. A
         # function name -> def map lets us skip annotated params.
+        #
+        # Same mechanism also carries pointer-shaped evidence (char *) — an
+        # unannotated param that is merely held/returned (no body-usage evidence
+        # at all, e.g. `def g(a): return a`) got no entry from _infer_param_types
+        # above and defaulted to int64_t, so calling it with a string argument
+        # (`g("ab")`) compiled the identity function as returning int64_t: the
+        # correct char* pointer value silently reinterpreted as an integer and
+        # printed as garbage. See bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
+        # Reuses this exact observe-per-call-site/apply-if-unanimous contract
+        # (rather than adding a third narrow body-usage special case alongside
+        # the map() one above) since the evidence here is inherently about the
+        # CALL SITE, not the function body.
         _fn_by_name = {s.name: s for s in all_functions if isinstance(s, FunctionDef)}
         _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
 
         def _arg_scalar_type(caller_name, a):
             if isinstance(a, FloatLiteral):
                 return 'double'
+            if isinstance(a, StringLiteral):
+                return 'char *'
             if isinstance(a, IdentExpr):
                 t = (self._inferred_var_types.get(caller_name, {}).get(a.name)
                      or self._inferred_param_types.get(caller_name, {}).get(a.name))
                 return t
             return None
 
-        for s in all_functions:
-            if not isinstance(s, FunctionDef):
-                continue
-            elem, nested, _ = self._scan_container_elems(s.body)
+        # Observe call sites both inside every function body AND at module top
+        # level (`_TOPLEVEL_CALLER`) — a call like `print(g("ab"))` sitting
+        # directly in module-level code (not inside any `def`) is otherwise
+        # invisible to this analysis entirely, since it only walked
+        # `all_functions`' bodies. `_TOPLEVEL_CALLER` is a name no real Mojo
+        # function can have (leading `<`), so _inferred_var_types/_inferred_
+        # param_types lookups for it simply miss (harmless) rather than
+        # colliding with a real function's per-name entries.
+        _TOPLEVEL_CALLER = '<toplevel>'
+        _caller_bodies = [(s.name, s.body) for s in all_functions if isinstance(s, FunctionDef)]
+        _caller_bodies.append((_TOPLEVEL_CALLER, stmts))
+        for caller_name, body in _caller_bodies:
+            elem, nested, _ = self._scan_container_elems(body)
             calls = []
-            self._calls_in_stmts(s.body, calls)
+            self._calls_in_stmts(body, calls)
             for call in calls:
                 if not isinstance(call.func, IdentExpr):
                     continue
@@ -15742,25 +15779,34 @@ class GimpleGen:
                     if isinstance(a, IdentExpr) and a.name in elem:
                         _record_param_elem(callee, pnames[i],
                                             elem[a.name], nested.get(a.name))
-                    st = _arg_scalar_type(s.name, a)
+                    st = _arg_scalar_type(caller_name, a)
                     if st:
                         _scalar_obs.setdefault(callee, {}).setdefault(pnames[i], set()).add(st)
 
-        # Apply: a unanimous concrete double observed across all call sites of an
-        # unannotated, weakly-defaulted param becomes that param's type.
+        # Apply: a unanimous concrete double (or char *) observed across all call
+        # sites of an unannotated, weakly-defaulted param becomes that param's type.
         for callee, pmap in _scalar_obs.items():
             fn = _fn_by_name.get(callee)
             if not fn:
                 continue
             ann = {pn: pt for pn, pt in (fn.params or [])}
             for pname, types in pmap.items():
-                if types != {'double'}:
-                    continue                         # not unanimous double
+                if types not in ({'double'}, {'char *'}):
+                    continue                         # not unanimous double / char *
                 if ann.get(pname) is not None:
                     continue                         # respect explicit annotation
                 cur = self._inferred_param_types.get(callee, {}).get(pname)
                 if cur in (None, 'int', 'int64_t'):
-                    self._inferred_param_types.setdefault(callee, {})[pname] = 'double'
+                    # types is exactly {'double'} or {'char *'} here (checked
+                    # above) — pick without next(iter(...)): a self-hosted
+                    # build of this very file (`make check-selfhost`) failed to
+                    # link with an undefined `_next` symbol when this used
+                    # `next(iter(types))`, since gimple_codegen.py's own
+                    # compiled-path lowering of the `next()` builtin over a
+                    # freshly-constructed set iterator doesn't cover this
+                    # shape.
+                    resolved_type = 'double' if types == {'double'} else 'char *'
+                    self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
         # Rebuild free-function param-type signatures so call-site coercion sees
         # the propagated scalar types (this must follow the propagation above).
@@ -15770,6 +15816,62 @@ class GimpleGen:
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+
+        # ── Pass 1.3e: refresh return types now that param inference is final ──
+        # "Pass 2" (above, executed earlier despite the lower number — it seeds
+        # func_return_types before _infer_param_types/Pass 1.3d even run) infers
+        # each unannotated function's return type by seeding its unannotated
+        # params with the naive int64_t default, since neither the body-usage
+        # pass (1.3) nor the cross-call contract (1.3d, just above) had run yet.
+        # A function whose real parameter shape only became known from body
+        # usage or from a call site's argument type — e.g. `def g(a): return a`
+        # called as `g("ab")`, whose `a`/return only resolve to char* via
+        # 1.3d's cross-call observation — was frozen here with the wrong
+        # int64_t return type. That stayed wrong for every caller compiled
+        # before g's own gen_func happened to re-sync func_return_types in
+        # Phase 2a (gen_func's "Sync so forward declarations match Phase 2a
+        # inference") — in particular a module-level statement like
+        # `y = g("a", "b")` (scanned further below, before Phase 2a) and any
+        # other function's local-variable type inference (Pass 1.3b above,
+        # which itself ran before this correction). Re-run the same
+        # inference here with the now-final param types as the seed, rather
+        # than adding a parallel special case. See
+        # bugs/CODEGEN_untyped_param_string_passthrough_wrong.md.
+        for s in all_functions:
+            if isinstance(s, FunctionDef) and s.return_type is None:
+                _saved_vt_23e = self.var_types
+                self.var_types = dict(_saved_vt_23e)
+                for pname, ptype in s.params:
+                    bare = pname.lstrip('*')
+                    if pname.startswith('*'):
+                        self.var_types[bare] = 'MojoList *'
+                    elif ptype is None:
+                        self.var_types[bare] = (self._inferred_param_types.get(s.name, {}).get(bare)
+                                                 or self._resolve_type(ptype))
+                    else:
+                        self.var_types[bare] = self._resolve_type(ptype)
+                inferred = self._infer_return_type(s.body)
+                if s.name == 'main' and inferred == 'void':
+                    inferred = 'int64_t'
+                self.var_types = _saved_vt_23e
+                self.func_return_types[s.name] = inferred
+
+        # ── Pass 1.3f: re-run local-variable type inference ────────────────
+        # Pass 1.3b (above) computed _inferred_var_types using the func_return_types
+        # in effect at the time — stale for any unannotated callee just corrected
+        # by Pass 1.3e. A local assigned straight from such a call (`y = g("a",
+        # "b")`) needs the refreshed callee return type to be typed as the real
+        # pointer instead of int64_t. Cheap to redo in full (same pass, same cost
+        # as Pass 1.3b already paid) rather than special-casing which functions
+        # need it recomputed.
+        for s in all_functions:
+            if isinstance(s, FunctionDef):
+                self._inferred_var_types[s.name] = self._infer_local_var_types(s)
+        for s in all_structs_for_methods:
+            if isinstance(s, StructDef):
+                for m in s.methods:
+                    key = f"{s.name}_{m.name}"
+                    self._inferred_var_types[key] = self._infer_local_var_types(m)
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
