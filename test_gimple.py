@@ -1990,6 +1990,19 @@ def f():
 f()
 """, "defined more than once across mutually-exclusive if/elif/else branches")
 
+    # Generator function (`yield`) honest-fallback: this codegen has no
+    # suspend/resume state-machine transform, so a generator function must
+    # be refused clearly (RuntimeError from gen_module/compile_to_gimple)
+    # rather than silently miscompiled into a single straight-line C
+    # function that just drops the yield. Milestone 1 of
+    # bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # mojo_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
+    # and gimple_codegen.py's gen_module pre-pass.
+    test_raises("generator_function_honest_fallback", """\
+def f():
+    yield 1
+""", "generator function")
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

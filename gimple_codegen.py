@@ -14478,6 +14478,44 @@ class GimpleGen:
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
+        # Generator functions (`yield`/`yield from` anywhere in a function's
+        # own body — mojo_compiler.py's parser sets FunctionDef.is_generator
+        # during parsing) cannot be lowered to a single straight-line C
+        # function the way this codegen represents every other function:
+        # they need an explicit suspend/resume state-machine transform,
+        # which does not exist yet (see
+        # bugs/INTERP_generator_yield_entirely_unimplemented.md — this is a
+        # parser-only milestone, generator codegen is a later one). Detect
+        # every generator FunctionDef anywhere in this module (top-level,
+        # nested inside if/elif/else branches, struct/class methods, or
+        # nested defs) via `_walk_ast`'s generic traversal — reused rather
+        # than a hand-rolled walk, matching this file's own established
+        # "don't duplicate a tree-walk" convention (see `_walk_ast`'s own
+        # docstring) — and refuse this module's compile clearly and
+        # immediately, BEFORE any of the module-wide pre-passes below start
+        # mutating `stmts`/registering names: same fail-fast rationale as
+        # the conditional-top-level-def-collision check a little further
+        # down (added in commit 2577b4f) — every caller of gen_module
+        # (_compile_imported_module, build_stdlib_dylib.py's per-module
+        # compile job, compile_stdlib.py, mojo.py's build_executable) already
+        # treats an exception raised from codegen as "this module/file can't
+        # be compiled natively" and falls back to interpreting it from
+        # source instead of emitting silently wrong or broken C.
+        _generator_fns = sorted({
+            n.name for n in _walk_ast(stmts)
+            if isinstance(n, FunctionDef) and n.is_generator
+        })
+        if _generator_fns:
+            raise RuntimeError(
+                "cannot compile module: function(s) "
+                f"{', '.join(_generator_fns)} contain a `yield`/`yield from` "
+                "(generator function(s)) — this codegen compiles every "
+                "function into a single straight-line C function and has no "
+                "suspend/resume state-machine transform for generators yet, "
+                "so a generator function cannot be represented as compiled "
+                "C without emitting silently wrong or broken code; falling "
+                "back to interpreting this module from source instead")
+
         # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
         # imported, or referenced but never actually resolved as local or
         # imported) — the only names _struct_method_qualifier may safely

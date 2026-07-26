@@ -1,0 +1,19 @@
+# COMPILE_FAIL: Doc/tools/extensions/misc_news.py
+
+Source file: `/Users/mrs/net/Python-3.14.6/Doc/tools/extensions/misc_news.py`
+
+(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+
+```
+Linking failed: Undefined symbols for architecture arm64:
+  "_MiscNews_get_source_info", referenced from:
+      _MiscNews_run in misc_news.o
+  "_sphinx_gettext", referenced from:
+      _MiscNews_run in misc_news.o
+ld: symbol(s) not found for architecture arm64
+collect2: error: ld returned 1 exit status
+
+```
+
+Exit code: 1
+Elapsed: 10.38s

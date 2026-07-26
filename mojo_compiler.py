@@ -6,7 +6,7 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 from __future__ import annotations
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields, is_dataclass as _dc_is_dataclass
 
 # ── Mojo pointer type shims ────────────────────────────────────────
 class _MojoPointerBase:
@@ -294,6 +294,27 @@ TupleLiteral = TupleExpr
 
 
 @dataclass
+class YieldExpr:
+    """`yield` / `yield expr` / `yield a, b` (implicit tuple, folded into a
+    single TupleExpr `value` by the parser, matching how `return a, b` is
+    represented). `value` is None for a bare `yield`. Milestone 1: parser +
+    static generator-detection only — no interpreter/codegen execution
+    support yet (see bugs/INTERP_generator_yield_entirely_unimplemented.md).
+    """
+    value: object = None
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class YieldFromExpr:
+    """`yield from expr` — delegating yield. Always carries a value (the
+    delegated iterable expression), unlike YieldExpr."""
+    value: object = None
+    line: int = 0
+    col: int = 0
+
+
+@dataclass
 class NoneLiteral:
     line: int = 0
     col: int = 0
@@ -422,6 +443,14 @@ class FunctionDef:
     param_defaults: dict = field(default_factory=dict)  # name -> default value expression AST node
     kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
     comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
+    is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
+        # function's own body (not inside a nested def/lambda/comprehension — a `yield`
+        # there belongs to THAT inner scope, matching real Python scoping rules).
+    yield_bearing_node_ids: object = None  # frozenset of id() of every statement/expression
+        # node in this function's own body (same nested-scope exclusion as is_generator)
+        # whose subtree contains a YieldExpr/YieldFromExpr. None for non-generator functions.
+        # Lets a later milestone's generator-execution pass cheaply ask "does this specific
+        # node need generator-aware handling" without re-walking the whole tree at runtime.
     line: int = 0
     col: int = 0
 
@@ -1194,6 +1223,55 @@ _BUILTIN_TRAITS = {
     'Comparable', 'Indexer', 'Absable', 'Powable', 'Roundable',
 }
 
+def _scan_yield_bearing(node, out_ids):
+    """Walk `node`'s subtree collecting id() of every statement/expression
+    node that has a YieldExpr/YieldFromExpr reachable within it, WITHOUT
+    crossing into a nested FunctionDef/LambdaExpr body (a `yield` there
+    belongs to that inner function's own scope, not this one — matches real
+    Python scoping) or into a Comprehension's element/generators (real
+    Python: `yield` inside a comprehension is a SyntaxError in the general
+    case; simplest correct stance here is to not detect/support it at all).
+
+    Returns True if `node` itself is (or contains) a yield-bearing node, and
+    as a side effect records every such node's id() into `out_ids`.
+    """
+    if node is None:
+        return False
+    if isinstance(node, (YieldExpr, YieldFromExpr)):
+        out_ids.add(id(node))
+        return True
+    if isinstance(node, (FunctionDef, LambdaExpr)):
+        # A `yield` inside a nested function/lambda makes THAT function a
+        # generator, not the enclosing one — don't recurse, don't mark.
+        return False
+    if isinstance(node, Comprehension):
+        # `yield` inside a comprehension body isn't supported/detected here
+        # (see docstring) — don't recurse into it.
+        return False
+    found = False
+    if isinstance(node, list):
+        for item in node:
+            if _scan_yield_bearing(item, out_ids):
+                found = True
+    elif _dc_is_dataclass(node):
+        for f in _dc_fields(node):
+            if _scan_yield_bearing(getattr(node, f.name), out_ids):
+                found = True
+    if found:
+        out_ids.add(id(node))
+    return found
+
+
+def _detect_generator(body: list):
+    """Given a FunctionDef's own body (list of statements), return
+    (is_generator, yield_bearing_node_ids frozenset-or-None)."""
+    out_ids = set()
+    found = _scan_yield_bearing(body, out_ids)
+    if not found:
+        return False, None
+    return True, frozenset(out_ids)
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -1523,15 +1601,61 @@ class Parser:
         self._expect("DEDENT")
         return stmts
 
+    def _parse_yield_expr(self):
+        """Parse a `yield`/`yield from` expression — assumes the current
+        token is the NAME('yield') token. `yield` is never a real Python
+        identifier (reserved since Python 2.2; confirmed by grepping
+        CPython's own test suite — the only `yield = ...`-shaped source
+        found there is test_syntax.py/test_generators.py doctests that
+        assert it's a SyntaxError), so no `var`/`await`-style "used as an
+        identifier" disambiguation is needed — every call site below only
+        invokes this where real Python's own grammar also treats `yield` as
+        the keyword, so no ambiguity is possible.
+        """
+        t = self._advance()  # consume 'yield'
+        line, col = t.line, t.col
+        if self._peek().kind == "KW" and self._peek().value == "from":
+            self._advance()
+            val = self._parse_expr(0)
+            return YieldFromExpr(value=val, line=line, col=col)
+        # Bare `yield`: next token can't start an expression.
+        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                "RBRACKET", "RBRACE", "COMMA", "COLON", "SEMICOLON"):
+            return YieldExpr(value=None, line=line, col=col)
+        val = self._parse_expr(0)
+        # Implicit tuple: yield a, b, c — same convention as `return a, b`.
+        if self._peek().kind == "COMMA":
+            elements = [val]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                        "RBRACKET", "RBRACE", "COLON", "SEMICOLON"):
+                    break
+                elements.append(self._parse_expr(0))
+            val = TupleExpr(elements=elements, line=val.line, col=val.col)
+        return YieldExpr(value=val, line=line, col=col)
+
+    def _parse_expr_or_yield(self):
+        """Like `_parse_expr(0)` but also recognizes a leading `yield`/
+        `yield from` — for use ONLY at the specific grammar positions real
+        Python allows a bare (unparenthesized) yield expression: the whole
+        RHS of a simple/chained/annotated/augmented assignment, and a bare
+        expression statement. Every other position (call arguments, `return`
+        value, `if`/`while` conditions, container-literal elements, ...)
+        must keep going through plain `_parse_expr(0)` so `yield` there
+        still requires explicit parens, matching real Python (`f((yield x))`,
+        not `f(yield x)`) — parenthesized grouping itself routes back through
+        this same recognition (see the LPAREN case in `_parse_primary`), so
+        `(yield x)` still works in those positions.
+        """
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "yield":
+            return self._parse_yield_expr()
+        return self._parse_expr(0)
+
     def _parse_stmt(self):
         t = self._peek()
         line, col = t.line, t.col
-        # Handle "yield from expr" — yield is NAME('yield'), from is KW('from')
-        if t.kind == "NAME" and t.value == "yield" and self._peek(1).kind == "KW" and self._peek(1).value == "from":
-            self._advance()  # consume yield
-            self._advance()  # consume from
-            self._parse_expr(0)  # parse the delegated generator expression
-            return ExprStmt(value=IdentExpr(name='yield'), line=line, col=col)
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
@@ -1770,7 +1894,7 @@ class Parser:
                 return self._parse_var_decl()
             self._expect("KW", "def or fn")
             return self._parse_funcdef(decs)
-        expr = self._parse_expr(0)
+        expr = self._parse_expr_or_yield()
         # Collect a comma-separated group starting with `expr` — this is
         # either a tuple-unpacking target (if followed by `=`) or a bare
         # comma/tuple expression statement (if not).
@@ -1807,7 +1931,7 @@ class Parser:
             groups = [first_group]
             while self._peek().kind == "ASSIGN":
                 self._advance()
-                val_expr = self._parse_expr(0)
+                val_expr = self._parse_expr_or_yield()
                 group = [val_expr]
                 while self._peek().kind == "COMMA":
                     self._advance()
@@ -1841,7 +1965,7 @@ class Parser:
             type_ann = self._parse_type_ann()
             if self._peek().kind == "ASSIGN":
                 self._advance()
-                val = self._parse_expr(0)
+                val = self._parse_expr_or_yield()
                 # `x: Type = value` previously silently discarded the
                 # annotation (AssignStmt has no type_ann field) — harmless
                 # for a local (type gets re-inferred from the value), but a
@@ -1880,7 +2004,7 @@ class Parser:
         # all handled uniformly above, before the COLON-annotation check).
         if self._peek().kind == "AUGASSIGN":
             op = self._advance().value
-            val = self._parse_expr(0)
+            val = self._parse_expr_or_yield()
             return AugAssignStmt(target=expr, op=op, value=val, line=line, col=col)
         self._skip_newlines()
         return ExprStmt(expr, line=line, col=col)
@@ -2384,13 +2508,16 @@ class Parser:
             ret = self._parse_type_ann()
         self._expect("COLON")
         body = self._parse_block()
+        is_generator, yield_bearing_node_ids = _detect_generator(body)
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
                            param_convs=param_convs,
                            param_has_default=param_has_default,
                            param_defaults=param_defaults,
                            kwonly=kwonly,
-                           comptime_params=comptime_params)
+                           comptime_params=comptime_params,
+                           is_generator=is_generator,
+                           yield_bearing_node_ids=yield_bearing_node_ids)
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
@@ -2603,6 +2730,10 @@ class Parser:
                     name = self._parse_dotted_name()
                     if self._peek().kind == "COLON" or self._is_kw("as"):
                         exc_type = name
+                    elif self._peek().kind == "COMMA":
+                        exc_type = name
+                        self._advance()
+                        exc_name = self._ident()
                     else:
                         self._pos = saved
                         exc_type = self._parse_expr(_KW_PREC['as'] + 1)
@@ -2610,6 +2741,9 @@ class Parser:
                     exc_type = self._parse_expr(_KW_PREC['as'] + 1)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
+                elif self._peek().kind == "COMMA":
+                    self._advance()
+                    exc_name = self._ident()
             self._expect("COLON")
             handlers.append(ExceptHandler(exc_type=exc_type, name=exc_name,
                                            body=self._parse_block()))
@@ -3329,7 +3463,12 @@ class Parser:
                 self._advance()
             if self._peek().kind == "RPAREN":
                 self._advance(); return TupleExpr(elements=[], line=line, col=col)
-            first = self._parse_expr(0)
+            # `_parse_expr_or_yield` (not plain `_parse_expr(0)`): parens are
+            # exactly the grouping real Python requires to use `yield`/
+            # `yield from` as a sub-expression (e.g. a call argument), so
+            # `(yield x)` must be recognized here even though the LPAREN
+            # itself belongs to a call/tuple/grouping, not a statement.
+            first = self._parse_expr_or_yield()
             if self._is_kw("for"):
                 # `_parse_generators` (plural) handles chained clauses:
                 # (x for row in rows for x in row) — a single `for` clause

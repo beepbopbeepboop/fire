@@ -1,0 +1,14 @@
+# CODEGEN_conditional_toplevel_def: Lib/shutil.py
+
+## Status
+**TIMEOUT resolved** (2026-07-25) - the hang was caused by the multi-name
+import a, b, c binding bug (fixed in commit 52ea4d7). The file no longer
+times out, but fails with a codegen limitation.
+
+## Build error
+
+
+Note: This pattern has an existing report:
+CODEGEN_conditional_toplevel_def_name_collision.md
+
+Source file: /Users/mrs/net/Python-3.14.6/Lib/shutil.py
