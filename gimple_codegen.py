@@ -14934,6 +14934,12 @@ class GimpleGen:
                 'closure_scope': 'Scope *',
                 'comptime_params': 'MojoList *',
                 '_pd': 'MojoList *',
+                # Milestone 2 of
+                # bugs/INTERP_generator_yield_entirely_unimplemented.md:
+                # MojoFunction.is_generator (myinterpreter.py) — mirrors
+                # FunctionDef.is_generator, gates MojoFunction._invoke's
+                # generator-construction-only vs. eager-execution branch.
+                'is_generator': '_Bool',
             }
             self.struct_field_types['_MojoSortFn'] = {
                 '_impl': 'int64_t',
@@ -14993,6 +14999,15 @@ class GimpleGen:
                 # infers 'int' and self-host miscompiles.
                 '_INT_TYPE_NAMES': 'MojoSet *',
                 '_FLOAT_TYPE_NAMES': 'MojoSet *',
+                # Milestone 2 of
+                # bugs/INTERP_generator_yield_entirely_unimplemented.md:
+                # Interpreter._gen_tls (myinterpreter.py, a
+                # `threading.local()`) — per-OS-thread storage for the
+                # currently-running Mojo generator's `yield_fn`. Opaque to
+                # the compiled path (only ever getattr/setattr'd, never
+                # itself Mojo-observable), same treatment as 'object'/'Any'
+                # elsewhere in this file.
+                '_gen_tls': 'void *',
             }
             self.struct_field_types['Parser'] = {
                 '_tok': 'MojoList *',

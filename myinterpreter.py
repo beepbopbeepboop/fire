@@ -18,6 +18,7 @@ import platform
 import operator
 import math
 import collections
+import threading
 from dataclasses import dataclass
 import mojo_compiler as N
 
@@ -113,7 +114,8 @@ class Scope:
 
 class MojoFunction:
     """Represents a function defined in Mojo code."""
-    def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None):
+    def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
+                 is_generator=False):
         self.name = name
         self.params = params
         self.body = body
@@ -125,6 +127,13 @@ class MojoFunction:
         self.comptime_params = comptime_params or []
         if param_defaults:
             self._pd = param_defaults
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # mirrors FunctionDef.is_generator (see mojo_compiler.py) — copied
+        # onto the MojoFunction at construction time (see
+        # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
+        # `_invoke` can branch to the generator-construction path without
+        # needing the original FunctionDef node around at call time.
+        self.is_generator = is_generator
 
     def __call__(self, interpreter, *args, **kwargs):
         return self._invoke(interpreter, {}, args, kwargs)
@@ -170,20 +179,341 @@ class MojoFunction:
                 if not _found:
                     func_scope.define(param, None)
 
-
-        # Execute function body
-        old_scope = interpreter.scope
-        interpreter.scope = func_scope
-        try:
-            for stmt in self.body:
-                interpreter.execute(stmt)
-            result = None
-        except ReturnValue as ret:
-            result = ret.value
-        finally:
-            interpreter.scope = old_scope
+        if self.is_generator:
+            # Calling a generator function must NOT run any of its body —
+            # real Python doesn't execute a single statement of a generator
+            # function until the caller starts pulling values out of it.
+            # Construct-and-return only; func_scope (with params/comptime
+            # bindings already bound above, exactly like the eager path)
+            # becomes this generator's own private scope, swapped in by
+            # MojoGeneratorObject around every resume — see its docstring
+            # for why the swap can't just happen once here.
+            #
+            # Routed through the same single `result`-variable/single-return
+            # shape as the eager path just below (rather than an early
+            # `return MojoGeneratorObject(...)`) deliberately: this file is
+            # itself self-hosted (gimple_codegen.py compiles it), and that
+            # compiler's return-type inference is a simple whole-function
+            # unification that got confused by two differently-shaped
+            # return statements in the same function (a boxed generic value
+            # vs. a directly-constructed local struct type) — see
+            # bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # Milestone 2 report for the concrete compile errors this
+            # produced before the fix.
+            result = MojoGeneratorObject(interpreter, func_scope, self.body)
+        else:
+            # Execute function body
+            old_scope = interpreter.scope
+            interpreter.scope = func_scope
+            try:
+                for stmt in self.body:
+                    interpreter.execute(stmt)
+                result = None
+            except ReturnValue as ret:
+                result = ret.value
+            finally:
+                interpreter.scope = old_scope
 
         return result
+
+
+class _ThreadedGenerator:
+    """A from-scratch generator-protocol implementation (`.send()`/
+    `.throw()`/`.close()`, raising `StopIteration` like a real Python
+    generator does) backed by a dedicated worker `threading.Thread`,
+    DELIBERATELY not using Python's native `yield` keyword anywhere in this
+    file. `body_fn(yield_fn)` runs entirely on the worker thread; it calls
+    `yield_fn(value)` to suspend and receive back whatever `.send()` later
+    passes in, and its `return value` becomes `StopIteration(value)`.
+
+    Why not just a plain Python generator function (as originally
+    implemented -- see git history)? myinterpreter.py is itself one of the
+    sources this project self-hosts (`mojo.py` compiling its own source,
+    `myinterpreter.py` included, via gimple_codegen.py). gimple_codegen.py's
+    generator detection (added for real Mojo-language `yield` support)
+    operates on the raw syntax tree it parses this file's own source into
+    and cannot distinguish "this Python function happens to use `yield` as
+    its own implementation technique" from "this is a user's Mojo generator
+    function" -- see commit 7ab861d, which hit and fixed the identical
+    problem in a different file (gimple_codegen.py's own internal
+    tree-walkers used `yield` purely as an implementation detail) by
+    rewriting them away from `yield` entirely. A single real `yield`
+    anywhere in myinterpreter.py's own top-level function bodies makes
+    gimple_codegen.py's module-level "fall back to interpreting from
+    source" trigger for the WHOLE of myinterpreter.py -- which in turn broke
+    `make check-selfhost`: other self-hosted modules calling into
+    `Interpreter` methods generate a properly-typed extern declaration for
+    them from myinterpreter.py's (normally available) static type info,
+    while mojo.py's own compiled code -- unable to get that info once
+    myinterpreter.py falls back -- instead emits a bare variadic stub
+    declaration for the very same C symbol. Two conflicting declarations of
+    one symbol in a single linked program is a hard GCC error
+    ("conflicting types for 'Interpreter_execute'"), confirmed by actually
+    running `make check-selfhost` against a native-generator-based first
+    draft of this mechanism.
+
+    A worker-thread coroutine gives the exact same suspend-from-anywhere
+    semantics as a native generator -- the Mojo body can `yield` from
+    arbitrarily deep inside execute()/eval_expr()'s ordinary recursive call
+    chain, with NO per-statement/per-expression-kind mirroring needed
+    (unlike the reverted native-generator draft's parallel `_exec_gen`/
+    `_eval_gen` dispatch family) -- without the keyword. Exactly one of
+    {caller thread, worker thread} runs at a time, handed off via two
+    `threading.Event`s: never real concurrency, just cooperative suspension
+    implemented with a thread instead of a generator frame."""
+
+    def __init__(self, body_fn):
+        self._to_worker = threading.Event()
+        self._to_caller = threading.Event()
+        self._sent_value = None
+        self._yielded_value = None
+        self._inject_exc = None    # caller -> worker: exception to raise at the suspend point
+        self._raised_exc = None    # worker -> caller: exception the body raised (propagates from send/throw)
+        self._return_value = None
+        self._done = False
+
+        def _yield_fn(value):
+            self._yielded_value = value
+            self._to_caller.set()
+            self._to_worker.wait()
+            self._to_worker.clear()
+            if self._inject_exc is not None:
+                exc, self._inject_exc = self._inject_exc, None
+                raise exc
+            return self._sent_value
+
+        def _worker():
+            self._to_worker.wait()
+            self._to_worker.clear()
+            try:
+                if self._inject_exc is not None:
+                    exc, self._inject_exc = self._inject_exc, None
+                    raise exc
+                self._return_value = body_fn(_yield_fn)
+            except BaseException as e:
+                self._raised_exc = e
+            finally:
+                self._done = True
+                self._to_caller.set()
+
+        # Deep *Mojo-level* recursion inside a generator body fans out into
+        # many nested Python frames per Mojo call the same way mojo.py's own
+        # `interpret_and_execute` worker thread does (eval_expr ->
+        # eval_CallExpr -> invoke -> _invoke -> execute -> ...) — the default
+        # OS thread stack is nowhere near big enough. threading.stack_size()
+        # is a process-global setting applied to threads created after the
+        # call, matching the same pattern mojo.py itself already uses.
+        _old_stack_size = threading.stack_size()
+        threading.stack_size(1024 * 1024 * 1024)
+        try:
+            self._thread = threading.Thread(target=_worker, daemon=True)
+            self._thread.start()
+        finally:
+            threading.stack_size(_old_stack_size)
+
+    def _resume(self):
+        """Common tail of send()/throw(): hand off to the worker thread and
+        wait for it to either yield again or finish. Raises a BARE
+        `StopIteration` (no constructor argument) when done — the return
+        value is read back off `self._return_value` afterward instead of
+        `StopIteration.value`/`.args` deliberately: this file self-hosts,
+        and the compiler's exception model represents a raised exception as
+        a type tag + opaque payload, not a real struct with a typed
+        `.value`/`.args` field it can generate attribute-access code
+        against (only `MojoError`'s dedicated `_raised_mojo_value` channel
+        and plain string messages are supported that way) — reading a
+        value off one of OUR OWN classes' ordinary fields instead sidesteps
+        that entirely."""
+        self._to_worker.set()
+        self._to_caller.wait()
+        self._to_caller.clear()
+        if self._done:
+            exc, self._raised_exc = self._raised_exc, None
+            if exc is not None:
+                raise exc
+            raise StopIteration
+        return self._yielded_value
+
+    def send(self, value):
+        if self._done:
+            raise StopIteration
+        self._sent_value = value
+        return self._resume()
+
+    def throw(self, exc):
+        if self._done:
+            raise exc
+        self._inject_exc = exc
+        return self._resume()
+
+    def close(self):
+        if self._done:
+            return
+        try:
+            self.throw(GeneratorExit())
+        except (GeneratorExit, StopIteration):
+            pass
+
+
+class MojoGeneratorObject:
+    """Wraps the `_ThreadedGenerator` produced by driving a Mojo generator
+    function's body through the ORDINARY, unmodified `execute()`/
+    `eval_expr()` dispatch (see `_ThreadedGenerator`'s docstring for why a
+    worker thread instead of a native Python generator), exposing the
+    subset of Python's generator protocol Mojo programs can observe:
+    `__iter__`, `__next__`, `.send()`, `.throw()`, `.close()`.
+
+    THE SHARP EDGE: `interpreter.scope` is a single mutable attribute, not a
+    parameter threaded through calls (see Scope/MojoFunction docstrings
+    elsewhere in this file). A naive design would swap `interpreter.scope`
+    to `func_scope` once when the underlying generator is first created and
+    swap it back once when the generator finally completes -- mirroring how
+    MojoFunction._invoke does it for an ordinary (non-suspending) call. That
+    is wrong here: between any two resumes of a suspended generator, the
+    interpreter keeps right on running other code (the code that called
+    `next()`/`.send()`, possibly itself another generator's body) with
+    `interpreter.scope` pointing wherever THAT code needs it to point.
+    Interleaved generators (e.g. two counters advanced in lockstep by a
+    `zip`-like loop) would otherwise read/write each other's locals -- even
+    though each generator's body runs on its own dedicated OS thread, only
+    one of {any generator's worker thread, the caller's thread} ever
+    actually runs at a time (strict handoff via `_ThreadedGenerator`'s
+    Events), so this is the exact same single-mutable-attribute hazard a
+    native-generator design would have, just realized with real threads
+    instead of generator frames.
+
+    The fix: every single entry into the underlying raw generator (each
+    `__next__`/`send`/`throw`/`close` call, not just the first/last one)
+    saves whatever scope is currently active, swaps in this generator's own
+    `func_scope` for the duration of exactly that one resume, and restores
+    the caller's scope the instant control returns -- whether by yielding
+    again, returning, or raising. This is exactly a context switch, done at
+    every switch point, not just at thread start/end."""
+
+    def __init__(self, interpreter, func_scope, body):
+        self.interpreter = interpreter
+        self.func_scope = func_scope
+
+        def _body_fn(yield_fn):
+            tls = interpreter._gen_tls
+            old_yield_fn = getattr(tls, 'yield_fn', None)
+            tls.yield_fn = yield_fn
+            try:
+                try:
+                    for stmt in body:
+                        interpreter.execute(stmt)
+                    return None
+                except ReturnValue as ret:
+                    return ret.value
+            finally:
+                tls.yield_fn = old_yield_fn
+
+        self._raw_gen = _ThreadedGenerator(_body_fn)
+        self._started = False
+        self._finished = False
+        # The delegate's `return value` (a Mojo `return` inside a generator
+        # body — becomes `StopIteration.value` in real Python), read off
+        # `_ThreadedGenerator._return_value` and re-exposed here as an
+        # ordinary field on one of THIS FILE's OWN classes rather than ever
+        # touching `.value`/`.args` on the `StopIteration` exception object
+        # itself — see `_ThreadedGenerator._resume`'s docstring for why
+        # (this file self-hosts; the compiler's exception model has no
+        # typed-attribute-access story for a builtin exception's payload).
+        # `eval_YieldFromExpr` reads this after catching a bare
+        # `StopIteration` to propagate `yield from`'s return value.
+        self.return_value = None
+
+    def __iter__(self):
+        return self
+
+    def _enter(self):
+        """Start one resume step: swap `interpreter.scope` to this
+        generator's own scope and return whatever scope was active before,
+        so the caller can restore it in `_leave()` — see class docstring.
+        Split into explicit enter/leave methods (rather than a single
+        `_drive(thunk)` taking a `lambda: ...` closure, the original shape)
+        because gimple_codegen.py's self-hosted compile of THIS file
+        couldn't resolve a lambda passed as a callable argument at a call
+        site (`_MojoGeneratorObject___next___lambda_1` etc. came back as
+        undefined symbols at link time) — an open/close pair with no
+        closure argument sidesteps that compiled-path gap entirely."""
+        old = self.interpreter.scope
+        self.interpreter.scope = self.func_scope
+        return old
+
+    def _leave(self, old):
+        self.interpreter.scope = old
+        self._started = True
+
+    def __next__(self):
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            return self._raw_gen.send(None)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def send(self, value):
+        if value is not None and not self._started:
+            # Matches real Python: a just-started generator can only be
+            # resumed with `.send(None)` (equivalent to `next()`) — it
+            # hasn't reached a `yield` expression yet to receive a value.
+            raise TypeError("can't send non-None value to a just-started generator")
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            return self._raw_gen.send(value)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def throw(self, exc_type, exc_val=None, exc_tb=None):
+        # Normalize the (exc_type, exc_val, exc_tb) / bare-instance call
+        # shapes real Python's generator.throw() accepts down to a single
+        # exception instance — `_ThreadedGenerator.throw` (see its
+        # docstring) only needs to inject one exception object at the
+        # suspend point, not reconstruct a full three-arg raise.
+        if isinstance(exc_type, BaseException):
+            exc = exc_type
+        elif exc_val is not None:
+            exc = exc_type(exc_val) if not isinstance(exc_val, BaseException) else exc_val
+        else:
+            exc = exc_type()
+        if self._finished:
+            raise exc
+        old = self._enter()
+        try:
+            return self._raw_gen.throw(exc)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def close(self):
+        """Throws GeneratorExit into the generator at its current suspension
+        point (delegating to `_ThreadedGenerator.close()`, which already
+        implements this correctly) so a `try/finally` holding a resource
+        inside the Mojo generator body runs its cleanup even if the
+        generator is never fully consumed."""
+        if self._finished:
+            return
+        old = self._enter()
+        try:
+            self._raw_gen.close()
+        finally:
+            self._leave(old)
+        self._finished = True
 
 
 class _MojoSelfType:
@@ -1722,6 +2052,14 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # per-OS-thread storage for "the yield_fn of the generator whose body
+        # is currently running on THIS thread" — see MojoGeneratorObject
+        # (each generator body runs on its own dedicated worker thread, so
+        # this is naturally scoped correctly with no explicit save/restore
+        # needed around individual yield/resume points, unlike
+        # `interpreter.scope` itself).
+        self._gen_tls = threading.local()
         self._setup_builtins()
 
     def _load_mojo_module_from_path(self, file_path):
@@ -2397,7 +2735,8 @@ class Interpreter:
         _pdv = None
         if _pd:
             _pdv = [(k, self.eval_expr(v)) for k, v in _pd.items()]
-        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv)
+        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
+                             is_generator=getattr(node, 'is_generator', False))
         spec = self._classify_params(node)
         return self._register_function(self.scope.vars, node.name, func, spec)
 
@@ -2434,7 +2773,8 @@ class Interpreter:
             comptime_params = getattr(m, 'comptime_params', None)
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
-            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
+            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
+                                        is_generator=getattr(m, 'is_generator', False))
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -2520,7 +2860,8 @@ class Interpreter:
                 comptime_params = getattr(m, 'comptime_params', None)
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
-                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
+                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
+                                        is_generator=getattr(m, 'is_generator', False))
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -2742,41 +3083,43 @@ class Interpreter:
 
     def execute_AugAssignStmt(self, node):
         """Execute augmented assignment (+=, -=, etc.)."""
-        # Get current value
         current = self.eval_expr(node.target)
-        # Get RHS value
         rhs = self.eval_expr(node.value)
-        # Apply operator
-        op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
-        if op == '+':
-            new_value = current + rhs
-        elif op == '-':
-            new_value = current - rhs
-        elif op == '*':
-            new_value = current * rhs
-        elif op == '/':
-            new_value = current / rhs
-        elif op == '%':
-            new_value = current % rhs
-        elif op == '//':
-            new_value = current // rhs
-        elif op == '**':
-            new_value = current ** rhs
-        elif op == '&':
-            new_value = current & rhs
-        elif op == '|':
-            new_value = current | rhs
-        elif op == '^':
-            new_value = current ^ rhs
-        elif op == '<<':
-            new_value = current << rhs
-        elif op == '>>':
-            new_value = current >> rhs
-        else:
-            raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
-        # Assign new value
+        new_value = self._apply_augassign_op(node, current, rhs)
         self._assign_target(node.target, new_value)
         return new_value
+
+    def _apply_augassign_op(self, node, current, rhs):
+        """Compute the new value for `target OP= value` given already-
+        evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
+        its own named step for clarity."""
+        op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
+        if op == '+':
+            return current + rhs
+        elif op == '-':
+            return current - rhs
+        elif op == '*':
+            return current * rhs
+        elif op == '/':
+            return current / rhs
+        elif op == '%':
+            return current % rhs
+        elif op == '//':
+            return current // rhs
+        elif op == '**':
+            return current ** rhs
+        elif op == '&':
+            return current & rhs
+        elif op == '|':
+            return current | rhs
+        elif op == '^':
+            return current ^ rhs
+        elif op == '<<':
+            return current << rhs
+        elif op == '>>':
+            return current >> rhs
+        else:
+            raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
 
     def _assign_target(self, target, value):
         """Assign a value to a target (variable, member, subscript, tuple, etc.)."""
@@ -3211,6 +3554,66 @@ class Interpreter:
         value = self.eval_expr(expr.value)
         self.scope.define(expr.name, value)
         return value
+
+    def _current_yield_fn(self, expr):
+        """The `yield_fn` of the generator whose body is currently running
+        on THIS OS thread — see MojoGeneratorObject/_ThreadedGenerator.
+        `None` means eval_YieldExpr/eval_YieldFromExpr is somehow running
+        outside any generator body, which mojo_compiler.py's parser-level
+        `is_generator`/`yield_bearing_node_ids` detection (Milestone 1)
+        should make unreachable in practice — a plain SyntaxError-style
+        message rather than an obscure AttributeError if it ever is."""
+        fn = getattr(self._gen_tls, 'yield_fn', None)
+        if fn is None:
+            raise SyntaxError(f"{self._loc(expr)}'yield' outside a generator function")
+        return fn
+
+    def eval_YieldExpr(self, expr: N.YieldExpr):
+        """`yield` / `yield expr`. Suspends the CURRENT thread (this Mojo
+        generator's own dedicated worker thread — see MojoGeneratorObject)
+        by calling that generator's `yield_fn`, which blocks until the
+        generator is resumed via `.send()`/`.__next__()`/`.throw()`, and
+        returns whatever value the resumer passed in (None for a plain
+        `next()`)."""
+        value = self.eval_expr(expr.value) if expr.value is not None else None
+        return self._current_yield_fn(expr)(value)
+
+    def eval_YieldFromExpr(self, expr: N.YieldFromExpr):
+        """`yield from <expr>` — delegating yield. If the delegated source
+        is itself another Mojo generator, drive it via its own `.send()`/
+        `.throw()`/`.close()` protocol so its `MojoGeneratorObject.
+        return_value` (a Mojo `return value` inside the delegate; see that
+        field's docstring for why the value is read from there rather than
+        `StopIteration.value`/`.args`) correctly becomes this expression's
+        own value, and a `.throw()`/`.close()` sent to THIS (outer)
+        generator is forwarded into the delegate before propagating —
+        matching real Python `yield from` semantics for a generator source.
+        A plain (non-generator) iterable falls back to a manual loop with
+        no `.send()` forwarding and no return value, also matching real
+        Python."""
+        source = self.eval_expr(expr.value)
+        yield_fn = self._current_yield_fn(expr)
+        if not isinstance(source, MojoGeneratorObject):
+            for item in source:
+                yield_fn(item)
+            return None
+        sent = None
+        while True:
+            try:
+                value = source.send(sent)
+            except StopIteration:
+                return source.return_value
+            try:
+                sent = yield_fn(value)
+            except GeneratorExit:
+                source.close()
+                raise
+            except BaseException as e:
+                try:
+                    value = source.throw(e)
+                except StopIteration:
+                    return source.return_value
+                sent = yield_fn(value)
 
     def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
@@ -3681,7 +4084,13 @@ class Interpreter:
 
         left = self.eval_expr(expr.left)
         right = self.eval_expr(expr.right)
+        return self._apply_binary_op(expr, op, left, right)
 
+    def _apply_binary_op(self, expr, op, left, right):
+        """Compute a binary operator's result from already-evaluated
+        operands (everything except the short-circuiting 'and'/'or'/'as',
+        handled directly in eval_BinaryOp before operands are evaluated).
+        Factored out of eval_BinaryOp as its own named step for clarity."""
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -3763,8 +4172,12 @@ class Interpreter:
     def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""
         operand = self.eval_expr(expr.operand)
-        op = expr.op
+        return self._apply_unary_op(expr, operand)
 
+    def _apply_unary_op(self, expr, operand):
+        """Compute a unary operator's result from an already-evaluated
+        operand. Factored out of eval_UnaryOp as its own named step."""
+        op = expr.op
         if op == '-': return self._wrap_int(-operand)
         elif op == '+': return +operand
         elif op == '~': return self._wrap_int(~operand)
@@ -3825,6 +4238,11 @@ class Interpreter:
     def eval_MemberExpr(self, expr: N.MemberExpr):
         """Evaluate member access."""
         obj = self.eval_expr(expr.obj)
+        return self._eval_member_of(expr, obj)
+
+    def _eval_member_of(self, expr, obj):
+        """Resolve `expr.member` against an already-evaluated `obj`.
+        Factored out of eval_MemberExpr as its own named step."""
         if isinstance(obj, MojoInstance):
             if expr.member in obj.__dict__:
                 return obj.__dict__[expr.member]
