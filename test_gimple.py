@@ -3451,6 +3451,134 @@ def main():
     print(x)
 """, "consumed as a value")
 
+    # ── Step F: `await asyncio.sock_recv(<fd>)` real-socket-I/O compile-only
+    # smoke test — same two-part bar as Step C's own
+    # test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path above
+    # (real gcc/g++ -fsyntax-only-clean output AND the generated code
+    # actually reaches Step A's real reactor primitive
+    # mojo_async_register_read, not a faked stand-in). See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run
+    # against a genuine socketpair(), with wall-clock timing proving actual
+    # reactor-driven suspension) counterpart.
+    def test_async_sock_recv_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
+
+async def recv_one():
+    fd = 3
+    b = await asyncio.sock_recv(fd)
+    return b
+
+def main():
+    x = asyncio.run(recv_one())
+    print(x)
+"""
+        name = "async_sock_recv_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected a non-empty generated .cpp for a "
+                  "compiled async function")
+            _FAIL += 1
+            return
+        if ('co_await' not in cpp_src
+                or 'mojo_async_register_read' not in cpp_src
+                or '_mojoasync_SockRecvAwaiter' not in cpp_src):
+            print(f"FAIL  {name}: the async function's body should lower "
+                  "`await asyncio.sock_recv(...)` to a real `co_await` on "
+                  "Step A's reactor read-registration API via "
+                  "_mojoasync_SockRecvAwaiter")
+            _FAIL += 1
+            return
+        if ('mojo_async_schedule_ready' not in c_src
+                or 'mojo_async_run_until_complete' not in c_src):
+            print(f"FAIL  {name}: the top-level `asyncio.run(recv_one())` "
+                  "call should drive the coroutine to completion via Step "
+                  "A's own scheduler API in the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_sock_recv_compiles_via_cpp_path()
+
+    # `asyncio.sock_recv(...)` referenced WITHOUT `await` (e.g. assigned) has
+    # no meaning at compiled-program runtime — same honest-fallback shape as
+    # `asyncio.sleep(...)` used without `await`, immediately above.
+    test_raises("asyncio_sock_recv_without_await_honest_fallback", """\
+import asyncio
+
+def main():
+    fd = 3
+    x = asyncio.sock_recv(fd)
+    print(x)
+""", "asyncio.sock_recv")
+
+    # A multi-argument `asyncio.sock_recv(fd, nbytes)` call — this step's
+    # deliberately narrow scope only recognizes the fixed-1-byte, single-
+    # argument shape (see gimple_codegen._is_asyncio_sock_recv_call's
+    # docstring); a 2-argument call doesn't match that shape at all, so it
+    # falls through to the generic "unsupported await target" refusal.
+    test_raises("asyncio_sock_recv_with_nbytes_arg_still_refused", """\
+async def f():
+    fd = 3
+    b = await asyncio.sock_recv(fd, 1024)
+    return b
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "async function(s), declared")
+
+    # A hypothetical `asyncio.sock_sendall(...)` (the write-side counterpart)
+    # remains entirely out of this step's scope — no special-case
+    # recognition exists for it at all, so it's refused exactly like any
+    # other unrecognized await target.
+    test_raises("asyncio_sock_sendall_not_recognized_still_refused", """\
+async def f():
+    fd = 3
+    await asyncio.sock_sendall(fd, 65)
+    return 0
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "async function(s), declared")
+
     # Step D: async-awaits-async composition (one Mojo async function
     # awaiting ANOTHER Mojo async function's call) now compiles for real —
     # see test_async_await_composition_compiles_via_cpp_path above for the

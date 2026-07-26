@@ -10,6 +10,7 @@ promise_type/extern "C" API (_start/_is_done/_value/_destroy, no `_resume`
 the generator one.
 """
 import os
+import socket
 import subprocess
 import tempfile
 import time
@@ -166,6 +167,186 @@ def test_async_stdout_timed(name: str, mojo_src: str, expected_stdout: str,
     except Exception as e:
         print(f"FAIL  {name}: {e}")
         _FAIL += 1
+
+
+def _recv_one_mojo_src(fd: int) -> str:
+    """The one Mojo source shape every Step F test below builds: an async
+    function that awaits exactly one byte off `fd` (embedded as a literal
+    int -- there is no Mojo-level socket type yet to obtain a runtime fd
+    from any other way, see gimple_codegen._is_asyncio_sock_recv_call's
+    docstring) and prints the resulting int64_t (0-255 on success, -1 on
+    EOF, -2 on a real read error) via the ordinary asyncio.run(...) bridge,
+    exactly mirroring every other test_async_stdout_timed case in this
+    file."""
+    return f"""\
+import asyncio
+
+async def recv_one():
+    fd = {fd}
+    b = await asyncio.sock_recv(fd)
+    return b
+
+def main():
+    x = asyncio.run(recv_one())
+    print(x)
+"""
+
+
+def test_sock_recv_delayed_write(name: str, delay_seconds: float):
+    """THE core proof for Step F, mirroring test_async_stdout_timed's role
+    for Step C's asyncio.sleep(...) exactly but for real socket I/O: a
+    compiled async function awaiting `asyncio.sock_recv(fd)` on one end of a
+    real `socket.socketpair()`, while THIS (parent) process writes a single
+    real byte to the other end only after a genuine delay. Asserts BOTH the
+    correct byte value was received (proving the actual `read(2)` in
+    `_mojoasync_SockRecvAwaiter::await_resume` ran and its result correctly
+    round-tripped back out through `asyncio.run(...)`) AND that the
+    measured wall-clock time is close to `delay_seconds`, not ~0 (which
+    would mean the coroutine never really suspended on the reactor at all)
+    and not wildly larger (a scheduler/reactor stall) -- exactly the same
+    two-part rigor bar test_async_stdout_timed already established for the
+    timer queue, now applied to the kqueue read-reactor path instead.
+
+    The child process is spawned via subprocess.Popen with the read end's
+    fd passed through `pass_fds` (kept open at the SAME fd number across
+    exec, which is exactly why that literal number can be safely embedded
+    into the Mojo source built just before spawning) -- the write end stays
+    in this (parent) Python process, which performs the real delayed
+    os.write() itself; nothing about the actual reactor mechanism is
+    mocked or simulated in either process."""
+    global _PASS, _FAIL
+    read_sock, write_sock = socket.socketpair()
+    try:
+        read_fd = read_sock.fileno()
+        mojo_src = _recv_one_mojo_src(read_fd)
+        exe = _build_async_program(mojo_src)
+
+        byte_value = 0x41  # 'A'
+        t0 = time.monotonic()
+        proc = subprocess.Popen([exe], stdout=subprocess.PIPE,
+                                 pass_fds=(read_fd,))
+        # The child inherited its own copy of read_fd across exec; this
+        # process's copy (and the never-inherited write_sock) must stay
+        # open on THIS side so the delayed write below actually reaches
+        # the child's kqueue registration.
+        time.sleep(delay_seconds)
+        write_sock.send(bytes([byte_value]))
+        try:
+            out, _ = proc.communicate(timeout=10)
+        finally:
+            dt = time.monotonic() - t0
+        expected = f"{byte_value}\n"
+        if out.decode() != expected:
+            print(f"FAIL  {name}: expected stdout {expected!r}, got {out.decode()!r}")
+            _FAIL += 1
+            return
+        # Generous headroom above (process startup + build already excluded
+        # -- only the Popen-to-exit window is timed -- but real scheduling/
+        # CI-machine noise still needs slack), a real floor below matching
+        # test_async_stdout_timed's own ~10ms-below-target convention.
+        min_seconds, max_seconds = delay_seconds - 0.03, max(1.0, delay_seconds * 5)
+        if not (min_seconds <= dt <= max_seconds):
+            print(f"FAIL  {name}: expected wall-clock time in "
+                  f"[{min_seconds}, {max_seconds}]s, measured {dt:.4f}s -- "
+                  "either sock_recv never really suspended on the reactor "
+                  "(too fast) or something stalled well beyond the write "
+                  "(too slow)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name} (dt={dt:.4f}s)")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        read_sock.close()
+        write_sock.close()
+
+
+def test_sock_recv_already_readable_before_await(name: str):
+    """Edge case beyond the obvious happy path (per this project's own
+    established pattern of budgeting real time for at least one edge case
+    at every step -- see this step's own docstrings/plan): the peer writes
+    its byte BEFORE the child process (and therefore its
+    `mojo_async_register_read` kqueue registration) even exists yet, so the
+    fd is already readable at the moment `await_suspend` registers interest
+    in it. Real kqueue semantics report an already-satisfied EVFILT_READ
+    interest as ready on the very next kevent() call (no special-cased
+    "check readability before registering" logic exists anywhere in this
+    codegen or in Step A's reactor -- see _mojoasync_SockRecvAwaiter's own
+    docstring in gimple_codegen.py), so this should resume on the process's
+    very first scheduler turn: asserts the SAME correct byte value, plus a
+    generous-but-real upper bound on wall-clock time (well under a second)
+    to positively confirm this path does NOT silently degenerate into
+    waiting for some unrelated/nonexistent event."""
+    global _PASS, _FAIL
+    read_sock, write_sock = socket.socketpair()
+    try:
+        read_fd = read_sock.fileno()
+        byte_value = 0x5A  # 'Z'
+        write_sock.send(bytes([byte_value]))
+        mojo_src = _recv_one_mojo_src(read_fd)
+        exe = _build_async_program(mojo_src)
+
+        t0 = time.monotonic()
+        proc = subprocess.Popen([exe], stdout=subprocess.PIPE,
+                                 pass_fds=(read_fd,))
+        out, _ = proc.communicate(timeout=10)
+        dt = time.monotonic() - t0
+        expected = f"{byte_value}\n"
+        if out.decode() != expected:
+            print(f"FAIL  {name}: expected stdout {expected!r}, got {out.decode()!r}")
+            _FAIL += 1
+            return
+        if dt >= 0.5:
+            print(f"FAIL  {name}: already-readable sock_recv took {dt:.4f}s "
+                  "(expected near-instant resumption, well under 0.5s) -- "
+                  "looks like it stalled instead of resuming on the first "
+                  "scheduler turn")
+            _FAIL += 1
+            return
+        print(f"PASS  {name} (dt={dt:.4f}s)")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        read_sock.close()
+        write_sock.close()
+
+
+def test_sock_recv_eof(name: str):
+    """A second edge case: the peer closes its end WITHOUT ever writing
+    anything, rather than sending a byte -- a real, valid `recv()`/`read()`
+    outcome (0 bytes read) distinct from "still waiting" and from "got a
+    byte", which `_mojoasync_SockRecvAwaiter::await_resume` reports as -1
+    (see its docstring). Confirms this third possible outcome round-trips
+    correctly too, not just the byte-received happy path."""
+    global _PASS, _FAIL
+    read_sock, write_sock = socket.socketpair()
+    try:
+        read_fd = read_sock.fileno()
+        mojo_src = _recv_one_mojo_src(read_fd)
+        exe = _build_async_program(mojo_src)
+
+        proc = subprocess.Popen([exe], stdout=subprocess.PIPE,
+                                 pass_fds=(read_fd,))
+        time.sleep(0.05)
+        write_sock.close()  # close with nothing ever sent -> peer sees EOF
+        out, _ = proc.communicate(timeout=10)
+        expected = "-1\n"
+        if out.decode() != expected:
+            print(f"FAIL  {name}: expected stdout {expected!r}, got {out.decode()!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        read_sock.close()
+        write_sock.close()  # already closed above; socket.close() is idempotent
 
 
 def run_tests():
@@ -679,6 +860,24 @@ def main():
     except ValueError as e:
         print(e)
 """, "inner\n")
+
+    # ── Step F: real socket I/O via `await asyncio.sock_recv(<fd>)` ────────
+    # Reuses Step A's own kqueue reactor (mojo_async_register_read) EXACTLY
+    # as it already is -- these tests are the Mojo-compiled-codegen sibling
+    # of Step A's own hand-written socketpair proof
+    # (test_async_runtime_scaffold.py's HAND_WRITTEN_MAIN_CPP), proving the
+    # SAME genuine reactor-driven suspension through the compiler's own
+    # codegen instead of hand-written C++. See gimple_codegen.py's
+    # _is_asyncio_sock_recv_call/_mojoasync_SockRecvAwaiter docstrings for
+    # the API-shape design rationale (single-byte recv, raw int fd -- no
+    # Mojo-level socket type exists yet anywhere in this project).
+    test_sock_recv_delayed_write(
+        "sock_recv_genuinely_suspends_until_delayed_write",
+        delay_seconds=0.08)
+    test_sock_recv_already_readable_before_await(
+        "sock_recv_resumes_immediately_when_already_readable")
+    test_sock_recv_eof(
+        "sock_recv_returns_minus_one_on_peer_close_eof")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

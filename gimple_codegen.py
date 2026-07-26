@@ -1980,6 +1980,43 @@ def _is_asyncio_sleep_call(node) -> bool:
             and not getattr(node, 'kwargs', None))
 
 
+def _is_asyncio_sock_recv_call(node) -> bool:
+    """True iff `node` is the exact call shape `asyncio.sock_recv(<one
+    positional fd expr>)` — Step F's ONE recognized real-socket-I/O call
+    shape, chosen after confirming (grep across myinterpreter.py and every
+    stdlib test file this project's interpreter/compiled paths already
+    cover) that this project has NEVER built any Mojo-level `socket` type or
+    module, at either the interpreter or compiled layer — this is genuinely
+    new ground, not a port of an existing Mojo-level API. Real Python's
+    asyncio exposes this operation as `await loop.sock_recv(sock, nbytes)`
+    (the low-level, loop-method API — see asyncio.AbstractEventLoop); this
+    textually mirrors that spelling minus two things this step deliberately
+    narrows away: the `loop.` receiver indirection (this file's own
+    `_is_asyncio_sleep_call` precedent already elides the same kind of
+    indirection — real `asyncio.sleep` needs no loop at all, but the
+    convention of "textually recognize `asyncio.<op>(...)`, not a real
+    resolved-module/method-lookup" is the established one this mirrors) and
+    `nbytes` (fixed at exactly 1 byte — the smallest useful real transfer
+    that still proves genuine reactor-driven suspension end-to-end; see
+    _mojoasync_SockRecvAwaiter's docstring in gen_module for why a fixed
+    1-byte transfer, not a real short-read-safe buffered `nbytes` read, is
+    this step's deliberately narrow scope). `<fd expr>` is an ordinary
+    already-supported scalar (int64_t) expression — a plain int literal or a
+    local/param already declared in the coroutine body — exactly like
+    `asyncio.sleep`'s own single scalar argument; there is no Mojo-level
+    socket TYPE (`socket.socket()`) for it to come from yet, so a raw
+    integer fd is this step's whole "socket handle" representation,
+    mirroring how a raw fd is exactly what a real POSIX `recv(2)`/`read(2)`
+    needs anyway."""
+    return (isinstance(node, CallExpr)
+            and isinstance(node.func, MemberExpr)
+            and isinstance(node.func.obj, IdentExpr)
+            and node.func.obj.name == 'asyncio'
+            and node.func.member == 'sock_recv'
+            and len(node.args) == 1
+            and not getattr(node, 'kwargs', None))
+
+
 def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> bool:
     """Cheap pre-filter before attempting the real _gen_cpp_async_unit
     translation, mirroring _generator_quick_eligible's role exactly: is_async,
@@ -2019,6 +2056,11 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
             if _is_asyncio_sleep_call(n.value):
                 continue
             if _is_async_call_to_known_fn(n.value, known_async_names):
+                continue
+            # Step F: `await asyncio.sock_recv(<fd>)` -- the one recognized
+            # real-socket-I/O shape (see _is_asyncio_sock_recv_call's
+            # docstring for why this exact shape/scope was chosen).
+            if _is_asyncio_sock_recv_call(n.value):
                 continue
             return False
     return True
@@ -2077,6 +2119,13 @@ def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
     with a sleep-shaped `e.value` still correctly falls through to None
     (unsupported) below, exactly like any other unresolvable shape."""
     call = e.value
+    # Step F: `await asyncio.sock_recv(<fd>)` always contributes int64_t (a
+    # byte value 0-255, or -1/-2 for EOF/error -- see
+    # _mojoasync_SockRecvAwaiter's docstring in gen_module). Checked before
+    # the IdentExpr-only known-async-fn shape below since sock_recv's
+    # `call.func` is a MemberExpr (`asyncio.sock_recv`), not an IdentExpr.
+    if _is_asyncio_sock_recv_call(call):
+        return 'int64_t'
     if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
         return None
     if async_api is None:
@@ -7822,6 +7871,17 @@ class GimpleGen:
                 raise RuntimeError(
                     "cannot compile module: asyncio.sleep(...) is only "
                     "supported directly as `await asyncio.sleep(...)` "
+                    "inside a compiled async function body -- falling "
+                    "back to interpreting this module from source instead")
+            # Step F: same reasoning as the asyncio.sleep(...) refusal just
+            # above, for asyncio.sock_recv(...) reaching this ordinary call-
+            # lowering path (i.e. used without `await`, or outside a
+            # compiled async function body) -- see _is_asyncio_sock_recv_
+            # call's docstring.
+            if module_name == 'asyncio' and method_name == 'sock_recv':
+                raise RuntimeError(
+                    "cannot compile module: asyncio.sock_recv(...) is only "
+                    "supported directly as `await asyncio.sock_recv(<fd>)` "
                     "inside a compiled async function body -- falling "
                     "back to interpreting this module from source instead")
 
@@ -15453,12 +15513,25 @@ class GimpleGen:
                     "`await asyncio.sleep(...)` does not produce a usable "
                     "value (real Python: None) -- use it as its own bare "
                     "statement, not inside an expression")
+            # Step F: `await asyncio.sock_recv(<fd>)` -- reuses Step A's
+            # kqueue reactor (mojo_async_register_read) exactly as-is via
+            # `_mojoasync_SockRecvAwaiter` (emitted once per module by
+            # gen_module whenever self._supported_async is non-empty,
+            # mirroring `_mojoasync_SleepAwaiter`'s own emission exactly --
+            # see that struct's docstring there for the full design). The fd
+            # expression is an ordinary already-supported scalar expression
+            # (int literal or declared int64_t local/param), cast to `int`
+            # for the awaiter's constructor.
+            if _is_asyncio_sock_recv_call(target):
+                fd_expr = self._cpp_expr(target.args[0])
+                return f"co_await _mojoasync_SockRecvAwaiter{{(int)({fd_expr})}}"
             raise _UnsupportedAsyncShape(
                 "only `await asyncio.sleep(<seconds>)` (as a bare "
-                "statement) or `await <call to another compiled async "
-                "function this module already compiled>` is supported in "
-                "a compiled async function body -- socket awaits are a "
-                f"later step (got {type(target).__name__ if target is not None else 'bare await'})")
+                "statement), `await asyncio.sock_recv(<fd>)`, or `await "
+                "<call to another compiled async function this module "
+                "already compiled>` is supported in a compiled async "
+                "function body (got "
+                f"{type(target).__name__ if target is not None else 'bare await'})")
         raise _UnsupportedGeneratorShape(
             f"unsupported expression in generator body: {type(e).__name__}")
 
@@ -15492,9 +15565,13 @@ class GimpleGen:
             # codegen-emitted awaiter shape instead of inventing a second
             # one), which arms Step A's timer queue
             # (mojo_async_schedule_timer) and genuinely suspends this
-            # coroutine until the timer fires. Anything else awaited (an
-            # `await` on another Mojo async function — composition is Step
-            # D — a socket read/write — Step F — or any other expression)
+            # coroutine until the timer fires. Composition (`await` on
+            # another Mojo async function, Step D) and a real socket read
+            # (`await asyncio.sock_recv(<fd>)`, Step F) are both ALSO
+            # recognized here, via the fallthrough to _cpp_expr's own
+            # AwaitExpr case just below (the single source of truth for
+            # both those shapes' actual co_await emission — not duplicated
+            # in this bare-statement branch). Anything else awaited
             # is an honest whole-module refusal: _async_quick_eligible
             # already filtered out any *other* unrecognized AwaitExpr
             # shape before this method is ever reached for THIS function,
@@ -20762,6 +20839,7 @@ class GimpleGen:
                 # GimpleGen._cpp_stmt's own AwaitExpr case (see there for
                 # the ns-conversion + co_await emission).
                 cpp_parts.append('#include <mojo_async_runtime.h>')
+                cpp_parts.append('#include <unistd.h>')
                 cpp_parts.append('')
                 cpp_parts.append('struct _mojoasync_SleepAwaiter {')
                 cpp_parts.append('    uint64_t delay_ns;')
@@ -20770,6 +20848,64 @@ class GimpleGen:
                 cpp_parts.append('        mojo_async_schedule_timer(h.address(), mojo_async_now_ns() + delay_ns);')
                 cpp_parts.append('    }')
                 cpp_parts.append('    void await_resume() const {}')
+                cpp_parts.append('};')
+                cpp_parts.append('')
+                # Step F (compiled-path async/await codegen project): the
+                # ONE real-socket-I/O awaiter this step adds, for `await
+                # asyncio.sock_recv(<fd>)` (see _is_asyncio_sock_recv_call's
+                # docstring for the API-shape rationale). Reuses Step A's
+                # kqueue reactor EXACTLY as it already is
+                # (mojo_async_register_read, declared in
+                # mojo_async_runtime.h) -- this awaiter is a thin codegen-
+                # emitted wrapper around it, not a reimplementation, mirroring
+                # `_mojoasync_SleepAwaiter`'s own relationship to Step A's
+                # timer queue exactly. `await_ready()` is unconditionally
+                # false (same as SleepAwaiter) -- even when `fd` already has
+                # data available BEFORE this await runs, kqueue's EV_ADD
+                # registration reports an already-ready fd as ready on the
+                # very next kevent() call (standard kqueue semantics, no
+                # special-cased "check first" logic needed here), so the
+                # "already readable" case still correctly resumes on the
+                # very next scheduler turn instead of blocking -- see this
+                # step's own test for an explicit timing assertion proving
+                # that path resumes near-instantly rather than waiting on
+                # some later, unrelated event.
+                #
+                # `await_suspend` only REGISTERS interest and returns to the
+                # scheduler -- per the standard reactor pattern (and this
+                # project's own Step A design doc), the reactor only tells
+                # you WHEN a fd becomes readable, never IF a subsequent
+                # read will fully succeed, so the actual `read(2)` syscall
+                # happens here, in `await_resume`, once the coroutine has
+                # genuinely been resumed by the reactor reporting readiness.
+                # Fixed at exactly 1 byte (see _is_asyncio_sock_recv_call's
+                # docstring: the smallest useful real transfer for this
+                # step's narrow scope) -- a real multi-byte, short-read-safe
+                # `nbytes`-parameterized read (looping until `nbytes` bytes
+                # are collected, or building a proper buffer/String result
+                # type to carry more than one scalar byte across this
+                # codegen's still-scalar-only value boundary) is explicitly
+                # NOT built here; a short/partial transfer for MORE than one
+                # byte is a real possibility future work would need to
+                # handle, noted here rather than silently glossed over.
+                # Returns int64_t: the byte value read (0-255) on success,
+                # -1 on a clean EOF (peer closed / recv() returned 0), or -2
+                # on an actual read() error (recv() returned -1) -- three
+                # results a single scalar int64_t can distinguish without
+                # needing errno plumbed across this boundary too.
+                cpp_parts.append('struct _mojoasync_SockRecvAwaiter {')
+                cpp_parts.append('    int fd;')
+                cpp_parts.append('    bool await_ready() const { return false; }')
+                cpp_parts.append('    void await_suspend(std::coroutine_handle<> h) const {')
+                cpp_parts.append('        mojo_async_register_read(fd, h.address());')
+                cpp_parts.append('    }')
+                cpp_parts.append('    int64_t await_resume() const {')
+                cpp_parts.append('        unsigned char c;')
+                cpp_parts.append('        ssize_t n = ::read(fd, &c, 1);')
+                cpp_parts.append('        if (n == 1) return (int64_t)c;')
+                cpp_parts.append('        if (n == 0) return (int64_t)-1;')
+                cpp_parts.append('        return (int64_t)-2;')
+                cpp_parts.append('    }')
                 cpp_parts.append('};')
                 cpp_parts.append('')
             if self._supported_generator_methods:
