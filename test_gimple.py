@@ -2416,6 +2416,189 @@ def main():
         print(x)
 """, "generator function")
 
+    # Milestone C step 3: generator METHODS on structs — the target shape
+    # from that step's writeup, a method reading a scalar `self` field.
+    # Mirrors test_generator_yield_from_delegation_compiles_via_cpp_path's
+    # shape (compile via compile_to_gimple_with_cpp, assert the extern "C"
+    # API + a `self->value` read appear in the .cpp text, then real-compile
+    # both the .c and .cpp outputs with gcc/g++ -fsyntax-only).
+    def test_generator_method_self_field_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value - i
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+"""
+        name = "generator_method_self_field_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_Counter_countdown_start' not in cpp_src:
+            print(f"FAIL  {name}: .cpp output missing the generator "
+                  "method's extern \"C\" API")
+            _FAIL += 1
+            return
+        if 'self->value' not in cpp_src:
+            print(f"FAIL  {name}: expected a self->value field read in "
+                  "the generated .cpp body")
+            _FAIL += 1
+            return
+        if 'typedef struct Counter' not in cpp_src:
+            print(f"FAIL  {name}: expected the Counter struct's C layout "
+                  "to be re-emitted (shared verbatim with the .c output) "
+                  "in the .cpp preamble")
+            _FAIL += 1
+            return
+        # No ordinary Counter_countdown(...) C function/forward-declaration
+        # should exist for this method at all — only the generator API.
+        if 'Counter_countdown (' in c_src or 'Counter_countdown(' in c_src:
+            print(f"FAIL  {name}: an ordinary (non-generator) forward "
+                  "declaration/definition for Counter_countdown leaked "
+                  "into the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_method_self_field_compiles_via_cpp_path()
+
+    # Still-out-of-scope generator-method shapes (Milestone C step 3):
+    # mutating a self field from inside the generator body. AssignStmt's
+    # target is a MemberExpr (self.value), not a plain identifier — refused
+    # by _cpp_stmt's existing AssignStmt case, unchanged; confirms this
+    # falls back to the honest whole-module refusal rather than silently
+    # dropping the mutation.
+    test_raises("generator_method_self_mutation_honest_fallback", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value
+            self.value = self.value - 1
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: a generator method calling ANOTHER method on self
+    # (`self.helper()`) — that's a CallExpr, which the narrow .cpp expression
+    # emitter has no case for, so it refuses cleanly.
+    test_raises("generator_method_calls_other_self_method_honest_fallback", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def helper(self):
+        return self.value
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.helper()
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: a nested attribute chain (self.inner.v) — only a
+    # direct self.<field> read is supported; self.inner resolves via the
+    # MemberExpr obj-is-not-plain-'self' branch and refuses.
+    test_raises("generator_method_nested_attribute_chain_honest_fallback", """\
+class Inner:
+    def __init__(self, v: Int):
+        self.v = v
+
+class Outer:
+    def __init__(self, v: Int):
+        self.inner = Inner(v)
+
+    def gen(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.inner.v
+            i = i + 1
+
+def main():
+    o = Outer(5)
+    for x in o.gen(2):
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: yielding a non-scalar self field (a String) --
+    # _infer_simple_expr_ctype's self_fields lookup refuses any field type
+    # outside int64_t/double/_Bool, same as any other non-scalar value.
+    test_raises("generator_method_nonscalar_field_honest_fallback", """\
+class Box:
+    def __init__(self, label: String):
+        self.label = label
+        self.count = 3
+
+    def gen(self):
+        i = 0
+        while i < self.count:
+            yield self.label
+            i = i + 1
+
+def main():
+    b = Box("hi")
+    for x in b.gen():
+        print(x)
+""", "generator function")
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

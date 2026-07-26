@@ -1975,7 +1975,8 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     return True
 
 
-def _infer_simple_expr_ctype(e, known: dict | None = None) -> str | None:
+def _infer_simple_expr_ctype(e, known: dict | None = None,
+                              self_fields: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -1987,22 +1988,36 @@ def _infer_simple_expr_ctype(e, known: dict | None = None) -> str | None:
     always guessing int64_t; falls back to the int64_t default, matching
     this codegen's own untyped-local default — see _param_ctype's identical
     default elsewhere in this file — for any name not in `known`, e.g. a
-    module-level global), or +-*/ arithmetic/unary ops over those."""
+    module-level global), a `self.<field>` attribute read (generator
+    METHODS only — `self_fields`, non-None exactly when this is a generator
+    method, is a name -> ctype map of the enclosing struct's OWN fields;
+    resolves to None, not a guess, for a field whose real type isn't scalar,
+    and for a bare `self` with no `.field` at all — self is never itself a
+    scalar value, unlike an ordinary parameter/local, so it must NOT fall
+    through to the int64_t default below), or +-*/ arithmetic/unary ops over
+    those."""
     if isinstance(e, IntLiteral):
         return 'int64_t'
     if isinstance(e, FloatLiteral):
         return 'double'
     if isinstance(e, BoolLiteral):
         return '_Bool'
+    if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
+        if self_fields is None:
+            return None
+        ft = self_fields.get(e.member)
+        return ft if ft in ('int64_t', 'double', '_Bool') else None
     if isinstance(e, IdentExpr):
+        if self_fields is not None and e.name == 'self':
+            return None
         if known is not None and e.name in known:
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields)
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known)
-        rt = _infer_simple_expr_ctype(e.right, known)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields)
         if lt is None or rt is None:
             return None
         if 'double' in (lt, rt):
@@ -2048,7 +2063,8 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
-                            generator_api: dict | None = None) -> str | None:
+                            generator_api: dict | None = None,
+                            self_fields: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -2059,13 +2075,15 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     lets `yield <param>` resolve to the param's real type instead of always
     guessing int64_t — see _infer_simple_expr_ctype's docstring.
     `generator_api` (self._generator_api, passed the same way) resolves a
-    `yield from <call>`'s contributed type via _yield_from_delegate_ctype."""
+    `yield from <call>`'s contributed type via _yield_from_delegate_ctype.
+    `self_fields` (generator METHODS only) lets `yield self.<field>` resolve
+    the field's real scalar type — see _infer_simple_expr_ctype."""
     ctype = None
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 return None
-            t = _infer_simple_expr_ctype(n.value, known)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields)
             if t is None:
                 return None
             if ctype is None:
@@ -2580,6 +2598,34 @@ class GimpleGen:
         # pinned (the self-hosted bootstrap forward-declares it), so this
         # rides along as an attribute instead; see compile_to_gimple_with_cpp.
         self.generated_cpp: str = ''
+        # Milestone C step 3 (generator METHODS on structs): the method
+        # analogues of _supported_generators/_generator_api just above, keyed
+        # by (struct_name, method_name) rather than by bare name — a struct
+        # method's name is only unique WITHIN its own struct (two different
+        # structs may each define a same-named generator method), unlike a
+        # module-level free function's name, so the free-function dicts'
+        # bare-string keys would be genuinely ambiguous here.
+        self._supported_generator_methods: dict[tuple[str, str], FunctionDef] = {}
+        self._generator_method_api: dict[tuple[str, str], dict] = {}
+        # Set (and always cleared in a finally) by _gen_cpp_generator_unit
+        # around ONE generator method's translation: the enclosing struct's
+        # name, and that struct's own field->ctype map — read by _cpp_expr's
+        # `self.<field>` case and by the self_fields threaded into
+        # _infer_simple_expr_ctype/_generator_yield_ctype. None whenever the
+        # generator currently being translated is an ordinary free function.
+        self._cpp_gen_self_struct: str | None = None
+        self._cpp_gen_self_fields: dict | None = None
+        # struct_name -> verbatim "typedef struct Name { ... } Name;" text,
+        # captured (not re-derived) from whichever of the two existing
+        # struct-typedef emission sites (struct_field_types-based, or
+        # StructDef-AST-based) actually emits it into the main .c/.ci output
+        # — reused byte-for-byte in the .cpp preamble for any struct a
+        # compiled generator METHOD needs visibility into, so gcc and g++
+        # compile an identical, ABI-compatible view of that struct's layout
+        # rather than two independently-derived (and potentially divergent)
+        # ones. See the two capture sites in gen_module and the
+        # generated_cpp assembly that consumes this dict.
+        self._struct_typedef_texts: dict[str, str] = {}
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
@@ -7504,6 +7550,31 @@ class GimpleGen:
                     field_type = self_struct_fields.get(func.obj.member)
                     if field_type:
                         ot = field_type  # Use the resolved field type
+
+        # Milestone C step 3: obj.method(args) where `method` is a supported
+        # compiled generator METHOD on obj's struct type (self._generator_
+        # method_api, keyed by (struct_name, method_name) — see that dict's
+        # docstring in __init__) — constructs the coroutine, binding `self`
+        # to obj, via the C++20-emitted `<base>_start(self, args...)`,
+        # mirroring the free-function generator call check in _lower_call
+        # (`fname_raw in self._generator_api`) but routed through THIS
+        # method-call path since the receiver is `obj.method(...)`, not a
+        # bare identifier call. Checked here, after `ot` has been resolved
+        # to the receiver's real struct-pointer type by the blocks just
+        # above, and before every other struct-method special case below —
+        # a generator-method call must never fall through to the ordinary
+        # StructName_method(...) lowering (there is no such ordinary C
+        # function for it; see gen_module's Phase 2a skip for
+        # _supported_generator_methods).
+        _gm_struct_name = _struct_name_of(ot) if isinstance(ot, str) and ot.endswith(' *') else None
+        if _gm_struct_name is not None:
+            _gm_api = self._generator_method_api.get((_gm_struct_name, method))
+            if _gm_api is not None:
+                arg_pairs = [self.lower_expr(a) for a in node.args]
+                all_args = [(ot, ov)] + arg_pairs
+                t = self._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
+                self._generator_var_api[t] = _gm_api
+                return 'MojoGenerator *', t
 
         # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
         # Must intercept BEFORE the opaque-int coerce below, which would misidentify
@@ -14804,7 +14875,34 @@ class GimpleGen:
         if isinstance(e, BoolLiteral):
             return 'true' if e.value else 'false'
         if isinstance(e, IdentExpr):
+            if e.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
+                raise _UnsupportedGeneratorShape(
+                    "bare `self` reference not supported in a generator "
+                    "method body (only self.<field> reads are supported)")
             return e.name
+        if isinstance(e, MemberExpr):
+            # Generator-METHOD `self.<field>` read — the only attribute
+            # access this narrow step supports. self._cpp_gen_self_struct
+            # (set/cleared by _gen_cpp_generator_unit around this whole
+            # method's compile attempt, never set for a free-function
+            # generator) names the enclosing struct so struct_field_types
+            # can be consulted for the field's real scalar type; anything
+            # else (self.other_method(), a nested chain like self.x.y, an
+            # attribute read on a non-self object) falls through to the
+            # raise below, unchanged.
+            struct_name = getattr(self, '_cpp_gen_self_struct', None)
+            if struct_name and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
+                ft = self.struct_field_types.get(struct_name, {}).get(e.member)
+                if ft in ('int64_t', 'double', '_Bool'):
+                    return f"self->{e.member}"
+                raise _UnsupportedGeneratorShape(
+                    f"unsupported self.{e.member} access in generator "
+                    f"method body (field type {ft!r} is not a supported "
+                    "scalar, or the field doesn't exist)")
+            raise _UnsupportedGeneratorShape(
+                "unsupported attribute-access expression in generator body "
+                "(only self.<field> reads are supported, and only inside a "
+                "generator method)")
         if isinstance(e, UnaryOp):
             op = {'not': '!'}.get(e.op, e.op)
             return f"({op}{self._cpp_expr(e.operand)})"
@@ -14842,7 +14940,8 @@ class GimpleGen:
             name = s.target.name
             val = self._cpp_expr(s.value)
             if name not in declared:
-                ctype = _infer_simple_expr_ctype(s.value, declared)
+                ctype = _infer_simple_expr_ctype(
+                    s.value, declared, getattr(self, '_cpp_gen_self_fields', None))
                 if ctype is None:
                     raise _UnsupportedGeneratorShape(
                         f"can't infer a scalar type for local '{name}'")
@@ -14984,7 +15083,8 @@ class GimpleGen:
             f"{indent}}}",
         ]
 
-    def _gen_cpp_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
+    def _gen_cpp_generator_unit(self, fn: FunctionDef,
+                                 struct_name: str | None = None) -> tuple[str, str, str, list]:
         """Translate ONE supported generator FunctionDef into a
         self-contained C++20 coroutine fragment. Returns (cpp_text,
         value_ctype, base_name, param_ctypes). Raises
@@ -14993,6 +15093,32 @@ class GimpleGen:
         second hand-written checklist) is the actual authority on "is this
         shape compilable", so gen_module's pre-pass calls it directly and
         catches that one exception type to decide supported-vs-refused.
+
+        `struct_name`, when given, means `fn` is a generator METHOD (not a
+        free function) on that struct: `fn.params[0]` must be `self`, typed
+        as `{struct_name} *` in the emitted C++ — the SAME pointer type an
+        ordinary (non-generator) compiled method's `self` already uses (see
+        _gen_struct_method's `self.var_types['self'] = f"{struct_name} *"`),
+        not a new convention. The struct's C layout (typedef) is already
+        emitted once, verbatim, into the main .c/.ci output by gen_module's
+        existing struct-typedef emission (from self.struct_field_types) —
+        rather than inventing a second representation for the .cpp side,
+        gen_module's preamble for self.generated_cpp textually re-emits that
+        SAME typedef (see the `_generator_cpp_units`-consuming code near the
+        end of gen_module) so both the gcc-compiled .c/.ci and the g++-
+        compiled .cpp see byte-identical field layout/order — a plain C
+        struct with only scalar/pointer fields is valid, ABI-identical C and
+        C++, so no `extern "C"` wrapping or separate mirror definition is
+        needed, just the one shared piece of text. Field access is limited
+        to `self.<field>` reads of a SCALAR (int64_t/double/_Bool) field —
+        see _cpp_expr's MemberExpr case and _infer_simple_expr_ctype's
+        self_fields parameter — method calls on self, nested attribute
+        chains, and mutating a self field are all out of this step's scope
+        and refuse naturally (see _cpp_expr/_cpp_stmt's existing refusal
+        paths, unchanged): a call on self.method() is a CallExpr, which
+        _cpp_expr has no case for; an assignment to self.field has a
+        MemberExpr (not IdentExpr) target, which _cpp_stmt's AssignStmt case
+        already refuses.
 
         Calling convention (opaque handle + 4 extern "C" functions): a
         std::coroutine_handle<Promise> IS already just a wrapped pointer to
@@ -15043,7 +15169,19 @@ class GimpleGen:
         # a local assigned straight from it, e.g. `v = start`) needs this to
         # actually round-trip correctly, not just type-check.
         param_ctypes: list[tuple[str, str]] = []
-        for pn, pt in (fn.params or []):
+        fn_params = list(fn.params or [])
+        if struct_name is not None:
+            if not fn_params or fn_params[0][0] != 'self':
+                raise _UnsupportedGeneratorShape(
+                    f"{fn.name}: a generator method must take `self` as its "
+                    "first parameter")
+            # Mirrors _gen_struct_method's own convention exactly (see that
+            # method's `self.var_types['self'] = f"{struct_name} *"`) — the
+            # SAME pointer type an ordinary compiled method's `self` already
+            # uses, not a new one.
+            param_ctypes.append(('self', f"{struct_name} *"))
+            fn_params = fn_params[1:]
+        for pn, pt in fn_params:
             if pn.startswith('*'):
                 raise _UnsupportedGeneratorShape(
                     f"{fn.name}: *args/**kwargs parameters not supported "
@@ -15055,7 +15193,8 @@ class GimpleGen:
                     f"type {ctype!r} (only scalar int64_t/double/_Bool "
                     "parameters are supported for compiled generators)")
             param_ctypes.append((pn, ctype))
-        base = f"_mojogen_{_safe_name(fn.name)}"
+        base = (f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
+                if struct_name is not None else f"_mojogen_{_safe_name(fn.name)}")
         # Params are already "declared" locals as far as the body emitter is
         # concerned — a param can be read (`i = start`) or directly
         # reassigned/augmented (`start = start + 1`) without a fresh `Type
@@ -15068,11 +15207,28 @@ class GimpleGen:
         # it — e.g. `v = start` (start: Float64 param) correctly types `v`
         # as double via the AssignStmt case just below, and a later `yield
         # v` then resolves to double too, instead of the int64_t default.
-        declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes}
-        body_lines: list[str] = []
-        for s in fn.body:
-            body_lines.extend(self._cpp_stmt(s, declared, '    '))
-        value_ctype = _generator_yield_ctype(fn, declared, self._generator_api)
+        # `self` is deliberately EXCLUDED from `declared`/`known` — it's a
+        # struct pointer, not a scalar, so a bare (non-`.field`) reference to
+        # it must refuse (see _cpp_expr's IdentExpr case), not silently fall
+        # through to the int64_t default every other unknown name gets.
+        declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes if pn != 'self'}
+        self_fields = self.struct_field_types.get(struct_name, {}) if struct_name else None
+        # Instance-scoped context for _cpp_expr/_cpp_stmt (mirrors this
+        # file's existing self._current_struct_name convention for ordinary
+        # struct methods) — set for the duration of this one generator's
+        # translation and always cleared afterward (even on refusal), so a
+        # LATER free-function generator (struct_name=None) in the same
+        # module never sees stale self-method context.
+        self._cpp_gen_self_struct = struct_name
+        self._cpp_gen_self_fields = self_fields
+        try:
+            body_lines: list[str] = []
+            for s in fn.body:
+                body_lines.extend(self._cpp_stmt(s, declared, '    '))
+            value_ctype = _generator_yield_ctype(fn, declared, self._generator_api, self_fields)
+        finally:
+            self._cpp_gen_self_struct = None
+            self._cpp_gen_self_fields = None
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
@@ -15184,12 +15340,29 @@ class GimpleGen:
         # instance (see this method's callers), so there is nothing to leak
         # into a later compile even if this one is ultimately refused after
         # partially populating this instance's tables.
-        _generator_names = set()
-        _async_names = set()
+        # Keyed by id(FunctionDef), NOT by name: a bare-name set (the shape
+        # this used prior to Milestone C step 3, generator METHODS) is only
+        # safe when every generator/async function in the module has a
+        # name unique across the WHOLE tree — true for top-level functions
+        # (already deduped by the `_overloaded` filter above... in practice,
+        # by the time struct methods entered scope for real support, no
+        # longer reliably true: two different structs may each define a
+        # same-named generator method (`def __iter__(self): yield ...`),
+        # one shape-supported and one not, or a struct method may simply
+        # share a name with an unrelated top-level generator function. A
+        # bare-name discard (`_generator_names.discard(s.name)`) in that
+        # situation would incorrectly mark the OTHER, still-unsupported,
+        # same-named function/method as resolved, silently skipping the
+        # honest whole-module refusal it still needs. Identity-based keys
+        # make this collision structurally impossible; display names are
+        # derived from the FunctionDef objects only at the very end, for
+        # the error message.
+        _generator_fns: dict[int, FunctionDef] = {}
+        _async_fns: dict[int, FunctionDef] = {}
         for n in _walk_ast(stmts):
             if isinstance(n, FunctionDef):
-                if n.is_generator: _generator_names.add(n.name)
-                if n.is_async: _async_names.add(n.name)
+                if n.is_generator: _generator_fns[id(n)] = n
+                if n.is_async: _async_fns[id(n)] = n
 
         # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
         # imported, or referenced but never actually resolved as local or
@@ -16626,8 +16799,8 @@ class GimpleGen:
         # (non-generator) function bodies were always emitted this late
         # already (Phase 2a, further below).
         for s in stmts:
-            if not (isinstance(s, FunctionDef) and s.name in _generator_names
-                    and s.name not in _async_names):
+            if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
+                    and id(s) not in _async_fns):
                 continue
             if not _generator_quick_eligible(s):
                 continue
@@ -16649,11 +16822,71 @@ class GimpleGen:
             # for this path.
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
-            _generator_names.discard(s.name)
+            _generator_fns.pop(id(s), None)
 
-        _gen_only = sorted(_generator_names - _async_names)
-        _async_only = sorted(_async_names - _generator_names)
-        _async_gen = sorted(_generator_names & _async_names)
+        # Milestone C step 3: generator METHODS on structs — same eligibility/
+        # compile-attempt shape as the free-function loop just above, keyed
+        # by (struct_name, method_name) rather than by bare name (see
+        # _supported_generator_methods' docstring). Runs in the same
+        # struct-declaration order as everything else in this file, after
+        # the identical Pass-1.3d cross-call inference the free-function
+        # loop above depends on, for the same reason (an unannotated scalar
+        # parameter of a generator method benefits from the exact same
+        # cross-call-site scalar inference an ordinary method's unannotated
+        # parameter already gets).
+        for _sd in stmts:
+            if not isinstance(_sd, StructDef):
+                continue
+            for m in _sd.methods:
+                if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
+                        and id(m) not in _async_fns):
+                    continue
+                if not _generator_quick_eligible(m):
+                    continue
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = \
+                        self._gen_cpp_generator_unit(m, struct_name=_sd.name)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'generator method {_sd.name}.{m.name!r} not '
+                                'eligible for C++ coroutine path, falling '
+                                'back to honest refusal', e)
+                    continue
+                key = (_sd.name, m.name)
+                self._supported_generator_methods[key] = m
+                self._generator_method_api[key] = {
+                    'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                }
+                self.func_param_types[f"{base}_start"] = param_ctypes
+                self._generator_cpp_units.append(cpp_text)
+                _generator_fns.pop(id(m), None)
+
+        # Plain for-loops (not comprehensions) building plain lists, then
+        # sorted — deliberately avoiding a `for i, fn in ...items()` set/
+        # dict comprehension here: this project's OWN self-hosting compiler
+        # flattens gen_module into one giant C function sharing a single
+        # flat per-name variable-type namespace (see the rename note on
+        # `_generator_fns`/`_async_fns` above), and the extremely common
+        # 2-letter name `fn` is ALREADY reused elsewhere in this same
+        # method for a plain field-name STRING (not a FunctionDef) — a
+        # comprehension-based version of this exact loop produced a real
+        # "assignment to 'char' from 'char *'" self-host compile error
+        # (confirmed via `make check-selfhost`), so this uses an
+        # unambiguous, never-reused local name and an ordinary loop instead.
+        _gen_only_names: list = []
+        for _gm_id, _gm_fn in _generator_fns.items():
+            if _gm_id not in _async_fns:
+                _gen_only_names.append(_gm_fn.name)
+        _async_only_names: list = []
+        for _gm_id, _gm_fn in _async_fns.items():
+            if _gm_id not in _generator_fns:
+                _async_only_names.append(_gm_fn.name)
+        _async_gen_names: list = []
+        for _gm_id, _gm_fn in _generator_fns.items():
+            if _gm_id in _async_fns:
+                _async_gen_names.append(_gm_fn.name)
+        _gen_only = sorted(_gen_only_names)
+        _async_only = sorted(_async_only_names)
+        _async_gen = sorted(_async_gen_names)
         if _gen_only or _async_only or _async_gen:
             _categories = []
             if _gen_only:
@@ -17197,6 +17430,14 @@ class GimpleGen:
                 # nested closures don't share capture state).
                 _moids = self._struct_method_overload_ids(stmt)
                 for m, overload_id in zip(stmt.methods, _moids):
+                    if (stmt.name, m.name) in self._supported_generator_methods:
+                        # Milestone C step 3: this method's body was already
+                        # fully translated to C++20 coroutine text by the
+                        # pre-pass above (self._generator_cpp_units) — same
+                        # as a supported free-function generator (see the
+                        # analogous FunctionDef skip just above), it gets NO
+                        # ordinary -fgimple C body here at all.
+                        continue
                     method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                     # Emit lifted closures for this method (if any), recursively
                     for ci in self._all_closures.get(method_outer_name, {}).values():
@@ -17674,8 +17915,10 @@ class GimpleGen:
                     if not dependencies_met:
                         continue
                     # All dependencies met (or are self-references), emit this struct
+                    _td_start = len(parts)
                     if struct_name == 'Pointer':
                         parts.append('#define _MOJO_POINTER_STRUCT_DEF')
+                        _td_start = len(parts)
                     parts.append(f"typedef struct {struct_name} {{")
                     # Runtime type tag, always first — see the other struct-typedef
                     # emission below (Section 2 for AST-sourced StructDefs) and
@@ -17699,6 +17942,14 @@ class GimpleGen:
                         # Empty struct - add a dummy field for valid C
                         parts.append(f"  int _dummy;")
                     parts.append(f"}} {struct_name};")
+                    # Milestone C step 3: verbatim copy of this exact typedef
+                    # text (nothing else, so an identical view compiles under
+                    # BOTH gcc -fgimple and g++) — reused, not re-derived, by
+                    # the .cpp preamble for any struct a compiled generator
+                    # METHOD needs to see (self.<field> access / the `self`
+                    # parameter's own pointer type). See the generated_cpp
+                    # assembly further below in gen_module.
+                    self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                     parts.append(f"#define _MOJO_STUB_{struct_name.upper()}")  # suppress any later variadic stub
                     emitted.add(struct_name)
                     self._emitted_structs.add(struct_name)  # track for dedup in Section 2
@@ -18047,8 +18298,10 @@ class GimpleGen:
 
             for sd, _ in track_best.values():
                 if sd.name not in self._emitted_structs:
+                    _td_start = len(parts)
                     if sd.name == 'Pointer':
                         parts.append('#define _MOJO_POINTER_STRUCT_DEF')
+                        _td_start = len(parts)
                     parts.append(f"typedef struct {sd.name} {{")
                     # Runtime type tag, always first — see mojo_read_type_tag
                     # in runtime/mojo_runtime.c and _struct_type_id above. Must
@@ -18074,6 +18327,12 @@ class GimpleGen:
                                 safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
                                 parts.append(f"  {field_type} {safe_fn};")
                     parts.append(f"}} {sd.name};")
+                    # Milestone C step 3: see the identical capture in the
+                    # struct_field_types-based typedef path above (Section 1)
+                    # — this is Section 2's own analogous copy, for a struct
+                    # only ever emitted via THIS path (not already in
+                    # struct_field_types when Section 1 ran).
+                    self._struct_typedef_texts[sd.name] = '\n'.join(parts[_td_start:])
                     # Suppress any builtin-ctor function stub of the same name in
                     # this or another module (a `typedef … Name;` type collides
                     # with an `int64_t Name(...)` function) — see _guarded_ctor.
@@ -18631,18 +18890,25 @@ class GimpleGen:
 
         # Forward declarations: free functions (skip main — handled specially)
         func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
-        if self._supported_generators:
-            # Milestone B: the extern "C" API (opaque handle + start/resume/
+        if self._supported_generators or self._generator_method_api:
+            # Milestone B (free functions) / Milestone C step 3 (struct
+            # methods): the extern "C" API (opaque handle + start/resume/
             # value/destroy) for every supported generator in this module —
             # the ONLY forward declarations these functions get (they have
             # no ordinary -fgimple C body/prototype at all; see the Phase 2a
-            # skip above). One shared opaque MojoGenerator typedef covers
-            # every generator regardless of its yielded-value type — see
+            # skip above, both the FunctionDef one and the StructDef-methods
+            # one). One shared opaque MojoGenerator typedef covers every
+            # generator regardless of its yielded-value type — see
             # _gen_cpp_generator_unit's docstring for why a bare
             # reinterpret_cast of the coroutine_handle's own address is
-            # enough, no separate wrapper allocation needed.
+            # enough, no separate wrapper allocation needed. A generator
+            # METHOD's `<base>_start` takes the enclosing struct's `{Name}
+            # *` as its first parameter — the struct's own C typedef is
+            # already emitted earlier in this same preamble (see the
+            # struct-typedef emission above, well before this point), so the
+            # type is already known here.
             parts.append('typedef struct MojoGenerator MojoGenerator;')
-            for _gname, _api in self._generator_api.items():
+            for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
                 _base, _vct = _api['base'], _api['value_ctype']
                 _gptypes = ', '.join(_api.get('params') or []) or 'void'
                 parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
@@ -18699,6 +18965,17 @@ class GimpleGen:
             method_ids = {id(m): oid for m, oid in zip(sd.methods, _moids)}
 
             for m in sd.methods:
+                if (sd.name, m.name) in self._supported_generator_methods:
+                    # Milestone C step 3: no ordinary StructName_method(...)
+                    # C function exists for this method at all — it has its
+                    # own extern "C" <base>_start/_resume/_value/_destroy
+                    # API instead (forward-declared separately, alongside
+                    # the free-function generator API — see the
+                    # `_generator_api`/`_generator_method_api` forward-decl
+                    # block above). Emitting an ordinary forward declaration
+                    # here would just be a harmless-looking but WRONG
+                    # prototype for a symbol nothing defines or calls.
+                    continue
                 overload_suffix = method_ids.get(id(m), '')
                 mangled_name = self._struct_method_csym(sd.name, m.name, overload_suffix)
                 # Use per-overload key first; fall back to base name, then AST annotation
@@ -18929,7 +19206,8 @@ class GimpleGen:
             cpp_parts = [
                 '/* Generated by gimple_codegen.py (Milestone B: C++20-coroutine',
                 '   translation of this module\'s supported generator function(s);',
-                '   Milestone C step 2 added `yield from`-delegation support) */',
+                '   Milestone C step 2 added `yield from`-delegation support;',
+                '   Milestone C step 3 added generator METHODS on structs) */',
                 '#include <coroutine>',
                 '#include <cstdint>',
                 '#include <exception>',
@@ -18956,6 +19234,46 @@ class GimpleGen:
                 '};',
                 '',
             ]
+            if self._supported_generator_methods:
+                # Milestone C step 3: every struct a compiled generator
+                # METHOD in this module binds `self` to needs its C layout
+                # visible here too (for `self->field` access and for the
+                # `self` parameter's own pointer type) — the EXACT same
+                # typedef text the .c/.ci output got (see
+                # self._struct_typedef_texts' docstring), not a
+                # independently-derived copy, so gcc and g++ agree on the
+                # struct's layout byte-for-byte.
+                cpp_parts.append('/* Struct layout(s) needed by this module\'s')
+                cpp_parts.append('   compiled generator method(s) -- verbatim copy of')
+                cpp_parts.append('   the same typedef(s) emitted into the .c/.ci output. */')
+                # Comprehension variable names deliberately avoid the very
+                # common `sn`/`_` — gen_module is one gigantic method that
+                # this project's OWN self-hosting compiler flattens into a
+                # single flat C function (every local across the whole
+                # method shares one C declaration namespace by name), and
+                # both those names are already used elsewhere in gen_module
+                # with a different inferred C type (`sn` as int64_t, `_` as
+                # int64_t) — reusing them here as char*/tuple-unpack targets
+                # produced real "conflicting types for 'sn'"/"for '_'" GCC
+                # errors under `make check-selfhost`, confirmed and fixed by
+                # this rename (see CLAUDE.md's self-host quality gate).
+                # Plain for-loop building a plain list (not a set/dict-key-
+                # tuple-unpacking comprehension) — see the analogous rename/
+                # rewrite a little further up (`_gen_only_names`/etc.) for
+                # why: this project's self-hosting compiler mis-typed a
+                # near-identical comprehension shape here too (confirmed via
+                # `make check-selfhost`), so the same defensive plain-loop
+                # style is used for consistency, not just to fix one spot.
+                _gm_struct_names_seen: list = []
+                for _gm_struct_method_key in self._supported_generator_methods:
+                    _gm_sname2 = _gm_struct_method_key[0]
+                    if _gm_sname2 not in _gm_struct_names_seen:
+                        _gm_struct_names_seen.append(_gm_sname2)
+                for _gm_method_struct_name in sorted(_gm_struct_names_seen):
+                    _td = self._struct_typedef_texts.get(_gm_method_struct_name)
+                    if _td:
+                        cpp_parts.append(_td)
+                        cpp_parts.append('')
             for unit in self._generator_cpp_units:
                 cpp_parts.append(unit)
                 cpp_parts.append('')

@@ -377,6 +377,103 @@ def main():
         print(x)
 """, "15\n16\n17\n")
 
+    # Milestone C step 3 (generator METHODS on structs): the target shape
+    # from that step's writeup -- a method reading a scalar `self` field,
+    # constructed via an ordinary compiled struct constructor and consumed
+    # by an inline `for x in obj.method(...):` loop (the same call-site
+    # shape _lower_struct_method_call's new generator-method branch
+    # handles; see that method's own comment for why an intermediate
+    # `g = obj.method(...)` assignment isn't supported -- a PRE-EXISTING
+    # gap shared with every other compiled generator, free-function or
+    # method, not something specific to this step).
+    test_generator_stdout("generator_method_reads_self_field", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value - i
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+""", "10\n9\n8\n")
+
+    # Per-instance isolation: TWO different Counter instances, each with
+    # its own `value`, each driving its own `countdown(...)` call -- the
+    # real bug-finding candidate for this step (a `self` binding that was
+    # accidentally shared/aliased across instances, e.g. a stray global/
+    # static instead of a genuine per-coroutine-frame copy of the `self`
+    # pointer argument, would make the second loop's output depend on the
+    # first instance's state instead of its own). Confirms each instance's
+    # generator produces independently-correct output.
+    test_generator_stdout("generator_method_self_binding_is_per_instance", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value - i
+            i = i + 1
+
+def main():
+    a = Counter(10)
+    b = Counter(100)
+    for x in a.countdown(3):
+        print(x)
+    for x in b.countdown(2):
+        print(x)
+""", "10\n9\n8\n100\n99\n")
+
+    # A generator method combining `self.<field>` reads with an ORDINARY
+    # scalar parameter (`step`) alongside the implicit `self` -- confirms
+    # this step's self-binding support composes naturally with the
+    # parameter-support step's existing machinery (Milestone C step 1),
+    # not just the self-only case.
+    test_generator_stdout("generator_method_self_field_plus_scalar_param", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countup(self, n: Int, step: Int):
+        i = 0
+        while i < n:
+            yield self.value + i * step
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countup(3, 2):
+        print(x)
+""", "10\n12\n14\n")
+
+    # A `double`-typed self field, read directly (no intermediate local) --
+    # confirms self-field type inference correctly resolves to `double`
+    # (not the int64_t default), mirroring the free-function parameter
+    # step's float coverage but for a struct field instead of a parameter.
+    test_generator_stdout("generator_method_self_field_double", """\
+class Sampler:
+    def __init__(self, base: Float64):
+        self.base = base
+
+    def samples(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.base + i
+            i = i + 1
+
+def main():
+    s = Sampler(1.5)
+    for x in s.samples(3):
+        print(x)
+""", "1.5\n2.5\n3.5\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
