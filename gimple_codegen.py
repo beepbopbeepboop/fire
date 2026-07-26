@@ -747,77 +747,80 @@ class DispatchSolver:
                     self.callers_of[callee].add(func_name)
 
     def _walk_stmts(self, stmts: list):
-        """Generator: yield all expression nodes in statement list."""
+        """Return a list of all expression nodes in statement list."""
+        result = []
         for stmt in stmts:
             if isinstance(stmt, ExprStmt):
-                yield from self._walk_expr(stmt.value)
+                result.extend(self._walk_expr(stmt.value))
             elif isinstance(stmt, ReturnStmt) and stmt.value:
-                yield from self._walk_expr(stmt.value)
+                result.extend(self._walk_expr(stmt.value))
             elif isinstance(stmt, AssignStmt):
-                yield from self._walk_expr(stmt.value)
+                result.extend(self._walk_expr(stmt.value))
             elif isinstance(stmt, IfStmt):
-                yield from self._walk_expr(stmt.condition)
-                yield from self._walk_stmts(stmt.then_body)
+                result.extend(self._walk_expr(stmt.condition))
+                result.extend(self._walk_stmts(stmt.then_body))
                 for _, elif_body in stmt.elifs:
-                    yield from self._walk_stmts(elif_body)
+                    result.extend(self._walk_stmts(elif_body))
                 if stmt.else_body:
-                    yield from self._walk_stmts(stmt.else_body)
+                    result.extend(self._walk_stmts(stmt.else_body))
             elif isinstance(stmt, (WhileStmt, ForStmt)):
                 if isinstance(stmt, WhileStmt):
-                    yield from self._walk_expr(stmt.condition)
+                    result.extend(self._walk_expr(stmt.condition))
                 elif isinstance(stmt, ForStmt):
-                    yield from self._walk_expr(stmt.iterable)
-                yield from self._walk_stmts(stmt.body)
+                    result.extend(self._walk_expr(stmt.iterable))
+                result.extend(self._walk_stmts(stmt.body))
             elif isinstance(stmt, TryStmt):
-                yield from self._walk_stmts(stmt.body)
+                result.extend(self._walk_stmts(stmt.body))
                 for h in stmt.handlers:
-                    yield from self._walk_stmts(h.body)
+                    result.extend(self._walk_stmts(h.body))
                 if stmt.else_body:
-                    yield from self._walk_stmts(stmt.else_body)
+                    result.extend(self._walk_stmts(stmt.else_body))
                 if stmt.finally_body:
-                    yield from self._walk_stmts(stmt.finally_body)
+                    result.extend(self._walk_stmts(stmt.finally_body))
             elif isinstance(stmt, WithStmt):
-                yield from self._walk_stmts(stmt.body)
+                result.extend(self._walk_stmts(stmt.body))
+        return result
 
     def _walk_expr(self, expr):
-        """Generator: yield expr and all sub-expressions."""
+        """Return a list containing expr and all sub-expressions."""
         if expr is None:
-            return
-        yield expr
+            return []
+        result = [expr]
         if isinstance(expr, BinaryOp):
-            yield from self._walk_expr(expr.left)
-            yield from self._walk_expr(expr.right)
+            result.extend(self._walk_expr(expr.left))
+            result.extend(self._walk_expr(expr.right))
         elif isinstance(expr, CompareChain):
             for o in expr.operands:
-                yield from self._walk_expr(o)
+                result.extend(self._walk_expr(o))
         elif isinstance(expr, UnaryOp):
-            yield from self._walk_expr(expr.operand)
+            result.extend(self._walk_expr(expr.operand))
         elif isinstance(expr, CallExpr):
-            yield from self._walk_expr(expr.func)
+            result.extend(self._walk_expr(expr.func))
             for arg in expr.args:
-                yield from self._walk_expr(arg)
+                result.extend(self._walk_expr(arg))
         elif isinstance(expr, MemberExpr):
-            yield from self._walk_expr(expr.obj)
+            result.extend(self._walk_expr(expr.obj))
         elif isinstance(expr, SubscriptExpr):
-            yield from self._walk_expr(expr.obj)
-            yield from self._walk_expr(expr.index)
+            result.extend(self._walk_expr(expr.obj))
+            result.extend(self._walk_expr(expr.index))
         elif isinstance(expr, SliceExpr):
-            yield from self._walk_expr(expr.obj)
+            result.extend(self._walk_expr(expr.obj))
             if expr.start:
-                yield from self._walk_expr(expr.start)
+                result.extend(self._walk_expr(expr.start))
             if expr.stop:
-                yield from self._walk_expr(expr.stop)
+                result.extend(self._walk_expr(expr.stop))
         elif isinstance(expr, TernaryExpr):
-            yield from self._walk_expr(expr.condition)
-            yield from self._walk_expr(expr.then_val)
-            yield from self._walk_expr(expr.else_val)
+            result.extend(self._walk_expr(expr.condition))
+            result.extend(self._walk_expr(expr.then_val))
+            result.extend(self._walk_expr(expr.else_val))
         elif isinstance(expr, (ListExpr, SetExpr, TupleExpr)):
             for e in expr.elements:
-                yield from self._walk_expr(e)
+                result.extend(self._walk_expr(e))
         elif isinstance(expr, DictExpr):
             for k, v in expr.pairs:
-                yield from self._walk_expr(k)
-                yield from self._walk_expr(v)
+                result.extend(self._walk_expr(k))
+                result.extend(self._walk_expr(v))
+        return result
 
     def _extract_callee_name(self, func_expr) -> str | None:
         """Extract function name if func_expr is a simple identifier or method.
@@ -1257,55 +1260,58 @@ class FunctionCompilability:
         return None  # Compilable
 
     def _walk_all_nodes(self, stmts: list):
-        """Recursively yield all AST nodes in statements and expressions."""
+        """Recursively return a list of all AST nodes in statements and expressions."""
+        result = []
         for stmt in stmts:
-            yield stmt
+            result.append(stmt)
 
             # Recurse into expressions in statements
             if isinstance(stmt, AssignStmt):
-                yield from self._walk_expr_nodes(stmt.value)
+                result.extend(self._walk_expr_nodes(stmt.value))
             elif isinstance(stmt, ReturnStmt) and stmt.value:
-                yield from self._walk_expr_nodes(stmt.value)
+                result.extend(self._walk_expr_nodes(stmt.value))
             elif isinstance(stmt, ExprStmt):
-                yield from self._walk_expr_nodes(stmt.value)
+                result.extend(self._walk_expr_nodes(stmt.value))
             elif isinstance(stmt, IfStmt):
-                yield from self._walk_expr_nodes(stmt.condition)
-                yield from self._walk_all_nodes(stmt.then_body)
+                result.extend(self._walk_expr_nodes(stmt.condition))
+                result.extend(self._walk_all_nodes(stmt.then_body))
                 for _, elif_body in stmt.elifs:
-                    yield from self._walk_all_nodes(elif_body)
+                    result.extend(self._walk_all_nodes(elif_body))
                 if stmt.else_body:
-                    yield from self._walk_all_nodes(stmt.else_body)
+                    result.extend(self._walk_all_nodes(stmt.else_body))
             elif isinstance(stmt, (WhileStmt, ForStmt)):
-                yield from self._walk_all_nodes(stmt.body)
+                result.extend(self._walk_all_nodes(stmt.body))
             elif isinstance(stmt, TryStmt):
-                yield from self._walk_all_nodes(stmt.body)
+                result.extend(self._walk_all_nodes(stmt.body))
+        return result
 
     def _walk_expr_nodes(self, expr):
-        """Recursively yield all nodes in an expression tree."""
+        """Recursively return a list of all nodes in an expression tree."""
         if expr is None:
-            return
+            return []
 
-        yield expr
+        result = [expr]
 
         if isinstance(expr, CallExpr):
-            yield from self._walk_expr_nodes(expr.func)
+            result.extend(self._walk_expr_nodes(expr.func))
             for arg in expr.args:
-                yield from self._walk_expr_nodes(arg)
+                result.extend(self._walk_expr_nodes(arg))
         elif isinstance(expr, BinaryOp):
-            yield from self._walk_expr_nodes(expr.left)
-            yield from self._walk_expr_nodes(expr.right)
+            result.extend(self._walk_expr_nodes(expr.left))
+            result.extend(self._walk_expr_nodes(expr.right))
         elif isinstance(expr, CompareChain):
             for o in expr.operands:
-                yield from self._walk_expr_nodes(o)
+                result.extend(self._walk_expr_nodes(o))
         elif isinstance(expr, TernaryExpr):
-            yield from self._walk_expr_nodes(expr.condition)
-            yield from self._walk_expr_nodes(expr.then_val)
-            yield from self._walk_expr_nodes(expr.else_val)
+            result.extend(self._walk_expr_nodes(expr.condition))
+            result.extend(self._walk_expr_nodes(expr.then_val))
+            result.extend(self._walk_expr_nodes(expr.else_val))
         elif isinstance(expr, SubscriptExpr):
-            yield from self._walk_expr_nodes(expr.obj)
-            yield from self._walk_expr_nodes(expr.index)
+            result.extend(self._walk_expr_nodes(expr.obj))
+            result.extend(self._walk_expr_nodes(expr.index))
         elif isinstance(expr, MemberExpr):
-            yield from self._walk_expr_nodes(expr.obj)
+            result.extend(self._walk_expr_nodes(expr.obj))
+        return result
 
     def is_compilable(self, func_name: str) -> bool:
         """Check if a function can be compiled to C."""
@@ -1897,28 +1903,30 @@ def _safe_field(name: str) -> str:
     return name
 
 def _walk_ast(node):
-    """Recursively yield every AST node (statement or expression) reachable
-    from `node`, generically — walks every dataclasses.field of a dataclass
-    node and every element of a list/tuple, rather than a hand-maintained
-    per-node-type attribute list. Used where struct-field inference needs to
-    see *every* `self.x` reference regardless of which statement kind it's
-    nested under (elif bodies, try/except handlers, finally blocks, match
-    cases, with-bodies, ...) — the previous hand-rolled traversals in this
-    file each covered only a handful of body-bearing attribute names and
-    silently missed the rest, which is exactly how fields assigned only
-    inside e.g. a `try:`/`except:` or `elif:` branch went unregistered and
-    produced 'no member named ...' errors from the C compiler on the
-    generated struct."""
+    """Recursively return a list of every AST node (statement or expression)
+    reachable from `node`, generically — walks every dataclasses.field of a
+    dataclass node and every element of a list/tuple, rather than a
+    hand-maintained per-node-type attribute list. Used where struct-field
+    inference needs to see *every* `self.x` reference regardless of which
+    statement kind it's nested under (elif bodies, try/except handlers,
+    finally blocks, match cases, with-bodies, ...) — the previous hand-rolled
+    traversals in this file each covered only a handful of body-bearing
+    attribute names and silently missed the rest, which is exactly how fields
+    assigned only inside e.g. a `try:`/`except:` or `elif:` branch went
+    unregistered and produced 'no member named ...' errors from the C
+    compiler on the generated struct."""
     if node is None:
-        return
+        return []
     if isinstance(node, (list, tuple)):
+        result = []
         for item in node:
-            yield from _walk_ast(item)
-        return
-    yield node
+            result.extend(_walk_ast(item))
+        return result
+    result = [node]
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
-            yield from _walk_ast(getattr(node, f.name))
+            result.extend(_walk_ast(getattr(node, f.name)))
+    return result
 
 
 def _struct_name_of(ctype: str) -> str:
@@ -15961,20 +15969,22 @@ class GimpleGen:
         def _scan_for_closures(outer_name: str, outer_scope: dict, body: list):
             """Scan a function/method body for nested FunctionDefs and register them as closures."""
             def _all_stmts_nonfunc(stmts):
-                """Yield statements recursively through control flow, not entering FunctionDef bodies."""
+                """Return a list of statements recursively through control flow, not entering FunctionDef bodies."""
+                result = []
                 for s in stmts:
-                    yield s
+                    result.append(s)
                     if isinstance(s, FunctionDef):
                         continue
                     for attr in ('then_body', 'else_body', 'body', 'finally_body'):
                         sub = getattr(s, attr, None)
                         if isinstance(sub, list):
-                            yield from _all_stmts_nonfunc(sub)
+                            result.extend(_all_stmts_nonfunc(sub))
                     for _cond, elif_body in getattr(s, 'elifs', []):
-                        yield from _all_stmts_nonfunc(elif_body)
+                        result.extend(_all_stmts_nonfunc(elif_body))
                     for handler in getattr(s, 'handlers', []):
                         if hasattr(handler, 'body') and isinstance(handler.body, list):
-                            yield from _all_stmts_nonfunc(handler.body)
+                            result.extend(_all_stmts_nonfunc(handler.body))
+                return result
 
             # Enrich outer_scope with local variable assignments/declarations for capture detection.
             enriched_scope = dict(outer_scope)
@@ -16985,17 +16995,19 @@ class GimpleGen:
         # Also recurse into TryStmt/IfStmt/ForStmt bodies at module level since Python
         # allows module-level assignments inside try/except (e.g. mojo_compiler = None).
         def _collect_global_stmts(stmt_list):
+            result = []
             for _gs in stmt_list:
-                yield _gs
+                result.append(_gs)
                 if isinstance(_gs, TryStmt):
-                    yield from _collect_global_stmts(_gs.body or [])
+                    result.extend(_collect_global_stmts(_gs.body or []))
                     for _h in (_gs.handlers or []):
-                        yield from _collect_global_stmts(getattr(_h, 'body', []) or [])
-                    yield from _collect_global_stmts(_gs.else_body or [] if isinstance(_gs.else_body, list) else [])
-                    yield from _collect_global_stmts(_gs.finally_body or [] if isinstance(_gs.finally_body, list) else [])
+                        result.extend(_collect_global_stmts(getattr(_h, 'body', []) or []))
+                    result.extend(_collect_global_stmts(_gs.else_body or [] if isinstance(_gs.else_body, list) else []))
+                    result.extend(_collect_global_stmts(_gs.finally_body or [] if isinstance(_gs.finally_body, list) else []))
                 elif isinstance(_gs, IfStmt):
-                    yield from _collect_global_stmts(_gs.then_body or [])
-                    yield from _collect_global_stmts(_gs.else_body or [])
+                    result.extend(_collect_global_stmts(_gs.then_body or []))
+                    result.extend(_collect_global_stmts(_gs.else_body or []))
+            return result
 
         all_global_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for stmt in _collect_global_stmts(all_global_scan):

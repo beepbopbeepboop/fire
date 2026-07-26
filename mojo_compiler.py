@@ -6,7 +6,8 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 from __future__ import annotations
 import re
 import sys
-from dataclasses import dataclass, field, fields as _dc_fields, is_dataclass as _dc_is_dataclass
+import dataclasses
+from dataclasses import dataclass, field
 
 # ── Mojo pointer type shims ────────────────────────────────────────
 class _MojoPointerBase:
@@ -1253,8 +1254,8 @@ def _scan_yield_bearing(node, out_ids):
         for item in node:
             if _scan_yield_bearing(item, out_ids):
                 found = True
-    elif _dc_is_dataclass(node):
-        for f in _dc_fields(node):
+    elif dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
             if _scan_yield_bearing(getattr(node, f.name), out_ids):
                 found = True
     if found:
