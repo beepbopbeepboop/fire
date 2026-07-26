@@ -566,6 +566,195 @@ def main():
     print("end")
 """, "0\n1\n2\nend\n")
 
+    # ── Milestone D: try/except/raise inside a compiled generator body ──────
+    # (real C++ exceptions confined to the generator's own .cpp translation
+    # unit, translated to the pre-existing mojo_exc_type/msg/obj global state
+    # only at the extern "C" `_resume` boundary — see gimple_codegen.py's
+    # _cpp_try_stmt/_cpp_raise_stmt and mojo_runtime.h's _mojo_exc_pending.)
+
+    # A raise CAUGHT by the generator's OWN internal try/except — continues
+    # yielding correctly afterward (not just "doesn't crash").
+    test_generator_stdout("generator_raise_caught_internally", """\
+def gen_internal_catch():
+    i = 0
+    while i < 5:
+        try:
+            if i == 2:
+                raise ValueError("boom")
+            yield i
+        except ValueError:
+            yield -1
+        i = i + 1
+
+def main():
+    for x in gen_internal_catch():
+        print(x)
+""", "0\n1\n-1\n3\n4\n")
+
+    # A raise NOT caught internally — propagates all the way out through the
+    # extern "C" `_resume` boundary to the CALLER's own try/except, with the
+    # right exception TYPE (only a ValueError handler matches) and the right
+    # MESSAGE (bound via `as e`, read back correctly through the mojo_exc_obj
+    # slot) — compared against real interpreter behavior below.
+    test_generator_stdout("generator_raise_propagates_to_caller", """\
+def gen_raises():
+    yield 1
+    yield 2
+    raise ValueError("boom")
+
+def main():
+    try:
+        for x in gen_raises():
+            print(x)
+    except ValueError as e:
+        print(e)
+""", "1\n2\nboom\n")
+
+    # `yield from` delegating to a generator that raises, uncaught, partway
+    # through — confirms the exception propagates correctly THROUGH the
+    # delegation (Milestone C step 2) to the outer generator's own caller,
+    # with values yielded before the raise (both the outer's own and the
+    # relayed inner ones) still coming through in order first.
+    test_generator_stdout("generator_yield_from_delegate_raises_propagates", """\
+def inner_raises():
+    yield 1
+    raise KeyError("nope")
+
+def outer_delegates():
+    yield 0
+    yield from inner_raises()
+    yield 99
+
+def main():
+    try:
+        for x in outer_delegates():
+            print(x)
+    except KeyError as e:
+        print("caught")
+        print(e)
+""", "0\n1\ncaught\nnope\n")
+
+    # `finally:` actually runs, the right NUMBER of times, across a mix of
+    # normal iterations and an internally-caught raise — the observable
+    # counterpart to test_gimple.py's compile-only finally coverage (a
+    # `finally` result yielded AFTER the loop that used it finishes
+    # normally, since `yield` can't appear inside the finally body itself —
+    # see _cpp_try_stmt's docstring on why).
+    test_generator_stdout("generator_try_except_finally_runs_every_time", """\
+def gen_with_cleanup():
+    cleanups = 0
+    i = 0
+    while i < 3:
+        try:
+            if i == 1:
+                raise KeyError("x")
+            yield i
+        except KeyError:
+            yield -1
+        finally:
+            cleanups = cleanups + 1
+        i = i + 1
+    yield cleanups
+
+def main():
+    for x in gen_with_cleanup():
+        print(x)
+""", "0\n-1\n2\n3\n")
+
+    # Early exit (`break`) out of a `for` loop consuming a generator that has
+    # an ACTIVE `try/finally` suspended mid-`co_yield` inside the try body —
+    # the real-exception-machinery counterpart to Milestone B's early-
+    # destroy precedent (for_loop_breaks_early_out_of_generator) and
+    # Milestone C step 2's yield-from-early-break test. Per the C++20
+    # coroutine-frame-destruction rules this relies on (see _cpp_try_stmt's
+    # docstring on `_MojoScopeExit`), the finally-guard's destructor must
+    # still fire correctly even though the coroutine is destroyed mid-try,
+    # never reaching the finally "the normal way" — a crash/hang here (e.g.
+    # from the guard's lambda capturing something already invalid) would
+    # fail this test's subprocess run, which is the real thing being
+    # checked, exactly like the precedent tests this one is modeled on.
+    test_generator_stdout("generator_try_finally_survives_early_break", """\
+def gen_finally_early_exit():
+    i = 0
+    while i < 100:
+        try:
+            yield i
+        finally:
+            i = i + 1
+
+def main():
+    for x in gen_finally_early_exit():
+        if x == 2:
+            break
+        print(x)
+""", "0\n1\n")
+
+    # Re-raise (bare `raise` with no value) inside a handler — the exception
+    # is caught internally, immediately re-raised, and propagates out
+    # uncaught (no value is ever yielded) to the caller's own try/except.
+    # Exercises _cpp_raise_stmt's `throw {caught_var};` path (see
+    # _cpp_try_stmt's docstring on why a bare `throw;` doesn't work here).
+    test_generator_stdout("generator_reraise_propagates_to_caller", """\
+def gen_reraise():
+    try:
+        raise ValueError("inner")
+        yield 1
+    except ValueError:
+        raise
+
+def main():
+    try:
+        for x in gen_reraise():
+            print(x)
+    except ValueError as e:
+        print("caught")
+        print(e)
+""", "caught\ninner\n")
+
+    # Multiple typed `except` clauses for DIFFERENT exception types in the
+    # same try, each actually dispatching to its own (not just the first)
+    # handler — exercises the descendant-OR dispatch chain built by
+    # _cpp_try_stmt for real, not just compile-checked.
+    test_generator_stdout("generator_multiple_except_types_dispatch_correctly", """\
+def gen_multi_except():
+    i = 0
+    while i < 4:
+        try:
+            if i == 0:
+                raise ValueError("v")
+            if i == 1:
+                raise KeyError("k")
+            yield i
+        except ValueError:
+            yield -1
+        except KeyError:
+            yield -2
+        i = i + 1
+
+def main():
+    for x in gen_multi_except():
+        print(x)
+""", "-1\n-2\n2\n3\n")
+
+    # A bare `except:` catch-all — every exception type matches it, not just
+    # ones that happen to share tag 0.
+    test_generator_stdout("generator_bare_except_catches_anything", """\
+def gen_bare_except():
+    i = 0
+    while i < 3:
+        try:
+            if i == 1:
+                raise RuntimeError("x")
+            yield i
+        except:
+            yield -1
+        i = i + 1
+
+def main():
+    for x in gen_bare_except():
+        print(x)
+""", "0\n-1\n2\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

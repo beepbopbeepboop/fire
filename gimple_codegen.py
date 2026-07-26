@@ -1966,11 +1966,18 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     list/other iterable, to an unsupported-shape generator, or to a call
     qualified by a module/attribute access, are all still refused) is,
     again, decided by _cpp_stmt/_gen_cpp_generator_unit — the single source
-    of truth — not duplicated here as a second checklist."""
+    of truth — not duplicated here as a second checklist.
+
+    `try`/`except`/`raise` are ALSO allowed through this quick filter as of
+    Milestone D (real C++ exceptions confined to the generator's own .cpp
+    translation unit, translated to the existing mojo_exc_type/msg/obj
+    global state only at the extern "C" `_resume` boundary — see
+    _cpp_try_stmt/_cpp_raise_stmt). `with` is still excluded here: it needs
+    its own __enter__/__exit__ codegen story this milestone doesn't add."""
     if fn.is_async or not fn.is_generator:
         return False
     for n in _walk_ast(fn.body):
-        if isinstance(n, (TryStmt, WithStmt)):
+        if isinstance(n, WithStmt):
             return False
     return True
 
@@ -9127,8 +9134,16 @@ class GimpleGen:
                     base, vct = api['base'], api['value_ctype']
                     resumed = self._new_val('_Bool', f"{base}_resume ({av})")
                     bb_ok = self._new_bb(); bb_exhausted = self._new_bb(); bb_merge = self._new_bb()
+                    bb_stopiter = self._new_bb()
                     self._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
                     self._emit_label(bb_exhausted)
+                    # Milestone D: `_resume` reporting false is ambiguous
+                    # between real exhaustion (StopIteration, the pre-
+                    # existing convention below) and an uncaught exception
+                    # that unwound the generator's whole body — see
+                    # _emit_generator_pending_exc_check's docstring.
+                    self._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
+                    self._emit_label(bb_stopiter)
                     self._emit(f"  mojo_exc_type_set ({self._exc_type_id('StopIteration')});")
                     self._emit("  mojo_raise ();")
                     self._emit(f"  goto {bb_merge};")
@@ -13923,11 +13938,12 @@ class GimpleGen:
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
+        bb_check_exc = self._new_bb()
         self._emit(f"  goto {bb_cond};")
 
         self._emit_label(bb_cond)
         cond_t = self._new_val('_Bool', f"{base}_resume ({gen_val})")
-        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_check_exc};")
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
@@ -13941,9 +13957,37 @@ class GimpleGen:
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
         self._emit(f"  goto {bb_cond};")
+        # `_resume` reporting "no value" is ambiguous between genuine
+        # exhaustion and an uncaught exception that unwound the whole
+        # generator body (Milestone D — see mojo_runtime.h's long comment
+        # on _mojo_exc_pending). Disambiguate before treating this as an
+        # ordinary end-of-loop.
+        self._emit_label(bb_check_exc)
+        self._emit_generator_pending_exc_check(gen_val, base, destroy_after, bb_after)
         self._emit_label(bb_after)
         if destroy_after:
             self._emit(f"  {base}_destroy ({gen_val});")
+
+    def _emit_generator_pending_exc_check(self, gen_val: str, base: str,
+                                           destroy_after: bool, bb_not_pending: str):
+        """Shared by every ordinary (never-suspended) GIMPLE consumer of a
+        compiled generator's `_resume` (this method, next()'s lowering, and
+        indirectly _cpp_yield_from's own analogous C++-side check) —
+        Milestone D. Called right after `_resume` reports false: if the
+        false was actually a propagated exception (mojo_exc_pending_get()),
+        clear the flag and call mojo_raise() for real — safe here because
+        this call site is ordinary GIMPLE C code that was never itself
+        suspended, so the longjmp only crosses live, ordinary C frames (see
+        mojo_runtime.h). Otherwise falls through to `bb_not_pending`
+        (ordinary ends-of-iteration handling, unchanged)."""
+        pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+        bb_pending = self._new_bb()
+        self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_not_pending};")
+        self._emit_label(bb_pending)
+        self._emit("  mojo_exc_pending_set (0);")
+        if destroy_after:
+            self._emit(f"  {base}_destroy ({gen_val});")
+        self._emit("  mojo_raise ();")
 
     def _gen_for_struct_iter(self, var: str, struct_type: str,
                               obj_val: str, body: list):
@@ -15114,8 +15158,293 @@ class GimpleGen:
                     "(a generator's `return` ends iteration with no value, "
                     "unlike an ordinary function's `return`)")
             return [f"{indent}co_return;"]
+        if isinstance(s, TryStmt):
+            return self._cpp_try_stmt(s, declared, indent)
+        if isinstance(s, RaiseStmt):
+            return self._cpp_raise_stmt(s, indent)
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
+
+    def _cpp_raise_stmt(self, s, indent: str) -> list[str]:
+        """`raise`/`raise ExcName(...)` inside a generator body — Milestone D.
+        Translates to a real C++ `throw` of `_MojoCppExc` (type tag + string
+        message + object slot — see the shared preamble's struct def and
+        _exc_type_id/mojo_exc_*_set, the EXACT SAME representation the
+        ordinary (non-generator) GIMPLE path's _gen_stmt_RaiseStmt already
+        uses, not a second one), confined to this coroutine's own .cpp
+        translation unit. Mirrors _gen_stmt_RaiseStmt's own restrictions
+        (single-string-argument constructor call, or a bare class reference)
+        rather than inventing a richer payload shape this narrow scalar-only
+        generator-body model has no way to represent anyway (a compiled
+        generator's locals/params are int64_t/double/_Bool only — see
+        _infer_simple_expr_ctype — so a raise message can only ever be a
+        literal string, never a variable, unlike the GIMPLE path)."""
+        if s.value is None:
+            # Bare `raise` (re-raise): only meaningful inside a translated
+            # except-handler's own body (`self._cpp_reraise_stack` — see
+            # _cpp_except_handler_body — names the LOCAL VARIABLE holding a
+            # copy of the exception this handler is running for; handler
+            # bodies execute OUTSIDE the actual `catch` clause — see
+            # _cpp_try_stmt's docstring for why — so this can't be a plain
+            # `throw;`, which is only legal lexically inside a real
+            # `catch`). Outside any handler a bare `raise` isn't well-
+            # defined in this narrow model (real Python itself raises a
+            # RuntimeError for a bare raise with no active exception) —
+            # refuse honestly rather than guess.
+            stack = getattr(self, '_cpp_reraise_stack', None)
+            if stack:
+                return [f"{indent}throw {stack[-1]};"]
+            raise _UnsupportedGeneratorShape(
+                "bare `raise` (re-raise) outside an except handler is not "
+                "supported in a generator body")
+        val = s.value
+        exc_name = None
+        msg_arg = None
+        if isinstance(val, CallExpr) and isinstance(val.func, IdentExpr):
+            exc_name = val.func.name
+            if len(val.args) == 1:
+                msg_arg = val.args[0]
+        elif isinstance(val, IdentExpr) and self._is_exc_class_name(val.name):
+            exc_name = val.name
+        if exc_name is None:
+            raise _UnsupportedGeneratorShape(
+                "unsupported `raise` value expression in generator body "
+                "(only `raise ExcName(...)`/`raise ExcName` with a "
+                "statically known exception class name is supported)")
+        tag = self._exc_type_id(exc_name)
+        msg_cpp = 'nullptr'
+        if msg_arg is not None:
+            if not isinstance(msg_arg, StringLiteral):
+                raise _UnsupportedGeneratorShape(
+                    "only a literal string message is supported for "
+                    "`raise ExcName(msg)` inside a generator body")
+            text, is_fstr = self._decode_str_literal_text(msg_arg.value)
+            if is_fstr:
+                raise _UnsupportedGeneratorShape(
+                    "an f-string `raise` message is not supported inside a "
+                    "generator body")
+            msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+        return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
+                f"(void *){msg_cpp} }};"]
+
+    def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict,
+                                  indent: str) -> list[str]:
+        """Emit one `except ...:` handler's binding + body as C++ lines,
+        nested inside the dispatch `if`/`else if` this handler's caller
+        (_cpp_try_stmt) already built OUTSIDE the actual `catch` clause (see
+        that method's docstring for why). `caught_var` names the local
+        `_MojoCppExc` variable — a plain copy taken inside the catch clause
+        — holding the exception this handler is running for; `except X as
+        e:` binds `e` by reading straight out of it. `declared` is shared
+        (not copied) with the enclosing generator body, matching this
+        emitter's existing if/while convention (see _cpp_stmt's IfStmt/
+        WhileStmt cases) — a name first assigned inside this handler is
+        registered globally for the rest of the translation, for better or
+        worse consistently with every other nested block here, not a new
+        scoping rule invented just for except-handlers."""
+        lines = []
+        if handler.name:
+            # Mirrors _emit_except_handler's own binding convention for the
+            # ordinary GIMPLE path: the object slot is a bare message string
+            # for every exception this narrow model can raise (see
+            # _cpp_raise_stmt), so bind as char * — there is no struct-typed
+            # exception payload in this scalar-only generator-body model.
+            declared[handler.name] = 'char *'
+            lines.append(f"{indent}char *{handler.name} = {caught_var}.msg;")
+        self._cpp_reraise_stack = getattr(self, '_cpp_reraise_stack', [])
+        self._cpp_reraise_stack.append(caught_var)
+        try:
+            for st in handler.body:
+                lines.extend(self._cpp_stmt(st, declared, indent))
+        finally:
+            self._cpp_reraise_stack.pop()
+        return lines
+
+    def _cpp_try_stmt(self, node, declared: dict, indent: str) -> list[str]:
+        """`try`/`except`/`finally` inside a generator body — Milestone D.
+        Real C++ `try`/`catch (_MojoCppExc &...)`, with the SAME per-
+        exception-type-tag dispatch semantics (inheritance-aware descendant
+        matching, untagged(0) lenient match on the first typed handler, bare
+        handler tried last, no match propagates) that _gen_stmt_TryStmt
+        already implements for the ordinary GIMPLE path — reusing
+        _handler_exc_name/_handler_exc_all_names/_exc_descendants/
+        _exc_type_id directly rather than a second hand-rolled copy of that
+        logic.
+
+        The except-handler BODIES are deliberately NOT emitted inside the
+        `catch` clause itself, even though that's the obvious first-draft
+        translation — found the hard way, via this milestone's own
+        independent hand-verification: g++ rejects `co_yield` lexically
+        inside a `catch` block outright ("await expressions are not
+        permitted in handlers", [expr.await] in the C++20 standard — a
+        suspension point mid-exception-handling has no well-defined
+        resume/unwind semantics, so the language simply forbids it), and a
+        `yield` inside an `except:` body is an entirely ordinary, expected
+        shape (see e.g. test_gimple_generator_runner.py's internally-caught
+        test). Worked around by hoisting: the `catch` clause itself does
+        nothing but record "yes, something was caught" (a bool flag) and
+        take a plain-data COPY of the `_MojoCppExc` into an ordinary local
+        declared before the `try` — copying a 3-field struct-of-scalars is
+        cheap and, crucially, doesn't itself need any C++ exception
+        machinery. The actual dispatch if/else-if chain and every handler's
+        real body then run in a plain `if (caught) { ... }` AFTER the
+        try/catch has already been fully exited — an ordinary block, not a
+        handler, so `co_yield` there is unrestricted, exactly like anywhere
+        else in this coroutine's body. A re-raise (bare `raise`) inside a
+        handler body correspondingly can't be a bare `throw;` either (only
+        legal lexically inside a real `catch`) — see _cpp_raise_stmt /
+        self._cpp_reraise_stack, which throws the captured copy by value
+        instead.
+
+        `finally` has no native C++ counterpart, but C++'s own RAII already
+        gives exactly Python's finally semantics for free: a locally-scoped
+        guard object whose destructor runs the (translated) finally body is
+        destroyed on EVERY way this block's scope can be exited — normal
+        fallthrough, break/continue, `co_return`, or an exception unwinding
+        through/past it — including when this coroutine's frame is
+        destroyed early while SUSPENDED inside this very block (verified
+        precedent: Milestone C step 2's `_mojogen_sub_guard` for `yield
+        from` relies on the exact same C++20 coroutine-frame-destruction
+        rule). `yield`/`yield from` inside the finally body itself is
+        refused: a destructor is an ordinary (non-coroutine) member
+        function and can't contain `co_yield` either (a DIFFERENT
+        restriction from the catch-handler one above — a destructor isn't
+        the coroutine function at all, so this one isn't specific to
+        exception handling)."""
+        if node.else_body:
+            raise _UnsupportedGeneratorShape(
+                "try/else is not supported in a generator body")
+
+        body_indent = indent
+        closing = []
+        lines: list[str] = []
+        if node.finally_body:
+            self._cpp_finally_seq = getattr(self, '_cpp_finally_seq', 0) + 1
+            fin_var = f"__mojofin{self._cpp_finally_seq}"
+            finally_lines = []
+            for fs in node.finally_body:
+                finally_lines.extend(
+                    self._cpp_stmt(fs, declared, indent + '        '))
+            if any('co_yield' in ln or 'co_await' in ln
+                   for ln in finally_lines):
+                raise _UnsupportedGeneratorShape(
+                    "`yield`/`yield from` inside a `finally:` block is not "
+                    "supported in a generator body")
+            lines.append(f"{indent}{{")
+            # `_MojoScopeExit` (shared preamble, alongside `_MojoCppExc`/
+            # `_mojogen_sub_guard`) wraps an arbitrary `std::function<void
+            # ()>`, run from its destructor on every way this scope can be
+            # exited — see this method's docstring. A LOCAL CLASS (the
+            # first thing tried here) doesn't work: its member functions
+            # have no implicit access to the enclosing function's own
+            # locals (unlike a lambda), so a finally body referencing any
+            # variable from outside itself failed to compile ("use of
+            # local variable with automatic storage from containing
+            # function") — found via this milestone's own independent
+            # hand-verification (a finally body that merely reads/writes an
+            # outer local, an extremely ordinary shape, not an edge case).
+            # A capturing lambda (`[&]`) fixes this outright.
+            lines.append(f"{indent}    _MojoScopeExit {fin_var}([&]() {{")
+            lines.extend(finally_lines)
+            lines.append(f"{indent}    }});")
+            body_indent = indent + '    '
+            closing.append(f"{indent}}}")
+
+        inner_indent = body_indent + '    '
+
+        self._cpp_try_seq = getattr(self, '_cpp_try_seq', 0) + 1
+        seq = self._cpp_try_seq
+        exc_var = f"__mojoexc{seq}"
+        caught_flag = f"__mojocaught{seq}"
+        caught_var = f"__mojocaughtexc{seq}"
+
+        handlers = node.handlers
+        if handlers:
+            lines.append(f"{body_indent}bool {caught_flag} = false;")
+            lines.append(f"{body_indent}_MojoCppExc {caught_var}{{}};")
+
+        lines.append(f"{body_indent}try {{")
+        for st in node.body:
+            lines.extend(self._cpp_stmt(st, declared, inner_indent))
+        lines.append(f"{body_indent}}}")
+
+        if not handlers:
+            # A pure try/finally with no except clauses at all: a bare C++
+            # `try { ... }` with no `catch` at all isn't legal syntax (found
+            # via this exact shape failing to even PARSE, not just behave
+            # wrong — g++: "expected 'catch' before '}' token") — so a
+            # catch-and-immediately-rethrow is still required here, even
+            # though there's nothing to actually dispatch on. The
+            # finally-guard's destructor still runs correctly either way
+            # (RAII, above) as the exception unwinds through this rethrow,
+            # exactly like an ordinary uncaught throw anywhere else in this
+            # translation unit.
+            lines.append(f"{body_indent}catch (...) {{ throw; }}")
+            lines.extend(closing)
+            return lines
+
+        lines.append(f"{body_indent}catch (_MojoCppExc &{exc_var}) {{")
+        lines.append(f"{inner_indent}{caught_flag} = true;")
+        lines.append(f"{inner_indent}{caught_var} = {exc_var};")
+        lines.append(f"{body_indent}}}")
+
+        lines.append(f"{body_indent}if ({caught_flag}) {{")
+        _UNIVERSAL_CATCH_NAMES = ('Exception', 'BaseException')
+        typed = [h for h in handlers
+                 if self._handler_exc_name(h) is not None
+                 and self._handler_exc_name(h) not in _UNIVERSAL_CATCH_NAMES]
+        bare = [h for h in handlers
+                if self._handler_exc_name(h) is None
+                or self._handler_exc_name(h) in _UNIVERSAL_CATCH_NAMES]
+        handler_indent = inner_indent
+
+        if not typed:
+            if bare:
+                lines.extend(self._cpp_except_handler_body(
+                    bare[0], caught_var, declared, handler_indent))
+            else:
+                lines.append(f"{handler_indent}throw {caught_var};")
+        else:
+            first = True
+            for h in typed:
+                names = set()
+                for dn in self._handler_exc_all_names(h):
+                    names |= self._exc_descendants.get(dn, {dn})
+                if not names:
+                    names = {self._handler_exc_name(h)}
+                cond = ' || '.join(
+                    f"{caught_var}.type_id == (int64_t){self._exc_type_id(n)}"
+                    for n in sorted(names))
+                if first:
+                    # Untagged (0) is treated leniently and falls to the
+                    # first typed handler — mirrors _gen_stmt_TryStmt's own
+                    # rationale for this exactly.
+                    cond = f"{caught_var}.type_id == (int64_t)0 || {cond}"
+                kw = 'if' if first else 'else if'
+                lines.append(f"{handler_indent}{kw} ({cond}) {{")
+                lines.extend(self._cpp_except_handler_body(
+                    h, caught_var, declared, handler_indent + '    '))
+                lines.append(f"{handler_indent}}}")
+                first = False
+            lines.append(f"{handler_indent}else {{")
+            if bare:
+                lines.extend(self._cpp_except_handler_body(
+                    bare[0], caught_var, declared, handler_indent + '    '))
+            else:
+                # No handler matched: this try wasn't meant to catch it —
+                # propagate to whatever encloses it (another try in this
+                # same coroutine body, or out to the coroutine's own
+                # unhandled_exception()), exactly like _gen_stmt_TryStmt's
+                # own bb_no_match falling through to mojo_raise(). Throws
+                # the captured COPY (not the original catch-clause
+                # reference, long out of scope by now) — same value either
+                # way, just needs to still be alive here.
+                lines.append(f"{handler_indent}    throw {caught_var};")
+            lines.append(f"{handler_indent}}}")
+        lines.append(f"{body_indent}}}")  # closes `if ({caught_flag})`
+
+        lines.extend(closing)
+        return lines
 
     def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[str]:
         """`yield from <call>` — delegates to ANOTHER generator this same
@@ -15200,6 +15529,35 @@ class GimpleGen:
             f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
             f"{indent}    while ({sub_base}_resume({guard}.g)) {{",
             f"{indent}        co_yield {sub_base}_value({guard}.g);",
+            f"{indent}    }}",
+            # Milestone D: the sub-generator's own `_resume` (same wrapper
+            # every compiled generator gets — see _gen_cpp_generator_unit)
+            # already translated any exception that escaped ITS body,
+            # uncaught, into the shared mojo_exc_* globals + the pending
+            # flag, and reported "done" the same as ordinary exhaustion so
+            # this loop above exits either way (see mojo_runtime.h's long
+            # comment). Disambiguate here: if it was really a pending
+            # exception, re-throw a FRESH _MojoCppExc built from those same
+            # globals, right here inside the delegating (outer) generator's
+            # OWN body -- NOT via mojo_raise()/longjmp, which must never
+            # originate from inside a coroutine frame (this while loop, and
+            # the `{guard}` RAII object still in scope one line below,
+            # prove exactly why: a longjmp here would skip past `{guard}`'s
+            # destructor without running it). Throwing instead keeps this
+            # propagating as an ordinary C++ exception: `{guard}`'s
+            # destructor runs correctly during the throw's normal stack
+            # unwind (a no-op `_destroy` on the sub-generator, which is
+            # already done()), and the exception keeps flowing outward
+            # through this SAME translation unit -- caught by an enclosing
+            # `try` in this generator's own body if there is one, or
+            # reaching this (outer) generator's own unhandled_exception(),
+            # which repeats the exact same translation for ITS OWN
+            # `_resume` boundary. Composes to any depth of nested `yield`
+            # `from` with no special-casing beyond this one check.
+            f"{indent}    if (mojo_exc_pending_get()) {{",
+            f"{indent}        mojo_exc_pending_set(0);",
+            f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
+            f"mojo_exc_msg_get(), mojo_exc_obj_get() }};",
             f"{indent}    }}",
             f"{indent}}}",
         ]
@@ -15389,7 +15747,47 @@ class GimpleGen:
             f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
             f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
             f"    std::suspend_always final_suspend() noexcept {{ return {{}}; }}",
-            f"    void unhandled_exception() {{ std::terminate(); }}",
+            # Milestone D: an exception that escapes this coroutine's own
+            # body uncaught is caught HERE, by the compiler-generated
+            # wrapper around the whole coroutine body (invokes
+            # unhandled_exception() from within its own catch-all).
+            # Written STRAIGHT to the shared mojo_exc_*/mojo_exc_pending
+            # globals rather than staged on the promise object first (the
+            # obvious first-draft design) — found the hard way, via this
+            # milestone's own required real compile+link+RUN verification
+            # (not just the -fsyntax-only compile check test_gimple.py
+            # does): adding even ONE extra field to a promise type breaks a
+            # genuinely unrelated thing, a coroutine function taking 2+
+            # parameters, on this project's GCC 15 -- confirmed via a
+            # minimal, Mojo-independent repro (a plain promise with one
+            # extra bool field plus a 2-parameter coroutine; the SECOND
+            # parameter's value was read back out of the UNRELATED extra
+            # promise field after resume — a real GCC-15 coroutine-frame-
+            # layout miscalculation, not anything about exceptions
+            # specifically). The promise here is therefore kept at its
+            # ORIGINAL Milestone B/C shape (current_value only) —
+            # unhandled_exception() has no reason to touch the promise at
+            # all, so this sidesteps the compiler bug entirely rather than
+            # working around it.
+            f"    void unhandled_exception() {{",
+            f"        try {{ std::rethrow_exception(std::current_exception()); }}",
+            f"        catch (_MojoCppExc &__e) {{",
+            f"            mojo_exc_type_set(__e.type_id);",
+            f"            mojo_exc_msg_set(__e.msg);",
+            f"            mojo_exc_obj_set(__e.obj);",
+            f"            mojo_exc_pending_set(1);",
+            f"        }}",
+            f"        catch (...) {{",
+            f"            /* Some other, non-Mojo C++ exception (e.g. a",
+            f"               std::bad_alloc) escaped -- tag 0 (untyped) so",
+            f"               it's still reported/catchable as SOME pending",
+            f"               exception rather than silently discarded. */",
+            f"            mojo_exc_type_set(0);",
+            f"            mojo_exc_msg_set(nullptr);",
+            f"            mojo_exc_obj_set(nullptr);",
+            f"            mojo_exc_pending_set(1);",
+            f"        }}",
+            f"    }}",
             f"    std::suspend_always yield_value({cpp_value_ctype} v) {{ current_value = v; return {{}}; }}",
             f"    void return_void() {{}}",
             f"}};",
@@ -15404,7 +15802,23 @@ class GimpleGen:
             f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
             f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
             f"    if (h.done()) return false;",
+            # Cleared right before resuming (not after — see
+            # mojo_exc_pending_get's docstring in mojo_runtime.h): this
+            # resume call is the only thing that could set it again before
+            # anyone looks, so this is just belt-and-suspenders against a
+            # flag some earlier, unrelated call left set without a
+            # consumer ever clearing it.
+            f"    mojo_exc_pending_set(0);",
             f"    h.resume();",
+            # See mojo_runtime.h's long comment on _mojo_exc_pending: this
+            # is the ONE place a compiled generator's own escaped exception
+            # is translated into the shared, pre-existing mojo_exc_type/
+            # msg/obj slots -- every ordinary (never-suspended) consumer of
+            # this generator's `_resume` (a `for` loop, next(), or a
+            # `yield from` delegation loop one level up) checks
+            # mojo_exc_pending_get() immediately after seeing `_resume`
+            # return false to tell real exhaustion apart from this.
+            f"    if (mojo_exc_pending_get()) return false;",
             f"    return !h.done();",
             f"}}",
             f'extern "C" {cpp_value_ctype} {base}_value (MojoGenerator *g) {{',
@@ -19328,13 +19742,47 @@ class GimpleGen:
                 '/* Generated by gimple_codegen.py (Milestone B: C++20-coroutine',
                 '   translation of this module\'s supported generator function(s);',
                 '   Milestone C step 2 added `yield from`-delegation support;',
-                '   Milestone C step 3 added generator METHODS on structs) */',
+                '   Milestone C step 3 added generator METHODS on structs;',
+                '   Milestone D added try/except/raise support) */',
                 '#include <coroutine>',
                 '#include <cstdint>',
                 '#include <exception>',
+                '#include <functional>',
                 '#include <mojo_runtime.h>',
                 '',
                 'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
+                '',
+                '/* Milestone D: RAII `finally:` translation (see',
+                '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
+                '   lambda from its destructor, so it fires on every way its',
+                '   enclosing scope can be exited (normal fallthrough, break/',
+                '   continue, co_return, an exception unwinding through/past it,',
+                '   or -- same C++20 coroutine-frame-destruction rule as',
+                '   `_mojogen_sub_guard` below -- this coroutine being destroyed',
+                '   early while suspended inside the guarded scope). A capturing',
+                '   lambda (not a local class) specifically: a local class\'s own',
+                '   member functions have NO implicit access to the enclosing',
+                '   function\'s locals, so a finally body referencing an outer',
+                '   variable wouldn\'t compile with that approach. */',
+                'struct _MojoScopeExit {',
+                '    std::function<void()> fn;',
+                '    explicit _MojoScopeExit(std::function<void()> f) : fn(std::move(f)) {}',
+                '    ~_MojoScopeExit() { fn(); }',
+                '};',
+                '',
+                '/* Milestone D: a Mojo exception thrown as a real C++ exception,',
+                '   confined to this coroutine\'s own .cpp translation unit (see',
+                '   GimpleGen._cpp_raise_stmt/_cpp_try_stmt). Carries exactly the',
+                '   same tri-part representation the ordinary (non-generator) GIMPLE',
+                '   path already uses for its mojo_exc_type/msg/obj globals (see',
+                '   mojo_runtime.h) -- reused, not reinvented, so the extern "C"',
+                '   `_resume` boundary below can translate one directly into the',
+                '   other with no lossy conversion. */',
+                'struct _MojoCppExc {',
+                '    int64_t type_id;',
+                '    char *msg;',
+                '    void *obj;',
+                '};',
                 '',
                 '/* RAII guard for a sub-generator a `yield from` delegates to (see',
                 '   GimpleGen._cpp_yield_from) -- guarantees the sub-generator\'s own',

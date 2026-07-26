@@ -65,6 +65,16 @@ int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
 
+/* Compiled-generator (C++20 coroutine) exception-boundary flag — see the
+ * long comment on this in mojo_runtime.h. Set only by a generator's
+ * extern "C" `<base>_resume()` (compiled .cpp side, gimple_codegen.py's
+ * _gen_cpp_generator_unit) when an exception escaped that coroutine's own
+ * body uncaught; consumed (checked, then cleared) by whichever ordinary,
+ * never-suspended code called `_resume()` and observed it return false. */
+int _mojo_exc_pending = 0;
+void mojo_exc_pending_set(int v) { _mojo_exc_pending = v; }
+int mojo_exc_pending_get(void) { return _mojo_exc_pending; }
+
 /* ── Global state for argc/argv ───────────────────────────────────────────*/
 static int _mojo_argc = 0;
 static const char **_mojo_argv = NULL;

@@ -5,6 +5,28 @@
 #include <stdlib.h>  /* malloc — mojo_bound_method_new below; mojo_runtime.c includes this
                        * header before its own <stdlib.h>, so the header must self-provide it. */
 
+/* Milestone D (compiled-generator exception boundary) is the first thing in
+ * this project to #include this header from a real .cpp translation unit
+ * (gimple_codegen.py's generated generator .cpp calls mojo_exc_type_get/
+ * mojo_exc_msg_get/mojo_exc_obj_get/mojo_exc_pending_get/set at the extern
+ * "C" `_resume()` boundary — see that .cpp's own preamble). Without this
+ * guard, every declaration below gets C++ (mangled) linkage when included
+ * from a .cpp file, while mojo_runtime.c itself is always compiled as plain
+ * C — a real link failure ("symbol not found ... declaration possibly
+ * missing 'extern \"C\"'"), found and fixed via this milestone's own
+ * required real compile+link+run verification, not just a syntax-only
+ * check (test_gimple.py's `-fsyntax-only` .c/.cpp checks never actually
+ * link the two together, so this was invisible there). Verified this
+ * header is otherwise already valid, unchanged, plain C++ (no `_Bool`-typed
+ * declarations, no C-only syntax) before wrapping it wholesale rather than
+ * hand-picking a handful of individual redeclarations (which would need to
+ * exactly match every attribute of the header's own declaration anyway, or
+ * conflict on language linkage — simplest and most robust to make the
+ * WHOLE header C-linkage when seen from C++, once, here). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Mojo type aliases */
 typedef int mojo_int;
 typedef float mojo_float;
@@ -111,6 +133,37 @@ void *      mojo_exc_obj_get(void);
 extern int64_t _mojo_exc_type;
 void    mojo_exc_type_set(int64_t type_id);
 int64_t mojo_exc_type_get(void);
+
+/* ── Compiled-generator (C++20 coroutine) exception boundary ─────────────
+ * A coroutine body can't use setjmp/longjmp directly (the C stack frame
+ * that ran setjmp() no longer exists once the coroutine has suspended by
+ * returning to its caller once) -- see gimple_codegen.py's _cpp_stmt
+ * TryStmt/RaiseStmt lowering. Instead, raise/try/except INSIDE a compiled
+ * generator's .cpp body use real C++ exceptions, confined to that one
+ * translation unit; an exception that escapes uncaught out of the whole
+ * coroutine body is caught once, at the extern "C" `<base>_resume()`
+ * boundary (a plain, never-suspended function call, so it's always
+ * running on an ordinary live C stack frame), and translated into these
+ * SAME mojo_exc_type/msg/obj slots above.
+ *
+ * `_resume()` still just returns a `_Bool` "did this produce a value"
+ * flag, and returning false is otherwise ambiguous between "the generator
+ * is genuinely exhausted" and "the generator's body raised, uncaught, and
+ * unwound the whole coroutine" -- this flag disambiguates the two. Every
+ * ordinary (never-suspended) consumer of a compiled generator's `_resume`
+ * (a `for` loop, `next()`, or another generator's own `yield from`
+ * delegation loop -- see gimple_codegen.py's _gen_for_generator_iter /
+ * next() lowering / _cpp_yield_from) checks this flag immediately after
+ * `_resume` reports false, and if set, propagates for real: ordinary
+ * GIMPLE C code calls mojo_raise() itself (safe -- that call site was
+ * never suspended, so the longjmp only ever crosses ordinary, live C
+ * frames); a `yield from` delegation loop re-throws a fresh C++ exception
+ * built from these same slots, so the exception keeps propagating as a
+ * real C++ exception through any further-nested coroutine frames instead
+ * of ever longjmp-ing across one. */
+extern int _mojo_exc_pending;
+void mojo_exc_pending_set(int v);
+int  mojo_exc_pending_get(void);
 
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
@@ -605,3 +658,7 @@ char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClass
                          char *(*callback)(void *, char *), void *env, char *src);
 char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
                           int root, int ngroups, char *repl, char *src);
+
+#ifdef __cplusplus
+}
+#endif

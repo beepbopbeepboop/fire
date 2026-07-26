@@ -2089,13 +2089,11 @@ def f():
     yield from [1, 2, 3]
 """, "generator function")
 
-    test_raises("generator_try_except_honest_fallback", """\
-def f():
-    try:
-        yield 1
-    except:
-        pass
-""", "generator function")
+    # Milestone D: try/except/raise inside a generator body now compiles via
+    # the C++20-coroutine path instead of falling back — see
+    # test_generator_try_except_compiles_via_cpp_path below for the positive
+    # compile-only smoke test, and test_gimple_generator_runner.py for the
+    # REAL behavioral (compile+link+run) coverage of this exact shape.
 
     # Mixed yield-value types (int then float): passes the cheap
     # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
@@ -2851,6 +2849,223 @@ def g(a: str) -> str:
     return a
 print(g("ab"))
 """)
+
+    # ── Milestone D: try/except/raise inside a compiled generator body ─────
+    def _generator_compiles_via_cpp(name: str, src: str, must_contain_cpp=None):
+        """Shared compile-only smoke-test helper for Milestone D's generator
+        try/except/raise support — mirrors
+        test_generator_simple_shape_compiles_via_cpp_path's own dance
+        (compile_to_gimple_with_cpp, then gcc -fsyntax-only the .c/.ci and
+        g++ -std=c++20 -fsyntax-only the .cpp) without duplicating that
+        subprocess plumbing a third/fourth/fifth time."""
+        global _PASS, _FAIL
+        import gimple_codegen
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if must_contain_cpp is not None and must_contain_cpp not in cpp_src:
+            print(f"FAIL  {name}: expected {must_contain_cpp!r} in generated .cpp")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    # A generator whose own internal try/except catches everything it
+    # raises — the simplest positive shape.
+    _generator_compiles_via_cpp("generator_try_except_compiles_via_cpp_path", """\
+def f():
+    i = 0
+    while i < 5:
+        try:
+            if i == 2:
+                raise ValueError("boom")
+            yield i
+        except ValueError:
+            yield -1
+        i = i + 1
+
+def main():
+    for x in f():
+        print(x)
+""", must_contain_cpp="_MojoCppExc")
+
+    # A generator whose raise is NOT caught internally — must compile (the
+    # exception propagates via the extern "C" `_resume` boundary + the
+    # mojo_exc_pending flag, checked by the ordinary GIMPLE consumer, not by
+    # anything inside the .cpp translation unit itself).
+    _generator_compiles_via_cpp("generator_raise_propagates_compiles_via_cpp_path", """\
+def f():
+    yield 1
+    raise ValueError("boom")
+
+def main():
+    try:
+        for x in f():
+            print(x)
+    except ValueError:
+        print("caught")
+""")
+
+    # try/except/finally together — the RAII-scope-guard finally translation
+    # composing with real dispatch.
+    _generator_compiles_via_cpp("generator_try_except_finally_compiles_via_cpp_path", """\
+def f():
+    cleanups = 0
+    i = 0
+    while i < 3:
+        try:
+            if i == 1:
+                raise KeyError("nope")
+            yield i
+        except KeyError:
+            yield -1
+        finally:
+            cleanups = cleanups + 1
+        i = i + 1
+    yield cleanups
+
+def main():
+    for x in f():
+        print(x)
+""")
+
+    # Multiple typed handlers plus a bare catch-all, and a re-raise (`raise`
+    # with no value) inside one of them — exercises the descendant-OR
+    # dispatch chain AND the `throw;` re-raise path together.
+    _generator_compiles_via_cpp("generator_try_multi_except_reraise_compiles_via_cpp_path", """\
+def f():
+    i = 0
+    while i < 3:
+        try:
+            if i == 0:
+                raise ValueError("v")
+            if i == 1:
+                raise KeyError("k")
+            yield i
+        except ValueError:
+            yield -1
+        except KeyError as e:
+            raise
+        except:
+            yield -2
+        i = i + 1
+
+def main():
+    for x in f():
+        print(x)
+""")
+
+    # `yield from` delegating to a generator that itself raises — confirms
+    # Milestone C step 2 (delegation) and Milestone D (exceptions) compose,
+    # not a fourth separate code path (see _cpp_yield_from's pending-
+    # exception check).
+    _generator_compiles_via_cpp("generator_yield_from_raise_compiles_via_cpp_path", """\
+def inner():
+    yield 1
+    raise ValueError("boom")
+
+def outer():
+    try:
+        yield from inner()
+    except ValueError:
+        yield -1
+
+def main():
+    for x in outer():
+        print(x)
+""")
+
+    # A generator METHOD (Milestone C step 3: `self` field reads) combined
+    # with try/except — confirms this composes with self-binding too, not
+    # just free functions.
+    _generator_compiles_via_cpp("generator_method_try_except_compiles_via_cpp_path", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            try:
+                if self.value - i == 0:
+                    raise ValueError("zero")
+                yield self.value - i
+            except ValueError:
+                yield -1
+            i = i + 1
+
+def main():
+    c = Counter(2)
+    for x in c.countdown(3):
+        print(x)
+""")
+
+    # Still-refused shapes: `yield` inside a `finally:` block (a destructor
+    # can't `co_yield`) and a bare `raise` with no enclosing handler both
+    # honestly fall back to the whole-module refusal, exactly like every
+    # other out-of-scope shape in this file.
+    test_raises("generator_yield_in_finally_honest_fallback", """\
+def f():
+    try:
+        yield 1
+    finally:
+        yield 2
+""", "generator function")
+
+    test_raises("generator_bare_raise_outside_handler_honest_fallback", """\
+def f():
+    raise
+    yield 1
+""", "generator function")
+
+    # `with` inside a generator body is still out of this milestone's scope
+    # (needs its own __enter__/__exit__ codegen story) — confirms adding
+    # try/except support didn't accidentally also let `with` through
+    # _generator_quick_eligible's pre-filter.
+    test_raises("generator_with_honest_fallback", """\
+class C:
+    def __enter__(self):
+        pass
+    def __exit__(self, a, b, c):
+        pass
+
+def f():
+    with C():
+        yield 1
+""", "generator function")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
