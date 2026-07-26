@@ -115,7 +115,7 @@ class Scope:
 class MojoFunction:
     """Represents a function defined in Mojo code."""
     def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
-                 is_generator=False):
+                 is_generator=False, is_async=False):
         self.name = name
         self.params = params
         self.body = body
@@ -134,6 +134,13 @@ class MojoFunction:
         # `_invoke` can branch to the generator-construction path without
         # needing the original FunctionDef node around at call time.
         self.is_generator = is_generator
+        # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # mirrors FunctionDef.is_async (see mojo_compiler.py) exactly the
+        # same way is_generator mirrors FunctionDef.is_generator above —
+        # copied onto the MojoFunction at construction time so `_invoke`
+        # can branch to the coroutine-construction path without needing
+        # the original FunctionDef node around at call time.
+        self.is_async = is_async
 
     def __call__(self, interpreter, *args, **kwargs):
         return self._invoke(interpreter, {}, args, kwargs)
@@ -179,7 +186,33 @@ class MojoFunction:
                 if not _found:
                     func_scope.define(param, None)
 
-        if self.is_generator:
+        if self.is_generator and self.is_async:
+            # `async def f(): yield x` — a real async generator. Python's
+            # actual protocol for these (`__aiter__`/`__anext__`, driven by
+            # `async for`, not by plain `await`) is a THIRD distinct
+            # protocol from both the sync-generator protocol
+            # (MojoGeneratorObject: __iter__/__next__/send/throw) and the
+            # coroutine protocol (MojoCoroutine: __await__) built for this
+            # milestone — see bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # Milestone 3b report. Deliberately NOT built here: rather than
+            # silently picking one of the two existing wrappers (either
+            # would behave subtly wrong under `async for`), fail loudly so
+            # this reads as a known, documented gap rather than a silent
+            # correctness bug.
+            raise NotImplementedError(
+                f"async generators (`async def {self.name}(): yield ...`) are not "
+                f"yet supported by the interpreter — __aiter__/__anext__ protocol "
+                f"is a documented follow-up gap, see Milestone 3b report")
+        elif self.is_async:
+            # Calling an async function must NOT run any of its body eagerly
+            # — mirrors is_generator immediately below (same rationale: real
+            # Python doesn't execute a single statement of a coroutine
+            # function's body until something actually drives it via
+            # __await__/.send()). Construct-and-return only; func_scope
+            # becomes this coroutine's own private scope, swapped in by
+            # MojoCoroutine around every resume — see its docstring.
+            result = MojoCoroutine(interpreter, func_scope, self.body)
+        elif self.is_generator:
             # Calling a generator function must NOT run any of its body —
             # real Python doesn't execute a single statement of a generator
             # function until the caller starts pulling values out of it.
@@ -215,6 +248,51 @@ class MojoFunction:
                 interpreter.scope = old_scope
 
         return result
+
+
+class _RealAwaitStep:
+    """Milestone 3b marker object: yielded (via a worker thread's
+    `yield_fn`, exactly like a Mojo `yield` would be) by `eval_AwaitExpr`
+    to mean "please advance THIS real iterator/generator (from a real
+    native coroutine's `__await__()`, or another `MojoCoroutine`'s) by one
+    step, on whatever thread is actually driving me" — see
+    `_ThreadedGenerator._resume`'s handling of it for why this can't be
+    stepped on the worker thread itself (real asyncio internals like
+    `asyncio.sleep` call `get_running_loop()`, which is thread-affine —
+    stepping them from the wrong OS thread raises
+    `RuntimeError: no running event loop`, confirmed empirically while
+    prototyping this milestone)."""
+    __slots__ = ("it",)
+    def __init__(self, it):
+        self.it = it
+
+
+class _RealThreadCall:
+    """Milestone 3b marker, sibling to `_RealAwaitStep`: some real Python
+    callables touch the running event loop the instant they're CALLED, not
+    merely when later awaited — `asyncio.gather(...)`, `ensure_future`,
+    `create_task`, `asyncio.Queue()`, etc. all call `get_running_loop()`/
+    `get_event_loop()` eagerly at call time (confirmed empirically:
+    `asyncio.gather(...)` invoked from a Mojo coroutine's worker thread
+    raised `RuntimeError: no running event loop`, the exact same
+    thread-affinity problem `_RealAwaitStep` solves for awaiting, but at
+    call time instead of await time). `Interpreter.invoke` wraps any plain
+    (non-Mojo) callable invocation made from inside a coroutine's worker
+    thread in one of these and hands it to `yield_fn`, so
+    `_ThreadedGenerator._resume` executes the call itself — a single
+    one-shot step, not a multi-round drive like `_RealAwaitStep` — on
+    whichever thread is actually driving this coroutine, then hands the
+    result (or propagates the exception) straight back to the worker
+    thread. Deliberately NOT applied to plain Mojo `yield` generators —
+    only coroutines interact with an event loop, so
+    `MojoGeneratorObject`/`_body_fn` never sets the `is_coroutine` TLS flag
+    this is gated on, keeping the existing generator fast path completely
+    unchanged."""
+    __slots__ = ("func", "args", "kwargs")
+    def __init__(self, func, args, kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
 
 
 class _ThreadedGenerator:
@@ -260,7 +338,20 @@ class _ThreadedGenerator:
     `_eval_gen` dispatch family) -- without the keyword. Exactly one of
     {caller thread, worker thread} runs at a time, handed off via two
     `threading.Event`s: never real concurrency, just cooperative suspension
-    implemented with a thread instead of a generator frame."""
+    implemented with a thread instead of a generator frame.
+
+    Milestone 3b (async/await execution) REUSES this class as-is for
+    `MojoCoroutine` too, rather than duplicating it — per CLAUDE.md's
+    consolidation principle, the underlying "run this body on a worker
+    thread, suspend via yield_fn+Events" mechanism is identical between a
+    Mojo `yield` and a Mojo `await`; only the protocol MojoGeneratorObject
+    vs. MojoCoroutine expose to their respective callers differs. To
+    support `await`, `_resume` additionally recognizes when the worker
+    yields a `_RealAwaitStep` (meaning: "step this real awaitable/
+    MojoCoroutine, not the Mojo body, and don't wake the Mojo body up
+    until that real thing is actually done") and drives it in a loop on
+    the CALLING thread — see `_resume`'s docstring for why the calling
+    thread specifically, not the worker thread, must do that stepping."""
 
     def __init__(self, body_fn):
         self._to_worker = threading.Event()
@@ -271,6 +362,12 @@ class _ThreadedGenerator:
         self._raised_exc = None    # worker -> caller: exception the body raised (propagates from send/throw)
         self._return_value = None
         self._done = False
+        # Milestone 3b: set while `_resume` is mid-stepping a real awaitable
+        # on behalf of `await` (see `_RealAwaitStep`) — non-None means "the
+        # worker thread is parked waiting for the FINAL result of this real
+        # await, don't resume it with an ordinary send/throw value; keep
+        # stepping `it` instead" (see `_resume`).
+        self._active_real_it = None
 
         def _yield_fn(value):
             self._yielded_value = value
@@ -311,11 +408,12 @@ class _ThreadedGenerator:
         finally:
             threading.stack_size(_old_stack_size)
 
-    def _resume(self):
-        """Common tail of send()/throw(): hand off to the worker thread and
-        wait for it to either yield again or finish. Raises a BARE
-        `StopIteration` (no constructor argument) when done — the return
-        value is read back off `self._return_value` afterward instead of
+    def _resume_once(self):
+        """The single Event-handoff step (exactly the original `_resume`
+        body, pre-Milestone-3b): hand off to the worker thread and wait for
+        it to either yield again or finish. Raises a BARE `StopIteration`
+        (no constructor argument) when done — the return value is read
+        back off `self._return_value` afterward instead of
         `StopIteration.value`/`.args` deliberately: this file self-hosts,
         and the compiler's exception model represents a raised exception as
         a type tag + opaque payload, not a real struct with a typed
@@ -323,7 +421,8 @@ class _ThreadedGenerator:
         against (only `MojoError`'s dedicated `_raised_mojo_value` channel
         and plain string messages are supported that way) — reading a
         value off one of OUR OWN classes' ordinary fields instead sidesteps
-        that entirely."""
+        that entirely. Assumes `self._sent_value`/`self._inject_exc` are
+        already set by the caller (`_resume`)."""
         self._to_worker.set()
         self._to_caller.wait()
         self._to_caller.clear()
@@ -334,17 +433,155 @@ class _ThreadedGenerator:
             raise StopIteration
         return self._yielded_value
 
+    def _resume(self):
+        """Drives one logical send()/throw() step to completion, which may
+        take MULTIPLE Event handoffs when a `_RealAwaitStep` is involved
+        (Milestone 3b). Loop body, each pass:
+
+        - If `self._active_real_it` is set, the worker is currently parked
+          waiting on the FINAL outcome of a real await — step `it` itself
+          right here, on THIS (the calling) thread. This is the crux of
+          why real asyncio interop works at all: `it` is (transitively) a
+          real native coroutine/Future's own `__await__()` iterator, and
+          real asyncio internals like `asyncio.sleep` call
+          `get_running_loop()`, which is thread-affine (fails with
+          `RuntimeError: no running event loop` off the loop's own thread —
+          confirmed empirically). Since `_resume` is always invoked by
+          whatever thread is legitimately driving this coroutine/generator
+          (the real event loop's Task-stepping code, for a top-level
+          `await`; another worker thread, for Mojo-await-Mojo), stepping
+          `it` HERE is always on a correct thread, transitively, all the
+          way up the chain.
+            - `it` raises `StopIteration(v)`: the real await is done;
+              clear `_active_real_it` and loop back around to hand `v` to
+              the worker as its ordinary yield_fn(...) return value —
+              exactly as if the worker's `yield_fn` call is now returning.
+            - `it` raises any other exception: same, but inject it instead
+              (the worker's `yield_fn` call raises it, matching real
+              `await`'s "the awaited thing raised" propagation).
+            - `it` yields again (still not done, e.g. `Future.__await__`'s
+              `yield self`): propagate that value straight back OUT to
+              whoever is driving US, untouched, WITHOUT touching the
+              worker thread at all — it stays parked. This is what lets a
+              real `Future` bubble all the way up to real asyncio's Task
+              machinery for actual timer/IO scheduling.
+        - Otherwise, do one ordinary Event handoff (`_resume_once`). If the
+          worker yielded a `_RealAwaitStep`, record its iterator as
+          `_active_real_it` and loop back around (first step: send(None),
+          matching how a freshly-`__await__()`-ed iterator is always first
+          primed with `None`). Any other yielded value (a genuine Mojo
+          `yield`, for MojoGeneratorObject) — or the worker finishing —
+          returns/raises straight out to the caller, unchanged from
+          pre-Milestone-3b behavior.
+
+        Routed through `self._yielded_value` as the SOLE carrier of
+        whatever this call ultimately returns, with exactly ONE textual
+        `return self._yielded_value` statement at the very end (`break`
+        out of the loop rather than returning from several different
+        points) — deliberately, mirroring the documented
+        `MojoFunction._invoke` workaround for `is_generator`/`is_async`:
+        this file is itself self-hosted, and the self-hosted compiler's
+        return-type inference is a simple whole-function unification that
+        gets confused by differently-shaped return statements/fresh local
+        variables in the same function — confirmed empirically while
+        building this (an earlier draft using a fresh local `result`
+        variable, even with a single `return result` statement, compiled
+        fine interpreted but failed `make check-selfhost` with a gimple
+        `non-trivial conversion in 'var_decl'` verifier error; routing
+        through the ALREADY-established `self._yielded_value` field —
+        whose type the inferencer already resolved correctly from
+        `_yield_fn`'s pre-existing, unmodified assignment — fixed that.
+        A SECOND, separate self-host failure of the same species hit right
+        after: this method used to take `send_val`/`exc` as its own
+        parameters (defaulting to `None`, reassigned across loop
+        iterations to real objects/exceptions). The self-hosted compiler's
+        exception representation is a `char *` message string (see
+        `_resume_once`'s docstring), and a local/parameter that's
+        SOMETIMES `None` (inferred `int64_t`) and SOMETIMES a real
+        exception (`char *`) is a genuine, unreconcilable C type conflict
+        for it — confirmed via the exact gimple dump
+        (`int64_t / char * / exc = _t38;`). `send()`/`throw()` (below)
+        instead set `self._sent_value`/`self._inject_exc` directly, the
+        exact same pre-existing fields `_resume_once`/`_yield_fn` already
+        use for this — proven to self-host correctly before this
+        milestone touched anything — and `_resume` takes no parameters at
+        all, consulting/updating only those fields."""
+        while True:
+            if self._active_real_it is not None:
+                it = self._active_real_it
+                try:
+                    if self._inject_exc is not None:
+                        e, self._inject_exc = self._inject_exc, None
+                        step_result = it.throw(e)
+                    else:
+                        step_result = it.send(self._sent_value)
+                        self._sent_value = None
+                except StopIteration as si:
+                    self._active_real_it = None
+                    self._sent_value = si.value
+                    self._inject_exc = None
+                    continue
+                except BaseException as e:
+                    self._active_real_it = None
+                    self._prime_inject(e)
+                    continue
+                self._yielded_value = step_result
+                break
+            y = self._resume_once()
+            if isinstance(y, _RealAwaitStep):
+                self._active_real_it = y.it
+                self._sent_value = None
+                self._inject_exc = None
+                continue
+            if isinstance(y, _RealThreadCall):
+                # One-shot version of the above: execute the call itself
+                # (not an iterator step) right here, on the correct
+                # thread, then immediately hand the result/exception back
+                # to the worker and loop around for its next suspension —
+                # see _RealThreadCall's docstring.
+                try:
+                    call_result = y.func(*y.args, **y.kwargs)
+                except BaseException as e:
+                    self._prime_inject(e)
+                else:
+                    self._sent_value = call_result
+                    self._inject_exc = None
+                continue
+            self._yielded_value = y
+            break
+        return self._yielded_value
+
     def send(self, value):
         if self._done:
             raise StopIteration
         self._sent_value = value
+        self._inject_exc = None
         return self._resume()
 
     def throw(self, exc):
         if self._done:
             raise exc
-        self._inject_exc = exc
+        self._prime_inject(exc)
         return self._resume()
+
+    def _prime_inject(self, exc):
+        """Sets up `self._inject_exc`/`self._sent_value` for the next
+        `_resume()` call to inject `exc` at the worker's suspension point —
+        factored out of `throw()` (whose `self._inject_exc = exc` /
+        `self._sent_value = None` pair is unchanged, just moved here) so
+        `_resume`'s own real-await-exception-handling branches (Milestone
+        3b) can reuse the EXACT SAME assignment shape for exceptions they
+        catch via `except BaseException as e:` from a real iterator/call.
+        This split mattered empirically, not just stylistically: assigning
+        an except-as-bound exception straight into `self._inject_exc`
+        inline inside `_resume`'s own try/except produced a genuine
+        self-hosted gimple type conflict (`int64_t` vs. `char *` — an
+        except-as binding apparently infers narrower than a same-shaped
+        assignment reached via an ordinary function parameter). Passing it
+        as a plain parameter across this method-call boundary instead —
+        identical statement, different call site — self-hosts correctly."""
+        self._inject_exc = exc
+        self._sent_value = None
 
     def close(self):
         if self._done:
@@ -511,6 +748,165 @@ class MojoGeneratorObject:
         old = self._enter()
         try:
             self._raw_gen.close()
+        finally:
+            self._leave(old)
+        self._finished = True
+
+
+class MojoCoroutine:
+    """Milestone 3b: the `async def` counterpart of `MojoGeneratorObject`.
+    Wraps a `_ThreadedGenerator` driving a Mojo coroutine function's body
+    through the ORDINARY, unmodified `execute()`/`eval_expr()` dispatch —
+    exactly the same underlying mechanism as `MojoGeneratorObject`, reused
+    directly rather than duplicated (see `_ThreadedGenerator`'s docstring)
+    since the only thing that differs is which protocol gets exposed:
+    `__iter__`/`__next__`/`.send()`/`.throw()` there, `__await__` here.
+
+    `__await__` is a PLAIN method (not `def __await__(self): yield ...`,
+    which would itself be a native-yield trap — see the module-wide
+    constraint documented on `_ThreadedGenerator`) that returns `self`,
+    since `MojoCoroutine` itself implements the `__next__`/`send`/`throw`
+    iterator protocol real Python's `await`/`asyncio` machinery actually
+    drives an awaitable's `__await__()` result through. This is genuinely
+    real-asyncio-compatible: `asyncio.run(mojo_coro)`,
+    `asyncio.gather(mojo_coro1, mojo_coro2)`, and `await mojo_coro` from
+    ordinary real Python `async def` code all work, validated empirically
+    (see bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+    3b report) — including a Mojo body that internally does
+    `await asyncio.sleep(...)`, which really suspends on the real event
+    loop and really takes real wall-clock time, and `asyncio.gather` of
+    several Mojo coroutines really running concurrently (interleaved by
+    the real event loop, not just sequentially).
+
+    Raises `StopIteration(value)` — WITH the constructor argument, unlike
+    `_ThreadedGenerator._resume_once`'s deliberately-bare `StopIteration`
+    — from `send`/`throw`/`__next__` when the coroutine body returns. This
+    might look like it contradicts `_ThreadedGenerator`'s documented
+    self-hosting workaround (avoiding `StopIteration.value` because the
+    self-hosted compiler's exception model can't do typed attribute access
+    against a builtin exception), but it doesn't: this file's OWN source
+    never reads `.value` off a `StopIteration` anywhere (`return_value` is
+    tracked as an ordinary field, exactly like `MojoGeneratorObject`, and
+    used to build the argument passed to `StopIteration(...)` here) — only
+    CONSTRUCTS and RAISES one. Real Python's own `await`/`SEND` bytecode
+    (running in the genuinely-interpreted path, where these objects are
+    real CPython objects) is what reads `.value` back out, and that's real
+    CPython machinery, not code inside this self-hosted file.
+
+    Same `interpreter.scope` swap-on-every-resume discipline as
+    `MojoGeneratorObject` (identical hazard: `interpreter.scope` is one
+    mutable attribute, not a per-call parameter — see that class's
+    docstring for the full explanation), extended to also cover
+    concurrent-by-real-asyncio coroutines, not just hand-interleaved
+    generators: since real asyncio only ever runs ONE callback at a time
+    on its single event-loop thread, and every one of a coroutine's worker
+    threads only ever runs while its OWN `_enter`/`_leave` window holds
+    `interpreter.scope` pinned to that coroutine's own scope (strictly
+    alternating with whichever OTHER coroutine/generator/plain call is
+    active at that instant, exactly like `_ThreadedGenerator`'s handoff
+    guarantees), the same single-mutable-attribute swap remains correct
+    even when several `MojoCoroutine`s are "concurrently" in flight from
+    asyncio's point of view."""
+
+    def __init__(self, interpreter, func_scope, body):
+        self.interpreter = interpreter
+        self.func_scope = func_scope
+
+        def _body_fn(yield_fn):
+            tls = interpreter._gen_tls
+            old_yield_fn = getattr(tls, 'yield_fn', None)
+            old_is_coroutine = getattr(tls, 'is_coroutine', False)
+            tls.yield_fn = yield_fn
+            # Gates Interpreter.invoke's _RealThreadCall bounce (see its
+            # docstring) — only coroutine bodies interact with an event
+            # loop, so plain Mojo generators never pay for or risk this.
+            tls.is_coroutine = True
+            try:
+                try:
+                    for stmt in body:
+                        interpreter.execute(stmt)
+                    return None
+                except ReturnValue as ret:
+                    return ret.value
+            finally:
+                tls.yield_fn = old_yield_fn
+                tls.is_coroutine = old_is_coroutine
+
+        self._raw = _ThreadedGenerator(_body_fn)
+        self._started = False
+        self._finished = False
+
+    def _enter(self):
+        """See MojoGeneratorObject._enter — identical swap-in, split out of
+        a lambda-taking `_drive` for the identical self-hosted-compile
+        reason documented there."""
+        old = self.interpreter.scope
+        self.interpreter.scope = self.func_scope
+        return old
+
+    def _leave(self, old):
+        self.interpreter.scope = old
+        self._started = True
+
+    def __await__(self):
+        """The entire real-asyncio-interop hinge point: returning `self`
+        (which implements `__next__`/`send`/`throw`) is all real Python's
+        `await`/`SEND` bytecode needs to drive this coroutine exactly like
+        any other awaitable — a real native coroutine, a real `Future`, or
+        another `MojoCoroutine` (Mojo-await-Mojo — see `eval_AwaitExpr`,
+        which treats a `MojoCoroutine` no differently from a real one,
+        uniformly, since both merely need to expose `__await__`)."""
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.send(None)
+
+    def send(self, value):
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            result = self._raw.send(value)
+            return result
+        except StopIteration:
+            self._finished = True
+            raise StopIteration(self._raw._return_value)
+        finally:
+            self._leave(old)
+
+    def throw(self, exc_type, exc_val=None, exc_tb=None):
+        # Normalize the (exc_type, exc_val, exc_tb) / bare-instance call
+        # shapes real Python's coroutine.throw() accepts — see
+        # MojoGeneratorObject.throw, identical normalization.
+        if isinstance(exc_type, BaseException):
+            exc = exc_type
+        elif exc_val is not None:
+            exc = exc_type(exc_val) if not isinstance(exc_val, BaseException) else exc_val
+        else:
+            exc = exc_type()
+        if self._finished:
+            raise exc
+        old = self._enter()
+        try:
+            result = self._raw.throw(exc)
+            return result
+        except StopIteration:
+            self._finished = True
+            raise StopIteration(self._raw._return_value)
+        finally:
+            self._leave(old)
+
+    def close(self):
+        """See MojoGeneratorObject.close — identical GeneratorExit-based
+        cleanup, delegated to the same `_ThreadedGenerator.close()`."""
+        if self._finished:
+            return
+        old = self._enter()
+        try:
+            self._raw.close()
         finally:
             self._leave(old)
         self._finished = True
@@ -2736,7 +3132,8 @@ class Interpreter:
         if _pd:
             _pdv = [(k, self.eval_expr(v)) for k, v in _pd.items()]
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
-                             is_generator=getattr(node, 'is_generator', False))
+                             is_generator=getattr(node, 'is_generator', False),
+                             is_async=getattr(node, 'is_async', False))
         spec = self._classify_params(node)
         return self._register_function(self.scope.vars, node.name, func, spec)
 
@@ -2774,7 +3171,8 @@ class Interpreter:
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
             method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False))
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -2861,7 +3259,8 @@ class Interpreter:
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
                 method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
-                                        is_generator=getattr(m, 'is_generator', False))
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -3556,16 +3955,24 @@ class Interpreter:
         return value
 
     def _current_yield_fn(self, expr):
-        """The `yield_fn` of the generator whose body is currently running
-        on THIS OS thread — see MojoGeneratorObject/_ThreadedGenerator.
-        `None` means eval_YieldExpr/eval_YieldFromExpr is somehow running
-        outside any generator body, which mojo_compiler.py's parser-level
-        `is_generator`/`yield_bearing_node_ids` detection (Milestone 1)
-        should make unreachable in practice — a plain SyntaxError-style
-        message rather than an obscure AttributeError if it ever is."""
+        """The `yield_fn` of the generator/coroutine whose body is
+        currently running on THIS OS thread — see
+        MojoGeneratorObject/MojoCoroutine/_ThreadedGenerator. `None` means
+        eval_YieldExpr/eval_YieldFromExpr/eval_AwaitExpr is somehow running
+        outside any generator/coroutine body, which mojo_compiler.py's
+        parser-level `is_generator`/`yield_bearing_node_ids` detection
+        (Milestone 1) and `is_async` detection (Milestone 3a) should make
+        unreachable in practice — a plain SyntaxError-style message rather
+        than an obscure AttributeError if it ever is. Deliberately shared
+        by both `yield` and `await` (Milestone 3b): both suspend "whichever
+        generator/coroutine body is running on this thread" via the exact
+        same `_ThreadedGenerator`-backed channel, and only one of
+        {a generator body, a coroutine body} ever runs on a given worker
+        thread at a time, so there's no ambiguity in reusing one TLS slot
+        for both."""
         fn = getattr(self._gen_tls, 'yield_fn', None)
         if fn is None:
-            raise SyntaxError(f"{self._loc(expr)}'yield' outside a generator function")
+            raise SyntaxError(f"{self._loc(expr)}'yield'/'await' outside a generator/coroutine function")
         return fn
 
     def eval_YieldExpr(self, expr: N.YieldExpr):
@@ -3614,6 +4021,47 @@ class Interpreter:
                 except StopIteration:
                     return source.return_value
                 sent = yield_fn(value)
+
+    def eval_AwaitExpr(self, expr: N.AwaitExpr):
+        """`await <expr>` — Milestone 3b. Evaluates the awaited expression,
+        then drives it via `_RealAwaitStep` regardless of what kind of
+        awaitable it turned out to be: a `MojoCoroutine` (Mojo-await-Mojo),
+        a real native coroutine/Task/Future (real asyncio interop — e.g.
+        `await asyncio.sleep(...)`), or anything else implementing
+        `__await__`, matching real Python `await`'s own actual protocol
+        (bytecode-level, not type-based — see
+        bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+        3b report for why this is genuinely real-asyncio-compatible).
+
+        This method itself runs on the current Mojo coroutine's OWN worker
+        thread (same as `eval_YieldExpr` for a generator's worker thread —
+        see `_current_yield_fn`). It does NOT step the real awaitable
+        itself — real asyncio internals like `asyncio.sleep` call
+        `get_running_loop()`, which is thread-affine and would raise
+        `RuntimeError: no running event loop` off this worker thread
+        (confirmed empirically). Instead it hands a `_RealAwaitStep`
+        wrapping the awaitable's own `__await__()` iterator to
+        `yield_fn` (the same suspension channel `eval_YieldExpr` uses) —
+        `_ThreadedGenerator._resume` recognizes that marker and does the
+        actual stepping on whichever thread is legitimately driving THIS
+        coroutine (the real event loop's thread, for a top-level `await`;
+        another worker thread, for Mojo-await-Mojo), looping until the
+        real awaitable is actually done, then delivers the final value (or
+        propagates the real exception) back here as this call's ordinary
+        return value/raised exception — the worker thread just blocks the
+        whole time, exactly like a plain Mojo `yield` blocks waiting for
+        `.send()`."""
+        value = self.eval_expr(expr.value)
+        if hasattr(value, '__await__'):
+            it = value.__await__()
+        elif hasattr(value, 'send') and hasattr(value, '__next__'):
+            # Old-style (pre-3.5 @asyncio.coroutine-style) generator-based
+            # awaitable, or a bare iterator — driveable the same way.
+            it = value
+        else:
+            raise TypeError(f"{self._loc(expr)}object {value!r} is not awaitable")
+        yield_fn = self._current_yield_fn(expr)
+        return yield_fn(_RealAwaitStep(it))
 
     def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
@@ -4229,11 +4677,25 @@ class Interpreter:
         """Call a value that may be a Mojo-defined function (which needs the
         interpreter threaded through as its first argument) or a plain Python
         callable — shared by eval_CallExpr and builtins like map[func] that
-        need to invoke a callee passed to them at runtime."""
+        need to invoke a callee passed to them at runtime.
+
+        Milestone 3b: a plain Python callable invoked from inside a
+        coroutine's own worker thread gets bounced through
+        `_RealThreadCall` instead of called directly — some real asyncio
+        functions (`asyncio.gather`, `ensure_future`, `create_task`, ...)
+        touch the running event loop the instant they're CALLED, not just
+        when later awaited, and the event loop is thread-affine (see
+        `_RealThreadCall`'s docstring for the empirically-confirmed
+        failure this fixes). Gated on the `is_coroutine` TLS flag
+        (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
-        else:
-            return func(*args, **kwargs)
+        tls = self._gen_tls
+        if getattr(tls, 'is_coroutine', False):
+            yield_fn = getattr(tls, 'yield_fn', None)
+            if yield_fn is not None:
+                return yield_fn(_RealThreadCall(func, args, kwargs))
+        return func(*args, **kwargs)
 
     def eval_MemberExpr(self, expr: N.MemberExpr):
         """Evaluate member access."""

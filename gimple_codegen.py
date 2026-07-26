@@ -14967,6 +14967,13 @@ class GimpleGen:
                 # FunctionDef.is_generator, gates MojoFunction._invoke's
                 # generator-construction-only vs. eager-execution branch.
                 'is_generator': '_Bool',
+                # Milestone 3b of
+                # bugs/INTERP_generator_yield_entirely_unimplemented.md:
+                # MojoFunction.is_async (myinterpreter.py) — mirrors
+                # FunctionDef.is_async, gates MojoFunction._invoke's
+                # coroutine-construction-only vs. eager-execution branch,
+                # same treatment as is_generator immediately above.
+                'is_async': '_Bool',
             }
             self.struct_field_types['_MojoSortFn'] = {
                 '_impl': 'int64_t',
