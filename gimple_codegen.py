@@ -1980,7 +1980,7 @@ def _is_asyncio_sleep_call(node) -> bool:
             and not getattr(node, 'kwargs', None))
 
 
-def _async_quick_eligible(fn: FunctionDef) -> bool:
+def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> bool:
     """Cheap pre-filter before attempting the real _gen_cpp_async_unit
     translation, mirroring _generator_quick_eligible's role exactly: is_async,
     not is_generator (an `async def f(): yield x` async generator is its own
@@ -1990,13 +1990,22 @@ def _async_quick_eligible(fn: FunctionDef) -> bool:
     start once the parameter-support step landed — async parameters are
     explicitly left for a later step per this project's plan). Step B
     required NO `await` anywhere in the body at all (proving the zero-
-    suspension-point pipeline end-to-end first); Step C narrows that rule
-    instead of keeping it absolute: every `AwaitExpr` anywhere in the body
-    must be the one recognized `asyncio.sleep(<scalar seconds>)` shape (see
-    _is_asyncio_sleep_call) — awaiting anything else (another Mojo async
-    function, a socket operation, ...) is still out of this step's scope
-    and correctly makes the whole function ineligible here, falling back
-    to the honest whole-module refusal exactly as an unsupported `await`
+    suspension-point pipeline end-to-end first); Step C narrowed that rule
+    instead of keeping it absolute (every `AwaitExpr` had to be the one
+    recognized `asyncio.sleep(<scalar seconds>)` shape — see
+    _is_asyncio_sleep_call); Step D narrows it once more: an `AwaitExpr` is
+    ALSO eligible when it's a bare, argument-less call to another `async
+    def` this same module compile has ALREADY successfully compiled to the
+    C++20-coroutine path (`known_async_names` — self._async_api's keys at
+    the time of this check, passed by gen_module's async pre-pass loop,
+    which runs in module source order — see _is_async_call_to_known_fn's
+    docstring for the resulting "callee must be defined first" ordering
+    constraint). Awaiting anything else (a socket operation, an arbitrary
+    non-async expression, a call WITH arguments even to a known async
+    function — Step D's own scope stays parameter-less, matching every
+    other async-function constraint here) is still out of scope and
+    correctly makes the whole function ineligible here, falling back to
+    the honest whole-module refusal exactly as an unsupported `await`
     always has. Whether the body's actual STATEMENTS are otherwise
     compilable (only the shared _cpp_stmt/_cpp_expr whitelist, ending in one
     `return <scalar-expr>`) is decided by _gen_cpp_async_unit itself, the
@@ -2007,8 +2016,11 @@ def _async_quick_eligible(fn: FunctionDef) -> bool:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, AwaitExpr):
-            if not _is_asyncio_sleep_call(n.value):
-                return False
+            if _is_asyncio_sleep_call(n.value):
+                continue
+            if _is_async_call_to_known_fn(n.value, known_async_names):
+                continue
+            return False
     return True
 
 
@@ -2050,8 +2062,59 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     return True
 
 
+def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
+    """Resolves `await <call>`'s contributed scalar type when `<call>` is a
+    bare, no-argument call to ANOTHER async function this same module
+    compile has already itself lowered to the C++20-coroutine path
+    (`async_api`, threaded from self._async_api) — Step D (async-awaits-
+    async composition). Mirrors _yield_from_delegate_ctype's identical role
+    for `yield from <call>` exactly (same "resolve via the sibling API
+    dict, None if unresolvable" shape), not a fresh pattern. `await
+    asyncio.sleep(...)` deliberately is NOT resolved here — it contributes
+    no value (real Python: None) and is only ever reachable as a bare
+    statement via GimpleGen._cpp_stmt's own AwaitExpr case, never as a
+    value-producing sub-expression — so a caller that reaches this helper
+    with a sleep-shaped `e.value` still correctly falls through to None
+    (unsupported) below, exactly like any other unresolvable shape."""
+    call = e.value
+    if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
+        return None
+    if async_api is None:
+        return None
+    if call.args or getattr(call, 'kwargs', None):
+        return None
+    api = async_api.get(call.func.name)
+    if api is None:
+        return None
+    return api.get('value_ctype')
+
+
+def _is_async_call_to_known_fn(node, known_async_names) -> bool:
+    """True iff `node` is a bare, argument-less call `g()` where `g` names
+    ANOTHER `async def` this same module compile has already successfully
+    lowered to the C++20-coroutine path (registered by name in
+    `known_async_names` — self._async_api's keys at the time this is
+    checked, threaded through by both _async_quick_eligible's caller and
+    GimpleGen._cpp_expr's own AwaitExpr case). This makes async-awaits-
+    async composition source-order-dependent: the callee must be DEFINED
+    (and have already compiled successfully) before the caller in the
+    module's own top-level statement order — gen_module's single forward
+    pass over `stmts` (see the Step B/C compile-attempt loop this reuses
+    verbatim) never builds a two-pass/topological ordering, so a forward
+    reference (caller textually before its not-yet-registered callee)
+    correctly falls back to the honest whole-module refusal, exactly like
+    any other not-yet-supported shape, instead of ever emitting a dangling/
+    forward C++ type reference."""
+    return (isinstance(node, CallExpr)
+            and isinstance(node.func, IdentExpr)
+            and node.func.name in known_async_names
+            and not node.args
+            and not getattr(node, 'kwargs', None))
+
+
 def _infer_simple_expr_ctype(e, known: dict | None = None,
-                              self_fields: dict | None = None) -> str | None:
+                              self_fields: dict | None = None,
+                              async_api: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -2089,15 +2152,20 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known, self_fields)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api)
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known, self_fields)
-        rt = _infer_simple_expr_ctype(e.right, known, self_fields)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api)
         if lt is None or rt is None:
             return None
         if 'double' in (lt, rt):
             return 'double'
         return 'int64_t'
+    if isinstance(e, AwaitExpr):
+        # Step D (async-awaits-async composition): `await <call to another
+        # compiled async function>` used as a value-producing sub-expression
+        # (e.g. `x = await inner()`) — see _await_call_ctype's docstring.
+        return _await_call_ctype(e, async_api)
     return None
 
 
@@ -2139,7 +2207,8 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             generator_api: dict | None = None,
-                            self_fields: dict | None = None) -> str | None:
+                            self_fields: dict | None = None,
+                            async_api: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -2152,13 +2221,21 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     `generator_api` (self._generator_api, passed the same way) resolves a
     `yield from <call>`'s contributed type via _yield_from_delegate_ctype.
     `self_fields` (generator METHODS only) lets `yield self.<field>` resolve
-    the field's real scalar type — see _infer_simple_expr_ctype."""
+    the field's real scalar type — see _infer_simple_expr_ctype. `async_api`
+    (self._async_api, Step D) lets an async function's `return await
+    <call>` resolve the awaited call's contributed type via
+    _await_call_ctype — mirrors `generator_api`'s role for `yield from`
+    exactly, kept as its own parameter (not reusing the `generator_api`
+    slot) since the two dicts serve genuinely different node shapes
+    (YieldFromExpr vs. AwaitExpr) that can never both appear in the same
+    function body (a generator can't `await`, an async function can't
+    `yield` — see gen_module's combined-refusal category)."""
     ctype = None
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 return None
-            t = _infer_simple_expr_ctype(n.value, known, self_fields)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api)
             if t is None:
                 return None
             if ctype is None:
@@ -2185,7 +2262,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             # only actually fires while translating an async function.
             if n.value is None:
                 continue
-            t = _infer_simple_expr_ctype(n.value, known, self_fields)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api)
             if t is None:
                 return None
             if ctype is None:
@@ -15311,6 +15388,51 @@ class GimpleGen:
                 b = self._cpp_expr(e.operands[i + 1])
                 links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
             return '(' + ' && '.join(links) + ')'
+        if isinstance(e, AwaitExpr):
+            # Step D (async-awaits-async composition): `await <call>` used
+            # as a value-producing sub-expression (`x = await inner()`, or
+            # any other expression context this shared _cpp_expr reaches —
+            # e.g. `return await inner()` via _cpp_stmt's ReturnStmt case,
+            # which calls _cpp_expr generically like every other value).
+            # `await asyncio.sleep(...)` (Step C) deliberately stays OUT of
+            # this method — it produces no usable value (real Python:
+            # None), and is only reachable as a bare, value-discarding
+            # ExprStmt via _cpp_stmt's own dedicated AwaitExpr handling,
+            # which never calls into this method for that shape. Reaching
+            # HERE with a sleep-shaped await (e.g. `x = await
+            # asyncio.sleep(...)`) is honestly refused below, not silently
+            # given a bogus value.
+            if self._cpp_emit_kind != 'async':
+                raise _UnsupportedGeneratorShape(
+                    "`await` is not supported in a generator body (only in "
+                    "an async function body)")
+            target = e.value
+            if (isinstance(target, CallExpr) and isinstance(target.func, IdentExpr)
+                    and target.func.name in self._async_api
+                    and not target.args and not getattr(target, 'kwargs', None)):
+                # The callee's own cpp unit (promise/handle/task/`_impl`/
+                # `_Awaiter` — see _gen_cpp_async_unit) must already have
+                # been emitted earlier in this module's compile (source-
+                # order dependency — see _is_async_call_to_known_fn's
+                # docstring): `target.func.name in self._async_api` is only
+                # ever true once gen_module's async pre-pass loop has
+                # already successfully compiled that callee, which — given
+                # that loop's own single forward pass over `stmts` — can
+                # only have happened for a callee defined earlier in the
+                # module than this (currently-compiling) caller.
+                callee_base = self._async_api[target.func.name]['base']
+                return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ().h}}"
+            if _is_asyncio_sleep_call(target):
+                raise _UnsupportedAsyncShape(
+                    "`await asyncio.sleep(...)` does not produce a usable "
+                    "value (real Python: None) -- use it as its own bare "
+                    "statement, not inside an expression")
+            raise _UnsupportedAsyncShape(
+                "only `await asyncio.sleep(<seconds>)` (as a bare "
+                "statement) or `await <call to another compiled async "
+                "function this module already compiled>` is supported in "
+                "a compiled async function body -- socket awaits are a "
+                f"later step (got {type(target).__name__ if target is not None else 'bare await'})")
         raise _UnsupportedGeneratorShape(
             f"unsupported expression in generator body: {type(e).__name__}")
 
@@ -15360,21 +15482,28 @@ class GimpleGen:
                         "`await` is not supported in a generator body "
                         "(only in an async function body)")
                 target = s.value.value
-                if not _is_asyncio_sleep_call(target):
-                    raise _UnsupportedAsyncShape(
-                        "only `await asyncio.sleep(<seconds>)` is "
-                        "supported in a compiled async function body this "
-                        "step — async-awaits-async composition and socket "
-                        f"awaits are later steps (got {type(target).__name__ if target is not None else 'bare await'})")
-                self_fields = getattr(self, '_cpp_gen_self_fields', None)
-                arg_ctype = _infer_simple_expr_ctype(target.args[0], declared, self_fields)
-                if arg_ctype not in ('int64_t', 'double'):
-                    raise _UnsupportedAsyncShape(
-                        "asyncio.sleep()'s argument must be a scalar "
-                        "int64_t/double seconds expression")
-                arg_expr = self._cpp_expr(target.args[0])
-                return [f"{indent}co_await _mojoasync_SleepAwaiter{{"
-                        f"(uint64_t)((double)({arg_expr}) * 1e9)}};"]
+                if _is_asyncio_sleep_call(target):
+                    self_fields = getattr(self, '_cpp_gen_self_fields', None)
+                    arg_ctype = _infer_simple_expr_ctype(target.args[0], declared, self_fields)
+                    if arg_ctype not in ('int64_t', 'double'):
+                        raise _UnsupportedAsyncShape(
+                            "asyncio.sleep()'s argument must be a scalar "
+                            "int64_t/double seconds expression")
+                    arg_expr = self._cpp_expr(target.args[0])
+                    return [f"{indent}co_await _mojoasync_SleepAwaiter{{"
+                            f"(uint64_t)((double)({arg_expr}) * 1e9)}};"]
+                # Step D: a bare, value-DISCARDING `await <call to another
+                # compiled async function>` statement — same real co_await/
+                # composition machinery as the value-producing shape
+                # (`x = await inner()`), just with the resulting value
+                # thrown away rather than assigned. Delegates to the shared
+                # _cpp_expr AwaitExpr case (single source of truth for the
+                # actual `co_await <base>_Awaiter{...}` emission) instead of
+                # duplicating it here; that method also owns the "anything
+                # else is an honest refusal" fallback (unrecognized await
+                # target, socket ops, ...), so no separate check is needed
+                # in this branch.
+                return [f"{indent}{self._cpp_expr(s.value)};"]
             # `print(<one scalar arg>)` — a small, deliberate addition (not
             # part of the original Milestone B generator whitelist, which
             # has never needed a body-internal side effect since a
@@ -15414,7 +15543,8 @@ class GimpleGen:
             val = self._cpp_expr(s.value)
             if name not in declared:
                 ctype = _infer_simple_expr_ctype(
-                    s.value, declared, getattr(self, '_cpp_gen_self_fields', None))
+                    s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
+                    self._async_api)
                 if ctype is None:
                     raise _UnsupportedGeneratorShape(
                         f"can't infer a scalar type for local '{name}'")
@@ -16244,7 +16374,9 @@ class GimpleGen:
             # one — no compiled generator returns a value -- so its
             # ReturnStmt branch until this step was pure dead code; Step B
             # is genuinely the first thing to exercise it).
-            value_ctype = _generator_yield_ctype(fn, declared, self._async_api, None)
+            value_ctype = _generator_yield_ctype(
+                fn, declared, generator_api=None, self_fields=None,
+                async_api=self._async_api)
         finally:
             self._cpp_emit_kind = 'generator'
             self._cpp_gen_self_struct = None
@@ -16257,6 +16389,7 @@ class GimpleGen:
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
+        final_awaiter, awaiter = f"{base}_FinalAwaiter", f"{base}_Awaiter"
         cpp_value_ctype = _c_to_cpp_scalar_type(value_ctype)
         lines = [
             f"struct {promise};",
@@ -16265,19 +16398,84 @@ class GimpleGen:
             f"    using promise_type = {promise};",
             f"    {handle_t} h;",
             f"}};",
+            # Step D (async-awaits-async composition): a dedicated
+            # final-suspend awaiter type PER async function, instead of the
+            # bare `std::suspend_always` Step B/C used -- needed because
+            # final_suspend must now do one extra thing beyond "stay
+            # suspended so <base>_value()/<base>_destroy() can still reach
+            # the completed frame" (unchanged from Step B/C, still true
+            # below): if ANOTHER coroutine is awaiting THIS one (recorded
+            # in the promise's own `continuation` field, set by that
+            # OTHER coroutine's own `{base}_Awaiter::await_suspend`, a few
+            # lines down), resume it -- specifically by pushing it onto
+            # Step A's ready queue (mojo_async_schedule_ready), NOT by
+            # resuming it directly/via symmetric transfer here. Routing
+            # through the ready queue (rather than a direct
+            # `return promise.continuation;`, the more common textbook
+            # "symmetric transfer" idiom) keeps every resume in this
+            # project driven through ONE place (Step A's
+            # mojo_async_run_until_complete loop), exactly matching how
+            # Step C's own SleepAwaiter already hands control back to the
+            # scheduler rather than ever resuming another coroutine
+            # in-line -- one consistent "who drives whom" story across
+            # every awaiter this codegen emits, not two different ones.
+            # Declared here (forward-declared members only) and DEFINED
+            # out-of-line below {promise} itself, since await_suspend's
+            # body needs `h.promise().continuation`, and a member function
+            # body defined INLINE here would need {promise} to already be
+            # a complete type -- impossible, since {promise} itself names
+            # this awaiter type in ITS OWN final_suspend() return type,
+            # a couple of lines down (the same forward-declare-then-
+            # define-out-of-line split proven safe by this project's own
+            # GCC-15 promise-field repro -- see this method's docstring
+            # and the commit introducing this comment for the hand-written,
+            # Mojo-independent confirmation that adding a `continuation`
+            # field to this (parameter-less, Step B/C/D's whole scope)
+            # promise shape does NOT reproduce Milestone D's generator-
+            # promise/2+-param frame-corruption bug: that bug was
+            # specifically about a coroutine with real FORMAL PARAMETERS,
+            # which no compiled async function has ever had, this step
+            # included).
+            f"struct {final_awaiter} {{",
+            f"    bool await_ready() noexcept {{ return false; }}",
+            f"    std::coroutine_handle<> await_suspend({handle_t} h) noexcept;",
+            f"    void await_resume() noexcept {{}}",
+            f"}};",
             f"struct {promise} {{",
             f"    {cpp_value_ctype} result{{}};",
+            # Type-erased (not `{handle_t}`): the coroutine AWAITING this
+            # one may be an entirely different async function with its own
+            # distinct promise type (e.g. `outer`'s promise stores a
+            # continuation of type `_mojoasync_outer_handle`-independent
+            # `std::coroutine_handle<>` while awaiting `inner`'s promise,
+            # which is `_mojoasync_inner_promise` -- there is no single
+            # concrete handle type that could work here across every
+            # possible caller). Default-constructed (`{{}}`) is the null/
+            # empty handle -- `if (continuation)` below correctly reads as
+            # "false" for a coroutine nobody is awaiting (the ordinary
+            # `asyncio.run(...)`-driven top-level case, unchanged from
+            # Step B/C), exactly like a null function pointer.
+            f"    std::coroutine_handle<> continuation{{}};",
             f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
             f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
-            # final_suspend() is suspend_always (not suspend_never), exactly
-            # like the generator promise's own final_suspend, and for the
-            # same reason: `<base>_value()` needs to read `result` back out
-            # of the (still-alive) promise AFTER the coroutine has
+            # final_suspend() itself still ALWAYS suspends (the {final_
+            # awaiter}'s own await_ready() is unconditionally false) --
+            # exactly like Step B/C's plain `std::suspend_always`, and for
+            # the same reason: `<base>_value()` needs to read `result`
+            # back out of the (still-alive) promise AFTER the coroutine has
             # completed, so the frame must not auto-destroy itself the
-            # instant co_return runs -- the caller destroys it explicitly
-            # via `<base>_destroy()`, mirroring the generator convention's
-            # `_destroy` exactly (not a new cleanup convention).
-            f"    std::suspend_always final_suspend() noexcept {{ return {{}}; }}",
+            # instant co_return runs -- the caller (either the top-level
+            # `asyncio.run(...)` bridge, unchanged, or -- Step D -- the
+            # AWAITING coroutine's own `{base}_Awaiter::await_resume`, a
+            # few lines down) destroys it explicitly, mirroring the
+            # generator convention's `_destroy` exactly (not a new cleanup
+            # convention). What's NEW in Step D is only what happens
+            # DURING that final suspension (see {final_awaiter} above): if
+            # some other coroutine is waiting on this one, it gets resumed
+            # (via the ready queue) as a side effect of reaching here,
+            # instead of nothing happening (Step B/C: nobody could ever be
+            # waiting, since composition didn't exist yet).
+            f"    {final_awaiter} final_suspend() noexcept {{ return {{}}; }}",
             # Step E's job (per this project's plan), not this step's: a
             # real exception escaping an async function's body needs the
             # same mojo_exc_type/msg/obj translation the generator
@@ -16290,6 +16488,11 @@ class GimpleGen:
             f"    void unhandled_exception() {{ std::terminate(); /* Step E: real exception handling */ }}",
             f"    void return_value({cpp_value_ctype} v) {{ result = v; }}",
             f"}};",
+            f"inline std::coroutine_handle<> {final_awaiter}::await_suspend({handle_t} h) noexcept {{",
+            f"    std::coroutine_handle<> cont = h.promise().continuation;",
+            f"    if (cont) mojo_async_schedule_ready(cont.address());",
+            f"    return std::noop_coroutine();",
+            f"}}",
             f"static {task} {impl} (void) {{",
             *body_lines,
             f"}}",
@@ -16315,6 +16518,52 @@ class GimpleGen:
             f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
             f"    if (h) h.destroy();",
             f"}}",
+            # Step D: the awaiter ANOTHER compiled async function's body
+            # uses to `await {fn.name}()` -- see GimpleGen._cpp_expr's own
+            # AwaitExpr case, which emits exactly
+            # `co_await {awaiter}{{{impl} ().h}}` at each such call site.
+            # Constructed directly from `{impl} ()` (the internal,
+            # strongly-typed constructor function a few lines up), NOT
+            # through the `extern "C"`/`MojoAsync *` boundary {base}_start
+            # uses -- composition only ever happens between two coroutines
+            # in the SAME .cpp translation unit (this whole module's
+            # `_generator_cpp_units` are concatenated into one .cpp file --
+            # see gen_module), so there is no ABI boundary to cross here,
+            # and going through the untyped `void *`/from_address() round
+            # trip {base}_start exists for would only add risk (a
+            # same-address-different-promise-type reinterpret_cast bug)
+            # for zero benefit. `await_suspend` registers the awaiting
+            # coroutine as this callee's continuation and pushes the
+            # callee onto Step A's ready queue (mirrors the
+            # `asyncio.run(...)` bridge's own
+            # `mojo_async_schedule_ready`+drive pattern, reused rather than
+            # a second scheduling convention) -- the callee genuinely runs
+            # as its own independently-scheduled turn of the SAME
+            # scheduler loop the caller itself is being driven by, not a
+            # direct/inline call, so a callee that itself awaits something
+            # real (asyncio.sleep, or a further nested async call) composes
+            # correctly: the caller stays suspended until the callee's own
+            # {final_awaiter} reschedules it, exactly like every other
+            # ready-queue-driven resume in this runtime. `await_resume`
+            # reads the completed value back out of the callee's promise
+            # and destroys its frame (the callee is never separately
+            # `_destroy`-ed by anyone else -- this awaiter, not the
+            # `asyncio.run(...)` bridge, owns that callee's whole
+            # lifetime, since nothing outside this awaiter ever held a
+            # reference to it).
+            f"struct {awaiter} {{",
+            f"    {handle_t} callee_h;",
+            f"    bool await_ready() noexcept {{ return false; }}",
+            f"    void await_suspend(std::coroutine_handle<> caller_h) noexcept {{",
+            f"        callee_h.promise().continuation = caller_h;",
+            f"        mojo_async_schedule_ready(callee_h.address());",
+            f"    }}",
+            f"    {cpp_value_ctype} await_resume() noexcept {{",
+            f"        {cpp_value_ctype} v = callee_h.promise().result;",
+            f"        callee_h.destroy();",
+            f"        return v;",
+            f"    }}",
+            f"}};",
         ]
         return '\n'.join(lines), value_ctype, base, []
 
@@ -17859,7 +18108,7 @@ class GimpleGen:
             if not (isinstance(s, FunctionDef) and id(s) in _async_fns
                     and id(s) not in _generator_fns):
                 continue
-            if not _async_quick_eligible(s):
+            if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
                 continue
             try:
                 cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_async_unit(s)

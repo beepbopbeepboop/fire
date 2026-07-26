@@ -2059,17 +2059,100 @@ print(list(g("hi")))
     # compiles via a real C++20-coroutine promise_type — see
     # test_async_simple_shape_compiles_via_cpp_path (this exact shape, just
     # with a consuming call site added so it's a complete module) and
-    # test_gimple_async_runner.py's real compile+link+run counterpart. An
-    # `await` anywhere in the body is still refused — see
-    # async_function_with_await_honest_fallback further below — that
-    # remains this codegen's honest boundary for "genuinely no event loop /
-    # suspend-resume codegen for a real await, yet" (Step C+'s job).
-    test_raises("async_function_with_await_still_refused_general_case", """\
+    # test_gimple_async_runner.py's real compile+link+run counterpart.
+    #
+    # `await` on ANOTHER compiled async function's call (`x = await f()`) —
+    # this exact shape — used to be refused (Step B/C's honest boundary,
+    # "genuinely no composition codegen for a real cross-coroutine await
+    # yet"). Step D (async-awaits-async composition) now compiles it for
+    # real — see test_async_await_composition_compiles_via_cpp_path further
+    # below (this exact shape) and test_gimple_async_runner.py's real
+    # compile+link+run+timed counterpart. `await` on anything ELSE (a
+    # forward reference to a not-yet-compiled callee, an arbitrary non-call
+    # expression, a socket op) remains refused — see
+    # async_await_forward_reference_honest_fallback and
+    # async_await_non_call_expression_honest_fallback further below.
+    def test_async_await_composition_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
 async def f():
     return 1
 
 async def g():
     x = await f()
+    return x
+
+def main():
+    result = asyncio.run(g())
+    print(result)
+"""
+        name = "async_await_composition_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src or '_mojoasync_f_Awaiter' not in cpp_src:
+            print(f"FAIL  {name}: expected the generated .cpp to contain "
+                  "the composition Awaiter for the awaited callee ('f')")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as fh:
+            fh.write(c_src)
+            c_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as fh:
+            fh.write(cpp_src)
+            cpp_path = fh.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_composition_compiles_via_cpp_path()
+
+    # Forward reference: `g` (the caller) is defined BEFORE `f` (the
+    # callee) in source order — gen_module's async pre-pass is a single
+    # forward pass over the module's top-level statements (see
+    # _is_async_call_to_known_fn's docstring), so `f` isn't registered in
+    # self._async_api yet at the point `g`'s own eligibility is checked.
+    # Honest whole-module refusal, not a guess/dangling forward reference.
+    test_raises("async_await_forward_reference_honest_fallback", """\
+async def g():
+    x = await f()
+    return x
+
+async def f():
+    return 1
+""", "async function")
+
+    # `await` on an arbitrary non-call expression (not asyncio.sleep(...),
+    # not a call to another compiled async function) is still refused —
+    # composition only recognizes the one specific call shape.
+    test_raises("async_await_non_call_expression_honest_fallback", """\
+async def f():
+    x = await 5
     return x
 """, "async function")
 
@@ -3222,10 +3305,18 @@ async def f(x):
     return x
 """, "async function")
 
-    # `await` anywhere in the body — Step C+'s job, not this step's.
-    test_raises("async_function_with_await_honest_fallback", """\
-async def f():
-    return 1
+    # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
+    # function>` (Step D) are both supported now — see
+    # test_async_await_composition_compiles_via_cpp_path and
+    # test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path. `await`
+    # on a call to an async function that ITSELF is out of scope (here: has
+    # a parameter, so `f` never gets compiled/registered in self._async_api
+    # at all) still correctly falls back to the honest whole-module
+    # refusal — not silently emitting a dangling reference to a callee that
+    # was never actually compiled.
+    test_raises("async_function_await_on_unsupported_callee_honest_fallback", """\
+async def f(x):
+    return x
 
 async def h():
     x = await f()
@@ -3360,15 +3451,91 @@ def main():
     print(x)
 """, "consumed as a value")
 
-    # `await` on anything other than `asyncio.sleep(...)` is still refused
-    # -- async-awaits-async composition (one Mojo async function awaiting
-    # ANOTHER Mojo async function) is Step D, not this step.
-    test_raises("async_await_on_another_async_function_honest_fallback", """\
-async def g():
-    return 1
+    # Step D: async-awaits-async composition (one Mojo async function
+    # awaiting ANOTHER Mojo async function's call) now compiles for real —
+    # see test_async_await_composition_compiles_via_cpp_path above for the
+    # 2-level compile-only smoke test; this one exercises a 3-level chain
+    # (`c` awaits `b` awaits `a`), each with its own real `await
+    # asyncio.sleep(...)` mixed in, confirming the composition
+    # awaiter/continuation mechanism generalizes past exactly one level of
+    # nesting and coexists with Step C's sleep-awaiter in the same body.
+    def test_async_await_composition_three_level_chain_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
 
+async def a():
+    await asyncio.sleep(0.01)
+    return 10
+
+async def b():
+    x = await a()
+    await asyncio.sleep(0.01)
+    return x + 1
+
+async def c():
+    x = await b()
+    await asyncio.sleep(0.01)
+    return x + 100
+
+def main():
+    result = asyncio.run(c())
+    print(result)
+"""
+        name = "async_await_composition_three_level_chain_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        needed = ('_mojoasync_a_Awaiter', '_mojoasync_b_Awaiter', 'continuation')
+        if not cpp_src or any(n not in cpp_src for n in needed):
+            print(f"FAIL  {name}: expected the generated .cpp to contain "
+                  f"every composition awaiter/continuation piece {needed}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as fh:
+            fh.write(c_src)
+            c_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as fh:
+            fh.write(cpp_src)
+            cpp_path = fh.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_composition_three_level_chain_compiles_via_cpp_path()
+
+    # `await` on a socket-style operation (no such Mojo-level API exists in
+    # this codegen at all yet — Step F's job) remains refused exactly like
+    # any other unrecognized await target: falls through to "not a call to
+    # asyncio.sleep nor to a known compiled async function".
+    test_raises("async_await_socket_like_expression_honest_fallback", """\
 async def f():
-    x = await g()
+    x = await some_socket.recv()
     return x
 """, "async function")
 
