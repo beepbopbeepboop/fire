@@ -15030,90 +15030,33 @@ class GimpleGen:
         # if/elif/else branches, struct/class methods, or nested defs) via
         # `_walk_ast`'s generic traversal — reused rather than a hand-rolled
         # walk, matching this file's own established "don't duplicate a
-        # tree-walk" convention (see `_walk_ast`'s own docstring) — and
-        # refuse this module's compile clearly and immediately, in ONE raise
-        # covering whichever categories apply, BEFORE any of the module-wide
-        # pre-passes below start mutating `stmts`/registering names: same
-        # fail-fast rationale as the conditional-top-level-def-collision
-        # check a little further down (added in commit 2577b4f) — every
-        # caller of gen_module (_compile_imported_module,
-        # build_stdlib_dylib.py's per-module compile job, compile_stdlib.py,
-        # mojo.py's build_executable) already treats an exception raised from
-        # codegen as "this module/file can't be compiled natively" and falls
-        # back to interpreting it from source instead of emitting silently
-        # wrong or broken C.
+        # tree-walk" convention (see `_walk_ast`'s own docstring). The actual
+        # eligibility/compile attempt (and the raise covering whichever
+        # categories remain unsupported) is deferred to further below, AFTER
+        # the module-wide parameter-type inference passes (in particular
+        # Pass 1.3d's cross-call scalar contract) have run — see the comment
+        # at that later site for why: an UNANNOTATED generator parameter
+        # needs that same inference an ordinary function's unannotated
+        # parameter already gets, and doing this here (before those passes
+        # exist) silently defaulted such a parameter to int64_t instead of
+        # honestly refusing it. Every caller of gen_module
+        # (_compile_imported_module, build_stdlib_dylib.py's per-module
+        # compile job, compile_stdlib.py, mojo.py's build_executable) already
+        # treats an exception raised from codegen (at any point during it) as
+        # "this module/file can't be compiled natively" and falls back to
+        # interpreting it from source instead of emitting silently wrong or
+        # broken C, so raising later than the earliest possible point is a
+        # pure (harmless) perf trade-off, not a correctness one — each
+        # gen_module call runs against its own freshly-constructed GimpleGen
+        # instance (see this method's callers), so there is nothing to leak
+        # into a later compile even if this one is ultimately refused after
+        # partially populating this instance's tables.
         _generator_names = set()
         _async_names = set()
         for n in _walk_ast(stmts):
             if isinstance(n, FunctionDef):
                 if n.is_generator: _generator_names.add(n.name)
                 if n.is_async: _async_names.add(n.name)
-
-        # Milestone B narrow allowlist: a TOP-LEVEL (not a struct/class
-        # method, not nested inside another def — those stay refused, out of
-        # scope for this milestone) generator matching
-        # _generator_quick_eligible is given a real shot at the new C++20-
-        # coroutine path via _gen_cpp_generator_unit (the single source of
-        # truth for the finer-grained "is this shape actually compilable"
-        # check — see _UnsupportedGeneratorShape's docstring). Anything that
-        # doesn't pass keeps falling into the existing honest whole-module
-        # refusal below, completely unchanged. Async functions (is_async, at
-        # all — including `async def f(): yield x` async generators) are
-        # NEVER eligible: this milestone only replaces the plain-generator
-        # refusal, not the async one.
-        for s in stmts:
-            if not (isinstance(s, FunctionDef) and s.name in _generator_names
-                    and s.name not in _async_names):
-                continue
-            if not _generator_quick_eligible(s):
-                continue
-            try:
-                cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
-            except _UnsupportedGeneratorShape as e:
-                _debug_note(f'generator {s.name!r} not eligible for C++ '
-                            'coroutine path, falling back to honest refusal', e)
-                continue
-            self._supported_generators[s.name] = s
-            self._generator_api[s.name] = {
-                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-            }
-            # <base>_start's real C parameter types, registered the exact
-            # same way an ordinary function's signature is registered — this
-            # is what lets _emit_call's existing argument-coercion machinery
-            # (int-literal-to-int64_t, etc.) apply to a generator call's
-            # arguments for free, with no separate coercion logic written
-            # for this path.
-            self.func_param_types[f"{base}_start"] = param_ctypes
-            self._generator_cpp_units.append(cpp_text)
-            _generator_names.discard(s.name)
-
-        _gen_only = sorted(_generator_names - _async_names)
-        _async_only = sorted(_async_names - _generator_names)
-        _async_gen = sorted(_generator_names & _async_names)
-        if _gen_only or _async_only or _async_gen:
-            _categories = []
-            if _gen_only:
-                _categories.append(
-                    f"{', '.join(_gen_only)} (generator function(s), contain "
-                    "a `yield`/`yield from`)")
-            if _async_only:
-                _categories.append(
-                    f"{', '.join(_async_only)} (async function(s), declared "
-                    "`async def`)")
-            if _async_gen:
-                _categories.append(
-                    f"{', '.join(_async_gen)} (async generator function(s), "
-                    "declared `async def` AND contain a `yield`/`yield from`)")
-            raise RuntimeError(
-                "cannot compile module: function(s) "
-                + "; ".join(_categories) +
-                " — this codegen compiles every function into a single "
-                "straight-line C function and has no suspend/resume "
-                "state-machine transform for generators, nor an event loop "
-                "/ suspend-resume codegen for async functions, yet, so "
-                "these cannot be represented as compiled C without "
-                "emitting silently wrong or broken code; falling back to "
-                "interpreting this module from source instead")
 
         # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
         # imported, or referenced but never actually resolved as local or
@@ -16509,6 +16452,99 @@ class GimpleGen:
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
+
+        # ── Pass 1.3d-gen: compiled-generator eligibility/compile attempt ──
+        # Deliberately placed HERE — after the cross-call scalar contract
+        # above has fully populated self._inferred_param_types — rather than
+        # at the top of gen_module where an earlier revision of this pass
+        # used to run. _gen_cpp_generator_unit's parameter-type refusal check
+        # (`ctype not in ('int64_t', 'double', '_Bool')`) calls
+        # self._param_ctype for each unannotated parameter, which itself
+        # consults self._inferred_param_types when present (see
+        # _param_ctype's "Check inferred parameter types first" branch) —
+        # but running the generator compile attempt before that dict even
+        # existed meant every unannotated generator parameter fell straight
+        # through to _resolve_type(None)'s naive int64_t default with NO
+        # cross-call-site evidence at all, unlike every ordinary (non-
+        # generator) unannotated parameter, which already benefits from this
+        # exact inference. A generator like `def g(s): yield s` called as
+        # `g("hi")` was silently compiled with `s` (and the coroutine
+        # promise's `current_value`) typed `int64_t` instead of being
+        # honestly refused — a char*/MojoStr* pointer value stored into and
+        # read back out of an int64_t slot, surviving only by platform-ABI
+        # luck since it was never arithmetically touched. See
+        # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md.
+        # Moving the compile attempt to after Pass 1.3d means an unanimous
+        # non-scalar (`char *`) cross-call observation for an unannotated
+        # generator parameter now lands in self._inferred_param_types before
+        # _gen_cpp_generator_unit ever looks, so _param_ctype resolves it to
+        # `char *`, which the existing refusal check already rejects —
+        # reusing that check exactly as before, with no new logic. A
+        # scalar-only (int64_t/double/_Bool) unannotated parameter, or one
+        # with no call-site scalar evidence either way (still defaults to
+        # int64_t, matching every other unannotated scalar parameter in this
+        # codegen), continues to compile exactly as it did before this move.
+        # Deferring this far also means _gen_cpp_generator_unit's body
+        # emission (_cpp_stmt) now runs with func_param_types/func_return_
+        # types/struct registries/imported-symbol tables/_inferred_var_types
+        # etc. already fully populated by the passes above, instead of the
+        # much sparser state that existed at the top of gen_module — a
+        # strict improvement, not a new dependency risk, since ordinary
+        # (non-generator) function bodies were always emitted this late
+        # already (Phase 2a, further below).
+        for s in stmts:
+            if not (isinstance(s, FunctionDef) and s.name in _generator_names
+                    and s.name not in _async_names):
+                continue
+            if not _generator_quick_eligible(s):
+                continue
+            try:
+                cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
+            except _UnsupportedGeneratorShape as e:
+                _debug_note(f'generator {s.name!r} not eligible for C++ '
+                            'coroutine path, falling back to honest refusal', e)
+                continue
+            self._supported_generators[s.name] = s
+            self._generator_api[s.name] = {
+                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            }
+            # <base>_start's real C parameter types, registered the exact
+            # same way an ordinary function's signature is registered — this
+            # is what lets _emit_call's existing argument-coercion machinery
+            # (int-literal-to-int64_t, etc.) apply to a generator call's
+            # arguments for free, with no separate coercion logic written
+            # for this path.
+            self.func_param_types[f"{base}_start"] = param_ctypes
+            self._generator_cpp_units.append(cpp_text)
+            _generator_names.discard(s.name)
+
+        _gen_only = sorted(_generator_names - _async_names)
+        _async_only = sorted(_async_names - _generator_names)
+        _async_gen = sorted(_generator_names & _async_names)
+        if _gen_only or _async_only or _async_gen:
+            _categories = []
+            if _gen_only:
+                _categories.append(
+                    f"{', '.join(_gen_only)} (generator function(s), contain "
+                    "a `yield`/`yield from`)")
+            if _async_only:
+                _categories.append(
+                    f"{', '.join(_async_only)} (async function(s), declared "
+                    "`async def`)")
+            if _async_gen:
+                _categories.append(
+                    f"{', '.join(_async_gen)} (async generator function(s), "
+                    "declared `async def` AND contain a `yield`/`yield from`)")
+            raise RuntimeError(
+                "cannot compile module: function(s) "
+                + "; ".join(_categories) +
+                " — this codegen compiles every function into a single "
+                "straight-line C function and has no suspend/resume "
+                "state-machine transform for generators, nor an event loop "
+                "/ suspend-resume codegen for async functions, yet, so "
+                "these cannot be represented as compiled C without "
+                "emitting silently wrong or broken code; falling back to "
+                "interpreting this module from source instead")
 
         # ── Pass 1.3e: refresh return types now that param inference is final ──
         # "Pass 2" (above, executed earlier despite the lower number — it seeds

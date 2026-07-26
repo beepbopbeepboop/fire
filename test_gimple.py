@@ -2021,6 +2021,33 @@ def f(s: String):
     yield 1
 """, "generator function")
 
+    # An UNANNOTATED generator parameter that is actually a string at its
+    # call site must be refused exactly like the explicitly-annotated case
+    # immediately above, not silently compiled with the parameter (and the
+    # coroutine's `current_value` field) mistyped as int64_t — a char*/
+    # MojoStr* pointer value stored into and read back out of an int64_t
+    # slot "works" only by platform-ABI luck (never arithmetically touched)
+    # and would break the moment it were used for anything that depends on
+    # its real type. Before the fix, this generator's compile attempt ran
+    # BEFORE the cross-call scalar-contract inference (Pass 1.3d) had
+    # populated self._inferred_param_types, so the unannotated `s` fell
+    # straight through to _resolve_type(None)'s naive int64_t default with
+    # no cross-call-site evidence at all — see
+    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md.
+    # The fix reuses the exact same cross-call scalar-contract mechanism
+    # that already protects ordinary (non-generator) unannotated parameters
+    # (e387af9/8799ec4) by deferring the generator compile attempt until
+    # after that inference has run, so a unanimous `char *` observation
+    # across g's call site(s) lands in _inferred_param_types before
+    # _gen_cpp_generator_unit's existing scalar-only refusal check
+    # (`ctype not in ('int64_t', 'double', '_Bool')`) ever looks — no new
+    # inference logic, just correct ordering.
+    test_raises("generator_unannotated_string_param_honest_fallback", """\
+def g(s):
+    yield s
+print(list(g("hi")))
+""", "generator function")
+
     # Async function (`async def`) honest-fallback: mirrors the generator
     # fallback immediately above. This codegen has no event loop /
     # suspend-resume codegen, so an async function must be refused clearly

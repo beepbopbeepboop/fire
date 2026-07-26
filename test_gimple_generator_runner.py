@@ -218,6 +218,28 @@ def main():
         print(x)
 """, "1.5\n2\n2.5\n")
 
+    # An UNANNOTATED parameter that's provably `double` at every call site
+    # (the cross-call scalar-contract mechanism, reused from the ordinary
+    # non-generator compiled-function path per e387af9/8799ec4) now compiles
+    # correctly end-to-end as `double`, not the naive int64_t default —
+    # the positive counterpart to the honest-refusal fix in
+    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md
+    # (an unannotated param unanimously called with a NON-scalar argument,
+    # e.g. a string, is refused instead; this one is unanimously called
+    # with a scalar double argument, so it's positively confirmed safe to
+    # compile). Before the fix, `x`'s compile attempt ran before the
+    # cross-call inference existed for generators at all, so it would have
+    # silently defaulted to int64_t and truncated/corrupted the double
+    # value instead of round-tripping it correctly.
+    test_generator_stdout("param_generator_unannotated_double_via_cross_call", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(3.5):
+        print(v)
+""", "3.5\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
