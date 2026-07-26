@@ -103,74 +103,94 @@ def test_async_stdout(name: str, mojo_src: str, expected_stdout: str):
         _FAIL += 1
 
 
+def test_async_build_refused(name: str, mojo_src: str, expected_substr: str):
+    """REAL behavioral counterpart of test_gimple.py's test_raises, but
+    through the actual dual-output (.c + .cpp) build entry point
+    (compile_to_gimple_with_cpp) this file's other tests use to build+link+
+    run real executables — not just compile_to_gimple. Asserts this source
+    is honestly refused (raises with a message containing expected_substr)
+    rather than silently producing the old eager-execution .cpp that would
+    otherwise link and run fine while being semantically wrong.
+    See bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md."""
+    global _PASS, _FAIL
+    try:
+        gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+    except Exception as e:
+        if expected_substr in str(e):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: wrong error: {e}")
+            _FAIL += 1
+        return
+    print(f"FAIL  {name}: expected an exception containing {expected_substr!r}, "
+          f"compile_to_gimple_with_cpp succeeded instead")
+    _FAIL += 1
+
+
 def run_tests():
-    # The exact target shape from Step B's writeup: `async def f(): return
-    # 42`, consumed by `x = f(); print(x)` in main() — proves the whole
-    # pipeline for real: constructing the coroutine WITHOUT running the body
-    # (`_start`, initial_suspend()==suspend_always), driving it to
-    # completion via Step A's OWN scheduler API
-    # (mojo_async_schedule_ready + mojo_async_run_until_complete — no
-    # bespoke `_resume` reinvented for this, see _lower_call's async
-    # branch), reading the completed result (`_value`), and cleanup
-    # (`_destroy`).
-    test_async_stdout("simple_async_function_returns_scalar", """\
-async def f():
-    return 42
-
-def main():
-    x = f()
-    print(x)
-""", "42\n")
-
-    # A second, structurally different consumption shape: the async call's
-    # result used directly as a `print(...)` argument, without an
-    # intermediate assignment — confirms the CallExpr lowering in
-    # _lower_call works from any value-consuming expression context, not
-    # just an AssignStmt's RHS (this step's design deliberately reuses the
-    # SAME ordinary self.lower_expr(...)-based call-lowering machinery every
-    # other function call in this codegen uses, rather than a special
-    # assignment-only statement-level hack).
-    test_async_stdout("async_call_result_used_directly_as_print_arg", """\
-async def f():
-    return 7
-
-def main():
-    print(f())
-""", "7\n")
-
-    # THE key correctness bar from Step B's plan: "calling f() must NOT run
-    # the body immediately... something must actually drive it to
-    # completion before its result is available." A bare, value-discarding
-    # `f()` statement constructs the coroutine and destroys it WITHOUT ever
-    # scheduling/running it (see _gen_stmt_ExprStmt's async special case) —
-    # so its `print(1)` side effect must NEVER fire. The second call,
-    # `x = f()`, DOES get driven to completion (the value-consuming path in
-    # _lower_call), so its own `print(1)` fires exactly once. If this
-    # codegen were instead (incorrectly) eager -- running an async
-    # function's body the moment it's called, regardless of whether the
-    # result is ever consumed -- the first, unused `f()` call would ALSO
-    # print "1", and the expected output below would see TWO "1"s instead
-    # of one. This is the one place, in real compiled+linked+run Mojo
-    # source (not just a hand-verified .cpp detail), where this step's
+    # REVISED (bugs/CODEGEN_compiled_async_eager_execution_semantic_
+    # mismatch.md): Step B's first cut consumed an async call's result via
+    # `x = f(); print(x)` / `print(f())`, which independent hand-
+    # verification against real CPython found to fuse construct+schedule+
+    # run+read+destroy into ONE expression's lowering -- eagerly running
+    # the coroutine's body the instant it's referenced, with no `await`
+    # anywhere, unlike real Python (and this project's own interpreter's
+    # MojoCoroutine) where calling an async function only ever produces a
+    # not-yet-started coroutine object. Fixed by narrowing this step's
+    # scope: the ONLY supported call shape is now a bare, value-discarding
+    # statement (`f()` alone) -- see test_async_build_refused's tests below
+    # for the honest-refusal counterpart proving the old eager-execution
+    # shapes no longer silently build.
+    #
+    # THE key correctness bar from Step B's (revised) plan: "calling f()
+    # must NOT run the body immediately -- nothing without a real `await`/
+    # driver may ever do so." A bare, value-discarding `f()` statement
+    # constructs the coroutine and destroys it WITHOUT ever scheduling/
+    # running it (see _gen_stmt_ExprStmt's async special case), so a
+    # `print(1)` side effect placed before the `return` must NEVER fire --
+    # if this codegen were instead (incorrectly) eager, the output below
+    # would be "1\n" instead of "" (empty). This is the one place, in real
+    # compiled+linked+run Mojo source (not just a hand-verified .cpp
+    # detail or a compile-time-only refusal check), where this step's
     # laziness requirement is independently observable.
-    test_async_stdout("unconsumed_async_call_never_runs_body", """\
+    test_async_stdout("bare_async_call_never_runs_body", """\
 async def f():
     print(1)
     return 42
 
 def main():
     f()
-    x = f()
-    print(x)
-""", "1\n42\n")
+""", "")
 
-    # A multi-statement body (assignment + a while loop + a print) ending in
-    # a scalar `return` — confirms this step's async body translation
+    # Same bar, multiple calls across two distinct async functions in one
+    # module -- confirms the per-module bookkeeping (self._supported_async/
+    # self._async_api, each keyed by name) doesn't cross-contaminate AND
+    # that laziness holds no matter how many times a bare call happens.
+    test_async_stdout("multiple_bare_async_calls_never_run_bodies", """\
+async def f():
+    print(1)
+    return 42
+
+async def g():
+    print(2)
+    return 7
+
+def main():
+    f()
+    g()
+    f()
+""", "")
+
+    # A multi-statement body (assignment + a while loop) ending in a scalar
+    # `return`, called bare -- confirms this step's async body translation
     # genuinely reuses the SAME shared _cpp_stmt/_cpp_expr whitelist
     # emitter the generator path already has (assignment, AugAssignStmt,
     # WhileStmt, IfStmt, ...), not a separate narrower one that only
-    # happens to handle a bare `return <literal>`.
-    test_async_stdout("async_function_multi_statement_body", """\
+    # happens to handle a bare `return <literal>`, AND that it still
+    # compiles+links+runs cleanly (no crash) even though this step has no
+    # mechanism to observe the computed value from outside.
+    test_async_stdout("async_function_multi_statement_body_compiles_and_runs", """\
 async def f():
     total = 0
     i = 0
@@ -180,39 +200,41 @@ async def f():
     return total
 
 def main():
-    x = f()
-    print(x)
-""", "10\n")
+    f()
+""", "")
 
-    # A `Float64`-typed scalar return — confirms this isn't hardcoded to
-    # int64_t; the promise's `result` field and `_value`'s C++ return type
-    # both correctly resolve to `double`.
-    test_async_stdout("async_function_float_return", """\
+    # A `Float64`-typed scalar return, called bare -- confirms this isn't
+    # hardcoded to int64_t; the promise's `result` field resolves to
+    # `double` and the whole unit still compiles+links+runs cleanly.
+    test_async_stdout("async_function_float_return_compiles_and_runs", """\
 async def f():
     return 3.5
 
 def main():
-    x = f()
-    print(x)
-""", "3.5\n")
+    f()
+""", "")
 
-    # TWO independent async functions, each called and consumed once —
-    # confirms the per-module bookkeeping (self._supported_async/
-    # self._async_api, each keyed by name) doesn't cross-contaminate between
-    # two distinct compiled coroutine units in the same translation unit.
-    test_async_stdout("two_independent_async_functions", """\
+    # The bug's exact repro, through the REAL dual-output build path (not
+    # just compile_to_gimple as in test_gimple.py) -- must be refused, not
+    # silently compiled into the old eager-execution shape.
+    test_async_build_refused("value_consuming_assignment_refused_at_real_build", """\
 async def f():
-    return 1
-
-async def g():
-    return 2
+    return 42
 
 def main():
-    a = f()
-    b = g()
-    print(a)
-    print(b)
-""", "1\n2\n")
+    x = f()
+    print(x)
+""", "consumed as a value")
+
+    # Same bug, argument-position shape (`print(f())`, no intermediate
+    # assignment) -- confirms the refusal isn't assignment-specific.
+    test_async_build_refused("value_consuming_print_arg_refused_at_real_build", """\
+async def f():
+    return 42
+
+def main():
+    print(f())
+""", "consumed as a value")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

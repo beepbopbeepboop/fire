@@ -3080,17 +3080,31 @@ def f():
 
     # ── Step B (compiled-path async/await codegen project) ─────────────────
     # The exact target shape from that step's writeup: a parameterless
-    # `async def` whose body is just `return 42`, called from `main` and its
-    # result printed — the smallest possible real compiled async function.
-    # Mirrors test_generator_simple_shape_compiles_via_cpp_path's shape
-    # exactly (compile via compile_to_gimple_with_cpp, assert both halves of
-    # the dual-output build are real gcc-fsyntax-only/g++-fsyntax-only-clean
+    # `async def` whose body is just `return 42`, called (bare, value-
+    # DISCARDING — see the revised design note below) from `main` — the
+    # smallest possible real compiled async function. Mirrors
+    # test_generator_simple_shape_compiles_via_cpp_path's shape exactly
+    # (compile via compile_to_gimple_with_cpp, assert both halves of the
+    # dual-output build are real gcc-fsyntax-only/g++-fsyntax-only-clean
     # C/C++), plus asserts the async-specific extern "C" API names (no
     # `_resume`, unlike the generator convention — see
     # GimpleGen._gen_cpp_async_unit's docstring) actually appear. See
-    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run,
-    # actual printed output, and the laziness/"doesn't run immediately")
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run)
     # counterpart of this same shape.
+    #
+    # REVISED (bugs/CODEGEN_compiled_async_eager_execution_semantic_
+    # mismatch.md): Step B's first cut called `f()` here as `x = f();
+    # print(x)`, which independent hand-verification against real CPython
+    # found to be a genuine semantic bug -- that shape got construct+
+    # schedule+run+read+destroy fused into ONE expression's lowering, so
+    # `x` was `42` immediately, even though real Python (and this project's
+    # own interpreter) never runs an async function's body just from
+    # calling it -- only `await`/an explicit driver does, and this codegen
+    # has neither yet. Fixed by narrowing this step's scope: the ONLY
+    # supported call shape is now a bare, value-discarding statement (see
+    # test_async_value_consuming_call_honest_fallback below for the
+    # honest-refusal counterpart proving the old eager-execution shape no
+    # longer silently compiles).
     def test_async_simple_shape_compiles_via_cpp_path():
         global _PASS, _FAIL
         import gimple_codegen
@@ -3099,8 +3113,7 @@ async def f():
     return 42
 
 def main():
-    x = f()
-    print(x)
+    f()
 """
         name = "async_simple_shape_compiles_via_cpp_path"
         try:
@@ -3128,9 +3141,13 @@ def main():
                   "docstring")
             _FAIL += 1
             return
-        if 'mojo_async_schedule_ready' not in c_src or 'mojo_async_run_until_complete' not in c_src:
-            print(f"FAIL  {name}: call-site lowering should drive the async "
-                  "call to completion via Step A's own scheduler API")
+        # A bare, value-discarding call must NOT drive the coroutine via
+        # Step A's scheduler at all -- if it did, the body would run, which
+        # is exactly the bug this revision fixes (see the module-level
+        # comment above).
+        if 'mojo_async_schedule_ready' in c_src or 'mojo_async_run_until_complete' in c_src:
+            print(f"FAIL  {name}: a bare, value-discarding async call must "
+                  "never reach the scheduler -- its body must never run")
             _FAIL += 1
             return
         with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
@@ -3163,6 +3180,30 @@ def main():
             os.unlink(cpp_path)
 
     test_async_simple_shape_compiles_via_cpp_path()
+
+    # The bug's exact repro (bugs/CODEGEN_compiled_async_eager_execution_
+    # semantic_mismatch.md): consuming an async call's result as a value
+    # (`x = f()`, then using `x`) must now be an honest whole-module
+    # refusal, NOT the old eager construct+schedule+run+read+destroy
+    # behavior that silently produced `42` with no `await` in sight.
+    test_raises("async_value_consuming_call_honest_fallback", """\
+async def f():
+    return 42
+
+def main():
+    x = f()
+    print(x)
+""", "consumed as a value")
+
+    # Same bug, `print(f())` shape (argument position, not assignment) --
+    # confirms the refusal isn't assignment-specific.
+    test_raises("async_value_consuming_call_as_arg_honest_fallback", """\
+async def f():
+    return 42
+
+def main():
+    print(f())
+""", "consumed as a value")
 
     # Narrowing checks: every out-of-scope async shape from this step's plan
     # must still hit the honest whole-module refusal, not be silently

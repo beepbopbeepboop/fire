@@ -2706,17 +2706,6 @@ class GimpleGen:
         # own "async generator" refusal category, see gen_module).
         self._supported_async: dict[str, FunctionDef] = {}
         self._async_api: dict[str, dict] = {}
-        # C temp-var name (as returned by _lower_call's `<base>_start ()`
-        # construction) -> that async function's _async_api entry. Not
-        # currently consulted by anything else (this step's only consumer of
-        # an async call's result is the SAME CallExpr lowering that just
-        # produced it — see _lower_call's `fname_raw in self._async_api`
-        # branch, which drives the coroutine to completion and reads its
-        # value inline, all within one Mojo-source expression's lowering),
-        # but recorded anyway, mirroring _generator_var_api, in case a later
-        # step (assign-then-await, first-class async values) needs it the
-        # same way Milestone C step 4 needed _generator_var_api.
-        self._async_var_api: dict[str, dict] = {}
         # Set (and always cleared in a finally) by _gen_cpp_async_unit for
         # the duration of ONE async function's body translation — lets the
         # SHARED _cpp_stmt/_cpp_expr whitelist emitter (reused from the
@@ -9203,41 +9192,42 @@ class GimpleGen:
             t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
-        # Step B: `f()` where `f` is a supported compiled async function —
-        # this is the ONE consumption shape this step wires up (no `await`
-        # codegen yet — see _async_quick_eligible): whenever an async call's
-        # RESULT is actually used as a value (assigned, passed as an
-        # argument, printed, ...), THIS lowering is what makes it real —
-        # construct (`<base>_start`, which per the promise's
-        # initial_suspend()==suspend_always truly does NOT run the body
-        # yet), hand it to Step A's own scheduler exactly as built
-        # (mojo_async_schedule_ready + mojo_async_run_until_complete — no
-        # bespoke "_resume" reinvented for this), read the completed
-        # value, then destroy. Because there are no suspension points in
-        # this step's supported shape, run_until_complete() draining the
-        # ready queue is guaranteed to run this coroutine through to its
-        # `co_return` in that one call, so reading `_value` immediately
-        # after is always safe.
-        #
-        # A bare, value-DISCARDING call (`f()` as its own statement) is
-        # deliberately NOT routed through here — see _gen_stmt_ExprStmt's
-        # own async special case, which constructs and destroys WITHOUT
-        # ever scheduling it, so the body genuinely never runs, matching
-        # real Python's "an unawaited coroutine's body never executes"
-        # semantics (mirrored by this project's own interpreter —
-        # myinterpreter.py's MojoCoroutine — even though real CPython also
-        # emits a "coroutine was never awaited" warning, out of scope here).
+        # Step B (revised — see bugs/CODEGEN_compiled_async_eager_execution_
+        # semantic_mismatch.md): `f()` where `f` is a supported compiled
+        # async function, with its result actually CONSUMED as a value
+        # (assigned, passed as an argument, printed, ...). Step B's first
+        # cut fused construct+schedule+run+read+destroy into this one
+        # expression's lowering — independently hand-verified against real
+        # CPython to be a genuine semantic bug: calling an async function
+        # NEVER runs its body immediately in real Python (or in this
+        # project's own interpreter's MojoCoroutine) — it only produces a
+        # not-yet-started coroutine object; getting a value out requires an
+        # explicit drive mechanism (`await`, or a top-level run driver),
+        # neither of which this codegen has yet. Rather than inventing an
+        # awkward partial "run it anyway" mechanism here, this step's scope
+        # is narrowed instead (the bug writeup's option (a)): the ONLY
+        # supported shape for a call to an async function is a bare,
+        # value-DISCARDING statement (`f()` alone — see
+        # _gen_stmt_ExprStmt's own async special case, which constructs and
+        # destroys WITHOUT ever scheduling it, so the body genuinely never
+        # runs). Any attempt to consume the result as a value — reached
+        # here — has no correct lowering yet, so this is an honest
+        # whole-module refusal instead of ever eagerly executing. Real
+        # `await`-driven consumption is deferred to the next step.
         if fname_raw in self._async_api:
-            api = self._async_api[fname_raw]
-            arg_pairs = [self.lower_expr(a) for a in node.args]
-            base, vct = api['base'], api['value_ctype']
-            handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
-            self._emit(f"  mojo_async_schedule_ready ({handle});")
-            self._emit(f"  mojo_async_run_until_complete ();")
-            result = self._new_val(vct, f"{base}_value ({handle})")
-            self._async_var_api[result] = api
-            self._emit(f"  {base}_destroy ({handle});")
-            return vct, result
+            raise RuntimeError(
+                "cannot compile module: call to async function "
+                f"{fname_raw!r} whose result is consumed as a value "
+                "(assigned, passed as an argument, printed, or otherwise "
+                "used) — this codegen has no `await`/top-level-run "
+                "mechanism yet to actually drive an async call to "
+                "completion, so eagerly running the coroutine here would "
+                "be semantically wrong (real Python never runs an async "
+                "function's body just from calling it — only `await` or "
+                "an explicit top-level driver does); only a bare, "
+                "value-discarding call (`f()` as its own statement) is "
+                "supported by this step — falling back to interpreting "
+                "this module from source instead")
         # next(g) where `g` is (or holds) a MojoGenerator* — the compiled-
         # generator "first-class value" gap (bugs/CODEGEN_compiled_generator_
         # not_first_class_value.md, second failure): previously `next` had NO
