@@ -3258,6 +3258,141 @@ async def f():
     return 1.5
 """, "async function")
 
+    # ── Step C (compiled-path async/await codegen project): real `await`,
+    # driven via an explicit `asyncio.run(...)` top-level bridge ──────────
+    # The exact target shape from Step C's writeup: `await asyncio.sleep(...)`
+    # inside an async function body, its result actually consumed via
+    # `asyncio.run(f())` at the top level. Compile-only smoke test — asserts
+    # BOTH halves of the dual-output build are real gcc -fsyntax-only/g++
+    # -fsyntax-only-clean C/C++ AND that the generated code actually reaches
+    # Step A's real scheduler primitives (mojo_async_schedule_timer for the
+    # `co_await`, mojo_async_schedule_ready/_run_until_complete for the
+    # `asyncio.run` driver) rather than faking either one. See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run,
+    # WITH wall-clock timing proving genuine suspension) counterpart.
+    def test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.05)
+    return 42
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+"""
+        name = "async_await_sleep_and_asyncio_run_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected a non-empty generated .cpp for a "
+                  "compiled async function")
+            _FAIL += 1
+            return
+        if 'co_await' not in cpp_src or 'mojo_async_schedule_timer' not in cpp_src:
+            print(f"FAIL  {name}: the async function's body should lower "
+                  "`await asyncio.sleep(...)` to a real `co_await` on "
+                  "Step A's timer-scheduling API")
+            _FAIL += 1
+            return
+        if ('mojo_async_schedule_ready' not in c_src
+                or 'mojo_async_run_until_complete' not in c_src):
+            print(f"FAIL  {name}: the top-level `asyncio.run(f())` call "
+                  "should drive the coroutine to completion via Step A's "
+                  "own scheduler API in the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path()
+
+    # `x = f()` alone (no `asyncio.run`) must STILL be honestly refused,
+    # unchanged from the bug fix's own bar (9a3a62b) — re-verified here
+    # under Step C's own test rather than assuming the pre-existing test
+    # above still covers it after this step's changes (it does — this is
+    # the exact same shape, unmodified — but this re-asserts it explicitly
+    # as part of Step C's own coverage, since Step C is precisely the step
+    # that could have accidentally regressed it by loosening the async-call
+    # value-consumption rule).
+    test_raises("async_bare_call_still_refused_without_asyncio_run", """\
+async def f():
+    await asyncio.sleep(0.01)
+    return 42
+
+def main():
+    x = f()
+    print(x)
+""", "consumed as a value")
+
+    # `await` on anything other than `asyncio.sleep(...)` is still refused
+    # -- async-awaits-async composition (one Mojo async function awaiting
+    # ANOTHER Mojo async function) is Step D, not this step.
+    test_raises("async_await_on_another_async_function_honest_fallback", """\
+async def g():
+    return 1
+
+async def f():
+    x = await g()
+    return x
+""", "async function")
+
+    # `asyncio.sleep(...)` referenced WITHOUT `await` (e.g. assigned) has no
+    # meaning in compiled code -- honest refusal, not a silent no-op or a
+    # call to an undefined symbol.
+    test_raises("asyncio_sleep_without_await_honest_fallback", """\
+import asyncio
+
+def main():
+    x = asyncio.sleep(0.1)
+""", "asyncio.sleep")
+
+    # `asyncio.run(...)` of anything other than a bare call to a supported
+    # compiled async function -- e.g. a non-call expression -- is an honest
+    # refusal, not a guessed-at lowering.
+    test_raises("asyncio_run_non_call_argument_honest_fallback", """\
+import asyncio
+
+def main():
+    x = 5
+    asyncio.run(x)
+""", "asyncio.run")
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

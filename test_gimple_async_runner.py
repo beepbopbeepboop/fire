@@ -12,6 +12,7 @@ the generator one.
 import os
 import subprocess
 import tempfile
+import time
 
 from build_config import find_gcc, find_gxx
 import gimple_codegen
@@ -128,6 +129,45 @@ def test_async_build_refused(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
+def test_async_stdout_timed(name: str, mojo_src: str, expected_stdout: str,
+                             min_seconds: float, max_seconds: float):
+    """Step C's own rigor bar, mirroring test_async_runtime_scaffold.py's
+    (Step A) real wall-clock-timing verification: builds+links+runs a real
+    executable and asserts BOTH the correct stdout (proving the coroutine
+    actually ran and `asyncio.run(...)` actually delivered its value) AND
+    that the measured real elapsed time is close to the requested sleep
+    duration, not ~0 (which would mean `await asyncio.sleep(...)` never
+    really suspended -- a faked/instant await) and not wildly larger
+    (which would mean something is stalling well beyond the timer, e.g. a
+    scheduler bug). `min_seconds`/`max_seconds` bracket the expected sleep
+    duration with the same kind of scheduling-slack floor Step A's own
+    test used (an ~5-10ms floor below the target, generous headroom
+    above)."""
+    global _PASS, _FAIL
+    try:
+        exe = _build_async_program(mojo_src)
+        t0 = time.monotonic()
+        run = subprocess.run([exe], capture_output=True, timeout=10)
+        dt = time.monotonic() - t0
+        out = run.stdout.decode()
+        if out != expected_stdout:
+            print(f"FAIL  {name}: expected stdout {expected_stdout!r}, got {out!r}")
+            _FAIL += 1
+            return
+        if not (min_seconds <= dt <= max_seconds):
+            print(f"FAIL  {name}: expected wall-clock time in "
+                  f"[{min_seconds}, {max_seconds}]s, measured {dt:.4f}s -- "
+                  "either the await never really suspended (too fast) or "
+                  "something stalled well beyond the timer (too slow)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name} (dt={dt:.4f}s)")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def run_tests():
     # REVISED (bugs/CODEGEN_compiled_async_eager_execution_semantic_
     # mismatch.md): Step B's first cut consumed an async call's result via
@@ -235,6 +275,116 @@ async def f():
 def main():
     print(f())
 """, "consumed as a value")
+
+    # ── Step C (compiled-path async/await codegen project): real `await`
+    # on a real timer, driven via an explicit `asyncio.run(...)` top-level
+    # bridge ────────────────────────────────────────────────────────────
+    # THE core proof for this step: an `async def` that does `await
+    # asyncio.sleep(0.05)` then `return 42`, driven to completion by
+    # `asyncio.run(f())` at the top level, prints the correct value AND
+    # genuinely took ~50ms of real wall-clock time -- not ~0ms (which would
+    # mean the `co_await` never actually suspended) and not some huge
+    # unexplained stall. Mirrors test_async_runtime_scaffold.py's own
+    # >= 45ms / < 1000ms bracketing exactly, applied here to a REAL
+    # Mojo-source-compiled program for the first time.
+    test_async_stdout_timed("await_sleep_then_return_driven_by_asyncio_run", """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.05)
+    return 42
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+""", "42\n", min_seconds=0.045, max_seconds=1.0)
+
+    # A longer sleep (0.15s) -- confirms the timing isn't a coincidence of
+    # one specific duration, and gives a wider margin between the sleep
+    # floor and process-startup/scheduling noise.
+    test_async_stdout_timed("await_longer_sleep_then_return_driven_by_asyncio_run", """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.15)
+    return 7
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+""", "7\n", min_seconds=0.13, max_seconds=1.2)
+
+    # A Float64-typed return value through the same await-then-drive path --
+    # confirms this isn't hardcoded to int64_t (mirrors
+    # async_function_float_return_compiles_and_runs above, but for the real
+    # await/asyncio.run path instead of the bare-discarded-call one).
+    test_async_stdout_timed("await_sleep_then_return_float_driven_by_asyncio_run", """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.05)
+    return 2.5
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+""", "2.5\n", min_seconds=0.045, max_seconds=1.0)
+
+    # A multi-statement body (assignment + a while loop) BEFORE the
+    # `await`, ending in a scalar `return` -- confirms ordinary statements
+    # and the real suspension point compose correctly through the shared
+    # _cpp_stmt/_cpp_expr whitelist emitter, not just a single-statement
+    # body.
+    test_async_stdout_timed("multi_statement_body_then_await_then_return", """\
+import asyncio
+
+async def f():
+    total = 0
+    i = 0
+    while i < 5:
+        total = total + i
+        i = i + 1
+    await asyncio.sleep(0.05)
+    return total
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+""", "10\n", min_seconds=0.045, max_seconds=1.0)
+
+    # `x = f()` (no `asyncio.run`) must STILL be honestly refused through
+    # the real dual-output build path -- re-verifying Step B's bug fix
+    # (9a3a62b) is unregressed by Step C's changes, now with a body that
+    # actually contains a real `await` too (not just the old zero-
+    # suspension-point shape), through the SAME real build entry point the
+    # rest of this file uses.
+    test_async_build_refused("bare_assignment_with_real_await_still_refused", """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.01)
+    return 42
+
+def main():
+    x = f()
+    print(x)
+""", "consumed as a value")
+
+    # `await` on anything other than `asyncio.sleep(...)` -- here, one Mojo
+    # async function awaiting ANOTHER -- must still be honestly refused
+    # through the real build path (async-awaits-async composition is
+    # Step D, not this step).
+    test_async_build_refused("await_on_another_async_function_still_refused", """\
+async def g():
+    return 1
+
+async def f():
+    x = await g()
+    return x
+
+def main():
+    f()
+""", "async function")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

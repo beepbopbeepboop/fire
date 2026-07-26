@@ -1959,6 +1959,27 @@ class _UnsupportedAsyncShape(_UnsupportedGeneratorShape):
     actually caught in practice."""
 
 
+def _is_asyncio_sleep_call(node) -> bool:
+    """True iff `node` is the exact call shape `asyncio.sleep(<one
+    positional arg, no kwargs>)` — the ONE recognized special-call shape
+    Step C's codegen understands, mirroring the textual os.path.*/re.sub-
+    style special-call-shape recognition convention `_lower_method_call`
+    already uses elsewhere in this file (grep for "Handle os.path.* calls")
+    rather than any general "call into a real Python module" mechanism —
+    there isn't one for compiled code, and there shouldn't be: real
+    `asyncio` doesn't exist at compiled-program runtime, only Step A's
+    mojo_async_runtime scheduler does, so this is a deliberately narrow,
+    purely textual/structural match on the exact source shape, not a
+    resolution of `asyncio` as an actual importable module."""
+    return (isinstance(node, CallExpr)
+            and isinstance(node.func, MemberExpr)
+            and isinstance(node.func.obj, IdentExpr)
+            and node.func.obj.name == 'asyncio'
+            and node.func.member == 'sleep'
+            and len(node.args) == 1
+            and not getattr(node, 'kwargs', None))
+
+
 def _async_quick_eligible(fn: FunctionDef) -> bool:
     """Cheap pre-filter before attempting the real _gen_cpp_async_unit
     translation, mirroring _generator_quick_eligible's role exactly: is_async,
@@ -1967,10 +1988,16 @@ def _async_quick_eligible(fn: FunctionDef) -> bool:
     parameter at all (this step's scope is deliberately narrower than even
     Milestone B's initial generator scope, which allowed params from the
     start once the parameter-support step landed — async parameters are
-    explicitly left for a later step per this project's plan) and no
-    `await` anywhere in the body (Step B's whole point is proving the
-    zero-suspension-point pipeline end-to-end first; real timer/socket
-    awaits are Step C+). Whether the body's actual STATEMENTS are otherwise
+    explicitly left for a later step per this project's plan). Step B
+    required NO `await` anywhere in the body at all (proving the zero-
+    suspension-point pipeline end-to-end first); Step C narrows that rule
+    instead of keeping it absolute: every `AwaitExpr` anywhere in the body
+    must be the one recognized `asyncio.sleep(<scalar seconds>)` shape (see
+    _is_asyncio_sleep_call) — awaiting anything else (another Mojo async
+    function, a socket operation, ...) is still out of this step's scope
+    and correctly makes the whole function ineligible here, falling back
+    to the honest whole-module refusal exactly as an unsupported `await`
+    always has. Whether the body's actual STATEMENTS are otherwise
     compilable (only the shared _cpp_stmt/_cpp_expr whitelist, ending in one
     `return <scalar-expr>`) is decided by _gen_cpp_async_unit itself, the
     single source of truth, not duplicated here."""
@@ -1980,7 +2007,8 @@ def _async_quick_eligible(fn: FunctionDef) -> bool:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, AwaitExpr):
-            return False
+            if not _is_asyncio_sleep_call(n.value):
+                return False
     return True
 
 
@@ -7627,6 +7655,72 @@ class GimpleGen:
                         filename_val = fn_val
                     t = self._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                     return 'char *', t
+
+            # Step C (compiled-path async/await codegen project):
+            # `asyncio.run(f())` — the explicit top-level bridge from sync
+            # to async code, mirroring real Python's own idiom
+            # (`asyncio.run(main())`) and this project's own interpreter's
+            # precedent (real asyncio itself drives myinterpreter.py's
+            # MojoCoroutine the same way — see test_async_execution.py).
+            # This is the ONLY place a compiled async function's result may
+            # actually be driven to completion and consumed as a value —
+            # reusing Step A's own scheduler API exactly as Step B's
+            # (reverted) eager-execution branch briefly did, now correctly
+            # gated behind this EXPLICIT driver call instead of firing on
+            # every value-consuming reference to `f()` (see
+            # bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md
+            # — that bug's fix, 9a3a62b, deliberately left bare `x = f()`
+            # (no `asyncio.run`) refused, and this still does not touch
+            # that: `fname_raw in self._async_api` in _lower_call, a few
+            # thousand lines below, is untouched and still raises for that
+            # shape). Narrow shape only: exactly one argument, itself a
+            # bare, param-less call to a function this module actually
+            # compiled to the C++20 coroutine path (registered in
+            # self._async_api by gen_module's async pre-pass) — composing
+            # `asyncio.run(...)` around anything else (a non-call
+            # expression, a call to an unsupported/uncompiled async
+            # function, extra arguments) is an honest whole-module refusal
+            # instead of guessing at a lowering.
+            if module_name == 'asyncio' and method_name == 'run':
+                inner = node.args[0] if len(node.args) == 1 else None
+                if (len(node.args) == 1 and not getattr(node, 'kwargs', None)
+                        and isinstance(inner, CallExpr)
+                        and isinstance(inner.func, IdentExpr)
+                        and inner.func.name in self._async_api
+                        and not inner.args):
+                    api = self._async_api[inner.func.name]
+                    base, vct = api['base'], api['value_ctype']
+                    handle = self._call_expr('MojoAsync *', f"{base}_start", [])
+                    self._emit(f"  mojo_async_schedule_ready ({handle});")
+                    self._emit(f"  mojo_async_run_until_complete ();")
+                    result = self._new_val(vct, f"{base}_value ({handle})")
+                    self._emit(f"  {base}_destroy ({handle});")
+                    return vct, result
+                raise RuntimeError(
+                    "cannot compile module: asyncio.run(...) is only "
+                    "supported for the shape `asyncio.run(<call to a "
+                    "supported, parameter-less compiled async function>)` "
+                    "-- async-awaits-async composition, arguments, or "
+                    "asyncio.run() of anything else is not supported yet "
+                    "-- falling back to interpreting this module from "
+                    "source instead")
+            # A reference to `asyncio.sleep(...)` reaching THIS (ordinary,
+            # non-coroutine-body) call-lowering path means it's being used
+            # somewhere other than directly as `await asyncio.sleep(...)`
+            # inside a compiled async function body (the only place
+            # GimpleGen._cpp_stmt's own AwaitExpr case gives it real
+            # meaning, translating it to a genuine co_await on Step A's
+            # timer queue) — e.g. called without `await`, or from ordinary
+            # sync code. There is no real `asyncio` module at compiled-
+            # program runtime to fall back to (see _is_asyncio_sleep_call's
+            # docstring), so honestly refuse rather than silently emitting
+            # a nonsensical call to an undefined symbol.
+            if module_name == 'asyncio' and method_name == 'sleep':
+                raise RuntimeError(
+                    "cannot compile module: asyncio.sleep(...) is only "
+                    "supported directly as `await asyncio.sleep(...)` "
+                    "inside a compiled async function body -- falling "
+                    "back to interpreting this module from source instead")
 
         ot, ov = self.lower_expr(func.obj)
         method = func.member
@@ -15239,6 +15333,48 @@ class GimpleGen:
                     raise _UnsupportedAsyncShape(
                         "`yield from` not supported in an async function body")
                 return self._cpp_yield_from(s.value, indent)
+            # Step C: `await asyncio.sleep(<seconds>)` as a bare statement —
+            # the ONE real suspension point this step's async codegen
+            # understands. Lowers to a genuine C++20 `co_await` on
+            # `_mojoasync_SleepAwaiter` (emitted once per module by
+            # gen_module whenever self._supported_async is non-empty —
+            # mirrors, field-for-field, the hand-written `SleepAwaiter` Step
+            # A's own test_async_runtime_scaffold.py proved out — see that
+            # file's HAND_WRITTEN_MAIN_CPP — reused as the one real,
+            # codegen-emitted awaiter shape instead of inventing a second
+            # one), which arms Step A's timer queue
+            # (mojo_async_schedule_timer) and genuinely suspends this
+            # coroutine until the timer fires. Anything else awaited (an
+            # `await` on another Mojo async function — composition is Step
+            # D — a socket read/write — Step F — or any other expression)
+            # is an honest whole-module refusal: _async_quick_eligible
+            # already filtered out any *other* unrecognized AwaitExpr
+            # shape before this method is ever reached for THIS function,
+            # but the check is repeated here too (single source of truth
+            # for what this step actually emits, not just what the cheap
+            # pre-filter allowed through) since `_async_quick_eligible`'s
+            # role is "worth attempting", not "guaranteed compilable".
+            if isinstance(s.value, AwaitExpr):
+                if self._cpp_emit_kind != 'async':
+                    raise _UnsupportedGeneratorShape(
+                        "`await` is not supported in a generator body "
+                        "(only in an async function body)")
+                target = s.value.value
+                if not _is_asyncio_sleep_call(target):
+                    raise _UnsupportedAsyncShape(
+                        "only `await asyncio.sleep(<seconds>)` is "
+                        "supported in a compiled async function body this "
+                        "step — async-awaits-async composition and socket "
+                        f"awaits are later steps (got {type(target).__name__ if target is not None else 'bare await'})")
+                self_fields = getattr(self, '_cpp_gen_self_fields', None)
+                arg_ctype = _infer_simple_expr_ctype(target.args[0], declared, self_fields)
+                if arg_ctype not in ('int64_t', 'double'):
+                    raise _UnsupportedAsyncShape(
+                        "asyncio.sleep()'s argument must be a scalar "
+                        "int64_t/double seconds expression")
+                arg_expr = self._cpp_expr(target.args[0])
+                return [f"{indent}co_await _mojoasync_SleepAwaiter{{"
+                        f"(uint64_t)((double)({arg_expr}) * 1e9)}};"]
             # `print(<one scalar arg>)` — a small, deliberate addition (not
             # part of the original Milestone B generator whitelist, which
             # has never needed a body-internal side effect since a
@@ -20219,6 +20355,36 @@ class GimpleGen:
                 '};',
                 '',
             ]
+            if self._supported_async:
+                # Step C (compiled-path async/await codegen project): this
+                # module has at least one compiled `async def` that
+                # actually uses `await asyncio.sleep(...)` (or could —
+                # emitted unconditionally whenever ANY async function
+                # compiled, harmless/unused otherwise, same convention as
+                # `_mojogen_sub_guard` just above). `_mojoasync_
+                # SleepAwaiter` is a real C++20 awaiter that arms Step A's
+                # timer queue (mojo_async_schedule_timer, declared in
+                # mojo_async_runtime.h) and genuinely suspends the awaiting
+                # coroutine until the timer fires -- field-for-field the
+                # same shape as the hand-written `SleepAwaiter` Step A's
+                # own test_async_runtime_scaffold.py already proved works
+                # end-to-end (see that file's HAND_WRITTEN_MAIN_CPP),
+                # reused here as the one real, codegen-emitted awaiter
+                # instead of inventing a second, parallel shape (see
+                # CLAUDE.md: consolidate, don't duplicate). Emitted by
+                # GimpleGen._cpp_stmt's own AwaitExpr case (see there for
+                # the ns-conversion + co_await emission).
+                cpp_parts.append('#include <mojo_async_runtime.h>')
+                cpp_parts.append('')
+                cpp_parts.append('struct _mojoasync_SleepAwaiter {')
+                cpp_parts.append('    uint64_t delay_ns;')
+                cpp_parts.append('    bool await_ready() const { return false; }')
+                cpp_parts.append('    void await_suspend(std::coroutine_handle<> h) const {')
+                cpp_parts.append('        mojo_async_schedule_timer(h.address(), mojo_async_now_ns() + delay_ns);')
+                cpp_parts.append('    }')
+                cpp_parts.append('    void await_resume() const {}')
+                cpp_parts.append('};')
+                cpp_parts.append('')
             if self._supported_generator_methods:
                 # Milestone C step 3: every struct a compiled generator
                 # METHOD in this module binds `self` to needs its C layout
