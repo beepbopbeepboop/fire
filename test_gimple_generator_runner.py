@@ -474,6 +474,98 @@ def main():
         print(x)
 """, "1.5\n2.5\n3.5\n")
 
+    # Milestone C step 4 (this step): compiled generators as first-class
+    # values — bugs/CODEGEN_compiled_generator_not_first_class_value.md's
+    # exact repro. Before this step `python3 mojo.py build` failed with a
+    # genuine gcc compile error ("invalid use of void expression") the
+    # moment a generator call's result was assigned to a variable before
+    # being consumed, rather than being consumed inline as the `for` loop's
+    # own iterable expression. This is the single most load-bearing new
+    # test in this step: real compile+link+run, asserting the exact correct
+    # output.
+    test_generator_stdout("assign_then_for_loop_consumes_generator", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    for x in g:
+        print(x)
+""", "0\n1\n2\n")
+
+    # The bug report's SECOND failure: calling next() directly on an
+    # assigned generator variable, rather than consuming it via `for`.
+    # Previously failed at LINK time (undefined symbol '_next') since the
+    # generic next() builtin had no case for MojoGenerator* at all.
+    test_generator_stdout("next_on_assigned_generator_var", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    print(next(g))
+    print(next(g))
+    print(next(g))
+""", "0\n1\n2\n")
+
+    # Edge case beyond the bug report's exact repro: calling next() PAST
+    # exhaustion must raise StopIteration (not crash, not silently return a
+    # stale/garbage value) — confirms the mojo_exc_type_set()/mojo_raise()
+    # StopIteration-signaling convention added for next() is actually
+    # catchable by an ordinary `except StopIteration:` in the same function,
+    # exactly like a real Python generator's exhausted next().
+    test_generator_stdout("next_past_exhaustion_raises_stopiteration", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(2)
+    print(next(g))
+    print(next(g))
+    try:
+        print(next(g))
+    except StopIteration:
+        print("done")
+""", "0\n1\ndone\n")
+
+    # Edge case beyond the bug report's exact repro: a generator variable
+    # consumed by TWO separate `for` loops in sequence (the second over an
+    # already-exhausted generator, which real Python simply iterates zero
+    # times). Found via independent verification during this step: the
+    # `for`-loop lowering originally destroyed the underlying coroutine
+    # unconditionally once drained (correct ONLY for Milestone B's inline-
+    # call-as-iterable shape, where that loop is the value's one and only
+    # reference) — the moment the SAME generator became reachable by name
+    # after the loop (this step's whole point), that unconditional destroy
+    # turned a second consumption attempt into a real use-after-free
+    # (confirmed crashing with SIGBUS before the fix). The second `for`
+    # loop below must print nothing (not crash) — see _gen_for_iter's
+    # destroy_after=isinstance(node.iterable, CallExpr) fix.
+    test_generator_stdout("generator_variable_survives_two_for_loops", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    for x in g:
+        print(x)
+    for x in g:
+        print(x)
+    print("end")
+""", "0\n1\n2\nend\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

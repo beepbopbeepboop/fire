@@ -2599,6 +2599,176 @@ def main():
         print(x)
 """, "generator function")
 
+    # Milestone C step 4 (this step): compiled-generator objects as
+    # first-class values — bugs/CODEGEN_compiled_generator_not_first_class_
+    # value.md's exact repro. Before this step, `g = counter(3)` typed `g`
+    # as `void` (the local-variable-type inference had no notion that a
+    # bare call to a known compiled generator function returns
+    # `MojoGenerator *`), and gcc genuinely failed to compile at all
+    # ("invalid use of void expression" / "variable or field 'g' declared
+    # void") — a real, loud build failure, not a silent miscompile. Asserts
+    # `g` is declared `MojoGenerator *` (not `void`/`int64_t`) and the
+    # `for`-loop over the plain-identifier `g` still drives the same
+    # `_resume`/`_value` API Milestone B's inline-call shape already used.
+    # See test_gimple_generator_runner.py for the REAL behavioral (compile+
+    # link+run) counterpart.
+    def test_generator_assign_then_for_loop_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    for x in g:
+        print(x)
+"""
+        name = "generator_assign_then_for_loop_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if 'MojoGenerator * g;' not in c_src and 'MojoGenerator *g;' not in c_src:
+            print(f"FAIL  {name}: expected `g` to be declared MojoGenerator *, "
+                  "not void/int64_t — .c/.ci decls:")
+            for line in c_src.splitlines():
+                if ' g;' in line or '*g;' in line:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume (g)' not in c_src:
+            print(f"FAIL  {name}: expected the for-loop over `g` to drive "
+                  "_resume(g)/_value(g), not fall back to the unsupported-"
+                  "iterable path")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_assign_then_for_loop_compiles_via_cpp_path()
+
+    # Same step: `next(g)` called directly on an assigned generator variable
+    # — bugs/CODEGEN_compiled_generator_not_first_class_value.md's SECOND
+    # failure (previously an undefined-symbol LINK error, since the generic
+    # `next()` builtin had no case for MojoGenerator* at all — only a
+    # variadic FIXME extern stub with no definition anywhere). Asserts the
+    # .c/.ci output calls _resume/_value directly (no reference to a bare,
+    # undefined `next (...)` C symbol) and signals exhaustion via the same
+    # mojo_exc_type_set()/mojo_raise() StopIteration convention
+    # `raise StopIteration` already uses elsewhere in this file, not a
+    # novel signaling scheme.
+    def test_generator_next_on_assigned_var_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    print(next(g))
+"""
+        name = "generator_next_on_assigned_var_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume (g)' not in c_src or '_mojogen_counter_value (g)' not in c_src:
+            print(f"FAIL  {name}: expected next(g) to lower to direct "
+                  "_resume(g)/_value(g) calls")
+            _FAIL += 1
+            return
+        if 'mojo_raise ()' not in c_src or 'mojo_exc_type_set' not in c_src:
+            print(f"FAIL  {name}: expected the exhaustion path to signal "
+                  "StopIteration via mojo_exc_type_set()/mojo_raise(), "
+                  "same as `raise StopIteration` elsewhere")
+            _FAIL += 1
+            return
+        # A bare, unresolved CALL SITE to the generic `next` extern stub
+        # would read `next (g)` (this file's call-lowering convention is a
+        # space before the paren) — distinct from the always-present,
+        # unconditional `int64_t next(...);` FORWARD DECLARATION emitted
+        # defensively in every build's preamble regardless of whether
+        # anything actually calls it (harmless on its own; only a real call
+        # site referencing it would fail at link time).
+        if 'next (g)' in c_src or 'next(g)' in c_src:
+            print(f"FAIL  {name}: a bare, undefined `next (...)` call site "
+                  "still leaked into the .c/.ci output instead of lowering "
+                  "to _resume/_value")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_next_on_assigned_var_compiles_via_cpp_path()
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

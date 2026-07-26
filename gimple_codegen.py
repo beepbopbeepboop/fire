@@ -4693,6 +4693,28 @@ class GimpleGen:
                 return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:
                 return f'{fname} *'
+            # A bare call to a KNOWN COMPILED GENERATOR function (Milestone
+            # B/C, self._generator_api) returns an opaque MojoGenerator* —
+            # calling the generator function only CONSTRUCTS the coroutine,
+            # it doesn't run the body (real Python/Mojo "calling a generator
+            # function returns a generator object" semantics), so this must
+            # be checked before the generic func_return_types fallback below
+            # (a generator function was never given an ordinary return type
+            # entry there — see bugs/CODEGEN_compiled_generator_not_first_
+            # class_value.md). This dict is only fully populated after
+            # gen_module's Pass 1.3d-gen eligibility loop runs (deliberately
+            # AFTER Pass 1.3b/1.3d, per that loop's own ordering note) —
+            # Pass 1.3b's FIRST call into this method (for a generator call
+            # site) still sees it empty and falls through to the int64_t
+            # default below, same as any other call to a not-yet-registered
+            # callee; Pass 1.3f's unconditional full rerun of local-variable-
+            # type inference (after the eligibility loop has populated
+            # _generator_api) is what actually corrects `g = counter(3)`'s
+            # inferred type, mirroring the exact same "corrective rerun"
+            # pattern Pass 1.3e/1.3f already use for a plain unannotated-
+            # callee return-type correction.
+            if fname in self._generator_api:
+                return 'MojoGenerator *'
             return self.func_return_types.get(fname, 'int64_t')
         if isinstance(node, CallExpr) and isinstance(node.func, MemberExpr):
             # .read()/.readline()/.readlines() on ANY receiver shape (not just
@@ -4752,6 +4774,15 @@ class GimpleGen:
                 ot = self.var_types.get(mod, '')
                 if ot and ot.endswith(' *'):
                     sn = _struct_name_of(ot)
+                    # obj.method(...) where `method` is a supported compiled
+                    # GENERATOR method (Milestone C step 3,
+                    # self._generator_method_api) — same "returns
+                    # MojoGenerator*, doesn't run the body" reasoning as the
+                    # free-function generator case above, checked before the
+                    # ordinary mangled-name func_return_types lookup below (a
+                    # generator method has no such ordinary entry either).
+                    if (sn, meth) in self._generator_method_api:
+                        return 'MojoGenerator *'
                     mangled = f"{sn}_{meth}"
                     rt = self.func_return_types.get(mangled)
                     if rt:
@@ -9071,6 +9102,43 @@ class GimpleGen:
             t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
+        # next(g) where `g` is (or holds) a MojoGenerator* — the compiled-
+        # generator "first-class value" gap (bugs/CODEGEN_compiled_generator_
+        # not_first_class_value.md, second failure): previously `next` had NO
+        # real lowering at all anywhere in this file (only a variadic FIXME
+        # extern declaration for the generic builtin — see the `next` entry
+        # in the always-declared-externs table — that has no definition
+        # anywhere and fails at LINK time, not compile time, for ANY use of
+        # next(), not just on generators; confirmed via grep, there is no
+        # pre-existing "next() on some other iterable type" convention to
+        # reuse here). Mirrors _gen_for_generator_iter's own resume()/value()
+        # driving exactly (same "returns 2 things" scheme, not invented
+        # fresh), but signals exhaustion as a real StopIteration exception
+        # via the SAME mojo_exc_type_set()/mojo_raise() mechanism
+        # _gen_stmt_RaiseStmt uses for `raise StopIteration`, rather than a
+        # third, novel signaling convention — so `except StopIteration:`
+        # around a next() call in the same function catches it correctly.
+        if fname_raw == 'next' and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            at = self._get_actual_type(at, av)
+            if at == 'MojoGenerator *':
+                api = self._generator_var_api.get(av)
+                if api is not None:
+                    base, vct = api['base'], api['value_ctype']
+                    resumed = self._new_val('_Bool', f"{base}_resume ({av})")
+                    bb_ok = self._new_bb(); bb_exhausted = self._new_bb(); bb_merge = self._new_bb()
+                    self._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+                    self._emit_label(bb_exhausted)
+                    self._emit(f"  mojo_exc_type_set ({self._exc_type_id('StopIteration')});")
+                    self._emit("  mojo_raise ();")
+                    self._emit(f"  goto {bb_merge};")
+                    self._emit_label(bb_ok)
+                    result = self._new_val(vct, f"{base}_value ({av})")
+                    self._emit(f"  goto {bb_merge};")
+                    self._emit_label(bb_merge)
+                    return vct, result
+                _debug_note('next() on MojoGenerator* with no known _generator_var_api entry '
+                            '(unreachable in normal use — see assign-then-next() propagation)', av)
         # A local variable of a callable struct type, invoked like a function:
         # obj(args) → obj.__call__(args).
         if (fname_raw in self.var_types and fname_raw not in self.func_return_types
@@ -11519,6 +11587,21 @@ class GimpleGen:
             # correctly instead of assuming int64_t.
             if dst == 'MojoBoundMethod *' and v in self._bound_method_ret_types:
                 self._bound_method_ret_types[tname] = self._bound_method_ret_types[v]
+            # `g = counter(3)` / `g = obj.countdown(n)`: the generator-call
+            # lowering above recorded which extern "C" resume/value/destroy
+            # API this coroutine uses, keyed by the CALL SITE's own SSA temp
+            # (see self._generator_var_api's docstring) — that key goes out
+            # of scope the moment the value is assigned to a real local, so
+            # propagate it onto the assigned variable's own name too,
+            # mirroring the exact same "carry the side-table entry across an
+            # assignment" pattern used above for MojoList*/MojoDict*/
+            # MojoBoundMethod* (_elem_types/_dict_val_types/_bound_method_
+            # ret_types). Without this, `for x in g:` / `next(g)` anywhere
+            # after this assignment finds no entry for `g` and falls back to
+            # the honest "no known API" refusal — see bugs/CODEGEN_compiled_
+            # generator_not_first_class_value.md.
+            if dst == 'MojoGenerator *' and v in self._generator_var_api:
+                self._generator_var_api[tname] = self._generator_var_api[v]
             self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
@@ -13292,7 +13375,32 @@ class GimpleGen:
                 # nonexistent MojoGenerator___has_next__/__next__).
                 api = self._generator_var_api.get(it_val)
                 if api is not None:
-                    self._gen_for_generator_iter(var, it_val, api, node.body)
+                    # Only auto-destroy the coroutine when this `for` loop's
+                    # iterable expression IS the generator construction call
+                    # itself (`for x in counter(3):`) — that value has no
+                    # other reference anywhere, so destroying it right after
+                    # the loop is the only chance to ever free it, exactly
+                    # matching Milestone B's original (pre-first-class-value)
+                    # behavior. When the iterable is instead a plain variable
+                    # reference (`g = counter(3); for x in g:` — the first-
+                    # class-value case this step adds), the SAME variable may
+                    # be read again later (another `for`/`next()`, or simply
+                    # falling out of scope naturally) — auto-destroying here
+                    # made a second consumption attempt a real use-after-free
+                    # (confirmed via a real compiled repro: a second `for x in
+                    # g:` after the first fully drained it crashed with SIGBUS,
+                    # not merely "0 iterations" like real Python's exhausted-
+                    # iterator semantics). Skipping the destroy for this shape
+                    # trades a coroutine-frame leak (no destructor call ever
+                    # runs for a named generator variable) for correctness —
+                    # strictly better than a crash, and a known, documented
+                    # follow-up (proper lifetime/ownership tracking for a
+                    # first-class MojoGenerator* is future work, not solved
+                    # here). See bugs/CODEGEN_compiled_generator_not_first_
+                    # class_value.md.
+                    destroy_after = isinstance(node.iterable, CallExpr)
+                    self._gen_for_generator_iter(var, it_val, api, node.body,
+                                                  destroy_after=destroy_after)
                 else:
                     _debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
                     self._emit_unsupported_iter(it_type, node)
@@ -13789,7 +13897,8 @@ class GimpleGen:
 
     # ── Struct iterator protocol (for x in obj where obj has __iter__) ────
 
-    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list):
+    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list,
+                                destroy_after: bool = True):
         """for x in <supported generator call>(): ... — <base>_resume()/
         <base>_value() deliberately mirror _gen_for_struct_iter's existing
         __has_next__/__next__ convention immediately below (resume both
@@ -13797,7 +13906,18 @@ class GimpleGen:
         whether one was produced; value reads the most recently produced
         one without advancing) — the established "returns 2 things" scheme
         this codegen already uses for iteration, reused rather than
-        invented fresh for generators."""
+        invented fresh for generators.
+
+        `destroy_after`: whether to call <base>_destroy() once the loop is
+        fully drained — True for the original Milestone B shape (the
+        iterable expression IS the generator construction call, so this
+        loop is the value's only reference and its only chance to be
+        freed), False when the caller (_gen_for_iter) determined the
+        generator instead came from a plain variable that may still be
+        read again afterward — destroying it unconditionally there is a
+        real use-after-free the first time that variable is consumed a
+        second time. See the call site in _gen_for_iter for the full
+        rationale."""
         base, vct = api['base'], api['value_ctype']
         self._declare_var(var, vct)
 
@@ -13822,7 +13942,8 @@ class GimpleGen:
         self._emit_label(bb_post)
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
-        self._emit(f"  {base}_destroy ({gen_val});")
+        if destroy_after:
+            self._emit(f"  {base}_destroy ({gen_val});")
 
     def _gen_for_struct_iter(self, var: str, struct_type: str,
                               obj_val: str, body: list):
