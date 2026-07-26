@@ -1948,20 +1948,29 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     """Cheap pre-filter before attempting the real (and more expensive)
     _gen_cpp_generator_unit translation: is_generator, not is_async, and
     nothing in the body that this milestone explicitly excludes by design
-    (try/except, with, `yield from` — richer generator semantics left for a
-    later milestone; see the module docstring on _UnsupportedGeneratorShape
-    for the rest of the narrowing, which is enforced by actually attempting
-    the translation rather than duplicated here as a second hand-maintained
+    (try/except, with — richer generator semantics left for a later
+    milestone; see the module docstring on _UnsupportedGeneratorShape for
+    the rest of the narrowing, which is enforced by actually attempting the
+    translation rather than duplicated here as a second hand-maintained
     checklist). Params ARE allowed through this quick filter as of the
     parameter-support step — whether a given param's TYPE is actually
     compilable (scalar int64_t/double/_Bool only; *args/**kwargs and
     string/pointer params are refused) is decided by
     _gen_cpp_generator_unit itself, the single source of truth, not
-    duplicated here."""
+    duplicated here.
+
+    `yield from` is ALSO allowed through this quick filter as of the
+    yield-from-delegation step — whether a given `yield from` actually
+    targets a plain call to another generator this same compile already
+    supports (the only delegation shape this step handles; delegating to a
+    list/other iterable, to an unsupported-shape generator, or to a call
+    qualified by a module/attribute access, are all still refused) is,
+    again, decided by _cpp_stmt/_gen_cpp_generator_unit — the single source
+    of truth — not duplicated here as a second checklist."""
     if fn.is_async or not fn.is_generator:
         return False
     for n in _walk_ast(fn.body):
-        if isinstance(n, (TryStmt, WithStmt, YieldFromExpr)):
+        if isinstance(n, (TryStmt, WithStmt)):
             return False
     return True
 
@@ -2015,21 +2024,56 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
     return 'bool' if ctype == '_Bool' else ctype
 
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None) -> str | None:
-    """The single scalar C++ type every `yield <value>` in fn's own body
-    must agree on (mixed types, or a bare `yield` with no value, both return
-    None == unsupported). Milestone B only supports numeric generators — see
-    the milestone writeup's "Value type crossing the boundary" section.
-    `known` (a name -> ctype map, passed by _gen_cpp_generator_unit for its
-    own generator's parameters) lets `yield <param>` resolve to the param's
-    real type instead of always guessing int64_t — see
-    _infer_simple_expr_ctype's docstring."""
+def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -> str | None:
+    """The C type a `yield from <expr>` site contributes to its enclosing
+    generator's overall yield-value type, for _generator_yield_ctype's
+    same-type-everywhere check — None if `<expr>` isn't a bare call to a
+    plain name (e.g. `yield from [1, 2, 3]`, `yield from mod.gen()`) or that
+    name isn't (yet — see the source-order note on the yield-from-delegation
+    step) a generator this same compile has already itself compiled via the
+    C++20-coroutine path (`generator_api`, threaded through from
+    self._generator_api by _gen_cpp_generator_unit/_generator_yield_ctype's
+    caller). Delegating to anything else remains out of this step's scope
+    and is refused here, at the same single-source-of-truth chokepoint as
+    every other unsupported generator-body shape."""
+    call = n.value
+    if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
+        return None
+    if generator_api is None:
+        return None
+    api = generator_api.get(call.func.name)
+    if api is None:
+        return None
+    return api.get('value_ctype')
+
+
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
+                            generator_api: dict | None = None) -> str | None:
+    """The single scalar C++ type every `yield <value>` / `yield from
+    <call>` in fn's own body must agree on (mixed types, a bare `yield` with
+    no value, or a `yield from` that doesn't resolve to a known compiled
+    generator's value type, all return None == unsupported). Milestone B
+    only supports numeric generators — see the milestone writeup's "Value
+    type crossing the boundary" section. `known` (a name -> ctype map,
+    passed by _gen_cpp_generator_unit for its own generator's parameters)
+    lets `yield <param>` resolve to the param's real type instead of always
+    guessing int64_t — see _infer_simple_expr_ctype's docstring.
+    `generator_api` (self._generator_api, passed the same way) resolves a
+    `yield from <call>`'s contributed type via _yield_from_delegate_ctype."""
     ctype = None
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 return None
             t = _infer_simple_expr_ctype(n.value, known)
+            if t is None:
+                return None
+            if ctype is None:
+                ctype = t
+            elif ctype != t:
+                return None
+        elif isinstance(n, YieldFromExpr):
+            t = _yield_from_delegate_ctype(n, generator_api)
             if t is None:
                 return None
             if ctype is None:
@@ -14786,6 +14830,8 @@ class GimpleGen:
                     raise _UnsupportedGeneratorShape(
                         "bare `yield` (no value) not supported")
                 return [f"{indent}co_yield {self._cpp_expr(s.value.value)};"]
+            if isinstance(s.value, YieldFromExpr):
+                return self._cpp_yield_from(s.value, indent)
             raise _UnsupportedGeneratorShape(
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
@@ -14850,6 +14896,93 @@ class GimpleGen:
             return [f"{indent}co_return;"]
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
+
+    def _cpp_yield_from(self, yf: 'YieldFromExpr', indent: str) -> list[str]:
+        """`yield from <call>` — delegates to ANOTHER generator this same
+        compile has already itself translated via the C++20-coroutine path
+        (self._supported_generators/self._generator_api; populated by
+        gen_module's Pass-1.3d-gen loop strictly in source order, so the
+        delegated-to generator must be DEFINED EARLIER in the same module —
+        the one scope restriction this step adds beyond "known compiled
+        generator", chosen because it falls out for free from the existing
+        single-pass compile-attempt loop instead of requiring a second,
+        dependency-ordered pass). Anything else — `yield from` over a list/
+        other plain iterable, over a call through an attribute/module
+        access, over a generator that itself failed to compile (unsupported
+        shape) or hasn't been compiled YET (defined later in the module) —
+        raises _UnsupportedGeneratorShape, exactly like every other
+        out-of-scope shape in this emitter.
+
+        C++20's co_yield-based coroutines have no built-in "delegate to a
+        sub-generator" primitive (unlike Python's `yield from`, which is
+        itself sugar for a resume/yield/exhaust loop plus StopIteration
+        value propagation — the value-propagation half is out of scope here
+        since this codegen's compiled generators don't support `return
+        <value>` at all yet). So delegation is hand-rolled as a local loop
+        inside the delegating coroutine's own body: call the sub-
+        generator's own <base>_start/_resume/_value/_destroy extern "C"
+        functions (already fully DEFINED earlier in this same .cpp
+        translation unit — gen_module concatenates every supported
+        generator's cpp unit in the same source order used here, so no
+        separate forward declaration is needed), co_yield-ing each value
+        until the sub-generator reports done.
+
+        Lifetime/early-cleanup: the sub-generator handle is held in a
+        `_mojogen_sub_guard` RAII wrapper (emitted once in the .cpp
+        preamble) whose destructor calls the sub-generator's `_destroy`.
+        This covers BOTH exit paths uniformly: normal exhaustion (the guard
+        goes out of scope at the end of the `{ ... }` block below, right
+        after the while-loop's condition first reports done), and the
+        delegating (outer) coroutine itself being destroyed early — e.g. a
+        consumer `break`s out of a `for x in outer(): ...` loop, which calls
+        `_start`'s own `_destroy`, i.e. std::coroutine_handle<>::destroy()
+        on a coroutine suspended mid-`co_yield` inside this very block. Per
+        the C++20 coroutine-frame-destruction rules, destroying a suspended
+        coroutine's frame runs the destructors of every local object in
+        scope at that suspension point, exactly as if the enclosing block
+        were unwound normally — so `_mojogen_sub_guard`'s destructor (and
+        hence the sub-generator's own `_destroy`) fires correctly even in
+        that case, without any special-case code here. Verified end-to-end
+        by test_gimple_generator_runner.py's
+        yield_from_delegation_early_break_cleans_up_both_generators test."""
+        call = yf.value
+        if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
+            raise _UnsupportedGeneratorShape(
+                "`yield from` is only supported when delegating directly to "
+                "a call to another generator function known to this same "
+                "compile (e.g. NOT `yield from [1, 2, 3]`, NOT `yield from "
+                "mod.gen()`)")
+        if call.kwargs:
+            raise _UnsupportedGeneratorShape(
+                "`yield from <call>` with keyword arguments is not supported")
+        sub_name = call.func.name
+        api = self._generator_api.get(sub_name)
+        if api is None or sub_name not in self._supported_generators:
+            raise _UnsupportedGeneratorShape(
+                f"`yield from {sub_name}(...)` does not delegate to a "
+                "generator this compile has itself already translated via "
+                "the C++20-coroutine path (either it's not a generator this "
+                "codegen supports, or it's defined LATER in this module — "
+                "the delegated-to generator must be defined earlier)")
+        sub_params: list = api.get('params') or []
+        if len(call.args) != len(sub_params):
+            raise _UnsupportedGeneratorShape(
+                f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
+                f"argument(s), got {len(call.args)}")
+        arg_exprs = [self._cpp_expr(a) for a in call.args]
+        sub_base = api['base']
+        self._yield_from_seq = getattr(self, '_yield_from_seq', 0) + 1
+        guard = f"__mojogen_sub{self._yield_from_seq}"
+        args_text = ', '.join(arg_exprs)
+        return [
+            f"{indent}{{",
+            f"{indent}    _mojogen_sub_guard {guard}"
+            f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
+            f"{indent}    while ({sub_base}_resume({guard}.g)) {{",
+            f"{indent}        co_yield {sub_base}_value({guard}.g);",
+            f"{indent}    }}",
+            f"{indent}}}",
+        ]
 
     def _gen_cpp_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         """Translate ONE supported generator FunctionDef into a
@@ -14939,7 +15072,7 @@ class GimpleGen:
         body_lines: list[str] = []
         for s in fn.body:
             body_lines.extend(self._cpp_stmt(s, declared, '    '))
-        value_ctype = _generator_yield_ctype(fn, declared)
+        value_ctype = _generator_yield_ctype(fn, declared, self._generator_api)
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
@@ -18795,13 +18928,32 @@ class GimpleGen:
         if self._generator_cpp_units:
             cpp_parts = [
                 '/* Generated by gimple_codegen.py (Milestone B: C++20-coroutine',
-                '   translation of this module\'s supported generator function(s)) */',
+                '   translation of this module\'s supported generator function(s);',
+                '   Milestone C step 2 added `yield from`-delegation support) */',
                 '#include <coroutine>',
                 '#include <cstdint>',
                 '#include <exception>',
                 '#include <mojo_runtime.h>',
                 '',
                 'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
+                '',
+                '/* RAII guard for a sub-generator a `yield from` delegates to (see',
+                '   GimpleGen._cpp_yield_from) -- guarantees the sub-generator\'s own',
+                '   `_destroy` runs exactly once, whether this scope exits because the',
+                '   sub-generator was exhausted normally or because the OUTER coroutine',
+                '   holding it is itself destroyed early (e.g. a consumer `break`s out',
+                '   of the loop that\'s driving it): C++20 destroys every local object',
+                '   in scope at a coroutine\'s suspension point when that coroutine\'s',
+                '   frame is destroyed, exactly as if the enclosing block unwound',
+                '   normally, so this destructor fires correctly in both cases with no',
+                '   special-case code at either call site. Emitted unconditionally',
+                '   whenever this module has ANY compiled generator -- harmless and',
+                '   unused if none of them actually use `yield from`. */',
+                'struct _mojogen_sub_guard {',
+                '    MojoGenerator *g;',
+                '    void (*destroy_fn)(MojoGenerator *);',
+                '    ~_mojogen_sub_guard() { if (g) destroy_fn(g); }',
+                '};',
                 '',
             ]
             for unit in self._generator_cpp_units:

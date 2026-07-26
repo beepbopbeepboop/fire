@@ -240,6 +240,143 @@ def main():
         print(v)
 """, "3.5\n")
 
+    # Milestone C step 2 (yield-from delegation): the exact target shape —
+    # `outer` delegates its entire output to `inner` via a bare
+    # `yield from inner()`. `inner` must be defined before `outer` (see
+    # gimple_codegen.GimpleGen._cpp_yield_from's docstring). Confirms the
+    # hand-rolled resume/yield/exhaust delegation loop actually produces the
+    # right VALUES, in order, not just that it type-checks.
+    test_generator_stdout("yield_from_delegates_to_another_generator", """\
+def inner():
+    yield 1
+    yield 2
+    yield 3
+
+def outer():
+    yield from inner()
+
+def main():
+    for x in outer():
+        print(x)
+""", "1\n2\n3\n")
+
+    # `yield from` composed with other statements around it in the
+    # delegating generator's own body — confirms the delegation loop is a
+    # normal statement in the body (not required to be the only statement),
+    # and that values yielded directly by `outer` and values relayed from
+    # `inner` interleave in the right order.
+    test_generator_stdout("yield_from_delegation_with_surrounding_yields", """\
+def inner():
+    yield 2
+    yield 3
+
+def outer():
+    yield 1
+    yield from inner()
+    yield 4
+
+def main():
+    for x in outer():
+        print(x)
+""", "1\n2\n3\n4\n")
+
+    # An EMPTY inner generator (yields nothing at all) — the delegation
+    # loop's while-condition must be false on the very first `_resume`
+    # call, so `yield from` contributes zero values and execution falls
+    # through to whatever follows it in `outer`'s own body, cleanly (no
+    # crash/hang on a sub-generator that never produces anything).
+    test_generator_stdout("yield_from_delegates_to_empty_generator", """\
+def inner():
+    if False:
+        yield 1
+
+def outer():
+    yield from inner()
+    yield 99
+
+def main():
+    for x in outer():
+        print(x)
+""", "99\n")
+
+    # Early exit (`break`) partway through consuming `outer()` from OUTSIDE
+    # — this calls outer's own `_destroy` (coroutine_handle::destroy()) on
+    # a coroutine suspended mid-`co_yield` INSIDE the yield-from delegation
+    # loop's nested block, holding a live handle to `inner`. Per the C++20
+    # coroutine-frame-destruction rules, all locals in scope at that
+    # suspension point (the `_mojogen_sub_guard` RAII wrapper) get
+    # destroyed as part of destroying outer's frame, which must in turn
+    # call inner's own `_destroy` -- confirms delegation composes correctly
+    # with early exit of the OUTER generator, not just normal exhaustion.
+    # (No direct way to observe "inner's _destroy actually ran" from mojo
+    # stdout alone, but a hang or crash here -- e.g. from a double-destroy,
+    # a leaked/never-destroyed inner coroutine frame corrupting later
+    # allocations, or an outright segfault destroying an in-flight frame --
+    # would fail this test's subprocess run/timeout, which is the real
+    # thing being checked.)
+    test_generator_stdout("yield_from_delegation_early_break_cleans_up_both_generators", """\
+def inner():
+    i = 0
+    while i < 100:
+        yield i
+        i = i + 1
+
+def outer():
+    yield from inner()
+
+def main():
+    for x in outer():
+        if x == 3:
+            break
+        print(x)
+""", "0\n1\n2\n")
+
+    # TWO LEVELS of `yield from` (level2 -> level1 -> level0), each level
+    # also yielding its own extra values around the delegation -- confirms
+    # delegation composes/nests correctly (not just a single hop), each
+    # generator's own extern "C" API calling into the next one down's,
+    # entirely resolved via same-translation-unit definitions.
+    test_generator_stdout("yield_from_delegation_two_levels_deep", """\
+def level0():
+    yield 1
+    yield 2
+
+def level1():
+    yield from level0()
+    yield 3
+
+def level2():
+    yield from level1()
+    yield 4
+
+def main():
+    for x in level2():
+        print(x)
+""", "1\n2\n3\n4\n")
+
+    # Parameterized delegation: BOTH the delegating (`outer`) and the
+    # delegated-to (`inner`) generator take parameters, and `outer` passes
+    # an expression (not just a bare literal) built from its own parameter
+    # as one of `inner`'s arguments -- confirms parameter support (from the
+    # Milestone C step 1 parameter-support step) and yield-from delegation
+    # (this step) compose correctly together, not just each in isolation.
+    test_generator_stdout("yield_from_delegation_with_parameters_both_sides", """\
+def inner(start, count):
+    i = start
+    n = 0
+    while n < count:
+        yield i
+        i = i + 1
+        n = n + 1
+
+def outer(base):
+    yield from inner(base + 5, 3)
+
+def main():
+    for x in outer(10):
+        print(x)
+""", "15\n16\n17\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

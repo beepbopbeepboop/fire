@@ -2070,11 +2070,20 @@ async def f():
     yield 1
 """, "async generator function")
 
-    # Milestone B narrowing checks: a generator using `yield from` or
-    # containing try/except is explicitly excluded from the new C++20-
-    # coroutine allowlist (richer generator semantics — Milestone C+, not
-    # this one) and must still hit the same honest whole-module refusal as
-    # before this milestone.
+    # Milestone B narrowing checks: a generator containing try/except is
+    # explicitly excluded from the new C++20-coroutine allowlist (richer
+    # generator semantics — Milestone D, not this one) and must still hit
+    # the same honest whole-module refusal as before this milestone.
+    #
+    # `yield from` itself is NO LONGER blanket-excluded as of Milestone C
+    # step 2 (yield-from delegation) — but `yield from [1, 2, 3]` doesn't
+    # target a call to another generator at all (it targets a list
+    # literal), so it's still refused, just via a different check now (see
+    # GimpleGen._cpp_yield_from's "not isinstance(call, CallExpr)" branch)
+    # instead of the old blanket _generator_quick_eligible disqualification.
+    # See test_generator_yield_from_delegation_compiles_via_cpp_path and its
+    # neighboring still-out-of-scope-shape refusal tests, further below,
+    # for the positive/narrower-negative coverage this step actually adds.
     test_raises("generator_yield_from_honest_fallback", """\
 def f():
     yield from [1, 2, 3]
@@ -2252,6 +2261,160 @@ def main():
             os.unlink(cpp_path)
 
     test_generator_param_shape_compiles_via_cpp_path()
+
+    # Milestone C step 2 (yield-from delegation): the exact target shape
+    # from that step's writeup — `outer` delegates its entire output to
+    # `inner` via a bare `yield from inner()`, both zero-param, both
+    # int64_t-yielding. `inner` must be defined BEFORE `outer` in the
+    # module (see GimpleGen._cpp_yield_from's docstring on the source-order
+    # restriction — self._generator_api is only populated as gen_module's
+    # single compile-attempt pass reaches each generator in source order).
+    # Confirms both halves of the dual-output build compile for real, and
+    # that the .cpp side actually emits the hand-rolled resume/yield/
+    # exhaust delegation loop (not e.g. silently dropping the `yield from`
+    # to nothing). See test_gimple_generator_runner.py for the REAL
+    # behavioral (compile+link+run, actual printed output) counterpart,
+    # including early-break/empty-inner/two-level-delegation/parameterized-
+    # delegation coverage beyond this compile-only smoke test.
+    def test_generator_yield_from_delegation_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def inner():
+    yield 1
+    yield 2
+    yield 3
+
+def outer():
+    yield from inner()
+
+def main():
+    for x in outer():
+        print(x)
+"""
+        name = "generator_yield_from_delegation_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_inner_start' not in cpp_src or '_mojogen_outer_start' not in cpp_src:
+            print(f"FAIL  {name}: .cpp output missing one of the two "
+                  "generators' extern \"C\" API")
+            _FAIL += 1
+            return
+        if '_mojogen_inner_resume(' not in cpp_src or '_mojogen_inner_value(' not in cpp_src:
+            print(f"FAIL  {name}: outer's body doesn't call inner's "
+                  "resume/value -- the delegation loop wasn't actually emitted")
+            _FAIL += 1
+            return
+        if '_mojogen_sub_guard' not in cpp_src:
+            print(f"FAIL  {name}: expected the RAII sub-generator lifetime "
+                  "guard to appear in the .cpp preamble")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_yield_from_delegation_compiles_via_cpp_path()
+
+    # Still-out-of-scope `yield from` shapes: delegating to a generator
+    # that ITSELF failed to compile via the C++20-coroutine path (here,
+    # because its own parameter is a String, out of scope since the
+    # parameter-support step) must fall back to the honest whole-module
+    # refusal, not silently miscompile.
+    test_raises("generator_yield_from_unsupported_sub_generator_honest_fallback", """\
+def inner(s):
+    yield s
+
+def outer():
+    yield from inner("hi")
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: `yield from` targeting a generator defined LATER
+    # in the module. This step's delegation support is deliberately scoped
+    # to same-module, already-compiled-by-the-time-we-get-here generators
+    # (see GimpleGen._cpp_yield_from's docstring) -- a forward reference
+    # isn't yet supported (would need a second, dependency-ordered pass)
+    # and must refuse cleanly rather than miscompile or crash.
+    test_raises("generator_yield_from_forward_reference_honest_fallback", """\
+def outer():
+    yield from inner()
+
+def inner():
+    yield 1
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: the delegating generator's own yield-value type
+    # doesn't agree with the sub-generator's (double vs int64_t) -- Milestone
+    # B's "one consistent scalar type across every yield site" rule extends
+    # naturally to `yield from` sites (see _yield_from_delegate_ctype), and
+    # this must refuse rather than silently truncate/misinterpret bits.
+    test_raises("generator_yield_from_type_mismatch_honest_fallback", """\
+def inner():
+    yield 1.5
+
+def outer():
+    yield from inner()
+    yield 2
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: wrong argument count at the `yield from` call
+    # site for a PARAMETERIZED sub-generator.
+    test_raises("generator_yield_from_argcount_mismatch_honest_fallback", """\
+def inner(a, b):
+    yield a + b
+
+def outer():
+    yield from inner(1)
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
 
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
