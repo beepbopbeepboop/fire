@@ -26,6 +26,7 @@ from mojo_compiler import (
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
     GlobalStmt,
     StructDef, TraitDef,
+    YieldExpr, YieldFromExpr,
     py_tokenize, Parser,
 )
 from module_loader import load_module, get_symbol_type
@@ -1929,6 +1930,100 @@ def _walk_ast(node):
     return result
 
 
+class _UnsupportedGeneratorShape(Exception):
+    """Raised by GimpleGen._gen_cpp_generator_unit (and nothing else) when a
+    generator FunctionDef gen_module already flagged as "worth trying" turns
+    out to need something outside Milestone B's narrow C++20-coroutine
+    allowlist (a statement/expression kind the .cpp emitter doesn't handle,
+    a bare `yield` with no value, `return <value>` inside the body, or a
+    `yield` whose value type can't be pinned to one consistent int64_t/double
+    across every `yield` site). gen_module's pre-pass catches this ONE
+    exception type to decide "fall back to the honest whole-module refusal
+    for this function" — deliberately narrow (not a bare `except Exception`)
+    so a real bug in the emitter still surfaces as a hard failure instead of
+    being silently absorbed into "unsupported shape"."""
+
+
+def _generator_quick_eligible(fn: FunctionDef) -> bool:
+    """Cheap pre-filter before attempting the real (and more expensive)
+    _gen_cpp_generator_unit translation: is_generator, not is_async, no
+    params, and nothing in the body that this milestone explicitly excludes
+    by design (try/except, with, `yield from` — richer generator semantics
+    left for a later milestone; see the module docstring on
+    _UnsupportedGeneratorShape for the rest of the narrowing, which is
+    enforced by actually attempting the translation rather than duplicated
+    here as a second hand-maintained checklist)."""
+    if fn.is_async or not fn.is_generator or fn.params:
+        return False
+    for n in _walk_ast(fn.body):
+        if isinstance(n, (TryStmt, WithStmt, YieldFromExpr)):
+            return False
+    return True
+
+
+def _infer_simple_expr_ctype(e) -> str | None:
+    """Best-effort scalar C++ type of a narrow-generator-body expression —
+    used both to pick each first-assigned local's declared type and to infer
+    a generator's single yielded-value type. Deliberately conservative:
+    returns None (== "don't know, refuse this shape") rather than guessing,
+    for anything beyond plain int/float/bool literals, a bare identifier
+    (assumed int64_t, matching this codegen's own untyped-local default —
+    see _param_ctype's identical default elsewhere in this file), or
+    +-*/ arithmetic/unary ops over those."""
+    if isinstance(e, IntLiteral):
+        return 'int64_t'
+    if isinstance(e, FloatLiteral):
+        return 'double'
+    if isinstance(e, BoolLiteral):
+        return '_Bool'
+    if isinstance(e, IdentExpr):
+        return 'int64_t'
+    if isinstance(e, UnaryOp):
+        return _infer_simple_expr_ctype(e.operand)
+    if isinstance(e, BinaryOp):
+        lt = _infer_simple_expr_ctype(e.left)
+        rt = _infer_simple_expr_ctype(e.right)
+        if lt is None or rt is None:
+            return None
+        if 'double' in (lt, rt):
+            return 'double'
+        return 'int64_t'
+    return None
+
+
+def _c_to_cpp_scalar_type(ctype: str) -> str:
+    """'_Bool' is a valid C99 type but NOT a valid C++ type name (`bool` is)
+    — used wherever a scalar ctype from _infer_simple_expr_ctype/
+    _generator_yield_ctype needs to appear INSIDE the .cpp text (local var
+    decls, the promise's current_value field, yield_value's parameter, the
+    `<base>_value` C++ return type). The .c-side extern declaration for
+    `<base>_value` keeps the original '_Bool' — see gen_module's preamble
+    emission — since that side genuinely is C and bool/_Bool are ABI-
+    identical there (1-byte, same representation), only the SPELLING needs
+    to differ per language."""
+    return 'bool' if ctype == '_Bool' else ctype
+
+
+def _generator_yield_ctype(fn: FunctionDef) -> str | None:
+    """The single scalar C++ type every `yield <value>` in fn's own body
+    must agree on (mixed types, or a bare `yield` with no value, both return
+    None == unsupported). Milestone B only supports numeric generators — see
+    the milestone writeup's "Value type crossing the boundary" section."""
+    ctype = None
+    for n in _walk_ast(fn.body):
+        if isinstance(n, YieldExpr):
+            if n.value is None:
+                return None
+            t = _infer_simple_expr_ctype(n.value)
+            if t is None:
+                return None
+            if ctype is None:
+                ctype = t
+            elif ctype != t:
+                return None
+    return ctype
+
+
 def _struct_name_of(ctype: str) -> str:
     """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
     s = ctype
@@ -2390,6 +2485,42 @@ class GimpleGen:
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
         self._extra_no_mangle: set = set(no_mangle)
+        # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
+        # for every top-level generator in THIS module that gen_module's
+        # pre-pass found to match the narrow supported shape (see
+        # _generator_quick_eligible / _gen_cpp_generator_unit). Populated by
+        # gen_module before Phase 2a's body-gen loop runs, so that loop (and
+        # the free-function forward-decl loop, and call-site/iteration
+        # lowering in _lower_call/_gen_for_iter/_lower_comprehension) can all
+        # key off it consistently instead of re-deriving "is this a
+        # supported generator" in four different places.
+        self._supported_generators: dict[str, FunctionDef] = {}
+        # name -> {'base': <mangled C symbol prefix>, 'value_ctype': <str>}
+        # for every entry in _supported_generators — the exact extern "C" API
+        # names/types the .c side forward-declares and calls into.
+        self._generator_api: dict[str, dict] = {}
+        # cpp_text fragments from _gen_cpp_generator_unit, one per supported
+        # generator, concatenated into self.generated_cpp at the end of
+        # gen_module once the common preamble is known.
+        self._generator_cpp_units: list[str] = []
+        # C temp-var name (as returned by _lower_call's `<base>_start ()`
+        # construction) -> that generator's _generator_api entry — lets any
+        # later consumer of the resulting 'MojoGenerator *' value (a `for`
+        # loop, list()/other iteration-lowering primitive) recover which
+        # extern "C" resume/value/destroy functions to call without having
+        # to re-derive it from the (long gone, by then) original CallExpr.
+        self._generator_var_api: dict[str, dict] = {}
+        # Concatenated .cpp text (one C++20 translation unit) for every
+        # supported generator in this module, or '' if none. Set at the very
+        # end of gen_module, once the API is fully known — the caller
+        # (mojo.py / build_stdlib_dylib.py) reads this attribute off the
+        # GimpleGen instance after calling gen_module to decide whether a
+        # second (g++-compiled) object file needs linking in alongside the
+        # ordinary -fgimple .o. Deliberately NOT threaded through
+        # compile_to_gimple's return value — that 3-arg function's ABI is
+        # pinned (the self-hosted bootstrap forward-declares it), so this
+        # rides along as an attribute instead; see compile_to_gimple_with_cpp.
+        self.generated_cpp: str = ''
         self.do_imports = do_imports
         self.emit_str_pool = emit_str_pool      # only main module emits string pool; imported modules skip it
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
@@ -8787,6 +8918,21 @@ class GimpleGen:
             return 'int', self._new_val('int', '0')
 
         fname_raw = node.func.name
+        # Milestone B: `counter()` where `counter` is a supported generator
+        # function — constructs the coroutine (via its C++20-emitted
+        # `<base>_start()`) WITHOUT running any body code yet, matching real
+        # Python/Mojo "calling a generator function returns a generator
+        # object" semantics. Checked before every other CallExpr special
+        # case below (mirrors how `_gen_for_iter`'s .finditer() structural
+        # check runs before the generic path) since a generator call must
+        # never fall through to the ordinary function-call lowering (there is
+        # no ordinary C function with this name to call — see gen_module's
+        # Phase 2a skip for _supported_generators).
+        if fname_raw in self._generator_api and not node.args:
+            api = self._generator_api[fname_raw]
+            t = self._new_val('MojoGenerator *', f"{api['base']}_start ()")
+            self._generator_var_api[t] = api
+            return 'MojoGenerator *', t
         # A local variable of a callable struct type, invoked like a function:
         # obj(args) → obj.__call__(args).
         if (fname_raw in self.var_types and fname_raw not in self.func_return_types
@@ -10377,6 +10523,8 @@ class GimpleGen:
                     self._elem_types[it_val] = self._elem_types[_old_it_val]
                 if _old_it_val in self._nested_elem_types:
                     self._nested_elem_types[it_val] = self._nested_elem_types[_old_it_val]
+                if _old_it_val in self._generator_var_api:
+                    self._generator_var_api[it_val] = self._generator_var_api[_old_it_val]
             it_type = _resolved_type
 
         if is_range:
@@ -10389,6 +10537,8 @@ class GimpleGen:
             self._compr_dict_loop(node, gen0, res, res_type, it_val)
         elif it_type == 'MojoSet *':
             self._compr_set_loop(node, gen0, res, res_type, it_val)
+        elif it_type == 'MojoGenerator *':
+            self._compr_generator_loop(node, gen0, res, res_type, it_val)
         else:
             self._emit(f"  /* TODO: comprehension over {it_type} */")
 
@@ -10514,6 +10664,35 @@ class GimpleGen:
         self._emit(f"  {idx64} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
+
+    def _compr_generator_loop(self, node, gen0, res, res_type, it_val):
+        """`list(<supported generator call>())` / any other comprehension
+        consuming one — mirrors _compr_list_loop's/_gen_for_generator_iter's
+        resume()/value() convention (see _gen_for_generator_iter's
+        docstring) so a `for` loop and this comprehension-based consumer
+        (which `list(...)`/`set(...)`/etc. all route through via
+        _lower_ctor_from_iterable) get identical, non-duplicated semantics."""
+        api = self._generator_var_api.get(it_val)
+        if api is None:
+            self._emit(f"  /* TODO: comprehension over MojoGenerator* with no known API (unreachable in Milestone B scope) */")
+            return
+        base, vct = api['base'], api['value_ctype']
+        self._declare_var(gen0.target, vct)
+        bb_cond = self._new_bb(); bb_body = self._new_bb()
+        bb_post = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        cond_t = self._new_val('_Bool', f"{base}_resume ({it_val})")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        self._emit_label(bb_body)
+        val = self._new_val(vct, f"{base}_value ({it_val})")
+        self._emit(f"  {gen0.target} = {val};")
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+        self._emit(f"  {base}_destroy ({it_val});")
 
     def _compr_str_loop(self, node, gen0, res, res_type, it_val):
         self._declare_var(gen0.target, 'char')
@@ -12967,6 +13146,18 @@ class GimpleGen:
                 self._gen_for_dict(var, it_val, node.body)
             elif it_type == 'MojoSet *':
                 self._gen_for_set(var, it_val, node.body)
+            elif it_type == 'MojoGenerator *':
+                # Milestone B: `for x in <supported generator call>():` —
+                # checked before the generic user-struct __iter__ protocol
+                # branch below (which would otherwise treat MojoGenerator*
+                # like any other pointer-shaped struct type and look for a
+                # nonexistent MojoGenerator___has_next__/__next__).
+                api = self._generator_var_api.get(it_val)
+                if api is not None:
+                    self._gen_for_generator_iter(var, it_val, api, node.body)
+                else:
+                    _debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
+                    self._emit_unsupported_iter(it_type, node)
             elif it_type.endswith(' *') or it_type.endswith('*'):
                 # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
                 base = _struct_name_of(it_type)
@@ -13459,6 +13650,41 @@ class GimpleGen:
         return '\n'.join(lines)
 
     # ── Struct iterator protocol (for x in obj where obj has __iter__) ────
+
+    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list):
+        """for x in <supported generator call>(): ... — <base>_resume()/
+        <base>_value() deliberately mirror _gen_for_struct_iter's existing
+        __has_next__/__next__ convention immediately below (resume both
+        advances the coroutine to its next co_yield/completion AND reports
+        whether one was produced; value reads the most recently produced
+        one without advancing) — the established "returns 2 things" scheme
+        this codegen already uses for iteration, reused rather than
+        invented fresh for generators."""
+        base, vct = api['base'], api['value_ctype']
+        self._declare_var(var, vct)
+
+        bb_cond  = self._new_bb(); bb_body  = self._new_bb()
+        bb_post  = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+
+        self._emit_label(bb_cond)
+        cond_t = self._new_val('_Bool', f"{base}_resume ({gen_val})")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+        self._loop_depth += 1
+        self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
+        val = self._new_val(vct, f"{base}_value ({gen_val})")
+        self._emit(f"  {var} = {val};")
+        self.loop_stack.append((bb_post, bb_after))
+        for s in body:
+            self.gen_stmt(s)
+        self.loop_stack.pop()
+        self._loop_depth -= 1
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+        self._emit(f"  {base}_destroy ({gen_val});")
 
     def _gen_for_struct_iter(self, var: str, struct_type: str,
                               obj_val: str, body: list):
@@ -14483,6 +14709,220 @@ class GimpleGen:
         ]
         return '\n'.join(lines)
 
+    # ── Generator codegen (Milestone B: narrow C++20-coroutine path) ───────
+    #
+    # Everything below is a SEPARATE, self-contained expression/statement-to-
+    # C++-text emitter for the one narrow generator shape gen_module's
+    # pre-pass allows onto this path (see _generator_quick_eligible /
+    # _UnsupportedGeneratorShape) — deliberately NOT routed through
+    # lower_expr/gen_stmt's GIMPLE machinery (self.decls/body_lines/bb
+    # labels/var_types/...), because that machinery exists to satisfy
+    # -fgimple's restricted single-static-assignment-ish subset of C, which
+    # doesn't apply to the plain, ordinary-control-flow C++20 this method
+    # emits into its own translation unit. Reuses this file's op tables
+    # (_GD_BIN_OPS) so operator spelling agrees with the GIMPLE path, but
+    # writes its own tiny recursive text emitter for the rest, restricted to
+    # exactly the node kinds the target shape needs — anything else raises
+    # _UnsupportedGeneratorShape, which gen_module's pre-pass catches to fall
+    # back to the existing honest whole-module refusal.
+
+    def _cpp_expr(self, e) -> str:
+        if isinstance(e, IntLiteral):
+            return str(e.value)
+        if isinstance(e, FloatLiteral):
+            s = repr(e.value)
+            if '.' not in s and 'e' not in s.lower():
+                s += '.0'
+            return s
+        if isinstance(e, BoolLiteral):
+            return 'true' if e.value else 'false'
+        if isinstance(e, IdentExpr):
+            return e.name
+        if isinstance(e, UnaryOp):
+            op = {'not': '!'}.get(e.op, e.op)
+            return f"({op}{self._cpp_expr(e.operand)})"
+        if isinstance(e, BinaryOp):
+            op = _GD_BIN_OPS.get(e.op, e.op)
+            return f"({self._cpp_expr(e.left)} {op} {self._cpp_expr(e.right)})"
+        if isinstance(e, CompareChain):
+            links = []
+            for i, op in enumerate(e.ops):
+                a = self._cpp_expr(e.operands[i])
+                b = self._cpp_expr(e.operands[i + 1])
+                links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
+            return '(' + ' && '.join(links) + ')'
+        raise _UnsupportedGeneratorShape(
+            f"unsupported expression in generator body: {type(e).__name__}")
+
+    def _cpp_stmt(self, s, declared: dict, indent: str) -> list[str]:
+        if isinstance(s, PassStmt):
+            return []
+        if isinstance(s, ExprStmt):
+            if isinstance(s.value, YieldExpr):
+                if s.value.value is None:
+                    raise _UnsupportedGeneratorShape(
+                        "bare `yield` (no value) not supported")
+                return [f"{indent}co_yield {self._cpp_expr(s.value.value)};"]
+            raise _UnsupportedGeneratorShape(
+                "unsupported expression statement in generator body "
+                f"({type(s.value).__name__})")
+        if isinstance(s, AssignStmt):
+            if not isinstance(s.target, IdentExpr):
+                raise _UnsupportedGeneratorShape(
+                    "only a plain identifier assignment target is supported")
+            name = s.target.name
+            val = self._cpp_expr(s.value)
+            if name not in declared:
+                ctype = _infer_simple_expr_ctype(s.value)
+                if ctype is None:
+                    raise _UnsupportedGeneratorShape(
+                        f"can't infer a scalar type for local '{name}'")
+                declared[name] = ctype
+                return [f"{indent}{_c_to_cpp_scalar_type(ctype)} {name} = {val};"]
+            return [f"{indent}{name} = {val};"]
+        if isinstance(s, AugAssignStmt):
+            if not isinstance(s.target, IdentExpr) or s.target.name not in declared:
+                raise _UnsupportedGeneratorShape(
+                    "augmented assignment to an undeclared/non-simple target")
+            op = _GD_BIN_OPS.get(s.op, s.op)
+            val = self._cpp_expr(s.value)
+            name = s.target.name
+            return [f"{indent}{name} = {name} {op} {val};"]
+        if isinstance(s, WhileStmt):
+            if s.else_body:
+                raise _UnsupportedGeneratorShape("while/else not supported")
+            cond = self._cpp_expr(s.condition)
+            lines = [f"{indent}while ({cond}) {{"]
+            for inner in s.body:
+                lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
+        if isinstance(s, IfStmt):
+            cond = self._cpp_expr(s.condition)
+            lines = [f"{indent}if ({cond}) {{"]
+            for inner in s.then_body:
+                lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            for econd, ebody in s.elifs:
+                lines.append(f"{indent}else if ({self._cpp_expr(econd)}) {{")
+                for inner in ebody:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+            if s.else_body:
+                lines.append(f"{indent}else {{")
+                for inner in s.else_body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+            return lines
+        if isinstance(s, BreakStmt):
+            return [f"{indent}break;"]
+        if isinstance(s, ContinueStmt):
+            return [f"{indent}continue;"]
+        if isinstance(s, ReturnStmt):
+            if s.value is not None:
+                raise _UnsupportedGeneratorShape(
+                    "`return <value>` inside a generator is not supported "
+                    "(a generator's `return` ends iteration with no value, "
+                    "unlike an ordinary function's `return`)")
+            return [f"{indent}co_return;"]
+        raise _UnsupportedGeneratorShape(
+            f"unsupported statement in generator body: {type(s).__name__}")
+
+    def _gen_cpp_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str]:
+        """Translate ONE Milestone-B-supported generator FunctionDef into a
+        self-contained C++20 coroutine fragment. Returns (cpp_text,
+        value_ctype, base_name). Raises _UnsupportedGeneratorShape for
+        anything gen_module's pre-pass didn't already rule out via
+        _generator_quick_eligible — this method (not a second hand-written
+        checklist) is the actual authority on "is this shape compilable",
+        so gen_module's pre-pass calls it directly and catches that one
+        exception type to decide supported-vs-refused.
+
+        Calling convention (opaque handle + 4 extern "C" functions): a
+        std::coroutine_handle<Promise> IS already just a wrapped pointer to
+        the compiler-allocated coroutine frame (.address()/from_address()
+        round-trip it losslessly), so the opaque `MojoGenerator *` the C side
+        sees is literally that address reinterpret_cast through an
+        incomplete `struct MojoGenerator` — no separate heap-allocated
+        wrapper object is needed.
+          <base>_start(void)          -> MojoGenerator*  (constructs, does
+                                          NOT run any body code yet --
+                                          initial_suspend() is suspend_always)
+          <base>_resume(MojoGenerator*) -> _Bool  (advances to the next
+                                          co_yield or co_return; mirrors this
+                                          codegen's existing __has_next__
+                                          convention for user __iter__
+                                          structs — see _gen_for_struct_iter
+                                          — reused rather than inventing a
+                                          new "returns 2 things" scheme)
+          <base>_value(MojoGenerator*)  -> value_ctype  (the value most
+                                          recently produced by _resume;
+                                          mirrors __next__'s role in that
+                                          same existing convention)
+          <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
+        """
+        value_ctype = _generator_yield_ctype(fn)
+        if value_ctype is None:
+            raise _UnsupportedGeneratorShape(
+                f"{fn.name}: every `yield` must carry a value, and all "
+                "values must agree on one scalar type (int64_t/double/_Bool)")
+        base = f"_mojogen_{_safe_name(fn.name)}"
+        declared: dict[str, str] = {}
+        body_lines: list[str] = []
+        for s in fn.body:
+            body_lines.extend(self._cpp_stmt(s, declared, '    '))
+
+        promise, handle_t, task, impl = (
+            f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
+        cpp_bool = 'bool'
+        # value_ctype (returned below) is the C-side spelling — kept as-is
+        # ('_Bool' included) since that's what the .c/.ci extern declaration
+        # for `<base>_value` needs. Every occurrence INSIDE this .cpp text
+        # must use cpp_value_ctype instead — '_Bool' isn't a valid C++ type
+        # name (see _c_to_cpp_scalar_type's docstring); int64_t/double are
+        # spelled identically in both languages so this is a no-op for them.
+        cpp_value_ctype = _c_to_cpp_scalar_type(value_ctype)
+        lines = [
+            f"struct {promise};",
+            f"using {handle_t} = std::coroutine_handle<{promise}>;",
+            f"struct {task} {{",
+            f"    using promise_type = {promise};",
+            f"    {handle_t} h;",
+            f"}};",
+            f"struct {promise} {{",
+            f"    {cpp_value_ctype} current_value{{}};",
+            f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
+            f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
+            f"    std::suspend_always final_suspend() noexcept {{ return {{}}; }}",
+            f"    void unhandled_exception() {{ std::terminate(); }}",
+            f"    std::suspend_always yield_value({cpp_value_ctype} v) {{ current_value = v; return {{}}; }}",
+            f"    void return_void() {{}}",
+            f"}};",
+            f"static {task} {impl} (void) {{",
+            *body_lines,
+            f"    co_return;",
+            f"}}",
+            f'extern "C" MojoGenerator *{base}_start (void) {{',
+            f"    {task} t = {impl} ();",
+            f"    return reinterpret_cast<MojoGenerator *>(t.h.address());",
+            f"}}",
+            f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
+            f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
+            f"    if (h.done()) return false;",
+            f"    h.resume();",
+            f"    return !h.done();",
+            f"}}",
+            f'extern "C" {cpp_value_ctype} {base}_value (MojoGenerator *g) {{',
+            f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
+            f"    return h.promise().current_value;",
+            f"}}",
+            f'extern "C" void {base}_destroy (MojoGenerator *g) {{',
+            f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
+            f"    if (h) h.destroy();",
+            f"}}",
+        ]
+        return '\n'.join(lines), value_ctype, base
+
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
@@ -14523,6 +14963,36 @@ class GimpleGen:
             if isinstance(n, FunctionDef):
                 if n.is_generator: _generator_names.add(n.name)
                 if n.is_async: _async_names.add(n.name)
+
+        # Milestone B narrow allowlist: a TOP-LEVEL (not a struct/class
+        # method, not nested inside another def — those stay refused, out of
+        # scope for this milestone) generator matching
+        # _generator_quick_eligible is given a real shot at the new C++20-
+        # coroutine path via _gen_cpp_generator_unit (the single source of
+        # truth for the finer-grained "is this shape actually compilable"
+        # check — see _UnsupportedGeneratorShape's docstring). Anything that
+        # doesn't pass keeps falling into the existing honest whole-module
+        # refusal below, completely unchanged. Async functions (is_async, at
+        # all — including `async def f(): yield x` async generators) are
+        # NEVER eligible: this milestone only replaces the plain-generator
+        # refusal, not the async one.
+        for s in stmts:
+            if not (isinstance(s, FunctionDef) and s.name in _generator_names
+                    and s.name not in _async_names):
+                continue
+            if not _generator_quick_eligible(s):
+                continue
+            try:
+                cpp_text, value_ctype, base = self._gen_cpp_generator_unit(s)
+            except _UnsupportedGeneratorShape as e:
+                _debug_note(f'generator {s.name!r} not eligible for C++ '
+                            'coroutine path, falling back to honest refusal', e)
+                continue
+            self._supported_generators[s.name] = s
+            self._generator_api[s.name] = {'base': base, 'value_ctype': value_ctype}
+            self._generator_cpp_units.append(cpp_text)
+            _generator_names.discard(s.name)
+
         _gen_only = sorted(_generator_names - _async_names)
         _async_only = sorted(_async_names - _generator_names)
         _async_gen = sorted(_generator_names & _async_names)
@@ -16437,6 +16907,15 @@ class GimpleGen:
 
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
+                if stmt.name in self._supported_generators:
+                    # Milestone B: this function's body was already fully
+                    # translated to C++20 coroutine text by the pre-pass
+                    # above (self._generator_cpp_units) — it gets NO ordinary
+                    # -fgimple C body here at all; only its extern "C" API
+                    # forward declarations appear in this .c/.ci output (see
+                    # the preamble emission and the free-function forward-
+                    # decl loop below, both gated the same way).
+                    continue
                 for ci in self._all_closures.get(stmt.name, {}).values():
                     _emit_closure_recursive(ci, stmt.name)
                 self._lambda_parts = []
@@ -17889,8 +18368,28 @@ class GimpleGen:
 
         # Forward declarations: free functions (skip main — handled specially)
         func_defs = [s for s in stmts if isinstance(s, FunctionDef)]
+        if self._supported_generators:
+            # Milestone B: the extern "C" API (opaque handle + start/resume/
+            # value/destroy) for every supported generator in this module —
+            # the ONLY forward declarations these functions get (they have
+            # no ordinary -fgimple C body/prototype at all; see the Phase 2a
+            # skip above). One shared opaque MojoGenerator typedef covers
+            # every generator regardless of its yielded-value type — see
+            # _gen_cpp_generator_unit's docstring for why a bare
+            # reinterpret_cast of the coroutine_handle's own address is
+            # enough, no separate wrapper allocation needed.
+            parts.append('typedef struct MojoGenerator MojoGenerator;')
+            for _gname, _api in self._generator_api.items():
+                _base, _vct = _api['base'], _api['value_ctype']
+                parts.append(f"extern MojoGenerator *{_base}_start (void);")
+                parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
+                parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
+                parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
+            parts.append('')
         for fn in func_defs:
             if fn.name == 'main':
+                continue
+            if fn.name in self._supported_generators:
                 continue
             ret    = self.func_return_types.get(fn.name, 'int64_t')
             # If any param is *args, the call convention uses a packed MojoList*
@@ -18162,6 +18661,23 @@ class GimpleGen:
             parts.append("}")
             parts.append('')
 
+        if self._generator_cpp_units:
+            cpp_parts = [
+                '/* Generated by gimple_codegen.py (Milestone B: C++20-coroutine',
+                '   translation of this module\'s supported generator function(s)) */',
+                '#include <coroutine>',
+                '#include <cstdint>',
+                '#include <exception>',
+                '#include <mojo_runtime.h>',
+                '',
+                'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
+                '',
+            ]
+            for unit in self._generator_cpp_units:
+                cpp_parts.append(unit)
+                cpp_parts.append('')
+            self.generated_cpp = '\n'.join(cpp_parts)
+
         return self._dedup_variadic_externs(parts)
 
     @staticmethod
@@ -18325,6 +18841,46 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
     return gen.gen_module(stmts)
+
+
+def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
+                                filename: str = "") -> tuple[str, str]:
+    """Like compile_to_gimple, but ALSO returns the companion .cpp text
+    (Milestone B's C++20-coroutine translation of this module's supported
+    generator function(s), '' if there are none). A separate entry point
+    rather than changing compile_to_gimple's own return shape — that
+    function's exact 3-arg-in/1-str-out signature is pinned (the self-hosted
+    bootstrap forward-declares it and compile_to_gimple_cached's CAS-cache
+    layer stores exactly one '.ci' text blob per key), so this is purely
+    additive. NOT CAS-cached (unlike compile_to_gimple_cached) — only called
+    by build paths that already checked (via a cheap pre-scan, no full
+    compile) that this module actually contains a supported generator, so
+    the extra work only happens on the rare module that needs it."""
+    _emitted_unresolved_stub_syms.clear()
+    tokens = py_tokenize(mojo_src)
+    stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
+    gen = GimpleGen(do_imports=do_imports)
+    gen._current_filename = filename
+    if do_imports:
+        gen._record_sys_path_inserts(
+            mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
+    c_code = gen.gen_module(stmts)
+    return c_code, gen.generated_cpp
+
+
+def module_may_have_supported_generator(mojo_src: str) -> bool:
+    """Cheap, purely-textual pre-scan: does this source even MENTION `yield`
+    outside a string/comment? Used by build_executable/build_stdlib_dylib.py
+    to decide whether a module is worth routing through the uncached
+    compile_to_gimple_with_cpp at all (the overwhelmingly common case, no
+    `yield` anywhere, keeps using the existing cached compile_to_gimple_cached
+    path — see that function's own docstring — completely unchanged). A
+    false positive here just costs one extra (uncached) compile attempt that
+    then finds generated_cpp == '' and behaves exactly like the plain path;
+    a false negative would incorrectly skip Milestone B's new path entirely,
+    so this intentionally over-triggers (a dumb substring check) rather than
+    under-triggers."""
+    return 'yield' in mojo_src
 
 
 def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:

@@ -296,7 +296,22 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
         # do_imports=True: inline transitive closure for a standalone binary
-        c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+        #
+        # Milestone B (C++20-coroutine generator codegen): a module that
+        # mentions `yield` at all MIGHT contain a generator this codegen can
+        # now compile natively (gimple_codegen.compile_to_gimple_with_cpp) —
+        # cheaply pre-screened by module_may_have_supported_generator so the
+        # overwhelmingly common case (no `yield` anywhere) keeps using the
+        # existing CAS-cached compile_to_gimple_cached path completely
+        # unchanged. cpp_code is '' whenever there's no ACTUAL supported
+        # generator (module mentions `yield` but it's an unsupported shape,
+        # or a false-positive textual match) — same single-.o build below.
+        cpp_code = ''
+        if gimple_codegen.module_may_have_supported_generator(src):
+            c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                src, do_imports=True, filename=input_file)
+        else:
+            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -322,6 +337,32 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
             return False
+
+        # Milestone B: this module contains at least one supported generator
+        # — compile its companion .cpp (Milestone A's g++ plumbing) into its
+        # OWN object file and link it in alongside the ordinary -fgimple .o
+        # (Milestone A's link_executable(cxx=True) selects g++ as the final
+        # link driver so the C++ runtime/coroutine-support symbols resolve;
+        # every individual .c/.ci compile step above is completely
+        # unaffected — cxx=True only changes the driver for this final link).
+        # Otherwise (the overwhelming common case) extra_objs/cxx_link stay
+        # at their defaults and this is byte-for-byte the pre-Milestone-B
+        # single-.o build.
+        extra_objs = []
+        cxx_link = False
+        if cpp_code:
+            cpp_file = f"{basename}_gen.cpp"
+            with open(cpp_file, "w") as f:
+                f.write(cpp_code)
+            gen_o = f"{basename}_gen.o"
+            cpp_cmd = ([_GXX_BIN] + cg_flags +
+                       ["-std=c++20", "-I", runtime_dir, "-c", "-o", gen_o, cpp_file])
+            result = subprocess.run(cpp_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Generator (.cpp) compilation failed: {result.stderr}", file=sys.stderr)
+                return False
+            extra_objs = [gen_o]
+            cxx_link = True
 
         # Link executable with CPython runtime
         exe_file = output if output else basename
@@ -352,7 +393,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         except:
             py_ldflags = []
 
-        result = link_executable([o_file, runtime_o], exe_file, py_ldflags)
+        result = link_executable([o_file, runtime_o] + extra_objs, exe_file, py_ldflags, cxx=cxx_link)
         if result.returncode != 0:
             print(f"Linking failed: {result.stderr}", file=sys.stderr)
             return False

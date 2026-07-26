@@ -1991,16 +1991,24 @@ f()
 """, "defined more than once across mutually-exclusive if/elif/else branches")
 
     # Generator function (`yield`) honest-fallback: this codegen has no
-    # suspend/resume state-machine transform, so a generator function must
-    # be refused clearly (RuntimeError from gen_module/compile_to_gimple)
-    # rather than silently miscompiled into a single straight-line C
-    # function that just drops the yield. Milestone 1 of
-    # bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # general suspend/resume state-machine transform, so a generator
+    # function outside Milestone B's narrow C++20-coroutine allowlist (see
+    # gimple_codegen.py's _generator_quick_eligible/_gen_cpp_generator_unit)
+    # must still be refused clearly (RuntimeError from
+    # gen_module/compile_to_gimple) rather than silently miscompiled into a
+    # single straight-line C function that just drops the yield. Milestone 1
+    # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
     # mojo_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
-    # and gimple_codegen.py's gen_module pre-pass.
+    # and gimple_codegen.py's gen_module pre-pass. A generator TAKING A
+    # PARAMETER is deliberately out of Milestone B's scope (the allowlist
+    # requires zero params — see the milestone writeup's "Constraints"
+    # section), so it's the shape used here instead of the old bare
+    # `def f(): yield 1` (which Milestone B's C++20-coroutine path now
+    # actually compiles — see generator_simple_shape_compiles_via_cpp_path
+    # below for that positive case).
     test_raises("generator_function_honest_fallback", """\
-def f():
-    yield 1
+def f(n):
+    yield n
 """, "generator function")
 
     # Async function (`async def`) honest-fallback: mirrors the generator
@@ -2024,6 +2032,107 @@ async def f():
 async def f():
     yield 1
 """, "async generator function")
+
+    # Milestone B narrowing checks: a generator using `yield from` or
+    # containing try/except is explicitly excluded from the new C++20-
+    # coroutine allowlist (richer generator semantics — Milestone C+, not
+    # this one) and must still hit the same honest whole-module refusal as
+    # before this milestone.
+    test_raises("generator_yield_from_honest_fallback", """\
+def f():
+    yield from [1, 2, 3]
+""", "generator function")
+
+    test_raises("generator_try_except_honest_fallback", """\
+def f():
+    try:
+        yield 1
+    except:
+        pass
+""", "generator function")
+
+    # Mixed yield-value types (int then float): passes the cheap
+    # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
+    # but _gen_cpp_generator_unit's own _generator_yield_ctype check must
+    # still reject it (Milestone B requires one consistent scalar type
+    # across every `yield` in the body) and gen_module's pre-pass must fall
+    # back to the honest refusal cleanly — exercises the
+    # _UnsupportedGeneratorShape catch path itself, not just the cheap
+    # pre-filter.
+    test_raises("generator_mixed_yield_types_honest_fallback", """\
+def f():
+    yield 1
+    yield 1.5
+""", "generator function")
+
+    # Milestone B positive case: the ONE generator shape this codegen now
+    # actually compiles — no params, no try/except/with, no `yield from` —
+    # gets routed to the new C++20-coroutine .cpp path instead of the
+    # honest refusal above. Confirms BOTH halves of the dual-output build:
+    # the .c/.ci side (gcc -fgimple -fsyntax-only) declares the extern "C"
+    # API and has NO ordinary body for `counter` at all, and the companion
+    # .cpp side (g++ -std=c++20 -fsyntax-only) is real, syntactically valid
+    # C++20 coroutine code. See test_gimple_generator_runner.py for the
+    # REAL behavioral (compile+link+run) counterpart of this same shape.
+    def test_generator_simple_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter():
+    i = 0
+    while i < 5:
+        yield i
+        i = i + 1
+
+def main():
+    for x in counter():
+        print(x)
+"""
+        name = "generator_simple_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start' not in c_src or 'MojoGenerator' not in c_src:
+            print(f"FAIL  {name}: .c/.ci output missing extern \"C\" generator API decls")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_simple_shape_compiles_via_cpp_path()
 
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
