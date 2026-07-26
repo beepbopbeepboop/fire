@@ -2048,18 +2048,29 @@ def g(s):
 print(list(g("hi")))
 """, "generator function")
 
-    # Async function (`async def`) honest-fallback: mirrors the generator
-    # fallback immediately above. This codegen has no event loop /
-    # suspend-resume codegen, so an async function must be refused clearly
-    # (RuntimeError from gen_module/compile_to_gimple) rather than silently
-    # compiled as an ordinary synchronous function. Milestone 3a of
-    # bugs/INTERP_generator_yield_entirely_unimplemented.md — see
-    # mojo_compiler.py's AwaitExpr/FunctionDef.is_async and
-    # gimple_codegen.py's gen_module pre-pass (combined with the generator
-    # check above into one pass/one raise).
-    test_raises("async_function_honest_fallback", """\
+    # Async function (`async def`) honest-fallback: originally (before the
+    # compiled-path async/await codegen project's Step B) this codegen had
+    # NO event loop / suspend-resume codegen at all, so EVERY `async def`
+    # was refused unconditionally — this exact case (`async def f(): return
+    # 1`, no params, no await) was that blanket refusal's own example. Step
+    # B narrowed that refusal (see _async_quick_eligible/_gen_cpp_async_unit
+    # in gimple_codegen.py): a parameterless async function whose body is
+    # just a scalar `return <expr>` and contains no `await` now genuinely
+    # compiles via a real C++20-coroutine promise_type — see
+    # test_async_simple_shape_compiles_via_cpp_path (this exact shape, just
+    # with a consuming call site added so it's a complete module) and
+    # test_gimple_async_runner.py's real compile+link+run counterpart. An
+    # `await` anywhere in the body is still refused — see
+    # async_function_with_await_honest_fallback further below — that
+    # remains this codegen's honest boundary for "genuinely no event loop /
+    # suspend-resume codegen for a real await, yet" (Step C+'s job).
+    test_raises("async_function_with_await_still_refused_general_case", """\
 async def f():
     return 1
+
+async def g():
+    x = await f()
+    return x
 """, "async function")
 
     # Async generator (`async def f(): yield x`) honest-fallback: both flags
@@ -3066,6 +3077,145 @@ def f():
     with C():
         yield 1
 """, "generator function")
+
+    # ── Step B (compiled-path async/await codegen project) ─────────────────
+    # The exact target shape from that step's writeup: a parameterless
+    # `async def` whose body is just `return 42`, called from `main` and its
+    # result printed — the smallest possible real compiled async function.
+    # Mirrors test_generator_simple_shape_compiles_via_cpp_path's shape
+    # exactly (compile via compile_to_gimple_with_cpp, assert both halves of
+    # the dual-output build are real gcc-fsyntax-only/g++-fsyntax-only-clean
+    # C/C++), plus asserts the async-specific extern "C" API names (no
+    # `_resume`, unlike the generator convention — see
+    # GimpleGen._gen_cpp_async_unit's docstring) actually appear. See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run,
+    # actual printed output, and the laziness/"doesn't run immediately")
+    # counterpart of this same shape.
+    def test_async_simple_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+async def f():
+    return 42
+
+def main():
+    x = f()
+    print(x)
+"""
+        name = "async_simple_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        missing = [s for s in ('_mojoasync_f_start', '_mojoasync_f_value',
+                                '_mojoasync_f_destroy', '_mojoasync_f_is_done',
+                                'MojoAsync')
+                   if s not in c_src]
+        if missing:
+            print(f"FAIL  {name}: .c/.ci output missing async extern \"C\" API "
+                  f"decl(s): {missing}")
+            _FAIL += 1
+            return
+        if '_mojoasync_f_resume' in c_src or '_mojoasync_f_resume' in cpp_src:
+            print(f"FAIL  {name}: async API should have NO `_resume` (unlike "
+                  "the generator convention) -- see _gen_cpp_async_unit's "
+                  "docstring")
+            _FAIL += 1
+            return
+        if 'mojo_async_schedule_ready' not in c_src or 'mojo_async_run_until_complete' not in c_src:
+            print(f"FAIL  {name}: call-site lowering should drive the async "
+                  "call to completion via Step A's own scheduler API")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_simple_shape_compiles_via_cpp_path()
+
+    # Narrowing checks: every out-of-scope async shape from this step's plan
+    # must still hit the honest whole-module refusal, not be silently
+    # (mis)compiled. async_function_honest_fallback/
+    # async_generator_function_honest_fallback above already cover the two
+    # broadest categories (a plain `async def` at all, and an async
+    # generator); these add the specific narrower shapes Step B's own
+    # eligibility narrowing needs to keep refusing even though a bare
+    # `async def f(): return <scalar>` now compiles.
+
+    # A parameter — this step's scope is deliberately narrower than even
+    # Milestone B's initial generator scope (which supported params from the
+    # start) — see _async_quick_eligible's docstring.
+    test_raises("async_function_with_param_honest_fallback", """\
+async def f(x):
+    return x
+""", "async function")
+
+    # `await` anywhere in the body — Step C+'s job, not this step's.
+    test_raises("async_function_with_await_honest_fallback", """\
+async def f():
+    return 1
+
+async def h():
+    x = await f()
+    return x
+""", "async function")
+
+    # A non-scalar return value (a string) — mirrors the generator
+    # project's own honest-fallback precedent for a non-scalar yielded
+    # value.
+    test_raises("async_function_string_return_honest_fallback", """\
+async def f():
+    return "hi"
+""", "async function")
+
+    # No return value at all (`pass`) — this step requires a genuine scalar
+    # result; a bare `return`/implicit fall-through isn't in scope (unlike
+    # the generator convention, where a value-less `return` is exactly the
+    # supported case — the two are deliberately opposite here).
+    test_raises("async_function_no_return_value_honest_fallback", """\
+async def f():
+    pass
+""", "async function")
+
+    # Two `return`s that don't agree on one consistent scalar type — the
+    # async counterpart of generator_mixed_yield_types_honest_fallback.
+    test_raises("async_function_mixed_return_types_honest_fallback", """\
+async def f():
+    if True:
+        return 1
+    return 1.5
+""", "async function")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

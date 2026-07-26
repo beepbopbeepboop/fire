@@ -364,6 +364,36 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
             extra_objs = [gen_o]
             cxx_link = True
 
+            # Step B (compiled-path async/await codegen): this module's
+            # generated .c/.ci preamble includes <mojo_async_runtime.h>
+            # exactly when gimple_codegen's async pre-pass actually
+            # compiled at least one `async def` (see GimpleGen.gen_module's
+            # "if self._supported_async:" preamble block) — a reliable
+            # textual proxy for "does this build need Step A's scheduler
+            # linked in", same cheap-textual-check spirit as
+            # module_may_have_supported_generator's own pre-scan, just
+            # applied to the ALREADY-GENERATED C instead of the raw source
+            # (no separate flag threaded out of gen_module needed). Compiled
+            # with g++ (same toolchain as the generator .cpp unit, and for
+            # the same reason: real C++20 coroutines), linked in as its own
+            # object file alongside mojo_runtime.o and the generator/async
+            # .cpp unit's own object — mirrors mojo_runtime.c always being
+            # linked in for ordinary programs, just conditional on actually
+            # needing it (this repo's own runtime/mojo_async_runtime.cpp has
+            # never been linked into a real mojo.py build before this step —
+            # Step A only proved it out via test_async_runtime_scaffold.py's
+            # own hand-written, separately-linked test binary).
+            if 'mojo_async_runtime.h' in c_code:
+                async_rt_src = os.path.join(runtime_dir, 'mojo_async_runtime.cpp')
+                async_rt_o = f"{basename}_async_runtime.o"
+                art_cmd = ([_GXX_BIN] + cg_flags +
+                           ["-std=c++20", "-I", runtime_dir, "-c", "-o", async_rt_o, async_rt_src])
+                result = subprocess.run(art_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"Async runtime compilation failed: {result.stderr}", file=sys.stderr)
+                    return False
+                extra_objs.append(async_rt_o)
+
         # Link executable with CPython runtime
         exe_file = output if output else basename
         # Get Python library path
