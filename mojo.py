@@ -28,8 +28,9 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-from build_config import find_gcc
+from build_config import find_gcc, find_gxx
 _GCC_BIN = find_gcc()
+_GXX_BIN = find_gxx()
 
 def _extract_codegen_flags(args: list):
     """Pull optimization (-O0/-O1/-O2/-O3/-Os/-Oz/-Og) and debug (-g/-g0../-g3)
@@ -263,6 +264,23 @@ def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None
         import traceback
         traceback.print_exc(file=sys.stderr)
 
+def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
+    """Run the final link step for an executable — factored out of
+    build_executable so the exact link-driver-selection logic is reusable by
+    any caller linking in a non-gcc-compiled object (e.g. a C++-derived
+    generator-coroutine object from the coroutine codegen path — see
+    build_config.find_gxx()'s docstring; not yet produced by any real build,
+    this milestone is toolchain plumbing only).
+
+    cxx=True selects g++ (find_gxx()) as the link driver instead of gcc for
+    just this invocation. Every individual .c/.ci compile step upstream is
+    unaffected — only the final link driver choice changes. Defaults to
+    cxx=False (gcc), so build_executable's ordinary all-C link is unchanged."""
+    driver = _GXX_BIN if cxx else _GCC_BIN
+    link_cmd = [driver, "-o", exe_file] + list(objs) + list(extra_ldflags or [])
+    return subprocess.run(link_cmd, capture_output=True, text=True)
+
+
 def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None):
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0]
@@ -334,10 +352,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         except:
             py_ldflags = []
 
-        link_cmd = [_GCC_BIN, "-o", exe_file, o_file, runtime_o]
-        link_cmd.extend(py_ldflags)
-
-        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        result = link_executable([o_file, runtime_o], exe_file, py_ldflags)
         if result.returncode != 0:
             print(f"Linking failed: {result.stderr}", file=sys.stderr)
             return False

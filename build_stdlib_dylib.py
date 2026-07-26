@@ -441,18 +441,27 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     return out
 
 
-def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None):
+def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None, link_driver=None):
     """Platform dylib link command. undefined=True allows unresolved symbols
-    (resolved at load from other dylibs, via dyld dynamic lookup)."""
+    (resolved at load from other dylibs, via dyld dynamic lookup).
+
+    link_driver: override the link-time driver binary (e.g. find_gxx()'s g++)
+    used in place of `gcc` for just this final link invocation. Every
+    individual module's .c -> .o compile step is unaffected — this only
+    matters when `objs` includes at least one C++-derived object (the
+    generator-coroutine codegen path, not yet wired into any real build —
+    see build_config.find_gxx()'s docstring). Defaults to `gcc`, so ordinary
+    all-C builds are unchanged."""
+    driver = link_driver or gcc
     if platform.system() == 'Darwin':
-        cmd = [gcc, '-dynamiclib',
+        cmd = [driver, '-dynamiclib',
                '-install_name', '@rpath/' + os.path.basename(out), '-o', out]
         if rpath:
             cmd += ['-Wl,-rpath,' + rpath]
         if undefined:
             cmd += ['-undefined', 'dynamic_lookup']
     else:
-        cmd = [gcc, '-shared', '-fPIC', '-o', out]
+        cmd = [driver, '-shared', '-fPIC', '-o', out]
         if undefined:
             cmd += ['-Wl,--allow-shlib-undefined']
         if rpath:
