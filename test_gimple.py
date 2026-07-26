@@ -3560,6 +3560,132 @@ def main():
     asyncio.run(x)
 """, "asyncio.run")
 
+    # ── Step E (compiled-path async/await codegen project): raise/try/
+    # except/finally inside async function bodies ───────────────────────────
+    # Compile-only smoke tests, mirroring the sleep/composition tests above
+    # (-fsyntax-only on both the .c and .cpp outputs) — REAL compile+link+run
+    # behavioral coverage (including the propagates-through-await-to-caller's-
+    # own-except case, the key new behavior) is test_gimple_async_runner.py's
+    # job, not this file's.
+    def _check_async_syntax_only(name, src, cpp_substrs=(), c_substrs=()):
+        global _PASS, _FAIL
+        import gimple_codegen
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        missing = [s for s in cpp_substrs if s not in cpp_src]
+        missing += [s for s in c_substrs if s not in c_src]
+        if missing:
+            print(f"FAIL  {name}: expected substrings missing: {missing}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    # An async function with an internal try/except -- real C++ try/throw/
+    # catch, the EXACT SAME _MojoCppExc/_cpp_try_stmt/_cpp_raise_stmt
+    # machinery generator Milestone D already built, reused (not
+    # duplicated) for the async emitter path.
+    _check_async_syntax_only(
+        "async_internal_try_except_compiles_via_cpp_path", """\
+async def f():
+    total = 0
+    try:
+        total = 1
+        raise ValueError("boom")
+    except ValueError:
+        total = total + 10
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(f()))
+""",
+        cpp_substrs=('throw _MojoCppExc', 'catch (_MojoCppExc'))
+
+    # An exception raised inside an awaited callee propagates through the
+    # `await` into the awaiting function's OWN try/except -- the per-
+    # awaiter rethrow this step actually adds (see `{base}_Awaiter::
+    # await_resume` in gimple_codegen.py's _gen_cpp_async_unit): the
+    # callee's promise stages "completed via exception" (exc/exc_pending),
+    # and `await_resume` throws a fresh _MojoCppExc into the CALLER's own
+    # body, catchable by its own ordinary try/except exactly like real
+    # Python's `await` propagating an exception.
+    _check_async_syntax_only(
+        "async_exception_propagates_through_await_to_caller_except_compiles", """\
+async def inner():
+    raise ValueError("boom")
+    return 0
+
+async def outer():
+    result = 0
+    try:
+        result = await inner()
+    except ValueError:
+        result = -1
+    return result
+
+def main():
+    import asyncio
+    print(asyncio.run(outer()))
+""",
+        cpp_substrs=('exc_pending', 'throw __e'))
+
+    # An exception escaping ALL THE WAY out to `asyncio.run(...)` uncaught
+    # -- the outermost-edge translation: `{base}_translate_pending_exc`
+    # copies the top-level coroutine's staged exception into the shared
+    # mojo_exc_type/msg/obj/mojo_exc_pending globals, and the ordinary
+    # GIMPLE .c call site checks mojo_exc_pending_get() + mojo_raise() right
+    # after, reusing the exact same "safe to longjmp here, never-suspended
+    # call site" idiom the generator convention's own `_resume()`-boundary
+    # consumers already use.
+    _check_async_syntax_only(
+        "async_exception_escapes_to_asyncio_run_caught_by_ordinary_code", """\
+async def f():
+    raise ValueError("boom")
+    return 0
+
+def main():
+    import asyncio
+    try:
+        asyncio.run(f())
+    except ValueError as e:
+        print(e)
+""",
+        cpp_substrs=('_translate_pending_exc',),
+        c_substrs=('_translate_pending_exc', 'mojo_exc_pending_get', 'mojo_raise'))
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

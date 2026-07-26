@@ -513,6 +513,173 @@ def main():
     f()
 """, "async function")
 
+    # ── Step E: raise/try/except/finally inside async function bodies ──────
+    # Real compile+link+run behavioral tests, mirroring
+    # test_gimple_generator_runner.py's own Milestone D coverage shape
+    # exactly (same rigor bar this whole project has held itself to at
+    # every step: real assertions on actual output/caught-exception-type,
+    # not just "it compiles").
+
+    # 1. An exception raised and caught by the SAME async function's own
+    # try/except -- execution continues normally afterward (not just
+    # "doesn't crash").
+    test_async_stdout("async_raise_caught_internally", """\
+async def f():
+    total = 0
+    try:
+        total = 1
+        raise ValueError("boom")
+        total = 99
+    except ValueError:
+        total = total + 10
+    print(total)
+    return total
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "11\n")
+
+    # 2. THE key new behavior this step must prove works, beyond what
+    # generator Milestone D already proved: an exception raised inside an
+    # AWAITED callee (inner()) propagates through the `await` into the
+    # AWAITING function's (outer()) own try/except, which correctly
+    # catches it and continues -- exactly like real Python's `await`
+    # propagating an exception through ordinary exception machinery, via
+    # the per-awaiter rethrow this step adds in `{base}_Awaiter::
+    # await_resume` (gimple_codegen.py's _gen_cpp_async_unit).
+    test_async_stdout("async_exception_propagates_through_await_to_callers_own_except", """\
+async def inner():
+    raise ValueError("boom")
+    return 0
+
+async def outer():
+    result = 0
+    try:
+        result = await inner()
+        print(999)
+    except ValueError:
+        result = -1
+    print(result)
+    return result
+
+def main():
+    import asyncio
+    asyncio.run(outer())
+""", "-1\n")
+
+    # 3. An exception escaping ALL THE WAY out to `asyncio.run(...)`
+    # uncaught, caught by ORDINARY (non-async) compiled code's own
+    # try/except around the `asyncio.run(...)` call, with the correct
+    # exception TYPE (only a ValueError handler matches) and MESSAGE (bound
+    # via `as e`) -- the outermost-edge translation into the pre-existing
+    # mojo_exc_type/msg/obj/mojo_exc_pending global state, reusing
+    # generator Milestone D's exact translation convention.
+    test_async_stdout("async_exception_escapes_to_asyncio_run_caught_by_ordinary_code", """\
+async def f():
+    raise ValueError("boom")
+    return 0
+
+def main():
+    import asyncio
+    try:
+        asyncio.run(f())
+    except ValueError as e:
+        print("caught")
+        print(e)
+""", "caught\nboom\n")
+
+    # 4. `finally:` running the correct NUMBER of times across a mix of
+    # normal completion and an internally-caught raise, matching generator
+    # Milestone D's own finally-coverage test shape exactly.
+    test_async_stdout("async_finally_runs_correct_number_of_times", """\
+async def f():
+    count = 0
+    i = 0
+    while i < 3:
+        try:
+            if i == 1:
+                raise ValueError("x")
+        except ValueError:
+            pass
+        finally:
+            count = count + 1
+        i = i + 1
+    print(count)
+    return count
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "3\n")
+
+    # 5. Beyond the obvious happy path (this project's own established
+    # pattern of finding real bugs via independent hand-verification): a
+    # bare `except:` inside an async function.
+    test_async_stdout("async_bare_except", """\
+async def f():
+    total = 0
+    try:
+        raise ValueError("boom")
+    except:
+        total = -1
+    print(total)
+    return total
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "-1\n")
+
+    # 6. Beyond the obvious happy path: an exception raised by a THIRD
+    # level of a composition chain (Step D: a() awaits b() awaits c())
+    # propagating up through TWO `await`s, correctly caught by the
+    # OUTERMOST function's (a's) own try/except -- proves the per-awaiter
+    # rethrow composes to more than one level, not just the direct-callee
+    # case test #2 above already covers.
+    test_async_stdout("async_exception_propagates_through_two_awaits_in_composition_chain", """\
+async def c():
+    raise KeyError("deep")
+    return 0
+
+async def b():
+    x = await c()
+    return x
+
+async def a():
+    result = 0
+    try:
+        result = await b()
+    except KeyError:
+        result = -7
+    print(result)
+    return result
+
+def main():
+    import asyncio
+    asyncio.run(a())
+""", "-7\n")
+
+    # 7. A re-raise (bare `raise` with no value) inside an async function's
+    # except handler propagates the SAME exception (type + message intact)
+    # out to `asyncio.run(...)`'s own caller -- mirrors generator Milestone
+    # D's own re-raise test shape.
+    test_async_stdout("async_bare_reraise_propagates_to_asyncio_run_caller", """\
+async def f():
+    try:
+        raise ValueError("inner")
+    except ValueError:
+        raise
+    return 0
+
+def main():
+    import asyncio
+    try:
+        asyncio.run(f())
+    except ValueError as e:
+        print(e)
+""", "inner\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

@@ -7770,6 +7770,32 @@ class GimpleGen:
                     handle = self._call_expr('MojoAsync *', f"{base}_start", [])
                     self._emit(f"  mojo_async_schedule_ready ({handle});")
                     self._emit(f"  mojo_async_run_until_complete ();")
+                    # Step E: the outermost edge -- this call site is
+                    # ordinary, never-suspended GIMPLE C code (exactly like
+                    # the generator convention's own `_resume()` boundary
+                    # consumers -- see _emit_generator_pending_exc_check,
+                    # reused here in spirit, not literally, since that
+                    # helper is generator-`_resume`-shaped and this is a
+                    # one-shot `_start`+run-to-completion call instead).
+                    # `{base}_translate_pending_exc` copies this top-level
+                    # coroutine's staged exception (if it completed via one
+                    # instead of an ordinary `co_return` -- see
+                    # _gen_cpp_async_unit's promise `exc`/`exc_pending`
+                    # fields) into the shared mojo_exc_*/mojo_exc_pending
+                    # globals; the mojo_exc_pending_get()/mojo_raise() pair
+                    # right after is the same "safe to longjmp here" idiom
+                    # every other ordinary-C consumer of a translated
+                    # pending exception in this file already uses.
+                    self._emit(f"  {base}_translate_pending_exc ({handle});")
+                    pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+                    bb_pending = self._new_bb()
+                    bb_ok = self._new_bb()
+                    self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+                    self._emit_label(bb_pending)
+                    self._emit(f"  mojo_exc_pending_set (0);")
+                    self._emit(f"  {base}_destroy ({handle});")
+                    self._emit("  mojo_raise ();")
+                    self._emit_label(bb_ok)
                     result = self._new_val(vct, f"{base}_value ({handle})")
                     self._emit(f"  {base}_destroy ({handle});")
                     return vct, result
@@ -16443,6 +16469,35 @@ class GimpleGen:
             f"}};",
             f"struct {promise} {{",
             f"    {cpp_value_ctype} result{{}};",
+            # Step E (exceptions): an exception that escapes this
+            # coroutine's own body uncaught is NOT translated straight into
+            # the shared mojo_exc_*/mojo_exc_pending globals the way the
+            # generator promise's unhandled_exception() does (see
+            # _gen_cpp_generator_unit) -- doing that here would be too EARLY
+            # for async, because of composition (Step D): if some OTHER
+            # coroutine is awaiting this one, the exception needs to
+            # surface as a real C++ exception thrown into THAT caller's own
+            # body (so its own try/except can catch it, exactly like real
+            # Python's `await` propagating an exception), not silently
+            # swallowed into global state before the caller even gets a
+            # chance to see it. So it's staged here instead, on the promise
+            # itself, and only the ONE place that's genuinely the "nobody
+            # left awaiting" outermost edge -- the `asyncio.run(...)`
+            # bridge in _lower_call, via the `{base}_translate_pending_exc`
+            # extern "C" helper below -- ever copies it into the shared
+            # globals, reusing the generator's exact translation
+            # convention there and ONLY there. Adding these two fields to
+            # this promise is safe against Milestone D's GCC-15 promise-
+            # field/2+-parameter-coroutine-frame-corruption bug (see
+            # {final_awaiter}'s own docstring above): that bug's trigger
+            # was specifically a coroutine with real formal PARAMETERS,
+            # which no compiled async function has ever had, `continuation`
+            # (Step D) included -- verified via this project's own
+            # from-scratch hand repro before Step D ever added a field
+            # here, and unchanged by adding two more of the same
+            # (parameter-less) kind.
+            f"    _MojoCppExc exc{{}};",
+            f"    bool exc_pending{{}};",
             # Type-erased (not `{handle_t}`): the coroutine AWAITING this
             # one may be an entirely different async function with its own
             # distinct promise type (e.g. `outer`'s promise stores a
@@ -16476,16 +16531,31 @@ class GimpleGen:
             # instead of nothing happening (Step B/C: nobody could ever be
             # waiting, since composition didn't exist yet).
             f"    {final_awaiter} final_suspend() noexcept {{ return {{}}; }}",
-            # Step E's job (per this project's plan), not this step's: a
-            # real exception escaping an async function's body needs the
-            # same mojo_exc_type/msg/obj translation the generator
-            # promise's unhandled_exception() already does (see
-            # _gen_cpp_generator_unit) -- deferred here, honestly, rather
-            # than half-built now. A plain std::terminate() is a safe,
-            # loud placeholder: it crashes immediately and visibly instead
-            # of silently discarding an exception or leaving `result`
-            # holding stale/uninitialized data.
-            f"    void unhandled_exception() {{ std::terminate(); /* Step E: real exception handling */ }}",
+            # Step E: an exception that escapes this coroutine's own body
+            # uncaught is caught here (the compiler-generated wrapper
+            # around the whole coroutine body invokes this from within its
+            # own catch-all), exactly like the generator promise's
+            # unhandled_exception() -- but staged on THIS promise's own
+            # exc/exc_pending fields instead of written straight to the
+            # shared globals (see those fields' own docstring just above
+            # for why: composition needs the exception to still be able to
+            # surface as a real, catchable C++ exception in an awaiting
+            # caller's own body, which writing to global state here, before
+            # any caller gets a chance to see it, would foreclose).
+            f"    void unhandled_exception() {{",
+            f"        try {{ std::rethrow_exception(std::current_exception()); }}",
+            f"        catch (_MojoCppExc &__e) {{ exc = __e; exc_pending = true; }}",
+            f"        catch (...) {{",
+            f"            /* Some other, non-Mojo C++ exception (e.g. a",
+            f"               std::bad_alloc) escaped -- tag 0 (untyped) so",
+            f"               it's still reported/catchable as SOME pending",
+            f"               exception rather than silently discarded,",
+            f"               mirroring the generator promise's own",
+            f"               unhandled_exception() catch-all exactly. */",
+            f"            exc = _MojoCppExc{{ (int64_t)0, nullptr, nullptr }};",
+            f"            exc_pending = true;",
+            f"        }}",
+            f"    }}",
             f"    void return_value({cpp_value_ctype} v) {{ result = v; }}",
             f"}};",
             f"inline std::coroutine_handle<> {final_awaiter}::await_suspend({handle_t} h) noexcept {{",
@@ -16517,6 +16587,39 @@ class GimpleGen:
             f'extern "C" void {base}_destroy (MojoAsync *g) {{',
             f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
             f"    if (h) h.destroy();",
+            f"}}",
+            # Step E: the OUTERMOST-edge translation -- called ONLY from the
+            # `asyncio.run(...)` bridge in _lower_call, right after
+            # mojo_async_run_until_complete() drives this top-level
+            # coroutine to completion (genuinely never-suspended ordinary
+            # GIMPLE C code at that call site, exactly like the generator
+            # convention's own `_resume()` boundary -- see
+            # _gen_cpp_generator_unit's unhandled_exception()/mojo_runtime.h's
+            # long comment on _mojo_exc_pending), never from inside another
+            # coroutine's own body (composition's rethrow-into-caller,
+            # above, handles that case instead -- this function and that
+            # one read the SAME staged exc/exc_pending state, just from two
+            # different callers depending on whether anyone is actually
+            # awaiting). If this top-level coroutine completed via an
+            # uncaught exception, copies it into the shared mojo_exc_type/
+            # msg/obj/mojo_exc_pending globals -- the EXACT SAME translation
+            # convention the generator promise's own unhandled_exception()
+            # used to write directly, reused here rather than reinvented --
+            # so ordinary (non-async, non-generator) compiled code calling
+            # `asyncio.run(...)` inside its own try/except (a real setjmp-
+            # based frame, safe to longjmp into from here since this call
+            # site was never itself suspended) observes it the normal way
+            # once _lower_call's own mojo_exc_pending_get()/mojo_raise()
+            # check (mirroring _emit_generator_pending_exc_check exactly)
+            # runs right after this call returns.
+            f'extern "C" void {base}_translate_pending_exc (MojoAsync *g) {{',
+            f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
+            f"    if (h.promise().exc_pending) {{",
+            f"        mojo_exc_type_set(h.promise().exc.type_id);",
+            f"        mojo_exc_msg_set(h.promise().exc.msg);",
+            f"        mojo_exc_obj_set(h.promise().exc.obj);",
+            f"        mojo_exc_pending_set(1);",
+            f"    }}",
             f"}}",
             # Step D: the awaiter ANOTHER compiled async function's body
             # uses to `await {fn.name}()` -- see GimpleGen._cpp_expr's own
@@ -16551,6 +16654,31 @@ class GimpleGen:
             # `asyncio.run(...)` bridge, owns that callee's whole
             # lifetime, since nothing outside this awaiter ever held a
             # reference to it).
+            #
+            # Step E: this is the one genuinely NEW piece of design this
+            # step adds (not a copy of anything the generator project
+            # already built) -- the per-awaiter rethrow. If the callee
+            # completed via an uncaught exception rather than an ordinary
+            # `co_return` (staged on the callee's OWN promise by its
+            # unhandled_exception(), above), `await_resume` -- which runs
+            # as part of the AWAITING coroutine's own resumption, right at
+            # the point the `co_await` expression is being evaluated --
+            # throws a FRESH `_MojoCppExc` built from that staged state,
+            # INTO the awaiting coroutine's own body. This is exactly the
+            # same "real C++ exception, confined to this translation unit"
+            # representation _cpp_raise_stmt/_cpp_try_stmt already use, so
+            # an enclosing `try`/`except` the awaiting function's own body
+            # wraps around this `await` (translated by the SAME
+            # _cpp_try_stmt every other try/except in this coroutine's body
+            # already goes through -- no separate/special case needed
+            # there) catches it exactly like real Python's `await`
+            # propagating an exception through ordinary exception
+            # machinery. If nobody awaits this callee at all (the top-level
+            # `asyncio.run(...)` case), this awaiter is never constructed
+            # for it, so the staged exc/exc_pending is picked up instead by
+            # `{base}_translate_pending_exc` below -- the SAME staged state,
+            # read from two different places depending on who's actually
+            # waiting on it, not two different representations.
             f"struct {awaiter} {{",
             f"    {handle_t} callee_h;",
             f"    bool await_ready() noexcept {{ return false; }}",
@@ -16558,7 +16686,12 @@ class GimpleGen:
             f"        callee_h.promise().continuation = caller_h;",
             f"        mojo_async_schedule_ready(callee_h.address());",
             f"    }}",
-            f"    {cpp_value_ctype} await_resume() noexcept {{",
+            f"    {cpp_value_ctype} await_resume() {{",
+            f"        if (callee_h.promise().exc_pending) {{",
+            f"            _MojoCppExc __e = callee_h.promise().exc;",
+            f"            callee_h.destroy();",
+            f"            throw __e;",
+            f"        }}",
             f"        {cpp_value_ctype} v = callee_h.promise().result;",
             f"        callee_h.destroy();",
             f"        return v;",
@@ -20245,6 +20378,11 @@ class GimpleGen:
                 parts.append(f"extern _Bool {_base}_is_done (MojoAsync *);")
                 parts.append(f"extern {_vct} {_base}_value (MojoAsync *);")
                 parts.append(f"extern void {_base}_destroy (MojoAsync *);")
+                # Step E: the outermost-edge exception translation, called
+                # ONLY from the `asyncio.run(...)` bridge below -- see
+                # _gen_cpp_async_unit's own {base}_translate_pending_exc
+                # docstring.
+                parts.append(f"extern void {_base}_translate_pending_exc (MojoAsync *);")
             parts.append('')
         for fn in func_defs:
             if fn.name == 'main':
