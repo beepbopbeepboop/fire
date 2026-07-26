@@ -1992,23 +1992,33 @@ f()
 
     # Generator function (`yield`) honest-fallback: this codegen has no
     # general suspend/resume state-machine transform, so a generator
-    # function outside Milestone B's narrow C++20-coroutine allowlist (see
+    # function outside the C++20-coroutine allowlist (see
     # gimple_codegen.py's _generator_quick_eligible/_gen_cpp_generator_unit)
     # must still be refused clearly (RuntimeError from
     # gen_module/compile_to_gimple) rather than silently miscompiled into a
     # single straight-line C function that just drops the yield. Milestone 1
     # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
     # mojo_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
-    # and gimple_codegen.py's gen_module pre-pass. A generator TAKING A
-    # PARAMETER is deliberately out of Milestone B's scope (the allowlist
-    # requires zero params — see the milestone writeup's "Constraints"
-    # section), so it's the shape used here instead of the old bare
-    # `def f(): yield 1` (which Milestone B's C++20-coroutine path now
-    # actually compiles — see generator_simple_shape_compiles_via_cpp_path
-    # below for that positive case).
-    test_raises("generator_function_honest_fallback", """\
-def f(n):
-    yield n
+    # and gimple_codegen.py's gen_module pre-pass. A generator taking a
+    # plain scalar parameter (`def f(n): yield n`) is now COMPILED, not
+    # refused — see generator_param_shape_compiles_via_cpp_path below — as
+    # of the parameter-support step; *args/**kwargs generator parameters are
+    # the still-out-of-scope shape used here instead (string/struct params
+    # are covered separately by
+    # generator_string_param_honest_fallback below).
+    test_raises("generator_varargs_param_honest_fallback", """\
+def f(*args):
+    yield args
+""", "generator function")
+
+    # A generator parameter typed as something other than a scalar
+    # int64_t/double/_Bool (e.g. String) is also still explicitly out of
+    # scope for the parameter-support step — see _gen_cpp_generator_unit's
+    # "Parameters" comment (string/struct/pointer params cross the C++/C
+    # boundary with lifetime/ownership questions deliberately deferred).
+    test_raises("generator_string_param_honest_fallback", """\
+def f(s: String):
+    yield 1
 """, "generator function")
 
     # Async function (`async def`) honest-fallback: mirrors the generator
@@ -2133,6 +2143,88 @@ def main():
             os.unlink(cpp_path)
 
     test_generator_simple_shape_compiles_via_cpp_path()
+
+    # Parameter-support step: a generator taking parameters (`start`,
+    # `count`) now compiles via the same C++20-coroutine path instead of
+    # hitting the honest whole-module refusal — mirrors
+    # test_generator_simple_shape_compiles_via_cpp_path immediately above,
+    # but also asserts the extern "C" `_start` declaration on the .c/.ci
+    # side actually carries the two int64_t parameters through (not just a
+    # bare `(void)`), and that the call site inside `main` passes real
+    # argument expressions rather than an empty arg list. See
+    # test_gimple_generator_runner.py for the REAL behavioral (compile+
+    # link+run, actual printed output) counterpart of this same shape.
+    def test_generator_param_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(start, count):
+    i = start
+    n = 0
+    while n < count:
+        yield i
+        i = i + 1
+        n = n + 1
+
+def main():
+    for x in counter(10, 3):
+        print(x)
+"""
+        name = "generator_param_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start (int64_t, int64_t)' not in c_src:
+            print(f"FAIL  {name}: .c/.ci extern decl doesn't carry both "
+                  f"int64_t params through")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start (int64_t start, int64_t count)' not in cpp_src:
+            print(f"FAIL  {name}: .cpp _start definition doesn't carry both "
+                  f"int64_t params through")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start ()' in c_src or '_mojogen_counter_start ();' in c_src:
+            print(f"FAIL  {name}: call site still emits a bare no-arg call")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_param_shape_compiles_via_cpp_path()
 
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a

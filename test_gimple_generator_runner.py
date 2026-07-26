@@ -148,6 +148,76 @@ def main():
         print(x)
 """, "0\n1\n2\n")
 
+    # Parameter-support step: the exact target shape from that step's
+    # writeup — `counter(start, count)`, two int64_t parameters threaded
+    # from the call site (`counter(10, 3)`) through `<base>_start`'s real
+    # arguments into the coroutine frame, and read back out via ordinary
+    # local variables inside the body. Confirms the whole pipeline actually
+    # produces the right VALUES (10, 11, 12), not just that it type-checks.
+    test_generator_stdout("param_generator_counter_start_count", """\
+def counter(start, count):
+    i = start
+    n = 0
+    while n < count:
+        yield i
+        i = i + 1
+        n = n + 1
+
+def main():
+    for x in counter(10, 3):
+        print(x)
+""", "10\n11\n12\n")
+
+    # A generator call site whose arguments are ordinary expressions (not
+    # bare literals) — confirms argument lowering reuses this codegen's
+    # normal self.lower_expr(a)-per-arg machinery (the same as any other
+    # function call), not just plain literal passthrough.
+    test_generator_stdout("param_generator_expression_args", """\
+def counter(start, count):
+    i = start
+    n = 0
+    while n < count:
+        yield i
+        i = i + 1
+        n = n + 1
+
+def main():
+    base = 5
+    for x in counter(base + 1, 1 + 2):
+        print(x)
+""", "6\n7\n8\n")
+
+    # A single-parameter generator that yields the parameter directly (no
+    # intermediate local) — the simplest possible parameterized shape.
+    test_generator_stdout("param_generator_single_param_direct_yield", """\
+def repeat_twice(v):
+    yield v
+    yield v
+
+def main():
+    for x in repeat_twice(42):
+        print(x)
+""", "42\n42\n")
+
+    # A Float64-typed parameter, yielded through a local that's mutated each
+    # iteration (`v = start`, then `v = v + step`) — confirms the value-type
+    # inference correctly resolves to double (not the int64_t default) both
+    # for a directly-yielded param and for a local assigned straight from
+    # one, per _generator_yield_ctype's `known`-map threading.
+    test_generator_stdout("param_generator_float_step", """\
+def stepper(start: Float64, step: Float64, count):
+    v = start
+    n = 0
+    while n < count:
+        yield v
+        v = v + step
+        n = n + 1
+
+def main():
+    for x in stepper(1.5, 0.5, 3):
+        print(x)
+""", "1.5\n2\n2.5\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

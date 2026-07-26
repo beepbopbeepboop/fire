@@ -1946,14 +1946,19 @@ class _UnsupportedGeneratorShape(Exception):
 
 def _generator_quick_eligible(fn: FunctionDef) -> bool:
     """Cheap pre-filter before attempting the real (and more expensive)
-    _gen_cpp_generator_unit translation: is_generator, not is_async, no
-    params, and nothing in the body that this milestone explicitly excludes
-    by design (try/except, with, `yield from` — richer generator semantics
-    left for a later milestone; see the module docstring on
-    _UnsupportedGeneratorShape for the rest of the narrowing, which is
-    enforced by actually attempting the translation rather than duplicated
-    here as a second hand-maintained checklist)."""
-    if fn.is_async or not fn.is_generator or fn.params:
+    _gen_cpp_generator_unit translation: is_generator, not is_async, and
+    nothing in the body that this milestone explicitly excludes by design
+    (try/except, with, `yield from` — richer generator semantics left for a
+    later milestone; see the module docstring on _UnsupportedGeneratorShape
+    for the rest of the narrowing, which is enforced by actually attempting
+    the translation rather than duplicated here as a second hand-maintained
+    checklist). Params ARE allowed through this quick filter as of the
+    parameter-support step — whether a given param's TYPE is actually
+    compilable (scalar int64_t/double/_Bool only; *args/**kwargs and
+    string/pointer params are refused) is decided by
+    _gen_cpp_generator_unit itself, the single source of truth, not
+    duplicated here."""
+    if fn.is_async or not fn.is_generator:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, (TryStmt, WithStmt, YieldFromExpr)):
@@ -1961,15 +1966,19 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     return True
 
 
-def _infer_simple_expr_ctype(e) -> str | None:
+def _infer_simple_expr_ctype(e, known: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
     returns None (== "don't know, refuse this shape") rather than guessing,
     for anything beyond plain int/float/bool literals, a bare identifier
-    (assumed int64_t, matching this codegen's own untyped-local default —
-    see _param_ctype's identical default elsewhere in this file), or
-    +-*/ arithmetic/unary ops over those."""
+    (looked up in `known` — a name -> ctype map of the generator's own
+    parameters and/or already-declared locals, threaded through by both
+    call sites so a parameter/local's REAL scalar type is used instead of
+    always guessing int64_t; falls back to the int64_t default, matching
+    this codegen's own untyped-local default — see _param_ctype's identical
+    default elsewhere in this file — for any name not in `known`, e.g. a
+    module-level global), or +-*/ arithmetic/unary ops over those."""
     if isinstance(e, IntLiteral):
         return 'int64_t'
     if isinstance(e, FloatLiteral):
@@ -1977,12 +1986,14 @@ def _infer_simple_expr_ctype(e) -> str | None:
     if isinstance(e, BoolLiteral):
         return '_Bool'
     if isinstance(e, IdentExpr):
+        if known is not None and e.name in known:
+            return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand)
+        return _infer_simple_expr_ctype(e.operand, known)
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left)
-        rt = _infer_simple_expr_ctype(e.right)
+        lt = _infer_simple_expr_ctype(e.left, known)
+        rt = _infer_simple_expr_ctype(e.right, known)
         if lt is None or rt is None:
             return None
         if 'double' in (lt, rt):
@@ -2004,17 +2015,21 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
     return 'bool' if ctype == '_Bool' else ctype
 
 
-def _generator_yield_ctype(fn: FunctionDef) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` in fn's own body
     must agree on (mixed types, or a bare `yield` with no value, both return
     None == unsupported). Milestone B only supports numeric generators — see
-    the milestone writeup's "Value type crossing the boundary" section."""
+    the milestone writeup's "Value type crossing the boundary" section.
+    `known` (a name -> ctype map, passed by _gen_cpp_generator_unit for its
+    own generator's parameters) lets `yield <param>` resolve to the param's
+    real type instead of always guessing int64_t — see
+    _infer_simple_expr_ctype's docstring."""
     ctype = None
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 return None
-            t = _infer_simple_expr_ctype(n.value)
+            t = _infer_simple_expr_ctype(n.value, known)
             if t is None:
                 return None
             if ctype is None:
@@ -8928,9 +8943,17 @@ class GimpleGen:
         # never fall through to the ordinary function-call lowering (there is
         # no ordinary C function with this name to call — see gen_module's
         # Phase 2a skip for _supported_generators).
-        if fname_raw in self._generator_api and not node.args:
+        if fname_raw in self._generator_api:
             api = self._generator_api[fname_raw]
-            t = self._new_val('MojoGenerator *', f"{api['base']}_start ()")
+            # Argument lowering reuses the exact same self.lower_expr(a)-per-
+            # arg + _call_expr/_emit_call path every ordinary function call
+            # in this file uses (see the plain call path a little further
+            # down) — func_param_types[f"{base}_start"] (registered in
+            # gen_module's generator pre-pass) is what lets _emit_call's
+            # existing coercion logic (int literal -> int64_t, etc.) apply
+            # here with no separate/duplicated coercion code.
+            arg_pairs = [self.lower_expr(a) for a in node.args]
+            t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
         # A local variable of a callable struct type, invoked like a function:
@@ -14773,7 +14796,7 @@ class GimpleGen:
             name = s.target.name
             val = self._cpp_expr(s.value)
             if name not in declared:
-                ctype = _infer_simple_expr_ctype(s.value)
+                ctype = _infer_simple_expr_ctype(s.value, declared)
                 if ctype is None:
                     raise _UnsupportedGeneratorShape(
                         f"can't infer a scalar type for local '{name}'")
@@ -14828,15 +14851,15 @@ class GimpleGen:
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
-    def _gen_cpp_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str]:
-        """Translate ONE Milestone-B-supported generator FunctionDef into a
+    def _gen_cpp_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
+        """Translate ONE supported generator FunctionDef into a
         self-contained C++20 coroutine fragment. Returns (cpp_text,
-        value_ctype, base_name). Raises _UnsupportedGeneratorShape for
-        anything gen_module's pre-pass didn't already rule out via
-        _generator_quick_eligible — this method (not a second hand-written
-        checklist) is the actual authority on "is this shape compilable",
-        so gen_module's pre-pass calls it directly and catches that one
-        exception type to decide supported-vs-refused.
+        value_ctype, base_name, param_ctypes). Raises
+        _UnsupportedGeneratorShape for anything gen_module's pre-pass didn't
+        already rule out via _generator_quick_eligible — this method (not a
+        second hand-written checklist) is the actual authority on "is this
+        shape compilable", so gen_module's pre-pass calls it directly and
+        catches that one exception type to decide supported-vs-refused.
 
         Calling convention (opaque handle + 4 extern "C" functions): a
         std::coroutine_handle<Promise> IS already just a wrapped pointer to
@@ -14845,9 +14868,21 @@ class GimpleGen:
         sees is literally that address reinterpret_cast through an
         incomplete `struct MojoGenerator` — no separate heap-allocated
         wrapper object is needed.
-          <base>_start(void)          -> MojoGenerator*  (constructs, does
+          <base>_start(params...)     -> MojoGenerator*  (constructs, does
                                           NOT run any body code yet --
-                                          initial_suspend() is suspend_always)
+                                          initial_suspend() is suspend_always.
+                                          Parameters (as of the parameter-
+                                          support step) are ordinary by-value
+                                          C++ function parameters on the
+                                          `impl` coroutine function --
+                                          std::coroutine_handle's frame
+                                          allocation copies them into the
+                                          frame itself, the same as any other
+                                          C++20 coroutine, so no manual
+                                          threading into the promise is
+                                          needed: they're simply in scope for
+                                          the whole coroutine body, exactly
+                                          like a local variable.)
           <base>_resume(MojoGenerator*) -> _Bool  (advances to the next
                                           co_yield or co_return; mirrors this
                                           codegen's existing __has_next__
@@ -14861,16 +14896,54 @@ class GimpleGen:
                                           same existing convention)
           <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
         """
-        value_ctype = _generator_yield_ctype(fn)
+        # Parameters: only plain scalar (int64_t/double/_Bool) positional
+        # params are supported this step. *args/**kwargs and any param whose
+        # resolved C type isn't one of those three are refused — string/
+        # struct/pointer parameters cross the C++/C boundary with lifetime
+        # and ownership questions this narrow step deliberately defers (see
+        # the parameter-support step's writeup: "small natural extension of
+        # what's already being built" vs. "opens new complexity"). Computed
+        # BEFORE value_ctype below so `yield <param>` can resolve the
+        # param's real type via _generator_yield_ctype's `known` map instead
+        # of always guessing int64_t (see _infer_simple_expr_ctype's
+        # docstring) — a double/_Bool param that's yielded (directly, or via
+        # a local assigned straight from it, e.g. `v = start`) needs this to
+        # actually round-trip correctly, not just type-check.
+        param_ctypes: list[tuple[str, str]] = []
+        for pn, pt in (fn.params or []):
+            if pn.startswith('*'):
+                raise _UnsupportedGeneratorShape(
+                    f"{fn.name}: *args/**kwargs parameters not supported "
+                    "for compiled generators")
+            ctype = self._param_ctype(pn, pt, fn)
+            if ctype not in ('int64_t', 'double', '_Bool'):
+                raise _UnsupportedGeneratorShape(
+                    f"{fn.name}: generator parameter '{pn}' has unsupported "
+                    f"type {ctype!r} (only scalar int64_t/double/_Bool "
+                    "parameters are supported for compiled generators)")
+            param_ctypes.append((pn, ctype))
+        base = f"_mojogen_{_safe_name(fn.name)}"
+        # Params are already "declared" locals as far as the body emitter is
+        # concerned — a param can be read (`i = start`) or directly
+        # reassigned/augmented (`start = start + 1`) without a fresh `Type
+        # name = ...` declaration, exactly like any other C++ function
+        # parameter used as a mutable local. Body emission runs BEFORE
+        # value_ctype is computed below (reordered from this method's
+        # original param-less shape) precisely so `declared` ends up holding
+        # every local's REAL inferred type (not just the params') by the
+        # time _generator_yield_ctype looks a `yield <name>`'s name up in
+        # it — e.g. `v = start` (start: Float64 param) correctly types `v`
+        # as double via the AssignStmt case just below, and a later `yield
+        # v` then resolves to double too, instead of the int64_t default.
+        declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes}
+        body_lines: list[str] = []
+        for s in fn.body:
+            body_lines.extend(self._cpp_stmt(s, declared, '    '))
+        value_ctype = _generator_yield_ctype(fn, declared)
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
                 "values must agree on one scalar type (int64_t/double/_Bool)")
-        base = f"_mojogen_{_safe_name(fn.name)}"
-        declared: dict[str, str] = {}
-        body_lines: list[str] = []
-        for s in fn.body:
-            body_lines.extend(self._cpp_stmt(s, declared, '    '))
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
@@ -14882,6 +14955,18 @@ class GimpleGen:
         # name (see _c_to_cpp_scalar_type's docstring); int64_t/double are
         # spelled identically in both languages so this is a no-op for them.
         cpp_value_ctype = _c_to_cpp_scalar_type(value_ctype)
+        # Parameter signature text, shared verbatim between the `impl`
+        # coroutine function and the extern "C" `_start` wrapper that calls
+        # it — the C++20 coroutine mechanics need no separate promise-side
+        # plumbing: parameters to a coroutine function are copied into the
+        # compiler-allocated coroutine frame exactly like any other C++20
+        # coroutine's parameters (verified empirically: a plain `co_yield`-
+        # based generator function can take ordinary by-value parameters and
+        # they remain valid/in-scope across suspend/resume, same as a local
+        # variable declared in the body).
+        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {pn}"
+                              for pn, ct in param_ctypes)) or 'void'
+        call_args = ', '.join(pn for pn, _ in param_ctypes)
         lines = [
             f"struct {promise};",
             f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -14898,12 +14983,12 @@ class GimpleGen:
             f"    std::suspend_always yield_value({cpp_value_ctype} v) {{ current_value = v; return {{}}; }}",
             f"    void return_void() {{}}",
             f"}};",
-            f"static {task} {impl} (void) {{",
+            f"static {task} {impl} ({cpp_sig}) {{",
             *body_lines,
             f"    co_return;",
             f"}}",
-            f'extern "C" MojoGenerator *{base}_start (void) {{',
-            f"    {task} t = {impl} ();",
+            f'extern "C" MojoGenerator *{base}_start ({cpp_sig}) {{',
+            f"    {task} t = {impl} ({call_args});",
             f"    return reinterpret_cast<MojoGenerator *>(t.h.address());",
             f"}}",
             f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
@@ -14921,7 +15006,7 @@ class GimpleGen:
             f"    if (h) h.destroy();",
             f"}}",
         ]
-        return '\n'.join(lines), value_ctype, base
+        return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
     # ── Module generation ─────────────────────────────────────────────────
 
@@ -14983,13 +15068,22 @@ class GimpleGen:
             if not _generator_quick_eligible(s):
                 continue
             try:
-                cpp_text, value_ctype, base = self._gen_cpp_generator_unit(s)
+                cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
             except _UnsupportedGeneratorShape as e:
                 _debug_note(f'generator {s.name!r} not eligible for C++ '
                             'coroutine path, falling back to honest refusal', e)
                 continue
             self._supported_generators[s.name] = s
-            self._generator_api[s.name] = {'base': base, 'value_ctype': value_ctype}
+            self._generator_api[s.name] = {
+                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            }
+            # <base>_start's real C parameter types, registered the exact
+            # same way an ordinary function's signature is registered — this
+            # is what lets _emit_call's existing argument-coercion machinery
+            # (int-literal-to-int64_t, etc.) apply to a generator call's
+            # arguments for free, with no separate coercion logic written
+            # for this path.
+            self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
             _generator_names.discard(s.name)
 
@@ -18381,7 +18475,8 @@ class GimpleGen:
             parts.append('typedef struct MojoGenerator MojoGenerator;')
             for _gname, _api in self._generator_api.items():
                 _base, _vct = _api['base'], _api['value_ctype']
-                parts.append(f"extern MojoGenerator *{_base}_start (void);")
+                _gptypes = ', '.join(_api.get('params') or []) or 'void'
+                parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
                 parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
                 parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
                 parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
