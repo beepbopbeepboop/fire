@@ -2003,6 +2003,28 @@ def f():
     yield 1
 """, "generator function")
 
+    # Async function (`async def`) honest-fallback: mirrors the generator
+    # fallback immediately above. This codegen has no event loop /
+    # suspend-resume codegen, so an async function must be refused clearly
+    # (RuntimeError from gen_module/compile_to_gimple) rather than silently
+    # compiled as an ordinary synchronous function. Milestone 3a of
+    # bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # mojo_compiler.py's AwaitExpr/FunctionDef.is_async and
+    # gimple_codegen.py's gen_module pre-pass (combined with the generator
+    # check above into one pass/one raise).
+    test_raises("async_function_honest_fallback", """\
+async def f():
+    return 1
+""", "async function")
+
+    # Async generator (`async def f(): yield x`) honest-fallback: both flags
+    # set at once must still be refused clearly, reported as its own
+    # combined category rather than silently only tripping one check.
+    test_raises("async_generator_function_honest_fallback", """\
+async def f():
+    yield 1
+""", "async generator function")
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

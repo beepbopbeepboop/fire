@@ -14488,41 +14488,68 @@ class GimpleGen:
     def gen_module(self, stmts: list) -> str:
         # Generator functions (`yield`/`yield from` anywhere in a function's
         # own body — mojo_compiler.py's parser sets FunctionDef.is_generator
-        # during parsing) cannot be lowered to a single straight-line C
+        # during parsing) and async functions (`async def` — sets
+        # FunctionDef.is_async) cannot be lowered to a single straight-line C
         # function the way this codegen represents every other function:
-        # they need an explicit suspend/resume state-machine transform,
-        # which does not exist yet (see
-        # bugs/INTERP_generator_yield_entirely_unimplemented.md — this is a
-        # parser-only milestone, generator codegen is a later one). Detect
-        # every generator FunctionDef anywhere in this module (top-level,
-        # nested inside if/elif/else branches, struct/class methods, or
-        # nested defs) via `_walk_ast`'s generic traversal — reused rather
-        # than a hand-rolled walk, matching this file's own established
-        # "don't duplicate a tree-walk" convention (see `_walk_ast`'s own
-        # docstring) — and refuse this module's compile clearly and
-        # immediately, BEFORE any of the module-wide pre-passes below start
-        # mutating `stmts`/registering names: same fail-fast rationale as
-        # the conditional-top-level-def-collision check a little further
-        # down (added in commit 2577b4f) — every caller of gen_module
-        # (_compile_imported_module, build_stdlib_dylib.py's per-module
-        # compile job, compile_stdlib.py, mojo.py's build_executable) already
-        # treats an exception raised from codegen as "this module/file can't
-        # be compiled natively" and falls back to interpreting it from
-        # source instead of emitting silently wrong or broken C.
-        _generator_fns = sorted({
-            n.name for n in _walk_ast(stmts)
-            if isinstance(n, FunctionDef) and n.is_generator
-        })
-        if _generator_fns:
+        # generators need an explicit suspend/resume state-machine transform
+        # and async functions need an event loop / suspend-resume codegen,
+        # neither of which exists yet (see
+        # bugs/INTERP_generator_yield_entirely_unimplemented.md — generator
+        # codegen and async codegen are both later milestones than the
+        # parser-only ones that introduced these flags). A function CAN be
+        # both (`async def f(): yield x`, a real "async generator") — that's
+        # reported as its own combined category below rather than tripping
+        # both the generator and async raises separately (only the first
+        # raise encountered would ever be seen by a caller). Detect every
+        # such FunctionDef anywhere in this module (top-level, nested inside
+        # if/elif/else branches, struct/class methods, or nested defs) via
+        # `_walk_ast`'s generic traversal — reused rather than a hand-rolled
+        # walk, matching this file's own established "don't duplicate a
+        # tree-walk" convention (see `_walk_ast`'s own docstring) — and
+        # refuse this module's compile clearly and immediately, in ONE raise
+        # covering whichever categories apply, BEFORE any of the module-wide
+        # pre-passes below start mutating `stmts`/registering names: same
+        # fail-fast rationale as the conditional-top-level-def-collision
+        # check a little further down (added in commit 2577b4f) — every
+        # caller of gen_module (_compile_imported_module,
+        # build_stdlib_dylib.py's per-module compile job, compile_stdlib.py,
+        # mojo.py's build_executable) already treats an exception raised from
+        # codegen as "this module/file can't be compiled natively" and falls
+        # back to interpreting it from source instead of emitting silently
+        # wrong or broken C.
+        _generator_names = set()
+        _async_names = set()
+        for n in _walk_ast(stmts):
+            if isinstance(n, FunctionDef):
+                if n.is_generator: _generator_names.add(n.name)
+                if n.is_async: _async_names.add(n.name)
+        _gen_only = sorted(_generator_names - _async_names)
+        _async_only = sorted(_async_names - _generator_names)
+        _async_gen = sorted(_generator_names & _async_names)
+        if _gen_only or _async_only or _async_gen:
+            _categories = []
+            if _gen_only:
+                _categories.append(
+                    f"{', '.join(_gen_only)} (generator function(s), contain "
+                    "a `yield`/`yield from`)")
+            if _async_only:
+                _categories.append(
+                    f"{', '.join(_async_only)} (async function(s), declared "
+                    "`async def`)")
+            if _async_gen:
+                _categories.append(
+                    f"{', '.join(_async_gen)} (async generator function(s), "
+                    "declared `async def` AND contain a `yield`/`yield from`)")
             raise RuntimeError(
                 "cannot compile module: function(s) "
-                f"{', '.join(_generator_fns)} contain a `yield`/`yield from` "
-                "(generator function(s)) — this codegen compiles every "
-                "function into a single straight-line C function and has no "
-                "suspend/resume state-machine transform for generators yet, "
-                "so a generator function cannot be represented as compiled "
-                "C without emitting silently wrong or broken code; falling "
-                "back to interpreting this module from source instead")
+                + "; ".join(_categories) +
+                " — this codegen compiles every function into a single "
+                "straight-line C function and has no suspend/resume "
+                "state-machine transform for generators, nor an event loop "
+                "/ suspend-resume codegen for async functions, yet, so "
+                "these cannot be represented as compiled C without "
+                "emitting silently wrong or broken code; falling back to "
+                "interpreting this module from source instead")
 
         # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
         # imported, or referenced but never actually resolved as local or

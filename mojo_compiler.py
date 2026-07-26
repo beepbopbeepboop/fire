@@ -314,6 +314,17 @@ class YieldFromExpr:
     line: int = 0
     col: int = 0
 
+@dataclass
+class AwaitExpr:
+    """`await expr` — Milestone 3a: parser + AST only, matching how
+    Milestone 1 handled YieldExpr/YieldFromExpr (no interpreter/codegen
+    execution support yet — see FunctionDef.is_async and
+    bugs/INTERP_generator_yield_entirely_unimplemented.md for the sibling
+    generator precedent this mirrors)."""
+    value: object = None
+    line: int = 0
+    col: int = 0
+
 
 @dataclass
 class NoneLiteral:
@@ -429,6 +440,11 @@ class ForStmt:
     iterable: object
     body: list
     else_body: object = None
+    is_async: bool = False  # True for `async for` — Milestone 3a (parser-only,
+        # mirrors FunctionDef.is_async; see AwaitExpr's docstring). A flag on
+        # the existing node rather than a new node type, matching how
+        # ComptimeForStmt is a distinct node only because comptime for-loops
+        # have genuinely different semantics/codegen, not just a modifier.
     line: int = 0
     col: int = 0
 
@@ -452,6 +468,14 @@ class FunctionDef:
         # whose subtree contains a YieldExpr/YieldFromExpr. None for non-generator functions.
         # Lets a later milestone's generator-execution pass cheaply ask "does this specific
         # node need generator-aware handling" without re-walking the whole tree at runtime.
+    is_async: bool = False  # True if declared `async def` — Milestone 3a
+        # (bugs/INTERP_generator_yield_entirely_unimplemented.md's async/await
+        # sibling). Detection is trivial (just "was `async` seen before this
+        # `def`/`fn`"), unlike is_generator's body tree-walk. A function CAN be
+        # both is_async AND is_generator (`async def f(): yield x` — a real,
+        # valid Python "async generator"); the two flags are independent, not
+        # mutually exclusive. No execution semantics are implied by this flag
+        # yet — see AwaitExpr's docstring.
     line: int = 0
     col: int = 0
 
@@ -602,6 +626,8 @@ class WithItem:
 class WithStmt:
     items: list
     body: list
+    is_async: bool = False  # True for `async with` — Milestone 3a (parser-only,
+        # mirrors ForStmt.is_async/FunctionDef.is_async; see AwaitExpr's docstring).
     line: int = 0
     col: int = 0
 
@@ -1663,6 +1689,35 @@ class Parser:
         # (`match(x)` a call, `match = 5` an assignment, etc).
         if t.kind == "NAME" and t.value == "match" and self._is_match_stmt():
             return self._parse_match()
+        # `async` is a soft keyword, same story as `match`/`fn`/`struct`/`var`
+        # above: `async` lexes as a plain NAME (not in _KEYWORDS — real
+        # Python has no bare `async` keyword outside `async def`/`async
+        # for`/`async with` either), so it's also a legal ordinary
+        # identifier. Only commit to an async-prefixed parse when the very
+        # next token is one of the three real async-statement openers
+        # (`def`/`fn`, `for`, `with`); otherwise fall through to ordinary
+        # expression/assignment parsing, where `async` reads as a plain
+        # identifier via _parse_primary. This is the UNDECORATED path for
+        # `async def` — the decorated path (`@dec\nasync def f(): ...`) is
+        # handled separately below, in the `@` decorator block, which strips
+        # a leading `async` before dispatching to `def`/`fn`.
+        if t.kind == "NAME" and t.value == "async":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value in ("def", "fn"):
+                self._advance()  # consume 'async'
+                self._advance()  # consume 'def'/'fn'
+                return self._parse_funcdef([], is_async=True)
+            if nxt.kind == "KW" and nxt.value == "for":
+                self._advance()  # consume 'async'
+                stmt = self._parse_for()
+                stmt.is_async = True
+                return stmt
+            if nxt.kind == "KW" and nxt.value == "with":
+                self._advance()  # consume 'async'
+                stmt = self._parse_with()
+                stmt.is_async = True
+                return stmt
+            # else: `async` used as an ordinary identifier — fall through.
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
@@ -1881,13 +1936,17 @@ class Parser:
                 return self._parse_trait()
             if kw.kind == "KW" and kw.value == "comptime":
                 return self._parse_comptime()
-            # Handle 'async def' — async is tokenized as NAME not KW
+            # Handle 'async def' — async is tokenized as NAME not KW. Milestone
+            # 3a: build a real is_async=True FunctionDef instead of silently
+            # discarding the `async` token (see AwaitExpr's docstring).
+            is_async = False
             if kw.kind == "NAME" and kw.value == "async":
+                is_async = True
                 self._advance()
                 kw = self._peek()
             if kw.kind == "KW" and kw.value in ("def", "fn"):
                 self._advance()
-                return self._parse_funcdef(decs)
+                return self._parse_funcdef(decs, is_async=is_async)
             # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
             # applied to a `var` declaration: decorators carry no codegen
             # meaning here, so just parse the var decl and drop them.
@@ -2323,7 +2382,7 @@ class Parser:
 
     # Ownership/convention keywords preserved in param_convs
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned'}
-    def _parse_funcdef(self, decorators=None):
+    def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
         t = self._peek()
@@ -2518,7 +2577,8 @@ class Parser:
                            kwonly=kwonly,
                            comptime_params=comptime_params,
                            is_generator=is_generator,
-                           yield_bearing_node_ids=yield_bearing_node_ids)
+                           yield_bearing_node_ids=yield_bearing_node_ids,
+                           is_async=is_async)
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
@@ -3086,15 +3146,17 @@ class Parser:
 
     def _parse_unary(self):
         t = self._peek()
-        # `await expr` — `await` lexes as a plain NAME (not a keyword). Async
-        # semantics aren't modeled, so unwrap to the awaited expression. Guard
-        # on the next token starting an expression so a variable literally
-        # named `await` (`x = await`, `await.foo`) still reads as an identifier.
+        # `await expr` — `await` lexes as a plain NAME (not a keyword).
+        # Milestone 3a: build a real AwaitExpr node (no execution semantics
+        # yet — see its docstring) instead of Milestone-1-era silently
+        # unwrapping to just the awaited expression. Guard on the next token
+        # starting an expression so a variable literally named `await`
+        # (`x = await`, `await.foo`) still reads as an identifier.
         if (t.kind == "NAME" and t.value == "await"
                 and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
                     "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE")):
             self._advance()
-            return self._parse_unary()
+            return AwaitExpr(value=self._parse_unary(), line=t.line, col=t.col)
         if t.kind == "OP" and t.value in ("-", "+", "~"):
             self._advance()
             return UnaryOp(op=t.value, operand=self._parse_unary())
