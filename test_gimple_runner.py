@@ -322,6 +322,21 @@ y = g("a", "b")
 print(f"result: {y}")
 """, "result: ab\n")
 
+    # 16. Same two-param concat shape, but called DIRECTLY inline inside the
+    # f-string's `{...}` interpolation — no intermediate variable at all.
+    # bugs/CODEGEN_untyped_param_string_direct_fstring_call.md: an f-string
+    # interpolation's `{expr}` sub-expression is raw source text kept inside
+    # the StringLiteral node, only parsed at actual codegen time — it was
+    # invisible to the earlier cross-call scalar-contract call-site scan
+    # (_collect_calls/_calls_in_stmts) that the `y = g(...)` shape above
+    # goes through, so `g`'s param/return types never got corrected from
+    # int64_t to char* for this shape specifically.
+    test_gimple_stdout("gimple_untyped_param_string_direct_fstring_call", """\
+def g(a, b):
+    return a + b
+print(f"result: {g('a', 'b')}")
+""", "result: ab\n")
+
 
 def main():
     gcc = find_gcc()

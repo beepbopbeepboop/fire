@@ -4737,12 +4737,46 @@ class GimpleGen:
 
         return result
 
+    def _fstring_sub_exprs(self, node) -> list:
+        """Parse an f-string StringLiteral's `{expr}` interpolations into AST
+        expression nodes, best-effort.
+
+        F-string interpolation sub-expressions are raw source text kept
+        inside the StringLiteral's own `.value` (only parsed lazily, at
+        actual codegen time, by _lower_StringLiteral) — they are NOT real
+        AST nodes reachable from the top-level parse tree. That made a call
+        embedded directly inside an interpolation (e.g. f"{g('a','b')}",
+        with no intermediate variable) invisible to _collect_calls and thus
+        to Pass 1.3d's cross-call scalar contract below: only the
+        `y = g(...)` shape, a genuine AssignStmt.value CallExpr, was ever
+        observed. See bugs/CODEGEN_untyped_param_string_direct_fstring_call.md.
+        Mirrors _lower_StringLiteral's own fresh-parse-from-text handling of
+        these so both paths agree on what a call site looks like."""
+        val, is_fstring = self._decode_str_literal_text(node.value)
+        if not is_fstring:
+            return []
+        out = []
+        for kind, text in self._parse_fstring_parts(val):
+            if kind != 'expr':
+                continue
+            try:
+                from mojo_compiler import Parser as _P, py_tokenize as _tok
+                expr_node = _P(_tok(text))._parse_expr(0)
+                expr_node = ast_rewriter.rewrite_node(expr_node)
+                out.append(expr_node)
+            except Exception:
+                pass  # same "can't be lowered" tolerance as _lower_StringLiteral
+        return out
+
     def _collect_calls(self, expr, out):
         """Append every CallExpr in an expression tree to out. A method (not a
         nested function) so it never goes through the closure-lift machinery."""
         if expr is None:
             return
-        if isinstance(expr, CallExpr):
+        if isinstance(expr, StringLiteral):
+            for sub in self._fstring_sub_exprs(expr):
+                self._collect_calls(sub, out)
+        elif isinstance(expr, CallExpr):
             out.append(expr)
             self._collect_calls(expr.func, out)
             for a in expr.args:
