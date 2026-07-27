@@ -62,6 +62,57 @@ EXPECTED_FAILURES = {
         'captured comptime-function/FuncType parameter closures are broken '
         'in the general codegen (independent of async) — see bugs/CODEGEN_'
         'device_context_captured_function_parameter_closures_broken.md',
+
+    # Blocked by a severe, pre-existing, systemic bug: comptime bracket-
+    # parametrized function calls (`f[N](...)`) silently compile to a
+    # placeholder `0` instead of actually binding/using the comptime
+    # argument — confirmed via two independent hand-verified repros (a
+    # free function and, separately, a `@parameter`-decorated nested def,
+    # matching these files' own exact shape:
+    # `test_asyncrt_add[lhs: Int](rhs: Int)` /
+    # `test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)`). This is NOT
+    # an async-codegen gap — it lives entirely in the general comptime/
+    # generic-parameter codegen, used throughout the compiled stdlib (SIMD
+    # widths, dtypes, comptime ints, ...), so fixing it is a separate,
+    # high-blast-radius project of its own, not a narrow async-codegen
+    # addition. (Each file may have additional, not-yet-fully-diagnosed
+    # blockers on top of this one — e.g. test_asyncrt.mojo's
+    # `create_task`/`Task` composition — this is only the first, confirmed
+    # one; it alone is enough to block the whole module.)
+    # See bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md
+    # for both repros and the full analysis.
+    'test/runtime/test_asyncrt.mojo':
+        'comptime bracket-parametrized function calls silently compile to '
+        '0 instead of binding the real value — see bugs/CODEGEN_comptime_'
+        'bracket_parametrized_function_calls_silently_wrong.md',
+    'test/runtime/test_tracing.mojo':
+        'comptime bracket-parametrized function calls silently compile to '
+        '0 instead of binding the real value — see bugs/CODEGEN_comptime_'
+        'bracket_parametrized_function_calls_silently_wrong.md',
+
+    # test_locks.mojo and test_raising_asyncrt.mojo do NOT hit the comptime-
+    # bracket-parameter bug above (their async functions use only plain
+    # runtime params, or none) — their blocker is that `create_task`/
+    # `Task`/`TaskGroup`/`RaisingTask`/`create_raising_task` have no
+    # codegen support at all yet (confirmed: zero references to any of
+    # these names anywhere in gimple_codegen.py). test_locks.mojo also
+    # needs `with`-statement support inside an async body (not yet
+    # attempted anywhere in this codegen, generator or async) and
+    # `TaskGroup.create_task`/`.wait[...]`'s own composition semantics.
+    # This is a real, substantial, not-yet-started feature (the natural
+    # next step after the comptime-parameter bug above is fixed, since
+    # `test_asyncrt.mojo`'s own simplest task usage would otherwise hit it
+    # immediately too) rather than a narrow addition, so it's left
+    # honestly undone this round instead of forced through.
+    'test/runtime/test_locks.mojo':
+        'create_task/Task/TaskGroup have no codegen support at all yet '
+        '(confirmed zero references anywhere in gimple_codegen.py), plus '
+        'this file needs `with`-statement support inside an async body, '
+        'never attempted in this codegen for generator or async bodies',
+    'test/runtime/test_raising_asyncrt.mojo':
+        'create_task/Task/RaisingTask/create_raising_task have no codegen '
+        'support at all yet (confirmed zero references anywhere in '
+        'gimple_codegen.py)',
 }
 
 def get_stdlib_path():
