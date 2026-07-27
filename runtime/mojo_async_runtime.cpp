@@ -204,4 +204,47 @@ void mojo_async_run_until_complete(void) {
     }
 }
 
+/* --- Generic (promise-type-erased) resume/destroy — see the doc comment
+ * on these two in mojo_async_runtime.h. */
+
+void mojo_coro_resume_generic(int64_t handle) {
+    if (handle == 0) return;
+    std::coroutine_handle<>::from_address(
+        reinterpret_cast<void *>(handle)).resume();
+}
+
+void mojo_coro_destroy_generic(int64_t handle) {
+    if (handle == 0) return;
+    std::coroutine_handle<>::from_address(
+        reinterpret_cast<void *>(handle)).destroy();
+}
+
+/* --- AsyncRT_DeviceContext_enqueueHostFunction(Range) — deliberate
+ * synchronous stub, see the doc comment on these two in
+ * mojo_async_runtime.h and bugs/CODEGEN_device_context_host_function_
+ * enqueue_synchronous_stub.md. */
+
+const char *AsyncRT_DeviceContext_enqueueHostFunction(
+        int64_t /*device_ctx_handle*/,
+        void (*resume_fn)(int64_t),
+        void (*destroy_fn)(int64_t),
+        int64_t coro_handle) {
+    resume_fn(coro_handle);
+    destroy_fn(coro_handle);
+    return nullptr;
+}
+
+const char *AsyncRT_DeviceContext_enqueueHostFunctionRange(
+        int64_t /*device_ctx_handle*/,
+        void (*resume_fn)(int64_t),
+        void (*destroy_fn)(int64_t),
+        const int64_t *coro_handles,
+        int64_t count) {
+    for (int64_t i = 0; i < count; ++i) {
+        resume_fn(coro_handles[i]);
+        destroy_fn(coro_handles[i]);
+    }
+    return nullptr;
+}
+
 } /* extern "C" */

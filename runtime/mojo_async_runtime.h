@@ -102,6 +102,83 @@ void mojo_async_cancel(int fd);
  * to do. */
 void mojo_async_run_until_complete(void);
 
+/* --- Generic (promise-type-erased) resume/destroy ---
+ *
+ * For Mojo source that extracts a raw coroutine handle via
+ * `Coroutine._take_handle()` and hands it to native code that will
+ * resume/destroy it itself, later, on its own schedule (e.g.
+ * std.gpu.host.DeviceContext.enqueue_cpu_function's `_coro_resume_fn`/
+ * `_coro_destroy_fn` arguments to AsyncRT_DeviceContext_enqueueHostFunction,
+ * below) — added alongside gimple_codegen.py's "detached async" codegen
+ * path (the narrow shape: an `async def` with parameters allowed only when
+ * its body never itself contains `await` and its only use at the call site
+ * is `_take_handle()`; see _detached_async_quick_eligible's docstring).
+ *
+ * A C++20 coroutine's resume()/destroy() functions live INSIDE the
+ * coroutine frame itself (the Itanium C++ coroutine ABI stores them
+ * there) — std::coroutine_handle<>::from_address(h).resume()/.destroy()
+ * reads them back out generically, with NO dependency on which concrete
+ * promise type produced the handle. So, unlike the per-function
+ * <base>_start/_value/_destroy trampolines gimple_codegen.py emits
+ * elsewhere in this project (one set per compiled async/generator
+ * function), ONE pair of these functions genuinely serves EVERY compiled
+ * coroutine this codegen ever emits — this mirrors real Mojo's own
+ * `_coro_resume_fn`/`_coro_destroy_fn` builtins (std.builtin.coroutine)
+ * exactly, which gimple_codegen.py's lowering for the `_take_handle()`-
+ * based external-dispatch call shape substitutes references to these two
+ * functions for (rather than ever attempting to compile the real
+ * `_coro_resume_fn`/`_coro_destroy_fn` Mojo source bodies themselves,
+ * which use raw `__mlir_op.co.resume`/`co.destroy` ops this codegen has
+ * no general lowering for — see coroutine.mojo's compiled output, which
+ * already reduces those to inert "deferred: coroutine lowering not
+ * modeled" stubs; letting THOSE stubs leak into this call path would
+ * silently make `func()` never actually run).
+ *
+ * Handles are plain `int64_t` here (not `void*`), matching how this
+ * codegen already represents AnyCoroutine/opaque handle values everywhere
+ * else (see coroutine.mojo's compiled `_coro_resume_fn_...(int64_t)`). */
+void mojo_coro_resume_generic(int64_t handle);
+void mojo_coro_destroy_generic(int64_t handle);
+
+/* --- AsyncRT_DeviceContext_enqueueHostFunction(Range) ---
+ *
+ * DELIBERATE SYNCHRONOUS SIMPLIFICATION, not real GPU stream-ordered
+ * dispatch — see bugs/CODEGEN_device_context_host_function_enqueue_
+ * synchronous_stub.md for the full writeup. Real AsyncRT enqueues the
+ * given host callback onto whichever GPU stream `device_ctx_handle`
+ * names and returns immediately; the callback runs later, out-of-line,
+ * once every op enqueued before it on that stream has completed. This
+ * project's compiled path has no GPU stream model at all (building one is
+ * a separate, much larger future project — see this project's own MSL/
+ * Metal-offload long-term notes), so these stubs run the wrapped callback
+ * SYNCHRONOUSLY, immediately, inline, before returning: call
+ * resume_fn(handle) exactly once (the wrapped Mojo closure's whole body
+ * has no internal suspension point — see
+ * gimple_codegen.py's `_detached_async_quick_eligible` — so one resume()
+ * genuinely drives it to completion, this is not merely "close enough"),
+ * then destroy_fn(handle) to free the coroutine frame. This is honest for
+ * every CURRENT call site (device_context.mojo's four `wrapper()`
+ * closures, which only ever wrap a plain, synchronous host callback with
+ * no awaits of its own) but is NOT a substitute for real ordered GPU
+ * dispatch — a caller that actually depended on stream ordering relative
+ * to other enqueued GPU work would observe different (wrong) behavior.
+ * Returns NULL (success) always — matching this codegen's established
+ * `_CString`/`_checked()` "NULL or an error message" convention — since a
+ * purely local, synchronous function-pointer call has no real failure
+ * mode to report here. */
+const char *AsyncRT_DeviceContext_enqueueHostFunction(
+    int64_t device_ctx_handle,
+    void (*resume_fn)(int64_t),
+    void (*destroy_fn)(int64_t),
+    int64_t coro_handle);
+
+const char *AsyncRT_DeviceContext_enqueueHostFunctionRange(
+    int64_t device_ctx_handle,
+    void (*resume_fn)(int64_t),
+    void (*destroy_fn)(int64_t),
+    const int64_t *coro_handles,
+    int64_t count);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
