@@ -1027,6 +1027,208 @@ def main():
     print(asyncio.run(main_driver()))
 """, "cannot compile module")
 
+    # ── Step I: create_task/Task/RaisingTask/create_raising_task ──────────
+    # (the create_task/Task/TaskGroup/RaisingTask codegen project). Real
+    # compile+link+run behavioral coverage for test_raising_asyncrt.mojo's
+    # own shapes (that file itself is the fuller, real-stdlib-linked
+    # end-to-end proof — these are the same shapes distilled into
+    # standalone, stdlib-free snippets this harness can build without a
+    # full dylib link, using `print(...)` in place of `assert_equal(...)`).
+
+    # 1. The simplest shape: a nested (`@parameter async def`), zero-
+    # parameter async function that itself awaits a top-level, PARAMETERIZED
+    # async function (Step H's own parameter-support addition), run via
+    # `create_task(...)` then blocked on with `.wait()` from ordinary
+    # (non-async) code. Exercises: nested-async compilation + scoped
+    # `_async_api` push (_compile_nested_async_functions), the
+    # `create_task`/`.wait()` handle tracking (_async_var_api), and that
+    # `create_task`/`create_raising_task` are intercepted before the
+    # generic-import-elaboration machinery a real `from std.runtime.asyncrt
+    # import ...` would otherwise route them through (see _lower_call's own
+    # docstring on why this ordering matters).
+    test_async_stdout("create_task_basic_wait", """\
+from std.runtime.asyncrt import create_task
+
+async def add_async(a: Int, b: Int) -> Int:
+    return a + b
+
+def test_basic() raises:
+    @parameter
+    async def wrapper() -> Int:
+        return await add_async(10, 20)
+
+    var task = create_task(wrapper())
+    print(task.wait())
+
+def main() raises:
+    test_basic()
+""", "30\n")
+
+    # 2. RaisingTask success + real error propagation through `.wait()` —
+    # the exact shape test_raising_asyncrt.mojo's Phase 2 uses:
+    # `create_raising_task(<call>)` at ordinary function scope, `task^.wait()`
+    # (the `^` transfer sigil — NOT stripped by the tokenizer, see
+    # _lower_method_call's own docstring) inside a real `try`/`except e:`.
+    # Exercises the `except e:`/bare-identifier-catch-all fix (a real,
+    # pre-existing bug this project found and fixed getting THIS exact
+    # shape working — see _handler_exc_name's docstring) and the promise's
+    # already-generic exception staging propagating a real error message
+    # all the way out through `.wait()`'s mojo_raise() bridge. Prints `e`
+    # directly (a plain `char *`, not `String(e)`) — general `String(...)`
+    # support for a non-literal argument is a separate, pre-existing gap in
+    # this codegen (unrelated to create_task/Task — see the `FIXME` on
+    # `String`'s stub extern declaration in gen_module's preamble
+    # emission), out of this project's scope; `print(e)` is what actually
+    # exercises this project's own exception-message plumbing correctly.
+    test_async_stdout("raising_task_wait_success_and_error", """\
+from std.runtime.asyncrt import create_task, create_raising_task
+
+async def add_async(a: Int, b: Int) raises -> Int:
+    return a + b
+
+async def failing_async() raises -> Int:
+    raise Error("intentional error from async task")
+
+def test_success() raises:
+    var task = create_raising_task(add_async(10, 20))
+    print(task^.wait())
+
+def test_error() raises:
+    var task = create_raising_task(failing_async())
+    var caught = False
+    try:
+        _ = task^.wait()
+    except e:
+        caught = True
+        print(e)
+    print(caught)
+
+def main() raises:
+    test_success()
+    test_error()
+""", "30\nintentional error from async task\n1\n")
+
+    # 3. A keyword-argument await composition (`await
+    # conditional_raise(should_fail=False)`) AND a keyword-argument
+    # `create_raising_task(conditional_raise(should_fail=True))` at ordinary
+    # function scope — real Mojo's own test_raising_asyncrt.mojo shape.
+    # Exercises _resolve_kwargs_for_known_async_call/_normalize_await_kwargs
+    # (this codegen's call-lowering is positional-only everywhere else; this
+    # is the one bridge from a real keyword-argument call site onto that
+    # positional-only async-composition machinery) in BOTH of the two
+    # places it's needed: a direct `await` target, and create_raising_task's
+    # own inner call.
+    test_async_stdout("kwarg_composition_both_shapes", """\
+from std.runtime.asyncrt import create_task, create_raising_task
+
+async def conditional_raise(should_fail: Bool) raises -> Int:
+    if should_fail:
+        raise Error("conditional failure")
+    return 42
+
+def test_direct_await() raises:
+    @parameter
+    async def success_wrapper() -> Int:
+        try:
+            return await conditional_raise(should_fail=False)
+        except:
+            return -1
+
+    var task = create_task(success_wrapper())
+    print(task.wait())
+
+def test_create_raising_task_kwarg() raises:
+    var t_ok = create_raising_task(conditional_raise(should_fail=False))
+    print(t_ok^.wait())
+    var t_fail = create_raising_task(conditional_raise(should_fail=True))
+    var caught = False
+    try:
+        _ = t_fail^.wait()
+    except:
+        caught = True
+    print(caught)
+
+def main() raises:
+    test_direct_await()
+    test_create_raising_task_kwarg()
+""", "42\n42\n1\n")
+
+    # 4. A held RaisingTask AWAITED from INSIDE another coroutine's own body
+    # (`var task = create_raising_task(f()); ...; return await task^`) —
+    # the narrow, documented single-use inlining
+    # (_inline_single_use_task_composition) that collapses this into a
+    # direct `await f()` composition when (and only when) the handle is
+    # never referenced anywhere else. Includes the "chained" shape (a
+    # `raises` async function itself awaiting a held RaisingTask, no
+    # try/except of its own — test_raising_asyncrt.mojo's own
+    # test_raising_task_await_chained).
+    test_async_stdout("held_raising_task_await_inlined", """\
+from std.runtime.asyncrt import create_task, create_raising_task
+
+async def add_async(a: Int, b: Int) raises -> Int:
+    return a + b
+
+def test_wrapper_holds_task() raises:
+    @parameter
+    async def wrapper() -> Int:
+        var task = create_raising_task(add_async(1, 2))
+        try:
+            return await task^
+        except:
+            return -1
+
+    var task = create_task(wrapper())
+    print(task.wait())
+
+def test_chained() raises:
+    async def outer() raises -> Int:
+        var inner = create_raising_task(add_async(5, 10))
+        return await inner^
+
+    var task = create_raising_task(outer())
+    print(task^.wait())
+
+def main() raises:
+    test_wrapper_holds_task()
+    test_chained()
+""", "3\n15\n")
+
+    # 5. Two DIFFERENT enclosing functions each define their own nested
+    # async helper with the SAME bare name (`wrapper`) — the exact scoping
+    # hazard _compile_nested_async_functions/self._nested_async_api's own
+    # docstrings call out (every compiled async cpp fragment in a module
+    # lands in ONE shared .cpp translation unit, so both the C++ symbol
+    # names AND the scoped self._async_api push/pop must keep them
+    # distinct). If this collided, one of the two would silently resolve
+    # to the WRONG compiled unit — this asserts both produce their own,
+    # independently-correct result.
+    test_async_stdout("same_named_nested_helpers_different_scopes", """\
+from std.runtime.asyncrt import create_task
+
+async def add_async(a: Int, b: Int) -> Int:
+    return a + b
+
+def test_a() raises:
+    @parameter
+    async def wrapper() -> Int:
+        return await add_async(1, 1)
+
+    var task = create_task(wrapper())
+    print(task.wait())
+
+def test_b() raises:
+    @parameter
+    async def wrapper() -> Int:
+        return await add_async(100, 100)
+
+    var task = create_task(wrapper())
+    print(task.wait())
+
+def main() raises:
+    test_a()
+    test_b()
+""", "2\n200\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

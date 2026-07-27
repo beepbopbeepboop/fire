@@ -94,29 +94,19 @@ EXPECTED_FAILURES = {
         '— see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_'
         'silently_wrong.md',
 
-    # test_locks.mojo and test_raising_asyncrt.mojo do NOT hit the comptime-
-    # bracket-parameter bug above (their async functions use only plain
-    # runtime params, or none) — their blocker is that `create_task`/
-    # `Task`/`TaskGroup`/`RaisingTask`/`create_raising_task` have no
-    # codegen support at all yet (confirmed: zero references to any of
-    # these names anywhere in gimple_codegen.py). test_locks.mojo also
-    # needs `with`-statement support inside an async body (not yet
-    # attempted anywhere in this codegen, generator or async) and
-    # `TaskGroup.create_task`/`.wait[...]`'s own composition semantics.
-    # This is a real, substantial, not-yet-started feature (the natural
-    # next step after the comptime-parameter bug above is fixed, since
-    # `test_asyncrt.mojo`'s own simplest task usage would otherwise hit it
-    # immediately too) rather than a narrow addition, so it's left
-    # honestly undone this round instead of forced through.
+    # test_locks.mojo's blocker: `TaskGroup` (create_task/Task/RaisingTask/
+    # create_raising_task now have real codegen support — see
+    # test_raising_asyncrt.mojo, which passes as of the commit removing its
+    # own entry here) plus `with`-statement support inside an async body
+    # (not yet attempted anywhere in this codegen, generator or async) and
+    # `TaskGroup.create_task`/`.wait[...]`'s own composition semantics —
+    # still a real, substantial, not-yet-started feature.
     'test/runtime/test_locks.mojo':
-        'create_task/Task/TaskGroup have no codegen support at all yet '
-        '(confirmed zero references anywhere in gimple_codegen.py), plus '
-        'this file needs `with`-statement support inside an async body, '
-        'never attempted in this codegen for generator or async bodies',
-    'test/runtime/test_raising_asyncrt.mojo':
-        'create_task/Task/RaisingTask/create_raising_task have no codegen '
-        'support at all yet (confirmed zero references anywhere in '
-        'gimple_codegen.py)',
+        'TaskGroup (create_task/Task/RaisingTask/create_raising_task now '
+        'have real codegen support — see test_raising_asyncrt.mojo) has no '
+        'codegen support at all yet, plus this file needs `with`-statement '
+        'support inside an async body, never attempted in this codegen for '
+        'generator or async bodies',
 }
 
 def get_stdlib_path():

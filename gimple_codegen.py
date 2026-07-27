@@ -7726,30 +7726,56 @@ class GimpleGen:
         func = node.func  # MemberExpr
 
         # Step I (create_task/Task/TaskGroup/RaisingTask project):
-        # `task.wait()` (or `task^.wait()` — the `^` transfer sigil is
-        # stripped by the tokenizer, see mojo_compiler.py, so it parses
-        # identically) where `task` holds a `MojoAsync *` handle produced
-        # by `create_task(...)`/`create_raising_task(...)` (tracked in
-        # self._async_var_api — see that dict's docstring). Blocks the
-        # current (single-threaded, cooperative) scheduler to completion —
-        # reuses the EXACT SAME drive/translate/read/destroy sequence the
-        # `asyncio.run(...)` bridge already uses (see _lower_call's
-        # `module_name == 'asyncio' and method_name == 'run'` branch),
-        # since blocking-wait-for-completion is semantically the same
-        # operation there and here, just reached via a different Mojo-level
-        # spelling. No structural distinction is made here between a plain
-        # `Task` and a `RaisingTask` — this codegen's promise already
-        # stages ANY escaped exception generically (Step E), regardless of
-        # whether the async function was declared `raises`, so
-        # `create_raising_task(...)` (below, in _lower_call) reuses this
-        # exact same tracking/handle shape; the real Mojo-level `Task` vs.
-        # `RaisingTask` distinction is a type-checking-only concern this
-        # codegen doesn't model.
-        if (isinstance(func.obj, IdentExpr) and func.obj.name in self._async_var_api
+        # `task.wait()` or `task^.wait()` where `task` holds a
+        # `MojoAsync *` handle produced by
+        # `create_task(...)`/`create_raising_task(...)` (tracked in
+        # self._async_var_api — see that dict's docstring). The `^`
+        # transfer sigil (real Mojo's own idiom for `RaisingTask.wait(deinit
+        # self)`'s ownership-transfer requirement) is NOT stripped by the
+        # tokenizer — confirmed directly via the parser: `task^` produces
+        # `UnaryOp(op='^', operand=IdentExpr('task'))` — so both shapes are
+        # matched explicitly below; this codegen has no ownership/deinit
+        # model to actually enforce, so `^` is simply unwrapped to the
+        # underlying variable reference. Blocks the current (single-
+        # threaded, cooperative) scheduler to completion — reuses the EXACT
+        # SAME drive/translate/read/destroy sequence the `asyncio.run(...)`
+        # bridge already uses (see _lower_call's `module_name == 'asyncio'
+        # and method_name == 'run'` branch), since blocking-wait-for-
+        # completion is semantically the same operation there and here,
+        # just reached via a different Mojo-level spelling. No structural
+        # distinction is made here between a plain `Task` and a
+        # `RaisingTask` — this codegen's promise already stages ANY escaped
+        # exception generically (Step E), regardless of whether the async
+        # function was declared `raises`, so `create_raising_task(...)`
+        # (below, in _lower_call) reuses this exact same tracking/handle
+        # shape; the real Mojo-level `Task` vs. `RaisingTask` distinction
+        # is a type-checking-only concern this codegen doesn't model.
+        _wait_obj = func.obj
+        if (isinstance(_wait_obj, UnaryOp) and _wait_obj.op == '^'
+                and isinstance(_wait_obj.operand, IdentExpr)):
+            _wait_obj = _wait_obj.operand
+        if (isinstance(_wait_obj, IdentExpr) and _wait_obj.name in self._async_var_api
                 and func.member == 'wait' and not node.args):
-            api = self._async_var_api[func.obj.name]
+            api = self._async_var_api[_wait_obj.name]
+            if api.get('stub'):
+                # See _lower_call's create_task/create_raising_task stub
+                # branch — this handle names a real async function this
+                # codegen couldn't compile (documented, narrow degrade for
+                # provably-unreachable dead code, not silent wrongness).
+                # `.wait()` on it degrades the exact same way: a loud,
+                # honest runtime abort() instead of trying to call
+                # nonexistent extern "C" API functions for a `base` that
+                # was never generated.
+                self._emit(
+                    '  fprintf(stderr, "mojo: .wait() reached on a stub '
+                    'create_task/create_raising_task handle (deliberate '
+                    'stub -- see gimple_codegen.py\'s _lower_call comment) '
+                    '-- aborting\\n");')
+                self._emit("  abort ();")
+                result = self._new_val('int64_t', '(int64_t)0')
+                return 'int64_t', result
             base, vct = api['base'], api['value_ctype']
-            handle_expr = func.obj.name
+            handle_expr = _wait_obj.name
             self._emit(f"  mojo_async_run_until_complete ();")
             self._emit(f"  {base}_translate_pending_exc ({handle_expr});")
             pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
@@ -9806,6 +9832,155 @@ class GimpleGen:
         return f"{ftype} *", t
 
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
+        # Step I (create_task/Task/TaskGroup/RaisingTask project):
+        # `create_task(f())` / `create_raising_task(f())` where `f` is a
+        # supported compiled async function (top-level OR nested — a
+        # nested one is only resolvable here while THIS enclosing
+        # function's body is being compiled, via gen_module's scoped
+        # push into self._async_api — see
+        # _compile_nested_async_functions's docstring). Constructs the
+        # coroutine via `{base}_start(args...)` (exactly like the
+        # generator-call path elsewhere in this method) and schedules it
+        # onto Step A's ready queue via `mojo_async_schedule_ready` -- but,
+        # unlike `asyncio.run(...)`'s bridge, does NOT drive the scheduler
+        # to completion here: real Mojo's own `create_task` returns a
+        # `Task` immediately, without blocking, and this project's
+        # single-threaded cooperative scheduler only actually RUNS
+        # scheduled work when something later drains it (`.wait()` -- see
+        # _lower_method_call's own `MojoAsync *`.`wait()` case -- or
+        # another `await`). The resulting `MojoAsync *` handle is tracked
+        # in self._async_var_api (mirrors self._generator_var_api's
+        # identical "value -> api" side-table pattern exactly) so a later
+        # `.wait()` on the variable it gets assigned to can recover which
+        # extern "C" API/value_ctype to use. No structural difference is
+        # made here between `create_task` and `create_raising_task` -- see
+        # _lower_method_call's own docstring on why this codegen's promise
+        # already stages ANY escaped exception generically regardless of a
+        # `raises` annotation, so both map onto the identical handle shape.
+        #
+        # Checked FIRST, before ANY other dispatch in this method
+        # (including the generic-import elaboration a little further
+        # down): real Mojo's own `create_task`/`create_raising_task` are
+        # themselves imported, generic-looking free functions from
+        # `std.runtime.asyncrt` (`create_raising_task[type: Movable,
+        # origins: OriginSet](...)`), so `_elaborate_generic_call` would
+        # otherwise try to elaborate their REAL body (raw MLIR ops,
+        # ThinAllocation, ...) instead of ever reaching this special case
+        # — and worse, that path unconditionally lowers every argument
+        # (`self.lower_expr(a) for a in node.args`, BEFORE its own
+        # try/except) to drive type inference, which would eagerly
+        # evaluate `f()` as a value-consuming call and hit THIS module's
+        # own, unrelated "async function called as a value" honest
+        # refusal a few hundred lines down — a confusing, wrong failure
+        # for a perfectly supported create_task/create_raising_task shape.
+        # Intercepting here, before that dispatch is even attempted, avoids
+        # it entirely rather than trying to special-case around it deeper
+        # in the shared generic-elaboration machinery.
+        if (isinstance(node.func, IdentExpr)
+                and node.func.name in ('create_task', 'create_raising_task')
+                and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
+            _fname = node.func.name
+            inner = node.args[0]
+            # Resolve any keyword arguments on the inner call (e.g. real
+            # Mojo's own `create_raising_task(conditional_raise(should_fail
+            # =False))`) against the callee's real parameter order — see
+            # _resolve_kwargs_for_known_async_call's own docstring; reused
+            # here (not re-implemented) since this is the SAME "keyword-
+            # argument call to a known async function" shape
+            # _normalize_await_kwargs already handles for the `await
+            # <call>` composition case, just reached from ordinary
+            # (non-coroutine-body) code instead.
+            self._resolve_kwargs_for_known_async_call(inner)
+            # A nested async def with no comptime bracket parameters is
+            # normally captured by gen_module's own _compile_nested_async_
+            # functions pass (registered into self._nested_async_api, then
+            # scoped-pushed into self._async_api for this enclosing
+            # function's body compile — see that pass's docstring) and
+            # resolves via the self._async_api lookup just below. But
+            # gen_module also has a SEPARATE, independently-built nested-
+            # in-top-level-function discovery pass (the comptime-bracket-
+            # parametrized one — see _async_closure_api's 'comptime_params'
+            # key) that targets the identical parent shape (an ordinary
+            # top-level function's body) and, for a param-less nested
+            # async def, would produce an equally valid compiled unit —
+            # gen_module's pass ORDERING already guarantees only one of the
+            # two ever actually claims any given nested async def (each
+            # pops its id out of the shared `_async_fns` on success, and
+            # the other checks that first), so no double-compile occurs.
+            # This fallback exists purely so create_task(...)'s own lookup
+            # doesn't silently regress if a future change to that ordering
+            # (or a bracket-param-free call to a function that happens to
+            # be comptime-parametrized) ever lets the OTHER pass claim it
+            # first instead.
+            _acl_fallback = self._async_closure_api.get((self.current_func_name,
+                                                          getattr(inner.func, 'name', None))) \
+                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr) else None
+            if (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
+                    and (inner.func.name in self._async_api or _acl_fallback is not None)
+                    and not getattr(inner, 'kwargs', None)):
+                api = self._async_api.get(inner.func.name) or _acl_fallback
+                base = api['base']
+                arg_pairs = [self.lower_expr(a) for a in inner.args]
+                handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
+                self._emit(f"  mojo_async_schedule_ready ({handle});")
+                self._async_var_api[handle] = api
+                return 'MojoAsync *', handle
+            # DELIBERATE, DOCUMENTED SIMPLIFICATION (not silent wrongness —
+            # see this project's own standing "honest, documented
+            # simplification" standard, e.g. bugs/CODEGEN_device_context_
+            # host_function_enqueue_synchronous_stub.md): the inner call
+            # names a REAL `async def` somewhere in this module (found by
+            # gen_module's own initial `_walk_ast` scan — self.
+            # _all_async_fn_names — regardless of whether it ended up
+            # eligible for this codegen's narrow C++20-coroutine path), but
+            # it never got compiled (e.g. a non-scalar/String return type —
+            # this codegen's shared coroutine-body emitter is deliberately
+            # scalar-only throughout, see _gen_cpp_async_unit's docstring).
+            # Concretely hit by test_raising_asyncrt.mojo's own
+            # `test_raising_async_error_message_via_wrapper` — a test the
+            # file's OWN author already disabled at its one call site in
+            # `main()` (commented out, citing a genuine, separate upstream
+            # Mojo MLIR bug, MOCO-3408) — so this specific function is
+            # provably unreachable in that file, yet (unlike a function
+            # body this codegen simply never emits) still has to COMPILE
+            # since every top-level function gets a C definition regardless
+            # of whether anything calls it.
+            #
+            # Rather than hard-refusing the WHOLE MODULE over one
+            # genuinely-dead, upstream-acknowledged-broken function, this
+            # emits a loud, honest RUNTIME failure in its place — a real
+            # `abort()` with a diagnostic message, not a silently wrong
+            # value — so if this specific call path were ever, contrary to
+            # the analysis above, actually reached, it fails LOUDLY at run
+            # time instead of returning a plausible-looking but bogus
+            # result. Scoped narrowly to names already confirmed to be
+            # real async functions (not a catch-all for any unresolved
+            # name) — an undefined/typo'd name still hits the ordinary
+            # hard compile-time refusal below.
+            if inner.func.name in self._all_async_fn_names:
+                for a in inner.args:
+                    self.lower_expr(a)  # side effects, if any
+                self._emit(
+                    f'  fprintf(stderr, "mojo: {_fname}({inner.func.name}(...)) '
+                    f'reached at runtime, but {inner.func.name!r} could not be '
+                    'compiled to a real coroutine by this codegen (deliberate '
+                    'stub -- see gimple_codegen.py\'s _lower_call comment on '
+                    'create_task/create_raising_task) -- aborting\\n");')
+                self._emit("  abort ();")
+                handle = self._new_val('MojoAsync *', '(MojoAsync *)0')
+                # Marked 'stub' (no real base/value_ctype exists) so a
+                # later `.wait()` on whatever variable this gets assigned
+                # to (see _lower_method_call's own `MojoAsync *`.`wait()`
+                # case) also degrades to the same abort()-based fallback
+                # instead of trying to call a nonexistent extern "C" API.
+                self._async_var_api[handle] = {'stub': True}
+                return 'MojoAsync *', handle
+            raise RuntimeError(
+                f"cannot compile module: {_fname}(...) is only "
+                "supported for the shape "
+                f"`{_fname}(<call to a supported compiled async "
+                "function>)` -- falling back to interpreting this module "
+                "from source instead")
         # __get_address_as_owned_value(addr)  →  *(int64_t *)addr
         # Mojo ownership intrinsic: load the value at a raw-pointer address.
         if isinstance(node.func, IdentExpr) and node.func.name == '__get_address_as_owned_value' \
@@ -10001,74 +10176,6 @@ class GimpleGen:
             t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
-        # Step I (create_task/Task/TaskGroup/RaisingTask project):
-        # `create_task(f())` / `create_raising_task(f())` where `f` is a
-        # supported compiled async function (top-level OR nested — a
-        # nested one is only resolvable here while THIS enclosing
-        # function's body is being compiled, via gen_module's scoped
-        # push into self._async_api — see
-        # _compile_nested_async_functions's docstring). Constructs the
-        # coroutine via `{base}_start(args...)` (exactly like the
-        # generator-call path just above) and schedules it onto Step A's
-        # ready queue via `mojo_async_schedule_ready` -- but, unlike
-        # `asyncio.run(...)`'s bridge, does NOT drive the scheduler to
-        # completion here: real Mojo's own `create_task` returns a `Task`
-        # immediately, without blocking, and this project's single-
-        # threaded cooperative scheduler only actually RUNS scheduled work
-        # when something later drains it (`.wait()` -- see
-        # _lower_method_call's own `MojoAsync *`.`wait()` case just above
-        # -- or another `await`). The resulting `MojoAsync *` handle is
-        # tracked in self._async_var_api (mirrors self._generator_var_api's
-        # identical "value -> api" side-table pattern exactly) so a later
-        # `.wait()` on the variable it gets assigned to can recover which
-        # extern "C" API/value_ctype to use. No structural difference is
-        # made here between `create_task` and `create_raising_task` -- see
-        # _lower_method_call's own docstring on why this codegen's promise
-        # already stages ANY escaped exception generically regardless of a
-        # `raises` annotation, so both map onto the identical handle shape.
-        if (fname_raw in ('create_task', 'create_raising_task') and len(node.args) == 1
-                and not getattr(node, 'kwargs', None)):
-            inner = node.args[0]
-            # A nested async def with no comptime bracket parameters is
-            # normally captured by gen_module's own _compile_nested_async_
-            # functions pass (registered into self._nested_async_api, then
-            # scoped-pushed into self._async_api for this enclosing
-            # function's body compile — see that pass's docstring) and
-            # resolves via the self._async_api lookup just below. But
-            # gen_module also has a SEPARATE, independently-built nested-
-            # in-top-level-function discovery pass (the comptime-bracket-
-            # parametrized one — see _async_closure_api's 'comptime_params'
-            # key) that targets the identical parent shape (an ordinary
-            # top-level function's body) and, for a param-less nested
-            # async def, would produce an equally valid compiled unit —
-            # gen_module's pass ORDERING already guarantees only one of the
-            # two ever actually claims any given nested async def (each
-            # pops its id out of the shared `_async_fns` on success, and
-            # the other checks that first), so no double-compile occurs.
-            # This fallback exists purely so create_task(...)'s own lookup
-            # doesn't silently regress if a future change to that ordering
-            # (or a bracket-param-free call to a function that happens to
-            # be comptime-parametrized) ever lets the OTHER pass claim it
-            # first instead.
-            _acl_fallback = self._async_closure_api.get((self.current_func_name,
-                                                          getattr(inner.func, 'name', None))) \
-                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr) else None
-            if (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
-                    and (inner.func.name in self._async_api or _acl_fallback is not None)
-                    and not getattr(inner, 'kwargs', None)):
-                api = self._async_api.get(inner.func.name) or _acl_fallback
-                base = api['base']
-                arg_pairs = [self.lower_expr(a) for a in inner.args]
-                handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
-                self._emit(f"  mojo_async_schedule_ready ({handle});")
-                self._async_var_api[handle] = api
-                return 'MojoAsync *', handle
-            raise RuntimeError(
-                f"cannot compile module: {fname_raw}(...) is only "
-                "supported for the shape "
-                f"`{fname_raw}(<call to a supported compiled async "
-                "function>)` -- falling back to interpreting this module "
-                "from source instead")
         # Step B (revised — see bugs/CODEGEN_compiled_async_eager_execution_
         # semantic_mismatch.md): `f()` where `f` is a supported compiled
         # async function, with its result actually CONSUMED as a value
@@ -13532,6 +13639,36 @@ class GimpleGen:
         if hasattr(h.exc_type, 'name'):
             return h.exc_type.name
         if isinstance(h.exc_type, str):
+            # Step I (create_task/Task/TaskGroup/RaisingTask project):
+            # real Mojo's `except e:` idiom — a BARE identifier with no
+            # `as` — means "catch anything, bind it to e" (there is no
+            # Python-style class named "e" being referenced; Mojo's
+            # grammar reuses the same "type or name?" position Python's
+            # `except <expr>:` uses, but a bare lowercase identifier that
+            # ISN'T a real, known exception type is conventionally the
+            # bind-all shorthand instead — confirmed via a hand repro
+            # against this project's own interpreter: `except e: print(e)`
+            # after `raise Error(...)` silently never caught anything
+            # before this fix, exactly mirroring the bug this method's own
+            # bare-string branch had). mojo_compiler.py's parser has no
+            # symbol table at parse time, so it can't distinguish these
+            # up front — it always stores a bare identifier in `exc_type`
+            # (see _parse_try's "the common case is a single ... exception
+            # type" comment) — so the distinction has to be made HERE,
+            # where struct_field_types/_KNOWN_EXCEPTION_NAMES are actually
+            # available: only a name _is_exc_class_name confidently
+            # recognizes as a real exception type (a builtin like
+            # ValueError, or a user-defined struct) is treated as a real
+            # type at all; anything else (test_raising_asyncrt.mojo's own
+            # `except e:`/`except caught_err:`-style handlers) is
+            # reported as untyped (None) here, which _gen_stmt_TryStmt's
+            # typed/bare classification then correctly treats as a
+            # catch-all — see _emit_except_handler's own mirrored fix for
+            # the BINDING half of this (the name still needs to reach the
+            # handler body as a real local, which `handler.name` alone
+            # doesn't carry for this shape).
+            if not self._is_exc_class_name(h.exc_type):
+                return None
             return h.exc_type
         return None
 
@@ -13545,6 +13682,23 @@ class GimpleGen:
             return []
         return [one]
 
+    def _handler_bind_name(self, h):
+        """The real local variable name this handler's body should bind the
+        caught exception to, or None if it doesn't bind one at all. Usually
+        just `h.name` (an explicit `except ... as e:`) — but Mojo's `except
+        e:` idiom (a bare identifier, no `as`) parses the name into
+        `h.exc_type` instead (mojo_compiler.py has no symbol table at parse
+        time to tell "real type" and "bind-all name" apart — see
+        _handler_exc_name's own docstring for the full rationale), so when
+        `h.name` is empty but `h.exc_type` is a string _handler_exc_name
+        does NOT recognize as a real exception type, THAT string is the
+        intended bind name instead."""
+        if h.name:
+            return h.name
+        if isinstance(h.exc_type, str) and self._handler_exc_name(h) is None:
+            return h.exc_type
+        return None
+
     def _emit_except_handler(self, handler, node, bb_after):
         """Emit one except-handler's binding + body + finally + exit goto.
         A plain method (not a closure nested in _gen_stmt_TryStmt): this file
@@ -13553,7 +13707,8 @@ class GimpleGen:
         it — kept flat here instead."""
         had_c_name = False
         restore_c_name = None
-        if handler.name:
+        bind_name = self._handler_bind_name(handler)
+        if bind_name:
             # Exception handlers are typed as pointers to exception objects.
             exc_type_name = self._handler_exc_name(handler)
             if exc_type_name and exc_type_name in self.struct_field_types:
@@ -13581,9 +13736,9 @@ class GimpleGen:
             # this handler's body to the fresh temp, and is restored after so
             # an unrelated same-named binding elsewhere in the function is
             # unaffected.
-            self.var_types.setdefault(handler.name, exc_ctype)
-            had_c_name = handler.name in self._c_names
-            restore_c_name = self._c_names.get(handler.name)
+            self.var_types.setdefault(bind_name, exc_ctype)
+            had_c_name = bind_name in self._c_names
+            restore_c_name = self._c_names.get(bind_name)
 
             # Retrieve the exception object from the runtime.
             # Use a temp to avoid casting function call results in GIMPLE.
@@ -13591,7 +13746,7 @@ class GimpleGen:
             self._emit(f"  {temp_var} = mojo_exc_obj_get ();")
             bound = self._new_temp(exc_ctype)
             self._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
-            self._c_names[handler.name] = bound
+            self._c_names[bind_name] = bound
         self._last_was_terminal = False
         for s in handler.body:
             self.gen_stmt(s)
@@ -13601,11 +13756,11 @@ class GimpleGen:
         # Only emit goto if the exception handler didn't end with a return
         if not self._last_was_terminal:
             self._emit(f"  goto {bb_after};")
-        if handler.name:
+        if bind_name:
             if had_c_name:
-                self._c_names[handler.name] = restore_c_name
+                self._c_names[bind_name] = restore_c_name
             else:
-                del self._c_names[handler.name]
+                del self._c_names[bind_name]
 
     def _gen_stmt_TryStmt(self, node):
         sj_ret = self._new_temp('int')
@@ -15475,15 +15630,30 @@ class GimpleGen:
                 lines.append(f"  {sub_fn} ();")
             # Only call root's _toplevel if root actually has top-level statements;
             # pre-scanned into _has_toplevel_code so we trim the call when empty.
-            # If it does, _toplevel() already runs the root module's own
-            # `if __name__ == '__main__': main()` (now that __name__ correctly
-            # resolves per-module — see the __name__ lowering above) — calling
-            # {safe}() again here unconditionally was a real double-invocation
-            # bug, previously masked because that guard never used to fire
-            # correctly (__name__ was hardcoded to "__main__" everywhere).
-            if getattr(self, '_has_toplevel_code', False):
+            # If it does AND that top-level code itself genuinely calls
+            # `main(...)` somewhere (self._toplevel_calls_main — see
+            # gen_module's own docstring on this flag for the real, pre-
+            # existing bug this distinction fixes), _toplevel() already runs
+            # the root module's own `if __name__ == '__main__': main()` (now
+            # that __name__ correctly resolves per-module — see the
+            # __name__ lowering above) — calling {safe}() again here
+            # unconditionally was a real double-invocation bug, previously
+            # masked because that guard never used to fire correctly
+            # (__name__ was hardcoded to "__main__" everywhere). But if the
+            # top-level code does NOT call main() itself (e.g. it's just an
+            # ordinary module docstring — ubiquitous in real Mojo source,
+            # which has no __name__/__main__ convention at all: `main()` is
+            # simply the direct, unconditional entry point), the compiled
+            # main function must still be called directly here, exactly
+            # like the "no top-level code at all" branch below — otherwise
+            # it silently never runs at all.
+            if getattr(self, '_has_toplevel_code', False) and getattr(self, '_toplevel_calls_main', False):
                 lines.append(f"  _toplevel ();")
                 lines.append(f"  {ret_type} result = 0;")
+            elif getattr(self, '_has_toplevel_code', False):
+                lines.append(f"  _toplevel ();")
+                call_args = ', '.join(['0'] * len(param_strs))
+                lines.append(f"  {ret_type} result = {safe} ({call_args});")
             else:
                 # `def main(args=None):` (a legitimate, common pattern — the
                 # file's own `if __name__ == '__main__': sys.exit(main())`
@@ -16296,6 +16466,21 @@ class GimpleGen:
         if isinstance(s, PassStmt):
             return []
         if isinstance(s, ExprStmt):
+            # Step I (create_task/Task/TaskGroup/RaisingTask project): a
+            # bare string-literal expression statement — real Mojo/Python's
+            # docstring convention (`"""..."""` as a function body's first
+            # statement) — is common in real stdlib async functions (every
+            # helper in test_raising_asyncrt.mojo has one) but wasn't in
+            # this narrow, whitelist-based emitter's ExprStmt shapes at
+            # all, refusing the whole function purely because of an inert
+            # docstring. Discarded exactly like real Python discards it
+            # (no runtime effect at all — a bare expression statement's
+            # value is always dropped), matching this method's own
+            # PassStmt/`comptime`-only-statement handling elsewhere in this
+            # file for other purely-declarative, side-effect-free
+            # statements.
+            if isinstance(s.value, StringLiteral):
+                return []
             if isinstance(s.value, YieldExpr):
                 if self._cpp_emit_kind == 'async':
                     raise _UnsupportedAsyncShape(
@@ -17453,6 +17638,24 @@ class GimpleGen:
             value_ctype = _generator_yield_ctype(
                 fn, declared, generator_api=None, self_fields=None,
                 async_api=self._async_api)
+            # Step I: an async function whose body NEVER reaches an
+            # ordinary `return <expr>` at all (real Mojo's own idiom for an
+            # always-raising helper, e.g. `async def failing_async() raises
+            # -> Int: raise Error(...)` — see test_raising_asyncrt.mojo) has
+            # no ReturnStmt for `_generator_yield_ctype`'s walk to unify a
+            # type from at all, so it always came back None here even
+            # though the function DOES have a real, resolvable scalar
+            # declared return-type annotation (`-> Int`) — fall back to
+            # that annotation, but ONLY when there is genuinely no
+            # value-carrying return anywhere (if there IS one and it
+            # resolved to None, that's a real "can't infer a scalar type"
+            # refusal, not this case, so must not be papered over here).
+            if value_ctype is None and not any(
+                    isinstance(n, ReturnStmt) and n.value is not None
+                    for n in _walk_ast(fn.body)):
+                annotated = self._resolve_type(fn.return_type) if fn.return_type else None
+                if annotated in ('int64_t', 'double', '_Bool'):
+                    value_ctype = annotated
         finally:
             self._cpp_emit_kind = 'generator'
             self._cpp_gen_self_struct = None
@@ -17659,6 +17862,23 @@ class GimpleGen:
             f"}}",
             f"static {task} {impl} ({cpp_sig}) {{",
             *body_lines,
+            # Step I: an always-raising function's body (e.g. `raise
+            # Error(...)` with no `return` anywhere at all — see the
+            # value_ctype fallback above) has NO co_return/co_await/
+            # co_yield anywhere in body_lines, which would mean the C++
+            # compiler never even recognizes `{impl}` as a coroutine at
+            # all (a hard C++20 requirement: at least one of those three
+            # keywords must appear textually in the function body for it
+            # to BE a coroutine, wired to {promise}/get_return_object()).
+            # Unconditionally appending a dummy `co_return 0;` here is safe
+            # for EVERY async function this codegen compiles, not just the
+            # always-raising case: every reachable normal-exit path already
+            # ends in a real `co_return <expr>;` from an explicit `return`
+            # (see _cpp_stmt's ReturnStmt case), so this line is simply
+            # unreachable dead code there (valid, harmless C++ — no error,
+            # unlike a genuinely missing return); the only case where it is
+            # NOT dead is exactly the one this fixes.
+            f"    co_return ({cpp_value_ctype})0;",
             f"}}",
             f'extern "C" MojoAsync *{base}_start ({cpp_sig}) {{',
             f"    {task} t = {impl} ({call_args});",
@@ -17795,6 +18015,189 @@ class GimpleGen:
         ]
         return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
+    def _resolve_kwargs_for_known_async_call(self, call) -> None:
+        """Step I (create_task/Task/TaskGroup/RaisingTask project): if
+        `call` is a CallExpr using ONLY keyword arguments (e.g.
+        `conditional_raise(should_fail=False)` — test_raising_asyncrt.mojo's
+        own real shape, in a DIRECT `await conditional_raise(should_fail=
+        False)` composition, no create_task/create_raising_task involved at
+        all) targeting a top-level async function this module has already
+        compiled (self._supported_async holds the real FunctionDef, with
+        its real parameter names/order), reorders the keyword arguments
+        into positional order matching the callee's own declared parameter
+        list, mutating `call.args`/`call.kwargs` in place — every other
+        piece of this codegen's async-composition machinery
+        (_is_async_call_to_known_fn, the `_cpp_expr` AwaitExpr composition
+        call site) is positional-only, matching this whole file's call-
+        lowering convention throughout (no keyword-arg support exists for
+        ANY call shape here, not just this one), so this is the one place
+        that bridges a real Mojo keyword-argument call site onto that
+        positional-only machinery, rather than teaching every consumer
+        about keyword arguments individually.
+
+        Leaves `call` COMPLETELY UNTOUCHED (no mutation at all) if it
+        can't be resolved this way (unknown/not-yet-compiled callee, a
+        keyword name that doesn't match any of the callee's real
+        parameters, a mix of positional and keyword arguments, ...) — the
+        ordinary composition eligibility check
+        (_is_async_call_to_known_fn) still correctly refuses a call whose
+        kwargs survive unresolved, exactly like any other not-yet-
+        supported shape; never guesses at an argument order."""
+        if not (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)):
+            return
+        if not getattr(call, 'kwargs', None) or call.args:
+            return
+        callee_fn = self._supported_async.get(call.func.name)
+        if callee_fn is None:
+            return
+        kwmap = dict(call.kwargs)
+        new_args = []
+        for pn, _pt in (callee_fn.params or []):
+            if pn in kwmap:
+                new_args.append(kwmap.pop(pn))
+            else:
+                return  # a required positional has no matching kwarg -- leave untouched
+        if kwmap:
+            return  # a leftover, unrecognized kwarg name -- leave untouched
+        call.args = new_args
+        call.kwargs = []
+
+    def _normalize_await_kwargs(self, body: list) -> None:
+        """Step I: applies _resolve_kwargs_for_known_async_call to every
+        `await <call>`'s target anywhere in `body` (any nesting depth —
+        `if`/`try`/etc. bodies included, via _walk_ast) — a small, generic
+        AST-normalization pass run BEFORE _async_quick_eligible sees the
+        body (mirrors _inline_single_use_task_composition's identical
+        "must run before eligibility, since the pre-rewrite shape looks
+        ineligible" ordering requirement — see both call sites, right next
+        to each other in gen_module/_compile_nested_async_functions)."""
+        for nd in _walk_ast(body):
+            if isinstance(nd, AwaitExpr):
+                self._resolve_kwargs_for_known_async_call(nd.value)
+
+    def _inline_single_use_task_composition(self, body: list) -> list:
+        """Step I (create_task/Task/TaskGroup/RaisingTask project): a
+        narrow, DOCUMENTED source-level simplification for real Mojo's own
+        Phase-3 `RaisingTask` idiom (see test_raising_asyncrt.mojo):
+
+            var task = create_raising_task(add_async(10, 20))
+            try:
+                return await task^
+            except:
+                return -1
+
+        This codegen has no general representation for a `Task`/
+        `RaisingTask` HANDLE held as a local variable INSIDE a compiled
+        coroutine's own body (unlike ordinary, non-coroutine code, where
+        `create_task(...)`'s result is a real `MojoAsync *` value tracked
+        in self._async_var_api — see _lower_call/_lower_method_call's
+        `.wait()` handling) — building that (a whole new ctype category
+        for the narrow, scalar-only shared _cpp_stmt/_cpp_expr emitter,
+        which _gen_cpp_generator_unit/_gen_cpp_async_unit's own docstrings
+        both describe as a deliberately scalar-only whitelist) is a much
+        larger, riskier addition than this one specific, very common
+        idiom needs.
+
+        Instead: when `var X = create_task(f(...))` / `create_raising_
+        task(f(...))` is followed, anywhere later IN THIS SAME BODY, by
+        EXACTLY ONE OTHER reference to `X` at all, and that one reference
+        is `await X` (`await X^` parses identically — the `^` transfer
+        sigil is stripped by the tokenizer), this is semantically IDENTICAL
+        to composing `await f(...)` directly (Step D's existing, already-
+        verified async-awaits-async composition) — creating a task and
+        immediately awaiting it once, with the handle never read, passed,
+        or awaited again anywhere else, cannot observably differ from
+        inlining the two operations into one `await`. Rewrites the AST IN
+        PLACE (mutates the matched AwaitExpr's own `.value` field from the
+        bare variable reference to the original inner call expression) and
+        drops the now-dead `var X = create_task(...)` declaration
+        entirely, so the shared emitter never even sees either
+        `create_task`/`create_raising_task` or a bare-variable `await` —
+        it only ever sees the ordinary, already-supported `await
+        f(...)` shape.
+
+        If the single-use condition does NOT hold (the handle is read,
+        reassigned, awaited more than once, or awaited zero times), this
+        is left COMPLETELY UNTOUCHED — the un-rewritten `await X` then
+        correctly fails _is_async_call_to_known_fn's "target must be a
+        CallExpr" check, making the whole function ineligible and falling
+        back to the honest whole-module refusal, exactly like any other
+        not-yet-supported shape. This is never a silent-miscompilation
+        risk: either the narrow, provably-equivalent single-use shape is
+        detected and inlined, or nothing here changes at all.
+
+        A keyword-argument inner call (e.g. `conditional_raise(should_fail
+        =False)`) is resolved to positional order using the callee's real
+        FunctionDef.params (self._supported_async holds the original
+        FunctionDef for every top-level async function already compiled by
+        the time this runs — see gen_module's pass ordering) — if the
+        callee isn't resolvable this way (e.g. a nested callee, or a
+        parameter-name mismatch), the kwargs are left as-is, which simply
+        makes the inlined call ineligible at the ordinary
+        _is_async_call_to_known_fn check (kwargs are refused there) rather
+        than guessing at an argument order.
+
+        Called on every async function's body (top-level and nested)
+        BEFORE both `_async_quick_eligible` and `_gen_cpp_async_unit` see
+        it (see both call sites in `_compile_nested_async_functions` and
+        the top-level async pre-pass) — idempotent (a second call is a
+        no-op, since the `var X = create_task(...)` statement this matches
+        no longer exists after the first rewrite), so re-running it
+        defensively at each call site is always safe."""
+        result = []
+        n = len(body)
+        i = 0
+        while i < n:
+            s = body[i]
+            if (isinstance(s, VarDecl) and isinstance(s.value, CallExpr)
+                    and isinstance(s.value.func, IdentExpr)
+                    and s.value.func.name in ('create_task', 'create_raising_task')
+                    and len(s.value.args) == 1 and not getattr(s.value, 'kwargs', None)):
+                inner = s.value.args[0]
+                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr):
+                    varname = s.name
+                    rest = body[i + 1:]
+                    # `await X` and `await X^` (the `^` transfer sigil —
+                    # real Mojo's own idiom for `RaisingTask.wait()`/
+                    # `__await__(deinit self)`'s ownership-transfer
+                    # requirement, e.g. `return await task^`) must both be
+                    # recognized here: `X^` parses to
+                    # `UnaryOp(op='^', operand=IdentExpr(X))`, NOT a bare
+                    # IdentExpr (confirmed via the parser directly — this
+                    # is NOT stripped away at the tokenizer level the way
+                    # some other `^` contexts are). Both shapes reduce to
+                    # the same rewrite (the `^`'s ownership-transfer has no
+                    # separate representation to preserve once the
+                    # `create_task`/`await` pair collapses into one direct
+                    # `await <call>` — there is no handle left to
+                    # transfer ownership of).
+                    def _var_ref_name(node):
+                        if isinstance(node, IdentExpr):
+                            return node.name
+                        if (isinstance(node, UnaryOp) and node.op == '^'
+                                and isinstance(node.operand, IdentExpr)):
+                            return node.operand.name
+                        return None
+                    all_refs = [nd for stmt in rest for nd in _walk_ast(stmt)
+                                if isinstance(nd, IdentExpr) and nd.name == varname]
+                    await_refs = [nd for stmt in rest for nd in _walk_ast(stmt)
+                                  if isinstance(nd, AwaitExpr)
+                                  and _var_ref_name(nd.value) == varname]
+                    if len(all_refs) == 1 and len(await_refs) == 1:
+                        # Reuses the SAME kwarg-to-positional resolution
+                        # _normalize_await_kwargs applies to every OTHER
+                        # `await <call>` in this module (see
+                        # _resolve_kwargs_for_known_async_call's docstring)
+                        # — not a second, parallel implementation of the
+                        # same logic.
+                        self._resolve_kwargs_for_known_async_call(inner)
+                        await_refs[0].value = inner
+                        i += 1
+                        continue
+            result.append(s)
+            i += 1
+        return result
+
     def _compile_nested_async_functions(self, enclosing_name: str, body: list,
                                          async_fns: dict) -> None:
         """Step I (create_task/Task/TaskGroup/RaisingTask project): compile
@@ -17852,16 +18255,61 @@ class GimpleGen:
                 # a sub-body reference) — nothing left to do.
                 continue
             qualified = f"{enclosing_name}::{n.name}"
-            if not _async_quick_eligible(n, frozenset(self._async_api.keys())):
-                continue
-            try:
-                cpp_text, value_ctype, base, param_ctypes = \
-                    self._gen_cpp_async_unit(n, scope_prefix=enclosing_name)
-            except _UnsupportedGeneratorShape as e:
-                _debug_note(f'nested async function {n.name!r} (inside '
-                            f'{enclosing_name!r}) not eligible for C++ '
-                            'coroutine path, falling back to honest '
-                            'refusal', e)
+            # See _inline_single_use_task_composition's/_normalize_await_
+            # kwargs's own docstrings — both must run BEFORE the
+            # eligibility check below: a bare `await task` (pre-rewrite)
+            # or a keyword-argument await target (pre-normalization) would
+            # otherwise make an eligible function look ineligible.
+            n.body = self._inline_single_use_task_composition(n.body)
+            self._normalize_await_kwargs(n.body)
+            eligible = _async_quick_eligible(n, frozenset(self._async_api.keys()))
+            if eligible:
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = \
+                        self._gen_cpp_async_unit(n, scope_prefix=enclosing_name)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'nested async function {n.name!r} (inside '
+                                f'{enclosing_name!r}) not eligible for C++ '
+                                'coroutine path, falling back to honest '
+                                'refusal', e)
+                    eligible = False
+            if not eligible:
+                # DELIBERATE, DOCUMENTED SIMPLIFICATION — see _lower_call's
+                # create_task/create_raising_task stub-branch docstring for
+                # the full rationale (a genuinely dead, upstream-
+                # acknowledged-broken helper like test_raising_asyncrt.
+                # mojo's `test_raising_async_error_message_via_wrapper`
+                # otherwise hard-refuses the WHOLE module over one
+                # provably-unreachable function). Narrowly scoped: only
+                # skip adding this failure to the module-wide fatal list
+                # (`async_fns` stays untouched, i.e. still counts as
+                # "unhandled", UNLESS this exact narrow shape holds) when
+                # `body` (this enclosing function's OWN remaining
+                # statements) references `n.name` EXACTLY ONCE, and that
+                # one reference is a bare `create_task(n.name())`/
+                # `create_raising_task(n.name())` call — the EXACT shape
+                # _lower_call's stub branch already handles gracefully at
+                # its call site. Any OTHER reference shape (a bare call,
+                # `await`, passed as a value, referenced more than once,
+                # ...) leaves `id(n)` in `async_fns` completely unchanged,
+                # so the existing whole-module fatal check still fires
+                # exactly as it always has for every other genuinely
+                # unhandled async function — this is not a general loosening
+                # of that safety net, only a documented carve-out for the
+                # one specific shape this codegen now has a real (if
+                # degraded) answer for.
+                refs = [nd for stmt in body for nd in _walk_ast(stmt)
+                        if isinstance(nd, IdentExpr) and nd.name == n.name]
+                task_refs = [nd for stmt in body for nd in _walk_ast(stmt)
+                             if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)
+                             and nd.func.name in ('create_task', 'create_raising_task')
+                             and len(nd.args) == 1 and not getattr(nd, 'kwargs', None)
+                             and isinstance(nd.args[0], CallExpr)
+                             and isinstance(nd.args[0].func, IdentExpr)
+                             and nd.args[0].func.name == n.name and not nd.args[0].args
+                             and not getattr(nd.args[0], 'kwargs', None)]
+                if len(refs) == 1 and len(task_refs) == 1:
+                    async_fns.pop(id(n), None)
                 continue
             self._nested_async_api[qualified] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
@@ -18124,6 +18572,17 @@ class GimpleGen:
             if isinstance(n, FunctionDef):
                 if n.is_generator: _generator_fns[id(n)] = n
                 if n.is_async: _async_fns[id(n)] = n
+        # Step I (create_task/Task/TaskGroup/RaisingTask project): every
+        # async function NAME anywhere in this module (top-level or
+        # nested), regardless of whether it ends up eligible/compiled —
+        # lets create_task/create_raising_task's call-site lowering in
+        # _lower_call tell "this genuinely names some async def in this
+        # module, just one our narrow codegen couldn't compile" (a real,
+        # documented, narrow degrade — see that call site's own docstring)
+        # apart from "this name doesn't exist / isn't async at all" (still
+        # an honest hard refusal, unchanged) when the inner call doesn't
+        # resolve in self._async_api.
+        self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
         # Structs DECLARED IN THIS FILE's own top-level stmts (as opposed to
         # imported, or referenced but never actually resolved as local or
@@ -19730,6 +20189,12 @@ class GimpleGen:
             if not (isinstance(s, FunctionDef) and id(s) in _async_fns
                     and id(s) not in _generator_fns):
                 continue
+            # See _inline_single_use_task_composition's/_normalize_await_
+            # kwargs's own docstrings — must run BEFORE the eligibility
+            # check below (mirrors the identical calls in
+            # _compile_nested_async_functions).
+            s.body = self._inline_single_use_task_composition(s.body)
+            self._normalize_await_kwargs(s.body)
             if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
                 continue
             try:
@@ -20513,6 +20978,46 @@ class GimpleGen:
                            BreakStmt, ContinueStmt, ReturnStmt,
                            RaiseStmt, AssertStmt, VarDecl)
         self._has_toplevel_code = any(isinstance(s, _toplevel_types) for s in stmts)
+        # Step I (create_task/Task/TaskGroup/RaisingTask project): a REAL,
+        # pre-existing bug found while getting a real behavioral (compile+
+        # link+RUN) verification of test_raising_asyncrt.mojo working —
+        # NOT something new this project introduced, but exposed by it
+        # (compile_stdlib.py's own gate never actually RUNS anything, only
+        # `gcc -fsyntax-only`, so this was invisible to every existing
+        # quality gate). `gen_func`'s wrapper for a module's own `def
+        # main():` (see its own comment there) assumed ANY top-level code
+        # at all means "the top-level code itself already calls main() —
+        # e.g. `if __name__ == '__main__': main()`" and therefore skips
+        # calling the compiled main function directly, relying entirely on
+        # `_toplevel()` to do it. That assumption is FALSE for a real Mojo
+        # program's top-level MODULE DOCSTRING (`"""...""""` as the file's
+        # first statement — an ordinary, harmless top-level `ExprStmt`,
+        # extremely common in real Mojo/stdlib source, ubiquitous in every
+        # test file) with NO `__name__` guard at all (real Mojo has no
+        # `__name__`/`__main__` convention — `main()` is just the direct,
+        # unconditional program entry point) — the compiled binary would
+        # silently do NOTHING and exit 0, "looking" like a clean, silent
+        # success while actually never running a single line of the
+        # program. Confirmed via a minimal repro
+        # (`"""doc"""\ndef main(): print(42)`) — `int main` called only
+        # `_toplevel()`, whose own body was just the inert docstring
+        # assignment, and `42` was never printed.
+        #
+        # Distinguishes the two cases correctly instead of guessing: does
+        # ANY top-level statement actually contain a call to `main(...)`
+        # anywhere in its own subtree (the real `if __name__ ==
+        # '__main__': main()` shape, and anything structurally
+        # equivalent)? If so, unchanged behavior (`_toplevel()` alone,
+        # avoiding the ORIGINAL double-invocation bug this code was built
+        # to prevent). If not, `gen_func`'s wrapper now calls BOTH
+        # `_toplevel()` (for whatever real top-level side effects exist)
+        # AND the compiled main function directly — the correct behavior
+        # for the common, unconditional-`main()` case this always should
+        # have handled.
+        self._toplevel_calls_main = any(
+            isinstance(n, CallExpr) and isinstance(n.func, IdentExpr) and n.func.name == 'main'
+            for s in stmts if isinstance(s, _toplevel_types)
+            for n in _walk_ast(s))
 
         for stmt in stmts:
             if isinstance(stmt, FunctionDef):
