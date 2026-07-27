@@ -8087,57 +8087,43 @@ class GimpleGen:
             # instead of guessing at a lowering.
             if module_name == 'asyncio' and method_name == 'run':
                 inner = node.args[0] if len(node.args) == 1 else None
+                # A bracket call to a nested async function/closure with
+                # its OWN comptime bracket parameter(s), e.g.
+                # test_asyncrt.mojo's `asyncio.run(test_asyncrt_add[1]
+                # (10))` — see gen_module's "Async closures/functions
+                # NESTED INSIDE A TOP-LEVEL FUNCTION" discovery pass /
+                # _async_closure_api's 'comptime_params' entry. Unlike the
+                # bare-name, param-less-only case just below (the existing,
+                # narrower Step C shape), this narrow addition allows real
+                # ordinary arguments too, threaded the same way the direct-
+                # call site (_lower_call's own SubscriptExpr+IdentExpr
+                # branch, a few thousand lines up) does — bracket args
+                # first (in comptime_params order), then ordinary call
+                # args, then any free-variable captures.
+                if (len(node.args) == 1 and not getattr(node, 'kwargs', None)
+                        and isinstance(inner, CallExpr) and not getattr(inner, 'kwargs', None)
+                        and isinstance(inner.func, SubscriptExpr)
+                        and isinstance(inner.func.obj, IdentExpr)):
+                    _acl_key3 = (self.current_func_name, inner.func.obj.name)
+                    _api3 = self._async_closure_api.get(_acl_key3)
+                    if _api3 is not None and _api3.get('comptime_params'):
+                        _cp_list3 = _api3['comptime_params']
+                        _idx3 = inner.func.index
+                        _elems3 = _idx3.elements if isinstance(_idx3, TupleExpr) else [_idx3]
+                        if len(_elems3) == len(_cp_list3):
+                            _arg_pairs3 = [self.lower_expr(a) for a in _elems3]
+                            _arg_pairs3 += [self.lower_expr(a) for a in inner.args]
+                            for _cap_name3, _ in _api3['captures'][len(_cp_list3):]:
+                                _arg_pairs3.append(self.lower_expr(IdentExpr(name=_cap_name3)))
+                            return self._emit_asyncio_run_drive(
+                                _api3['base'], _api3['value_ctype'], _arg_pairs3)
                 if (len(node.args) == 1 and not getattr(node, 'kwargs', None)
                         and isinstance(inner, CallExpr)
                         and isinstance(inner.func, IdentExpr)
                         and inner.func.name in self._async_api
                         and not inner.args):
                     api = self._async_api[inner.func.name]
-                    base, vct = api['base'], api['value_ctype']
-                    handle = self._call_expr('MojoAsync *', f"{base}_start", [])
-                    self._emit(f"  mojo_async_schedule_ready ({handle});")
-                    self._emit(f"  mojo_async_run_until_complete ();")
-                    # Step E: the outermost edge -- this call site is
-                    # ordinary, never-suspended GIMPLE C code (exactly like
-                    # the generator convention's own `_resume()` boundary
-                    # consumers -- see _emit_generator_pending_exc_check,
-                    # reused here in spirit, not literally, since that
-                    # helper is generator-`_resume`-shaped and this is a
-                    # one-shot `_start`+run-to-completion call instead).
-                    # `{base}_translate_pending_exc` copies this top-level
-                    # coroutine's staged exception (if it completed via one
-                    # instead of an ordinary `co_return` -- see
-                    # _gen_cpp_async_unit's promise `exc`/`exc_pending`
-                    # fields) into the shared mojo_exc_*/mojo_exc_pending
-                    # globals; the mojo_exc_pending_get()/mojo_raise() pair
-                    # right after is the same "safe to longjmp here" idiom
-                    # every other ordinary-C consumer of a translated
-                    # pending exception in this file already uses.
-                    self._emit(f"  {base}_translate_pending_exc ({handle});")
-                    pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
-                    bb_pending = self._new_bb()
-                    bb_ok = self._new_bb()
-                    self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
-                    self._emit_label(bb_pending)
-                    self._emit(f"  mojo_exc_pending_set (0);")
-                    self._emit(f"  {base}_destroy ({handle});")
-                    self._emit("  mojo_raise ();")
-                    self._emit_label(bb_ok)
-                    # A genuinely void-returning compiled async function
-                    # (device_context.mojo's `-> None` wrapper closures) has
-                    # no real value to read back -- `{base}_value(...)`
-                    # returns C++ `void`, and declaring a `void` GIMPLE local
-                    # to hold it is invalid C. Skip the read entirely and
-                    # return a harmless int64_t 0 placeholder (this call
-                    # site is itself value-DISCARDING from the ordinary-C
-                    # caller's perspective whenever vct is void — nothing
-                    # meaningful could be read back anyway).
-                    if vct == 'void':
-                        self._emit(f"  {base}_destroy ({handle});")
-                        return 'int64_t', self._new_val('int64_t', '(int64_t)0')
-                    result = self._new_val(vct, f"{base}_value ({handle})")
-                    self._emit(f"  {base}_destroy ({handle});")
-                    return vct, result
+                    return self._emit_asyncio_run_drive(api['base'], api['value_ctype'], [])
                 raise RuntimeError(
                     "cannot compile module: asyncio.run(...) is only "
                     "supported for the shape `asyncio.run(<call to a "
@@ -9212,6 +9198,44 @@ class GimpleGen:
             module_src = open(source).read()
             import elaborate
             el = elaborate.Elaborator()
+            # Guard against a real, hand-verified silent-miscompile risk:
+            # monomorphize.py's substitution is purely TEXTUAL over the
+            # whole extracted template block (see monomorphize_source),
+            # including any NESTED def inside it — it has no notion of
+            # nested-scope shadowing (a nested `async def inner[enabled:
+            # Bool](...)` re-declaring a bracket-param name the OUTER
+            # generic ALSO uses, e.g. test_tracing.mojo's own real shape:
+            # `def test_tracing[level, enabled](): async def
+            # test_tracing_add[enabled, lhs](...): ...` — textual `enabled`
+            # substitution corrupts the nested bracket declaration's own
+            # syntax), nor any way to compile a resulting fragment that
+            # itself needs a SEPARATE .cpp translation unit (a nested
+            # async/generator def inside the generic — monomorphize.py's
+            # own `instantiate()`/`build()` only ever compiles the .c side,
+            # silently discarding `gen.generated_cpp` entirely). Confirmed
+            # via a hand-written repro: elaborating such a generic threw
+            # inside monomorphize.py, was caught by the broad `except
+            # Exception` below, and the call site fell all the way through
+            # to `_lower_call`'s final "not an IdentExpr callee" catch-all,
+            # silently compiling to a bare placeholder `0` — exactly the
+            # class of bug bugs/CODEGEN_comptime_bracket_parametrized_
+            # function_calls_silently_wrong.md was written to eliminate.
+            # Until monomorphize.py genuinely supports dual C/C++ output
+            # (a real, separate feature — not attempted here), refuse
+            # honestly instead of ever reaching that silent fallback.
+            _tmpl_check = elaborate.extract_fn_source(module_src, g, arg_count=len(arg_pairs))
+            if _tmpl_check and re.search(r'\basync\s+def\b', _tmpl_check):
+                raise RuntimeError(
+                    f"cannot compile module: generic function {g!r} being "
+                    "elaborated (via a bracket call) contains a nested "
+                    "async/generator def — this codegen's monomorphization "
+                    "is purely textual and has no dual C/C++ (coroutine) "
+                    "output support for an elaborated fragment yet, so "
+                    "instantiating this generic would either corrupt "
+                    "nested-scope bracket-parameter names via blind text "
+                    "substitution or silently discard the required "
+                    "coroutine translation unit — falling back to "
+                    "interpreting this module from source instead")
             if explicit:
                 idx = node.func.index
                 elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
@@ -9266,6 +9290,15 @@ class GimpleGen:
             else:
                 info = el.elaborate_generic_call_inferred(
                     module_src, g, [ct for ct, _ in arg_pairs])
+        except RuntimeError:
+            # The nested-async-in-a-generic guard above raises RuntimeError
+            # deliberately — an honest refusal, not a "try something else"
+            # signal — so it must propagate, not be swallowed into the
+            # silent `info = None` fallback the broad `except Exception`
+            # below exists for (genuinely transient/inapplicable
+            # elaboration failures elsewhere, e.g. a generic this
+            # elaborator just can't handle yet).
+            raise
         except Exception:
             _debug_note('generic call elaboration failed')
             info = None
@@ -9728,6 +9761,38 @@ class GimpleGen:
             res = self._elaborate_generic_call(node)
             if res is not None:
                 return res
+        # Bracket call to a nested async function/closure with its OWN
+        # comptime bracket parameter(s), e.g. test_asyncrt.mojo's
+        # `test_asyncrt_add[1](rhs)` (`test_asyncrt_add` is a sibling
+        # nested `async def` inside the SAME enclosing function currently
+        # being compiled — see gen_module's "Async closures/functions
+        # NESTED INSIDE A TOP-LEVEL FUNCTION" discovery pass). The bracket
+        # argument(s) were threaded through as ordinary trailing
+        # parameters at definition time (in comptime_params order, before
+        # any free-variable captures) — forward them here the same way.
+        if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr):
+            _acl_key2 = (self.current_func_name, node.func.obj.name)
+            _api2 = self._async_closure_api.get(_acl_key2)
+            if _api2 is not None and _api2.get('comptime_params'):
+                _cp_list = _api2['comptime_params']
+                _idx2 = node.func.index
+                _elems2 = _idx2.elements if isinstance(_idx2, TupleExpr) else [_idx2]
+                if len(_elems2) == len(_cp_list):
+                    arg_pairs2 = [self.lower_expr(a) for a in _elems2]
+                    arg_pairs2 += [self.lower_expr(a) for a in node.args]
+                    for cap_name, _cap_ctype in _api2['captures'][len(_cp_list):]:
+                        arg_pairs2.append(self.lower_expr(IdentExpr(name=cap_name)))
+                    handle2 = self._call_expr('MojoAsync *', f"{_api2['base']}_start", arg_pairs2)
+                    if _api2['value_ctype'] != 'void':
+                        raise RuntimeError(
+                            "cannot compile module: call to nested async "
+                            f"function {node.func.obj.name!r} whose result "
+                            "is consumed as a value and carries a real "
+                            "return value — this codegen has no await/"
+                            "top-level-run mechanism yet to drive it to "
+                            "completion here (use asyncio.run(...) to "
+                            "drive a single such call directly instead)")
+                    return 'MojoAsync *', handle2
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
         # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call.
@@ -10584,6 +10649,41 @@ class GimpleGen:
             arg_pairs.append(self.lower_expr(IdentExpr(name=cap_name)))
         handle = self._call_expr('MojoAsync *', f"{api['base']}_start", arg_pairs)
         return handle, api['value_ctype']
+
+    def _emit_asyncio_run_drive(self, base: str, vct: str, arg_pairs: list) -> tuple[str, str]:
+        """`asyncio.run(f(...))`'s real drive-to-completion sequence for
+        ANY compiled-async-coroutine API sharing the `_start`/`_value`/
+        `_destroy`/`_translate_pending_exc` shape (self._async_api's
+        top-level functions AND self._async_closure_api's nested async
+        closures/functions alike) — construct via `_start`, schedule +
+        run Step A's scheduler to completion, translate any pending
+        exception (Step E's own convention — see _gen_cpp_async_unit's
+        promise exc/exc_pending fields), then read back the value (skipped
+        for a genuinely void-returning coroutine, matching device_
+        context.mojo's own wrapper closures — a `void` GIMPLE local is
+        invalid C) and destroy the frame. Factored out of _lower_call's
+        `asyncio.run(...)` branch so the nested-async-closure case (test_
+        asyncrt.mojo's `asyncio.run(test_asyncrt_add[1](10))`) doesn't
+        duplicate this same real sequence a second time."""
+        handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
+        self._emit(f"  mojo_async_schedule_ready ({handle});")
+        self._emit(f"  mojo_async_run_until_complete ();")
+        self._emit(f"  {base}_translate_pending_exc ({handle});")
+        pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+        bb_pending = self._new_bb()
+        bb_ok = self._new_bb()
+        self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+        self._emit_label(bb_pending)
+        self._emit(f"  mojo_exc_pending_set (0);")
+        self._emit(f"  {base}_destroy ({handle});")
+        self._emit("  mojo_raise ();")
+        self._emit_label(bb_ok)
+        if vct == 'void':
+            self._emit(f"  {base}_destroy ({handle});")
+            return 'int64_t', self._new_val('int64_t', '(int64_t)0')
+        result = self._new_val(vct, f"{base}_value ({handle})")
+        self._emit(f"  {base}_destroy ({handle});")
+        return vct, result
 
     def _lower_fnptr_call(self, fname_raw: str, var_ctype: str,
                           node: CallExpr) -> tuple[str, str]:
@@ -17909,8 +18009,35 @@ class GimpleGen:
             for _gn in _local_generics:
                 self._imported_generics.setdefault(_gn, self._current_filename)
             if _local_generics:
+                _stripped_generic_fns = [s for s in stmts
+                                          if isinstance(s, FunctionDef) and s.name in _local_generics]
                 stmts = [s for s in stmts
                          if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
+                # A nested async/generator def inside a stripped local
+                # generic (test_tracing.mojo's own real shape:
+                # `test_tracing_add`/`test_tracing_add_two_of_them` nested
+                # inside `def test_tracing[level: TraceLevel, enabled:
+                # Bool]()`) was already counted into _async_fns/
+                # _generator_fns by the deep `_walk_ast(stmts)` scan a few
+                # lines above — which ran BEFORE this strip, over the
+                # ORIGINAL (unstripped) `stmts`. Once the outer generic is
+                # stripped here, nothing else in THIS module compile will
+                # ever attempt (or pop) that nested id — it's only ever
+                # compiled inside the SEPARATE, per-call-site elaborated
+                # instance `_elaborate_generic_call`/monomorphize.py spins
+                # up (its own independent GimpleGen, own independent
+                # gen_module run, own independent _async_fns/_generator_fns
+                # tally). Left uncleaned, it would ALWAYS show up in this
+                # module's own final "still unsupported" error — a real,
+                # pre-existing false-positive refusal for ANY module with a
+                # local generic function that happens to nest an async/
+                # generator def, confirmed via a hand-written repro
+                # matching test_tracing.mojo's exact structure.
+                for _sgf in _stripped_generic_fns:
+                    for _n in _walk_ast(_sgf.body):
+                        if isinstance(_n, FunctionDef):
+                            _async_fns.pop(id(_n), None)
+                            _generator_fns.pop(id(_n), None)
 
         # Struct methods with a FUNCTION-TYPED comptime bracket parameter that
         # is actually referenced (directly or via a nested closure) — see
@@ -19378,6 +19505,74 @@ class GimpleGen:
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 self._generator_cpp_units.append(cpp_text)
                 _generator_fns.pop(id(m), None)
+
+        # Async closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION (not a
+        # method) — test_asyncrt.mojo's/test_tracing.mojo's own shape:
+        # `@parameter async def test_asyncrt_add[lhs: Int](rhs: Int) -> Int:
+        # ...` defined inside an ordinary `def test_runtime_task() raises:`.
+        # Comptime bracket parameters on a NESTED async function are
+        # threaded through as ordinary trailing parameters exactly like
+        # _method_threaded_comptime_params does for a function-TYPED
+        # comptime method parameter (see that mechanism's own docstring) —
+        # but here unconditionally, for EVERY comptime param regardless of
+        # its annotated type (Int, Bool, ...), because this reasoning
+        # applies more broadly than just function-typed values: _gen_cpp_
+        # async_unit never does any compile-time folding/specialization on
+        # a comptime parameter's VALUE at all (it just compiles one
+        # coroutine body per Mojo function definition and threads whatever
+        # scalar arguments a call site supplies) — so `test_asyncrt_add[1]
+        # (10)` and `test_asyncrt_add[2](20)` calling the SAME compiled
+        # coroutine unit with `lhs` passed as an ordinary 1/2 argument is
+        # exactly equivalent to real per-call-site monomorphization for
+        # this codegen's own (non-branching-on-comptime-ness) purposes —
+        # unlike the general (non-async) free-function/struct-method paths
+        # elsewhere in this file, which DO need real per-call-site
+        # elaboration (see bugs/CODEGEN_comptime_bracket_parametrized_
+        # function_calls_silently_wrong.md) because those bodies CAN
+        # observe comptime-ness (e.g. `@parameter if`, static array sizes)
+        # — no compiled async function anywhere in this codebase does that.
+        if _gsrc:
+            for _od in stmts:
+                if not isinstance(_od, FunctionDef):
+                    continue
+                _outer_scope2 = {}
+                for _pname, _ptype in (_od.params or []):
+                    _outer_scope2[_pname] = self._resolve_type(_ptype)
+                for _inner in _od.body:
+                    if not (isinstance(_inner, FunctionDef) and id(_inner) in _async_fns):
+                        continue
+                    _cp_ctypes = {}
+                    if _inner.comptime_params:
+                        _bp_types2 = _bracket_param_type_annotations(_gsrc, _inner.name)
+                        for _cp in _inner.comptime_params:
+                            _ann = _bp_types2.get(_cp, '')
+                            _cp_ctypes[_cp] = ('int64_t' if _ann.startswith('def')
+                                               else self._resolve_type(_ann))
+                    if not _async_quick_eligible(_inner, frozenset(self._async_api.keys())):
+                        continue
+                    _captures2 = self._compute_nested_closure_captures(_inner, _outer_scope2)
+                    _extra2 = [(cp, _cp_ctypes.get(cp, 'int64_t')) for cp in _inner.comptime_params] + _captures2
+                    _base_override2 = f"{_od.name}_{_inner.name}"
+                    try:
+                        cpp_text, value_ctype, base, param_ctypes = \
+                            self._gen_cpp_async_unit(_inner, extra_captures=_extra2,
+                                                     base_name_override=_base_override2)
+                    except _UnsupportedGeneratorShape as e:
+                        _debug_note(f'nested async function {_od.name}.'
+                                    f'{_inner.name!r} not eligible for C++ '
+                                    'coroutine path, falling back to honest '
+                                    'refusal', e)
+                        continue
+                    key = (_od.name, _inner.name)
+                    self._supported_async_closures[key] = _inner
+                    self._async_closure_api[key] = {
+                        'base': base, 'value_ctype': value_ctype,
+                        'params': param_ctypes, 'captures': _extra2,
+                        'comptime_params': list(_inner.comptime_params),
+                    }
+                    self.func_param_types[f"{base}_start"] = param_ctypes
+                    self._generator_cpp_units.append(cpp_text)
+                    _async_fns.pop(id(_inner), None)
 
         # Async closures NESTED INSIDE A METHOD (not themselves a method,
         # and not a top-level function either) — device_context.mojo's

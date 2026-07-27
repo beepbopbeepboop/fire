@@ -149,56 +149,98 @@ above now prints `11`/`22`, plus two more shapes (distinct bracket-value
 bindings each getting their own specialization; a `Bool`-typed comptime
 param, matching `test_tracing.mojo`'s own parameter shape).
 
-## Still open — NOT fixed by the above
+## Update — nested async comptime-bracket functions FIXED too (continued this session)
 
-The fix above only covers a bracket call to a function *defined at module
-top level*. Confirmed still broken, same silent-`0` failure mode: a
-`@parameter`-decorated **nested** `def f[lhs: Int](rhs): ...` (defined
-inside another function's body) — the exact shape `test_asyncrt.mojo`'s
-`test_asyncrt_add[lhs: Int](rhs: Int)` and `test_tracing.mojo`'s
-`test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)` actually use. Root
-cause: `gen_module`'s "Local generic free functions" registration scan
-only walks top-level `stmts` looking for `isinstance(s, FunctionDef)` —
-nested defs live inside an enclosing `FunctionDef.body`, so they're never
-registered into `_imported_generics` and never stripped from being
-(mis-)compiled as an ordinary nested closure. Confirmed via a fresh repro
-(`@parameter def nested_add[lhs: Int](rhs: Int)` inside `main()`) — still
-folds to `0`.
+Landed on top of `device_context.mojo`'s async-closure work (see
+`bugs/CODEGEN_device_context_captured_function_parameter_closures_broken.md`'s
+own "Update" sections): a NEW `gen_module` pass ("Async closures/functions
+NESTED INSIDE A TOP-LEVEL FUNCTION") discovers a nested `async def` with
+its OWN comptime bracket parameters — `test_asyncrt.mojo`'s
+`test_asyncrt_add[lhs: Int](rhs: Int)`/`return_value[value: Int]()` — and
+compiles it via `_gen_cpp_async_unit`, threading EVERY comptime bracket
+parameter through as an ordinary trailing runtime parameter, regardless of
+its annotated type (Int, Bool, ...): this codegen's async-unit compiler
+never does any compile-time folding/specialization on a parameter's VALUE
+at all, so `test_asyncrt_add[1](10)`/`test_asyncrt_add[2](20)` calling the
+SAME compiled coroutine with `lhs` passed as an ordinary 1/2 argument is
+exactly equivalent, for this codegen's purposes, to real per-call-site
+monomorphization — unlike the general (non-async) paths, which DO need
+real elaboration because their bodies CAN observe comptime-ness
+(`@parameter if`, static array sizes). A new `_lower_call` branch (and an
+`asyncio.run(...)`-composed variant, sharing a new `_emit_asyncio_run_drive`
+helper factored out of the existing top-level-async-function bridge)
+recognizes a bracket call to such a nested function and forwards the
+bracket arguments as extra positional args at the call site. Verified
+end-to-end (compile+link+run): `test_asyncrt_add[1](10)`/`[2](20)`, driven
+via `asyncio.run(...)`, print `11`/`22`.
 
-Additionally, `test_asyncrt_add`/`test_tracing_add` are themselves `async
-def`, not just nested — even with nested-comptime-registration fixed,
-these two files are STILL refused today for a separate, legitimate reason:
-`_async_quick_eligible` rejects any parameterized `async def` outright
-(confirmed directly: after this fix, `test_asyncrt.mojo` now fails with
-"function(s) ... test_asyncrt_add, test_asyncrt_add_two_of_them (async
-function(s), declared `async def`)" — the ordinary "no compiled
-async/generator support for this shape" refusal, not the comptime bug).
-So getting `test_asyncrt.mojo`/`test_tracing.mojo` to pass needs BOTH (a)
-extending local-generic registration to recurse into nested function
-bodies, in a way that's compatible with `@parameter`/closure-capture
-semantics for nested defs, AND (b) the previously-scoped "parametric
-`@parameter async def` support" / `_async_quick_eligible` widening work —
-neither attempted yet.
+A real, PRE-EXISTING bug surfaced while landing this (independent of
+whether the nested function is async): stripping a top-level local
+generic function from `stmts` (the "Local generic free functions" block)
+never cleaned up nested async/generator defs INSIDE it from `_async_fns`/
+`_generator_fns` — those dicts are populated by a deep `_walk_ast(stmts)`
+scan that runs BEFORE the strip, so a nested async/generator def's `id()`
+stayed in the tracking dicts forever, un-poppable by anything (since no
+later pass ever sees it once its parent is stripped), always surfacing in
+the final "still unsupported" error regardless of whether it was actually
+compiled via the SEPARATE per-call-site-elaborated instance. Fixed by
+walking each stripped generic's own body and popping its nested
+async/generator ids too.
+
+Confirmed via the real stdlib file: `test_asyncrt.mojo` now fails ONLY on
+`build_message`/`run_as_group`/`test_asyncrt_add_two_of_them` — all three
+need `create_task`/`await ... + await ...` composition (root cause #3, a
+separate, not-yet-landed feature) — `test_asyncrt_add`/`return_value`/
+`compute` (the comptime-bracket-parametrized ones this fix targets) no
+longer appear in the unsupported-function list at all.
+
+`test_tracing.mojo` needs the identical fix (also confirmed working) but
+hits a SEPARATE, harder problem on top: `test_tracing_add` is nested
+inside `test_tracing[level: TraceLevel, enabled: Bool]()` — itself a
+comptime-bracket-parametrized (non-async) function, elaborated via the
+EXISTING cross-module-style textual monomorphizer
+(`elaborate.py`/`monomorphize.py`) whenever bracket-called
+(`test_tracing[TraceLevel.ALWAYS, True]()`). That monomorphizer substitutes
+`level`/`enabled` textually across the WHOLE extracted block — including
+inside `test_tracing_add`'s own nested bracket declaration, which
+re-declares an UNRELATED comptime parameter also named `enabled` — with no
+notion of nested-scope shadowing, and no support for compiling a fragment
+that itself needs its own SEPARATE `.cpp` coroutine translation unit
+(`monomorphize.instantiate`'s `build()` only ever compiles the `.c` side,
+silently discarding `gen.generated_cpp`). Hand-verified: elaborating
+`test_tracing` this way threw internally, was silently caught by
+`_elaborate_generic_call`'s broad `except Exception`, and the call site
+fell through to `_lower_call`'s final "not an `IdentExpr` callee"
+catch-all — compiling `test_tracing[...]()`'s ENTIRE body to a bare
+placeholder `0` (a genuinely NEW silent-miscompile risk, of exactly the
+class this bug report exists to describe, freshly exposed by this
+session's own nested-async work interacting with the pre-existing
+elaboration pipeline). Fixed with an honest, upfront refusal instead:
+`_elaborate_generic_call` now detects a nested `async def` inside the
+generic being elaborated (via a cheap textual pre-scan of the extracted
+template) and raises a clear `RuntimeError` before ever attempting textual
+substitution, rather than risking the silent fallback. `test_tracing.mojo`
+itself still cannot compile until monomorphize.py genuinely supports dual
+C/C++ output for an elaborated fragment (a real, separate,
+not-yet-started feature) — but it no longer risks silently miscompiling
+in the attempt.
 
 ## Current status
 
-Free top-level functions: FIXED and verified (see
-`test_comptime_bracket_params.py`). `device_context.mojo`'s Repro 1 (a
-comptime FUNCTION-TYPE bracket parameter on a struct METHOD, called from a
-nested closure) is a structurally different call shape (`obj.method[Func]
-(...)`, routed through `_lower_call`'s separate "Subscripted method call"
-branch, not the local-generics path this fix touches) and is confirmed
-STILL broken — see `bugs/CODEGEN_device_context_captured_function_
-parameter_closures_broken.md`, unchanged by this fix.
+Free top-level functions: FIXED and verified (`test_comptime_bracket_
+params.py`). Nested async functions with their own comptime bracket
+parameters (not themselves inside an ALSO-generic enclosing function):
+FIXED and verified (`test_async_void_return.py`, hand-verified repros
+matching `test_asyncrt.mojo`'s exact shape). `device_context.mojo`'s
+Repro 1 (a comptime FUNCTION-TYPE bracket parameter on a struct METHOD) —
+a structurally different, ALSO now-fixed shape — see
+`bugs/CODEGEN_device_context_captured_function_parameter_closures_broken.md`.
 
-All four Group 1 files (`test/runtime/test_asyncrt.mojo`,
-`test_locks.mojo`, `test_raising_asyncrt.mojo`, `test_tracing.mojo`)
-remain honest whole-module refusals in `compile_stdlib.py`'s
-`EXPECTED_FAILURES` — `test_asyncrt.mojo`/`test_tracing.mojo`'s entries
-have been updated to describe their real current blocker (nested/async
-comptime-parametrized `async def`s, not the general value-binding bug,
-which is now fixed for the top-level case). The other two
-(`test_locks.mojo`, `test_raising_asyncrt.mojo`) are blocked by a
-different, separately-documented reason (no `create_task`/`Task`/
-`TaskGroup`/`RaisingTask` codegen support exists at all yet — see their
-own `EXPECTED_FAILURES` entries in compile_stdlib.py).
+Remaining honest whole-module refusals in `compile_stdlib.py`'s
+`EXPECTED_FAILURES`: `test_asyncrt.mojo`/`test_tracing.mojo` (both now
+blocked ONLY by `create_task`/`Task`/`TaskGroup` composition — root cause
+#3 — plus, for `test_tracing.mojo` alone, the separate elaborated-generic-
+with-nested-async gap just described), and `test_locks.mojo`/
+`test_raising_asyncrt.mojo` (blocked by the same `create_task`/`Task`/
+`TaskGroup`/`RaisingTask` gap, no codegen support at all yet — see their
+own `EXPECTED_FAILURES` entries in `compile_stdlib.py`).

@@ -40,40 +40,59 @@ DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', '
 # genuinely UNEXPECTED failures below) rather than silently absorbed.
 # Never add an entry here without a bugs/*.md file backing it.
 EXPECTED_FAILURES = {
-    # UPDATE (this session): the general comptime bracket-parameter
-    # value-binding bug (`f[N](...)` silently compiling to a placeholder
-    # `0`) is FIXED for top-level free functions — see
-    # bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md's
-    # "Update" section, verified end-to-end in
-    # test_comptime_bracket_params.py. These two files are still blocked,
-    # but for their OWN, narrower remaining reason: their comptime-bracket-
-    # parametrized functions (`test_asyncrt_add[lhs: Int](rhs: Int)` /
-    # `test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)`) are BOTH (a)
-    # NESTED `def`s (defined inside another function's body — the fix's
-    # local-generic-function registration only scans top-level module
-    # statements, confirmed via a fresh nested-def repro that still folds
-    # to 0) and (b) themselves `async def` — confirmed directly: after the
-    # top-level fix, this module now fails with the ordinary "no compiled
-    # async/generator support for this shape" refusal
-    # (`_async_quick_eligible` rejects any parameterized `async def`), not
-    # the comptime bug. Needs both nested-function generic registration
-    # (compatible with `@parameter`/closure-capture semantics) AND the
-    # previously-scoped "parametric `@parameter async def` support" /
-    # `_async_quick_eligible` widening — neither attempted yet.
+    # UPDATE (this session, continued): nested-function generic
+    # registration for a comptime-bracket-parametrized ASYNC def (`async
+    # def test_asyncrt_add[lhs: Int](rhs: Int) -> Int`, defined inside
+    # another function's body) is now ALSO fixed — see gen_module's "Async
+    # closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" discovery pass
+    # and bugs/CODEGEN_comptime_bracket_parametrized_function_calls_
+    # silently_wrong.md's "Update" section. Verified end-to-end (compile+
+    # link+run) in test_async_void_return.py and by hand: `test_asyncrt.
+    # mojo` now fails ONLY on its `create_task`/`await ... + await ...`
+    # composition (`build_message`, `run_as_group`,
+    # `test_asyncrt_add_two_of_them`) — confirmed directly, `test_asyncrt_
+    # add`/`return_value`/`compute` (the comptime-bracket-parametrized ones)
+    # no longer appear in the unsupported-function list at all. That
+    # remaining gap is root cause #3 (create_task/Task/TaskGroup — see this
+    # file's own EXPECTED_FAILURES entry below), not this one.
+    #
+    # `test_tracing.mojo` needs the SAME nested-generic-async fix (also
+    # confirmed fixed) but ALSO has an outer complication the fix
+    # deliberately does NOT attempt: `test_tracing_add` is nested inside
+    # `test_tracing[level: TraceLevel, enabled: Bool]()` — itself a
+    # comptime-bracket-parametrized (non-async) function that gets
+    # elaborated via the EXISTING cross-module-style textual monomorphizer
+    # (elaborate.py/monomorphize.py) whenever it's bracket-called
+    # (`test_tracing[TraceLevel.ALWAYS, True]()`). That monomorphizer is
+    # purely textual over the WHOLE extracted block (including nested
+    # defs) with no notion of nested-scope shadowing (`test_tracing_add`'s
+    # OWN `enabled: Bool` bracket parameter re-declares the outer
+    # `enabled` name) and no support for compiling a fragment that itself
+    # needs a SEPARATE .cpp coroutine translation unit — hand-verified to
+    # throw internally, silently caught, and — before this session's fix —
+    # fall through to a bare placeholder `0` (a real, newly-introduced
+    # silent-miscompile risk). Fixed with an honest upfront refusal instead
+    # (`_elaborate_generic_call` now detects a nested `async def` inside
+    # the generic being elaborated and raises, rather than ever reaching
+    # that silent fallback) — correctness-safe, but means `test_tracing.
+    # mojo` still can't compile until monomorphize.py genuinely supports
+    # dual C/C++ output for an elaborated fragment (a real, separate,
+    # not-yet-started feature) AND create_task lands.
     'test/runtime/test_asyncrt.mojo':
-        'nested, async-def comptime-bracket-parametrized functions '
-        '(test_asyncrt_add[lhs: Int](rhs: Int)) — the general top-level '
-        'value-binding bug is fixed, but nested-function generic '
-        'registration and parameterized-async-def eligibility widening '
-        'are still unimplemented — see bugs/CODEGEN_comptime_bracket_'
-        'parametrized_function_calls_silently_wrong.md',
+        'create_task/await-composition (build_message, run_as_group, '
+        'test_asyncrt_add_two_of_them) — the comptime-bracket-parametrized '
+        'nested async defs (test_asyncrt_add, return_value, compute) are '
+        'now fixed and no longer part of this blocker — see bugs/CODEGEN_'
+        'comptime_bracket_parametrized_function_calls_silently_wrong.md',
     'test/runtime/test_tracing.mojo':
-        'nested, async-def comptime-bracket-parametrized functions '
-        '(test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)) — the '
-        'general top-level value-binding bug is fixed, but nested-function '
-        'generic registration and parameterized-async-def eligibility '
-        'widening are still unimplemented — see bugs/CODEGEN_comptime_'
-        'bracket_parametrized_function_calls_silently_wrong.md',
+        'test_tracing_add is nested inside test_tracing[level, enabled](), '
+        'itself a comptime-bracket-parametrized function elaborated via '
+        'the textual monomorphizer, which has no support for nested-scope '
+        'bracket-parameter shadowing or a fragment needing its own .cpp '
+        'coroutine translation unit — an honest upfront refusal now '
+        '(previously a silent placeholder-0 miscompile), plus create_task '
+        '— see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_'
+        'silently_wrong.md',
 
     # test_locks.mojo and test_raising_asyncrt.mojo do NOT hit the comptime-
     # bracket-parameter bug above (their async functions use only plain
