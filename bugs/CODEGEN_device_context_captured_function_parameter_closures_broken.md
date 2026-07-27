@@ -148,14 +148,93 @@ question that can't be reasoned through safely in the current scope" this
 project's standing rules call out as a legitimate reason to stop and leave
 an honest, documented refusal rather than force a fix through.
 
+## Update — both repros FIXED (this session)
+
+**Repro 1** (comptime function-typed bracket parameter, called via a nested
+closure): the bracket argument was being silently DROPPED at the call site —
+`_lower_call`'s "obj.method[TypeParam](...)" branch unconditionally forwarded
+to `_lower_method_call` with the `[...]` stripped, never binding `func` to
+anything. Fixed via a new mechanism (`GimpleGen._method_threaded_comptime_
+params`, populated in `gen_module`'s early pre-pass): a struct method's
+comptime bracket parameter is threaded through as an ordinary TRAILING C
+parameter (an opaque `int64_t` callable pointer — a function value carries
+no compile-time-varying information this codegen's monomorphization needs,
+unlike an Int/Bool comptime value) whenever it's BOTH function-typed (its
+bracket annotation textually starts with `def` — `_bracket_param_type_
+annotations`) AND actually referenced as a plain identifier somewhere in the
+method's own body or a nested closure's body (`_used_idents_deep`, which —
+unlike the pre-existing `_used_idents_node` — crosses FunctionDef
+boundaries). `_gen_struct_method` appends the parameter; `_scan_for_closures`
+seeds it into a nested closure's capturable outer scope; the "obj.
+method[X](...)" call site forwards the bracket argument as an extra
+positional arg. Gated by BOTH signals together (not `comptime_params`
+membership alone) so a comptime TYPE parameter merely BOUNDING an ordinary
+parameter's type (e.g. `FuncType: def() -> None` typing `func: FuncType` —
+Repro 2's own shape) is correctly left untouched.
+
+**Repro 2** (runtime `FuncType`-parametrized closure argument): the
+environment-struct CAPTURE was already working correctly (contrary to this
+bug's original description — the codebase had changed since that repro was
+first documented); the actual live bug was in `_gen_stmt_ExprStmt`'s
+captured-function-pointer guard, which — unlike `_lower_call`'s identical
+guard a few hundred lines up, which correctly calls `_lower_fnptr_call` —
+only evaluated the call's ARGUMENTS (for side effects) and then silently
+dropped the call itself. A bare, value-discarding statement calling a
+captured function-type parameter (`func()` alone, exactly `wrapper`'s entire
+body) compiled to a real no-op. Fixed by making that guard call
+`_lower_fnptr_call` too, mirroring the already-correct sibling.
+
+**Real regressions found and fixed while landing Repro 1**: the first
+implementation keyed `_method_threaded_comptime_params` by bare method name
+only, which cross-contaminated (a) two sibling overloads of the same method
+name ON ONE STRUCT with different bracket-parameter shapes
+(`std/memory/span.mojo`'s two `binary_search_by` overloads — a full
+from-scratch stdlib dylib rebuild regressed from 1 skip to 4, adding
+`std/memory/span.mojo` and `std/benchmark/bencher.mojo`) and (b) two
+UNRELATED structs defining a same-named method where only one needed
+threading (`std/builtin/variadics.mojo`'s `VariadicList.consume_elements`
+vs. `VariadicPack.consume_elements` — added `std/builtin/variadics.mojo` to
+the regressed skip list too). Fixed by keying on `(struct_name, method_name,
+overload_id)` instead (using `_struct_method_overload_ids`, this codegen's
+own established overload-safe-keying convention, and a struct-scoped,
+occurrence-indexed bracket-text search rather than a whole-module,
+name-only one). After the fix, a full from-scratch stdlib dylib rebuild is
+back to exactly 1 skip (`device_context.mojo` itself, for the separate,
+still-open async-eligibility reason below) — confirming no other stdlib
+file regressed. See `test_closure_capture_comptime_func_params.py` for
+real, compile+link+run (and, for the two overload-collision regressions,
+real `gcc -fgimple -fsyntax-only`) verification of all of the above,
+including both original repros printing `"ran"` end-to-end.
+
+**Known remaining narrow gap** (not hit by any real stdlib file today,
+confirmed via the clean full dylib rebuild, so left undone rather than
+risked): once a bracket argument is appended at a call site to match a
+threaded overload's real, AUGMENTED C parameter count, `_lower_method_call`'s
+own overload-dispatch (which matches by the ORIGINAL, pre-threading Mojo-
+level argument count) could in principle pick the WRONG sibling overload if
+one happens to also accept that same augmented count — a separate,
+pre-existing overload-resolution limitation this fix doesn't touch.
+
 ## Current status
 
-`device_context.mojo` remains an honest whole-module refusal
-(`compile_stdlib.py`'s `EXPECTED_FAILURES`, with this file as the
-justification). The async-specific plumbing that WOULD be needed once the
-capture bugs are fixed (`_take_handle()`/eligibility widening/
-`AsyncRT_DeviceContext_enqueueHostFunction(Range)` synchronous stubs) is
-already built and verified inert/safe in `runtime/mojo_async_runtime.h`/
-`.cpp` (generic `mojo_coro_resume_generic`/`mojo_coro_destroy_generic` +
-the two stub externs), ready to be wired up once a future pass fixes
-Repro 1/Repro 2 above.
+Both capture bugs (Repro 1, Repro 2) are fixed and verified. `device_
+context.mojo` REMAINS an honest whole-module refusal in `compile_stdlib.py`'s
+`EXPECTED_FAILURES` — its actual remaining blocker is now purely the
+async-eligibility gate (`_async_quick_eligible` rejects any parameterized
+`async def`, and `wrapper`'s four instances are effectively parameterized —
+they close over `func`/`FuncType` from their enclosing method), confirmed by
+re-running `compile_module_to_c_cached` on this file directly and seeing
+the SAME "function(s) wrapper, wrapper, wrapper, wrapper (async
+function(s), declared `async def`)" refusal as before, unrelated to either
+capture bug now. The async-specific plumbing that WOULD be needed once
+eligibility is widened (`_take_handle()`/`AsyncRT_DeviceContext_
+enqueueHostFunction(Range)` synchronous stubs) is already built and
+verified inert/safe in `runtime/mojo_async_runtime.h`/`.cpp` (generic
+`mojo_coro_resume_generic`/`mojo_coro_destroy_generic` + the two stub
+externs), ready to be wired up once a future pass widens
+`_async_quick_eligible` for this shape (a real, substantial, not-yet-
+started piece of work — reasoned about, but not attempted, in this
+session; see the compiled-async-codegen project's own notes for why the
+device_context.mojo shape and the nested `@parameter async def` shape
+`test_asyncrt.mojo`/`test_tracing.mojo` need are NOT obviously the same
+narrow widening and may need distinct eligibility conditions).

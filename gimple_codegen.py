@@ -2482,6 +2482,90 @@ def _is_concrete_type_arg(ann: str) -> bool:
     return True
 
 
+_BRACKET_HEAD_RE = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
+
+
+def _bracket_param_type_annotations(gsrc: str, name: str, occurrence: int = 0) -> dict:
+    """For `def/fn name[p1: T1, p2: T2, ...](...)` (a method or free function
+    with a bracket/comptime parameter list), map each bracket parameter name
+    to its raw type-annotation text (e.g. {'func': 'def() capturing -> None'}
+    or {'FuncType': 'def() -> None'}). Used to distinguish a FUNCTION-TYPED
+    comptime bracket parameter (see _method_threaded_comptime_params) from an
+    Int/Bool/other comptime parameter — a function-typed one carries no
+    compile-time-varying information this codegen's monomorphization needs
+    (it's always just an opaque callable pointer, regardless of which
+    concrete function is bound at a given call site — see bugs/CODEGEN_
+    device_context_captured_function_parameter_closures_broken.md's Repro 1),
+    so it can be threaded through as an ordinary trailing C parameter instead
+    of needing per-call-site specialization. Purely textual (mirrors
+    elaborate.py's own `_HEAD`/`type_param_names`), since the parser itself
+    only records comptime PARAM NAMES (FunctionDef.comptime_params), not
+    their type annotations.
+
+    `occurrence` selects the Nth (0-based) `def/fn name[...]` match in
+    source order — REQUIRED when `name` is overloaded (multiple sibling
+    definitions sharing one name, e.g. std/memory/span.mojo's two
+    `binary_search_by` overloads with completely different bracket-parameter
+    shapes): matching by name alone would always return the FIRST overload's
+    bracket text regardless of which one is actually being processed,
+    silently applying its parameter-threading decision to every sibling
+    overload too. Returns {} if `name`'s `occurrence`-th match isn't found or
+    has no bracket parameter list."""
+    m = _BRACKET_HEAD_RE.search(gsrc)
+    seen = -1
+    while m:
+        if m.group(1) == name:
+            seen += 1
+            if seen == occurrence:
+                break
+        m = _BRACKET_HEAD_RE.search(gsrc, m.end())
+    if not m:
+        return {}
+    out = {}
+    for part in _split_top_level_commas(m.group(2)):
+        part = part.strip()
+        if not part or part in ('/', '*') or ':' not in part:
+            continue
+        pname, ptype = part.split(':', 1)
+        out[pname.strip()] = ptype.strip()
+    return out
+
+
+def _used_idents_deep(node) -> set:
+    """Like _used_idents_node, but ALSO recurses into nested FunctionDef
+    bodies (a nested closure's own free-identifier references count as
+    "used" by the enclosing function too) — needed to detect a comptime
+    bracket parameter that's referenced only inside a nested closure (e.g.
+    device_context.mojo's `async def wrapper() capturing -> None: func()`,
+    where `func` is the enclosing method's own comptime bracket parameter,
+    never referenced directly in the method's own top-level body)."""
+    if isinstance(node, FunctionDef):
+        r = set()
+        for b in node.body:
+            r |= _used_idents_deep(b)
+        return r
+    if isinstance(node, list):
+        r = set()
+        for b in node:
+            r |= _used_idents_deep(b)
+        return r
+    base = _used_idents_node(node)
+    for attr in ('then_body', 'else_body', 'body', 'finally_body'):
+        sub = getattr(node, attr, None)
+        if isinstance(sub, list):
+            for s in sub:
+                base |= _used_idents_deep(s)
+    for _cond, elif_body in getattr(node, 'elifs', []) or []:
+        for s in elif_body:
+            base |= _used_idents_deep(s)
+    for handler in getattr(node, 'handlers', []) or []:
+        hbody = getattr(handler, 'body', None)
+        if isinstance(hbody, list):
+            for s in hbody:
+                base |= _used_idents_deep(s)
+    return base
+
+
 def _safe_name(name: str) -> str:
     # Handle backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
     if name.startswith('`') and name.endswith('`') and len(name) > 2:
@@ -3112,6 +3196,37 @@ class GimpleGen:
         # Imported names that are generic templates (not concrete exports):
         # name -> the module source path, used to instantiate at call sites.
         self._imported_generics: dict = {}
+        # (struct_name, method_name) -> {overload_id: ordered list of
+        # comptime bracket parameter names that are BOTH function-typed (per
+        # _bracket_param_type_annotations) AND actually referenced somewhere
+        # in the method's own body (directly or via a nested closure — per
+        # _used_idents_deep)}. These are threaded through as ordinary
+        # trailing C parameters (opaque function pointers) instead of being
+        # silently dropped at the call site — see bugs/CODEGEN_device_
+        # context_captured_function_parameter_closures_broken.md's Repro 1
+        # and _gen_struct_method/_lower_call's "obj.method[...]" branch.
+        # Keyed by (struct_name, method_name) THEN by overload_id (matching
+        # _struct_method_overload_ids' own convention) — required because
+        # (a) two DIFFERENT structs can define a same-named method where only
+        # one needs threading (e.g. std/builtin/variadics.mojo's
+        # `VariadicList.consume_elements` — an ORDINARY `elt_handler`
+        # parameter, no brackets at all — vs. the unrelated
+        # `VariadicPack.consume_elements[elt_handler: def[idx: Int](...)]` —
+        # a struct-name-blind key wrongly threaded VariadicPack's decision
+        # onto VariadicList's method too, duplicating its already-ordinary
+        # `elt_handler` parameter) and (b) two sibling overloads of the same
+        # method name ON THE SAME STRUCT can also have completely different
+        # bracket-parameter shapes (e.g. std/memory/span.mojo's
+        # `binary_search_by[func: def(Self.T) -> Int](self)` vs. the sibling
+        # `binary_search_by[FuncType: def(Self.T) -> Int](self, func:
+        # FuncType)`).
+        self._method_threaded_comptime_params: dict = {}
+        # (struct_name, method_name) -> {overload_id: the method's FULL
+        # comptime_params list, in bracket declaration order} (parallel to
+        # _method_threaded_comptime_params, which is a FILTERED subset) —
+        # lets the call site map each bracket argument expression back to its
+        # parameter by position, once an overload is identified.
+        self._method_comptime_param_order: dict = {}
         # Imported function name -> module source path, for comptime evaluation
         # (run the function at compile time via comptime.evaluate; slice 3).
         self._imported_fn_sources: dict = {}
@@ -9466,9 +9581,60 @@ class GimpleGen:
                 return res
         if isinstance(node.func, MemberExpr):
             return self._lower_method_call(node)
-        # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call
+        # Subscripted method call: obj.method[TypeParam](...) — unwrap type param and route as method call.
+        # A method whose comptime bracket parameter is function-typed and
+        # actually used (registered in _method_threaded_comptime_params —
+        # see its docstring / bugs/CODEGEN_device_context_captured_function_
+        # parameter_closures_broken.md's Repro 1) is compiled with that
+        # parameter as an ordinary TRAILING C parameter (_gen_struct_method),
+        # so the bracket argument(s) here must be forwarded as extra
+        # positional args, in the same order as the method's own
+        # comptime_params — dropping them silently (the pre-existing
+        # behavior, still correct for every OTHER bracket parameter: a pure
+        # type-bound never referenced as a plain identifier, or an Int/Bool/
+        # other comptime parameter this narrow mechanism doesn't touch)
+        # left `func` unresolved inside the method body / its nested
+        # closures, emitted as a bogus, never-defined bare C identifier call.
         if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, MemberExpr):
-            inner = CallExpr(func=node.func.obj, args=node.args,
+            method_name = node.func.obj.member
+            extra_args = []
+            # Resolve the receiver's struct name cheaply (no side effects —
+            # _quick_type is a pure lookup) so the (struct_name, method_name)
+            # key can't cross-contaminate an unrelated struct's same-named
+            # method (see _method_threaded_comptime_params' docstring for
+            # why struct-name-blind keying is unsafe: std/builtin/
+            # variadics.mojo's VariadicList.consume_elements — an ordinary,
+            # non-generic method — vs. the unrelated VariadicPack.
+            # consume_elements[elt_handler: def[idx: Int](...)]).
+            _recv_ct = self._quick_type(node.func.obj.obj)
+            _struct_name = _recv_ct[:-2] if _recv_ct.endswith(' *') else _recv_ct
+            orders_by_oid = self._method_comptime_param_order.get((_struct_name, method_name))
+            if orders_by_oid:
+                idx = node.func.index
+                elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+                # Which sibling overload does this call site's bracket-
+                # argument COUNT match? Real overload resolution happens
+                # deeper (in _lower_method_call, called below), which this
+                # narrow, textual pre-scan doesn't have access to — but the
+                # comptime-param arity alone is enough to disambiguate
+                # honestly: if exactly one candidate overload's
+                # comptime_params list is the same length as the bracket-
+                # argument list actually supplied here, use its threaded-
+                # parameter set; if zero or more than one match (genuinely
+                # ambiguous), do nothing — the pre-existing "drop the
+                # bracket" behavior — rather than guess and risk forwarding
+                # an extra argument to an overload compiled WITHOUT a
+                # matching trailing parameter.
+                _candidates = [oid for oid, order in orders_by_oid.items()
+                               if len(order) == len(elems)]
+                if len(_candidates) == 1:
+                    oid = _candidates[0]
+                    order = orders_by_oid[oid]
+                    threaded = self._method_threaded_comptime_params.get((_struct_name, method_name), {}).get(oid, [])
+                    for i, cp_name in enumerate(order):
+                        if cp_name in threaded and i < len(elems):
+                            extra_args.append(elems[i])
+            inner = CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                              kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
             return self._lower_method_call(inner)
         # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
@@ -12715,12 +12881,24 @@ class GimpleGen:
                 return
             # Redirect calls to user's main() to its renamed symbol (root ->
             # _gimple_main; sub-module -> _{module}_main), matching gen_func.
-            # If raw_name is a local variable holding a function value (e.g., a
-            # Mojo function-type parameter stored as int64_t), calling it directly
-            # in GIMPLE is invalid. Stub it out here — same guard as _lower_CallExpr.
+            # If raw_name is a local (or captured) variable holding a function
+            # value (e.g., a Mojo function-type parameter stored as int64_t),
+            # calling it directly in GIMPLE is invalid — needs the same
+            # mojo_fnptr_call_N() indirection _lower_call's identical guard
+            # already uses via _lower_fnptr_call. This statement-level twin
+            # previously only evaluated the call's ARGUMENTS (for side
+            # effects) and then silently dropped the call itself — a real,
+            # standalone bug (not merely "unsupported"): a bare, value-
+            # discarding statement calling a captured function-type parameter
+            # (e.g. `func()` as a nested closure's entire body — see
+            # bugs/CODEGEN_device_context_captured_function_parameter_
+            # closures_broken.md's Repro 2) silently compiled to a no-op,
+            # never actually invoking the captured function at all. See
+            # _lower_call's own identical guard a few hundred lines up for
+            # the same fix already proven correct there.
             _var_ctype = self.var_types.get(raw_name, '')
             if _var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
-                for a in node.value.args: self.lower_expr(a)
+                self._lower_fnptr_call(raw_name, _var_ctype, node.value)
                 return
             # Same guard as _lower_CallExpr: don't redirect an *imported*
             # 'main' (e.g. `from foo import main; main()`) to the
@@ -15456,6 +15634,18 @@ class GimpleGen:
                 self.var_types[safe_bare] = ctype
             param_strs.append(f"{ctype} {safe_bare}")
 
+        # Thread any function-typed, actually-used comptime bracket
+        # parameter(s) through as ordinary trailing C parameters (opaque
+        # callable pointers) — see _method_threaded_comptime_params'
+        # docstring / bugs/CODEGEN_device_context_captured_function_
+        # parameter_closures_broken.md's Repro 1. Call sites append the
+        # matching bracket argument as an extra positional arg (see
+        # _lower_call's "obj.method[...]" branch), so this signature and
+        # that call-site lowering must stay in lockstep.
+        for _cp_name in self._method_threaded_comptime_params.get((struct_name, node.name), {}).get(overload_id, []):
+            self.var_types[_cp_name] = 'int64_t'
+            param_strs.append(f"int64_t {_cp_name}")
+
         params_str = ', '.join(param_strs) if param_strs else 'void'
         mangled    = self._struct_method_csym(struct_name, node.name, overload_id)
 
@@ -17344,6 +17534,62 @@ class GimpleGen:
                 stmts = [s for s in stmts
                          if not (isinstance(s, FunctionDef) and s.name in _local_generics)]
 
+        # Struct methods with a FUNCTION-TYPED comptime bracket parameter that
+        # is actually referenced (directly or via a nested closure) — see
+        # _method_threaded_comptime_params' docstring / bugs/CODEGEN_
+        # device_context_captured_function_parameter_closures_broken.md's
+        # Repro 1. Unlike the local-generic-FREE-FUNCTION case above (which
+        # elaborates a distinct specialized function per call site via
+        # textual substitution), a function-typed comptime parameter carries
+        # no compile-time-varying information this codegen's monomorphization
+        # needs — it's always just an opaque callable pointer — so it's
+        # threaded through as one ordinary trailing C parameter instead
+        # (_gen_struct_method appends it; the "obj.method[...]"  call site in
+        # _lower_call forwards the bracket argument as an extra positional
+        # arg), with NO per-call-site specialization and no change to methods
+        # whose comptime bracket parameter is never independently threaded
+        # (an Int/Bool/other comptime method parameter, or one that's a pure
+        # type-bound never referenced as a plain identifier — e.g. `FuncType:
+        # def() -> None` typing an ordinary `func: FuncType` parameter — is
+        # completely unaffected, left exactly as before).
+        if _gsrc:
+            for _s in stmts:
+                if not isinstance(_s, StructDef):
+                    continue
+                # Scope the textual bracket-annotation search to just THIS
+                # struct's own source slice (not the whole module) — an
+                # occurrence index is only meaningful relative to a single,
+                # well-defined search space; scoping to the struct keeps
+                # "occurrence N of this method name" unambiguous even if
+                # some other struct/free-function elsewhere in the same file
+                # happens to reuse the same method name with its own bracket
+                # parameters.
+                try:
+                    import elaborate as _elaborate_mod
+                    _struct_src = _elaborate_mod.extract_struct_source(_gsrc, _s.name) or _gsrc
+                except Exception:
+                    _struct_src = _gsrc
+                _moids_pre = self._struct_method_overload_ids(_s)
+                _name_occurrence: dict = {}  # method name -> next occurrence index to consume
+                for _m, _oid in zip(_s.methods, _moids_pre):
+                    _occ = _name_occurrence.get(_m.name, 0)
+                    _name_occurrence[_m.name] = _occ + 1
+                    if not _m.comptime_params:
+                        continue
+                    _bp_types = _bracket_param_type_annotations(_struct_src, _m.name, occurrence=_occ)
+                    _func_typed = {p for p in _m.comptime_params
+                                   if _bp_types.get(p, '').startswith('def')}
+                    if not _func_typed:
+                        continue
+                    _used = set()
+                    for _b in _m.body:
+                        _used |= _used_idents_deep(_b)
+                    _threaded = [p for p in _m.comptime_params if p in _func_typed and p in _used]
+                    if _threaded:
+                        _key = (_s.name, _m.name)
+                        self._method_threaded_comptime_params.setdefault(_key, {})[_oid] = _threaded
+                        self._method_comptime_param_order.setdefault(_key, {})[_oid] = list(_m.comptime_params)
+
         # Structs with a __call__ method: a variable of such a type invoked like a
         # function (obj(args)) routes to Struct___call__(obj, args).
         self._callable_structs = {
@@ -19035,6 +19281,17 @@ class GimpleGen:
                             outer_scope['self'] = f"{s.name} *"
                         else:
                             outer_scope[pname] = self._resolve_type(ptype)
+                    # Function-typed, actually-used comptime bracket parameters
+                    # are threaded through as ordinary trailing parameters (see
+                    # _method_threaded_comptime_params) — include them in
+                    # outer_scope too, so a nested closure that references one
+                    # (e.g. device_context.mojo's `wrapper` calling the
+                    # enclosing method's own `func` bracket parameter) is
+                    # correctly detected as a free variable and captured,
+                    # instead of falling through as an unresolved bare
+                    # identifier.
+                    for _cp_name in self._method_threaded_comptime_params.get((s.name, method.name), {}).get(_oid, []):
+                        outer_scope[_cp_name] = 'int64_t'
                     # Seed var_types so _quick_type can resolve method calls on self/params
                     _saved_vt = dict(self.var_types)
                     self.var_types.update(outer_scope)

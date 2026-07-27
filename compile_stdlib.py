@@ -40,28 +40,32 @@ DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', '
 # genuinely UNEXPECTED failures below) rather than silently absorbed.
 # Never add an entry here without a bugs/*.md file backing it.
 EXPECTED_FAILURES = {
-    # Blocked by two pre-existing, orthogonal bugs in the GENERAL (non-async)
-    # closure/capture codegen — NOT primarily an async-codegen gap (the
-    # async-specific plumbing this file's `wrapper()` closures would also
-    # need is already built, in runtime/mojo_async_runtime.h/.cpp, and
-    # verified inert/safe; it's unwired pending a fix to the capture bugs
-    # below, since wiring it up on top of a broken capture value would be
-    # silent miscompilation, not a real fix):
-    #   1. A comptime function-type bracket parameter (`func: def() capturing
-    #      -> None`) called from a nested closure lowers to a bogus,
-    #      unresolved bare-identifier extern call (`func(...)`) instead of
-    #      the real bound callee.
-    #   2. A runtime `FuncType`-generic closure argument captured into a
-    #      nested closure's environment struct is written through a struct
-    #      member that was never declared on that struct (the env struct is
-    #      emitted with zero fields) — real memory corruption risk, masked
-    #      today only because `-fgimple -fsyntax-only` doesn't validate it.
-    # See bugs/CODEGEN_device_context_captured_function_parameter_closures_broken.md
-    # for both repros and the full analysis.
+    # UPDATE (this session): both closure-capture bugs this file's blocker
+    # was originally attributed to are FIXED (see bugs/CODEGEN_device_
+    # context_captured_function_parameter_closures_broken.md's "Update"
+    # section + test_closure_capture_comptime_func_params.py's real
+    # compile+link+run verification). This file's ACTUAL remaining blocker
+    # is now purely the pre-existing async-eligibility gate:
+    # `_async_quick_eligible` rejects any parameterized `async def`, and
+    # this file's four `wrapper()` closures all close over their enclosing
+    # method's `func`/`FuncType` parameter — confirmed unchanged by
+    # re-running compile_module_to_c_cached directly (same "function(s)
+    # wrapper, wrapper, wrapper, wrapper (async function(s), declared
+    # `async def`)" refusal as before either capture fix). The async-
+    # specific plumbing this WOULD need once eligibility is widened
+    # (`_take_handle()`/`AsyncRT_DeviceContext_enqueueHostFunction(Range)`
+    # stubs) is already built and verified inert/safe in runtime/
+    # mojo_async_runtime.h/.cpp, ready to be wired up — a real, substantial,
+    # not-yet-started piece of work (reasoned about but not attempted this
+    # session; may need its own eligibility condition distinct from the
+    # nested `@parameter async def` shape test_asyncrt.mojo/test_tracing.mojo
+    # need — the two were NOT confirmed to be the same widening).
     'std/gpu/host/device_context.mojo':
-        'captured comptime-function/FuncType parameter closures are broken '
-        'in the general codegen (independent of async) — see bugs/CODEGEN_'
-        'device_context_captured_function_parameter_closures_broken.md',
+        'async-eligibility gate rejects this file\'s four parameterized '
+        '`wrapper()` closures (`_async_quick_eligible` has no parameterized-'
+        'async-def support yet) — the two closure-capture bugs this file was '
+        'originally blocked on are now fixed — see bugs/CODEGEN_device_'
+        'context_captured_function_parameter_closures_broken.md',
 
     # UPDATE (this session): the general comptime bracket-parameter
     # value-binding bug (`f[N](...)` silently compiling to a placeholder
