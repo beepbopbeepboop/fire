@@ -879,6 +879,154 @@ def main():
     test_sock_recv_eof(
         "sock_recv_returns_minus_one_on_peer_close_eof")
 
+    # ── Final step: combined async generators (`async def f(): ... yield``,
+    # consumed via `async for`) ─────────────────────────────────────────────
+    # See gimple_codegen.GimpleGen._gen_cpp_async_generator_unit's docstring
+    # for the full design (a THIRD, distinct promise type combining
+    # yield_value() with a continuation field, verified safe against
+    # Milestone D's GCC-15 frame-corruption bug via a hand-written,
+    # Mojo-independent repro before this method was written at all) and
+    # _cpp_async_for_stmt's docstring for `async for`'s own lowering (the
+    # first codegen anywhere, compiled or interpreted, to consume
+    # ForStmt.is_async at all).
+
+    # 1. THE core proof, mirroring test_async_stdout_timed's role for plain
+    # `await asyncio.sleep(...)` exactly: two real sleeps genuinely
+    # happening IN SEQUENCE between yields (not fused/instant), consumed by
+    # a real `async for` in another async function, with the correct
+    # accumulated result.
+    test_async_stdout_timed(
+        "async_gen_two_real_sleeps_between_yields_accumulated_via_async_for",
+        """\
+async def f():
+    await asyncio.sleep(0.08)
+    yield 1
+    await asyncio.sleep(0.08)
+    yield 2
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    result = asyncio.run(main_driver())
+    print(result)
+""", "3\n", min_seconds=0.15, max_seconds=1.5)
+
+    # 2. Beyond the obvious happy path (this project's own established
+    # pattern): an `async for` that `break`s out EARLY, only partially
+    # consuming the generator (2 of 4 yields). Asserts BOTH the correct
+    # partial accumulation (proving `break` genuinely stops consumption,
+    # not just stops accumulating) AND that wall-clock time reflects only
+    # the TWO sleeps that actually ran, not all four -- if the generator's
+    # coroutine frame weren't destroyed/abandoned correctly on early exit,
+    # this would either hang (if destroy() were never reached) or take
+    # ~4x as long (if the loop kept driving the generator past the break).
+    test_async_stdout_timed(
+        "async_gen_early_break_stops_consumption_and_cleans_up",
+        """\
+async def f():
+    await asyncio.sleep(0.08)
+    yield 10
+    await asyncio.sleep(0.08)
+    yield 20
+    await asyncio.sleep(0.08)
+    yield 30
+    await asyncio.sleep(0.08)
+    yield 40
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+        if x == 20:
+            break
+    return total
+
+def main():
+    import asyncio
+    result = asyncio.run(main_driver())
+    print(result)
+""", "30\n", min_seconds=0.15, max_seconds=1.2)
+
+    # 3. Exceptions: a `raise` inside an async generator body (after one
+    # real yield) propagates OUT of `async for` as a real, catchable
+    # exception in the awaiting function's own body -- composes Milestone
+    # D's generator exception machinery (reused verbatim by this step's
+    # promise) with Step E's per-awaiter rethrow (reused verbatim by
+    # `<base>_AnextAwaiter::await_resume`), exactly like this step's own
+    # docstring claims, not a fourth exception mechanism.
+    test_async_stdout(
+        "async_gen_exception_after_yield_caught_by_async_for_caller", """\
+async def f():
+    await asyncio.sleep(0.01)
+    yield 1
+    raise ValueError("boom")
+
+async def main_driver():
+    total = 0
+    try:
+        async for x in f():
+            total = total + x
+    except ValueError:
+        total = total + 100
+    return total
+
+def main():
+    import asyncio
+    result = asyncio.run(main_driver())
+    print(result)
+""", "101\n")
+
+    # 4. Honest refusal: `yield from` inside an async generator is still out
+    # of this step's scope (delegation composed with async suspension is
+    # genuinely new risk this step doesn't take on -- see
+    # `_async_gen_quick_eligible`'s docstring), even though the plain
+    # (non-async) generator path already supports `yield from` on its own.
+    test_async_build_refused(
+        "async_gen_yield_from_still_refused",
+        """\
+async def g():
+    yield 1
+
+async def f():
+    yield from g()
+
+async def main_driver():
+    async for x in f():
+        pass
+    return 0
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "cannot compile module")
+
+    # 5. Honest refusal: an async generator with parameters is still out of
+    # this step's scope (deliberately parameter-less, matching every other
+    # step's own narrowest-shape-first precedent -- see
+    # `_async_gen_quick_eligible`'s docstring), even though the GCC-15 repro
+    # this step ran found the combined promise safe WITH parameters too.
+    test_async_build_refused(
+        "async_gen_with_parameters_still_refused",
+        """\
+async def f(n: int):
+    yield n
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "cannot compile module")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

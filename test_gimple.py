@@ -2156,13 +2156,17 @@ async def f():
     return x
 """, "async function")
 
-    # Async generator (`async def f(): yield x`) honest-fallback: both flags
-    # set at once must still be refused clearly, reported as its own
-    # combined category rather than silently only tripping one check.
-    test_raises("async_generator_function_honest_fallback", """\
-async def f():
-    yield 1
-""", "async generator function")
+    # Async generator (`async def f(): yield x`) -- REVISED (final step of
+    # the async/await codegen project): the simplest possible shape (no
+    # params, one `yield`, no `yield from`/`with`) is now this step's own
+    # target shape and successfully compiles via a combined promise type
+    # (_gen_cpp_async_generator_unit) -- see
+    # async_generator_simple_shape_compiles_via_cpp_path further below
+    # (defined after _generator_compiles_via_cpp exists) for the compile-
+    # only smoke test, and async_generator_with_param_honest_fallback/
+    # async_generator_with_yield_from_honest_fallback for the narrower
+    # shapes that still correctly hit the (no-longer-blanket) combined
+    # refusal.
 
     # Milestone B narrowing checks: a generator containing try/except is
     # explicitly excluded from the new C++20-coroutine allowlist (richer
@@ -3813,6 +3817,131 @@ def main():
 """,
         cpp_substrs=('_translate_pending_exc',),
         c_substrs=('_translate_pending_exc', 'mojo_exc_pending_get', 'mojo_raise'))
+
+    # ── Final step: combined async generators (`async def f(): ... yield``,
+    # consumed via `async for`) ─────────────────────────────────────────────
+    # See gimple_codegen.GimpleGen._gen_cpp_async_generator_unit's docstring
+    # for the full design (a THIRD, distinct promise type) and
+    # _cpp_async_for_stmt's docstring for `async for`'s own lowering.
+    # REAL compile+link+run behavioral coverage (correct accumulated
+    # results, genuine wall-clock suspension between yields, early-`break`
+    # cleanup, exception composition) lives in test_gimple_async_runner.py,
+    # matching this file's own established compile-only-smoke-test role.
+
+    # The simplest possible target shape: a zero-parameter async generator,
+    # consumed by a plain `async def` via `async for`.
+    _generator_compiles_via_cpp(
+        "async_generator_simple_shape_compiles_via_cpp_path", """\
+async def f():
+    await asyncio.sleep(0.01)
+    yield 1
+    await asyncio.sleep(0.01)
+    yield 2
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""")
+
+    # A lone, uncalled async generator (no consumer at all) also compiles --
+    # harmless dead code, exactly mirroring how a bare, uncalled plain
+    # generator/async function has always been allowed to compile (see
+    # generator_simple_shape_compiles_via_cpp_path/
+    # async_simple_shape_compiles_via_cpp_path for the identical precedent
+    # on the two predecessor categories) -- no consumer is required for
+    # this step's own eligibility check either.
+    _generator_compiles_via_cpp(
+        "async_generator_no_consumer_still_compiles_as_dead_code", """\
+async def f():
+    yield 1
+""")
+
+    # `async for` genuinely reaching Step A's scheduler -- confirms this
+    # isn't a fake/instant drive (the same kind of "did this actually use
+    # the real suspend/resume machinery" check test_async_simple_shape_
+    # compiles_via_cpp_path already does for plain async composition).
+    _check_async_syntax_only(
+        "async_generator_uses_real_coroutine_machinery", """\
+async def f():
+    await asyncio.sleep(0.01)
+    yield 1
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""",
+        cpp_substrs=('_mojoasyncgen_f_AnextAwaiter', 'yield_value',
+                     'mojo_async_schedule_ready'),
+        c_substrs=())
+
+    # Narrowing checks: the two out-of-scope shapes from this step's own
+    # plan must still hit the honest whole-module refusal.
+
+    # A parameter -- this step's scope is deliberately parameter-less (see
+    # _async_gen_quick_eligible's docstring), matching every other step's
+    # own narrowest-shape-first precedent.
+    test_raises("async_generator_with_param_honest_fallback", """\
+async def f(n: int):
+    yield n
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "async")
+
+    # `yield from` inside an async generator -- delegation composed with
+    # async suspension is genuinely new risk this step doesn't take on.
+    test_raises("async_generator_with_yield_from_honest_fallback", """\
+async def g():
+    yield 1
+
+async def f():
+    yield from g()
+
+async def main_driver():
+    async for x in f():
+        pass
+    return 0
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "async")
+
+    # A plain (non-`async`) `for` loop over a generator inside an async
+    # function's own body is still unsupported -- `async for` is the ONLY
+    # loop construct this step's `_cpp_stmt` recognizes at all (no plain
+    # `for` support exists anywhere in a compiled generator/async body,
+    # before or after this step).
+    test_raises("plain_for_inside_async_function_honest_fallback", """\
+async def main_driver():
+    total = 0
+    for i in range(3):
+        total = total + i
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "async")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
