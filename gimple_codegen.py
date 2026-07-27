@@ -2021,35 +2021,37 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
     """Cheap pre-filter before attempting the real _gen_cpp_async_unit
     translation, mirroring _generator_quick_eligible's role exactly: is_async,
     not is_generator (an `async def f(): yield x` async generator is its own
-    combined-refusal category, handled entirely separately below), and no
-    parameter at all (this step's scope is deliberately narrower than even
-    Milestone B's initial generator scope, which allowed params from the
-    start once the parameter-support step landed — async parameters are
-    explicitly left for a later step per this project's plan). Step B
+    combined-refusal category, handled entirely separately below). Step B
     required NO `await` anywhere in the body at all (proving the zero-
     suspension-point pipeline end-to-end first); Step C narrowed that rule
     instead of keeping it absolute (every `AwaitExpr` had to be the one
     recognized `asyncio.sleep(<scalar seconds>)` shape — see
     _is_asyncio_sleep_call); Step D narrows it once more: an `AwaitExpr` is
-    ALSO eligible when it's a bare, argument-less call to another `async
-    def` this same module compile has ALREADY successfully compiled to the
-    C++20-coroutine path (`known_async_names` — self._async_api's keys at
-    the time of this check, passed by gen_module's async pre-pass loop,
-    which runs in module source order — see _is_async_call_to_known_fn's
-    docstring for the resulting "callee must be defined first" ordering
-    constraint). Awaiting anything else (a socket operation, an arbitrary
-    non-async expression, a call WITH arguments even to a known async
-    function — Step D's own scope stays parameter-less, matching every
-    other async-function constraint here) is still out of scope and
-    correctly makes the whole function ineligible here, falling back to
-    the honest whole-module refusal exactly as an unsupported `await`
-    always has. Whether the body's actual STATEMENTS are otherwise
-    compilable (only the shared _cpp_stmt/_cpp_expr whitelist, ending in one
-    `return <scalar-expr>`) is decided by _gen_cpp_async_unit itself, the
-    single source of truth, not duplicated here."""
+    ALSO eligible when it's a call to another `async def` this same module
+    compile has ALREADY successfully compiled to the C++20-coroutine path
+    (`known_async_names` — self._async_api's keys at the time of this check,
+    passed by gen_module's async pre-pass loop, which runs in module source
+    order — see _is_async_call_to_known_fn's docstring for the resulting
+    "callee must be defined first" ordering constraint). Step H (the
+    create_task/Task/TaskGroup/RaisingTask project) widens this once more:
+    params ARE now allowed through this quick filter, mirroring
+    _generator_quick_eligible's own identical widening for the exact same
+    reason (parameters are simply ordinary by-value C++20 coroutine-frame
+    locals — see _gen_cpp_async_unit's docstring for the empirical
+    confirmation this is safe for async too, not just generators) — whether
+    a given param's TYPE is actually compilable (scalar int64_t/double/_Bool
+    only) is decided by _gen_cpp_async_unit itself, the single source of
+    truth, not duplicated here. Call-WITH-arguments composition
+    (`await inner(x, y)`) is correspondingly also now allowed (see
+    _is_async_call_to_known_fn). Awaiting anything else (a socket operation,
+    an arbitrary non-async expression) is still out of scope and correctly
+    makes the whole function ineligible here, falling back to the honest
+    whole-module refusal exactly as an unsupported `await` always has.
+    Whether the body's actual STATEMENTS are otherwise compilable (only the
+    shared _cpp_stmt/_cpp_expr whitelist, ending in one `return
+    <scalar-expr>`) is decided by _gen_cpp_async_unit itself, the single
+    source of truth, not duplicated here."""
     if fn.is_generator or not fn.is_async:
-        return False
-    if fn.params:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, AwaitExpr):
@@ -2170,7 +2172,12 @@ def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
         return None
     if async_api is None:
         return None
-    if call.args or getattr(call, 'kwargs', None):
+    # Step H: call-WITH-arguments composition is now allowed (see
+    # _is_async_call_to_known_fn) -- the callee's return type doesn't depend
+    # on how many arguments were passed, so no argument-count check is
+    # needed here beyond what _is_async_call_to_known_fn already enforces
+    # (kwargs are still refused there).
+    if getattr(call, 'kwargs', None):
         return None
     api = async_api.get(call.func.name)
     if api is None:
@@ -2179,25 +2186,35 @@ def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
 
 
 def _is_async_call_to_known_fn(node, known_async_names) -> bool:
-    """True iff `node` is a bare, argument-less call `g()` where `g` names
-    ANOTHER `async def` this same module compile has already successfully
-    lowered to the C++20-coroutine path (registered by name in
-    `known_async_names` — self._async_api's keys at the time this is
-    checked, threaded through by both _async_quick_eligible's caller and
-    GimpleGen._cpp_expr's own AwaitExpr case). This makes async-awaits-
-    async composition source-order-dependent: the callee must be DEFINED
-    (and have already compiled successfully) before the caller in the
-    module's own top-level statement order — gen_module's single forward
-    pass over `stmts` (see the Step B/C compile-attempt loop this reuses
-    verbatim) never builds a two-pass/topological ordering, so a forward
-    reference (caller textually before its not-yet-registered callee)
-    correctly falls back to the honest whole-module refusal, exactly like
-    any other not-yet-supported shape, instead of ever emitting a dangling/
-    forward C++ type reference."""
+    """True iff `node` is a call `g(...)` where `g` names ANOTHER `async
+    def` this same module compile has already successfully lowered to the
+    C++20-coroutine path (registered by name in `known_async_names` —
+    self._async_api's keys at the time this is checked, threaded through by
+    both _async_quick_eligible's caller and GimpleGen._cpp_expr's own
+    AwaitExpr case). This makes async-awaits-async composition source-
+    order-dependent: the callee must be DEFINED (and have already compiled
+    successfully) before the caller in the module's own top-level statement
+    order — gen_module's single forward pass over `stmts` (see the Step B/C
+    compile-attempt loop this reuses verbatim) never builds a two-pass/
+    topological ordering, so a forward reference (caller textually before
+    its not-yet-registered callee) correctly falls back to the honest
+    whole-module refusal, exactly like any other not-yet-supported shape,
+    instead of ever emitting a dangling/forward C++ type reference.
+
+    Step H (create_task/Task/TaskGroup/RaisingTask project) widens this
+    from Step D's original argument-LESS-only shape to allow real
+    positional arguments (`await inner(x, y)`) — the callee's own
+    parameters are now compiled as ordinary C++20 coroutine-frame locals
+    (see _gen_cpp_async_unit's Step H parameter-support addition), so the
+    caller just needs to pass the same argument expressions through to
+    `{callee_base}_impl(...)` at the composition call site (see
+    GimpleGen._cpp_expr's AwaitExpr case). Keyword arguments are still
+    refused here (this codegen's scalar-arg call convention throughout this
+    file is positional-only; no keyword-arg support exists for ANY call
+    shape here, not just this one)."""
     return (isinstance(node, CallExpr)
             and isinstance(node.func, IdentExpr)
             and node.func.name in known_async_names
-            and not node.args
             and not getattr(node, 'kwargs', None))
 
 
@@ -15756,7 +15773,7 @@ class GimpleGen:
             target = e.value
             if (isinstance(target, CallExpr) and isinstance(target.func, IdentExpr)
                     and target.func.name in self._async_api
-                    and not target.args and not getattr(target, 'kwargs', None)):
+                    and not getattr(target, 'kwargs', None)):
                 # The callee's own cpp unit (promise/handle/task/`_impl`/
                 # `_Awaiter` — see _gen_cpp_async_unit) must already have
                 # been emitted earlier in this module's compile (source-
@@ -15768,7 +15785,15 @@ class GimpleGen:
                 # only have happened for a callee defined earlier in the
                 # module than this (currently-compiling) caller.
                 callee_base = self._async_api[target.func.name]['base']
-                return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ().h}}"
+                # Step H: thread the call's own argument expressions through
+                # to `{callee_base}_impl(...)` -- each arg is lowered via the
+                # same shared `self._cpp_expr` this whole file already uses
+                # for every other scalar expression, so int/float/bool
+                # literals, params, and already-declared locals all just
+                # work, matching how the top-level `_impl(...)`/`_start(...)`
+                # signatures already accept arbitrary scalar C++ expressions.
+                call_args = ', '.join(self._cpp_expr(a) for a in target.args)
+                return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
             if _is_asyncio_sleep_call(target):
                 raise _UnsupportedAsyncShape(
                     "`await asyncio.sleep(...)` does not produce a usable "
@@ -16791,12 +16816,42 @@ class GimpleGen:
         branch) -- reusing Step A's scheduler exactly as built, rather than
         wrapping it in a same-shaped-but-redundant `_resume`.
         """
-        if fn.params:
-            raise _UnsupportedAsyncShape(
-                f"{fn.name}: async function parameters are not supported "
-                "yet (Step B's scope is deliberately parameter-less)")
+        # Step H (create_task/Task/TaskGroup/RaisingTask project): scalar
+        # parameter support, mirroring _gen_cpp_generator_unit's own
+        # identical parameter-support step exactly (see that method's
+        # docstring/comments for the full rationale) — a C++20 coroutine's
+        # formal parameters are copied into the compiler-allocated
+        # coroutine frame automatically, exactly like a generator's, so no
+        # promise-side plumbing is needed here either. *args/**kwargs and
+        # any non-scalar parameter type are still refused (same as
+        # generators). Real Mojo's `create_task`/`RaisingTask` machinery
+        # this project rewrites onto this unit (see ast_rewriter.py) always
+        # wraps a plain `def`/`async def` with ordinary scalar params (Int/
+        # Bool) — no struct/string parameters are needed for either target
+        # test file, so this mirrors the generator project's own narrow
+        # "small natural extension" scope rather than opening new
+        # complexity.
+        param_ctypes: list[tuple[str, str]] = []
+        for pn, pt in (fn.params or []):
+            if pn.startswith('*'):
+                raise _UnsupportedAsyncShape(
+                    f"{fn.name}: *args/**kwargs parameters not supported "
+                    "for compiled async functions")
+            ctype = self._param_ctype(pn, pt, fn)
+            if ctype not in ('int64_t', 'double', '_Bool'):
+                raise _UnsupportedAsyncShape(
+                    f"{fn.name}: async function parameter '{pn}' has "
+                    f"unsupported type {ctype!r} (only scalar int64_t/"
+                    "double/_Bool parameters are supported for compiled "
+                    "async functions)")
+            param_ctypes.append((pn, ctype))
         base = f"_mojoasync_{_safe_name(fn.name)}"
-        declared: dict[str, str] = {}
+        # Params are already "declared" locals as far as the body emitter is
+        # concerned -- exactly mirrors _gen_cpp_generator_unit's identical
+        # `declared` seeding (see that method's docstring for why this
+        # ordering, body-emission-before-value_ctype-is-computed, matters
+        # for an unannotated return/local that reads a param).
+        declared: dict[str, str] = dict(param_ctypes)
         self._cpp_gen_self_struct = None
         self._cpp_gen_self_fields = None
         self._cpp_emit_kind = 'async'
@@ -16833,6 +16888,15 @@ class GimpleGen:
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
         final_awaiter, awaiter = f"{base}_FinalAwaiter", f"{base}_Awaiter"
         cpp_value_ctype = _c_to_cpp_scalar_type(value_ctype)
+        # Step H: parameter signature text, shared verbatim between the
+        # `impl` coroutine function and the extern "C" `_start` wrapper --
+        # mirrors _gen_cpp_generator_unit's identical `cpp_sig`/`call_args`
+        # exactly (see that method's comment for why no promise-side
+        # plumbing is needed: C++20 coroutine frame allocation copies
+        # parameters into the frame itself automatically).
+        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {pn}"
+                              for pn, ct in param_ctypes)) or 'void'
+        call_args = ', '.join(pn for pn, _ in param_ctypes)
         lines = [
             f"struct {promise};",
             f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -16979,11 +17043,11 @@ class GimpleGen:
             f"    if (cont) mojo_async_schedule_ready(cont.address());",
             f"    return std::noop_coroutine();",
             f"}}",
-            f"static {task} {impl} (void) {{",
+            f"static {task} {impl} ({cpp_sig}) {{",
             *body_lines,
             f"}}",
-            f'extern "C" MojoAsync *{base}_start (void) {{',
-            f"    {task} t = {impl} ();",
+            f'extern "C" MojoAsync *{base}_start ({cpp_sig}) {{',
+            f"    {task} t = {impl} ({call_args});",
             f"    return reinterpret_cast<MojoAsync *>(t.h.address());",
             f"}}",
             # 'bool' (not '_Bool' -- see _c_to_cpp_scalar_type's docstring:
@@ -17114,7 +17178,7 @@ class GimpleGen:
             f"    }}",
             f"}};",
         ]
-        return '\n'.join(lines), value_ctype, base, []
+        return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
     def _gen_cpp_async_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         """Final step of the compiled-path async/await codegen project:

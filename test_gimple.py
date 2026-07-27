@@ -3301,11 +3301,21 @@ def main():
     # eligibility narrowing needs to keep refusing even though a bare
     # `async def f(): return <scalar>` now compiles.
 
-    # A parameter — this step's scope is deliberately narrower than even
-    # Milestone B's initial generator scope (which supported params from the
-    # start) — see _async_quick_eligible's docstring.
-    test_raises("async_function_with_param_honest_fallback", """\
+    # Step H (create_task/Task/TaskGroup/RaisingTask project): a scalar
+    # (or untyped, which defaults to int64_t) parameter is now SUPPORTED —
+    # mirrors the generator project's own identical parameter-support step
+    # exactly (see _gen_cpp_async_unit's docstring: a C++20 coroutine's
+    # formal parameters are ordinary frame-local values, same as a
+    # generator's). This replaces the old "any parameter at all is an
+    # honest fallback" assertion — a NON-scalar-typed parameter (String,
+    # below) is still refused.
+    test("async_function_with_scalar_param_compiles", """\
 async def f(x):
+    return x
+""")
+
+    test_raises("async_function_with_nonscalar_param_honest_fallback", """\
+async def f(x: String) -> String:
     return x
 """, "async function")
 
@@ -3314,16 +3324,16 @@ async def f(x):
     # test_async_await_composition_compiles_via_cpp_path and
     # test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path. `await`
     # on a call to an async function that ITSELF is out of scope (here: has
-    # a parameter, so `f` never gets compiled/registered in self._async_api
-    # at all) still correctly falls back to the honest whole-module
-    # refusal — not silently emitting a dangling reference to a callee that
-    # was never actually compiled.
+    # a non-scalar-typed parameter, so `f` never gets compiled/registered
+    # in self._async_api at all) still correctly falls back to the honest
+    # whole-module refusal — not silently emitting a dangling reference to
+    # a callee that was never actually compiled.
     test_raises("async_function_await_on_unsupported_callee_honest_fallback", """\
-async def f(x):
+async def f(x: String) -> String:
     return x
 
-async def h():
-    x = await f()
+async def h() -> String:
+    x = await f("hi")
     return x
 """, "async function")
 
