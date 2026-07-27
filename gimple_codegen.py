@@ -18262,6 +18262,33 @@ class GimpleGen:
             # otherwise make an eligible function look ineligible.
             n.body = self._inline_single_use_task_composition(n.body)
             self._normalize_await_kwargs(n.body)
+            # A nested async def with its OWN comptime bracket parameter(s)
+            # (test_asyncrt.mojo's/test_nested_async_generic.py's exact
+            # shape: `async def test_asyncrt_add[lhs: Int](rhs: Int) ->
+            # Int:`) is deliberately left untouched by THIS pass and instead
+            # handled by gen_module's separate, dedicated "Async closures/
+            # functions NESTED INSIDE A TOP-LEVEL FUNCTION" pass (registered
+            # into self._async_closure_api, keyed by (enclosing_name,
+            # n.name), with comptime bracket params threaded through as
+            # ordinary trailing parameters — see that pass's own comment
+            # and _compute_nested_closure_captures/_gen_cpp_async_unit's
+            # `extra_captures`). This method's own _gen_cpp_async_unit call
+            # only ever inspects `n.params` (ordinary runtime parameters),
+            # never `n.comptime_params` — so calling it directly here for a
+            # comptime-bracket-parametrized nested def would silently
+            # compile a WRONG unit that simply drops the bracket
+            # parameter(s) entirely (a real, hand-verified regression: this
+            # exact gap let this pass claim `test_asyncrt_add` before the
+            # dedicated pass ever got a chance, registering an incomplete
+            # unit under the wrong dict and breaking the comptime-aware
+            # asyncio.run(...) call-site lookup). Explicitly deferring here
+            # (rather than relying on eligibility/exception behavior to
+            # catch it) keeps the two passes' scopes genuinely disjoint:
+            # this one owns "no comptime params", the other owns "has
+            # comptime params" — for the identical nested-in-ordinary-
+            # top-level-function parent shape.
+            if n.comptime_params:
+                continue
             eligible = _async_quick_eligible(n, frozenset(self._async_api.keys()))
             if eligible:
                 try:
