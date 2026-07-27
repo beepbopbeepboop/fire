@@ -2079,14 +2079,37 @@ def _async_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> boo
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, AwaitExpr):
-            if _is_asyncio_sleep_call(n.value):
+            v = n.value
+            if _is_asyncio_sleep_call(v):
                 continue
-            if _is_async_call_to_known_fn(n.value, known_async_names):
+            if _is_async_call_to_known_fn(v, known_async_names):
                 continue
             # Step F: `await asyncio.sock_recv(<fd>)` -- the one recognized
             # real-socket-I/O shape (see _is_asyncio_sock_recv_call's
             # docstring for why this exact shape/scope was chosen).
-            if _is_asyncio_sock_recv_call(n.value):
+            if _is_asyncio_sock_recv_call(v):
+                continue
+            # Step I (create_task/Task/TaskGroup/RaisingTask project):
+            # `await create_task(<call>)`/`await create_raising_task(
+            # <call>)` used directly (no intermediate `var` -- see
+            # GimpleGen._cpp_expr's AwaitExpr case, the single source of
+            # truth for whether the WRAPPED call itself is actually
+            # compilable) and `await <call to a sibling comptime-bracket-
+            # parametrized nested async def>` (a CallExpr whose `func` is a
+            # SubscriptExpr, resolved against self._async_closure_api --
+            # this module-level function has no `self` to check that dict
+            # against, so, mirroring this whole filter's own "cheap and
+            # optimistic, not a second checklist" design, both shapes are
+            # let through here unconditionally; an inner call this project
+            # genuinely can't compile still correctly falls back to the
+            # honest whole-module refusal once _gen_cpp_async_unit actually
+            # attempts it, exactly like any other not-yet-supported shape).
+            if (isinstance(v, CallExpr) and isinstance(v.func, IdentExpr)
+                    and v.func.name in ('create_task', 'create_raising_task')
+                    and len(v.args) == 1 and not getattr(v, 'kwargs', None)):
+                continue
+            if (isinstance(v, CallExpr) and isinstance(v.func, SubscriptExpr)
+                    and isinstance(v.func.obj, IdentExpr)):
                 continue
             return False
     return True
@@ -2170,7 +2193,8 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     return True
 
 
-def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
+def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None,
+                       closure_api: dict | None = None) -> str | None:
     """Resolves `await <call>`'s contributed scalar type when `<call>` is a
     bare, no-argument call to ANOTHER async function this same module
     compile has already itself lowered to the C++20-coroutine path
@@ -2192,21 +2216,47 @@ def _await_call_ctype(e: 'AwaitExpr', async_api: dict | None) -> str | None:
     # `call.func` is a MemberExpr (`asyncio.sock_recv`), not an IdentExpr.
     if _is_asyncio_sock_recv_call(call):
         return 'int64_t'
-    if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
+    # Step I (create_task/Task/TaskGroup/RaisingTask project): `await
+    # create_task(<call>)`/`await create_raising_task(<call>)` contributes
+    # the SAME type as awaiting `<call>` directly -- see GimpleGen._cpp_expr
+    # AwaitExpr case's identical unwrap for the full equivalence rationale.
+    if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+            and call.func.name in ('create_task', 'create_raising_task')
+            and len(call.args) == 1 and not getattr(call, 'kwargs', None)):
+        call = call.args[0]
+    if not isinstance(call, CallExpr):
         return None
-    if async_api is None:
-        return None
-    # Step H: call-WITH-arguments composition is now allowed (see
-    # _is_async_call_to_known_fn) -- the callee's return type doesn't depend
-    # on how many arguments were passed, so no argument-count check is
-    # needed here beyond what _is_async_call_to_known_fn already enforces
-    # (kwargs are still refused there).
     if getattr(call, 'kwargs', None):
         return None
-    api = async_api.get(call.func.name)
-    if api is None:
-        return None
-    return api.get('value_ctype')
+    if isinstance(call.func, IdentExpr):
+        if async_api is None:
+            return None
+        # Step H: call-WITH-arguments composition is now allowed (see
+        # _is_async_call_to_known_fn) -- the callee's return type doesn't
+        # depend on how many arguments were passed, so no argument-count
+        # check is needed here beyond what _is_async_call_to_known_fn
+        # already enforces (kwargs are still refused there).
+        api = async_api.get(call.func.name)
+        return api.get('value_ctype') if api else None
+    # Step I: `await <call to a sibling comptime-bracket-parametrized nested
+    # async def>` (test_asyncrt.mojo's `test_asyncrt_add[1](a)`, `return_
+    # value[1]()`) -- resolved via `closure_api`, a plain name -> api dict
+    # ALREADY scoped to the current enclosing top-level function (built by
+    # the caller from self._async_closure_api -- see _gen_cpp_async_unit's
+    # own call site), mirroring `async_api`'s identical bare-name-keyed
+    # shape so this function doesn't need the (enclosing, name) tuple key
+    # or any `self` access itself.
+    if (isinstance(call.func, SubscriptExpr) and isinstance(call.func.obj, IdentExpr)
+            and closure_api is not None):
+        api = closure_api.get(call.func.obj.name)
+        if api is None or not api.get('comptime_params'):
+            return None
+        idx = call.func.index
+        elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+        if len(elems) != len(api['comptime_params']):
+            return None
+        return api.get('value_ctype')
+    return None
 
 
 def _is_async_call_to_known_fn(node, known_async_names) -> bool:
@@ -2244,7 +2294,8 @@ def _is_async_call_to_known_fn(node, known_async_names) -> bool:
 
 def _infer_simple_expr_ctype(e, known: dict | None = None,
                               self_fields: dict | None = None,
-                              async_api: dict | None = None) -> str | None:
+                              async_api: dict | None = None,
+                              closure_api: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -2282,10 +2333,10 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api)
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api)
-        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api)
         if lt is None or rt is None:
             return None
         if 'double' in (lt, rt):
@@ -2295,7 +2346,7 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # Step D (async-awaits-async composition): `await <call to another
         # compiled async function>` used as a value-producing sub-expression
         # (e.g. `x = await inner()`) — see _await_call_ctype's docstring.
-        return _await_call_ctype(e, async_api)
+        return _await_call_ctype(e, async_api, closure_api)
     return None
 
 
@@ -2338,7 +2389,8 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             generator_api: dict | None = None,
                             self_fields: dict | None = None,
-                            async_api: dict | None = None) -> str | None:
+                            async_api: dict | None = None,
+                            closure_api: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -2365,7 +2417,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
         if isinstance(n, YieldExpr):
             if n.value is None:
                 return None
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
             if t is None:
                 return None
             if ctype is None:
@@ -2392,7 +2444,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             # only actually fires while translating an async function.
             if n.value is None:
                 continue
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
             if t is None:
                 return None
             if ctype is None:
@@ -3028,6 +3080,13 @@ class GimpleGen:
         # generator currently being translated is an ordinary free function.
         self._cpp_gen_self_struct: str | None = None
         self._cpp_gen_self_fields: dict | None = None
+        # See _gen_cpp_async_unit's `enclosing_scope` param docstring: the
+        # enclosing top-level function name for a bracket-parametrized
+        # nested async def currently being compiled, so `_cpp_expr`'s
+        # AwaitExpr composition case can key into self._async_closure_api
+        # the same way gen_module's discovery pass does. None outside that
+        # narrow context.
+        self._cpp_async_enclosing_scope: str | None = None
         # struct_name -> verbatim "typedef struct Name { ... } Name;" text,
         # captured (not re-derived) from whichever of the two existing
         # struct-typedef emission sites (struct_field_types-based, or
@@ -9876,6 +9935,24 @@ class GimpleGen:
         # Intercepting here, before that dispatch is even attempted, avoids
         # it entirely rather than trying to special-case around it deeper
         # in the shared generic-elaboration machinery.
+        # `_create_task(f(...), desired_worker_id=<hint>)` (test_asyncrt.
+        # mojo's `test_create_task_with_affinity_runs_coroutine`) is real
+        # Mojo's own affinity-hinted variant of `create_task` -- the hint is
+        # documented as purely advisory (correctness must hold whether or
+        # not the runtime honours it; see that test's own docstring), and
+        # this codegen's scheduler has no worker-affinity concept at all, so
+        # the hint is simply dropped (still lowered via `self.lower_expr`
+        # for its side effects, matching every other discarded-value
+        # argument elsewhere in this file) and the call is treated exactly
+        # like a bare `create_task(f(...))` -- an honest, documented
+        # simplification (the hint's own contract permits this), not a
+        # silent correctness gap.
+        _ct_kwargs = getattr(node, 'kwargs', None) or []
+        if (isinstance(node.func, IdentExpr) and node.func.name == '_create_task'
+                and len(node.args) == 1 and len(_ct_kwargs) == 1
+                and _ct_kwargs[0][0] == 'desired_worker_id'):
+            self.lower_expr(_ct_kwargs[0][1])
+            node = CallExpr(func=IdentExpr(name='create_task'), args=node.args, kwargs=[])
         if (isinstance(node.func, IdentExpr)
                 and node.func.name in ('create_task', 'create_raising_task')
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)):
@@ -16412,6 +16489,29 @@ class GimpleGen:
                     "`await` is not supported in a generator body (only in "
                     "an async function body)")
             target = e.value
+            # Step I (create_task/Task/TaskGroup/RaisingTask project):
+            # `await create_task(<call>)` / `await create_raising_task(
+            # <call>)` used directly inside an expression, with no
+            # intermediate `var` holding the task handle at all
+            # (test_asyncrt.mojo's `test_asyncrt_add_two_of_them` --
+            # `return await create_task(test_asyncrt_add[1](a)) + await
+            # create_task(test_asyncrt_add[2](b))`). Semantically identical
+            # to awaiting `<call>` directly: creating a task and
+            # immediately awaiting it, with the handle never named, bound,
+            # or referenced again, cannot observably differ from ordinary
+            # async-awaits-async composition (Step D) -- the same
+            # equivalence _inline_single_use_task_composition's docstring
+            # already establishes for the `var X = create_task(...); ...
+            # await X` shape, just with no variable binding to rewrite
+            # away here since there never was one. Unwrapped BEFORE the
+            # two composition shapes below so both the plain-IdentExpr-
+            # callee case and the bracket-parametrized-callee case (just
+            # below it) recognize a create_task-wrapped call exactly like
+            # a bare one.
+            if (isinstance(target, CallExpr) and isinstance(target.func, IdentExpr)
+                    and target.func.name in ('create_task', 'create_raising_task')
+                    and len(target.args) == 1 and not getattr(target, 'kwargs', None)):
+                target = target.args[0]
             if (isinstance(target, CallExpr) and isinstance(target.func, IdentExpr)
                     and target.func.name in self._async_api
                     and not getattr(target, 'kwargs', None)):
@@ -16435,6 +16535,69 @@ class GimpleGen:
                 # signatures already accept arbitrary scalar C++ expressions.
                 call_args = ', '.join(self._cpp_expr(a) for a in target.args)
                 return f"co_await {callee_base}_Awaiter{{{callee_base}_impl ({call_args}).h}}"
+            # Step I (create_task/Task/TaskGroup/RaisingTask project):
+            # `await <call to a SIBLING comptime-bracket-parametrized nested
+            # async def>` (test_asyncrt.mojo's `test_asyncrt_add[1](a)` --
+            # `test_asyncrt_add` is nested in the SAME enclosing top-level
+            # function as the coroutine currently being compiled, e.g.
+            # `test_asyncrt_add_two_of_them`). Resolved via self.
+            # _async_closure_api, keyed by (enclosing top-level function
+            # name, callee name) -- exactly the same key gen_module's own
+            # "Async closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION"
+            # discovery pass uses (see that pass and the ordinary call-site
+            # lookups at `_lower_call`'s SubscriptExpr+IdentExpr branch /
+            # the `asyncio.run(...)` branch, both of which already use this
+            # exact same dict for the identical shape reached from
+            # ORDINARY, non-coroutine code). This coroutine-body emitter
+            # never sets self.current_func_name (unlike gen_func/gen_stmt),
+            # so the enclosing name is threaded through the dedicated
+            # self._cpp_async_enclosing_scope side channel instead -- see
+            # _gen_cpp_async_unit's `enclosing_scope` param docstring.
+            elif (isinstance(target, CallExpr) and isinstance(target.func, SubscriptExpr)
+                    and isinstance(target.func.obj, IdentExpr)
+                    and not getattr(target, 'kwargs', None)
+                    and self._cpp_async_enclosing_scope):
+                # Locals below use a distinctive `_bc9`-suffixed naming
+                # scheme (not the plain `_api`/`_cp_list`/`_idx`/`_elems`
+                # names the sibling bracket-call-resolution blocks
+                # elsewhere in this file use) -- this project's OWN self-
+                # hosting compiler (`make check-selfhost`) infers each
+                # local's C type from its FIRST assignment and can conflate
+                # same-named locals across unrelated call sites, so a fresh,
+                # never-reused name avoids that risk entirely rather than
+                # relying on scope analysis this codegen doesn't do (see
+                # the "Plain for-loops (not comprehensions)" note in
+                # gen_module for the identical, previously-hit class of
+                # bug).
+                _bc9_key = (self._cpp_async_enclosing_scope, target.func.obj.name)
+                _bc9_api = self._async_closure_api.get(_bc9_key)
+                if _bc9_api is not None and _bc9_api.get('comptime_params'):
+                    _bc9_cps = _bc9_api['comptime_params']
+                    _bc9_idx = target.func.index
+                    _bc9_elems = _bc9_idx.elements if isinstance(_bc9_idx, TupleExpr) else [_bc9_idx]
+                    if len(_bc9_elems) == len(_bc9_cps):
+                        # Same argument ORDER as every other established
+                        # bracket-call composition site (the ordinary
+                        # SubscriptExpr+IdentExpr call-lowering branch and
+                        # the asyncio.run(...) branch, both a few thousand
+                        # lines up): bracket (comptime) elements first, in
+                        # declared comptime_params order, then the call's
+                        # own ordinary arguments, then any trailing
+                        # captured free variable(s) beyond the comptime
+                        # params -- matching how `_extra_captures` was
+                        # built (comptime params then captures) when this
+                        # callee's own unit was compiled.
+                        _bc9_args = []
+                        for _bc9_e in _bc9_elems:
+                            _bc9_args.append(self._cpp_expr(_bc9_e))
+                        for _bc9_a in target.args:
+                            _bc9_args.append(self._cpp_expr(_bc9_a))
+                        for _bc9_cap_name, _bc9_cap_ctype in _bc9_api['captures'][len(_bc9_cps):]:
+                            _bc9_args.append(self._cpp_expr(IdentExpr(name=_bc9_cap_name)))
+                        _bc9_base = _bc9_api['base']
+                        _bc9_joined = ', '.join(_bc9_args)
+                        return (f"co_await {_bc9_base}_Awaiter"
+                                f"{{{_bc9_base}_impl ({_bc9_joined}).h}}")
             if _is_asyncio_sleep_call(target):
                 raise _UnsupportedAsyncShape(
                     "`await asyncio.sleep(...)` does not produce a usable "
@@ -17466,7 +17629,8 @@ class GimpleGen:
 
     def _gen_cpp_async_unit(self, fn: FunctionDef, extra_captures: list | None = None,
                             base_name_override: str | None = None,
-                            scope_prefix: str | None = None) -> tuple[str, str, str, list]:
+                            scope_prefix: str | None = None,
+                            enclosing_scope: str | None = None) -> tuple[str, str, str, list]:
         """Step B of the compiled-path async/await codegen project (the
         async-function sibling of _gen_cpp_generator_unit, which Step B's
         planning deliberately decided should be a SEPARATE method/promise
@@ -17619,6 +17783,18 @@ class GimpleGen:
         self._cpp_gen_self_struct = None
         self._cpp_gen_self_fields = None
         self._cpp_emit_kind = 'async'
+        # `enclosing_scope` (when supplied -- only by gen_module's "Async
+        # closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" pass, the
+        # SAME enclosing top-level function name it uses to key
+        # self._async_closure_api) is threaded through this side channel
+        # (mirroring self._cpp_gen_self_fields' identical technique) so
+        # `_cpp_expr`'s AwaitExpr composition case can resolve a SIBLING
+        # bracket-parametrized nested async def (`await create_task(
+        # test_asyncrt_add[1](a))`, test_asyncrt.mojo's own shape) without
+        # relying on self.current_func_name, which this coroutine-body
+        # emitter path never sets (unlike ordinary gen_func/gen_stmt
+        # compiles) -- see that AwaitExpr case's own comment.
+        self._cpp_async_enclosing_scope = enclosing_scope
         try:
             body_lines: list[str] = []
             for s in fn.body:
@@ -17635,9 +17811,28 @@ class GimpleGen:
             # one — no compiled generator returns a value -- so its
             # ReturnStmt branch until this step was pure dead code; Step B
             # is genuinely the first thing to exercise it).
+            # Step I: scope self._async_closure_api (keyed by (enclosing top-
+            # level function name, callee name)) down to a plain name -> api
+            # dict for JUST this unit's own enclosing function, mirroring
+            # `async_api`'s bare-name-keyed shape -- see `enclosing_scope`'s
+            # own docstring on why this coroutine-body compile can't just
+            # use self.current_func_name for the lookup key.
+            # Plain loop, not a dict-comprehension-with-tuple-key-unpacking
+            # -- this project's OWN self-hosting compiler (`make check-
+            # selfhost`) has no translation for that specific comprehension
+            # shape (confirmed via a real self-host build failure: "expected
+            # expression before '(' token"), mirroring the sibling "Plain
+            # for-loops (not comprehensions)" note a few thousand lines down
+            # in gen_module for the identical reason.
+            _closure_api_scoped = None
+            if enclosing_scope:
+                _closure_api_scoped = {}
+                for _cak, _cav in self._async_closure_api.items():
+                    if _cak[0] == enclosing_scope:
+                        _closure_api_scoped[_cak[1]] = _cav
             value_ctype = _generator_yield_ctype(
                 fn, declared, generator_api=None, self_fields=None,
-                async_api=self._async_api)
+                async_api=self._async_api, closure_api=_closure_api_scoped)
             # Step I: an async function whose body NEVER reaches an
             # ordinary `return <expr>` at all (real Mojo's own idiom for an
             # always-raising helper, e.g. `async def failing_async() raises
@@ -17660,6 +17855,7 @@ class GimpleGen:
             self._cpp_emit_kind = 'generator'
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
+            self._cpp_async_enclosing_scope = None
         if value_ctype is None:
             # A genuinely void-returning async function (declared `-> None`
             # or unannotated, with no value-carrying `return` anywhere) —
@@ -18154,7 +18350,22 @@ class GimpleGen:
                     and s.value.func.name in ('create_task', 'create_raising_task')
                     and len(s.value.args) == 1 and not getattr(s.value, 'kwargs', None)):
                 inner = s.value.args[0]
-                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr):
+                # Step I: the inner call's callee may be a bare name
+                # (`create_task(f(...))`) OR a bracket call to a sibling
+                # comptime-bracket-parametrized nested async def
+                # (`create_task(return_value[1]())`, test_asyncrt.mojo's
+                # `run_as_group` shape) -- the single-use-handle inlining
+                # reasoning above is identical either way (this rewrite
+                # only ever moves `inner` verbatim into the matched `await`
+                # site; it never inspects `inner.func`'s own shape beyond
+                # this check), so both are accepted here. Whether the
+                # inlined bracket call itself is actually composable is
+                # decided later, by `_async_quick_eligible`/`_cpp_expr`'s
+                # AwaitExpr case -- not duplicated here.
+                if isinstance(inner, CallExpr) and (
+                        isinstance(inner.func, IdentExpr)
+                        or (isinstance(inner.func, SubscriptExpr)
+                            and isinstance(inner.func.obj, IdentExpr))):
                     varname = s.name
                     rest = body[i + 1:]
                     # `await X` and `await X^` (the `^` transfer sigil —
@@ -18293,7 +18504,8 @@ class GimpleGen:
             if eligible:
                 try:
                     cpp_text, value_ctype, base, param_ctypes = \
-                        self._gen_cpp_async_unit(n, scope_prefix=enclosing_name)
+                        self._gen_cpp_async_unit(n, scope_prefix=enclosing_name,
+                                                 enclosing_scope=enclosing_name)
                 except _UnsupportedGeneratorShape as e:
                     _debug_note(f'nested async function {n.name!r} (inside '
                                 f'{enclosing_name!r}) not eligible for C++ '
@@ -20350,7 +20562,8 @@ class GimpleGen:
                     try:
                         cpp_text, value_ctype, base, param_ctypes = \
                             self._gen_cpp_async_unit(_inner, extra_captures=_extra2,
-                                                     base_name_override=_base_override2)
+                                                     base_name_override=_base_override2,
+                                                     enclosing_scope=_od.name)
                     except _UnsupportedGeneratorShape as e:
                         _debug_note(f'nested async function {_od.name}.'
                                     f'{_inner.name!r} not eligible for C++ '
@@ -23029,7 +23242,8 @@ class GimpleGen:
                 '};',
                 '',
             ]
-            if self._supported_async or self._supported_async_gen or self._supported_async_closures:
+            if (self._supported_async or self._supported_async_gen
+                    or self._supported_async_closures or self._nested_async_api):
                 # Step C (compiled-path async/await codegen project): this
                 # module has at least one compiled `async def` that
                 # actually uses `await asyncio.sleep(...)` (or could —

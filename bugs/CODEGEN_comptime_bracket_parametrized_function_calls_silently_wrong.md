@@ -244,3 +244,105 @@ with-nested-async gap just described), and `test_locks.mojo`/
 `test_raising_asyncrt.mojo` (blocked by the same `create_task`/`Task`/
 `TaskGroup`/`RaisingTask` gap, no codegen support at all yet — see their
 own `EXPECTED_FAILURES` entries in `compile_stdlib.py`).
+
+## Update — root cause #3 (create_task/await-composition) landed for `test_asyncrt.mojo`
+
+Three narrow, related gaps in `gimple_codegen.py`'s compiled async/await
+codegen, all in the SAME family (composing `create_task`/`await` inside a
+compiled coroutine's own body, or via `_create_task`'s affinity-hinted
+variant at ordinary call sites), fixed together and verified end-to-end
+(real compile+link+run, not just `gcc -fsyntax-only`):
+
+1. **`await create_task(<call>)` used directly in an expression** (no
+   intermediate `var` — `test_asyncrt_add_two_of_them`'s `return await
+   create_task(test_asyncrt_add[1](a)) + await create_task(
+   test_asyncrt_add[2](b))`). `GimpleGen._cpp_expr`'s `AwaitExpr` case now
+   unwraps a `create_task(...)`/`create_raising_task(...)` wrapper around
+   the awaited call before the existing composition checks — semantically
+   identical to awaiting the inner call directly (the same equivalence
+   `_inline_single_use_task_composition`'s docstring already established
+   for the `var`-bound shape).
+
+2. **`await <call to a SIBLING comptime-bracket-parametrized nested async
+   def>`** (`test_asyncrt_add[1](a)`, `return_value[1]()` — a `CallExpr`
+   whose `func` is a `SubscriptExpr`, not a bare `IdentExpr`). Neither
+   `_cpp_expr`'s `AwaitExpr` composition case nor `_await_call_ctype`
+   (return-type unification) nor `_async_quick_eligible` (the cheap
+   pre-filter) had ever handled this shape — all three now resolve it via
+   `self._async_closure_api`, keyed by `(enclosing top-level function
+   name, callee name)`. The tricky part: this coroutine-body emitter path
+   never sets `self.current_func_name` (unlike ordinary `gen_func`/
+   `gen_stmt` compiles), so the enclosing name is threaded through a new
+   `self._cpp_async_enclosing_scope` side channel (mirroring
+   `self._cpp_gen_self_fields`'s identical technique), set by
+   `_gen_cpp_async_unit`'s new `enclosing_scope` parameter. A second,
+   independent bug in the SAME family:
+   `_inline_single_use_task_composition` (the `var X = create_task(f());
+   ...; await X` -> `await f()` rewrite) only ever recognized a bare-
+   `IdentExpr` inner callee, so `var t0 = create_task(return_value[1]())`
+   (`run_as_group`'s own shape) was silently left un-rewritten, making the
+   whole function look ineligible — widened to also accept a
+   `SubscriptExpr`-based inner callee.
+
+3. **`_create_task(f(), desired_worker_id=<hint>)`** (`test_
+   create_task_with_affinity_runs_coroutine`) — real Mojo's affinity-
+   hinted variant of `create_task`, whose hint is documented as purely
+   advisory. `_lower_call` now normalizes this shape (lowering the hint
+   expression for its side effects, then dropping it) onto the existing
+   `create_task(...)` handling — an honest, documented simplification (no
+   worker-affinity concept exists in this codegen's scheduler), not a
+   correctness gap, since the hint's own contract permits ignoring it.
+
+A separate, PRE-EXISTING bug surfaced while verifying end-to-end (a real
+`g++` link failed with "`mojo_async_schedule_ready` was not declared"):
+one of gen_module's several near-duplicate "does this module need
+`#include <mojo_async_runtime.h>` in the generated `.cpp`?" gates (the one
+guarding the `.cpp`-side `_mojoasync_SleepAwaiter`/sock-recv-awaiter
+preamble) checked `self._supported_async or self._supported_async_gen or
+self._supported_async_closures` but — unlike the other, sibling gates a
+few hundred lines away in the SAME file — never checked
+`self._nested_async_api`. Invisible to every existing test because they
+always paired a plain nested async closure with something else that also
+populated one of the checked dicts; `test_create_task_with_affinity_runs_
+coroutine` (a single nested `async def compute()` with no comptime params,
+no top-level async sibling, and no struct-method closure) is the first
+real shape to hit this gate with `_nested_async_api` as the ONLY populated
+dict, so the `.cpp` silently omitted the header and failed to link. Fixed
+by adding `self._nested_async_api` to that one gate, matching its
+siblings.
+
+**Verified via a real compile+link+run** (not just this project's
+`gcc -fsyntax-only` check): `test_runtime_task` prints `33`,
+`test_runtime_taskgroup` prints `6`, and a hand-reduced repro of
+`test_create_task_with_affinity_runs_coroutine` prints `affinity task
+result: 42` — all exactly as expected.
+
+**Not fixed, and intentionally not attempted this round**:
+`test_runtime_unified_async_memory_result_raises`'s `build_message`
+(`async def build_message() raises {mut prefix} -> String: return prefix +
+String(" world")`) still cannot be compiled to a real C++20 coroutine —
+its return type is `String`, and this codegen's coroutine-body emitter
+(`_gen_cpp_async_unit`/`_cpp_stmt`/`_cpp_expr`) is deliberately scalar-only
+throughout (see that method's own docstring) — a real, separate, larger
+feature (a whole new non-scalar ctype category for that shared whitelist
+emitter), not a narrow composition gap like the three above. Its
+`create_raising_task(build_message())` call site therefore still falls
+through to `_lower_call`'s existing, PRE-EXISTING "reachable but
+uncompilable async function" stub: a loud runtime `abort()` with a
+diagnostic message (NOT a silently wrong value), the same mechanism
+already used for `test_raising_asyncrt.mojo`'s own provably-dead disabled
+function — except `build_message` is NOT dead code here, so if this
+compiled binary actually reaches `test_runtime_unified_async_memory_
+result_raises`, it genuinely aborts. This is an honest, loud, documented
+gap (not a silent miscompile), but it means `test_asyncrt.mojo` is not
+YET fully correct end-to-end for every one of its tests — only removed
+from `compile_stdlib.py`'s `EXPECTED_FAILURES` because that check is
+(and, throughout this whole project, always has been) a `gcc
+-fsyntax-only` check, which this file now genuinely passes. Fixing
+`build_message` for real requires the non-scalar/String-return coroutine
+support described above — a follow-on, not started this session.
+
+`test_locks.mojo` (`TaskGroup` + `with`-inside-async) and `test_tracing.
+mojo` (the monomorphizer nested-scope-shadowing gap, plus this same
+`create_task` work, now landed) remain in `compile_stdlib.py`'s
+`EXPECTED_FAILURES`, not attempted this session.

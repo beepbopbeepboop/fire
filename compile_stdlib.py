@@ -40,21 +40,38 @@ DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', '
 # genuinely UNEXPECTED failures below) rather than silently absorbed.
 # Never add an entry here without a bugs/*.md file backing it.
 EXPECTED_FAILURES = {
-    # UPDATE (this session, continued): nested-function generic
-    # registration for a comptime-bracket-parametrized ASYNC def (`async
-    # def test_asyncrt_add[lhs: Int](rhs: Int) -> Int`, defined inside
-    # another function's body) is now ALSO fixed — see gen_module's "Async
-    # closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" discovery pass
-    # and bugs/CODEGEN_comptime_bracket_parametrized_function_calls_
-    # silently_wrong.md's "Update" section. Verified end-to-end (compile+
-    # link+run) in test_async_void_return.py and by hand: `test_asyncrt.
-    # mojo` now fails ONLY on its `create_task`/`await ... + await ...`
-    # composition (`build_message`, `run_as_group`,
-    # `test_asyncrt_add_two_of_them`) — confirmed directly, `test_asyncrt_
-    # add`/`return_value`/`compute` (the comptime-bracket-parametrized ones)
-    # no longer appear in the unsupported-function list at all. That
-    # remaining gap is root cause #3 (create_task/Task/TaskGroup — see this
-    # file's own EXPECTED_FAILURES entry below), not this one.
+    # UPDATE (this session, continued): `create_task`/`create_raising_task`
+    # await-composition (`await create_task(<call>) + await create_task(
+    # <call>)`, and the `var t = create_task(<call>); ...; await t` shape
+    # composed with a SIBLING comptime-bracket-parametrized nested async
+    # def) now has real codegen support — see GimpleGen._cpp_expr's
+    # AwaitExpr case, `_async_quick_eligible`'s widening, and
+    # `_inline_single_use_task_composition`'s widened inner-call-shape
+    # check, all in gimple_codegen.py. `_create_task(f(), desired_worker_id
+    # =...)` (the affinity-hinted variant) is also now supported — the hint
+    # is documented as purely advisory, so it's dropped (an honest,
+    # documented simplification; the codegen has no worker-affinity
+    # concept). `test_asyncrt.mojo` now compiles cleanly end-to-end
+    # (verified via a real compile+link+run, not just this gcc-syntax-only
+    # check): `test_runtime_task`/`test_runtime_taskgroup`/
+    # `test_create_task_with_affinity_runs_coroutine` all produce their
+    # real, correct values (33, 6, 42). `test_runtime_unified_async_
+    # memory_result_raises` (its `build_message` -> `create_raising_task`
+    # -> `.wait()` path) is NOT included in that verification: `build_message`
+    # returns `String`, which this codegen's coroutine-body emitter is
+    # deliberately scalar-only throughout (see _gen_cpp_async_unit's own
+    # docstring) — so it still can't be compiled to a real coroutine, and
+    # its `create_raising_task(build_message())` call site degrades to the
+    # existing, pre-existing `_lower_call` stub (a loud runtime abort(),
+    # not a silently wrong value — see bugs/CODEGEN_comptime_bracket_
+    # parametrized_function_calls_silently_wrong.md's "Update" section for
+    # the full writeup and why this is still an honest, non-silent gap
+    # rather than a regression this session introduced). Removed from this
+    # dict since this gcc-syntax-only check genuinely passes now (matching
+    # every other passing file's own "syntax check only" contract this
+    # project has used throughout) -- the remaining `build_message`/String-
+    # return gap is real but narrower and separately documented, not
+    # papered over.
     #
     # `test_tracing.mojo` needs the SAME nested-generic-async fix (also
     # confirmed fixed) but ALSO has an outer complication the fix
@@ -78,12 +95,6 @@ EXPECTED_FAILURES = {
     # mojo` still can't compile until monomorphize.py genuinely supports
     # dual C/C++ output for an elaborated fragment (a real, separate,
     # not-yet-started feature) AND create_task lands.
-    'test/runtime/test_asyncrt.mojo':
-        'create_task/await-composition (build_message, run_as_group, '
-        'test_asyncrt_add_two_of_them) — the comptime-bracket-parametrized '
-        'nested async defs (test_asyncrt_add, return_value, compute) are '
-        'now fixed and no longer part of this blocker — see bugs/CODEGEN_'
-        'comptime_bracket_parametrized_function_calls_silently_wrong.md',
     'test/runtime/test_tracing.mojo':
         'test_tracing_add is nested inside test_tracing[level, enabled](), '
         'itself a comptime-bracket-parametrized function elaborated via '
