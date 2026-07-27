@@ -215,26 +215,104 @@ level argument count) could in principle pick the WRONG sibling overload if
 one happens to also accept that same augmented count — a separate,
 pre-existing overload-resolution limitation this fix doesn't touch.
 
-## Current status
+## Update — device_context.mojo now genuinely PASSES compile_stdlib.py (this session, continued)
 
-Both capture bugs (Repro 1, Repro 2) are fixed and verified. `device_
-context.mojo` REMAINS an honest whole-module refusal in `compile_stdlib.py`'s
-`EXPECTED_FAILURES` — its actual remaining blocker is now purely the
-async-eligibility gate (`_async_quick_eligible` rejects any parameterized
-`async def`, and `wrapper`'s four instances are effectively parameterized —
-they close over `func`/`FuncType` from their enclosing method), confirmed by
-re-running `compile_module_to_c_cached` on this file directly and seeing
-the SAME "function(s) wrapper, wrapper, wrapper, wrapper (async
-function(s), declared `async def`)" refusal as before, unrelated to either
-capture bug now. The async-specific plumbing that WOULD be needed once
-eligibility is widened (`_take_handle()`/`AsyncRT_DeviceContext_
-enqueueHostFunction(Range)` synchronous stubs) is already built and
-verified inert/safe in `runtime/mojo_async_runtime.h`/`.cpp` (generic
-`mojo_coro_resume_generic`/`mojo_coro_destroy_generic` + the two stub
-externs), ready to be wired up once a future pass widens
-`_async_quick_eligible` for this shape (a real, substantial, not-yet-
-started piece of work — reasoned about, but not attempted, in this
-session; see the compiled-async-codegen project's own notes for why the
-device_context.mojo shape and the nested `@parameter async def` shape
-`test_asyncrt.mojo`/`test_tracing.mojo` need are NOT obviously the same
-narrow widening and may need distinct eligibility conditions).
+A sibling agent's merged commit (`cecf087`, "Add scalar parameter support to
+compiled async functions") widened `_async_quick_eligible` to allow
+parameterized `async def`s in general — but re-running
+`compile_module_to_c_cached` on `device_context.mojo` directly afterward
+showed the SAME "function(s) wrapper, ... (async function(s), declared
+`async def`)" refusal, confirming (as flagged above) that this file's real
+gap was NOT that single gate — `wrapper` is a NESTED closure (inside a
+struct method, not a top-level function or a method itself), a shape none
+of `gen_module`'s existing async pre-passes (top-level free-function loop,
+generator/async-METHOD loops) ever attempt at all, eligible or not.
+
+Built and landed, all in `gimple_codegen.py`:
+- A genuinely NEW `gen_module` pass discovering async closures nested one
+  level inside a struct method, computing their captured free variables via
+  a new `_compute_nested_closure_captures` helper (mirrors `_scan_for_
+  closures`'s own free-variable computation, deliberately NOT shared code
+  with it per this file's established generator/async duplication
+  precedent), and compiling each via `_gen_cpp_async_unit` with the
+  captures appended as ordinary trailing parameters. Registered in new
+  `_supported_async_closures`/`_async_closure_api` dicts keyed by
+  `(outer_ctx, inner_name)` — `outer_ctx` being `f"{struct}_{method}
+  {overload_id}"`, matching `_all_closures`'s own convention — NOT bare
+  name, since this file alone has FOUR distinct `wrapper` closures (one per
+  `enqueue_cpu_function`/`enqueue_cpu_range` overload) that would otherwise
+  collide (confirmed via a real "conflicting types for
+  '_mojoasync_wrapper_start'" gcc error on the first cut, keyed by bare
+  name — fixed by mangling each closure's C++ `base` symbol with its full
+  outer context via a new `base_name_override` parameter).
+- Void/`None`-returning compiled async functions (`_gen_cpp_async_unit`):
+  previously a hard refusal ("every return must carry a scalar value") —
+  `wrapper`'s entire body is a call with no return at all. Needed careful
+  handling of the promise type's `return_void()` vs `return_value(T)`
+  (mutually exclusive in a C++20 promise), the `_value()`/`Awaiter::
+  await_resume()` no-`result`-field cases, and — the one genuinely
+  surprising part, found via a hand-written repro trapping with
+  `EXC_BREAKPOINT` at the very first instruction of the generated coroutine
+  — the fact that a C++ function is only treated as a real coroutine by the
+  compiler if `co_return`/`co_await`/`co_yield` appears SYNTACTICALLY
+  somewhere in its body; a function with genuinely no `return` anywhere
+  needed an explicit trailing `co_return;` appended, not just a
+  `return_void()` promise method.
+- A `CallExpr` case in `_cpp_stmt` (the coroutine-body sub-compiler) for a
+  bare call to a captured/parameter function-type value (`func()`/
+  `func(idx)`), via the same `mojo_fnptr_call_N()` runtime helper the
+  ordinary GIMPLE path's `_lower_fnptr_call` already uses.
+- `std.builtin.coroutine`'s `_set_noop_callback()` (a no-op, matching this
+  codegen's honest synchronous-stub simplification) and `_take_handle()`
+  (returns the same `MojoAsync*` handle, reinterpreted as the plain
+  `int64_t` handle representation `mojo_coro_resume_generic`/
+  `mojo_coro_destroy_generic` expect) as special-cased methods in
+  `_lower_method_call`, and `_coro_resume_fn`/`_coro_destroy_fn` (used as
+  bare function-pointer VALUES) mapped to those same two generic runtime
+  functions via `BUILTIN_VALUE_MAP`.
+- `external_call["AsyncRT_DeviceContext_enqueueHostFunction(Range)", ...]`
+  wired up correctly: registered real function-pointer-typed signatures in
+  `_LIBC_SIGS`/`_LIBC_DECLARED` (deferring to `mojo_async_runtime.h`'s own
+  declaration instead of auto-generating a conflicting `void*`-typed one),
+  and fixed a genuinely general bug this surfaced in `_new_temp` (the one
+  central GIMPLE-temp-declaration spot in the whole file): a function-
+  pointer ctype like `'void (*)(int64_t)'` was declared as `TYPE name;`
+  (invalid C for a function pointer — corrupts the REST of the file's gcc
+  parse) instead of the correct `TYPE (*name)(PARAMS);` — fixed via a new
+  `_c_var_decl` helper.
+- `build_stdlib_dylib.py`: a real, hand-verified regression found via the
+  mandatory from-scratch dylib rebuild gate (skip count briefly went 1 → 2,
+  `device_context.mojo` itself AND `std/runtime/asyncrt.mojo`) — neither
+  `mojo_async_runtime.cpp` (providing `mojo_coro_resume_generic`/
+  `mojo_coro_destroy_generic`) nor a C++ link driver were ever folded into
+  the production stdlib dylib, so a module referencing them compiled clean
+  but crashed at real dyld-load time ("symbol not found in flat
+  namespace") — undetected by `compile_stdlib.py`'s own `gcc -fsyntax-only`
+  check (no linker involved) or even by the dylib's OWN link step
+  (`-undefined dynamic_lookup` tolerates it). Fixed by compiling
+  `mojo_async_runtime.cpp` via g++ (CAS-cached, mirroring `mojo_runtime.o`'s
+  own handling) and linking the production dylib via `g++` instead of
+  plain `gcc`; also extended `runtime_dylib()` (the separate dylib
+  `link_runtime=True` test builds link against) the same way, scoped
+  carefully to avoid polluting `test_module_cache.py`'s exact CAS
+  hit/miss-count assertions.
+
+Verified end-to-end (compile+link+run, not compile-only) via
+`test_async_void_return.py`: a void async function actually driven via
+`asyncio.run(...)`, the EXACT `enqueue_cpu_function`-shaped repro (prints
+`"ran-for-real"` then `"done"` — `func_impl` genuinely invoked through the
+runtime stub's synchronous resume callback, not merely constructed), and
+the `enqueue_cpu_range`-shaped repro (three independently-driven handles,
+each calling the captured function with its own correct index).
+
+## Current status — RESOLVED
+
+`device_context.mojo` genuinely passes `compile_stdlib.py` now (confirmed:
+`std_gpu_host_device_context.o` compiles clean via real `gcc -fgimple` and
+the full from-scratch stdlib dylib rebuild is back to 0 skips, the first
+time this project has reached 0). Its `EXPECTED_FAILURES` entry has been
+removed from `compile_stdlib.py` (the stale-entry check would otherwise
+fail the gate). Both closure-capture bugs this file was originally
+blocked on, the async-eligibility gate, the nested-closure discovery gap,
+void-return support, the coroutine-handle primitives, and the dylib
+build/link gap are all fixed and verified real, running end to end.

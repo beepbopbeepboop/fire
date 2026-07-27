@@ -40,33 +40,6 @@ DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', '
 # genuinely UNEXPECTED failures below) rather than silently absorbed.
 # Never add an entry here without a bugs/*.md file backing it.
 EXPECTED_FAILURES = {
-    # UPDATE (this session): both closure-capture bugs this file's blocker
-    # was originally attributed to are FIXED (see bugs/CODEGEN_device_
-    # context_captured_function_parameter_closures_broken.md's "Update"
-    # section + test_closure_capture_comptime_func_params.py's real
-    # compile+link+run verification). This file's ACTUAL remaining blocker
-    # is now purely the pre-existing async-eligibility gate:
-    # `_async_quick_eligible` rejects any parameterized `async def`, and
-    # this file's four `wrapper()` closures all close over their enclosing
-    # method's `func`/`FuncType` parameter — confirmed unchanged by
-    # re-running compile_module_to_c_cached directly (same "function(s)
-    # wrapper, wrapper, wrapper, wrapper (async function(s), declared
-    # `async def`)" refusal as before either capture fix). The async-
-    # specific plumbing this WOULD need once eligibility is widened
-    # (`_take_handle()`/`AsyncRT_DeviceContext_enqueueHostFunction(Range)`
-    # stubs) is already built and verified inert/safe in runtime/
-    # mojo_async_runtime.h/.cpp, ready to be wired up — a real, substantial,
-    # not-yet-started piece of work (reasoned about but not attempted this
-    # session; may need its own eligibility condition distinct from the
-    # nested `@parameter async def` shape test_asyncrt.mojo/test_tracing.mojo
-    # need — the two were NOT confirmed to be the same widening).
-    'std/gpu/host/device_context.mojo':
-        'async-eligibility gate rejects this file\'s four parameterized '
-        '`wrapper()` closures (`_async_quick_eligible` has no parameterized-'
-        'async-def support yet) — the two closure-capture bugs this file was '
-        'originally blocked on are now fixed — see bugs/CODEGEN_device_'
-        'context_captured_function_parameter_closures_broken.md',
-
     # UPDATE (this session): the general comptime bracket-parameter
     # value-binding bug (`f[N](...)` silently compiling to a placeholder
     # `0`) is FIXED for top-level free functions — see

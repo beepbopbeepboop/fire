@@ -24,7 +24,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import cas
 import reflect
-from build_config import find_gcc
+from build_config import find_gcc, find_gxx
 from gimple_codegen import GimpleGen, FromImportStmt
 from mojo_compiler import py_tokenize, Parser
 from module_loader import load_module, STDLIB_PATH, module_name_for_path
@@ -345,8 +345,12 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
         cas.toolchain_fingerprint(gcc, ()), open(rt_src).read())
 
+    gxx = find_gxx()
+
     if link_runtime:
-        # For test modules: link against standalone runtime dylib
+        # For test modules: link against standalone runtime dylib (which
+        # itself now also folds in mojo_async_runtime.o — see
+        # runtime_dylib()'s own docstring).
         rt_dylib = runtime_dylib(gcc)
         rt_path = rt_dylib
     else:
@@ -357,6 +361,46 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             return open(o, 'rb').read()
         rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
         objs.append(rt_o)
+
+        # runtime/mojo_async_runtime.cpp's mojo_coro_resume_generic/
+        # mojo_coro_destroy_generic (+ the AsyncRT_DeviceContext_
+        # enqueueHostFunction(Range) stubs) — needed the moment ANY
+        # compiled stdlib module references `_coro_resume_fn`/
+        # `_coro_destroy_fn` as a bare value (device_context.mojo's own
+        # enqueue_cpu_function/enqueue_cpu_range, and std/runtime/
+        # asyncrt.mojo's `_async_execute` generic — see gimple_codegen.py's
+        # BUILTIN_VALUE_MAP entries for these two names) or defines a
+        # compiled async function/closure at all (MojoAsync's own `_start`/
+        # `_is_done`/`_value`/`_destroy` API). A real, hand-verified
+        # regression otherwise: the module itself compiles clean (gcc
+        # -fgimple -fsyntax-only never sees a linker), and this production
+        # dylib link uses `-undefined dynamic_lookup` (below) so even the
+        # DYLIB LINK doesn't fail — the missing symbol only surfaces as a
+        # dyld "symbol not found in flat namespace" crash the first time a
+        # real program actually calls into the affected stdlib code at
+        # runtime. Compiled with g++ (C++20; the .cpp needs real coroutine/
+        # exception support mojo_runtime.c's plain-C -fgimple objects
+        # don't), CAS-cached exactly like mojo_runtime.o's own object above
+        # — folded into the SAME production dylib (not a separate runtime
+        # piece) via a C++ link driver (find_gxx()) so the final link pulls
+        # in libstdc++ correctly. Scoped to ONLY this (production) branch —
+        # computing it unconditionally added a spurious extra CAS hit/miss
+        # to the link_runtime=True test path's own cas.stats bookkeeping
+        # (test_module_cache.py's stage3 "exactly 2 cache ops" assertions),
+        # even though that path never used the result (runtime_dylib()
+        # already builds its own copy, untracked by cas.stats — see there).
+        async_rt_src = os.path.join(RUNTIME, 'mojo_async_runtime.cpp')
+        async_rt_key = 'rtobj/' + cas._hash(
+            'mojo-async-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+            cas.toolchain_fingerprint(gcc, ()), open(async_rt_src).read())
+
+        def _build_async_rt_obj():
+            o = os.path.join(workdir, 'mojo_async_runtime.o')
+            subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
+                            async_rt_src], check=True)
+            return open(o, 'rb').read()
+        async_rt_o, _ = cas.get_or_build(async_rt_key, '.o', _build_async_rt_obj)
+        objs.append(async_rt_o)
         rt_path = None
 
     if extra_exports:
@@ -425,14 +469,18 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     subprocess.run([gcc, '-fno-builtin', '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # Linking depends on whether runtime is included or linked separately
+    # Linking depends on whether runtime is included or linked separately.
+    # link_driver=gxx: the production dylib now always folds in mojo_
+    # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
+    # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
+    # mojo.py's own link_executable(cxx=True) convention exactly.
     if link_runtime:
         # For test modules: link against runtime dylib, all symbols must resolve
         link = _dylink(gcc, out, objs, undefined=False, extra_libs=[rt_path],
-                      rpath=os.path.dirname(rt_path))
+                      rpath=os.path.dirname(rt_path), link_driver=gxx)
     else:
         # For production: cross-module references resolve at load time
-        link = _dylink(gcc, out, objs, undefined=True)
+        link = _dylink(gcc, out, objs, undefined=True, link_driver=gxx)
     subprocess.run(link, check=True)
     # Publish the linked dylib to the shared CAS so future builds skip the link
     # (even on use_cache=False runs: the fresh link is the correct artifact).
@@ -480,12 +528,20 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     The stdlib dylib now includes the runtime, but test modules and external
     clients need a separate runtime dylib to link against and resolve symbols.
     Built with all symbols resolved (undefined=False).
-    """
+
+    Also folds in runtime/mojo_async_runtime.o (mojo_coro_resume_generic/
+    mojo_coro_destroy_generic/AsyncRT_DeviceContext_enqueueHostFunction(Range))
+    for the same reason build()'s production dylib path does — a compiled
+    stdlib module (test or production) can reference these via
+    `_coro_resume_fn`/`_coro_destroy_fn` used as bare values, or define a
+    compiled async function/closure, independent of link_runtime mode."""
     gcc = gcc or find_gcc()
+    gxx = find_gxx()
     src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
+    async_src = open(os.path.join(RUNTIME, 'mojo_async_runtime.cpp')).read()
     key = 'rtdylib/' + cas._hash(
-        'mojo-rtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, flags), src)
+        'mojo-rtdylib-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, flags), src, async_src)
     out = cas.path_for(key, '.dylib')
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -493,7 +549,11 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
         o = os.path.join(wd, 'mojo_runtime.o')
         subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
                         os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
-        subprocess.run(_dylink(gcc, out, [o], undefined=False), check=True)
+        async_o = os.path.join(wd, 'mojo_async_runtime.o')
+        subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', async_o,
+                        os.path.join(RUNTIME, 'mojo_async_runtime.cpp')], check=True)
+        subprocess.run(_dylink(gcc, out, [o, async_o], undefined=False, link_driver=gxx),
+                       check=True)
     return out
 
 

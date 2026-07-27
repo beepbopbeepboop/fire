@@ -1728,6 +1728,30 @@ def _c_id(ctype: str) -> str:
     """Convert a C type to a valid identifier suffix (for helper function names)."""
     return _C_ID_MAP.get(ctype, ctype.replace(' ', '_').replace('*', 'ptr'))
 
+_FNPTR_CTYPE_RE = re.compile(r'^(.*)\(\*\)\((.*)\)$')
+
+def _c_var_decl(ctype: str, name: str) -> str:
+    """A variable declaration for `ctype name` (no trailing `;`) — almost
+    always just `f"{ctype} {name}"`, EXCEPT a function-pointer ctype (e.g.
+    `'void (*)(int64_t)'`, this file's own spelling for the resume_fn/
+    destroy_fn parameters of runtime/mojo_async_runtime.h's
+    AsyncRT_DeviceContext_enqueueHostFunction(Range) stubs — see
+    _LIBC_SIGS' entries for those two names), whose C declarator syntax
+    embeds the variable NAME INSIDE the parentheses (`void (*name)
+    (int64_t)`), not after the whole type spelling like every other C
+    type. Every declaration site in this file (_new_temp, the one central
+    spot every GIMPLE temp's declaration text is built) used to do the
+    naive `f"{ctype} {name}"` unconditionally, which is syntactically
+    invalid for a function-pointer ctype and corrupted GCC's parse of the
+    rest of the file (a real, hand-verified bug, not a hypothetical one —
+    found wiring up device_context.mojo's `_coro_resume_fn`/
+    `_coro_destroy_fn` values through to this exact call site)."""
+    m = _FNPTR_CTYPE_RE.match(ctype)
+    if m:
+        ret, params = m.group(1).rstrip(), m.group(2)
+        return f"{ret} (*{name})({params})"
+    return f"{ctype} {name}"
+
 def _printf_fmt(ctype: str) -> str:
     return TypeLattice.printf_fmt(ctype)
 
@@ -2910,6 +2934,24 @@ class GimpleGen:
         'max': 'mojo_max',
         'min': 'mojo_min',
         'sum': 'mojo_sum',
+        # std.builtin.coroutine's `_coro_resume_fn`/`_coro_destroy_fn` —
+        # real Mojo implements these via raw `__mlir_op.co.resume`/
+        # `co.destroy` ops this codegen has no general lowering for (see
+        # coroutine.mojo's own compiled output, which reduces them to inert
+        # "deferred: coroutine lowering not modeled" stubs). Used ONLY as
+        # bare VALUES (function-pointer arguments to `external_call[
+        # "AsyncRT_DeviceContext_enqueueHostFunction(Range)", ...]` in
+        # device_context.mojo — never actually invoked as ordinary Mojo
+        # calls anywhere in this codebase) — substituted for this
+        # codegen's OWN generic resume/destroy pair instead, which operate
+        # on the SAME plain-int64_t coroutine-handle representation this
+        # codegen's own `_take_handle()` lowering produces (see runtime/
+        # mojo_async_runtime.h's own docstring on `mojo_coro_resume_generic`/
+        # `mojo_coro_destroy_generic` for why one generic pair suffices for
+        # every compiled coroutine, and _lower_method_call's `_take_handle`
+        # special case).
+        '_coro_resume_fn': 'mojo_coro_resume_generic',
+        '_coro_destroy_fn': 'mojo_coro_destroy_generic',
         'sorted': 'mojo_sorted',
         'reversed': 'mojo_reversed',
         '__builtins__': '0',
@@ -3001,6 +3043,19 @@ class GimpleGen:
         # own "async generator" refusal category, see gen_module).
         self._supported_async: dict[str, FunctionDef] = {}
         self._async_api: dict[str, dict] = {}
+        # (outer_ctx, inner_name) -> FunctionDef / API dict for an async
+        # closure NESTED INSIDE A METHOD (device_context.mojo's `async def
+        # wrapper(...) capturing -> None:` shape — see gen_module's
+        # dedicated discovery pass). Kept separate from _supported_async/
+        # _async_api (which are keyed by bare top-level function name only)
+        # since a nested closure's name is only unique within its enclosing
+        # method's own scope, not module-wide — `outer_ctx` is
+        # `f"{struct_name}_{method_name}{overload_id}"`, matching
+        # _all_closures'/self.current_func_name's own convention exactly, so
+        # a call site compiling that same method's ordinary body can look
+        # this up via `(self.current_func_name, name)`.
+        self._supported_async_closures: dict[tuple, FunctionDef] = {}
+        self._async_closure_api: dict[tuple, dict] = {}
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -3940,7 +3995,7 @@ class GimpleGen:
     def _new_temp(self, ctype: str) -> str:
         self.temp_counter += 1
         name = f"_t{self.temp_counter}"
-        self.decls.append(f"  {ctype} {name};")
+        self.decls.append(f"  {_c_var_decl(ctype, name)};")
         self.var_types[name] = ctype
         return name
 
@@ -7666,6 +7721,45 @@ class GimpleGen:
             fake_obj_type = f"{base_name} *"
             return self._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
 
+        # `coro._set_noop_callback()` / `coro^._take_handle()` — the two
+        # std.builtin.coroutine.Coroutine methods device_context.mojo's
+        # `enqueue_cpu_function`/`enqueue_cpu_range` call on the coroutine
+        # object a compiled async closure's call site produces (see
+        # _lower_async_closure_construct — a `MojoAsync *` handle, this
+        # codegen's own opaque coroutine-handle representation). Real
+        # Mojo's `Coroutine`/`RaisingCoroutine` wrap a raw MLIR
+        # `!co.routine` handle (`AnyCoroutine`) with these two methods;
+        # since this codegen already represents ITS OWN coroutine handles
+        # as a `MojoAsync *` (not a real `Coroutine` struct instance), the
+        # two methods are modeled directly against that representation
+        # rather than attempting to compile std.builtin.coroutine's own
+        # Mojo source (which uses raw `__mlir_op.co.resume`/`co.destroy`
+        # ops this codegen has no general lowering for):
+        #   `_set_noop_callback()` — a no-op here. Real Mojo uses this to
+        #     arm a callback for genuinely ASYNCHRONOUS dispatch; this
+        #     codegen's own runtime stub (AsyncRT_DeviceContext_
+        #     enqueueHostFunction(Range), runtime/mojo_async_runtime.cpp)
+        #     is a deliberate synchronous simplification that always
+        #     drives the coroutine to completion with one direct resume()
+        #     call — see that stub's own docstring — so there is no
+        #     separate callback state to arm.
+        #   `_take_handle()` — returns the SAME `MojoAsync *` handle this
+        #     coroutine's own construction (`_start()`) already produced,
+        #     reinterpreted as the plain `int64_t` handle representation
+        #     `mojo_coro_resume_generic`/`mojo_coro_destroy_generic` (and
+        #     the AsyncRT_DeviceContext_enqueueHostFunction(Range) stubs)
+        #     expect — see runtime/mojo_async_runtime.h's own docstring on
+        #     why handles are plain int64_t there, matching real Mojo's
+        #     own AnyCoroutine representation.
+        if isinstance(func.obj, (IdentExpr, UnaryOp)):
+            _obj_type, _obj_val = self.lower_expr(func.obj)
+            if _obj_type == 'MojoAsync *':
+                if func.member == '_set_noop_callback' and not node.args:
+                    return 'int64_t', self._new_val('int64_t', '(int64_t)0')
+                if func.member == '_take_handle' and not node.args:
+                    t = self._new_val('int64_t', f'(int64_t){_obj_val}')
+                    return 'int64_t', t
+
         # `m.group()`/`m.start()` where m is a regex-match for-loop variable
         # (see _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f).
         # Only the no-arg forms py_tokenize's own `for m in _TOKEN_RE.finditer(...)`
@@ -8029,6 +8123,18 @@ class GimpleGen:
                     self._emit(f"  {base}_destroy ({handle});")
                     self._emit("  mojo_raise ();")
                     self._emit_label(bb_ok)
+                    # A genuinely void-returning compiled async function
+                    # (device_context.mojo's `-> None` wrapper closures) has
+                    # no real value to read back -- `{base}_value(...)`
+                    # returns C++ `void`, and declaring a `void` GIMPLE local
+                    # to hold it is invalid C. Skip the read entirely and
+                    # return a harmless int64_t 0 placeholder (this call
+                    # site is itself value-DISCARDING from the ordinary-C
+                    # caller's perspective whenever vct is void — nothing
+                    # meaningful could be read back anyway).
+                    if vct == 'void':
+                        self._emit(f"  {base}_destroy ({handle});")
+                        return 'int64_t', self._new_val('int64_t', '(int64_t)0')
                     result = self._new_val(vct, f"{base}_value ({handle})")
                     self._emit(f"  {base}_destroy ({handle});")
                     return vct, result
@@ -8976,10 +9082,36 @@ class GimpleGen:
         'signal', 'raise',
         # Wide char (wchar.h)
         'wcslen', 'wcscmp', 'wcscat',
+        # runtime/mojo_async_runtime.h — already declared there (included in
+        # any module's preamble with a supported async function/closure —
+        # see gen_module), with real function-POINTER-typed parameters
+        # (resume_fn/destroy_fn); external_call["AsyncRT_DeviceContext_
+        # enqueueHostFunction(Range)", ...] (device_context.mojo's own call
+        # shape) must defer to that real declaration rather than auto-
+        # generating a conflicting one inferred from the (scalar-looking,
+        # `void *`-typed) lowered argument values — see _LIBC_SIGS's own
+        # entries for these two names, which pin the real parameter types
+        # for arg-count padding/coercion purposes.
+        'AsyncRT_DeviceContext_enqueueHostFunction',
+        'AsyncRT_DeviceContext_enqueueHostFunctionRange',
     }
 
     # Correct signatures for C standard library functions to prevent conflicts
     _LIBC_SIGS: dict[str, tuple[str, list[str]]] = {
+        # runtime/mojo_async_runtime.h's own honest-synchronous-simplification
+        # stubs (see _LIBC_DECLARED's matching entries above) — real
+        # function-pointer parameter types, matching the header exactly, so
+        # external_call's own arg-count padding/coercion logic (which reads
+        # this table) agrees with what's already declared instead of
+        # inferring a conflicting `void *`-typed prototype from the lowered
+        # argument values (_coro_resume_fn/_coro_destroy_fn lower to `void
+        # *`, via BUILTIN_VALUE_MAP — see _lower_IdentExpr's "C function
+        # name used as a value" case).
+        'AsyncRT_DeviceContext_enqueueHostFunction':
+            ('char *', ['int64_t', 'void (*)(int64_t)', 'void (*)(int64_t)', 'int64_t']),
+        'AsyncRT_DeviceContext_enqueueHostFunctionRange':
+            ('char *', ['int64_t', 'void (*)(int64_t)', 'void (*)(int64_t)',
+                        'const int64_t *', 'int64_t']),
         'memcmp': ('int', ['char *', 'char *', 'int']),
         'strlen': ('int', ['char *']),
         'strcmp': ('int', ['char *', 'char *']),
@@ -9680,6 +9812,30 @@ class GimpleGen:
             return 'int', self._new_val('int', '0')
 
         fname_raw = node.func.name
+        # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
+        # `async def wrapper(...) capturing -> None:` shape — see
+        # gen_module's dedicated discovery pass / _async_closure_api).
+        # Constructs via `{base}_start(<ordinary args>, <captures>)`,
+        # mirroring the top-level-async-function construct convention
+        # exactly (Step B: never runs the body immediately). Captures are
+        # read HERE, at the call site, as ordinary already-in-scope
+        # identifiers (this method's own param/threaded-comptime-param) —
+        # not pre-populated into an env struct at the nested `async def`
+        # statement itself (see _gen_stmt_FunctionDef's matching skip).
+        _acl_key = (self.current_func_name, fname_raw)
+        if _acl_key in self._async_closure_api:
+            handle, vct = self._lower_async_closure_construct(_acl_key, node)
+            if vct != 'void':
+                raise RuntimeError(
+                    "cannot compile module: call to nested async closure "
+                    f"{fname_raw!r} whose result is consumed as a value "
+                    "and carries a real return value — this codegen has no "
+                    "await/top-level-run mechanism yet to drive a nested "
+                    "async closure to completion and read a real value "
+                    "back out of it; only a void-returning nested async "
+                    "closure (device_context.mojo's own shape) may have its "
+                    "raw, un-driven handle captured this way")
+            return 'MojoAsync *', handle
         # Milestone B: `counter()` where `counter` is a supported generator
         # function — constructs the coroutine (via its C++20-emitted
         # `<base>_start()`) WITHOUT running any body code yet, matching real
@@ -10415,6 +10571,19 @@ class GimpleGen:
         static_name = f'_funcptr_{lifted_name}'
         t = self._new_val('void *', static_name)
         return 'void *', t
+
+    def _lower_async_closure_construct(self, key: tuple, node: CallExpr) -> tuple[str, str]:
+        """Construct (never run the body of) a nested async closure — see
+        _async_closure_api's registration in gen_module and this call
+        site's caller in _lower_call. Returns (handle_expr, value_ctype);
+        the caller decides whether consuming that handle as a value is
+        allowed (only when value_ctype == 'void' — see the caller)."""
+        api = self._async_closure_api[key]
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        for cap_name, cap_ctype in api['captures']:
+            arg_pairs.append(self.lower_expr(IdentExpr(name=cap_name)))
+        handle = self._call_expr('MojoAsync *', f"{api['base']}_start", arg_pairs)
+        return handle, api['value_ctype']
 
     def _lower_fnptr_call(self, fname_raw: str, var_ctype: str,
                           node: CallExpr) -> tuple[str, str]:
@@ -12849,6 +13018,16 @@ class GimpleGen:
             # this narrow step's "calling f() must not run the body
             # immediately" correctness bar is genuinely observable from
             # Mojo source (see test_gimple_async_runner.py's laziness test).
+            # A nested async closure (see the identical, value-CONSUMING
+            # case in _lower_call) called as a bare, value-discarding
+            # statement — same construct-then-immediately-destroy-without-
+            # scheduling convention as the plain top-level async case just
+            # below.
+            _acl_key = (self.current_func_name, raw_name)
+            if _acl_key in self._async_closure_api:
+                handle, _vct = self._lower_async_closure_construct(_acl_key, node.value)
+                self._emit(f"  {self._async_closure_api[_acl_key]['base']}_destroy ({handle});")
+                return
             if raw_name in self._async_api:
                 api = self._async_api[raw_name]
                 arg_pairs = [self.lower_expr(a) for a in node.value.args]
@@ -13505,6 +13684,18 @@ class GimpleGen:
             _emit_exits()
 
     def _gen_stmt_FunctionDef(self, node):
+        # An async closure nested inside this method (device_context.mojo's
+        # `async def wrapper(...) capturing -> None:` shape) was already
+        # fully compiled to its own C++20 coroutine unit by gen_module's
+        # dedicated discovery pass (see _async_closure_api) — it gets NO
+        # ordinary GIMPLE body/env-struct-alloc here at all, exactly
+        # mirroring how a top-level supported async function's FunctionDef
+        # is skipped entirely in gen_module's own Phase 2a loop. Its
+        # captured value(s) are read directly at each CALL site instead
+        # (see _lower_call's/_gen_stmt_ExprStmt's async-closure-call
+        # handling), not pre-populated into an env struct here.
+        if (self.current_func_name, node.name) in getattr(self, '_async_closure_api', {}):
+            return
         outer_closures = getattr(self, '_all_closures', {}).get(
             self.current_func_name, {})
         ci = outer_closures.get(node.name)
@@ -15923,6 +16114,41 @@ class GimpleGen:
                 if arg_ctype == '_Bool':
                     return [f'{indent}printf({fmt}, ({arg_expr}) ? "True" : "False");']
                 return [f"{indent}printf({fmt}, {arg_expr});"]
+            # A bare call to a captured (or scalar-parameter) function-type
+            # value — device_context.mojo's `async def wrapper(...)
+            # capturing -> None: func()`/`func(idx)`, the ENTIRE body of
+            # each of its four `wrapper` closures. `declared[name] ==
+            # 'int64_t'` is this coroutine sub-compiler's own convention for
+            # an opaque callable pointer (mirrors the ordinary, non-async
+            # GIMPLE path's identical `_fname_var_ctype in ('int', 'int64_t',
+            # 'void *', '_Bool')` guard in _lower_call/_gen_stmt_ExprStmt —
+            # see _lower_fnptr_call). Uses the SAME mojo_fnptr_call_N()
+            # runtime helper (declared `static inline` in mojo_runtime.h,
+            # which this .cpp translation unit already #includes) rather
+            # than inventing a second indirect-call convention — only 0-4
+            # scalar arguments are supported, matching that helper's own
+            # fixed arity family.
+            if (isinstance(s.value, CallExpr) and isinstance(s.value.func, IdentExpr)
+                    and s.value.func.name in declared
+                    and declared[s.value.func.name] == 'int64_t'
+                    and not getattr(s.value, 'kwargs', None)
+                    and len(s.value.args) <= 4):
+                fname = s.value.func.name
+                self_fields = getattr(self, '_cpp_gen_self_fields', None)
+                arg_exprs = []
+                for a in s.value.args:
+                    actype = _infer_simple_expr_ctype(a, declared, self_fields, self._async_api)
+                    if actype not in ('int64_t', 'double', '_Bool'):
+                        raise _UnsupportedAsyncShape(
+                            f"calling captured function '{fname}': argument "
+                            "must be a scalar int64_t/double/_Bool expression")
+                    ae = self._cpp_expr(a)
+                    if actype != 'int64_t':
+                        ae = f"(int64_t)({ae})"
+                    arg_exprs.append(ae)
+                helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
+                return [f"{indent}{helper}({call_args});"]
             raise _UnsupportedGeneratorShape(
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
@@ -16751,7 +16977,30 @@ class GimpleGen:
         ]
         return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
-    def _gen_cpp_async_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
+    def _compute_nested_closure_captures(self, inner: FunctionDef, outer_scope: dict) -> list:
+        """[(name, ctype)] for free variables `inner` (a nested async
+        closure — device_context.mojo's `async def wrapper(...) capturing
+        -> None:` shape) references that resolve to a name in the enclosing
+        method's own scope (self/params/threaded comptime params — see
+        gen_module's nested-async-closure discovery pass, the only caller).
+        Mirrors gen_module's own `_scan_for_closures` inner free-variable
+        computation (used - declared - globals) for the ordinary (non-
+        async) closure-lifting path, but deliberately NOT shared code with
+        it — that closure is deeply embedded inside gen_module's own local
+        scope and not easily factored out without broader risk to the
+        already-working ordinary path; kept as its own small, self-
+        contained duplicate instead, matching this project's already-
+        accepted generator/async promise-type duplication precedent (see
+        _gen_cpp_async_unit's own docstring for why that trade was made
+        deliberately, not by oversight)."""
+        used = _used_idents_deep(inner.body)
+        inner_params = {pn.lstrip('*') for pn, _ in (inner.params or [])}
+        declared_vars = _declared_vars_body(inner.body)
+        free = used - inner_params - declared_vars
+        return [(v, outer_scope[v]) for v in sorted(free) if v in outer_scope]
+
+    def _gen_cpp_async_unit(self, fn: FunctionDef, extra_captures: list | None = None,
+                            base_name_override: str | None = None) -> tuple[str, str, str, list]:
         """Step B of the compiled-path async/await codegen project (the
         async-function sibling of _gen_cpp_generator_unit, which Step B's
         planning deliberately decided should be a SEPARATE method/promise
@@ -16845,7 +17094,36 @@ class GimpleGen:
                     "double/_Bool parameters are supported for compiled "
                     "async functions)")
             param_ctypes.append((pn, ctype))
-        base = f"_mojoasync_{_safe_name(fn.name)}"
+        # A NESTED async closure's captured free variable(s) (device_
+        # context.mojo's `async def wrapper(...) capturing -> None:`,
+        # closing over its enclosing method's `func`/`FuncType` bracket
+        # parameter) are threaded through as ordinary trailing parameters,
+        # exactly like the general (non-async) closure-capture path's
+        # _method_threaded_comptime_params mechanism does for the SAME
+        # captured value in the ordinary GIMPLE codegen — a C++20
+        # coroutine's formal parameters are copied into the compiler-
+        # allocated frame automatically, so this needs no extra promise-
+        # side plumbing beyond appending them here; the call site (see the
+        # nested-async-closure discovery pass in gen_module) supplies the
+        # captured value(s) automatically, exactly as if they were ordinary
+        # call arguments, since the Mojo source itself never spells them
+        # out at the `wrapper()` call site.
+        for cap_name, cap_ctype in (extra_captures or []):
+            param_ctypes.append((cap_name, cap_ctype))
+        # Bare `fn.name` is only unique for a genuinely top-level compiled
+        # async function. A NESTED async closure (device_context.mojo's
+        # `wrapper` — see gen_module's dedicated discovery pass) is defined
+        # separately inside EACH of several methods (this exact file has
+        # FOUR distinct `wrapper` closures, one per enqueue_cpu_function/
+        # enqueue_cpu_range overload) — a bare-name `base` collided across
+        # all four (`_mojoasync_wrapper_start` redeclared with different
+        # signatures each time — a real, hand-verified "conflicting types"
+        # gcc error, the exact same class of bug _method_threaded_
+        # comptime_params' own struct/overload-blind keying hit earlier),
+        # so the caller supplies a fully-qualified override name instead
+        # (mirroring the ordinary closure-lifting convention's own
+        # `f"{outer}_{inner.name}"` mangling exactly).
+        base = f"_mojoasync_{_safe_name(base_name_override or fn.name)}"
         # Params are already "declared" locals as far as the body emitter is
         # concerned -- exactly mirrors _gen_cpp_generator_unit's identical
         # `declared` seeding (see that method's docstring for why this
@@ -16879,10 +17157,43 @@ class GimpleGen:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
         if value_ctype is None:
-            raise _UnsupportedAsyncShape(
-                f"{fn.name}: every `return` must carry a scalar value "
-                "(int64_t/double/_Bool), and all of them must agree on one "
-                "consistent type")
+            # A genuinely void-returning async function (declared `-> None`
+            # or unannotated, with no value-carrying `return` anywhere) —
+            # see bugs/CODEGEN_device_context_captured_function_parameter_
+            # closures_broken.md's device_context.mojo follow-on: its
+            # `async def wrapper(...) capturing -> None:` closures never
+            # return a value at all (their entire body is a single call to
+            # the captured function). Distinct from the "return present but
+            # types disagree / unsupported" case above (still an honest
+            # refusal): only promoted to 'void' when there is NO value-
+            # carrying `return` anywhere in the body at all.
+            _has_value_return = any(
+                isinstance(n, ReturnStmt) and n.value is not None
+                for n in _walk_ast(fn.body))
+            if not _has_value_return and fn.return_type in (None, 'None'):
+                value_ctype = 'void'
+                # A C++20 function is only actually TREATED as a coroutine
+                # if its body syntactically contains at least one
+                # co_return/co_await/co_yield -- merely defining
+                # return_void() on the promise is not enough. Mojo source
+                # with no `return`/`await` anywhere at all (e.g. `pass`, or
+                # a bare call statement — device_context.mojo's `wrapper()`
+                # closures) would otherwise compile as an ordinary (non-
+                # coroutine) function falling off the end without ever
+                # returning its by-value `_Task` result -- real undefined
+                # behavior, which this project's GCC/Clang helpfully
+                # compiles to a hard trap instruction rather than silently
+                # garbage (confirmed via a hand-written repro: EXC_BREAKPOINT
+                # at the very first instruction of the "impl" function).
+                # An explicit trailing `co_return;` guarantees the marker
+                # exists syntactically, regardless of what's already in
+                # body_lines.
+                body_lines.append("    co_return;")
+            else:
+                raise _UnsupportedAsyncShape(
+                    f"{fn.name}: every `return` must carry a scalar value "
+                    "(int64_t/double/_Bool), and all of them must agree on "
+                    "one consistent type")
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
@@ -16948,7 +17259,8 @@ class GimpleGen:
             f"    void await_resume() noexcept {{}}",
             f"}};",
             f"struct {promise} {{",
-            f"    {cpp_value_ctype} result{{}};",
+            (f"    {cpp_value_ctype} result{{}};" if value_ctype != 'void'
+             else "    /* void: no stored return value */"),
             # Step E (exceptions): an exception that escapes this
             # coroutine's own body uncaught is NOT translated straight into
             # the shared mojo_exc_*/mojo_exc_pending globals the way the
@@ -17036,7 +17348,8 @@ class GimpleGen:
             f"            exc_pending = true;",
             f"        }}",
             f"    }}",
-            f"    void return_value({cpp_value_ctype} v) {{ result = v; }}",
+            (f"    void return_value({cpp_value_ctype} v) {{ result = v; }}"
+             if value_ctype != 'void' else "    void return_void() noexcept {}"),
             f"}};",
             f"inline std::coroutine_handle<> {final_awaiter}::await_suspend({handle_t} h) noexcept {{",
             f"    std::coroutine_handle<> cont = h.promise().continuation;",
@@ -17062,7 +17375,7 @@ class GimpleGen:
             f"}}",
             f'extern "C" {cpp_value_ctype} {base}_value (MojoAsync *g) {{',
             f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
-            f"    return h.promise().result;",
+            ("    (void)h;" if value_ctype == 'void' else "    return h.promise().result;"),
             f"}}",
             f'extern "C" void {base}_destroy (MojoAsync *g) {{',
             f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -17172,9 +17485,10 @@ class GimpleGen:
             f"            callee_h.destroy();",
             f"            throw __e;",
             f"        }}",
-            f"        {cpp_value_ctype} v = callee_h.promise().result;",
-            f"        callee_h.destroy();",
-            f"        return v;",
+            (f"        {cpp_value_ctype} v = callee_h.promise().result;"
+             if value_ctype != 'void' else "        callee_h.destroy();"),
+            ("        callee_h.destroy();" if value_ctype != 'void' else ""),
+            ("        return v;" if value_ctype != 'void' else "        return;"),
             f"    }}",
             f"}};",
         ]
@@ -19064,6 +19378,69 @@ class GimpleGen:
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 self._generator_cpp_units.append(cpp_text)
                 _generator_fns.pop(id(m), None)
+
+        # Async closures NESTED INSIDE A METHOD (not themselves a method,
+        # and not a top-level function either) — device_context.mojo's
+        # `async def wrapper(...) capturing -> None:` shape, defined inside
+        # `enqueue_cpu_function`/`enqueue_cpu_range`. Neither the free-
+        # function loop above (only scans top-level `stmts`) nor the
+        # generator/async-METHOD loops (only scan `_sd.methods` themselves,
+        # one level deep) ever attempt a doubly-nested async def like this
+        # one — confirmed via a hand-written repro that reached this file's
+        # final "still unsupported" refusal even after `_async_quick_
+        # eligible` itself was widened to accept parameterized async defs
+        # (Step H's merge) — `wrapper` is never even OFFERED to that
+        # eligibility check by any existing pass. This is a NEW pass, not a
+        # widening of an existing one, run in the same struct-declaration
+        # order as everything else in this file, one level deeper (struct
+        # -> method -> nested async def).
+        for _sd in stmts:
+            if not isinstance(_sd, StructDef):
+                continue
+            _moids_ac = self._struct_method_overload_ids(_sd)
+            for _m, _oid in zip(_sd.methods, _moids_ac):
+                # The same outer scope Pass 3 (_scan_for_closures, below)
+                # would build for this method: self, its own params, and
+                # any function-typed comptime bracket parameter threaded
+                # through as an ordinary trailing parameter (see
+                # _method_threaded_comptime_params) — the only kinds of
+                # free variable a nested async closure could actually
+                # capture here.
+                _outer_scope = {_sd.name.lower(): f"{_sd.name} *",
+                                 'self': f"{_sd.name} *"}
+                for _pname, _ptype in _m.params:
+                    if _pname != 'self':
+                        _outer_scope[_pname] = self._resolve_type(_ptype)
+                for _cp_name in self._method_threaded_comptime_params.get(
+                        (_sd.name, _m.name), {}).get(_oid, []):
+                    _outer_scope[_cp_name] = 'int64_t'
+                for _inner in _m.body:
+                    if not (isinstance(_inner, FunctionDef) and id(_inner) in _async_fns):
+                        continue
+                    if not _async_quick_eligible(_inner, frozenset(self._async_api.keys())):
+                        continue
+                    _captures = self._compute_nested_closure_captures(_inner, _outer_scope)
+                    _base_override = f"{_sd.name}_{_m.name}{_oid}_{_inner.name}"
+                    try:
+                        cpp_text, value_ctype, base, param_ctypes = \
+                            self._gen_cpp_async_unit(_inner, extra_captures=_captures,
+                                                     base_name_override=_base_override)
+                    except _UnsupportedGeneratorShape as e:
+                        _debug_note(f'nested async closure {_sd.name}.{_m.name}.'
+                                    f'{_inner.name!r} not eligible for C++ '
+                                    'coroutine path, falling back to honest '
+                                    'refusal', e)
+                        continue
+                    outer_ctx = f"{_sd.name}_{_m.name}{_oid}"
+                    key = (outer_ctx, _inner.name)
+                    self._supported_async_closures[key] = _inner
+                    self._async_closure_api[key] = {
+                        'base': base, 'value_ctype': value_ctype,
+                        'params': param_ctypes, 'captures': _captures,
+                    }
+                    self.func_param_types[f"{base}_start"] = param_ctypes
+                    self._generator_cpp_units.append(cpp_text)
+                    _async_fns.pop(id(_inner), None)
 
         # Plain for-loops (not comprehensions) building plain lists, then
         # sorted — deliberately avoiding a `for i, fn in ...items()` set/
@@ -21135,10 +21512,42 @@ class GimpleGen:
                 parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
                 parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
             parts.append('')
-        if self._supported_async:
+        # `_coro_resume_fn`/`_coro_destroy_fn` (std.builtin.coroutine) used
+        # as bare VALUES anywhere in this compile — even a module with NO
+        # supported async function/closure of its OWN can still reference
+        # them this way (e.g. std/runtime/asyncrt.mojo's `_async_execute`
+        # generic, elaborated via monomorphize.py's own INDEPENDENT
+        # GimpleGen instance per instantiation — a real, hand-verified
+        # regression: that instance's `_funcptr_mojo_coro_resume_generic =
+        # (void *)mojo_coro_resume_generic;` static initializer referenced
+        # an undeclared symbol, since the header's inclusion was gated only
+        # on this SAME instance's own _supported_async/_supported_async_
+        # closures, which an elaborated fragment with no async function of
+        # its own never populates) — so this must ALSO pull in the header,
+        # independent of the `_supported_async`/`_supported_async_closures`
+        # gate just below.
+        _needs_async_runtime_h = bool(
+            self._supported_async or self._supported_async_closures
+            or (self._funcptr_builtins_needed
+                & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}))
+        if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures):
+            parts.append('typedef struct MojoAsync MojoAsync;')
+            parts.append('#include <mojo_async_runtime.h>')
+            parts.append('')
+        if self._supported_async or self._supported_async_closures:
             # Step B: the extern "C" API (opaque handle + start/is_done/
             # value/destroy — no `_resume`, see _gen_cpp_async_unit's
             # docstring) for every supported async function in this module.
+            # `_supported_async_closures` (device_context.mojo's nested
+            # `async def wrapper(...) capturing -> None:` closures — see
+            # gen_module's dedicated discovery pass) shares this exact same
+            # extern "C" API shape, just keyed by (outer_ctx, inner_name)
+            # instead of bare name, so it ALSO needs this preamble (the
+            # `MojoAsync` opaque type + mojo_async_runtime.h) even when the
+            # module has no genuinely TOP-LEVEL supported async function at
+            # all — a name-only gate on _supported_async would silently
+            # leave this file with implicit-declaration errors for
+            # `_mojoasync_wrapper_start`/etc. instead.
             # A separate opaque `MojoAsync` type from `MojoGenerator` (not
             # reused) — matches _gen_cpp_async_unit's own promise_type being
             # a deliberately fresh, separate C++ type from the generator's;
@@ -21165,6 +21574,14 @@ class GimpleGen:
                 # ONLY from the `asyncio.run(...)` bridge below -- see
                 # _gen_cpp_async_unit's own {base}_translate_pending_exc
                 # docstring.
+                parts.append(f"extern void {_base}_translate_pending_exc (MojoAsync *);")
+            for _api in self._async_closure_api.values():
+                _base, _vct = _api['base'], _api['value_ctype']
+                _aptypes = ', '.join(_api.get('params') or []) or 'void'
+                parts.append(f"extern MojoAsync *{_base}_start ({_aptypes});")
+                parts.append(f"extern _Bool {_base}_is_done (MojoAsync *);")
+                parts.append(f"extern {_vct} {_base}_value (MojoAsync *);")
+                parts.append(f"extern void {_base}_destroy (MojoAsync *);")
                 parts.append(f"extern void {_base}_translate_pending_exc (MojoAsync *);")
             parts.append('')
         for fn in func_defs:
@@ -21526,7 +21943,7 @@ class GimpleGen:
                 '};',
                 '',
             ]
-            if self._supported_async or self._supported_async_gen:
+            if self._supported_async or self._supported_async_gen or self._supported_async_closures:
                 # Step C (compiled-path async/await codegen project): this
                 # module has at least one compiled `async def` that
                 # actually uses `await asyncio.sleep(...)` (or could —

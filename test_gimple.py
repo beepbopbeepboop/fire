@@ -3345,14 +3345,20 @@ async def f():
     return "hi"
 """, "async function")
 
-    # No return value at all (`pass`) — this step requires a genuine scalar
-    # result; a bare `return`/implicit fall-through isn't in scope (unlike
-    # the generator convention, where a value-less `return` is exactly the
-    # supported case — the two are deliberately opposite here).
-    test_raises("async_function_no_return_value_honest_fallback", """\
+    # No return value at all (`pass`) — UPDATE: this shape is now genuinely
+    # supported (was an honest refusal through Step G; the device_context.mojo
+    # follow-on added real void/None-returning compiled-async-function
+    # support — see _gen_cpp_async_unit's "value_ctype = 'void'" branch),
+    # needed for device_context.mojo's `async def wrapper(...) capturing ->
+    # None:` closures, which never return a value at all. Compile-only smoke
+    # test here (mirrors this file's other `test(...)` entries); real
+    # behavioral (compile+link+run) proof lives in
+    # test_closure_capture_comptime_func_params.py /
+    # test_async_void_return.py.
+    test("async_function_no_return_value_now_supported", """\
 async def f():
     pass
-""", "async function")
+""")
 
     # Two `return`s that don't agree on one consistent scalar type — the
     # async counterpart of generator_mixed_yield_types_honest_fallback.
