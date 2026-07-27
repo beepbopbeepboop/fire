@@ -8896,7 +8896,20 @@ class GimpleGen:
     def _type_expr_to_ann(self, node) -> str:
         """Reconstruct a type-annotation string from a type expression node, so
         parametric types in external_call/MLIR positions resolve via _mojo_type.
-        e.g. UnsafePointer[Int8] -> 'UnsafePointer[Int8]', c_ssize_t -> 'c_ssize_t'."""
+        e.g. UnsafePointer[Int8] -> 'UnsafePointer[Int8]', c_ssize_t -> 'c_ssize_t'.
+
+        Also doubles as the textual rendering of a COMPTIME VALUE bracket
+        argument (`f[1]`, `f[True]`, `f[-1]`) for a comptime-bracket-
+        parametrized call (`f[N: Int](...)`, not a type-parametrized generic)
+        — see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_
+        silently_wrong.md. monomorphize.py's substitution is purely textual
+        (`re.sub(r'\\bTP\\b', str(concrete), src)`), so a literal's Python
+        repr substitutes into the callee body exactly like a type name does;
+        no separate value-vs-type code path is needed downstream, only this
+        node-to-string step, which previously returned '' for every literal
+        (IntLiteral/BoolLiteral/negative-int UnaryOp), making
+        _is_concrete_type_arg reject it and silently falling back to the
+        placeholder-0 codegen instead of ever binding/invoking the callee."""
         if isinstance(node, IdentExpr):
             return node.name
         if isinstance(node, SubscriptExpr):
@@ -8907,6 +8920,12 @@ class GimpleGen:
             return f"{base}[{inner}]"
         if isinstance(node, MemberExpr):
             return f"{self._type_expr_to_ann(node.obj)}.{node.member}"
+        if isinstance(node, IntLiteral):
+            return str(node.value)
+        if isinstance(node, BoolLiteral):
+            return 'True' if node.value else 'False'
+        if isinstance(node, UnaryOp) and node.op == '-' and isinstance(node.operand, IntLiteral):
+            return str(-node.operand.value)
         return ''
 
     def _elaborate_generic_call(self, node: CallExpr):

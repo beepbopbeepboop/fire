@@ -116,17 +116,89 @@ codegen this project has been extending. This is exactly the class of
 current scope" this project's standing rules call out as a legitimate
 reason to stop and leave an honest, documented refusal.
 
+## Update — top-level free-function case FIXED (this session)
+
+The root cause was narrower than it first looked: `gimple_codegen.py`
+already has a complete, working monomorphization pipeline for bracket-
+parametrized calls to TOP-LEVEL functions/structs imported from another
+module (`_imported_generics`/`_elaborate_generic_call`, backed by
+`elaborate.py` + `monomorphize.py`'s purely-textual `\bTP\b` substitution),
+and `gen_module` already self-registers a module's OWN top-level
+`def f[...]`-shaped functions into that exact same mechanism (see the
+"Local generic free functions" block in `gen_module`) — so same-module
+calls were *supposed* to go through it too. They didn't, because
+`GimpleGen._type_expr_to_ann` (which turns a bracket argument's AST node
+into the string `elaborate.py` substitutes textually) only handled
+type-shaped nodes (`IdentExpr`/`SubscriptExpr`/`MemberExpr`) and returned
+`''` for literal VALUE nodes (`IntLiteral`, `BoolLiteral`, negative-int
+`UnaryOp`) — so `_is_concrete_type_arg('')` rejected every value-typed
+bracket argument, `_elaborate_generic_call` bailed out with `None`, and
+the call fell through to `_lower_call`'s final `if not isinstance(node.func,
+IdentExpr): return 'int', self._new_val('int', '0')` catch-all.
+
+Fix: `_type_expr_to_ann` now also renders `IntLiteral`/`BoolLiteral`/
+negative-int-`UnaryOp` nodes as their literal text (`"1"`, `"True"`, ...).
+`monomorphize.py`'s substitution was already value-agnostic (plain
+`re.sub(r'\bTP\b', str(concrete), src)`), so no other change was needed —
+`add_const[1](10)` now really monomorphizes to a genuine `add_const_1`
+function body with `lhs` substituted to `1`, compiles it via the same CAS-
+backed `elaborate.Elaborator`/`monomorphize.instantiate` path any other
+local generic uses, and calls it. Verified with a real compile+link+run
+(not compile-only) via `test_comptime_bracket_params.py`: the exact repro
+above now prints `11`/`22`, plus two more shapes (distinct bracket-value
+bindings each getting their own specialization; a `Bool`-typed comptime
+param, matching `test_tracing.mojo`'s own parameter shape).
+
+## Still open — NOT fixed by the above
+
+The fix above only covers a bracket call to a function *defined at module
+top level*. Confirmed still broken, same silent-`0` failure mode: a
+`@parameter`-decorated **nested** `def f[lhs: Int](rhs): ...` (defined
+inside another function's body) — the exact shape `test_asyncrt.mojo`'s
+`test_asyncrt_add[lhs: Int](rhs: Int)` and `test_tracing.mojo`'s
+`test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)` actually use. Root
+cause: `gen_module`'s "Local generic free functions" registration scan
+only walks top-level `stmts` looking for `isinstance(s, FunctionDef)` —
+nested defs live inside an enclosing `FunctionDef.body`, so they're never
+registered into `_imported_generics` and never stripped from being
+(mis-)compiled as an ordinary nested closure. Confirmed via a fresh repro
+(`@parameter def nested_add[lhs: Int](rhs: Int)` inside `main()`) — still
+folds to `0`.
+
+Additionally, `test_asyncrt_add`/`test_tracing_add` are themselves `async
+def`, not just nested — even with nested-comptime-registration fixed,
+these two files are STILL refused today for a separate, legitimate reason:
+`_async_quick_eligible` rejects any parameterized `async def` outright
+(confirmed directly: after this fix, `test_asyncrt.mojo` now fails with
+"function(s) ... test_asyncrt_add, test_asyncrt_add_two_of_them (async
+function(s), declared `async def`)" — the ordinary "no compiled
+async/generator support for this shape" refusal, not the comptime bug).
+So getting `test_asyncrt.mojo`/`test_tracing.mojo` to pass needs BOTH (a)
+extending local-generic registration to recurse into nested function
+bodies, in a way that's compatible with `@parameter`/closure-capture
+semantics for nested defs, AND (b) the previously-scoped "parametric
+`@parameter async def` support" / `_async_quick_eligible` widening work —
+neither attempted yet.
+
 ## Current status
+
+Free top-level functions: FIXED and verified (see
+`test_comptime_bracket_params.py`). `device_context.mojo`'s Repro 1 (a
+comptime FUNCTION-TYPE bracket parameter on a struct METHOD, called from a
+nested closure) is a structurally different call shape (`obj.method[Func]
+(...)`, routed through `_lower_call`'s separate "Subscripted method call"
+branch, not the local-generics path this fix touches) and is confirmed
+STILL broken — see `bugs/CODEGEN_device_context_captured_function_
+parameter_closures_broken.md`, unchanged by this fix.
 
 All four Group 1 files (`test/runtime/test_asyncrt.mojo`,
 `test_locks.mojo`, `test_raising_asyncrt.mojo`, `test_tracing.mojo`)
 remain honest whole-module refusals in `compile_stdlib.py`'s
-`EXPECTED_FAILURES`. This file is the justification for two of them
-(`test_asyncrt.mojo`, `test_tracing.mojo`) — the other two
+`EXPECTED_FAILURES` — `test_asyncrt.mojo`/`test_tracing.mojo`'s entries
+have been updated to describe their real current blocker (nested/async
+comptime-parametrized `async def`s, not the general value-binding bug,
+which is now fixed for the top-level case). The other two
 (`test_locks.mojo`, `test_raising_asyncrt.mojo`) are blocked by a
 different, separately-documented reason (no `create_task`/`Task`/
 `TaskGroup`/`RaisingTask` codegen support exists at all yet — see their
-own `EXPECTED_FAILURES` entries in compile_stdlib.py). None of
-`create_task`/`Task`/`TaskGroup`/`RaisingTask`/`Trace` context managers
-have been attempted yet given this comptime-parameter prerequisite is
-itself broken for the two files that need it.
+own `EXPECTED_FAILURES` entries in compile_stdlib.py).

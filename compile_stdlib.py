@@ -63,31 +63,39 @@ EXPECTED_FAILURES = {
         'in the general codegen (independent of async) — see bugs/CODEGEN_'
         'device_context_captured_function_parameter_closures_broken.md',
 
-    # Blocked by a severe, pre-existing, systemic bug: comptime bracket-
-    # parametrized function calls (`f[N](...)`) silently compile to a
-    # placeholder `0` instead of actually binding/using the comptime
-    # argument — confirmed via two independent hand-verified repros (a
-    # free function and, separately, a `@parameter`-decorated nested def,
-    # matching these files' own exact shape:
-    # `test_asyncrt_add[lhs: Int](rhs: Int)` /
-    # `test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)`). This is NOT
-    # an async-codegen gap — it lives entirely in the general comptime/
-    # generic-parameter codegen, used throughout the compiled stdlib (SIMD
-    # widths, dtypes, comptime ints, ...), so fixing it is a separate,
-    # high-blast-radius project of its own, not a narrow async-codegen
-    # addition. (Each file may have additional, not-yet-fully-diagnosed
-    # blockers on top of this one — e.g. test_asyncrt.mojo's
-    # `create_task`/`Task` composition — this is only the first, confirmed
-    # one; it alone is enough to block the whole module.)
-    # See bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md
-    # for both repros and the full analysis.
+    # UPDATE (this session): the general comptime bracket-parameter
+    # value-binding bug (`f[N](...)` silently compiling to a placeholder
+    # `0`) is FIXED for top-level free functions — see
+    # bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md's
+    # "Update" section, verified end-to-end in
+    # test_comptime_bracket_params.py. These two files are still blocked,
+    # but for their OWN, narrower remaining reason: their comptime-bracket-
+    # parametrized functions (`test_asyncrt_add[lhs: Int](rhs: Int)` /
+    # `test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)`) are BOTH (a)
+    # NESTED `def`s (defined inside another function's body — the fix's
+    # local-generic-function registration only scans top-level module
+    # statements, confirmed via a fresh nested-def repro that still folds
+    # to 0) and (b) themselves `async def` — confirmed directly: after the
+    # top-level fix, this module now fails with the ordinary "no compiled
+    # async/generator support for this shape" refusal
+    # (`_async_quick_eligible` rejects any parameterized `async def`), not
+    # the comptime bug. Needs both nested-function generic registration
+    # (compatible with `@parameter`/closure-capture semantics) AND the
+    # previously-scoped "parametric `@parameter async def` support" /
+    # `_async_quick_eligible` widening — neither attempted yet.
     'test/runtime/test_asyncrt.mojo':
-        'comptime bracket-parametrized function calls silently compile to '
-        '0 instead of binding the real value — see bugs/CODEGEN_comptime_'
-        'bracket_parametrized_function_calls_silently_wrong.md',
+        'nested, async-def comptime-bracket-parametrized functions '
+        '(test_asyncrt_add[lhs: Int](rhs: Int)) — the general top-level '
+        'value-binding bug is fixed, but nested-function generic '
+        'registration and parameterized-async-def eligibility widening '
+        'are still unimplemented — see bugs/CODEGEN_comptime_bracket_'
+        'parametrized_function_calls_silently_wrong.md',
     'test/runtime/test_tracing.mojo':
-        'comptime bracket-parametrized function calls silently compile to '
-        '0 instead of binding the real value — see bugs/CODEGEN_comptime_'
+        'nested, async-def comptime-bracket-parametrized functions '
+        '(test_tracing_add[enabled: Bool, lhs: Int](rhs: Int)) — the '
+        'general top-level value-binding bug is fixed, but nested-function '
+        'generic registration and parameterized-async-def eligibility '
+        'widening are still unimplemented — see bugs/CODEGEN_comptime_'
         'bracket_parametrized_function_calls_silently_wrong.md',
 
     # test_locks.mojo and test_raising_asyncrt.mojo do NOT hit the comptime-
