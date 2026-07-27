@@ -2990,6 +2990,16 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
+        # Step I (create_task/Task/TaskGroup/RaisingTask project): mirrors
+        # self._generator_var_api exactly, but for a `MojoAsync *` value
+        # produced by `create_task(...)`/`create_raising_task(...)` and held
+        # in a real Mojo variable across statements (`var task =
+        # create_task(f()); ...; task.wait()`) -- lets `.wait()` (and any
+        # later `await task`) recover which extern "C" _start/_is_done/
+        # _value/_destroy/_translate_pending_exc API and value_ctype this
+        # particular handle uses, without re-deriving it from the (long
+        # gone, by then) original create_task(...) CallExpr.
+        self._async_var_api: dict[str, dict] = {}
         # Concatenated .cpp text (one C++20 translation unit) for every
         # supported generator in this module, or '' if none. Set at the very
         # end of gen_module, once the API is fully known — the caller
@@ -3056,6 +3066,33 @@ class GimpleGen:
         # this up via `(self.current_func_name, name)`.
         self._supported_async_closures: dict[tuple, FunctionDef] = {}
         self._async_closure_api: dict[tuple, dict] = {}
+        # Step I (create_task/Task/TaskGroup/RaisingTask project): async
+        # functions nested INSIDE an ordinary top-level function's own body
+        # (e.g. a local `@parameter async def wrapper(): ...` helper
+        # private to one `def test_xxx():`) — compiled by gen_module's own
+        # dedicated nested-async pass (see _compile_nested_async_functions),
+        # keyed by the QUALIFIED name `f"{enclosing_name}::{nested_name}"`
+        # (never by bare name — two different enclosing functions may each
+        # define their own same-named nested helper, e.g. two different
+        # tests each with their own local `wrapper()`, and this dict must
+        # keep them distinct). This is NOT the dict any call-site lowering
+        # consults directly: gen_module's main per-statement loop instead
+        # temporarily copies each entry belonging to the function currently
+        # being compiled into self._async_api under its BARE name (a scoped
+        # push), lowers that one function's body (so create_task(wrapper())
+        # resolves it exactly like a top-level async function would), then
+        # pops it back out — real lexical scoping on top of self._async_api's
+        # flat, bare-name-keyed shape, without changing that shape or any of
+        # its existing bare-name consumers (create_task, await composition,
+        # asyncio.run).
+        #
+        # Distinct from _async_closure_api (struct-method-nested closures,
+        # above): that mechanism handles a nested `async def` whose PARENT is
+        # a struct method's body; this one handles a nested `async def`
+        # whose PARENT is an ordinary top-level function's body. The two
+        # discovery passes scan disjoint parent-container shapes and never
+        # register the same FunctionDef twice.
+        self._nested_async_api: dict[str, dict] = {}
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -7688,6 +7725,46 @@ class GimpleGen:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
 
+        # Step I (create_task/Task/TaskGroup/RaisingTask project):
+        # `task.wait()` (or `task^.wait()` — the `^` transfer sigil is
+        # stripped by the tokenizer, see mojo_compiler.py, so it parses
+        # identically) where `task` holds a `MojoAsync *` handle produced
+        # by `create_task(...)`/`create_raising_task(...)` (tracked in
+        # self._async_var_api — see that dict's docstring). Blocks the
+        # current (single-threaded, cooperative) scheduler to completion —
+        # reuses the EXACT SAME drive/translate/read/destroy sequence the
+        # `asyncio.run(...)` bridge already uses (see _lower_call's
+        # `module_name == 'asyncio' and method_name == 'run'` branch),
+        # since blocking-wait-for-completion is semantically the same
+        # operation there and here, just reached via a different Mojo-level
+        # spelling. No structural distinction is made here between a plain
+        # `Task` and a `RaisingTask` — this codegen's promise already
+        # stages ANY escaped exception generically (Step E), regardless of
+        # whether the async function was declared `raises`, so
+        # `create_raising_task(...)` (below, in _lower_call) reuses this
+        # exact same tracking/handle shape; the real Mojo-level `Task` vs.
+        # `RaisingTask` distinction is a type-checking-only concern this
+        # codegen doesn't model.
+        if (isinstance(func.obj, IdentExpr) and func.obj.name in self._async_var_api
+                and func.member == 'wait' and not node.args):
+            api = self._async_var_api[func.obj.name]
+            base, vct = api['base'], api['value_ctype']
+            handle_expr = func.obj.name
+            self._emit(f"  mojo_async_run_until_complete ();")
+            self._emit(f"  {base}_translate_pending_exc ({handle_expr});")
+            pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+            bb_pending = self._new_bb()
+            bb_ok = self._new_bb()
+            self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+            self._emit_label(bb_pending)
+            self._emit(f"  mojo_exc_pending_set (0);")
+            self._emit(f"  {base}_destroy ({handle_expr});")
+            self._emit("  mojo_raise ();")
+            self._emit_label(bb_ok)
+            result = self._new_val(vct, f"{base}_value ({handle_expr})")
+            self._emit(f"  {base}_destroy ({handle_expr});")
+            return vct, result
+
         # `super().method(args)` — resolve directly to the base struct's method
         # rather than falling through to the generic obj.method() dispatch below,
         # which would try to evaluate `super()` as an ordinary call to a bare
@@ -9924,6 +10001,74 @@ class GimpleGen:
             t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
+        # Step I (create_task/Task/TaskGroup/RaisingTask project):
+        # `create_task(f())` / `create_raising_task(f())` where `f` is a
+        # supported compiled async function (top-level OR nested — a
+        # nested one is only resolvable here while THIS enclosing
+        # function's body is being compiled, via gen_module's scoped
+        # push into self._async_api — see
+        # _compile_nested_async_functions's docstring). Constructs the
+        # coroutine via `{base}_start(args...)` (exactly like the
+        # generator-call path just above) and schedules it onto Step A's
+        # ready queue via `mojo_async_schedule_ready` -- but, unlike
+        # `asyncio.run(...)`'s bridge, does NOT drive the scheduler to
+        # completion here: real Mojo's own `create_task` returns a `Task`
+        # immediately, without blocking, and this project's single-
+        # threaded cooperative scheduler only actually RUNS scheduled work
+        # when something later drains it (`.wait()` -- see
+        # _lower_method_call's own `MojoAsync *`.`wait()` case just above
+        # -- or another `await`). The resulting `MojoAsync *` handle is
+        # tracked in self._async_var_api (mirrors self._generator_var_api's
+        # identical "value -> api" side-table pattern exactly) so a later
+        # `.wait()` on the variable it gets assigned to can recover which
+        # extern "C" API/value_ctype to use. No structural difference is
+        # made here between `create_task` and `create_raising_task` -- see
+        # _lower_method_call's own docstring on why this codegen's promise
+        # already stages ANY escaped exception generically regardless of a
+        # `raises` annotation, so both map onto the identical handle shape.
+        if (fname_raw in ('create_task', 'create_raising_task') and len(node.args) == 1
+                and not getattr(node, 'kwargs', None)):
+            inner = node.args[0]
+            # A nested async def with no comptime bracket parameters is
+            # normally captured by gen_module's own _compile_nested_async_
+            # functions pass (registered into self._nested_async_api, then
+            # scoped-pushed into self._async_api for this enclosing
+            # function's body compile — see that pass's docstring) and
+            # resolves via the self._async_api lookup just below. But
+            # gen_module also has a SEPARATE, independently-built nested-
+            # in-top-level-function discovery pass (the comptime-bracket-
+            # parametrized one — see _async_closure_api's 'comptime_params'
+            # key) that targets the identical parent shape (an ordinary
+            # top-level function's body) and, for a param-less nested
+            # async def, would produce an equally valid compiled unit —
+            # gen_module's pass ORDERING already guarantees only one of the
+            # two ever actually claims any given nested async def (each
+            # pops its id out of the shared `_async_fns` on success, and
+            # the other checks that first), so no double-compile occurs.
+            # This fallback exists purely so create_task(...)'s own lookup
+            # doesn't silently regress if a future change to that ordering
+            # (or a bracket-param-free call to a function that happens to
+            # be comptime-parametrized) ever lets the OTHER pass claim it
+            # first instead.
+            _acl_fallback = self._async_closure_api.get((self.current_func_name,
+                                                          getattr(inner.func, 'name', None))) \
+                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr) else None
+            if (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
+                    and (inner.func.name in self._async_api or _acl_fallback is not None)
+                    and not getattr(inner, 'kwargs', None)):
+                api = self._async_api.get(inner.func.name) or _acl_fallback
+                base = api['base']
+                arg_pairs = [self.lower_expr(a) for a in inner.args]
+                handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
+                self._emit(f"  mojo_async_schedule_ready ({handle});")
+                self._async_var_api[handle] = api
+                return 'MojoAsync *', handle
+            raise RuntimeError(
+                f"cannot compile module: {fname_raw}(...) is only "
+                "supported for the shape "
+                f"`{fname_raw}(<call to a supported compiled async "
+                "function>)` -- falling back to interpreting this module "
+                "from source instead")
         # Step B (revised — see bugs/CODEGEN_compiled_async_eager_execution_
         # semantic_mismatch.md): `f()` where `f` is a supported compiled
         # async function, with its result actually CONSUMED as a value
@@ -12288,6 +12433,22 @@ class GimpleGen:
             # If value has element type tracking (e.g. split result), propagate to inferred var
             if node.type_ann is None and v in self._elem_types:
                 self._elem_types[node.name] = self._elem_types[v]
+            # `var g = counter(3)` / `var task = create_task(f())` — the
+            # `var`-keyword spelling of a declaration lowers through THIS
+            # method (VarDecl), not the plain AssignStmt path a few lines
+            # below in this file, which already carries the generator/async
+            # "value -> api" side-table entries across a `g = counter(3)`-
+            # style (no `var`) assignment (see that method's own comment on
+            # self._generator_var_api/self._async_var_api). Mirrored here
+            # for the exact same reason — without it, `var task =
+            # create_task(f())` followed by `task.wait()` found no entry
+            # for `task` and fell through to a bogus generic method-
+            # dispatch fallback instead of the real _lower_method_call
+            # `.wait()` handling.
+            if actual_dst == 'MojoGenerator *' and v in self._generator_var_api:
+                self._generator_var_api[node.name] = self._generator_var_api[v]
+            if actual_dst == 'MojoAsync *' and v in self._async_var_api:
+                self._async_var_api[node.name] = self._async_var_api[v]
             self._safe_coerce_emit(vtype, actual_dst, v, self._write_dest(node.name))
         else:
             ctype = self._resolve_type(node.type_ann)
@@ -12516,6 +12677,13 @@ class GimpleGen:
             # generator_not_first_class_value.md.
             if dst == 'MojoGenerator *' and v in self._generator_var_api:
                 self._generator_var_api[tname] = self._generator_var_api[v]
+            # Step I: `var task = create_task(f())` -- mirrors the
+            # MojoGenerator* carry-through immediately above exactly (see
+            # self._async_var_api's own docstring for the identical "value
+            # -> api" side-table rationale, just for `MojoAsync *` instead
+            # of `MojoGenerator *`).
+            if dst == 'MojoAsync *' and v in self._async_var_api:
+                self._async_var_api[tname] = self._async_var_api[v]
             self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
@@ -13784,17 +13952,29 @@ class GimpleGen:
             _emit_exits()
 
     def _gen_stmt_FunctionDef(self, node):
-        # An async closure nested inside this method (device_context.mojo's
-        # `async def wrapper(...) capturing -> None:` shape) was already
-        # fully compiled to its own C++20 coroutine unit by gen_module's
-        # dedicated discovery pass (see _async_closure_api) — it gets NO
-        # ordinary GIMPLE body/env-struct-alloc here at all, exactly
-        # mirroring how a top-level supported async function's FunctionDef
-        # is skipped entirely in gen_module's own Phase 2a loop. Its
-        # captured value(s) are read directly at each CALL site instead
-        # (see _lower_call's/_gen_stmt_ExprStmt's async-closure-call
-        # handling), not pre-populated into an env struct here.
-        if (self.current_func_name, node.name) in getattr(self, '_async_closure_api', {}):
+        # A nested `async def` (not an async generator) — whether nested
+        # inside a struct method (device_context.mojo's `async def
+        # wrapper(...) capturing -> None:` shape, discovered by gen_module's
+        # dedicated struct-method-nested pass and registered in
+        # _async_closure_api — see that dict's docstring) or nested inside
+        # an ordinary top-level function's own body (Step I's
+        # `@parameter async def wrapper(): ...` shape, discovered by
+        # _compile_nested_async_functions and registered in
+        # _nested_async_api) — was already fully compiled to its own C++20
+        # coroutine unit by one of those two (disjoint-parent-shape)
+        # discovery passes. It gets NO ordinary GIMPLE body/env-struct-alloc
+        # here at all, exactly mirroring how a top-level supported async
+        # function's FunctionDef is skipped entirely in gen_module's own
+        # Phase 2a loop. Any call site referencing it resolves through
+        # _async_closure_api (keyed by (current_func_name, name)) or
+        # self._async_api's scoped push (for the top-level-function-nested
+        # case — see gen_module's per-statement loop), not through anything
+        # this statement itself would emit. A nested async def that turned
+        # out NOT eligible for either discovery pass is also skipped here
+        # (never falls through to ordinary closure-lifting, which has no
+        # `await` support at all) — any call site referencing it then hits
+        # its own honest, already-existing refusal instead.
+        if node.is_async and not node.is_generator:
             return
         outer_closures = getattr(self, '_all_closures', {}).get(
             self.current_func_name, {})
@@ -17100,7 +17280,8 @@ class GimpleGen:
         return [(v, outer_scope[v]) for v in sorted(free) if v in outer_scope]
 
     def _gen_cpp_async_unit(self, fn: FunctionDef, extra_captures: list | None = None,
-                            base_name_override: str | None = None) -> tuple[str, str, str, list]:
+                            base_name_override: str | None = None,
+                            scope_prefix: str | None = None) -> tuple[str, str, str, list]:
         """Step B of the compiled-path async/await codegen project (the
         async-function sibling of _gen_cpp_generator_unit, which Step B's
         planning deliberately decided should be a SEPARATE method/promise
@@ -17211,19 +17392,39 @@ class GimpleGen:
         for cap_name, cap_ctype in (extra_captures or []):
             param_ctypes.append((cap_name, cap_ctype))
         # Bare `fn.name` is only unique for a genuinely top-level compiled
-        # async function. A NESTED async closure (device_context.mojo's
-        # `wrapper` — see gen_module's dedicated discovery pass) is defined
-        # separately inside EACH of several methods (this exact file has
-        # FOUR distinct `wrapper` closures, one per enqueue_cpu_function/
-        # enqueue_cpu_range overload) — a bare-name `base` collided across
-        # all four (`_mojoasync_wrapper_start` redeclared with different
-        # signatures each time — a real, hand-verified "conflicting types"
-        # gcc error, the exact same class of bug _method_threaded_
-        # comptime_params' own struct/overload-blind keying hit earlier),
-        # so the caller supplies a fully-qualified override name instead
-        # (mirroring the ordinary closure-lifting convention's own
-        # `f"{outer}_{inner.name}"` mangling exactly).
-        base = f"_mojoasync_{_safe_name(base_name_override or fn.name)}"
+        # async function. Two DISTINCT nested shapes need a qualified name
+        # instead, mutually exclusive (a caller only ever supplies one):
+        #   - A NESTED ASYNC CLOSURE (device_context.mojo's `wrapper` —
+        #     struct-method-nested, see gen_module's dedicated discovery
+        #     pass) is defined separately inside EACH of several methods
+        #     (this exact file has FOUR distinct `wrapper` closures, one per
+        #     enqueue_cpu_function/enqueue_cpu_range overload) — a bare-name
+        #     `base` collided across all four (`_mojoasync_wrapper_start`
+        #     redeclared with different signatures each time — a real,
+        #     hand-verified "conflicting types" gcc error, the exact same
+        #     class of bug _method_threaded_comptime_params' own struct/
+        #     overload-blind keying hit earlier), so the caller supplies a
+        #     fully-qualified override name instead (mirroring the ordinary
+        #     closure-lifting convention's own `f"{outer}_{inner.name}"`
+        #     mangling exactly).
+        #   - A NESTED ASYNC FUNCTION (Step I's `@parameter async def
+        #     wrapper(): ...` — nested inside an ordinary top-level
+        #     function's body, see _compile_nested_async_functions) passes
+        #     its own enclosing function's name as `scope_prefix`, mirroring
+        #     _gen_cpp_generator_unit's identical `{struct_name}_
+        #     {method_name}` qualification for generator METHODS -- needed
+        #     for the identical reason: two DIFFERENT enclosing functions
+        #     each defining their own same-named nested async def (e.g. two
+        #     different tests each with their own local `wrapper()`) would
+        #     otherwise collide on identical C++ symbol names.
+        # A genuinely top-level async function (neither override supplied)
+        # keeps its original, unqualified base exactly as before.
+        if base_name_override:
+            base = f"_mojoasync_{_safe_name(base_name_override)}"
+        elif scope_prefix:
+            base = f"_mojoasync_{_safe_name(scope_prefix)}_{_safe_name(fn.name)}"
+        else:
+            base = f"_mojoasync_{_safe_name(fn.name)}"
         # Params are already "declared" locals as far as the body emitter is
         # concerned -- exactly mirrors _gen_cpp_generator_unit's identical
         # `declared` seeding (see that method's docstring for why this
@@ -17593,6 +17794,82 @@ class GimpleGen:
             f"}};",
         ]
         return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
+
+    def _compile_nested_async_functions(self, enclosing_name: str, body: list,
+                                         async_fns: dict) -> None:
+        """Step I (create_task/Task/TaskGroup/RaisingTask project): compile
+        any `async def` nested INSIDE an ordinary top-level function's own
+        body (e.g. a local `@parameter async def wrapper(): ...` helper
+        private to one `def test_xxx():`) via the exact same
+        _gen_cpp_async_unit path a top-level `async def` already uses.
+
+        gen_module's own `_walk_ast`-based scan (building `async_fns`)
+        already DISCOVERS these, but the original compile-ATTEMPT loop only
+        ever iterated top-level `stmts` — a nested async def was therefore
+        always left uncompiled, silently tripping the final "unhandled
+        async function(s)" whole-module refusal for any module containing
+        one at all (which is every real test file `create_task`/`Task`
+        needs, since real Mojo's own idiom is `@parameter async def
+        wrapper(): ...` scoped inside the test function that uses it, never
+        a bare top-level `async def`).
+
+        Called once per ordinary top-level FunctionDef, from gen_module's
+        own pre-pass (BEFORE the final "any remaining async_fns is an
+        honest whole-module refusal" check — see that check's own
+        docstring) — so this must itself decide eligibility/compile right
+        here rather than deferring it, and must pop every id it resolves
+        out of `async_fns` (the same dict gen_module's own top-level async
+        loop already pops into), exactly mirroring that loop's own
+        contract.
+
+        Registers each successfully-compiled nested function into
+        self._nested_async_api under the QUALIFIED key
+        `f"{enclosing_name}::{nested_name}"` — never into self._async_api
+        directly (see self._nested_async_api's own docstring for why: two
+        different enclosing functions may each define their own same-named
+        nested helper, and every compiled async cpp fragment in this module
+        lands in ONE shared .cpp translation unit, so both the dict key AND
+        the underlying C++ symbol names — see _gen_cpp_async_unit's
+        `scope_prefix` — must stay qualified/unique). gen_module's main
+        per-statement loop is responsible for temporarily copying the
+        entries belonging to whichever function it's about to compile into
+        self._async_api under their bare names (a scoped push/pop) right
+        around that one `gen_func` call.
+
+        An unsupported nested async def is silently left uncompiled here
+        (not an error) — a caller that actually references it (e.g.
+        `create_task(it())`) then hits that call site's own honest,
+        already-existing refusal instead, exactly like any other
+        not-yet-supported shape; nothing here ever emits a dangling/
+        unresolved reference."""
+        for n in _walk_ast(body):
+            if not (isinstance(n, FunctionDef) and n.is_async and not n.is_generator):
+                continue
+            if id(n) not in async_fns:
+                # Already handled (e.g. also reachable as a top-level
+                # statement, or visited by an earlier call to this method
+                # for a different enclosing function that happens to share
+                # a sub-body reference) — nothing left to do.
+                continue
+            qualified = f"{enclosing_name}::{n.name}"
+            if not _async_quick_eligible(n, frozenset(self._async_api.keys())):
+                continue
+            try:
+                cpp_text, value_ctype, base, param_ctypes = \
+                    self._gen_cpp_async_unit(n, scope_prefix=enclosing_name)
+            except _UnsupportedGeneratorShape as e:
+                _debug_note(f'nested async function {n.name!r} (inside '
+                            f'{enclosing_name!r}) not eligible for C++ '
+                            'coroutine path, falling back to honest '
+                            'refusal', e)
+                continue
+            self._nested_async_api[qualified] = {
+                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                'nested_name': n.name,
+            }
+            self.func_param_types[f"{base}_start"] = param_ctypes
+            self._generator_cpp_units.append(cpp_text)
+            async_fns.pop(id(n), None)
 
     def _gen_cpp_async_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         """Final step of the compiled-path async/await codegen project:
@@ -19470,6 +19747,31 @@ class GimpleGen:
             self._generator_cpp_units.append(cpp_text)
             _async_fns.pop(id(s), None)
 
+        # Step I (create_task/Task/TaskGroup/RaisingTask project): async
+        # functions NESTED inside an ordinary top-level function's own body
+        # (real Mojo's own idiom: `@parameter async def wrapper(): ...`
+        # scoped inside the test function that uses it, never a bare
+        # top-level `async def`) — the loop just above only ever iterates
+        # top-level `stmts`, so a nested one is otherwise always left
+        # uncompiled in `_async_fns`, tripping the final "unhandled async
+        # function(s)" whole-module refusal below. Must run BEFORE that
+        # final check (not deferred to the later per-statement body-compile
+        # loop, which runs much further down) — see
+        # _compile_nested_async_functions's own docstring for the full
+        # design (qualified-key registration into self._nested_async_api,
+        # scoped push/pop into self._async_api done later, per enclosing
+        # function, by the per-statement loop). Only ordinary (not
+        # themselves async/generator) top-level FunctionDefs are scanned —
+        # an async/generator top-level function's own body was already
+        # fully handled by its own dedicated `_gen_cpp_*_unit` pass above,
+        # which has no nested-def support of its own (out of scope: no
+        # target file needs a doubly-nested async def).
+        for s in stmts:
+            if not (isinstance(s, FunctionDef) and id(s) not in _async_fns
+                    and id(s) not in _generator_fns):
+                continue
+            self._compile_nested_async_functions(s.name, s.body, _async_fns)
+
         # Milestone C step 3: generator METHODS on structs — same eligibility/
         # compile-attempt shape as the free-function loop just above, keyed
         # by (struct_name, method_name) rather than by bare name (see
@@ -19797,6 +20099,29 @@ class GimpleGen:
             self.var_types = _saved_vt2
             for stmt in _all_stmts_nonfunc(body):
                 if not isinstance(stmt, FunctionDef):
+                    continue
+                # Step I (create_task/Task/TaskGroup/RaisingTask project):
+                # a nested `async def` (not an async GENERATOR — those stay
+                # on this ordinary closure-lifting path unchanged, out of
+                # this step's scope) was already compiled, if eligible, via
+                # the dedicated C++20-coroutine path by gen_module's own
+                # _compile_nested_async_functions pre-pass (which runs
+                # BEFORE this closure scan — see gen_module for the pass
+                # ordering) — it must NOT also be lifted into an ordinary
+                # plain-C closure function here, which would either
+                # silently shadow/duplicate it or (since no ordinary,
+                # non-coroutine lowering anywhere in this file has ever
+                # handled `await` — confirmed via grep) simply re-hit the
+                # same "unsupported expression" refusal an ordinary
+                # lowering attempt of an `await`-containing body always
+                # already did before this project's async codegen existed
+                # at all. Skipping it here is therefore never a regression
+                # (a nested async def with `await` in its body could not
+                # have compiled via this ordinary path either way) and is
+                # required for a genuinely ELIGIBLE one (skipping it here
+                # is what lets the C++ coroutine unit be the only
+                # definition anyone calls into).
+                if stmt.is_async and not stmt.is_generator:
                     continue
                 inner     = stmt
                 lifted    = f"{outer_name}_{inner.name}"
@@ -20206,7 +20531,30 @@ class GimpleGen:
                 for ci in self._all_closures.get(stmt.name, {}).values():
                     _emit_closure_recursive(ci, stmt.name)
                 self._lambda_parts = []
-                func_parts.append(self.gen_func(stmt))
+                # Step I: scoped push — temporarily expose this function's
+                # own nested async helpers (compiled earlier by
+                # gen_module's own _compile_nested_async_functions pass,
+                # under a QUALIFIED key — see self._nested_async_api's
+                # docstring) into self._async_api under their bare names,
+                # for the duration of THIS ONE function's body compile
+                # only, so create_task(wrapper())/await composition inside
+                # it resolve exactly like a top-level async function would.
+                # Popped again right after (whether or not gen_func raises
+                # — see `finally`), so a later, unrelated top-level
+                # function never sees a stale entry belonging to a
+                # DIFFERENT enclosing function's same-named nested helper.
+                _nested_pushed = []
+                _prefix = f"{stmt.name}::"
+                for _qn, _info in self._nested_async_api.items():
+                    if _qn.startswith(_prefix):
+                        _nm = _info['nested_name']
+                        self._async_api[_nm] = _info
+                        _nested_pushed.append(_nm)
+                try:
+                    func_parts.append(self.gen_func(stmt))
+                finally:
+                    for _nm in _nested_pushed:
+                        self._async_api.pop(_nm, None)
                 # Flush any lambdas lifted during gen_func, emitting them
                 # immediately before the enclosing function body so forward
                 # declarations in the preamble resolve correctly.
@@ -21719,17 +22067,19 @@ class GimpleGen:
         # on this SAME instance's own _supported_async/_supported_async_
         # closures, which an elaborated fragment with no async function of
         # its own never populates) — so this must ALSO pull in the header,
-        # independent of the `_supported_async`/`_supported_async_closures`
-        # gate just below.
+        # independent of the `_supported_async`/`_supported_async_closures`/
+        # `_nested_async_api` gate just below.
         _needs_async_runtime_h = bool(
             self._supported_async or self._supported_async_closures
+            or self._nested_async_api
             or (self._funcptr_builtins_needed
                 & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}))
-        if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures):
+        if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures
+                                            or self._nested_async_api):
             parts.append('typedef struct MojoAsync MojoAsync;')
             parts.append('#include <mojo_async_runtime.h>')
             parts.append('')
-        if self._supported_async or self._supported_async_closures:
+        if self._supported_async or self._supported_async_closures or self._nested_async_api:
             # Step B: the extern "C" API (opaque handle + start/is_done/
             # value/destroy — no `_resume`, see _gen_cpp_async_unit's
             # docstring) for every supported async function in this module.
@@ -21758,7 +22108,16 @@ class GimpleGen:
             # C, no cast needed at the call site.
             parts.append('typedef struct MojoAsync MojoAsync;')
             parts.append('#include <mojo_async_runtime.h>')
-            for _api in self._async_api.values():
+            # Step I: nested async functions (self._nested_async_api,
+            # qualified-key-only — see that dict's own docstring) get their
+            # extern "C" declarations emitted here too, unconditionally,
+            # alongside the top-level ones (self._async_api) — each has its
+            # own already-unique, scope_prefix-qualified `base` (see
+            # _gen_cpp_async_unit), so there is no name-collision risk in
+            # emitting every nested unit's forward declarations regardless
+            # of which one (if any) the module's own per-statement body
+            # loop ends up actually calling into.
+            for _api in list(self._async_api.values()) + list(self._nested_async_api.values()):
                 _base, _vct = _api['base'], _api['value_ctype']
                 _aptypes = ', '.join(_api.get('params') or []) or 'void'
                 parts.append(f"extern MojoAsync *{_base}_start ({_aptypes});")
