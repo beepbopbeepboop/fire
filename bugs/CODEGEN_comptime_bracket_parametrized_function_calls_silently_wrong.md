@@ -578,28 +578,40 @@ name -> captures lookup, no graph traversal needed).
 
 That part is genuinely simple. But a SEPARATE, deeper problem surfaced
 first: does the GENERAL (non-async) closure-lifting mechanism even
-support a captured variable being MUTATED at all today? A minimal,
-hand-written, non-async repro answered this directly:
+support a captured variable being MUTATED at all today?
+
+**Correction (independently verified against real Mojo via `tools/mojo`
+after this Update was first written):** the original repro here was
+`def inc(): counter += 1`, with NO explicit capture-spec — that is not
+actually valid Mojo. Real Mojo rejects it outright at parse time:
+`error: Could not infer capture convention of the captured value
+counter`. Mojo requires an explicit `{mut}` capture-spec (unlike
+Python's implicit closure-over-enclosing-scope) to mutate a captured
+variable at all. The corrected, actually-valid repro:
 
 ```python
 def test_ordinary_mut() raises:
     var counter = 0
-    def inc():
+    def inc() {mut}:
         counter += 1
     inc(); inc(); inc()
     print(counter)
 ```
 
-Compiles and links clean, but prints `0`, not `3` — real Mojo/Python
-semantics ("`inc` mutates the enclosing scope's `counter`") is silently
-NOT what this codegen's general closure lifter does; it captures
-`counter` (if at all) as a plain by-VALUE copy, with no by-reference
-capture mechanism of any kind. This is a genuinely SEPARATE, PRE-
-EXISTING, latent bug in the general closure system — independent of
-async, independent of TaskGroup, independent of this whole project —
-that nothing in this codebase's own test suite currently exercises or
-depends on (confirmed: no existing test covers a mutated closure
-capture), which is presumably why it's gone unnoticed.
+Confirmed against real Mojo (`tools/mojo`): prints `3`, as expected.
+Confirmed against THIS project, both paths, independently: `mojo.py run`
+prints `0`; `mojo.py build` + running the compiled binary also prints
+`0`. So the underlying finding stands, just narrower/more precise than
+originally stated — this is not "real Mojo silently allows implicit
+mutable capture and we're wrong about the default"; it's "even the
+explicitly-`{mut}`-annotated, actually-valid form of mutable capture
+doesn't work in either of this project's execution paths." This is a
+genuinely SEPARATE, PRE-EXISTING, latent bug in the general closure
+system — independent of async, independent of TaskGroup, independent of
+this whole project — that nothing in this codebase's own test suite
+currently exercises or depends on (confirmed: no existing test covers a
+`{mut}`-capture-spec closure at all), which is presumably why it's gone
+unnoticed.
 
 This changes the shape of gap (3): transitively PROPAGATING `inc`'s
 capture NAMES into `test_atomic`'s own free-variable set (the simple
