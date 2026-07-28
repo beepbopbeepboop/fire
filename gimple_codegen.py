@@ -41,6 +41,22 @@ from generated_dispatch import (
 
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Sentinel stored in GimpleGen._own_imported_func_home when a bare free-
+# function name genuinely cannot be resolved to one home module within a
+# single compile unit — e.g. one file with two different nested scopes each
+# locally importing a same-named function from two DIFFERENT sibling
+# modules (see _note_own_func_home / _func_qualifier). Distinguishes "not
+# registered at all" (falls through to the next, less-specific tier) from
+# "registered, but genuinely ambiguous" (must raise rather than silently
+# pick one — see doc/STDLIB-BUGS.md SB-1's per-scope-import residual).
+# A string, not object() — a real module-qualifier name is always a valid
+# Mojo identifier (module_name_for_path output), and this string can never
+# collide with one; object() itself is NOT self-host-safe (make
+# check-selfhost's own compile of this file's `_AMBIGUOUS_FUNC_HOME =
+# object()` tried to lower it as a call to an undefined C symbol `_object`,
+# per this project's "self-host every codegen-affecting change" gate).
+_AMBIGUOUS_FUNC_HOME = '\x00__SB1_AMBIGUOUS_FUNC_HOME__\x00'
+
 # Matches a literal `sys.path.insert(<int>, "<string>")` / `(..., '...')` call
 # in Mojo source text. This compiler never executes anything, so a runtime
 # `sys.path.insert` (the pattern myinterpreter.py's actual interpretation of
@@ -3490,10 +3506,45 @@ class GimpleGen:
         # call site must independently derive the exact same qualifier the
         # defining module used, which is what this dict records (mirroring
         # _imported_struct_home's own comment above almost verbatim).
-        # Populated by _emit_stdlib_import_externs (module_loader-resolved
-        # imports), _register_link_imports (dylib-reflection/link-mode
-        # imports), and gen_module's do_imports inline-compile loop.
+        # Populated ONLY by gen_module's do_imports inline-compile loop, keyed
+        # by an inlined module's OWN top-level FunctionDef names -> ITS OWN
+        # module_name — see that loop's own comment. SHARED (by object
+        # identity) across every nested temp_gen a do_imports=True build
+        # spins up (_compile_imported_module below), which makes it at best a
+        # cross-module FALLBACK, never authoritative for a specific call
+        # site: _func_qualifier consults _own_imported_func_home (below)
+        # FIRST, precisely because this dict cannot disambiguate "two sibling
+        # modules define the same bare function name" — whichever inlined
+        # module is processed first claims the bare-name key via setdefault
+        # and every other module's OWN local definition of that same bare
+        # name would otherwise silently inherit the first one's qualifier.
         self._imported_func_home: dict = {}
+        # Imported free-function bare name -> its home module's qualifier,
+        # populated ONLY from the CURRENT gen_module call's own top-level
+        # FromImportStmt scan (_emit_stdlib_import_externs /
+        # _register_link_imports, both of which operate on `stmts` — this
+        # instance's own compile unit — never a nested/sibling module's).
+        # Deliberately NOT shared across nested temp_gens (contrast
+        # _imported_func_home above): a real bug (found via `mojo.py build`
+        # on two sibling modules that each define a same-named free function
+        # and are each wrapped by their OWN importer module — e.g.
+        # alpha_wrapper.mojo doing `from alpha_module import f` and
+        # beta_wrapper.mojo doing `from beta_module import f`, both
+        # transitively pulled into one program) showed that when
+        # _imported_func_home is consulted first, beta_wrapper's own,
+        # correctly-resolved registration of `f -> beta_module` is a
+        # setdefault no-op (alpha_module already claimed the bare key `f` in
+        # the SHARED dict via the do_imports Phase-0 loop, which runs before
+        # any wrapper module's own imports are even scanned) — so
+        # beta_wrapper's call site silently called alpha_module's `f`
+        # instead of beta_module's: a real, silent miscompile, not a build
+        # failure. Every module that actually REFERENCES an imported name
+        # necessarily has that name's own FromImportStmt somewhere in ITS
+        # OWN top-level stmts (Mojo/Python scoping requires it), so this
+        # per-instance dict is always authoritative for any name looked up
+        # while compiling THIS module's own body — no sharing needed, and
+        # sharing is exactly what caused the bug.
+        self._own_imported_func_home: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -3925,6 +3976,52 @@ class GimpleGen:
                 continue
             for name, alias in stmt.names:
                 sym = alias if alias else name
+                # Record this function's home module (SB-1 fix, _func_qualifier)
+                # UNCONDITIONALLY — deliberately BEFORE the `sym in seen`
+                # early-exit below. `seen` (and func_return_types, which
+                # seeds it) is SHARED across every nested temp_gen a
+                # do_imports=True build spins up (_compile_imported_module:
+                # `temp_gen.func_return_types = self.func_return_types`), so
+                # by the time a SECOND module's own FromImportStmt scan for
+                # the SAME bare name runs, `sym in seen` is already true
+                # (some earlier module already registered it) and an early
+                # `continue` here would skip this registration entirely —
+                # exactly the bug that made _own_imported_func_home stay
+                # empty for beta_wrapper.mojo's own compile in the repro
+                # below, silently leaving its call site to fall through to
+                # the shared, first-registered-wins _imported_func_home
+                # fallback (alpha_module's qualifier) instead of its own
+                # correct one. This registration is independent of `exports`/
+                # `info`/`sig` (needs only `mod` + `sym`) and setdefault-safe,
+                # so computing it before the early-exit is always correct.
+                # Resolved via module_loader's OWN resolve_module_path (the
+                # exact resolution `load_module(mod)` below just used to find
+                # this module's exports) rather than self._parsed_import/
+                # imports' process-global Resolver singleton: that
+                # singleton's search path is mutated by whichever test/build
+                # last called imports.reset_resolver(path=...) and is NOT
+                # necessarily scoped to this compile, so resolving through it
+                # here was observed to silently return no path (test order-
+                # dependent — a prior test's reset_resolver(path=[some other
+                # tempdir]) left the global resolver unable to find a
+                # runtime/-relative sibling module like 'corolike'),
+                # producing an unqualified qualifier that disagreed with the
+                # defining module's own (correctly qualified) compile and
+                # broke the link. module_loader's resolve_module_path has no
+                # such global mutable state — it's a pure function of
+                # STDLIB_PATH/TEST_PATH.
+                import module_loader as _mlmod
+                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
+                if _imp_path and os.path.exists(_imp_path):
+                    _qual = _mlmod.module_name_for_path(_imp_path)
+                    if _qual:
+                        # _own_imported_func_home (per-instance, see its own
+                        # comment): THIS module's own FromImportStmt is
+                        # authoritative for this bare name within this
+                        # module's own body — must win over any OTHER
+                        # module's claim on the same bare name in the shared
+                        # _imported_func_home fallback.
+                        self._note_own_func_home(sym, _qual)
                 if sym in seen or sym in _C_BUILTINS:
                     continue
                 info = exports.get(name)
@@ -3943,32 +4040,6 @@ class GimpleGen:
                     'module': mod, 'original_name': name,
                     'c_return_type': ret, 'signature': sig,
                 }
-                # Record this function's home module (SB-1 fix, _func_qualifier)
-                # so this call site's _func_csym computes the SAME qualified
-                # symbol the defining module's own standalone compile actually
-                # emits, instead of an unqualified name two different modules'
-                # same-named overloads could collide on. Deliberately resolved
-                # via module_loader's OWN resolve_module_path (the exact
-                # resolution `load_module(mod)` above just used to find this
-                # module's exports) rather than self._parsed_import/imports'
-                # process-global Resolver singleton: that singleton's search
-                # path is mutated by whichever test/build last called
-                # imports.reset_resolver(path=...) and is NOT necessarily
-                # scoped to this compile, so resolving through it here was
-                # observed to silently return no path (test order-dependent —
-                # a prior test's reset_resolver(path=[some other tempdir])
-                # left the global resolver unable to find a runtime/-relative
-                # sibling module like 'corolike'), producing an unqualified
-                # qualifier that disagreed with the defining module's own
-                # (correctly qualified) compile and broke the link.
-                # module_loader's resolve_module_path has no such global
-                # mutable state — it's a pure function of STDLIB_PATH/TEST_PATH.
-                import module_loader as _mlmod
-                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
-                if _imp_path and os.path.exists(_imp_path):
-                    _qual = _mlmod.module_name_for_path(_imp_path)
-                    if _qual:
-                        self._imported_func_home.setdefault(sym, _qual)
                 # When imported with an alias, replace the original name in the sig
                 # so the extern matches the alias name used at call sites.
                 if alias and name != alias:
@@ -4132,7 +4203,11 @@ class GimpleGen:
                             import module_loader as _mlmod
                             _qual = _mlmod.module_name_for_path(source)
                             if _qual:
-                                self._imported_func_home.setdefault(sym, _qual)
+                                # _own_imported_func_home (per-instance): see
+                                # its own comment — this module's own import
+                                # must win over any other module's claim on
+                                # the same bare name.
+                                self._note_own_func_home(sym, _qual)
                         # Don't emit extern if: (a) locally defined in this module
                         # (would conflict), or (b) it's a C stdlib symbol GCC already
                         # declares (conflicting types when Mojo stub has different sig).
@@ -16060,6 +16135,42 @@ class GimpleGen:
     def _overload_suffix(self, bare_name: str) -> str:
         return self.overload_suffix_for(self.func_param_types.get(bare_name))
 
+    def _note_own_func_home(self, bare_name: str, module_name: str) -> None:
+        """Register bare_name's home module into THIS instance's own
+        _own_imported_func_home (see its own comment) — or, if bare_name is
+        already registered to a DIFFERENT module within this SAME compile
+        unit, mark it _AMBIGUOUS_FUNC_HOME instead of silently keeping
+        whichever module happened to be processed first.
+
+        This genuine same-instance conflict is narrower than it looks: it
+        can only fire when ONE gen_module call's own transitive import
+        discovery (find_imports) pulls in two DIFFERENT sibling modules that
+        both define a function with the SAME bare name — e.g. one file with
+        two different nested scopes each locally importing a same-named
+        function from two different sibling modules (do_imports=True; a
+        real repro found via `mojo.py build`, not build_stdlib_dylib.py's
+        per-module-standalone-compile path, which never shares/nests
+        GimpleGen instances this way). It does NOT fire across DIFFERENT
+        compile instances (e.g. two sibling WRAPPER modules each importing
+        their own same-named dependency) — those each get their OWN private
+        _own_imported_func_home dict, so there's nothing to conflict with;
+        that shape is the one this whole tier exists to get right, and is
+        covered by test_sb1_wrapper_modules_distinct_symbols.
+
+        _func_qualifier only raises for _AMBIGUOUS_FUNC_HOME if the
+        ambiguous name is actually looked up — an unrelated, coincidentally
+        same-named private helper in two sibling modules that this compile
+        unit never actually CALLS by that bare name never triggers an
+        error, only a genuinely ambiguous reference does (never silently
+        miscompile, but also never spuriously refuse an innocuous
+        same-named-but-unused coincidence)."""
+        home = self._own_imported_func_home
+        cur = home.get(bare_name)
+        if cur is None:
+            home[bare_name] = module_name
+        elif cur != _AMBIGUOUS_FUNC_HOME and cur != module_name:
+            home[bare_name] = _AMBIGUOUS_FUNC_HOME
+
     def _func_qualifier(self, bare_name: str) -> str:
         """Module-qualifier prefix for a free function's mangled C symbol — the
         free-function analog of _struct_method_qualifier (same exemptions,
@@ -16073,24 +16184,99 @@ class GimpleGen:
         input fixes it. Prefixing the symbol with the function's owning
         module's name distinguishes them without touching the hash at all.
 
-        _imported_func_home (populated by _emit_stdlib_import_externs,
-        _register_link_imports, and gen_module's do_imports inline-compile
-        loop) is checked FIRST and takes priority over local-definition
-        status: an imported name can also appear in self._mangled_funcs (see
-        _register_link_imports), and in that case the qualifier must be the
-        function's actual defining module — never this (importing) module's
-        own name — or a caller and the dylib's real (correctly self-
-        qualified) definition would disagree and fail to link/dlopen.
+        Three-tier priority, most-specific first — this ordering is
+        load-bearing, not cosmetic, and was tightened twice after two
+        DIFFERENT real miscompiles surfaced via `mojo.py build`'s actual
+        multi-file driver path (do_imports=True inline compilation), neither
+        of which build_stdlib_dylib.py's per-module-standalone-compile tests
+        could ever exercise (its GimpleGen instances are never shared or
+        nested the way do_imports=True's are):
+
+        1. _local_top_level_func_names (THIS exact gen_module call's own
+           top-level FunctionDefs) — a bare_name declared directly in the
+           module THIS instance is compiling is always authoritative for
+           itself, full stop. Needed because _imported_func_home (tier 3) is
+           a single dict SHARED (by object identity,
+           _compile_imported_module's `temp_gen._imported_func_home = self.
+           _imported_func_home`) across every nested temp_gen a
+           do_imports=True build spins up, keyed by bare function NAME
+           ALONE via setdefault — so when two sibling modules being inlined
+           together each define a same-named function, whichever is
+           processed first "claims" that bare name, and the second module's
+           OWN nested temp_gen would otherwise silently inherit the FIRST
+           module's qualifier for its OWN local definition (repro: beta_
+           module's own `sb1_probe_x` got emitted under
+           `alpha_module_sb1_probe_x_...`, colliding with alpha_module's own
+           definition at link).
+        2. _own_imported_func_home (THIS exact gen_module call's own
+           FromImportStmt scan — _emit_stdlib_import_externs /
+           _register_link_imports, operating only on `stmts`, never shared
+           across temp_gens) — for a bare_name NOT locally defined here but
+           imported here. Needed because tier 3 alone is insufficient even
+           for a name that ISN'T a collision at its own definition site: two
+           sibling WRAPPER modules (e.g. alpha_wrapper.mojo doing `from
+           alpha_module import f`, beta_wrapper.mojo doing `from beta_module
+           import f`, both transitively pulled into one program) each
+           correctly compute their own `f`'s true home via their own
+           FromImportStmt — but if that result were written into the SAME
+           shared dict tier-3 uses, beta_wrapper's correct `f -> beta_module`
+           registration would be a setdefault no-op (alpha_module's do_imports
+           Phase-0 registration already claimed the bare key `f` first), so
+           beta_wrapper's call site would silently CALL alpha_module's `f`
+           instead of beta_module's — a real, silent, wrong-result
+           miscompile with no build error at all, not just a naming
+           collision. Every module that references an imported name
+           necessarily has that name's own FromImportStmt in ITS OWN
+           top-level stmts (Mojo/Python scoping requires it), so this
+           per-instance (never shared) dict is always authoritative for any
+           name referenced while compiling THIS module's own body.
+        3. _imported_func_home (see its own comment — populated only by
+           gen_module's do_imports inline-compile loop, shared across nested
+           temp_gens) — the last-resort fallback, kept for whatever a
+           bare_name that is neither locally defined nor locally imported in
+           THIS exact compile still needs it for (its own known limitation:
+           first-registered-module-wins on a same-bare-name collision — the
+           same class of accepted, documented limitation
+           _imported_struct_home already has for structs, see
+           test_module_cache.py's test_module_qualified_struct_symbols
+           "aliasing an imported struct" comment).
         """
         _cur_file = getattr(self, '_current_filename', None)
         if (_cur_file and _cur_file.endswith('.py') and os.path.commonpath(
                 [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR):
             return ''
+        if bare_name in getattr(self, '_local_top_level_func_names', ()):
+            return self.module_name or ''
+        own_home = getattr(self, '_own_imported_func_home', None)
+        if own_home and bare_name in own_home:
+            qualifier = own_home[bare_name]
+            if qualifier == _AMBIGUOUS_FUNC_HOME:
+                # Never silently miscompile (doc/STDLIB-BUGS.md SB-1's
+                # per-scope-import residual): this compile unit transitively
+                # imports TWO different sibling modules that both define a
+                # function named `bare_name`, and this codegen has no
+                # per-lexical-scope import tracking to know which one THIS
+                # specific reference means — picking either one silently
+                # would risk calling the wrong module's implementation with
+                # no error at all. Honest refusal instead (see
+                # _note_own_func_home's docstring for the exact repro shape
+                # and why this can't be resolved by the module-qualifier
+                # mechanism alone).
+                raise RuntimeError(
+                    f"cannot compile module: {bare_name!r} is ambiguous — this "
+                    "program transitively imports two different sibling "
+                    "modules that both define a free function named "
+                    f"{bare_name!r}, each from a different lexical scope "
+                    "(e.g. two different nested `from X import ...` "
+                    "statements); this compiler cannot yet disambiguate a "
+                    "same-bare-name free-function reference by which import "
+                    "statement lexically encloses it. Rename one of the two "
+                    "functions, or import qualified (`import X` + "
+                    "`X.func(...)`), to work around this.")
+            return qualifier
         home = getattr(self, '_imported_func_home', None)
         if home and bare_name in home:
             return home[bare_name]
-        if bare_name in getattr(self, '_local_top_level_func_names', ()):
-            return self.module_name or ''
         return ''
 
     def _func_mangleable(self, name: str) -> bool:
@@ -20246,6 +20432,17 @@ class GimpleGen:
                                 # identical qualified symbol instead of an
                                 # unqualified one nothing defines.
                                 self._imported_func_home.setdefault(_ms.name, module_name)
+                                # _own_imported_func_home (per-instance, NOT
+                                # shared across nested temp_gens — see its own
+                                # comment): `self` HERE is specifically the
+                                # temp_gen that is DOING the importing (its own
+                                # find_imports scan is what put module_name into
+                                # modules_to_compile), so this registration is
+                                # always correct for THIS module's own call
+                                # sites and must win over any OTHER importer's
+                                # conflicting claim on the same bare name in the
+                                # shared _imported_func_home fallback above.
+                                self._note_own_func_home(_ms.name, module_name)
                             elif isinstance(_ms, StructDef):
                                 for _m in _ms.methods:
                                     self._global_inline_defs.add(_m.name)
@@ -20321,6 +20518,17 @@ class GimpleGen:
                                 # identical qualified symbol instead of an
                                 # unqualified one nothing defines.
                                 self._imported_func_home.setdefault(_ms.name, module_name)
+                                # _own_imported_func_home (per-instance, NOT
+                                # shared across nested temp_gens — see its own
+                                # comment): `self` HERE is specifically the
+                                # temp_gen that is DOING the importing (its own
+                                # find_imports scan is what put module_name into
+                                # modules_to_compile), so this registration is
+                                # always correct for THIS module's own call
+                                # sites and must win over any OTHER importer's
+                                # conflicting claim on the same bare name in the
+                                # shared _imported_func_home fallback above.
+                                self._note_own_func_home(_ms.name, module_name)
                             elif isinstance(_ms, StructDef):
                                 for _m in _ms.methods:
                                     self._global_inline_defs.add(_m.name)

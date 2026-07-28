@@ -124,6 +124,113 @@ previously known, and NOT all handled by the collision-dedup stopgap:**
   the safety net (source-fallback instead of a crash) rather than
   individually root-caused.
 
+**FIXED (real fix, not the collision-dedup stopgap) — 2026-07-28, commit
+`bf96f55` + follow-up.** Free-function C symbols are now module-qualified
+(`GimpleGen._func_qualifier` / `reflect._func_export_csym`'s `module_prefix`
+param), the same mechanism struct methods already used
+(`_struct_method_qualifier` / `_struct_method_csym_static`), extended to
+free functions: a genuinely LOCAL definition is qualified with the
+compiling module's own name; an IMPORTED reference resolves its true
+defining module via `_imported_func_home` (and, for `do_imports=True`
+inline builds, the per-instance `_own_imported_func_home` — see below),
+populated at every import site (`_emit_stdlib_import_externs`,
+`_register_link_imports`, and `gen_module`'s `do_imports` inline-compile
+loop) so a caller and the definer always agree on the same qualified
+symbol. `gimple_codegen.py` and `reflect.py` compute the qualifier
+identically, keeping codegen and the reflection-table emitter in agreement
+per this project's "single source of truth" convention.
+
+Note: the originally-cited `math.abs(SIMD)` / `complex.abs(Complex)`
+collision no longer reproduces in the current stdlib snapshot — `math.abs`
+is now generic (`def abs[T: Absable](...)`), and generics are never
+overload-mangled free-function exports (`collect_exports_src`'s existing
+generic detection excludes them). Verified instead via a direct, faithful
+minimal repro of the same collision shape (two sibling modules each
+defining `def sb1_scale(x: Int64) -> Int64` — `Int64` always boxes to plain
+`int64_t`, exactly like the historical case) —
+`test_sb1_cross_module_same_c_param_overload_mangling` in
+`test_module_cache.py`. A from-scratch dylib rebuild shows 0
+excluded-for-collision both before and after this fix (unchanged from
+baseline, since the concrete `mojo_abs` collision had already evaporated
+independently).
+
+**A real bug in the first version of this fix (`bf96f55`), found by
+independent verification via `mojo.py build`'s actual CLI path (NOT
+`build_stdlib_dylib.py`'s per-module-standalone-compile pipeline, which
+never shares/nests `GimpleGen` instances the way `do_imports=True` builds
+do) — fixed same day:**
+
+1. `_imported_func_home` was a single dict SHARED across every nested
+   `temp_gen` a `do_imports=True` build spins up
+   (`_compile_imported_module`), keyed by bare function name via
+   `setdefault`. Two sibling modules each defining the SAME bare
+   free-function name (exactly the SB-1 shape) — e.g.
+   `alpha_module.sb1_probe_x` / `beta_module.sb1_probe_x` — caused the
+   SECOND module's own local definition to silently be emitted under the
+   FIRST module's qualifier: a hard `redefinition of
+   'alpha_module_sb1_probe_x_...'` compile error. Fixed by checking
+   `_local_top_level_func_names` (this exact compile's own top-level
+   `FunctionDef`s) FIRST in `_func_qualifier`, ahead of any imported/shared
+   registry.
+2. Even with (1) fixed, a SEPARATE, worse bug remained for CALL SITES: two
+   sibling WRAPPER modules (`alpha_wrapper.mojo` doing `from alpha_module
+   import f`, `beta_wrapper.mojo` doing `from beta_module import f`, both
+   transitively imported into one program — an entirely ordinary way to
+   organize sibling modules, not an exotic pattern) each correctly know
+   their OWN function's true home from their OWN `FromImportStmt` — but the
+   shared dict's first-registered-wins semantics meant the SECOND wrapper's
+   call site silently CALLED the FIRST module's function instead of its
+   own: a real, silent, WRONG-RESULT miscompile with no build error at all.
+   Fixed by giving each `GimpleGen` instance its own private
+   `_own_imported_func_home` dict (never shared across nested `temp_gen`s),
+   checked ahead of the shared `_imported_func_home` fallback in
+   `_func_qualifier`.
+3. A narrower RESIDUAL, found while fixing (2) and deliberately left
+   NOT-fully-fixed (a proper fix needs per-lexical-scope import tracking
+   this codegen doesn't have): ONE file with two different NESTED
+   (function-body-local) scopes each importing a same-named free function
+   from two DIFFERENT sibling modules (`def call_alpha(): from alpha_module
+   import f; ...` / `def call_beta(): from beta_module import f; ...` in
+   the SAME file) is genuinely ambiguous to `_own_imported_func_home`,
+   which is per-`GimpleGen`-INSTANCE, not per-lexical-scope — both nested
+   imports live in the same root instance. Before hardening, this silently
+   picked whichever sibling module was processed first (confirmed: printed
+   the SAME value from both call sites instead of two distinct ones) — a
+   real silent miscompile. Hardened (not fixed) by detecting the
+   same-instance conflict (`_note_own_func_home` marks the entry
+   `_AMBIGUOUS_FUNC_HOME` instead of keeping the first value) and having
+   `_func_qualifier` raise a clear, honest `RuntimeError` if that specific
+   ambiguous name is ever actually looked up — never silently miscompile,
+   even though this codegen still can't correctly COMPILE this shape
+   (workaround: rename one of the two functions, or use `import X` +
+   `X.func(...)` qualified access instead of `from X import func`). The
+   identical class of gap, via the analogous `_imported_struct_home`,
+   already existed and STILL exists for STRUCTS (confirmed unaffected by
+   this session — still a hard `redefinition` compile error, not hardened
+   to a clean refusal) — this is a general, pre-existing `do_imports=True`
+   architectural limitation, not novel to free functions, and a full fix
+   (for both structs and functions) is future work.
+
+   Also confirmed, separately and NOT fixed here (pre-existing on vanilla
+   master before any SB-1 work, unrelated to overload-mangling): aliased
+   free-function-VALUE imports (`from X import f as g`) never resolve
+   their call site to the real mangled symbol via `mojo.py build`'s
+   `do_imports=True` path at all (falls to a generic `(...)` vararg stub
+   that never links) — even for a single, non-colliding aliased import.
+   This is what stops the ORIGINAL coordinator-reported repro (two sibling
+   modules, top-level ALIASED imports) from fully linking+running
+   end-to-end even after the redefinition fix above: the redefinition is
+   gone, but the alias-call-site bug still blocks the final link. Real,
+   confirmed, but a different code path from anything SB-1 touches.
+
+   Regression tests: `test_sb1_mojo_build_cli_wrapper_modules` (real
+   `mojo.py build` CLI subprocess, wrapper-module shape, asserts distinct
+   correct results 112/223) and
+   `test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles` (asserts
+   the nested-scope case refuses cleanly rather than miscompiling, and that
+   `mojo.py run`'s separate interpreter implementation is unaffected), both
+   in `test_module_cache.py`.
+
 ---
 
 ## SB-2 — Per-OS modules define the same symbols (FIXED at build level)

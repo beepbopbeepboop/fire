@@ -780,6 +780,164 @@ def test_sb1_cross_module_same_c_param_overload_mangling(wd):
               _run(exe).stdout.startswith('qc'))
 
 
+def test_sb1_mojo_build_cli_wrapper_modules(wd):
+    """SB-1 follow-up (independent verification found a real bug in the first
+    fix, bf96f55): `mojo.py build`'s actual CLI path (do_imports=True inline
+    compilation, gimple_codegen.compile_to_gimple / build_executable in
+    mojo.py) is a COMPLETELY DIFFERENT code path from build_stdlib_dylib.py's
+    per-module-standalone-compile pipeline the first SB-1 test above
+    exercises — its GimpleGen instances are nested and share state
+    (_compile_imported_module), which the standalone pipeline never does.
+    That sharing hid two real, independently-discovered miscompiles the
+    first fix's own test suite could not have caught:
+
+    1. `_imported_func_home` was a single dict SHARED across every nested
+       temp_gen, keyed by bare function name via setdefault: two sibling
+       modules each defining the SAME bare free-function name (exactly what
+       SB-1 is about) — here `alpha_module.sb1_probe_t` / `beta_module.
+       sb1_probe_t` — caused the SECOND module's own local definition to be
+       silently emitted under the FIRST module's qualifier, a hard
+       redefinition compile error (`redefinition of
+       'alpha_module_sb1_probe_t_...'`). Fixed by checking
+       _local_top_level_func_names (this exact compile's own top-level
+       FunctionDefs) BEFORE consulting the shared dict in _func_qualifier.
+    2. Even with (1) fixed, a SEPARATE bug remained for CALL SITES: two
+       sibling WRAPPER modules (alpha_wrapper.mojo doing `from alpha_module
+       import sb1_probe_t`, beta_wrapper.mojo doing `from beta_module import
+       sb1_probe_t`, both transitively imported into one program) each
+       correctly know their OWN function's true home from their OWN
+       FromImportStmt — but the shared dict's first-registered-wins
+       semantics meant beta_wrapper's call site silently CALLED
+       alpha_module's sb1_probe_t instead of beta_module's: a real, silent,
+       WRONG-RESULT miscompile with no build error at all (worse than (1)).
+       Fixed by giving each GimpleGen instance its OWN private
+       _own_imported_func_home dict (never shared across nested temp_gens),
+       checked ahead of the shared fallback.
+
+    This test reproduces (2) — the wrapper-module shape, chosen because it
+    is fully achievable end-to-end through mojo.py build's REAL CLI (unlike
+    the coordinator's original top-level-ALIASED-import repro, which hits a
+    SEPARATE, independently-confirmed-pre-existing bug in aliased free-
+    function-value call sites — present on vanilla master before ANY SB-1
+    work, unrelated to overload-mangling qualification, and explicitly out
+    of scope here) — and asserts a REAL compile+link+run through the actual
+    `python3 mojo.py build <file>` subprocess gets each sibling module's own,
+    distinct, correct result."""
+    src_alpha_module = "def sb1_probe_t(x: Int64) -> Int64:\n    return x + 111\n"
+    src_beta_module = "def sb1_probe_t(x: Int64) -> Int64:\n    return x + 222\n"
+    src_alpha_wrapper = ("from alpha_module import sb1_probe_t\n\n"
+                          "def call_alpha(x: Int64) -> Int64:\n"
+                          "    return sb1_probe_t(x)\n")
+    src_beta_wrapper = ("from beta_module import sb1_probe_t\n\n"
+                         "def call_beta(x: Int64) -> Int64:\n"
+                         "    return sb1_probe_t(x)\n")
+    src_main = ("from alpha_wrapper import call_alpha\n"
+                "from beta_wrapper import call_beta\n\n"
+                "def main() raises:\n"
+                "    print(call_alpha(1))\n"
+                "    print(call_beta(1))\n")
+
+    proj = os.path.join(wd, 'sb1_cli_wrappers')
+    os.makedirs(proj, exist_ok=True)
+    for fname, src in (('alpha_module.mojo', src_alpha_module),
+                        ('beta_module.mojo', src_beta_module),
+                        ('alpha_wrapper.mojo', src_alpha_wrapper),
+                        ('beta_wrapper.mojo', src_beta_wrapper),
+                        ('main.mojo', src_main)):
+        with open(os.path.join(proj, fname), 'w') as f:
+            f.write(src)
+
+    exe = os.path.join(proj, 'main')
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'mojo.py'), 'build', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=120)
+    check("SB-1 (mojo.py build CLI): two sibling modules' same-named free "
+          "function build without a redefinition error",
+          'redefinition of' not in r.stderr and 'redefinition of' not in r.stdout,
+          r.stdout + r.stderr)
+    check("SB-1 (mojo.py build CLI): build succeeds and produces an executable",
+          r.returncode == 0 and os.path.exists(exe), r.stdout + r.stderr)
+    if os.path.exists(exe):
+        run = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+        check("SB-1 (mojo.py build CLI): each wrapper's call gets its own "
+              "sibling module's distinct, correct result (112 / 223, not "
+              "112 / 112)",
+              run.stdout.strip().splitlines() == ['112', '223'],
+              repr(run.stdout))
+
+
+def test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles(wd):
+    """SB-1 follow-up, "never silently miscompile" guard: a narrower residual
+    found while fixing test_sb1_mojo_build_cli_wrapper_modules above — ONE
+    file with two different NESTED (function-body-local) scopes each
+    importing a same-named free function from two DIFFERENT sibling modules
+    (`def call_alpha(): from alpha_module import f; ...` / `def call_beta():
+    from beta_module import f; ...` in the SAME main.mojo) is a genuine
+    per-lexical-scope ambiguity this codegen has no machinery to resolve
+    (_own_imported_func_home is per-GimpleGen-INSTANCE, not per-scope — both
+    nested imports live in the same root instance). Before this fix, that
+    ambiguity was silently resolved by picking whichever sibling module's
+    registration happened first (module_stmts processed in sorted() order) —
+    a real silent-wrong-answer miscompile (confirmed: printed the SAME
+    value twice instead of two distinct ones). Fixed by detecting the
+    same-instance conflict (_note_own_func_home marking the entry
+    _AMBIGUOUS_FUNC_HOME instead of keeping the first value) and having
+    _func_qualifier raise a clear, honest RuntimeError if that specific
+    ambiguous name is ever actually looked up — never silently miscompile,
+    even though this codegen still can't correctly COMPILE this shape.
+    (The identical class of gap, via the analogous _imported_struct_home,
+    already existed and still exists for STRUCTS — confirmed still a hard
+    'redefinition' compile error, unaffected by this session's changes,
+    since struct qualification code was not touched — this is a general,
+    pre-existing do_imports=True architectural limitation, not novel to
+    free functions.)"""
+    src_alpha_module = "def sb1_probe_amb(x: Int64) -> Int64:\n    return x + 111\n"
+    src_beta_module = "def sb1_probe_amb(x: Int64) -> Int64:\n    return x + 222\n"
+    src_main = ("def call_alpha() raises -> Int64:\n"
+                "    from alpha_module import sb1_probe_amb\n"
+                "    return sb1_probe_amb(1)\n\n"
+                "def call_beta() raises -> Int64:\n"
+                "    from beta_module import sb1_probe_amb\n"
+                "    return sb1_probe_amb(1)\n\n"
+                "def main() raises:\n"
+                "    print(call_alpha())\n"
+                "    print(call_beta())\n")
+
+    proj = os.path.join(wd, 'sb1_cli_ambiguous')
+    os.makedirs(proj, exist_ok=True)
+    for fname, src in (('alpha_module.mojo', src_alpha_module),
+                        ('beta_module.mojo', src_beta_module),
+                        ('main.mojo', src_main)):
+        with open(os.path.join(proj, fname), 'w') as f:
+            f.write(src)
+
+    exe = os.path.join(proj, 'main')
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'mojo.py'), 'build', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=120)
+    check("SB-1 ambiguous-scope: mojo.py build refuses (nonzero exit), doesn't "
+          "silently succeed with a wrong-answer binary",
+          r.returncode != 0, f"rc={r.returncode}")
+    check("SB-1 ambiguous-scope: refusal names the real cause (ambiguous "
+          "ambiguous free function), not an unrelated/confusing crash",
+          'ambiguous' in (r.stdout + r.stderr) and 'sb1_probe_amb' in (r.stdout + r.stderr),
+          r.stdout + r.stderr)
+    check("SB-1 ambiguous-scope: no executable is produced (honest failure, "
+          "not a silently-wrong one)",
+          not os.path.exists(exe))
+    # The interpreter path (myinterpreter.py) is a completely separate
+    # implementation, unaffected by this compiled-path limitation — real
+    # Mojo/Python scoping makes this genuinely unambiguous at the source
+    # level (each `from X import f` shadows only within its own function
+    # body), so `mojo.py run` must still get both distinct, correct values.
+    ri = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'mojo.py'), 'run', 'main.mojo'],
+        cwd=proj, capture_output=True, text=True, timeout=20)
+    check("SB-1 ambiguous-scope: the INTERPRETER path (unaffected, separate "
+          "implementation) still gets both distinct, correct values",
+          ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -850,6 +1008,8 @@ def main():
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
+        test_sb1_mojo_build_cli_wrapper_modules(wd)
+        test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()
