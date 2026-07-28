@@ -6,6 +6,7 @@ cache behaves (cold miss / warm hit / invalidation). Run via `make check` or
 directly: `python3 test_module_cache.py`.
 """
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -62,8 +63,13 @@ def test_stage1_extern_boundary(wd):
                   "        var ok = \"s1\\n\"\n"
                   "        var n = external_call[\"write\", Int64](1, ok, 3)\n")
         cC = compile_to_gimple_linked(client, filename='client.mojo')
+        # SB-1 fix: an imported free function's extern/call-site symbol is now
+        # module-qualified with its home module's name (s1lib_s1_add_<hash>,
+        # not bare s1_add_<hash>) — see gimple_codegen._func_qualifier. Match
+        # any qualifier/suffix rather than the exact old unqualified name.
         check("stage1: extern decl emitted, no inlined body",
-              'extern int64_t s1_add' in cC and 's1_add (int64_t a, int64_t b)\n{' not in cC)
+              bool(re.search(r'extern int64_t \w*s1_add\w*\s*\(int64_t, int64_t\);', cC))
+              and 's1_add (int64_t a, int64_t b)\n{' not in cC)
         # build library artifact separately, link, run
         from gimple_codegen import GimpleGen
         from mojo_compiler import py_tokenize, Parser
@@ -692,6 +698,88 @@ def test_cross_module_free_func_mangling_agrees(wd):
         os.remove(def_path)
 
 
+def test_sb1_cross_module_same_c_param_overload_mangling(wd):
+    """STDLIB-BUGS.md SB-1: two modules' same-named free-function overloads that
+    box down to the exact same C parameter TYPE (not just an unresolved one, as
+    test_cross_module_free_func_mangling_agrees above covers) used to collide at
+    link, because overload_suffix_for hashes only the collapsed C parameter-type
+    list — 'int64_t' hashes the same no matter which Mojo-level function produced
+    it. The historically-discovered instance was math.abs(SIMD) vs
+    complex.abs(Complex), both boxing to a lone int64_t; math.abs is generic
+    (`def abs[T: Absable](...)`) in the current stdlib snapshot and no longer
+    reproduces the collision on its own (generics are never reflection-exported
+    free functions), so this test reproduces the underlying shape directly and
+    durably: two sibling modules each define `def sb1_scale(x: Int64) -> Int64`
+    (Int64 always boxes to plain int64_t — no exotic/unresolved type needed) with
+    DIFFERENT, independently-checkable bodies. Fixed by module-qualifying every
+    free function's mangled C symbol with its owning module's name
+    (gimple_codegen._func_qualifier / reflect._func_export_csym's module_prefix)
+    — the same mechanism struct methods already used (_struct_method_qualifier),
+    now extended to free functions."""
+    import re
+    import imports
+    src_a = ("def sb1_scale(x: Int64) -> Int64:\n"
+             "    if x < 0:\n"
+             "        return -x\n"
+             "    return x + 1000\n")
+    src_b = ("def sb1_scale(x: Int64) -> Int64:\n"
+             "    if x < 0:\n"
+             "        return -x - 2000\n"
+             "    return x + 2000\n")
+    path_a = os.path.join(wd, 'sb1_mod_a.mojo'); open(path_a, 'w').write(src_a)
+    path_b = os.path.join(wd, 'sb1_mod_b.mojo'); open(path_b, 'w').write(src_b)
+
+    # reflect.py and gimple_codegen.py must independently compute the SAME
+    # qualified symbol for each module's own definition (the whole point of
+    # this mangling scheme: codegen and the reflection-table emitter agree).
+    from gimple_codegen import GimpleGen
+    from mojo_compiler import py_tokenize, Parser
+    for path, name, src in ((path_a, 'sb1_mod_a', src_a), (path_b, 'sb1_mod_b', src_b)):
+        gen = GimpleGen(emit_entry_points=False, module_name=name)
+        gen._current_filename = path
+        c = gen.gen_module(Parser(py_tokenize(src)).parse_module())
+        codegen_syms = set(re.findall(r'\b(\w*sb1_scale\w*)\s*\(', c))
+        refl_syms = {reflect.export_csym(e).lstrip('_')
+                     for e in reflect.collect_exports_src(src, module_prefix=name)
+                     if e['name'] == 'sb1_scale'}
+        check(f"SB-1: {name} codegen and reflect.py agree on the qualified symbol",
+              codegen_syms == refl_syms, f"{codegen_syms} vs {refl_syms}")
+
+    dylib = os.path.join(wd, 'libsb1.dylib')
+    bsd.build([path_a, path_b], dylib, link_runtime=True, use_cache=False)
+    syms = bsd._defined_symbols(GCC, dylib)
+    scale_syms = sorted(s for s in syms if 'scale' in s)
+    check("SB-1: both modules' sb1_scale get DISTINCT defined symbols",
+          len(scale_syms) == 2, str(scale_syms))
+
+    # Real compile+link+run: a client importing EACH module's sb1_scale
+    # independently gets that module's own, correct, DIFFERENT behavior — not
+    # one silently overwriting/aliasing the other.
+    from gimple_codegen import compile_linked
+    for modname, x, expected in (('sb1_mod_a', -5, 5), ('sb1_mod_b', -5, -1995)):
+        imports.reset_resolver(path=[wd])
+        client = (f"from {modname} import sb1_scale\n"
+                  "fn main():\n"
+                  f"    var r = sb1_scale({x})\n"
+                  f"    if r == {expected}:\n"
+                  "        var ok = \"qc\\n\"\n"
+                  "        var n = external_call[\"write\", Int64](1, ok, 3)\n")
+        code, dylibs, _objs, _cpp, _cxx = compile_linked(client)
+        cc = os.path.join(wd, f'sb1c_{modname}.c'); open(cc, 'w').write(code)
+        co = os.path.join(wd, f'sb1c_{modname}.o')
+        subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)
+        exe = os.path.join(wd, f'sb1c_{modname}')
+        rt = bsd.runtime_dylib()
+        link_cmd = [GCC, '-o', exe, co]
+        if rt:
+            link_cmd.extend([rt, f'-Wl,-rpath,{os.path.dirname(rt)}'])
+        link_cmd.extend(dylibs)
+        link_cmd.extend([f'-Wl,-rpath,{os.path.dirname(d)}' for d in dylibs])
+        subprocess.run(link_cmd, check=True)
+        check(f"SB-1: client calling {modname}'s sb1_scale() gets its own correct value",
+              _run(exe).stdout.startswith('qc'))
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -761,6 +849,7 @@ def main():
         test_review_fixes_monomorphize_overload(wd)
         test_def_overload_not_dangling_export(wd)
         test_cross_module_free_func_mangling_agrees(wd)
+        test_sb1_cross_module_same_c_param_overload_mangling(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

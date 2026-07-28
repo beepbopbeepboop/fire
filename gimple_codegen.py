@@ -3477,6 +3477,23 @@ class GimpleGen:
         # extracting the qualifier already baked into the dylib's advertised
         # symbol string — there's no local source file to derive it from).
         self._imported_struct_home: dict = {}
+        # Imported free-function bare name -> its home module's C-symbol
+        # qualifier — the free-function analog of _imported_struct_home
+        # above, added to fix SB-1 (doc/STDLIB-BUGS.md): two modules' same-
+        # named free-function overloads that box down to the same C parameter
+        # shape (e.g. math.abs(SIMD) and complex.abs(Complex), both boxing to
+        # a lone int64_t) hashed to the identical overload_suffix_for(...)
+        # suffix and collided at link. Prefixing every genuinely LOCAL
+        # definition with its owning module's name (see _func_qualifier)
+        # makes the two collide-prone symbols distinct without touching
+        # overload_suffix_for's hashing at all — but an IMPORTING module's
+        # call site must independently derive the exact same qualifier the
+        # defining module used, which is what this dict records (mirroring
+        # _imported_struct_home's own comment above almost verbatim).
+        # Populated by _emit_stdlib_import_externs (module_loader-resolved
+        # imports), _register_link_imports (dylib-reflection/link-mode
+        # imports), and gen_module's do_imports inline-compile loop.
+        self._imported_func_home: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -3772,6 +3789,11 @@ class GimpleGen:
                     # exports under (BUG-2026-032's arena.mojo/ast_nodes.mojo chain,
                     # discovered once the direct 2-level case above was fixed).
                     temp_gen._imported_struct_home = self._imported_struct_home
+                    # share: same reasoning as _imported_struct_home just above,
+                    # for free functions (SB-1 fix, _func_qualifier) — a 3-level
+                    # chain must see a function's home qualifier no matter which
+                    # ancestor temp_gen first registered it.
+                    temp_gen._imported_func_home = self._imported_func_home
                     temp_gen._c_kw_struct_renames = self._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                     temp_gen.struct_boxed_fields = self.struct_boxed_fields
                     temp_gen.struct_bool_fields = self.struct_bool_fields
@@ -3921,6 +3943,32 @@ class GimpleGen:
                     'module': mod, 'original_name': name,
                     'c_return_type': ret, 'signature': sig,
                 }
+                # Record this function's home module (SB-1 fix, _func_qualifier)
+                # so this call site's _func_csym computes the SAME qualified
+                # symbol the defining module's own standalone compile actually
+                # emits, instead of an unqualified name two different modules'
+                # same-named overloads could collide on. Deliberately resolved
+                # via module_loader's OWN resolve_module_path (the exact
+                # resolution `load_module(mod)` above just used to find this
+                # module's exports) rather than self._parsed_import/imports'
+                # process-global Resolver singleton: that singleton's search
+                # path is mutated by whichever test/build last called
+                # imports.reset_resolver(path=...) and is NOT necessarily
+                # scoped to this compile, so resolving through it here was
+                # observed to silently return no path (test order-dependent —
+                # a prior test's reset_resolver(path=[some other tempdir])
+                # left the global resolver unable to find a runtime/-relative
+                # sibling module like 'corolike'), producing an unqualified
+                # qualifier that disagreed with the defining module's own
+                # (correctly qualified) compile and broke the link.
+                # module_loader's resolve_module_path has no such global
+                # mutable state — it's a pure function of STDLIB_PATH/TEST_PATH.
+                import module_loader as _mlmod
+                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
+                if _imp_path and os.path.exists(_imp_path):
+                    _qual = _mlmod.module_name_for_path(_imp_path)
+                    if _qual:
+                        self._imported_func_home.setdefault(sym, _qual)
                 # When imported with an alias, replace the original name in the sig
                 # so the extern matches the alias name used at call sites.
                 if alias and name != alias:
@@ -4072,6 +4120,19 @@ class GimpleGen:
                             ptypes = _param_ctypes(info.get('c_parameters'))
                         self.func_return_types[sym] = ret
                         self.func_param_types[sym] = ptypes
+                        # Record this function's home module (SB-1 fix,
+                        # _func_qualifier) so this call site's _func_csym
+                        # computes the SAME module-qualified symbol the
+                        # defining module's own compile actually emits —
+                        # mirrors _register_reflected_struct's
+                        # _imported_struct_home bookkeeping for structs.
+                        # `source` is the resolved file path from _exports
+                        # above (populated whether or not a dylib exists).
+                        if source:
+                            import module_loader as _mlmod
+                            _qual = _mlmod.module_name_for_path(source)
+                            if _qual:
+                                self._imported_func_home.setdefault(sym, _qual)
                         # Don't emit extern if: (a) locally defined in this module
                         # (would conflict), or (b) it's a C stdlib symbol GCC already
                         # declares (conflicting types when Mojo stub has different sig).
@@ -15999,6 +16060,39 @@ class GimpleGen:
     def _overload_suffix(self, bare_name: str) -> str:
         return self.overload_suffix_for(self.func_param_types.get(bare_name))
 
+    def _func_qualifier(self, bare_name: str) -> str:
+        """Module-qualifier prefix for a free function's mangled C symbol — the
+        free-function analog of _struct_method_qualifier (same exemptions,
+        same "only when this compile genuinely knows a home module" rule),
+        added to fix SB-1 (doc/STDLIB-BUGS.md): two modules' same-named free
+        function overloads that box down to the same C parameter shape (e.g.
+        math.abs(SIMD) vs complex.abs(Complex), both boxing to a lone
+        int64_t) hash to the identical overload_suffix_for(...) suffix and
+        collide at link, since the C types have already collapsed by the
+        time that hash runs — no amount of re-hashing the SAME collapsed
+        input fixes it. Prefixing the symbol with the function's owning
+        module's name distinguishes them without touching the hash at all.
+
+        _imported_func_home (populated by _emit_stdlib_import_externs,
+        _register_link_imports, and gen_module's do_imports inline-compile
+        loop) is checked FIRST and takes priority over local-definition
+        status: an imported name can also appear in self._mangled_funcs (see
+        _register_link_imports), and in that case the qualifier must be the
+        function's actual defining module — never this (importing) module's
+        own name — or a caller and the dylib's real (correctly self-
+        qualified) definition would disagree and fail to link/dlopen.
+        """
+        _cur_file = getattr(self, '_current_filename', None)
+        if (_cur_file and _cur_file.endswith('.py') and os.path.commonpath(
+                [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR):
+            return ''
+        home = getattr(self, '_imported_func_home', None)
+        if home and bare_name in home:
+            return home[bare_name]
+        if bare_name in getattr(self, '_local_top_level_func_names', ()):
+            return self.module_name or ''
+        return ''
+
     def _func_mangleable(self, name: str) -> bool:
         """Whether a free function's C symbol is overload-mangled. True for a local
         user def (in _mangled_funcs) or an imported Mojo function (a concrete
@@ -16025,7 +16119,9 @@ class GimpleGen:
         base = _safe_name(bare_name)
         if not self._func_mangleable(bare_name):
             return base
-        mangled = base + self._overload_suffix(bare_name)
+        qualifier = self._func_qualifier(bare_name)
+        qualified_base = f"{qualifier}_{base}" if qualifier else base
+        mangled = qualified_base + self._overload_suffix(bare_name)
         # Mirror the param/return types under the mangled key so _emit_call's
         # argument coercion and return typing (keyed by the emitted name) still
         # work — func_param_types/func_return_types are keyed by the bare name.
@@ -20059,6 +20155,16 @@ class GimpleGen:
         # Struct[Args](...) calls / nested generic-struct type args elaborate too.
         self._register_imported_generic_structs(stmts)
 
+        # This module's own top-level function names — used by _func_qualifier
+        # (SB-1 fix) to tell a genuinely LOCAL definition (qualify with THIS
+        # module's own name) apart from a same-bare-name entry that merely got
+        # added to self._mangled_funcs because it's an IMPORTED function (must
+        # use its actual defining module's qualifier instead — see
+        # _imported_func_home). `stmts` is this call's own top-level list, so
+        # identity membership here is exactly "declared in this file".
+        self._local_top_level_func_names = {
+            s.name for s in stmts if isinstance(s, FunctionDef)}
+
         # Pre-register current module's own function names into _global_inline_defs
         # BEFORE Phase 0 so that recursive sub-module compilations see them.
         for _s in stmts:
@@ -20129,6 +20235,17 @@ class GimpleGen:
                         for _ms in module_stmts:
                             if isinstance(_ms, FunctionDef):
                                 self._global_inline_defs.add(_ms.name)
+                                # SB-1 fix (_func_qualifier): the nested temp_gen
+                                # that compiled this function inline used
+                                # module_name=module_name as ITS OWN module_name
+                                # (see _compile_imported_module below), so any
+                                # mangled symbol it emitted for this function was
+                                # qualified with that same prefix. Record it here
+                                # (mirroring _imported_struct_home just below) so
+                                # a call site in this module recomputes the
+                                # identical qualified symbol instead of an
+                                # unqualified one nothing defines.
+                                self._imported_func_home.setdefault(_ms.name, module_name)
                             elif isinstance(_ms, StructDef):
                                 for _m in _ms.methods:
                                     self._global_inline_defs.add(_m.name)
@@ -20193,6 +20310,17 @@ class GimpleGen:
                         for _ms in module_stmts:
                             if isinstance(_ms, FunctionDef):
                                 self._global_inline_defs.add(_ms.name)
+                                # SB-1 fix (_func_qualifier): the nested temp_gen
+                                # that compiled this function inline used
+                                # module_name=module_name as ITS OWN module_name
+                                # (see _compile_imported_module below), so any
+                                # mangled symbol it emitted for this function was
+                                # qualified with that same prefix. Record it here
+                                # (mirroring _imported_struct_home just below) so
+                                # a call site in this module recomputes the
+                                # identical qualified symbol instead of an
+                                # unqualified one nothing defines.
+                                self._imported_func_home.setdefault(_ms.name, module_name)
                             elif isinstance(_ms, StructDef):
                                 for _m in _ms.methods:
                                     self._global_inline_defs.add(_m.name)

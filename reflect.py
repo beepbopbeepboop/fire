@@ -42,14 +42,28 @@ def _sig_param_ctypes(signature: str) -> list:
     return out
 
 
-def _func_export_csym(name: str, signature: str) -> str:
-    """The mangled C symbol for a SYM_FUNCTION export — `_safe_name(name)` plus the
-    same overload suffix gimple_codegen._func_csym appends, so the reflection table
-    advertises the symbol the dylib actually defines."""
+def _func_export_csym(name: str, signature: str, module_prefix: str = '') -> str:
+    """The mangled C symbol for a SYM_FUNCTION export — `_safe_name(name)` plus a
+    `module_prefix` qualifier plus the same overload suffix gimple_codegen._func_csym
+    appends, so the reflection table advertises the symbol the dylib actually
+    defines.
+
+    The `module_prefix` qualifier mirrors gimple_codegen.py's _func_qualifier
+    (SB-1 fix, doc/STDLIB-BUGS.md): every free function collect_exports sees is,
+    by construction, declared directly in the module being reflected (this
+    function's own top-level source) — never an inlined import — the same "this
+    compile is that function's true home" condition _func_qualifier checks via
+    _local_top_level_func_names, just always true here. Without it, two modules'
+    same-named overloads that box down to the same C parameter shape (e.g.
+    math.abs(SIMD) and complex.abs(Complex), both boxing to a lone int64_t) would
+    still hash to the identical suffix and collide at link — qualifying by the
+    function's home module (like struct methods already do via
+    _struct_method_csym_static) makes them distinct without touching the hash."""
     base = _safe_name(name)
     if name in _NO_MANGLE_FUNCS:
         return base
-    return base + GimpleGen.overload_suffix_for(_sig_param_ctypes(signature))
+    qualified_base = f"{module_prefix}_{base}" if module_prefix else base
+    return qualified_base + GimpleGen.overload_suffix_for(_sig_param_ctypes(signature))
 
 
 # Symbol kinds — must match reflect.h.
@@ -119,6 +133,11 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
                 'name': s.name,
                 'signature': _c_signature(s.name, s.return_type, s.params),
                 'kind': SYM_FUNCTION,
+                # SB-1 fix: this function's home-module qualifier, so
+                # export_csym/_func_export_csym can compute the same
+                # module-qualified symbol gimple_codegen._func_csym emits for
+                # it (see _func_export_csym's docstring).
+                'module_prefix': module_prefix,
             })
         elif isinstance(s, StructDef) and not s.name.startswith('_'):
             exports.append({
@@ -217,7 +236,7 @@ def export_csym(e: dict) -> str:
     (to verify, via `nm`, that the compiled object actually defines it before
     trusting the export — see that module's `build()`)."""
     if e['kind'] == SYM_FUNCTION:
-        return _func_export_csym(e['name'], e['signature'])
+        return _func_export_csym(e['name'], e['signature'], e.get('module_prefix', ''))
     return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
 
 
