@@ -2292,6 +2292,29 @@ def _is_async_call_to_known_fn(node, known_async_names) -> bool:
             and not getattr(node, 'kwargs', None))
 
 
+def _local_literal_ctype(value) -> str | None:
+    """The REAL declared C type `_gen_stmt_VarDecl` gives an unannotated
+    `var name = <value>` whose `value` is a bare literal -- mirrors
+    `GimpleGen._lower_IntLiteral`/`_lower_FloatLiteral`/`_lower_BoolLiteral`'s
+    own exact rules (a SMALL int literal lowers to plain C `int`, NOT
+    `int64_t` -- unlike this file's other two "guess a scalar type"
+    estimators, `_quick_type`/`_infer_simple_expr_ctype`, which both assume
+    `int64_t` for any integer literal and disagree with the real lowering)
+    rather than reusing either of those broader, already-established-
+    elsewhere estimators and risking the same disagreement `_enclosing_
+    scope_with_locals`'s own docstring describes hitting the hard way.
+    Deliberately narrow: only the three literal kinds `_gen_stmt_VarDecl`
+    actually special-cases via a bare lowered literal are recognized here;
+    anything else returns None (not a guess)."""
+    if isinstance(value, IntLiteral):
+        return 'uint64_t' if value.value > 0x7FFFFFFFFFFFFFFF else 'int'
+    if isinstance(value, FloatLiteral):
+        return 'double'
+    if isinstance(value, BoolLiteral):
+        return '_Bool'
+    return None
+
+
 def _infer_simple_expr_ctype(e, known: dict | None = None,
                               self_fields: dict | None = None,
                               async_api: dict | None = None,
@@ -3087,6 +3110,11 @@ class GimpleGen:
         # the same way gen_module's discovery pass does. None outside that
         # narrow context.
         self._cpp_async_enclosing_scope: str | None = None
+        # See _gen_cpp_async_unit's `mut_capture_names` param docstring:
+        # names of captured free variables the coroutine body currently
+        # being compiled REASSIGNS (threaded through as pointer parameters,
+        # dereferenced on every read/write) -- empty outside that context.
+        self._cpp_mut_capture_names: frozenset = frozenset()
         # struct_name -> verbatim "typedef struct Name { ... } Name;" text,
         # captured (not re-derived) from whichever of the two existing
         # struct-typedef emission sites (struct_field_types-based, or
@@ -7846,6 +7874,22 @@ class GimpleGen:
             self._emit(f"  {base}_destroy ({handle_expr});")
             self._emit("  mojo_raise ();")
             self._emit_label(bb_ok)
+            # A genuinely void-returning task (mutable-capture project:
+            # `create_task(inc())` where `inc()`'s whole body is side
+            # effects on a captured variable, no `return <value>` at all --
+            # test_locks.mojo's own `inc()` shape) has no real `current_
+            # value` to read back -- a `void` GIMPLE local is invalid C, and
+            # `{base}_value`'s own C++ body has nothing meaningful to
+            # return for this case anyway. Mirrors `_emit_asyncio_run_
+            # drive`'s identical void-skip exactly (the same underlying
+            # `_start`/`_value`/`_destroy` API, just reached via `.wait()`
+            # instead of `asyncio.run(...)`) -- this exact combination
+            # (`create_task`+`.wait()` on a VOID async function) was never
+            # exercised before the mutable-capture work, since every prior
+            # `create_task`/`.wait()` test drove a value-returning task.
+            if vct == 'void':
+                self._emit(f"  {base}_destroy ({handle_expr});")
+                return 'int64_t', self._new_val('int64_t', '(int64_t)0')
             result = self._new_val(vct, f"{base}_value ({handle_expr})")
             self._emit(f"  {base}_destroy ({handle_expr});")
             return vct, result
@@ -9998,6 +10042,35 @@ class GimpleGen:
                 api = self._async_api.get(inner.func.name) or _acl_fallback
                 base = api['base']
                 arg_pairs = [self.lower_expr(a) for a in inner.args]
+                # Captured free variable(s) (see `_compile_nested_async_
+                # functions`'s own capture-computation, and `_gen_cpp_
+                # async_unit`'s `mut_capture_names` docstring for the by-
+                # reference case) are appended as extra trailing arguments
+                # here, exactly as the Mojo-level call site never spells
+                # them out itself -- mirrors the bracket-parametrized
+                # nested-closure call site's identical capture-forwarding
+                # a few thousand lines down (`_lower_call`'s SubscriptExpr+
+                # IdentExpr branch). A capture in `api['mut_capture_names']`
+                # is passed by ADDRESS (`&name`, via a proper GIMPLE temp --
+                # `-fgimple` doesn't allow a bare `&name` as an inline call
+                # argument expression) instead of by value, matching the
+                # pointer parameter type `_gen_cpp_async_unit` compiled that
+                # unit's signature with.
+                # `api['captures']` always stores each capture's PLAIN
+                # (dereferenced) ctype, e.g. "int64_t" -- never the pointer
+                # form -- so both this call site and `_gen_cpp_async_unit`'s
+                # own `extra_captures` construction derive the pointer type
+                # (`f"{ctype} *"`) the same way, in exactly one place each,
+                # rather than one of them baking "int64_t *" into the stored
+                # dict and the other stripping it back off.
+                _mut_names = api.get('mut_capture_names') or frozenset()
+                for _cap_name, _cap_ctype in (api.get('captures') or []):
+                    if _cap_name in _mut_names:
+                        _ptr_ctype = f"{_cap_ctype} *"
+                        _addr = self._new_val(_ptr_ctype, f"&{_cap_name}")
+                        arg_pairs.append((_ptr_ctype, _addr))
+                    else:
+                        arg_pairs.append(self.lower_expr(IdentExpr(name=_cap_name)))
                 handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
                 self._emit(f"  mojo_async_schedule_ready ({handle});")
                 self._async_var_api[handle] = api
@@ -16433,6 +16506,13 @@ class GimpleGen:
                 raise _UnsupportedGeneratorShape(
                     "bare `self` reference not supported in a generator "
                     "method body (only self.<field> reads are supported)")
+            # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
+            # `mut_capture_names` docstring) is threaded through as a
+            # pointer parameter -- every ordinary READ of its name must
+            # dereference that pointer, not read the pointer's own address
+            # as if it were the value.
+            if e.name in self._cpp_mut_capture_names:
+                return f"(*{e.name})"
             return e.name
         if isinstance(e, MemberExpr):
             # Generator-METHOD `self.<field>` read — the only attribute
@@ -16795,6 +16875,12 @@ class GimpleGen:
                         f"can't infer a scalar type for local '{name}'")
                 declared[name] = ctype
                 return [f"{indent}{_c_to_cpp_scalar_type(ctype)} {name} = {val};"]
+            # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
+            # `mut_capture_names` docstring) is a pointer parameter -- the
+            # WRITE must go through it (`*name = ...`), not overwrite the
+            # pointer itself.
+            if name in self._cpp_mut_capture_names:
+                return [f"{indent}*{name} = {val};"]
             return [f"{indent}{name} = {val};"]
         if isinstance(s, AugAssignStmt):
             if not isinstance(s.target, IdentExpr) or s.target.name not in declared:
@@ -16803,6 +16889,10 @@ class GimpleGen:
             op = _GD_BIN_OPS.get(s.op, s.op)
             val = self._cpp_expr(s.value)
             name = s.target.name
+            # Same by-reference dereference as AssignStmt just above --
+            # test_locks.mojo's own `rawCounter += 1` shape.
+            if name in self._cpp_mut_capture_names:
+                return [f"{indent}*{name} = *{name} {op} {val};"]
             return [f"{indent}{name} = {name} {op} {val};"]
         if isinstance(s, WhileStmt):
             if s.else_body:
@@ -17627,10 +17717,132 @@ class GimpleGen:
         free = used - inner_params - declared_vars
         return [(v, outer_scope[v]) for v in sorted(free) if v in outer_scope]
 
+    def _enclosing_scope_with_locals(self, outer_fn: FunctionDef) -> dict:
+        """Widens `_compute_nested_closure_captures`'s `outer_scope` argument
+        beyond just `outer_fn`'s own PARAMETERS (all every existing caller
+        supplied before this method existed) to ALSO include `outer_fn`'s
+        own top-level LOCAL variables (`var lock = ...`, `var counter =
+        ...`) declared directly in its body -- real Mojo's own mutable-
+        capture idiom (test_locks.mojo's `async def inc() {mut}: ...`
+        closing over `lock`/`rawCounter`/`counter`, all locals of the
+        enclosing `test_basic_lock`, not parameters) needs exactly this:
+        without it, `_compute_nested_closure_captures`'s final `if v in
+        outer_scope` filter silently DROPS every captured local (they were
+        simply never in the dict at all), which is what made a captured
+        local look like a plain undeclared name to the body emitter (the
+        "augmented assignment to an undeclared/non-simple target" refusal)
+        rather than being recognized as a capture in the first place.
+
+        Deliberately SHALLOW (only `outer_fn.body`'s own top-level
+        statements, via a single sequential pass -- does not descend into
+        `if`/`for`/`with`/`try` blocks, mirroring `_declared_vars_body`'s
+        own scope, and does NOT walk into nested function bodies, which
+        are a separate scope entirely): real Mojo requires a local be
+        declared (`var x = ...`) before any closure defined later in the
+        same body can reference it, so a single top-to-bottom scan in
+        source order, seeded with `outer_fn`'s own scalar parameters,
+        correctly sees every local declared before the nested closure's
+        own `async def` statement. A local declared AFTER the closure (or
+        only inside a conditional/loop) is not resolvable this way and is
+        simply left out of the returned scope -- exactly like an
+        unresolvable parameter type already is -- so `_compute_nested_
+        closure_captures` correctly treats it as "not capturable" rather
+        than guessing.
+
+        A captured local's ctype must match whatever `outer_fn`'s own
+        ORDINARY (non-async) body compile will actually declare it as in
+        real C -- getting this wrong doesn't just mis-infer a type, it
+        makes a mutable capture's pointer parameter (`{ctype} *`) disagree
+        with the real variable's own address (`&counter`), a hard `gcc`
+        "incompatible pointer type" error (confirmed via a real hand-
+        written repro). Two sources, tried in order, mirroring exactly how
+        `_gen_stmt_VarDecl` itself decides a variable's declared type:
+          1. `self._inferred_var_types[outer_fn.name]` -- populated by
+             `_infer_local_var_types` in an earlier gen_module pass (always
+             runs before this one). This is `_gen_stmt_VarDecl`'s own
+             `self.var_types.get(name, ctype)` pre-seed: the WIDENED type
+             a variable settles on when it's REASSIGNED (a plain `x = ...`,
+             not `var x = ...`) one or more times with a value of a
+             different type than its initial `var` declaration. Only
+             covers names with at least one such reassignment (`_infer_
+             local_var_types` scans `AssignStmt` only, never `VarDecl`).
+          2. For a name with NO entry there (test_locks.mojo's/this
+             method's own target shape: `var counter = 0`, declared once,
+             never reassigned by a plain `counter = ...` anywhere) --
+             `_gen_stmt_VarDecl` falls through to `vtype` from `self.
+             lower_expr(node.value)`, i.e. the INITIALIZER's own real
+             lowered type. `_quick_type`/`_infer_simple_expr_ctype` (this
+             file's two other "guess a scalar type" helpers) both guess
+             `int64_t` for a bare integer literal -- but `_lower_IntLiteral`
+             (the REAL lowering `_gen_stmt_VarDecl` actually calls) returns
+             plain C `int` instead (confirmed the hard way: an earlier
+             draft of this method used `_infer_simple_expr_ctype` here,
+             disagreeing with the real declared type). `_local_literal_
+             ctype` (right below) mirrors `_lower_IntLiteral`/`_lower_
+             FloatLiteral`/`_lower_BoolLiteral`'s exact literal-only rules
+             instead of guessing via either of those broader estimators --
+             deliberately narrow (bare literal initializers only): a local
+             initialized from anything else (a call, another variable, an
+             arithmetic expression, ...) is simply left OUT of the
+             returned scope rather than risking a second independent guess
+             disagreeing with the real one again."""
+        scope: dict = {}
+        for pname, ptype in (outer_fn.params or []):
+            pname = pname.lstrip('*')
+            ctype = self._resolve_type(ptype) if ptype is not None else None
+            if ctype in ('int64_t', 'int', 'double', '_Bool'):
+                scope[pname] = ctype
+        widened = self._inferred_var_types.get(outer_fn.name, {})
+        for name, ctype in widened.items():
+            if ctype in ('int64_t', 'int', 'double', '_Bool') and name not in scope:
+                scope[name] = ctype
+        for stmt in outer_fn.body:
+            if (isinstance(stmt, VarDecl) and isinstance(stmt.name, str)
+                    and ',' not in stmt.name and stmt.name not in scope
+                    and stmt.name not in widened and stmt.type_ann is None
+                    and stmt.value is not None):
+                ctype = _local_literal_ctype(stmt.value)
+                if ctype is not None:
+                    scope[stmt.name] = ctype
+        return scope
+
+    def _mutated_free_names(self, inner: FunctionDef, candidate_names) -> frozenset:
+        """Of `candidate_names` (a captured-free-variable name set --
+        `_compute_nested_closure_captures`'s own return value, name-only),
+        which ones `inner`'s own body ever REASSIGNS (a plain `name = ...`
+        or `name += ...`/etc. with `name` as the direct target, anywhere in
+        the body, any nesting depth via `_walk_ast` -- `if`/`while`/`with`/
+        `try` bodies included) rather than only ever READING. Those need a
+        genuine by-REFERENCE capture (threaded through the coroutine frame
+        as a pointer parameter, dereferenced on every read/write inside the
+        body -- see `_gen_cpp_async_unit`'s `mut_capture_names` parameter
+        and `_cpp_expr`/`_cpp_stmt`'s own dereferencing) instead of the
+        existing by-VALUE capture (a plain scalar parameter copy) every
+        OTHER captured free variable still uses unchanged: real Mojo's own
+        `test_locks.mojo` idiom (`async def inc() {mut}: rawCounter += 1`)
+        needs the mutation to be visible to the CALLER across every one of
+        thousands of separate task invocations, which a by-value copy
+        cannot do. A name that's merely READ (e.g. `return x + 1`) is left
+        out of this set and keeps the existing, already-verified by-value
+        path -- unchanged, zero regression risk for every capture shape
+        this project already supports (device_context.mojo's closures,
+        `test_asyncrt_add`'s threaded comptime params, ...), none of which
+        ever reassign a captured name."""
+        mutated: set = set()
+        for n in _walk_ast(inner.body):
+            if isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr):
+                if n.target.name in candidate_names:
+                    mutated.add(n.target.name)
+            elif isinstance(n, AugAssignStmt) and isinstance(n.target, IdentExpr):
+                if n.target.name in candidate_names:
+                    mutated.add(n.target.name)
+        return frozenset(mutated)
+
     def _gen_cpp_async_unit(self, fn: FunctionDef, extra_captures: list | None = None,
                             base_name_override: str | None = None,
                             scope_prefix: str | None = None,
-                            enclosing_scope: str | None = None) -> tuple[str, str, str, list]:
+                            enclosing_scope: str | None = None,
+                            mut_capture_names: frozenset = frozenset()) -> tuple[str, str, str, list]:
         """Step B of the compiled-path async/await codegen project (the
         async-function sibling of _gen_cpp_generator_unit, which Step B's
         planning deliberately decided should be a SEPARATE method/promise
@@ -17738,8 +17950,23 @@ class GimpleGen:
         # captured value(s) automatically, exactly as if they were ordinary
         # call arguments, since the Mojo source itself never spells them
         # out at the `wrapper()` call site.
+        # `extra_captures` always stores each entry's PLAIN ctype (e.g.
+        # "int64_t") -- a comptime bracket parameter (never reassignable)
+        # always keeps that plain ctype in the compiled SIGNATURE too, but
+        # an entry whose name is in `mut_capture_names` (see this method's
+        # own docstring on that parameter) is widened to a POINTER ctype
+        # HERE, in the one place that actually builds the C++ function
+        # signature -- the caller (gen_module's discovery passes) never
+        # bakes " *" into the stored dict itself, so every OTHER consumer
+        # of that same captures list (the call-site argument-forwarding in
+        # `_lower_call`'s create_task branch) can derive the same pointer
+        # type from the identical plain-ctype + mut_capture_names pair,
+        # rather than two places independently deciding this.
         for cap_name, cap_ctype in (extra_captures or []):
-            param_ctypes.append((cap_name, cap_ctype))
+            if cap_name in mut_capture_names:
+                param_ctypes.append((cap_name, f"{cap_ctype} *"))
+            else:
+                param_ctypes.append((cap_name, cap_ctype))
         # Bare `fn.name` is only unique for a genuinely top-level compiled
         # async function. Two DISTINCT nested shapes need a qualified name
         # instead, mutually exclusive (a caller only ever supplies one):
@@ -17779,10 +18006,36 @@ class GimpleGen:
         # `declared` seeding (see that method's docstring for why this
         # ordering, body-emission-before-value_ctype-is-computed, matters
         # for an unannotated return/local that reads a param).
-        declared: dict[str, str] = dict(param_ctypes)
+        #
+        # A MUTATED capture (`mut_capture_names` -- see `_mutated_free_
+        # names`) is threaded through as a POINTER parameter (its entry in
+        # `param_ctypes`/`extra_captures` is already e.g. "int64_t *", built
+        # by the caller), but `declared` here must record its DEREFERENCED
+        # (pointee) type instead -- `declared`/`known` feeds `_infer_
+        # simple_expr_ctype` for ordinary scalar type-inference (e.g. `x =
+        # counter + 1`), which must see `counter` as `int64_t`, not `int64_t
+        # *`, or arithmetic involving it would infer a bogus pointer type.
+        # The C++ SIGNATURE itself (built from `param_ctypes`, above,
+        # unchanged) still correctly declares the real pointer parameter --
+        # only this type-inference-facing dict differs.
+        declared: dict[str, str] = {}
+        for _pn, _pct in param_ctypes:
+            if _pn in mut_capture_names and _pct.endswith(' *'):
+                declared[_pn] = _pct[:-2]
+            else:
+                declared[_pn] = _pct
         self._cpp_gen_self_struct = None
         self._cpp_gen_self_fields = None
         self._cpp_emit_kind = 'async'
+        # See _cpp_expr's IdentExpr case / _cpp_stmt's AssignStmt/
+        # AugAssignStmt cases: every read/write of a name in this set is
+        # auto-dereferenced (`(*name)` / `*name = ...`) instead of a bare
+        # `name` -- the ONE piece of state those methods need to tell a
+        # mutated-by-reference capture apart from an ordinary scalar local/
+        # parameter, mirroring `_cpp_gen_self_fields`'s identical side-
+        # channel technique (this coroutine-body emitter has no `self`-
+        # scoped AST annotation to consult instead).
+        self._cpp_mut_capture_names = mut_capture_names
         # `enclosing_scope` (when supplied -- only by gen_module's "Async
         # closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" pass, the
         # SAME enclosing top-level function name it uses to key
@@ -17856,6 +18109,7 @@ class GimpleGen:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
             self._cpp_async_enclosing_scope = None
+            self._cpp_mut_capture_names = frozenset()
         if value_ctype is None:
             # A genuinely void-returning async function (declared `-> None`
             # or unannotated, with no value-carrying `return` anywhere) —
@@ -18409,7 +18663,7 @@ class GimpleGen:
             i += 1
         return result
 
-    def _compile_nested_async_functions(self, enclosing_name: str, body: list,
+    def _compile_nested_async_functions(self, outer_fn: FunctionDef,
                                          async_fns: dict) -> None:
         """Step I (create_task/Task/TaskGroup/RaisingTask project): compile
         any `async def` nested INSIDE an ordinary top-level function's own
@@ -18455,7 +18709,22 @@ class GimpleGen:
         `create_task(it())`) then hits that call site's own honest,
         already-existing refusal instead, exactly like any other
         not-yet-supported shape; nothing here ever emits a dangling/
-        unresolved reference."""
+        unresolved reference.
+
+        Step I (mutable-capture follow-on): also computes this nested
+        function's own captured free variable(s) via `_compute_nested_
+        closure_captures`, using `_enclosing_scope_with_locals(outer_fn)`
+        (params AND top-level local `var`s of `outer_fn` -- see that
+        method's own docstring for why locals matter here: test_locks.
+        mojo's `inc()` captures `lock`/`rawCounter`/`counter`, all locals
+        of `test_basic_lock`, not parameters). A captured name `inc`'s own
+        body REASSIGNS (`_mutated_free_names`) is threaded through as a
+        by-reference (pointer) parameter instead of the by-value copy
+        every other capture already used; see `_gen_cpp_async_unit`'s
+        `mut_capture_names` docstring."""
+        enclosing_name = outer_fn.name
+        body = outer_fn.body
+        outer_scope = self._enclosing_scope_with_locals(outer_fn)
         for n in _walk_ast(body):
             if not (isinstance(n, FunctionDef) and n.is_async and not n.is_generator):
                 continue
@@ -18500,12 +18769,16 @@ class GimpleGen:
             # top-level-function parent shape.
             if n.comptime_params:
                 continue
+            _captures = self._compute_nested_closure_captures(n, outer_scope)
+            _mut_names = self._mutated_free_names(n, {_cn for _cn, _ in _captures})
             eligible = _async_quick_eligible(n, frozenset(self._async_api.keys()))
             if eligible:
                 try:
                     cpp_text, value_ctype, base, param_ctypes = \
-                        self._gen_cpp_async_unit(n, scope_prefix=enclosing_name,
-                                                 enclosing_scope=enclosing_name)
+                        self._gen_cpp_async_unit(n, extra_captures=_captures,
+                                                 scope_prefix=enclosing_name,
+                                                 enclosing_scope=enclosing_name,
+                                                 mut_capture_names=_mut_names)
                 except _UnsupportedGeneratorShape as e:
                     _debug_note(f'nested async function {n.name!r} (inside '
                                 f'{enclosing_name!r}) not eligible for C++ '
@@ -18552,7 +18825,8 @@ class GimpleGen:
                 continue
             self._nested_async_api[qualified] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                'nested_name': n.name,
+                'nested_name': n.name, 'captures': _captures,
+                'mut_capture_names': _mut_names,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
@@ -20474,7 +20748,7 @@ class GimpleGen:
             if not (isinstance(s, FunctionDef) and id(s) not in _async_fns
                     and id(s) not in _generator_fns):
                 continue
-            self._compile_nested_async_functions(s.name, s.body, _async_fns)
+            self._compile_nested_async_functions(s, _async_fns)
 
         # Milestone C step 3: generator METHODS on structs — same eligibility/
         # compile-attempt shape as the free-function loop just above, keyed

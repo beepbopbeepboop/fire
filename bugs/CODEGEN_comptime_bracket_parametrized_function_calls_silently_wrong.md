@@ -346,3 +346,104 @@ support described above — a follow-on, not started this session.
 mojo` (the monomorphizer nested-scope-shadowing gap, plus this same
 `create_task` work, now landed) remain in `compile_stdlib.py`'s
 `EXPECTED_FAILURES`, not attempted this session.
+
+## Update — mutable (by-reference) closure capture for async coroutines (test_locks.mojo Step 1/2)
+
+`test_locks.mojo`'s own blocker is really three independent, stackable
+features (`TaskGroup` as a real type, `with`-inside-async, and mutable
+closure capture) — this update lands the FIRST of the three, the one the
+other two depend on having available at all: `async def inc() {mut}:
+rawCounter += 1` mutating a captured local across thousands of separate
+`create_task(...)` invocations, with the mutation genuinely visible back
+to the caller.
+
+**Safety validated BEFORE writing any real codegen** (this project's own
+standing precedent for every prior promise/frame-shape change — see
+Milestone D's/Step D's/Step H's own GCC-15 repros): a minimal, Mojo-
+independent hand-written `.cpp` (a coroutine taking 1, then 3, POINTER-
+typed parameters, mutating through them across multiple `co_await
+std::suspend_always{}` suspend points, run at `-O0` through `-O3` on this
+project's actual `g++-mp-15`) confirmed this is safe. Critically, this is
+a DIFFERENT shape from the one GCC-15 corrupted before: that bug was
+specifically about adding an EXTRA FIELD to the PROMISE type (see
+`_gen_cpp_generator_unit`'s `unhandled_exception()` docstring) — a
+coroutine's ordinary FORMAL PARAMETERS (of any type, including pointers)
+have always been safe on this compiler, and this change never touches
+any promise type at all.
+
+**What changed** (all in `gimple_codegen.py`):
+- `_mutated_free_names(inner, candidate_names)`: which of a nested
+  closure's captured free variables its OWN body actually REASSIGNS
+  (`AssignStmt`/`AugAssignStmt` with that name as the direct target,
+  anywhere in the body) — those need a pointer capture; a merely-READ
+  capture (every shape this project already supported: device_context.
+  mojo's closures, `test_asyncrt_add`'s threaded comptime params, ...)
+  keeps the existing, unchanged by-value path.
+- `_enclosing_scope_with_locals(outer_fn)`: widens the captured-variable
+  lookup scope beyond `outer_fn`'s own PARAMETERS (all `_compute_nested_
+  closure_captures` had access to before) to ALSO include its top-level
+  local `var`s — test_locks.mojo's own `lock`/`rawCounter`/`counter` are
+  ALL locals of `test_basic_lock`, never parameters, so without this the
+  existing capture computation silently found nothing to capture at all.
+  Getting a captured local's C TYPE right here took two real, hand-
+  verified false starts: an independent re-inference (`_infer_simple_
+  expr_ctype`) guessed `int64_t` for a plain `var counter = 0`, but the
+  REAL declared type `_gen_stmt_VarDecl` uses for that exact shape (no
+  later reassignment anywhere in the function) is plain C `int` (`_lower_
+  IntLiteral`'s own literal-only rule, not the broader int64_t-default
+  estimators this file's OTHER "guess a scalar type" helpers use) — a
+  real "incompatible pointer type" gcc error from taking the address of
+  the wrong-width variable. Fixed by consulting `self._inferred_var_
+  types[outer_fn.name]` (the SAME table `_gen_stmt_VarDecl` itself
+  consults, for a name that IS reassigned elsewhere) with a narrow,
+  literal-only fallback (`_local_literal_ctype`, mirroring `_lower_
+  IntLiteral`/`_lower_FloatLiteral`/`_lower_BoolLiteral` exactly) for a
+  name that's declared once and never reassigned — the actual common
+  case, and the one every existing "guess" helper got wrong.
+- `_gen_cpp_async_unit` gained a `mut_capture_names` parameter: a mutated
+  capture's ctype in `extra_captures` is widened to a pointer (`f"{ctype}
+  *"`) for the compiled unit's own SIGNATURE, while a separate `declared`
+  table (feeding ordinary scalar type-inference, e.g. `counter + 1`) keeps
+  the DEREFERENCED type — the C signature and the body's own type-
+  inference need to disagree on purpose here.
+- `_cpp_expr`'s `IdentExpr` case and `_cpp_stmt`'s `AssignStmt`/
+  `AugAssignStmt` cases dereference (`(*name)` / `*name = ...`) any name
+  in a new `self._cpp_mut_capture_names` side channel (mirroring `self.
+  _cpp_gen_self_fields`'s identical technique — this coroutine-body
+  emitter has no `self`-scoped AST annotation to consult instead).
+- The `create_task(...)` call-site lowering (`_lower_call`, ordinary non-
+  coroutine code) now forwards EVERY registered capture as an extra
+  trailing argument (previously: none at all, for a plain nested async
+  def with no comptime bracket params — read-only captures were simply
+  never wired up for that specific pass either, until now) — a mutated
+  one via a real GIMPLE address-of temp (`t = &name; ...`; `-fgimple`
+  forbids a bare `&name` as an inline call-argument expression), a
+  read-only one by value, unchanged.
+- `_compile_nested_async_functions` (the pass handling a plain, non-
+  comptime nested async def — test_locks.mojo's `inc()` shape) now
+  actually computes and threads captures at all; it never did before
+  (every real file it previously handled, e.g. `test_raising_asyncrt.
+  mojo`'s `wrapper`, happened to have no captures).
+- A separate, PRE-EXISTING bug surfaced by the same verification: `task.
+  wait()` on a genuinely VOID-returning task unconditionally called `t =
+  {base}_value(handle)` even when `vct == 'void'` — a `void` GIMPLE local
+  is invalid C. This exact combination (`create_task`+`.wait()` on a void
+  async function) was never exercised before (every prior test drove a
+  void async function via `asyncio.run(...)` instead, which already had
+  its own correct void-skip in `_emit_asyncio_run_drive`). Fixed by
+  mirroring that same skip in `.wait()`'s own lowering.
+
+**Verified end-to-end** (real compile+link+run, not compile-only) via the
+new `test_mutable_async_capture.py`: a single captured `Int` incremented
+by 3 separate `create_task(...)` calls reads back `3` (not `0`, which is
+what a silent by-value regression would print), and two INDEPENDENT
+captured counters mutated by two different closures with interleaved task
+creation read back correctly (`3`/`104`) — confirming no cross-instance
+frame aliasing between two different pointer-typed captures.
+
+**Not yet done** (test_locks.mojo's own remaining two features, per the
+original staged plan): `TaskGroup` as a real compiled type, and `with`-
+statement support inside a compiled coroutine body (`_cpp_stmt` still has
+no `WithStmt` case at all) — needed for `BlockingScopedLock`. `test_locks.
+mojo` itself is NOT yet passing; this update only lands the capture
+mechanism those two remaining pieces depend on.
