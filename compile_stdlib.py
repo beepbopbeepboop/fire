@@ -73,37 +73,29 @@ EXPECTED_FAILURES = {
     # return gap is real but narrower and separately documented, not
     # papered over.
     #
-    # `test_tracing.mojo` needs the SAME nested-generic-async fix (also
-    # confirmed fixed) but ALSO has an outer complication the fix
-    # deliberately does NOT attempt: `test_tracing_add` is nested inside
-    # `test_tracing[level: TraceLevel, enabled: Bool]()` — itself a
-    # comptime-bracket-parametrized (non-async) function that gets
-    # elaborated via the EXISTING cross-module-style textual monomorphizer
-    # (elaborate.py/monomorphize.py) whenever it's bracket-called
-    # (`test_tracing[TraceLevel.ALWAYS, True]()`). That monomorphizer is
-    # purely textual over the WHOLE extracted block (including nested
-    # defs) with no notion of nested-scope shadowing (`test_tracing_add`'s
-    # OWN `enabled: Bool` bracket parameter re-declares the outer
-    # `enabled` name) and no support for compiling a fragment that itself
-    # needs a SEPARATE .cpp coroutine translation unit — hand-verified to
-    # throw internally, silently caught, and — before this session's fix —
-    # fall through to a bare placeholder `0` (a real, newly-introduced
-    # silent-miscompile risk). Fixed with an honest upfront refusal instead
-    # (`_elaborate_generic_call` now detects a nested `async def` inside
-    # the generic being elaborated and raises, rather than ever reaching
-    # that silent fallback) — correctness-safe, but means `test_tracing.
-    # mojo` still can't compile until monomorphize.py genuinely supports
-    # dual C/C++ output for an elaborated fragment (a real, separate,
-    # not-yet-started feature) AND create_task lands.
-    'test/runtime/test_tracing.mojo':
-        'test_tracing_add is nested inside test_tracing[level, enabled](), '
-        'itself a comptime-bracket-parametrized function elaborated via '
-        'the textual monomorphizer, which has no support for nested-scope '
-        'bracket-parameter shadowing or a fragment needing its own .cpp '
-        'coroutine translation unit — an honest upfront refusal now '
-        '(previously a silent placeholder-0 miscompile), plus create_task '
-        '— see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_'
-        'silently_wrong.md',
+    # `test_tracing.mojo` — FIXED: monomorphize.py now genuinely supports
+    # dual C/C++ output for an elaborated fragment (a nested `async def`
+    # inside a comptime-bracket-parametrized generic, e.g. `test_tracing_
+    # add`/`test_tracing_add_two_of_them` inside `test_tracing[level,
+    # enabled]()`) -- `instantiate()` compiles+CAS-caches a companion
+    # `.cpp.o` alongside the ordinary `.o` whenever `GimpleGen.generated_
+    # cpp` is non-empty, `monomorphize_source`'s substitution gained
+    # `_shadowed_spans`/`_sub_outside_spans` to skip a nested function's
+    # own re-declared (shadowing) bracket-parameter scope, `_cpp_stmt`
+    # gained `ComptimeVarStmt` (a compile-time-only no-op) and a bare
+    # `abort(...)` call case, and `Trace` joined `BlockingScopedLock` as a
+    # recognized no-op-elidable async guard type (see gimple_codegen.py's
+    # `_ASYNC_NOOP_LOCK_GUARD_TYPES`). Also fixed two REAL, separately
+    # hand-verified bugs surfaced while landing this: a comptime-bracket-
+    # argument/ordinary-argument ORDER swap at three separate composition
+    # call sites (masked by every existing test's own commutative
+    # arithmetic — `lhs + rhs` gives the same sum either order — until
+    # test_tracing.mojo's real, non-commutative-enough 3-parameter shape
+    # caught it), and `monomorphize.instantiate()` never setting `gen.
+    # _current_filename`, which silently no-opped an entire gen_module
+    # pass (nested async-with-comptime-params discovery) for every
+    # elaborated fragment. See bugs/CODEGEN_comptime_bracket_parametrized_
+    # function_calls_silently_wrong.md's own "dual C/C++ output" update.
 
     # test_locks.mojo's blocker, updated this session: `TaskGroup` (as a
     # real compiled intrinsic type -- `TaskGroup()`/`.create_task(...)`/

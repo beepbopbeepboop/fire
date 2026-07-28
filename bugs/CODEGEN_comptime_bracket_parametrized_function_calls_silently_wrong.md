@@ -762,3 +762,157 @@ their exact prior counts.
 (`Atomic[DType.int64]`) struct capture (`counter.fetch_add(1)`/`counter.
 load()`) — `counter`, unlike `lock`, IS actually read/written by `inc()`'s
 body, so it can't be elided the same way.
+
+## Update — test_tracing.mojo fixed: monomorphize.py's dual C/C++ output
+
+`test_tracing.mojo` now compiles: `compile_stdlib.py` moved from 662/664
+(2 expected failures) to 663/664 (1 expected failure — only test_locks.mojo
+remains). This landed the "genuinely separate, not-yet-started feature"
+this doc's own "Update — nested async comptime-bracket functions FIXED
+too" section deferred: `monomorphize.py`'s dual C/C++ output for an
+elaborated fragment containing a nested `async def`.
+
+**`monomorphize.py`**: `instantiate()`'s `build()` now also asks for
+`gen.generated_cpp` (previously silently discarded) and, when non-empty,
+compiles it with g++ into a SECOND object, CAS-cached under the SAME
+instantiation key but a `.cpp.o` extension (`cas.get_or_build`'s own
+`(key, ext)` pair already supports this — no new storage layer). Also:
+`build()` now writes the CONCRETE (already-monomorphized) source to a real
+file and points `gen._current_filename` at it — a real, hand-verified
+bug found while landing this: several `gen_module` passes (notably the
+"Async closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" discovery
+pass, which is what actually compiles a nested async def with its OWN
+comptime bracket params) are gated on `self._current_filename` being a
+real, readable path, and this was never set for an elaborated fragment's
+own independent `GimpleGen` instance at all — every such pass silently
+no-opped, so a nested async-with-comptime-params inside a generic always
+fell through to the final "still unsupported" whole-module refusal
+regardless of the dual-artifact fix.
+
+**`monomorphize_source`**: gained `_shadowed_spans`/`_sub_outside_spans` —
+before substituting a type param name, find any NESTED `fn`/`def NAME[...]`
+(async or not) that RE-DECLARES that same name as its own bracket
+parameter (test_tracing.mojo's real triple-shadow: `test_tracing[level,
+enabled]()` containing `test_tracing_add_two_of_them[enabled](...)`
+containing `test_tracing_add[enabled, lhs](...)`), and exclude that whole
+nested function's span (declaration AND body) from the substitution. Two
+real bugs fixed while building this: the original regex didn't match
+`async def` (only bare `def`/`fn`), and the span-END calculation sliced
+the source (`src[m.end():]`) before re-searching for `(?m)^` — since a
+slice's own start looks like a false line-start to the regex engine when
+the match doesn't begin exactly at a real line boundary, every span
+collapsed to just its declaration line, leaving the actual body (where
+the shadowed name is also used) still exposed. Fixed by searching the
+ORIGINAL string via `Pattern.finditer(string, pos)` instead of a slice.
+
+**`_elaborate_generic_call`**: the blanket "generic contains a nested
+async def -> refuse" guard is gone (dual C/C++ output makes it
+unnecessary); `elaborate.py`'s three `mm.instantiate(...)` call sites
+thread the new `cpp_object` through their returned dicts;
+`_emit_generic_instantiation`/`_ensure_generic_struct` collect it onto
+`self._link_objects` and set a new `self._link_needs_cxx` flag.
+
+**`compile_linked`/`driver.py`**: `compile_linked` now ALSO returns this
+module's own top-level `generated_cpp` and a combined `needs_cxx` flag (a
+program with an ordinary top-level `async def`/`create_task(...)` — no
+generics involved at all — previously compiled fine through link mode but
+FAILED TO LINK when driven through `driver.compile_program`, a real,
+independently hand-verified pre-existing gap: link mode had NO C++/
+coroutine-object support whatsoever, silently papered over in practice
+only because `mojo.py build`/`run` fall back to a completely different,
+already-correct inline pipeline whenever `driver.compile_program` fails).
+`driver.py`'s `_build` now selects `g++` as the final link driver when
+`needs_cxx`, and compiles+CAS-caches this module's own top-level `.cpp`
+(if any) into an object added to the link line. Confirmed via a direct
+repro that a downstream client does NOT need to separately recompile/
+relink `runtime/mojo_async_runtime.cpp` — the production stdlib dylib
+already exports its symbols unconditionally (`build_stdlib_dylib.py`'s own
+existing behavior) — only the client's OWN coroutine object(s) plus a
+C++-aware final link driver are needed.
+
+**Two more real, separately hand-verified bugs found while testing the
+above against test_tracing.mojo's actual doubly-nested composition
+shape** (a nested async def with its own comptime bracket params, called
+via `create_task(...)`/`await` from ANOTHER bracket-parametrized nested
+async def):
+  - **Argument order swap** at THREE independent bracket-call composition
+    sites (`_lower_call`'s ordinary SubscriptExpr+IdentExpr branch, the
+    `asyncio.run(...)` branch, and `_cpp_expr`'s AwaitExpr coroutine-body
+    composition branch): each built the callee's argument list as
+    `[bracket/comptime elements..., ordinary call args...]`, but the
+    callee's REAL compiled signature (`_gen_cpp_async_unit`) is `[ordinary
+    fn.params..., extra_captures (comptime params then free-variable
+    captures)...]` — ordinary-first, not comptime-first. Silently masked
+    by every existing test's own commutative arithmetic (`lhs + rhs` sums
+    to the same value whether `lhs`/`rhs` are swapped) until test_tracing.
+    mojo's real, non-commutative, 3-parameter shape caught it directly (a
+    hand-verified `11 + 22` computing as `11 + 21 = 32`, not `33`, before
+    the fix). Fixed at all three sites: ordinary args first, then bracket
+    elements, then remaining captures.
+  - **`_cpp_stmt` had no `ComptimeVarStmt` case** — test_tracing_add's
+    real body opens with `comptime s1 = "..." if enabled else "..."`
+    (feeding the `with Trace[level](s1, s2):` guard, which `_cpp_with_stmt`
+    elides entirely — see below — so `s1`/`s2` are never actually
+    evaluated). Fixed as a deliberate no-op skip (this narrow scalar-only
+    coroutine model has no STRING representation at all, unlike the
+    ordinary GIMPLE path's real `self._comptime_vals` fold) — safe
+    specifically because the only reader of `s1`/`s2` is the now-elided
+    guard; a genuine later reference would still hit `_cpp_expr`'s own
+    honest "unsupported identifier" refusal, never a silent wrong value.
+  - **`_cpp_stmt` had no bare `abort(...)` call case** — test_tracing_add's
+    except-handler calls `abort(String(e))`. Real Mojo's `abort` never
+    returns regardless of its message, which this narrow model can't
+    represent anyway (a `String`/exception-object value) — compiles to a
+    real C `abort()` (with a stderr diagnostic first), mirroring this
+    file's own established "loud, honest runtime failure for a provably-
+    unreachable-in-practice call" pattern (the guarded body, once elided,
+    never actually raises, so this handler is dead code in practice, but
+    every statement in a function body must still compile).
+
+**`Trace` joined `BlockingScopedLock`** in `_ASYNC_NOOP_LOCK_GUARD_TYPES`
+(`_cpp_with_guard_type_name` widened to also recognize a bracket-
+parametrized guard, `Trace[level](s1, s2)`, not just a bare call) — safe
+to elide for a DIFFERENT reason than the lock (documented distinctly in
+that set's own docstring): `Trace`'s `__enter__`/`__exit__` write only to
+a profiling side channel (`MODULAR_PROFILE_FILENAME`), never to anything
+the program's own computation observes.
+
+Verified end-to-end (real compile+link+run via `driver.compile_program`,
+the actual `mojo.py build`/`run` pipeline) via new `test_dual_cpp_
+elaboration.py` (6/6): a `_shadowed_spans` unit test proving BOTH nested
+shadow levels stay protected while a non-shadowed name still substitutes
+through them; the simplest nested-generic-containing-async shape; the
+doubly-nested bracket-async composition with the argument-order fix
+(`33`, not the swapped-order `32`); and the FULL test_tracing.mojo-shaped
+repro (Trace elision + comptime no-op + `abort()` + doubly-nested bracket
+async composition, `33`).
+
+Regression-checked: `make check-selfhost` (`--no-cache`, clean), a
+from-scratch stdlib dylib rebuild (0 skips, unchanged), `compile_stdlib.py`
+(**663/664**, up from 662 — only `test_locks.mojo` remains, 0 unexpected),
+and all 19 of this project's existing test suites at their exact prior
+counts.
+
+**Known remaining gap, found but NOT fixed (out of scope for this
+update)**: the REAL `test_tracing.mojo` file (with its actual `from std.
+runtime.tracing import Trace, TraceLevel`/`from std.os import abort`/
+`from std.runtime.asyncrt import create_task` imports, as opposed to this
+update's own hand-built repros using the SAME bare intrinsic names with no
+real imports at all) does NOT yet build+link+run via `driver.compile_
+program` — `compile_stdlib.py`'s own gate (codegen + `gcc -fsyntax-only`
+on the resulting `.c`, the same criterion every other stdlib file in this
+project has been held to throughout) is satisfied and is what moved the
+663/664 count, but a genuine full link attempt hits a SEPARATE, pre-
+existing, unrelated failure: `std/sys/__init__.mojo`'s own generic imports
+(`align_of`, `size_of`, ...) produce a real "'CompilationTarget'
+redeclared as different kind of symbol" / "conflicting types for
+'mojo_abort'" conflict once test_tracing.mojo's real (GPU/DeviceContext-
+pulling) `std.runtime.tracing` import chain is inlined through link mode
+— confirmed unrelated to anything in this update (reproduces from the
+outer client compile step, before any of this update's own elaboration
+code even runs, and is plausibly present for ANY program pulling in that
+same real import chain through link mode). A separate, deep, not-yet-
+investigated gap in real stdlib import-chain resolution, matching this
+project's own established precedent of every other stdlib file's
+`compile_stdlib.py` PASS meaning "codegen + syntax-check", not "genuinely
+link+run with its real, full import graph."

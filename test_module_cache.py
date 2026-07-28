@@ -174,9 +174,9 @@ def test_stage4_reflection(wd):
 def test_stage5_monomorphization(wd):
     cas.reset_stats()
     tmpl = "fn s5_id[T](x: T) -> T:\n    return x\n"
-    n1, o1, h1 = mm.instantiate(tmpl, {'T': 'Int64'})
-    n2, o2, h2 = mm.instantiate(tmpl, {'T': 'Float64'})
-    n3, o3, h3 = mm.instantiate(tmpl, {'T': 'Int64'})
+    n1, o1, h1, _cpp1 = mm.instantiate(tmpl, {'T': 'Int64'})
+    n2, o2, h2, _cpp2 = mm.instantiate(tmpl, {'T': 'Float64'})
+    n3, o3, h3, _cpp3 = mm.instantiate(tmpl, {'T': 'Int64'})
     check("stage5: distinct type args → distinct artifacts (2 misses)",
           (not h1) and (not h2) and o1 != o2)
     check("stage5: re-instantiation is a hit (same object)", h3 and o3 == o1)
@@ -263,7 +263,7 @@ def test_elaboration_generic_call(wd):
     open(gl, 'w').write("fn box[T](x: T) -> T:\n    return x\n")
     try:
         client = "from el_genlib import box\nfn main():\n    var y = box[Int64](42)\n"
-        code, dylibs, objects = compile_linked(client)
+        code, dylibs, objects, _cpp, _cxx = compile_linked(client)
         check("elaborate: client emits extern + concrete call + records object",
               'extern int64_t box_Int64' in code and 'box_Int64 (' in code
               and len(objects) == 1)
@@ -286,7 +286,7 @@ def test_elaboration_inference_and_comptime(wd):
                             "        return n\n    return fib(n - 1) + fib(n - 2)\n")
     try:
         # slice 2 wiring: box(42) with no explicit [..] elaborates
-        code, _d, objs = compile_linked("from el_box import box\n"
+        code, _d, objs, _cpp, _cxx = compile_linked("from el_box import box\n"
                                         "fn main():\n    var y = box(42)\n")
         check("slice2: inferred generic call elaborates (no explicit [..])",
               ('box_Int64' in code or 'box_Int' in code) and len(objs) == 1)
@@ -297,7 +297,7 @@ def test_elaboration_inference_and_comptime(wd):
                "        external_call[\"exit\", NoneType](55)\n"
                "    else:\n"
                "        external_call[\"exit\", NoneType](1)\n")
-        code2, _d2, _o2 = compile_linked(src)
+        code2, _d2, _o2, _cpp, _cxx = compile_linked(src)
         check("slice3: comptime call evaluated as machine code; live branch only",
               ('exit (55)' in code2 or '= 55;' in code2) and 'exit (1)' not in code2)
     finally:
@@ -319,7 +319,7 @@ def test_elaboration_generic_struct(wd):
     bl = os.path.join(RUNTIME, 'el_boxlib.mojo')
     open(bl, 'w').write(mod)
     try:
-        code, _d, objs = compile_linked(
+        code, _d, objs, _cpp, _cxx = compile_linked(
             "from el_boxlib import Box\n"
             "fn main():\n    var b = Box[Int64](42)\n    var y = b.unbox()\n")
         check("slice5: client materializes struct + calls method + records object",
@@ -345,7 +345,7 @@ def test_elaboration_overload(wd):
     ol = os.path.join(RUNTIME, 'el_ovlib.mojo')
     open(ol, 'w').write(mod)
     try:
-        code, _d, objs = compile_linked(
+        code, _d, objs, _cpp, _cxx = compile_linked(
             "from el_ovlib import pick\n"
             "fn main():\n    var a: Int64 = 5\n    var y = pick(a)\n")
         check("slice4: client calls the signature-mangled overload",
@@ -463,7 +463,7 @@ def test_reflected_struct_import(wd):
                   "        if w == 41:\n"
                   "            var ok = \"rs\\n\"\n"
                   "            var n = external_call[\"write\", Int64](1, ok, 3)\n")
-        code, dylibs, _objs = compile_linked(client)
+        code, dylibs, _objs, _cpp, _cxx = compile_linked(client)
         # The dylib compiled this module with a real module_name
         # (module_loader.module_name_for_path on runtime/rs_cnt.mojo ->
         # 'rs_cnt'), so its methods are module-qualified C symbols — the
@@ -568,7 +568,7 @@ def test_module_qualified_struct_symbols(wd):
                   f"    if r == {expected}:\n"
                   "        var ok = \"qc\\n\"\n"
                   "        var n = external_call[\"write\", Int64](1, ok, 3)\n")
-        code, dylibs, _objs = compile_linked(client)
+        code, dylibs, _objs, _cpp, _cxx = compile_linked(client)
         cc = os.path.join(wd, f'qc_{modname}.c'); open(cc, 'w').write(code)
         co = os.path.join(wd, f'qc_{modname}.o')
         subprocess.run([GCC, '-fgimple', f'-I{RUNTIME}', '-c', '-o', co, cc], check=True)

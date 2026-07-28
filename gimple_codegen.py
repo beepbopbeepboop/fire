@@ -3403,6 +3403,16 @@ class GimpleGen:
         # Object files the program must link, recorded by elaboration as it
         # instantiates generics on demand (ELABORATION.md). Deduped.
         self._link_objects: list = []
+        # True once ANY object added to `_link_objects` was compiled from
+        # C++ (a generic instantiation whose body needed a real coroutine
+        # translation unit — monomorphize.instantiate's `cpp_object`, e.g.
+        # test_tracing.mojo's `test_tracing[level, enabled]()` containing a
+        # nested `async def`) OR this module's own top-level `generated_
+        # cpp` is non-empty. The final link driver must be C++-aware
+        # (g++, not gcc) whenever this is True — see driver.py's own
+        # `compile_program`/`_build`, which reads this via `compile_
+        # linked`'s return tuple.
+        self._link_needs_cxx: bool = False
         # Modules imported (for a plain, non-generic struct) in link mode that
         # couldn't be resolved via imports.py's MOJO_PATH-based dylib resolver
         # or module_loader's std/test-only loader — e.g. an ordinary sibling
@@ -8598,8 +8608,15 @@ class GimpleGen:
                         _idx3 = inner.func.index
                         _elems3 = _idx3.elements if isinstance(_idx3, TupleExpr) else [_idx3]
                         if len(_elems3) == len(_cp_list3):
-                            _arg_pairs3 = [self.lower_expr(a) for a in _elems3]
-                            _arg_pairs3 += [self.lower_expr(a) for a in inner.args]
+                            # Ordinary args FIRST, then bracket (comptime)
+                            # elements, then any trailing captures --
+                            # matches the callee's REAL compiled signature
+                            # order (see the sibling composition sites'
+                            # identical fix/comment: _gen_cpp_async_unit
+                            # emits `fn.params` before `extra_captures`,
+                            # never the reverse).
+                            _arg_pairs3 = [self.lower_expr(a) for a in inner.args]
+                            _arg_pairs3 += [self.lower_expr(a) for a in _elems3]
                             for _cap_name3, _ in _api3['captures'][len(_cp_list3):]:
                                 _arg_pairs3.append(self.lower_expr(IdentExpr(name=_cap_name3)))
                             return self._emit_asyncio_run_drive(
@@ -9685,44 +9702,26 @@ class GimpleGen:
             module_src = open(source).read()
             import elaborate
             el = elaborate.Elaborator()
-            # Guard against a real, hand-verified silent-miscompile risk:
-            # monomorphize.py's substitution is purely TEXTUAL over the
-            # whole extracted template block (see monomorphize_source),
-            # including any NESTED def inside it — it has no notion of
-            # nested-scope shadowing (a nested `async def inner[enabled:
-            # Bool](...)` re-declaring a bracket-param name the OUTER
-            # generic ALSO uses, e.g. test_tracing.mojo's own real shape:
-            # `def test_tracing[level, enabled](): async def
-            # test_tracing_add[enabled, lhs](...): ...` — textual `enabled`
-            # substitution corrupts the nested bracket declaration's own
-            # syntax), nor any way to compile a resulting fragment that
-            # itself needs a SEPARATE .cpp translation unit (a nested
-            # async/generator def inside the generic — monomorphize.py's
-            # own `instantiate()`/`build()` only ever compiles the .c side,
-            # silently discarding `gen.generated_cpp` entirely). Confirmed
-            # via a hand-written repro: elaborating such a generic threw
-            # inside monomorphize.py, was caught by the broad `except
-            # Exception` below, and the call site fell all the way through
-            # to `_lower_call`'s final "not an IdentExpr callee" catch-all,
-            # silently compiling to a bare placeholder `0` — exactly the
-            # class of bug bugs/CODEGEN_comptime_bracket_parametrized_
-            # function_calls_silently_wrong.md was written to eliminate.
-            # Until monomorphize.py genuinely supports dual C/C++ output
-            # (a real, separate feature — not attempted here), refuse
-            # honestly instead of ever reaching that silent fallback.
-            _tmpl_check = elaborate.extract_fn_source(module_src, g, arg_count=len(arg_pairs))
-            if _tmpl_check and re.search(r'\basync\s+def\b', _tmpl_check):
-                raise RuntimeError(
-                    f"cannot compile module: generic function {g!r} being "
-                    "elaborated (via a bracket call) contains a nested "
-                    "async/generator def — this codegen's monomorphization "
-                    "is purely textual and has no dual C/C++ (coroutine) "
-                    "output support for an elaborated fragment yet, so "
-                    "instantiating this generic would either corrupt "
-                    "nested-scope bracket-parameter names via blind text "
-                    "substitution or silently discard the required "
-                    "coroutine translation unit — falling back to "
-                    "interpreting this module from source instead")
+            # A generic being elaborated here MAY contain a nested async/
+            # generator def (test_tracing.mojo's own real shape: `def
+            # test_tracing[level, enabled](): async def test_tracing_add
+            # [enabled, lhs](...): ...`). This used to be an unconditional
+            # honest refusal — monomorphize.py's substitution is purely
+            # TEXTUAL over the whole extracted template block, which has no
+            # notion of nested-scope shadowing (a nested nested nested
+            # bracket-param re-declaring an OUTER template's own bracket-
+            # param name), and `instantiate()`'s `build()` only ever
+            # compiled the .c side, silently discarding the required
+            # coroutine translation unit. Both are now handled: `monomorphize
+            # _source`'s `_shadowed_spans`/`_sub_outside_spans` exclude any
+            # nested function's own re-declared bracket-parameter scope from
+            # the outer substitution, and `instantiate()` compiles+CAS-
+            # caches a SECOND (.cpp-compiled) object whenever `GimpleGen.
+            # generated_cpp` is non-empty (see that method's own docstring),
+            # threaded through elaborate.py's returned dict as `cpp_object`
+            # and collected onto `self._link_objects`/`self._link_needs_cxx`
+            # by `_emit_generic_instantiation`/`_ensure_generic_struct`
+            # below — no refusal needed here anymore.
             if explicit:
                 idx = node.func.index
                 elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
@@ -9894,6 +9893,10 @@ class GimpleGen:
                     self._elaborated_externs.append(decl)
         if info['object'] not in self._link_objects:
             self._link_objects.append(info['object'])
+        _cpp_obj = info.get('cpp_object')
+        if _cpp_obj is not None and _cpp_obj not in self._link_objects:
+            self._link_objects.append(_cpp_obj)
+            self._link_needs_cxx = True
         return name
 
     def _elaborate_generic_struct_call(self, node: CallExpr):
@@ -9952,6 +9955,10 @@ class GimpleGen:
         # real .o is contributed by the outer frame; don't add a null link entry.
         if info['object'] is not None and info['object'] not in self._link_objects:
             self._link_objects.append(info['object'])
+        _cpp_obj = info.get('cpp_object')
+        if _cpp_obj is not None and _cpp_obj not in self._link_objects:
+            self._link_objects.append(_cpp_obj)
+            self._link_needs_cxx = True
         self.func_return_types[sym] = info['ret']
         self.func_param_types[sym] = info['params']
         # The template may have trailing params with a default value (e.g.
@@ -10456,8 +10463,19 @@ class GimpleGen:
                 _idx2 = node.func.index
                 _elems2 = _idx2.elements if isinstance(_idx2, TupleExpr) else [_idx2]
                 if len(_elems2) == len(_cp_list):
-                    arg_pairs2 = [self.lower_expr(a) for a in _elems2]
-                    arg_pairs2 += [self.lower_expr(a) for a in node.args]
+                    # Ordinary args FIRST, then bracket (comptime) elements,
+                    # then any trailing captures -- matches the callee's
+                    # REAL compiled signature order (_gen_cpp_async_unit:
+                    # `fn.params` then `extra_captures`), not bracket-
+                    # elements-first. See the sibling coroutine-body
+                    # composition site's own identical fix (a few thousand
+                    # lines down, `_bc9_args`) for the hand-verified repro
+                    # that caught this same ordering bug (masked here too
+                    # by every existing caller's own commutative arithmetic
+                    # -- never independently exercised until test_tracing.
+                    # mojo's real shape).
+                    arg_pairs2 = [self.lower_expr(a) for a in node.args]
+                    arg_pairs2 += [self.lower_expr(a) for a in _elems2]
                     for cap_name, _cap_ctype in _api2['captures'][len(_cp_list):]:
                         arg_pairs2.append(self.lower_expr(IdentExpr(name=cap_name)))
                     handle2 = self._call_expr('MojoAsync *', f"{_api2['base']}_start", arg_pairs2)
@@ -17036,22 +17054,32 @@ class GimpleGen:
                     _bc9_idx = target.func.index
                     _bc9_elems = _bc9_idx.elements if isinstance(_bc9_idx, TupleExpr) else [_bc9_idx]
                     if len(_bc9_elems) == len(_bc9_cps):
-                        # Same argument ORDER as every other established
-                        # bracket-call composition site (the ordinary
-                        # SubscriptExpr+IdentExpr call-lowering branch and
-                        # the asyncio.run(...) branch, both a few thousand
-                        # lines up): bracket (comptime) elements first, in
-                        # declared comptime_params order, then the call's
-                        # own ordinary arguments, then any trailing
-                        # captured free variable(s) beyond the comptime
-                        # params -- matching how `_extra_captures` was
-                        # built (comptime params then captures) when this
-                        # callee's own unit was compiled.
+                        # Same argument ORDER the callee's own compiled
+                        # signature actually uses (_gen_cpp_async_unit:
+                        # ordinary `fn.params` first, THEN `extra_captures`
+                        # -- comptime bracket params, in declared order,
+                        # THEN any trailing captured free variable(s)) --
+                        # NOT bracket-elements-first. A real, hand-verified
+                        # bug: an EARLIER version of this code built comptime
+                        # args before the call's own ordinary arguments,
+                        # silently swapping them at every bracket-call
+                        # composition site reached from inside a coroutine
+                        # body. Never caught by test_asyncrt.mojo's own
+                        # `test_asyncrt_add[1](10)`/`[2](20)` tests --
+                        # `lhs + rhs` is commutative and both callee params
+                        # are the same ctype, so a swapped (rhs, lhs) vs.
+                        # (lhs, rhs) call happens to produce an identical
+                        # sum either way -- only surfaced by test_tracing.
+                        # mojo's real shape (`test_tracing_add[enabled: Bool,
+                        # lhs: Int](rhs: Int)`, non-commutative and THREE
+                        # params, one of them non-literal), confirmed via a
+                        # direct off-by-one repro (`11 + 22` computed as
+                        # `11 + 21 = 32`, not `33`) before this fix.
                         _bc9_args = []
-                        for _bc9_e in _bc9_elems:
-                            _bc9_args.append(self._cpp_expr(_bc9_e))
                         for _bc9_a in target.args:
                             _bc9_args.append(self._cpp_expr(_bc9_a))
+                        for _bc9_e in _bc9_elems:
+                            _bc9_args.append(self._cpp_expr(_bc9_e))
                         for _bc9_cap_name, _bc9_cap_ctype in _bc9_api['captures'][len(_bc9_cps):]:
                             _bc9_args.append(self._cpp_expr(IdentExpr(name=_bc9_cap_name)))
                         _bc9_base = _bc9_api['base']
@@ -17237,6 +17265,26 @@ class GimpleGen:
                 helper = f"mojo_fnptr_call_{len(arg_exprs)}"
                 call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
                 return [f"{indent}{helper}({call_args});"]
+            # A bare `abort(...)` call (real Mojo's `std.os.abort`,
+            # test_tracing.mojo's own `except e: abort(String(e))` shape) --
+            # `abort`'s ENTIRE observable contract is "never returns,
+            # terminates the process", regardless of its message argument,
+            # which this narrow scalar-only coroutine-body model has no way
+            # to represent faithfully anyway (a `String`/exception-object
+            # value). Compiles to a real `abort()` (with a diagnostic on
+            # stderr first) -- mirrors this file's own established "loud,
+            # honest runtime failure, not silently wrong" pattern used
+            # elsewhere for a provably-unreachable-in-practice call (see
+            # `_lower_call`'s create_task/create_raising_task stub-branch
+            # comment) -- correctness here doesn't depend on ever actually
+            # reaching this statement at runtime (test_tracing.mojo's own
+            # `with Trace[level](...): return lhs + rhs` guarded body,
+            # elided per `_cpp_with_stmt`, never raises), only on it
+            # COMPILING, since every statement in a function body must.
+            if (isinstance(s.value, CallExpr) and isinstance(s.value.func, IdentExpr)
+                    and s.value.func.name == 'abort'):
+                return [f'{indent}fprintf(stderr, "mojo: abort() called\\n");',
+                        f"{indent}abort();"]
             raise _UnsupportedGeneratorShape(
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
@@ -17333,6 +17381,29 @@ class GimpleGen:
             return self._cpp_async_for_stmt(s, declared, indent)
         if isinstance(s, WithStmt):
             return self._cpp_with_stmt(s, declared, indent)
+        if isinstance(s, ComptimeVarStmt):
+            # `comptime NAME = <value>` inside an async/generator coroutine
+            # body -- test_tracing.mojo's own real shape (`comptime s1 =
+            # "ENABLED: ..." if enabled else "DISABLED: ..."`, feeding a
+            # `with Trace[level](s1, s2):` guard `_cpp_with_stmt` already
+            # elides ENTIRELY as a no-op intrinsic -- see that method's own
+            # docstring -- so `s1`/`s2` are never actually evaluated at
+            # all here). Comptime values are compile-time-only by
+            # definition (no runtime code either way -- mirrors the
+            # ordinary GIMPLE path's identical `_gen_stmt_ComptimeVarStmt`
+            # treatment), but THIS narrow scalar-only (int64_t/double/
+            # _Bool) coroutine-body model has no representation for a
+            # STRING comptime value at all (this repro's own shape) and no
+            # comptime-folding evaluator of its own (unlike the ordinary
+            # path's `self._comptime_vals`/`_eval_const`) -- so this is a
+            # deliberate, narrow no-op skip, not a real fold: if `s.target`
+            # were ever actually REFERENCED later as a plain identifier
+            # (impossible in the with-elision shape above, since the whole
+            # guard expression that would read it is never evaluated),
+            # `_cpp_expr`'s own name resolution would raise its own honest
+            # "unsupported identifier" refusal there -- never a silent
+            # wrong value.
+            return []
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
@@ -17345,14 +17416,42 @@ class GimpleGen:
     # reinterpreted as compiler intrinsics rather than real compiled
     # structs, for the same "the real struct is deep external_call/Atomic-
     # backed machinery entirely outside this narrow scalar-only async
-    # codegen's model" reason.
-    _ASYNC_NOOP_LOCK_GUARD_TYPES = frozenset({'BlockingScopedLock'})
+    # codegen's model" reason:
+    #  - `BlockingScopedLock` (std/utils/lock.mojo): a scoped MUTUAL-
+    #    EXCLUSION lock guard, safe to elide because this runtime is
+    #    genuinely single-threaded/cooperative (see this method's own
+    #    docstring) -- there's no other coroutine that could ever actually
+    #    contend for the lock mid-body.
+    #  - `Trace` (std/runtime/tracing.mojo, called bracket-parametrized —
+    #    `Trace[level](s1, s2)`, test_tracing.mojo's real shape): a
+    #    PROFILING/observability guard, safe to elide for a completely
+    #    DIFFERENT reason -- its `__enter__`/`__exit__` write to a side
+    #    channel (MODULAR_PROFILE_FILENAME), never to any value the
+    #    program's own computation observes, so skipping it changes
+    #    nothing about the program's actual computed results (only whether
+    #    profiling events get emitted, which this codegen doesn't support
+    #    at all regardless).
+    _ASYNC_NOOP_LOCK_GUARD_TYPES = frozenset({'BlockingScopedLock', 'Trace'})
+
+    def _cpp_with_guard_type_name(self, expr) -> str | None:
+        """The recognized-no-op-guard type name `with EXPR(...):`'s `EXPR`
+        resolves to, or None if `expr` isn't a call to a plain name (`Type
+        (...)`) or a bracket-parametrized name (`Type[args](...)`,
+        `Trace[level](...)`'s own shape) at all."""
+        if not isinstance(expr, CallExpr):
+            return None
+        if isinstance(expr.func, IdentExpr):
+            return expr.func.name
+        if (isinstance(expr.func, SubscriptExpr)
+                and isinstance(expr.func.obj, IdentExpr)):
+            return expr.func.obj.name
+        return None
 
     def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[str]:
-        """`with BlockingScopedLock(lock): <body>` inside an async
-        coroutine body (test_locks.mojo's `inc()`'s own real shape,
-        formerly test_locks.mojo gap (2): `_cpp_stmt` had no `WithStmt`
-        case at all).
+        """`with BlockingScopedLock(lock): <body>` / `with Trace[level](s1,
+        s2): <body>` inside an async coroutine body (test_locks.mojo's/
+        test_tracing.mojo's own real shapes, formerly gap (2): `_cpp_stmt`
+        had no `WithStmt` case at all).
 
         This project's async runtime (runtime/mojo_async_runtime.cpp) is
         genuinely single-threaded and cooperative -- confirmed via a
@@ -17364,42 +17463,48 @@ class GimpleGen:
         consequently a real, provable NO-OP for correctness in this
         specific runtime model -- not a shortcut or an approximation:
         there is no other coroutine that could ever actually contend for
-        the lock mid-body. This reinterprets `BlockingScopedLock` (see
-        `_ASYNC_NOOP_LOCK_GUARD_TYPES`) as a compiler-recognized intrinsic,
-        exactly like `TaskGroup`/`create_task` already are, rather than
-        genuinely compiling `BlockingSpinLock`'s real body (a deep
-        `external_call`/`Atomic`-backed struct -- see std/utils/lock.mojo
-        -- entirely outside this narrow scalar-only async codegen's
-        model). The guarded expression itself (`lock` in `BlockingScopedLock
-        (lock)`) is never evaluated at all: eliding the whole guard means
-        it's never referenced, so it doesn't even need to be threaded
+        the lock mid-body. This reinterprets each type in `_ASYNC_NOOP_
+        LOCK_GUARD_TYPES` (see that set's own docstring for why EACH one,
+        individually, is safe to elide -- not all for the same reason) as
+        a compiler-recognized intrinsic, exactly like `TaskGroup`/
+        `create_task` already are, rather than genuinely compiling the
+        real struct's body (in both cases, deep machinery -- `external_
+        call`/`Atomic`-backed for `BlockingSpinLock`, GPU/DeviceContext-
+        importing for `Trace` -- entirely outside this narrow scalar-only
+        async codegen's model). The guarded expression itself (`lock` in
+        `BlockingScopedLock(lock)`, `level`/`s1`/`s2` in `Trace[level](s1,
+        s2)`) is never evaluated at all: eliding the whole guard means none
+        of it is ever referenced, so it doesn't even need to be threaded
         through as a capture.
 
         Safety is enforced, not just asserted: an `await` anywhere in the
         protected body makes this an honest refusal instead of silently
         eliding a guard that would have been load-bearing across a real
         suspension point (where a DIFFERENT coroutine genuinely could run
-        while this one is suspended)."""
+        while this one is suspended) -- true for BOTH guard types (a real
+        lock's mutual exclusion AND a real trace span's start/end timing
+        would both be observably wrong if silently elided across one)."""
         for item in s.items:
             expr = item.expr
-            if not (isinstance(expr, CallExpr) and isinstance(expr.func, IdentExpr)
-                    and expr.func.name in self._ASYNC_NOOP_LOCK_GUARD_TYPES):
+            gname = self._cpp_with_guard_type_name(expr)
+            if gname not in self._ASYNC_NOOP_LOCK_GUARD_TYPES:
                 raise _UnsupportedAsyncShape(
                     "`with` inside an async function body is only "
-                    "supported for a recognized no-op lock guard "
+                    "supported for a recognized no-op guard type "
                     f"({sorted(self._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
-                    f"{type(expr).__name__}")
+                    f"{type(expr).__name__}"
+                    + (f" ({gname!r})" if gname else ""))
             if item.alias is not None:
                 raise _UnsupportedAsyncShape(
                     "`with ... as name:` is not supported for an async "
-                    "lock-guard `with` (BlockingScopedLock has no usable "
-                    "return value to bind)")
+                    f"no-op guard `with` ({gname} has no usable return "
+                    "value to bind)")
         if any(isinstance(n, AwaitExpr) for st in s.body for n in _walk_ast(st)):
             raise _UnsupportedAsyncShape(
-                "`await` inside a `with BlockingScopedLock(...):` body is "
-                "not supported -- eliding the lock guard (this codegen's "
-                "own no-op optimization, safe only because nothing else "
-                "can interleave BETWEEN statements in this runtime's "
+                "`await` inside a `with`-guarded body is not supported "
+                "-- eliding the guard (this codegen's own no-op "
+                "optimization, safe only because nothing else can "
+                "interleave BETWEEN statements in this runtime's "
                 "single-threaded cooperative scheduler) would be UNSAFE "
                 "across a real suspension point, where another coroutine "
                 "genuinely could run")
@@ -18921,14 +19026,27 @@ class GimpleGen:
 
     def _resolve_and_start_task(self, inner) -> tuple[str, dict] | None:
         """Resolves `inner` (a bare-name `CallExpr`, e.g. `inc()`, `f(x,
-        y)`) against `self._async_api` / `self._async_closure_api`'s
-        fallback, and if resolvable, actually CONSTRUCTS + SCHEDULES the
-        task (`{base}_start(...)`, `mojo_async_schedule_ready(...)`) --
-        forwarding any captured free variable(s) as extra trailing
-        arguments (a mutated one by ADDRESS, via a proper GIMPLE temp;
-        `-fgimple` forbids a bare `&name` as an inline call-argument
-        expression -- see `_gen_cpp_async_unit`'s `mut_capture_names`
-        docstring for the by-reference-capture design this mirrors).
+        y)`, OR a bracket-parametrized `CallExpr`, e.g. `test_tracing_add
+        [enabled, 1](rhs)` -- test_tracing.mojo's own real shape, a nested
+        async def with its OWN comptime bracket params, called via
+        `create_task(...)` from the ENCLOSING (non-async, ordinary) code,
+        not from inside another coroutine's `await` composition) against
+        `self._async_api` / `self._async_closure_api`'s fallback, and if
+        resolvable, actually CONSTRUCTS + SCHEDULES the task (`{base}_
+        start(...)`, `mojo_async_schedule_ready(...)`) -- forwarding any
+        captured free variable(s) as extra trailing arguments (a mutated
+        one by ADDRESS, via a proper GIMPLE temp; `-fgimple` forbids a bare
+        `&name` as an inline call-argument expression -- see `_gen_cpp_
+        async_unit`'s `mut_capture_names` docstring for the by-reference-
+        capture design this mirrors) and, for a bracket-parametrized
+        callee, its bracket ARGUMENT EXPRESSIONS (lowered at THIS call
+        site, not resolved by name -- a comptime bracket param is always
+        passed BY VALUE, like an ordinary parameter, never boxed/mutable,
+        since this codegen threads every nested async function's comptime
+        bracket parameter through as an ordinary trailing runtime
+        parameter regardless of its annotated type -- see the "Async
+        closures/functions NESTED INSIDE A TOP-LEVEL FUNCTION" gen_module
+        pass's own docstring).
         Returns `(handle, api)` on success, `None` if `inner` doesn't
         resolve to a known compiled async unit this way (the caller is
         responsible for its own fallback/refusal in that case -- this
@@ -18942,15 +19060,36 @@ class GimpleGen:
         sequence a second time) -- CLAUDE.md's consolidation principle:
         one shared implementation, not two independently-maintained
         copies of this same, fairly intricate sequence."""
-        if not (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
+        _bracket_vals: dict = {}
+        if (isinstance(inner, CallExpr) and isinstance(inner.func, SubscriptExpr)
+                and isinstance(inner.func.obj, IdentExpr) and not getattr(inner, 'kwargs', None)):
+            base_name = inner.func.obj.name
+            api = self._async_closure_api.get((self.current_func_name, base_name))
+            if api is None:
+                return None
+            idx = inner.func.index
+            elems = idx.elements if isinstance(idx, TupleExpr) else [idx]
+            cp_names = api.get('comptime_params') or []
+            if len(elems) != len(cp_names):
+                # Arity mismatch against what this callee was actually
+                # compiled with -- not this codegen's shape at all (a
+                # genuinely malformed/unsupported call); let the caller's
+                # own fallback/refusal handle it rather than guessing.
+                return None
+            for cp_name, cp_expr in zip(cp_names, elems):
+                _bracket_vals[cp_name] = self.lower_expr(cp_expr)
+            base = api['base']
+            arg_pairs = [self.lower_expr(a) for a in inner.args]
+        elif (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
                 and not getattr(inner, 'kwargs', None)):
+            _acl_fallback = self._async_closure_api.get((self.current_func_name, inner.func.name))
+            api = self._async_api.get(inner.func.name) or _acl_fallback
+            if api is None:
+                return None
+            base = api['base']
+            arg_pairs = [self.lower_expr(a) for a in inner.args]
+        else:
             return None
-        _acl_fallback = self._async_closure_api.get((self.current_func_name, inner.func.name))
-        api = self._async_api.get(inner.func.name) or _acl_fallback
-        if api is None:
-            return None
-        base = api['base']
-        arg_pairs = [self.lower_expr(a) for a in inner.args]
         # `api['captures']` always stores each capture's PLAIN
         # (dereferenced) ctype, e.g. "int64_t" -- never the pointer form --
         # so this call site and `_gen_cpp_async_unit`'s own `extra_
@@ -18960,7 +19099,16 @@ class GimpleGen:
         # stripping it back off.
         _mut_names = api.get('mut_capture_names') or frozenset()
         for _cap_name, _cap_ctype in (api.get('captures') or []):
-            if _cap_name in _mut_names:
+            if _cap_name in _bracket_vals:
+                # A comptime bracket parameter (`enabled`/`lhs` in
+                # `test_tracing_add[enabled, 1](rhs)`) -- its value comes
+                # from THIS call site's own bracket argument expression
+                # (already lowered above), never from a captured free
+                # variable of the same name, and is always passed BY
+                # VALUE (never boxed/mutable -- see this method's own
+                # docstring).
+                arg_pairs.append(_bracket_vals[_cap_name])
+            elif _cap_name in _mut_names:
                 _ptr_ctype = f"{_cap_ctype} *"
                 _boxed = getattr(self, '_boxed_mut_locals', {})
                 _mutptr = getattr(self, '_gimple_mut_ptr', {})
@@ -24521,9 +24669,29 @@ def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:
 
 
 def compile_linked(mojo_src: str, filename: str = "") -> tuple:
-    """Link-mode compile that also returns what the driver must link: the dylibs
-    `import` recorded and the object files elaboration produced (generic
-    instantiations). Returns (c_code, [dylib, ...], [object, ...])."""
+    """Link-mode compile that also returns what the driver must link: the
+    dylibs `import` recorded, the object files elaboration produced
+    (generic instantiations — possibly including a C++-compiled coroutine
+    unit for a generic whose body needed one, e.g. test_tracing.mojo's own
+    `test_tracing[level, enabled]()` — see monomorphize.instantiate's
+    `cpp_object`), this module's OWN top-level companion .cpp text (real
+    Mojo's `async def f(): ...`/generator content directly in THIS module,
+    as opposed to inside an elaborated generic — '' if none), and whether
+    the final link needs a C++-aware driver at all (True if either of the
+    previous two is non-empty). Returns (c_code, [dylib, ...],
+    [object, ...], cpp_code, needs_cxx).
+
+    Before this gained the last two return values, link-mode compiles had
+    NO way to signal "this program needs C++/coroutine support at link
+    time" at all — confirmed via a direct repro: a program with an
+    ordinary top-level `async def`/`create_task(...)` compiled fine through
+    this function (the `.c` side has no problem referencing the coroutine
+    unit's symbols) but FAILED TO LINK when driven through driver.py's
+    `compile_program` (plain `gcc`, no companion .cpp ever compiled) —
+    silently papered over in practice only because `mojo.py build`/`run`
+    fall back to a completely different, simpler inline pipeline
+    (`mojo.py`'s own `build_executable`, which already had this handling)
+    whenever `driver.compile_program` fails, masking the gap."""
     tokens = py_tokenize(mojo_src)
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(link_imports=True)
@@ -24539,6 +24707,9 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     if filename:
         gen._record_sys_path_inserts(mojo_src, os.path.dirname(os.path.abspath(filename)))
     code = gen.gen_module(stmts)
+    needs_cxx = gen._link_needs_cxx or bool(gen.generated_cpp)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
-            list(dict.fromkeys(gen._link_objects)))
+            list(dict.fromkeys(gen._link_objects)),
+            gen.generated_cpp,
+            needs_cxx)

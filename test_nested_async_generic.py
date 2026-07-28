@@ -163,12 +163,26 @@ def main() raises:
 
 
 def test_nested_generic_inside_generic_is_honest_refusal_not_silent_miscompile():
-    """test_tracing.mojo's harder shape: the async def's OWN enclosing
-    function is ALSO comptime-bracket-parametrized (elaborated via the
-    textual monomorphizer). This must be an honest refusal (a raised
-    exception whose message names the real cause), never a silent
-    placeholder-0 -- confirmed this was a real, live risk before the
-    _elaborate_generic_call guard was added."""
+    """A DIRECT (no `create_task`/`await`) call to a nested async def whose
+    OWN enclosing function is ALSO comptime-bracket-parametrized. This must
+    be an honest refusal (a raised exception whose message names the real
+    cause), never a silent placeholder-0.
+
+    NOTE: `_elaborate_generic_call`'s own former blanket "generic contains
+    a nested async def -> refuse" guard (which used to fire here, with a
+    message naming 'test_tracing'/'nested async' specifically) was removed
+    once monomorphize.py genuinely gained dual C/C++ output + shadow-safe
+    substitution (see bugs/CODEGEN_comptime_bracket_parametrized_function_
+    calls_silently_wrong.md) -- test_tracing.mojo's OWN real shape (`create_
+    task(test_tracing_add[enabled, 1](a))`, composed via `await`) now
+    genuinely compiles. THIS test's repro is deliberately narrower/
+    different: `test_tracing_add[enabled, 1](10)` called DIRECTLY, as if
+    it were an ordinary synchronous function -- calling an async function
+    with no `await`/`create_task` driving it at all is a separate, still-
+    unsupported shape (there's no runtime mechanism to synchronously block
+    for a coroutine's completion outside `create_task(...).wait()`), caught
+    instead by gen_module's own final "unhandled async function(s)" whole-
+    module check -- a different, but equally honest, refusal message."""
     src = """\
 def test_tracing[level: Int, enabled: Bool]() raises:
     @parameter
@@ -193,7 +207,7 @@ def main() raises:
     except Exception as e:
         msg = str(e)
         check("nested-generic-in-generic raises an honest, specific refusal",
-              'nested async' in msg and 'test_tracing' in msg, detail=msg)
+              'async function' in msg and 'test_tracing_add' in msg, detail=msg)
 
 
 def run_all():
