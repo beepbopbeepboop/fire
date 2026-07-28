@@ -2946,6 +2946,15 @@ class ClosureInfo:
         self.is_re_sub_callback = False      # True if used as re.sub(pat, THIS, src)
         self.inferred_params: dict = {}      # pname → ctype (filled by _gen_lifted_closure)
         self.inferred_ret: str = ''          # filled by _gen_lifted_closure
+        # Names in `captures` that this closure's own body REASSIGNS (a
+        # plain `{mut}`-capture-spec closure's `counter += 1` idiom — see
+        # GimpleGen._mutated_free_names, reused here exactly like the
+        # async mutable-capture mechanism reuses it) -- these get a
+        # by-REFERENCE capture (env struct field widened to a pointer,
+        # populated with `&local` instead of a value copy) instead of the
+        # ordinary by-value capture every other entry in `captures` still
+        # uses. Filled by gen_module's `_scan_for_closures` pass.
+        self.mut_names: frozenset = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -2959,6 +2968,16 @@ static int64_t __mojo_floordiv (int64_t a, int64_t b)
   return q - (a % b != 0 && (a ^ b) < 0);
 }
 """
+
+# Byte size of each scalar ctype this codegen's `{mut}`-capture-spec
+# heap-boxing (see GimpleGen._seed_mut_captured_local_types) can encounter
+# as a captured local's ctype -- `-fgimple` rejects `sizeof(int64_t)` as an
+# inline expression, so the box's `malloc(...)` call needs a literal byte
+# count instead (see _gen_stmt_VarDecl's own comment on that repro).
+_SCALAR_CTYPE_SIZE: dict = {
+    'int': 4, 'int64_t': 8, 'uint64_t': 8, 'double': 8, 'float': 4,
+    '_Bool': 1, 'char': 1,
+}
 
 # ---------------------------------------------------------------------------
 # String constants for GIMPLE-compatible emit patterns
@@ -3521,6 +3540,29 @@ class GimpleGen:
         self.decls:       list[str]         = []
         self.body_lines:  list[str]         = []
         self.var_types:   dict[str, str]    = {}
+        # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
+        # closure) -- reset per function so a stale entry from a
+        # previously-compiled closure can never leak into an unrelated
+        # function's body.
+        self._gimple_mut_ptr: dict[str, str] = {}
+        # ENCLOSING function's own locals that some nested closure captures
+        # BY REFERENCE (name -> pointee ctype) -- see _seed_mut_captured_
+        # local_types's docstring for why these are "boxed" (heap-
+        # allocated, the local itself declared as a POINTER) rather than
+        # plain stack locals whose address is taken: `-fgimple` rejects a
+        # stack local's address being taken anywhere in the function if
+        # that same local is also the target of a cast-assignment or the
+        # direct operand of a `return` statement elsewhere (confirmed via
+        # a hand-reduced repro -- "non-register as LHS of unary operation"
+        # / "invalid operand in return statement"), which real stdlib code
+        # doing exactly that (std/memory/span.mojo's `Span.count`, hit
+        # during this fix's own stdlib-dylib regression check) triggers
+        # immediately. Boxing sidesteps the restriction entirely: the
+        # local is a plain, never-address-taken pointer variable from
+        # first declaration, so ordinary GIMPLE rules apply to IT, and
+        # only its (separately allocated) pointee is ever accessed
+        # in-place.
+        self._boxed_mut_locals: dict[str, str] = {}
         self.loop_stack:  list[tuple[str,str]] = []
         self.exc_depth    = 0
         self.func_ret_type: str             = ''
@@ -4166,6 +4208,15 @@ class GimpleGen:
         self._last_was_terminal = False
 
     def _type_of(self, name: str) -> str:
+        boxed = getattr(self, '_boxed_mut_locals', None)
+        if boxed and name in boxed and name not in self._captures:
+            # See _seed_mut_captured_local_types: `var_types[name]` holds
+            # the POINTER ctype (what the real C declaration needs), but
+            # ordinary scalar type-inference (e.g. `count + 1`) must see
+            # the pointee type instead, exactly like the async mutable-
+            # capture mechanism's own `declared` dict does for the same
+            # reason (see _gen_cpp_async_unit's docstring).
+            return boxed[name]
         return self.var_types.get(name, 'int64_t')
 
     def _elem_of(self, name: str) -> str:
@@ -4851,9 +4902,19 @@ class GimpleGen:
         through register temps as required by GIMPLE."""
 
         is_field = '->' in lhs
+        # A dereferenced pointer lvalue (`*name`, e.g. a `{mut}`-capture-
+        # spec's heap-boxed local -- see _seed_mut_captured_local_types)
+        # needs the exact same "coerce into a register temp first, then a
+        # plain (no embedded cast) store" treatment as a struct-field LHS:
+        # `-fgimple` rejects a cast expression's result being stored
+        # directly through an INDIRECT_REF just as it rejects one through
+        # a COMPONENT_REF (confirmed via a hand-reduced repro: `*count =
+        # (int64_t)0;` is invalid GIMPLE, `t = (int64_t)0; *count = t;`
+        # is not).
+        is_deref = lhs.startswith('*')
         val_is_literal = val.startswith('"') or val.startswith("'") or (
             val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
-        needs_temp = is_field
+        needs_temp = is_field or is_deref
 
         def _simple_emit(dest, v, s, d):
             # GIMPLE: integer constant assigned to int64_t needs explicit cast
@@ -5230,8 +5291,72 @@ class GimpleGen:
         """Return the C lvalue for a write to variable `name`.
         Inside a closure, captured variables must be written through the env pointer."""
         if name in self._captures and self._env_param:
+            mut_ptr = getattr(self, '_gimple_mut_ptr', None)
+            if mut_ptr and name in mut_ptr:
+                # `{mut}`-capture-spec (ClosureInfo.mut_names): the env
+                # field is a POINTER to the real outer local, preloaded
+                # into `mut_ptr[name]` once at closure entry (see
+                # _gen_lifted_closure) -- dereference it so the write
+                # lands on the outer local itself, not a private copy.
+                return f'*{mut_ptr[name]}'
             return f'{self._env_param}->{name}'
+        if name in self._boxed_mut_locals:
+            # This function's OWN local is heap-boxed (a pointer variable,
+            # `{ctype} * name`) because some nested closure captures it BY
+            # REFERENCE -- see _seed_mut_captured_local_types's docstring.
+            # Dereference the pointer directly (no preload needed: unlike
+            # `_gimple_mut_ptr` above, this name IS already a plain,
+            # directly-named local pointer, not behind a struct
+            # component_ref, so `*name` is already valid GIMPLE).
+            return f'*{self._cname(name)}'
         return self._cname(name)
+
+    def _seed_mut_captured_local_types(self, func_name: str):
+        """For every local of `func_name` that some nested closure captures
+        BY REFERENCE (ClosureInfo.mut_names), declare it as a heap-boxed
+        POINTER (`self._boxed_mut_locals[name] = pointee_ctype`) instead of
+        an ordinary scalar, and register the pointer-typed declaration now,
+        before that local's own VarDecl statement is compiled (`_declare_
+        var` is a no-op for a name already in `var_types` -- the same
+        "declared by an earlier pass" mechanism `_inferred_var_types`
+        already relies on, see `_enclosing_scope_with_locals`'s docstring).
+
+        Boxing (not just taking `&local` of an ordinary stack scalar, this
+        method's first design) is required, not a style choice: `-fgimple`
+        rejects a stack local's address being taken ANYWHERE in the
+        function if that same local is also cast-assigned or directly
+        `return`ed elsewhere in the SAME function -- confirmed via a
+        hand-reduced repro ("non-register as LHS of unary operation" /
+        "invalid operand in return statement") after this by-reference-
+        capture feature's own stdlib-dylib regression check hit it for
+        real on `std/memory/span.mojo`'s `Span.count` (`var count = 0`,
+        later `return count` in the SAME function that also captures
+        `count` by reference into a nested `do_count` closure -- exactly
+        this shape). A never-address-taken pointer local sidesteps the
+        restriction entirely: ordinary GIMPLE rules apply to the pointer
+        variable itself, and only its separately-allocated pointee is
+        dereferenced.
+
+        `_gen_stmt_VarDecl`/`_lower_IdentExpr`/`_write_dest`/`_type_of`
+        each consult `self._boxed_mut_locals` to malloc the box at
+        declaration time and route every later read/write through a
+        dereference instead of a bare identifier."""
+        for ci in getattr(self, '_all_closures', {}).get(func_name, {}).values():
+            cap_types = dict(ci.captures)
+            for mn in ci.mut_names:
+                if mn in cap_types and mn not in self.var_types:
+                    ctype = cap_types[mn]
+                    self._boxed_mut_locals[mn] = ctype
+                    # _declare_var (not a bare var_types assignment): must
+                    # actually EMIT the C declaration here too, since this
+                    # runs before the local's own VarDecl statement is
+                    # compiled -- `_declare_var` is a no-op (by design) for
+                    # a name already in `var_types`, so if we only set the
+                    # dict entry without also declaring it, nothing would
+                    # ever emit the real C declaration at all (a real
+                    # "'name' undeclared" gcc error, hit and fixed during
+                    # this feature's own verification).
+                    self._declare_var(mn, f"{ctype} *")
 
     def _new_jbp_temp(self) -> str:
         self.temp_counter += 1
@@ -6108,6 +6233,17 @@ class GimpleGen:
         if name == 'None':  return 'int', '0'
         if name == 'True':  return 'int', '1'
         if name == 'False': return 'int', '0'
+        if name in self._boxed_mut_locals and name not in self._captures:
+            # This function's OWN local is heap-boxed because some nested
+            # closure captures it by reference -- see _seed_mut_captured_
+            # local_types's docstring. `name not in self._captures`:
+            # inside a closure body, a same-named captured field is a
+            # DIFFERENT thing (handled by the branch below via `_gimple_
+            # mut_ptr`) -- this branch is only for reading the box from
+            # the ENCLOSING function that owns it.
+            ctype = self._boxed_mut_locals[name]
+            t = self._new_val(ctype, f'*{self._cname(name)}')
+            return ctype, t
         if name == '__file__':
             t = self._new_val('char *', f'{self._intern_string("<bootstrap>")}')
             return 'char *', t
@@ -6126,7 +6262,16 @@ class GimpleGen:
             return 'char *', t
         if name in self._captures and self._env_param:
             ctype = self._captures[name]
-            t = self._new_val(ctype, f'{self._env_param}->{name}')
+            mut_ptr = getattr(self, '_gimple_mut_ptr', None)
+            if mut_ptr and name in mut_ptr:
+                # `{mut}`-capture-spec (ClosureInfo.mut_names): the env
+                # field is a POINTER to the real outer local, preloaded
+                # into `mut_ptr[name]` once at closure entry (see
+                # _gen_lifted_closure) -- dereference it, mirroring
+                # `_write_dest`'s identical special case for writes.
+                t = self._new_val(ctype, f'*{mut_ptr[name]}')
+            else:
+                t = self._new_val(ctype, f'{self._env_param}->{name}')
             return ctype, t
         # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
         _BUILTIN_TYPE_NAMES = frozenset({
@@ -12763,6 +12908,34 @@ class GimpleGen:
         return
 
     def _gen_stmt_VarDecl(self, node):
+        # `var name = value` where `name` is heap-boxed (some nested
+        # closure captures it BY REFERENCE -- see _seed_mut_captured_
+        # local_types's docstring): `_declare_var` already emitted the
+        # POINTER declaration (`{ctype} * name;`) before this statement
+        # ever runs. Allocate the box, then store the (coerced) initial
+        # value through it -- mirrors the env-struct allocator's own
+        # `_vp = malloc (...); _e = (T *) _vp;` two-step pattern (`-fgimple`
+        # requires the malloc/cast split; a direct `name = (T *) malloc
+        # (...)` in one statement is invalid GIMPLE).
+        if (isinstance(node.name, str) and node.name in self._boxed_mut_locals
+                and node.value is not None):
+            ctype = self._boxed_mut_locals[node.name]
+            cname = self._cname(node.name)
+            # A literal byte count, not `sizeof({ctype})`: confirmed via a
+            # hand-reduced repro that `-fgimple` rejects `sizeof(int64_t)`
+            # as an inline expression ("expected expression before
+            # 'sizeof'") even though `sizeof(SomeStructTypedef)` (the
+            # env-struct allocator's own identical-looking pattern) is
+            # accepted -- gimple's expression grammar apparently only
+            # recognizes `sizeof` applied to an aggregate/struct type name,
+            # not a scalar typedef. `_SCALAR_CTYPE_SIZE` covers every ctype
+            # `ClosureInfo.captures`/`_quick_type` can actually produce for
+            # a `{mut}`-captured local (see _seed_mut_captured_local_types).
+            vp = self._new_val('void *', f"malloc ({_SCALAR_CTYPE_SIZE.get(ctype, 8)})")
+            self._emit(f"  {cname} = ({ctype} *) {vp};")
+            vtype, v = self.lower_expr(node.value)
+            self._safe_coerce_emit(vtype, ctype, v, f'*{cname}')
+            return
         # Tuple VarDecl: parser sets name='a,b' for `a, b = expr`. Lower as individual
         # assignments to avoid GIMPLE's implicit multi-value decl which causes
         # "redeclaration with no linkage" when the names were already declared.
@@ -14413,8 +14586,33 @@ class GimpleGen:
             self._declare_var(env_var, f"{ci.env_struct} *")
             self._emit(f"  {env_var} = {alloc_fn} ();")
             for vname, vtype in ci.captures:
+                if vname in ci.mut_names and not (vname in self._captures and self._env_param):
+                    # `{mut}`-capture-spec closure (ClosureInfo.mut_names):
+                    # store the local's own POINTER (not its dereferenced
+                    # value) so a write inside the nested closure's body is
+                    # visible here after it returns. `vname` is already a
+                    # heap-boxed pointer local at this point (`_seed_mut_
+                    # captured_local_types` declared it as `{vtype} *
+                    # vname` and _gen_stmt_VarDecl allocated it) -- NOT the
+                    # address of an ordinary stack scalar (`&vname`), which
+                    # this mechanism's first draft used and which `-fgimple`
+                    # rejects once that same local is also cast-assigned or
+                    # `return`ed elsewhere in this function (see _seed_mut_
+                    # captured_local_types's docstring for the hand-reduced
+                    # repro that surfaced this, via std/memory/span.mojo's
+                    # real `Span.count`).
+                    #
+                    # A capture that's ALSO already captured (by reference)
+                    # in the CURRENT function's own env is a doubly-nested
+                    # closure -- not yet supported transitively (see
+                    # bugs/CODEGEN_comptime_bracket_parametrized_function_
+                    # calls_silently_wrong.md's gap 3); falls through to
+                    # the by-value branch below rather than emit something
+                    # silently wrong.
+                    ptr_val = self._new_val(f"{vtype} *", self._cname(vname))
+                    self._emit(f"  {env_var}->{vname} = {ptr_val};")
                 # If vname is captured in the current function's own env, read from _env->vname.
-                if vname in self._captures and self._env_param:
+                elif vname in self._captures and self._env_param:
                     # GIMPLE: cannot use component_ref directly as RHS of struct store;
                     # load into a temp first.
                     tmp = self._new_val(vtype, f"{self._env_param}->{vname}")
@@ -15358,6 +15556,7 @@ class GimpleGen:
         self.current_func_name = ci.lifted_name
         self._captures  = dict(ci.captures)
         self._env_param = '_env' if ci.env_struct else ''
+        self._gimple_mut_ptr = {}  # mut-captured name -> preloaded local pointer temp (set below)
         self._inner_func_name = ci.inner_def.name  # original name for recursive call detection
 
         # Expose sibling closures (other nested `def`s in the same enclosing
@@ -15473,6 +15672,23 @@ class GimpleGen:
         params_str = ', '.join(param_strs) if param_strs else 'void'
 
         self._emit_label("bb_2")
+        # `{mut}`-capture-spec names (ClosureInfo.mut_names): the env
+        # struct field is a POINTER (see the struct-typedef emission's own
+        # `field_ctype` widening). GIMPLE forbids dereferencing a compound
+        # expression like `_env->name` directly (the same "component_ref
+        # can't be used directly" restriction the by-value path already
+        # works around by loading into a temp first) -- load the pointer
+        # into a plain local ONCE here, then every read/write in the body
+        # (`_lower_IdentExpr`/`_write_dest`) dereferences that simple local
+        # instead, which GIMPLE does allow (mirrors the existing `*{temp}`
+        # pattern used throughout this file, e.g. UnsafePointer derefs).
+        for _mn in sorted(ci.mut_names):
+            if _mn in self._captures:
+                _ptr_ctype = f"{self._captures[_mn]} *"
+                _ptr_var = f"_mutptr_{_mn}"
+                self._declare_var(_ptr_var, _ptr_ctype)
+                self._emit(f"  {_ptr_var} = {self._env_param}->{_mn};")
+                self._gimple_mut_ptr[_mn] = _ptr_var
         for stmt in node.body:
             self.gen_stmt(stmt)
 
@@ -15485,6 +15701,7 @@ class GimpleGen:
         ]
         self._captures  = {}
         self._env_param = ''
+        self._gimple_mut_ptr = {}
         self._lambda_outer_closures = {}
         return '\n'.join(lines)
 
@@ -15880,6 +16097,8 @@ class GimpleGen:
         # For main (in main module only), call class-attr initializer first
         if node.name == 'main' and self.emit_struct_defs:
             self._emit('  _mojo_classattr_init ();')
+
+        self._seed_mut_captured_local_types(node.name)
 
         # Don't emit bb_2 label at function start - let statements flow directly
         for stmt in node.body:
@@ -16599,6 +16818,8 @@ class GimpleGen:
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
         mangled    = self._struct_method_csym(struct_name, node.name, overload_id)
+
+        self._seed_mut_captured_local_types(self.current_func_name)
 
         self._emit_label("bb_2")
         for stmt in node.body:
@@ -21358,6 +21579,26 @@ class GimpleGen:
                                 if v in enriched_scope]
                 env_struct   = f"{lifted}_env" if captures else ""
                 ci           = ClosureInfo(lifted, env_struct, captures, inner)
+                # `{mut}`-capture-spec closures (`def inc() {mut}: counter
+                # += 1`) reassign a captured free variable -- detected the
+                # same way the async mutable-capture mechanism detects it
+                # (_mutated_free_names, a static "does the body ever
+                # reassign this name" scan; the parser discards the actual
+                # `{mut}` capture-spec text today, so this is the only
+                # signal available) -- see ClosureInfo.mut_names.
+                # Loop variable deliberately NOT named `v`: this file is
+                # itself self-hosted, and re-using a name already bound by
+                # an EARLIER comprehension in this same enclosing function
+                # (the `captures = [(v, ...) for v in ...]` a few lines up)
+                # in a SECOND, later comprehension hit a real self-host
+                # compile error ('v' undeclared) -- gimple_codegen.py's own
+                # comprehension-loop lowering doesn't give each
+                # comprehension a properly independent C-level loop
+                # variable when the same source name is reused. Not
+                # investigated further here (see the async path's
+                # identical `_cn`-named sibling below for why `_cn`, not
+                # `v`, is this project's established safe convention).
+                ci.mut_names = self._mutated_free_names(inner, {_cap_n for _cap_n, _ in captures})
                 if outer_name not in self._all_closures:
                     self._all_closures[outer_name] = {}
                 self._all_closures[outer_name][inner.name] = ci
@@ -22743,7 +22984,11 @@ class GimpleGen:
                     if ci.env_struct and ci.env_struct not in self._emitted_structs:
                         parts.append(f"typedef struct {ci.env_struct} {{")
                         for vname, vtype in ci.captures:
-                            parts.append(f"  {vtype} {vname};")
+                            # A mutably-captured (`{mut}`-spec) name gets a
+                            # pointer field instead of a value copy -- see
+                            # ClosureInfo.mut_names.
+                            field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                            parts.append(f"  {field_ctype} {vname};")
                         parts.append(f"}} {ci.env_struct};")
                         parts.append('')
                         self._emitted_structs.add(ci.env_struct)
@@ -23554,7 +23799,11 @@ class GimpleGen:
                     if ci.env_struct and ci.env_struct not in self._emitted_structs:
                         parts.append(f"typedef struct {ci.env_struct} {{")
                         for vname, vtype in ci.captures:
-                            parts.append(f"  {vtype} {vname};")
+                            # A mutably-captured (`{mut}`-spec) name gets a
+                            # pointer field instead of a value copy -- see
+                            # ClosureInfo.mut_names.
+                            field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
+                            parts.append(f"  {field_ctype} {vname};")
                         parts.append(f"}} {ci.env_struct};")
                         parts.append('')
                         self._emitted_structs.add(ci.env_struct)

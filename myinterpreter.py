@@ -3485,7 +3485,7 @@ class Interpreter:
         current = self.eval_expr(node.target)
         rhs = self.eval_expr(node.value)
         new_value = self._apply_augassign_op(node, current, rhs)
-        self._assign_target(node.target, new_value)
+        self._assign_target(node.target, new_value, augassign=True)
         return new_value
 
     def _apply_augassign_op(self, node, current, rhs):
@@ -3520,8 +3520,30 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
 
-    def _assign_target(self, target, value):
-        """Assign a value to a target (variable, member, subscript, tuple, etc.)."""
+    def _assign_target(self, target, value, augassign=False):
+        """Assign a value to a target (variable, member, subscript, tuple, etc.).
+
+        `augassign`: True only when called from execute_AugAssignStmt (`x
+        += ...` etc.), never from a plain `x = ...`. A plain assignment to
+        an identifier always creates/overwrites a LOCAL binding (Python's
+        own default nested-function-scoping rule, already the existing
+        behavior here) -- but real Mojo's `{mut}`-capture-spec idiom
+        (`def inc() {mut}: counter += 1`, see bugs/CODEGEN_comptime_
+        bracket_parametrized_function_calls_silently_wrong.md) needs an
+        augmented assignment to a captured free variable (one this
+        closure's own scope never independently defines) to mutate the
+        ENCLOSING scope's binding, not silently shadow it with a
+        same-named local that vanishes when the closure returns -- the
+        exact bug this parameter fixes (previously ALL assignment here,
+        aug or plain, used Scope.define, which only ever writes the
+        innermost scope's own dict, so a captured counter's mutation was
+        never visible to the caller across separate calls).
+        Scope.set (used only for this augassign case) already does
+        exactly the right thing for every other case too: if `target.name`
+        is already bound in the CURRENT scope's own dict (an ordinary
+        local `x = 0; x += 1` within the same function, or a parameter),
+        it updates that local in place, identical to `define`'s prior
+        behavior for anyone not intending nonlocal effects."""
         if self._is_instance(target, 'IdentExpr'):
             # Check if this is a global variable
             global_vars = getattr(self, 'global_vars', set())
@@ -3531,6 +3553,8 @@ class Interpreter:
                 while scope.parent:
                     scope = scope.parent
                 scope.define(target.name, value)
+            elif augassign:
+                self.scope.set(target.name, value)
             else:
                 self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
