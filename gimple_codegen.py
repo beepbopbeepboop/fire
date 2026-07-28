@@ -8035,7 +8035,21 @@ class GimpleGen:
             handle_expr = _wait_obj.name
             self._emit(f"  mojo_async_run_until_complete ();")
             self._emit(f"  {base}_translate_pending_exc ({handle_expr});")
-            pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+            # 'int', not '_Bool': mojo_runtime.h's real prototype is `int
+            # mojo_exc_pending_get(void);` -- a '_Bool'-typed temp here is
+            # invalid under STRICT `-fgimple` mode ("invalid conversion in
+            # gimple call"), confirmed via a hand-reduced repro. Silently
+            # tolerated everywhere this pattern was reached before (every
+            # existing passing test's own `.wait()` call sites all
+            # compile through gen_func's LENIENT, non-`__GIMPLE`-tagged
+            # top-level function path, which accepts the implicit int->
+            # _Bool narrowing the same way ordinary C does) -- first
+            # surfaced for real once `.wait()` became reachable from
+            # inside a strict-`__GIMPLE` NESTED closure (test_locks.mojo's
+            # `test_atomic()` calling `tg.wait(...)` transitively via the
+            # gap-(1) transitive-capture-propagation fix). `int` still
+            # works identically as an `if (pending_t) ...` condition.
+            pending_t = self._new_val('int', "mojo_exc_pending_get ()")
             bb_pending = self._new_bb()
             bb_ok = self._new_bb()
             self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
@@ -8140,7 +8154,9 @@ class GimpleGen:
                 raw_h = self._new_val('int64_t', f"mojo_list_get_int ({list_expr}, {idx64})")
                 h_expr = self._new_val('MojoAsync *', f"(MojoAsync *){raw_h}")
                 self._emit(f"  {base}_translate_pending_exc ({h_expr});")
-                pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+                # 'int', not '_Bool' -- see the identical comment on this
+                # same pattern a bit further up in this method.
+                pending_t = self._new_val('int', "mojo_exc_pending_get ()")
                 bb_pending = self._new_bb()
                 bb_ok = self._new_bb()
                 self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
@@ -11331,7 +11347,7 @@ class GimpleGen:
         self._emit(f"  mojo_async_schedule_ready ({handle});")
         self._emit(f"  mojo_async_run_until_complete ();")
         self._emit(f"  {base}_translate_pending_exc ({handle});")
-        pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+        pending_t = self._new_val('int', "mojo_exc_pending_get ()")
         bb_pending = self._new_bb()
         bb_ok = self._new_bb()
         self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
@@ -15775,7 +15791,7 @@ class GimpleGen:
         suspended, so the longjmp only crosses live, ordinary C frames (see
         mojo_runtime.h). Otherwise falls through to `bb_not_pending`
         (ordinary ends-of-iteration handling, unchanged)."""
-        pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+        pending_t = self._new_val('int', "mojo_exc_pending_get ()")
         bb_pending = self._new_bb()
         self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_not_pending};")
         self._emit_label(bb_pending)
@@ -18871,26 +18887,46 @@ class GimpleGen:
         _mut_names = api.get('mut_capture_names') or frozenset()
         for _cap_name, _cap_ctype in (api.get('captures') or []):
             if _cap_name in _mut_names:
-                # `&{_cap_name}` is only valid C when `_cap_name` is a
-                # plain local/parameter of the CURRENT C function being
-                # generated -- true when this call site is compiled
-                # directly inside the SAME enclosing function `inc`'s own
-                # capture was resolved against, but NOT when this call
-                # site is reached from a DIFFERENT, sibling nested closure
-                # (test_locks.mojo's real shape: `test_atomic()`, itself
-                # lifted via the ordinary/non-async closure mechanism,
-                # calls `inc()` without ever directly referencing `counter`
-                # itself -- the ordinary closure lifter never threads a
-                # transitively-needed capture like this through a calling
-                # closure that doesn't textually reference it). `self.
-                # var_types` holds every name actually in scope for
-                # whichever function is CURRENTLY being generated (params,
-                # locals, and a lifted closure's own threaded captures) --
-                # an honest compile-time refusal here (not a raw, confusing
-                # gcc "undeclared identifier" error) when `_cap_name` isn't
-                # one of them, rather than emitting a reference to a name
-                # this function's own C body was never given.
-                if _cap_name not in self.var_types:
+                _ptr_ctype = f"{_cap_ctype} *"
+                _boxed = getattr(self, '_boxed_mut_locals', {})
+                _mutptr = getattr(self, '_gimple_mut_ptr', {})
+                if _cap_name in _boxed:
+                    # `_cap_name` is a heap-boxed local of the CURRENT
+                    # function (see GimpleGen._seed_mut_captured_local_
+                    # types's docstring for why boxing, not `&stack_
+                    # local`) -- it's already a pointer, forward it
+                    # directly.
+                    ptr_val = self._new_val(_ptr_ctype, self._cname(_cap_name))
+                    arg_pairs.append((_ptr_ctype, ptr_val))
+                elif _cap_name in self._captures and _cap_name in _mutptr:
+                    # This call site is itself inside a closure body that
+                    # ALREADY captured `_cap_name` by reference (gap (1)'s
+                    # transitive-capture-propagation fix in _scan_for_
+                    # closures: test_locks.mojo's `test_atomic()` calling
+                    # `inc()` without itself textually referencing `inc()`'s
+                    # own captured `lock`/`rawCounter`) -- forward the
+                    # already-preloaded local pointer (`_gimple_mut_ptr`,
+                    # see _gen_lifted_closure) instead of taking its
+                    # address again.
+                    ptr_val = self._new_val(_ptr_ctype, _mutptr[_cap_name])
+                    arg_pairs.append((_ptr_ctype, ptr_val))
+                elif _cap_name in self.var_types:
+                    # A genuinely plain, never-address-taken-elsewhere
+                    # local/parameter of the CURRENT function -- safe to
+                    # take its address directly here (true when this call
+                    # site is compiled directly inside the SAME enclosing
+                    # function the callee's capture was resolved against).
+                    _addr = self._new_val(_ptr_ctype, f"&{_cap_name}")
+                    arg_pairs.append((_ptr_ctype, _addr))
+                else:
+                    # `self.var_types` holds every name actually in scope
+                    # for whichever function is CURRENTLY being generated
+                    # (params, locals, and a lifted closure's own threaded
+                    # captures) -- an honest compile-time refusal here (not
+                    # a raw, confusing gcc "undeclared identifier" error)
+                    # when `_cap_name` isn't one of them, rather than
+                    # emitting a reference to a name this function's own C
+                    # body was never given.
                     raise RuntimeError(
                         "cannot compile module: create_task(...)'s callee "
                         f"mutably captures {_cap_name!r}, which isn't in "
@@ -18900,9 +18936,6 @@ class GimpleGen:
                         "captured variable is not yet supported) -- "
                         "falling back to interpreting this module from "
                         "source instead")
-                _ptr_ctype = f"{_cap_ctype} *"
-                _addr = self._new_val(_ptr_ctype, f"&{_cap_name}")
-                arg_pairs.append((_ptr_ctype, _addr))
             else:
                 arg_pairs.append(self.lower_expr(IdentExpr(name=_cap_name)))
         handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
@@ -21577,6 +21610,35 @@ class GimpleGen:
                 free         = used - inner_declared - free_globals
                 captures     = [(v, enriched_scope[v]) for v in sorted(free)
                                 if v in enriched_scope]
+                # Transitively union in the captures of any REGISTERED
+                # nested async unit THIS closure's body calls BY NAME
+                # (test_locks.mojo's `test_atomic()` calling `inc()`
+                # without itself ever textually referencing `inc()`'s own
+                # captured `lock`/`rawCounter` -- gap (1) of bugs/CODEGEN_
+                # comptime_bracket_parametrized_function_calls_silently_
+                # wrong.md's test_locks.mojo analysis). `self.
+                # _nested_async_api` (keyed `f"{enclosing}::{name}"`) is
+                # already fully populated for `outer_name` by gen_module's
+                # own `_compile_nested_async_functions` pass, which always
+                # runs BEFORE this scan (see that method's own docstring
+                # for the pass ordering) -- a flat "does this closure call
+                # that async unit's name" lookup, not general call-graph
+                # analysis, since the async registration already gives an
+                # exact, flat name -> captures lookup.
+                _cap_names_so_far = {_cn for _cn, _ in captures}
+                _called_names = {nd.func.name for nd in _walk_ast(inner.body)
+                                  if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
+                _transitive_mut: set = set()
+                for _called in _called_names:
+                    _t_api = self._nested_async_api.get(f"{outer_name}::{_called}")
+                    if _t_api is None:
+                        continue
+                    for _tn, _tt in (_t_api.get('captures') or []):
+                        if _tn not in _cap_names_so_far and _tn in enriched_scope:
+                            captures.append((_tn, enriched_scope[_tn]))
+                            _cap_names_so_far.add(_tn)
+                        if _tn in (_t_api.get('mut_capture_names') or frozenset()):
+                            _transitive_mut.add(_tn)
                 env_struct   = f"{lifted}_env" if captures else ""
                 ci           = ClosureInfo(lifted, env_struct, captures, inner)
                 # `{mut}`-capture-spec closures (`def inc() {mut}: counter
@@ -21585,7 +21647,11 @@ class GimpleGen:
                 # (_mutated_free_names, a static "does the body ever
                 # reassign this name" scan; the parser discards the actual
                 # `{mut}` capture-spec text today, so this is the only
-                # signal available) -- see ClosureInfo.mut_names.
+                # signal available) -- see ClosureInfo.mut_names. Unioned
+                # with `_transitive_mut` (above) so a captured name that's
+                # only mutated INSIDE the called async unit's own body
+                # (never textually reassigned by THIS closure itself) still
+                # gets threaded through by reference, not by value.
                 # Loop variable deliberately NOT named `v`: this file is
                 # itself self-hosted, and re-using a name already bound by
                 # an EARLIER comprehension in this same enclosing function
@@ -21598,7 +21664,7 @@ class GimpleGen:
                 # investigated further here (see the async path's
                 # identical `_cn`-named sibling below for why `_cn`, not
                 # `v`, is this project's established safe convention).
-                ci.mut_names = self._mutated_free_names(inner, {_cap_n for _cap_n, _ in captures})
+                ci.mut_names = self._mutated_free_names(inner, _cap_names_so_far) | _transitive_mut
                 if outer_name not in self._all_closures:
                     self._all_closures[outer_name] = {}
                 self._all_closures[outer_name][inner.name] = ci
@@ -22046,6 +22112,29 @@ class GimpleGen:
                         _nm = _info['nested_name']
                         self._async_api[_nm] = _info
                         _nested_pushed.append(_nm)
+                # A `comptime NAME = <value>` declared directly in `stmt`'s
+                # own top-level body is normally only folded into `self.
+                # _comptime_vals` when `_gen_stmt_ComptimeVarStmt` actually
+                # RUNS, during `gen_func(stmt)` below -- too late for any
+                # NESTED closure of `stmt` that references it (`range(0,
+                # maxI)`-shaped, test_locks.mojo's own `test_atomic()`
+                # idiom), since `_emit_closure_recursive` just below
+                # compiles every nested closure BEFORE `gen_func(stmt)`
+                # ever runs. Pre-fold them here first -- pure compile-time
+                # constant folding, no runtime state involved, so doing it
+                # early is always safe. A hand-verified real bug: without
+                # this, `range(0, maxI)` inside a nested closure silently
+                # read `maxI` as `0` (the same "ct param or undeclared"
+                # placeholder `_lower_IdentExpr`'s comptime fallback uses
+                # for a genuinely unresolvable name), not a compile error —
+                # exactly the kind of silent miscompile CLAUDE.md forbids.
+                for _cvs in stmt.body:
+                    if isinstance(_cvs, ComptimeVarStmt):
+                        _cv = self._eval_const(_cvs.value)
+                        if _cv is not None:
+                            if not hasattr(self, '_comptime_vals'):
+                                self._comptime_vals = {}
+                            self._comptime_vals.setdefault(_cvs.target, _cv)
                 try:
                     for ci in self._all_closures.get(stmt.name, {}).values():
                         _emit_closure_recursive(ci, stmt.name)

@@ -635,3 +635,80 @@ subsystem, not just call-graph/name propagation). Not attempted further
 this session. `test_locks.mojo` remains blocked on all three gaps listed
 in the previous update; moving on to `test_tracing.mojo` next per the
 standing plan.
+
+## Update — general {mut}-capture fix landed, then transitive capture propagation (gap 1) fixed on top of it
+
+A later session fixed the deeper blocker identified just above: general
+(non-async) `{mut}`-capture-spec closures (`def inc() {mut}: counter +=
+1`) now genuinely mutate their captured variable by reference, in both
+execution paths (commit `90dbbbe`) — see `myinterpreter.py`'s
+`_assign_target`/`Scope.set` fix and `gimple_codegen.py`'s heap-boxed
+`_boxed_mut_locals` mechanism (needed instead of a plain `&stack_local`
+because `-fgimple` rejects a stack local's address being taken anywhere in
+a function that also casts or `return`s that same local elsewhere — a real
+gap the by-reference-capture design above didn't anticipate, surfaced by
+`std/memory/span.mojo`'s own `Span.count`).
+
+With that landed, gap (1)/(3) (transitive capture — `test_atomic()`
+calling `inc()` without itself referencing `inc()`'s own captures) turned
+out to be exactly the "simple part" this Update originally set out to try,
+now that the general closure lifter can actually thread a capture through
+by reference at all: `_scan_for_closures` was widened to transitively
+union in a called `self._nested_async_api` unit's own captures (value AND
+mut_names) into the CALLING closure's own capture set, and
+`_resolve_and_start_task` (the `create_task(...)`/`TaskGroup.create_task(
+...)` call-site lowering) now forwards a mutably-captured name from
+either a heap-boxed LOCAL of the current function or an already-preloaded
+`_gimple_mut_ptr` entry (this closure's own by-reference capture of that
+same name), not only ever `&name` (which is invalid inside a closure body,
+where the name was never a plain addressable local to begin with).
+
+Verifying this against a real 10,000-task stress test (mirroring
+test_locks.mojo's own `for _ in range(maxI): for _ in range(maxJ):
+tg.create_task(inc())` shape, called from a sibling closure) surfaced TWO
+FURTHER, separate, genuinely pre-existing bugs — both fixed, both
+previously unreachable because `.wait()`/`comptime` had simply never been
+exercised from inside a nested (non-top-level) closure by any existing
+test:
+  - Every `.wait()` call site's `mojo_exc_pending_get()` pending-exception
+    check declared its result temp as `_Bool`, but the real runtime
+    prototype returns `int` — invalid under STRICT `-fgimple` ("invalid
+    conversion in gimple call"). Silently tolerated everywhere else only
+    because every other `.wait()` call site compiled through `gen_func`'s
+    LENIENT (non-`__GIMPLE`-tagged) top-level-function path, which accepts
+    the implicit int→_Bool narrowing like ordinary C — `_gen_lifted_
+    closure`/`_gen_struct_method` always emit `__GIMPLE`, so this was only
+    ever going to surface once `.wait()` became reachable from inside one
+    of those. Fixed by declaring the temp `int` instead (works identically
+    as an `if (...)` condition).
+  - A `comptime NAME = <value>` declared in an enclosing function was
+    invisible to that function's OWN nested closures (silently read as
+    `0` via `_lower_IdentExpr`'s existing "ct param or undeclared"
+    fallback — NOT a compile error, a real silent-miscompile risk).
+    Closures are compiled in a pre-pass BEFORE the enclosing function's
+    own body (and hence its `comptime` statement) is ever compiled via
+    `gen_func`. Fixed by pre-folding an enclosing function's own
+    top-level `comptime` statements into `self._comptime_vals` before
+    compiling any of its nested closures.
+
+Verified end-to-end (real compile+link+run) via `test_transitive_closure_
+capture.py`: the simplest bare `create_task(...)`-from-a-sibling-closure
+shape (`3`), and the full 10,000-task TaskGroup stress test with
+same-named nested loops and `comptime` bounds, called from a sibling
+closure (`10000`, exactly).
+
+Also fixed a real gap in this project's own quality-gate tooling found
+while re-verifying `make check-selfhost` after this work: `checked_run.py`
+check-selfhost target never included `gimple_codegen.py` in its cache
+key's `--extra` list (only `mojo_compiler.py`/`myinterpreter.py`/`mojo.py`/
+`mojo_main.py`/`test_selfhost.py`), even though it's the compiler
+`test_selfhost.py` actually exercises and is listed as a Makefile
+prerequisite — a change to `gimple_codegen.py` alone could get a STALE
+cached "pass" replayed without ever being re-verified. Fixed by adding
+`--extra gimple_codegen.py` to the Makefile target.
+
+`test_locks.mojo` remains blocked on the two REMAINING gaps: `with
+BlockingScopedLock(lock):` inside `inc()`'s body (no `WithStmt` case in
+the async coroutine body emitter) and the non-scalar (`Atomic[DType.
+int64]`) struct capture. `compile_stdlib.py`'s `EXPECTED_FAILURES` entry
+updated accordingly (662/664 unchanged, 0 unexpected).

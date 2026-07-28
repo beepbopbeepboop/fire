@@ -72,6 +72,7 @@ check-modcache: test_module_cache.py myinterpreter.py mojo.py mojo_main.py
 # link cleanliness so it can't silently regress.
 check-selfhost: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py mojo_main.py test_selfhost.py
 	python3 checked_run.py check-selfhost \
+		--extra gimple_codegen.py \
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
