@@ -6958,14 +6958,18 @@ class GimpleGen:
             return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr',
                             [('void *', vp), ('char *', f'"{node.member}"')])
         else:
-            # Unknown struct field — fall back
-            # If the object is a pointer type, assume the field is also a pointer
-            if '*' in ot:
-                field_type = struct_name + ' *'
+            # Unknown struct field — fall back to opaque int64_t.
+            # This avoids StructName_field(...) dispatch for untracked fields
+            # (e.g. errs.append(X) → TranspilerResult_append linker error).
+            # int64_t enables the mojo_obj_call1 runtime-dispatch path.
+            field_type = 'int64_t'
+            if op == '->':
+                # GIMPLE: declare separate temp to avoid inline cast in rvalue
+                field_tmp = self._new_temp('int64_t')
+                self._emit(f"  {field_tmp} = (int64_t){ov}{op}{_safe_field(node.member)};")
+                t = field_tmp
             else:
-                field_type = 'int64_t'
-            t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
-            return field_type, t
+                t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
 
     def _lower_bound_method_value(self, struct_name: str, method: str,
                                    self_type: str, self_val: str) -> tuple[str, str]:
