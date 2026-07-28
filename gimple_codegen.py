@@ -11990,6 +11990,16 @@ class GimpleGen:
                     _attr_val.obj = node.obj
                     return self._lower_slice(_attr_val)
 
+        # Regular slice subscript: node.index is a bare SliceExpr (obj=None)
+        # whose object is really the SubscriptExpr's own obj — forward it so
+        # _lower_slice can determine the container type and call the correct
+        # runtime function (mojo_list_slice, mojo_str_slice, etc.) instead of
+        # falling through to the generic pointer-arithmetic path below which
+        # would return the raw address of the first element as int64_t.
+        if isinstance(node.index, SliceExpr):
+            node.index.obj = node.obj
+            return self._lower_slice(node.index)
+
         ot, ov = self.lower_expr(node.obj)
         idx_type, iv  = self.lower_expr(node.index)
 
