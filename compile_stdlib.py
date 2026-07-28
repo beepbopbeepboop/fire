@@ -121,11 +121,20 @@ EXPECTED_FAILURES = {
     # closures, since closures are compiled in a pre-pass before the
     # enclosing function's own comptime-folding statement ever runs) now
     # all work, verified end-to-end via test_taskgroup.py's real
-    # 10,000-task stress test and test_transitive_closure_capture.py.
-    # What's STILL missing, confirmed by attempting the real file
-    # directly: (1) `with BlockingScopedLock(lock):` inside `inc()`'s own
-    # body -- `_cpp_stmt` (the shared generator/async body emitter) still
-    # has no `WithStmt` case at all; (2) capturing `lock`/`counter` (an
+    # 10,000-task stress test and test_transitive_closure_capture.py. Also
+    # fixed: `with BlockingScopedLock(lock):` inside `inc()`'s own body --
+    # `_cpp_stmt` gained a `WithStmt` case that reinterprets
+    # `BlockingScopedLock` as a compiler-recognized no-op intrinsic (elides
+    # the whole guard), safe because this project's async runtime is
+    # genuinely single-threaded/cooperative (grep-confirmed: no pthread/
+    # std::thread anywhere in mojo_async_runtime.cpp) -- a coroutine only
+    # ever yields at an explicit `co_await`, so nothing can interleave
+    # between two statements with no suspension point between them. An
+    # `await` inside the guarded body is an honest refusal, not a silent
+    # elision, since eliding would be genuinely unsafe there. Verified via
+    # test_async_with_lock_guard.py (incl. a real 10,000-task stress test
+    # AND the await-inside-guard refusal). What's STILL missing, confirmed
+    # by attempting the real file directly: capturing `counter` (an
     # `Atomic[DType.int64]`, a non-scalar STRUCT) mutably -- this codegen's
     # mutable-capture mechanism (see bugs/CODEGEN_comptime_bracket_
     # parametrized_function_calls_silently_wrong.md's "Update") only
@@ -136,11 +145,12 @@ EXPECTED_FAILURES = {
     # "Update — TaskGroup + real stress test" and "transitive-closure-
     # capture gap" sections for the full writeup.
     'test/runtime/test_locks.mojo':
-        '`with BlockingScopedLock(...)` inside inc() (no WithStmt support '
-        'in the compiled coroutine body emitter) and a mutable capture of '
-        'a non-scalar struct (Atomic[DType.int64]) — TaskGroup, scalar '
-        'mutable capture, general {mut}-capture-spec closures, and '
-        'transitive capture propagation all now work, see bugs/CODEGEN_'
+        'a mutable capture of a non-scalar struct (Atomic[DType.int64], '
+        'counter.fetch_add(1)/counter.load()) — TaskGroup, scalar mutable '
+        'capture, general {mut}-capture-spec closures, transitive capture '
+        'propagation, and `with BlockingScopedLock(...)` inside inc() (a '
+        'no-op lock elision, safe because this runtime is genuinely '
+        'single-threaded/cooperative) all now work, see bugs/CODEGEN_'
         'comptime_bracket_parametrized_function_calls_silently_wrong.md',
 }
 

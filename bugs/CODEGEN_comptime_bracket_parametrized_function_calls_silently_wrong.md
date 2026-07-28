@@ -712,3 +712,53 @@ BlockingScopedLock(lock):` inside `inc()`'s body (no `WithStmt` case in
 the async coroutine body emitter) and the non-scalar (`Atomic[DType.
 int64]`) struct capture. `compile_stdlib.py`'s `EXPECTED_FAILURES` entry
 updated accordingly (662/664 unchanged, 0 unexpected).
+
+## Update — gap (2) fixed: `with BlockingScopedLock(lock):` inside an async coroutine body
+
+`_cpp_stmt` gained a `WithStmt` case (`_cpp_with_stmt`). Rather than
+genuinely compiling `BlockingSpinLock`'s real body (a deep `external_call`/
+`Atomic`-backed struct, std/utils/lock.mojo — an actual spin-wait loop
+against a compiler-rt primitive, entirely outside this narrow scalar-only
+async C++ coroutine codegen's model), `BlockingScopedLock` is reinterpreted
+as a compiler-recognized INTRINSIC whose entire `__enter__`/`__exit__` pair
+is elided — mirroring `TaskGroup`/`create_task` already being reinterpreted
+the same way, for the identical "the real struct is out of scope" reason.
+
+This is a real, PROVABLE no-op for correctness in this specific runtime,
+not an approximation: `runtime/mojo_async_runtime.cpp` has no `pthread`/
+`std::thread`/worker-pool anywhere (grep-confirmed) — this project's async
+runtime is genuinely single-threaded and cooperative. A coroutine's body
+only ever yields control to another coroutine at an explicit `co_await`;
+nothing can interleave between two statements with no suspension point
+between them. A scoped lock guard whose only job is mutual exclusion is
+therefore inert here — there is no other coroutine that could ever
+actually contend for the lock mid-body. The guarded expression (`lock` in
+`BlockingScopedLock(lock)`) is never evaluated at all, so it doesn't even
+need to be threaded through as a capture.
+
+Safety is enforced, not just asserted: `_cpp_with_stmt` raises an honest
+`_UnsupportedAsyncShape` refusal (falls back to interpreting the module
+from source) if the guarded body contains an `await` anywhere — eliding
+the guard would be genuinely UNSAFE across a real suspension point, where
+a different coroutine really could run.
+
+Verified end-to-end via new `test_async_with_lock_guard.py` (3/3): a
+single-task `with BlockingScopedLock(lock): rawCounter += 1` (`1`),
+test_locks.mojo's own real shape — a real 10,000-task stress test with
+same-named nested loops and `comptime` bounds, `inc()`'s lock-guarded
+increment called from a DIFFERENT sibling closure (exercising gap (1)'s
+transitive-capture fix at the same time) — (`10000`, exactly), and the
+await-inside-guard safety refusal (confirmed honestly refused, not
+silently elided).
+
+Regression-checked: `make check-selfhost` (`--no-cache`, clean), a
+from-scratch stdlib dylib rebuild (0 skips, unchanged), `compile_stdlib.py`
+(662/664, 2 expected failures, 0 unexpected — unchanged; `test_locks.mojo`'s
+`EXPECTED_FAILURES` description updated to drop the now-fixed with-
+statement reason), and all 18 of this project's existing test suites at
+their exact prior counts.
+
+`test_locks.mojo` remains blocked on ONE final gap: the non-scalar
+(`Atomic[DType.int64]`) struct capture (`counter.fetch_add(1)`/`counter.
+load()`) — `counter`, unlike `lock`, IS actually read/written by `inc()`'s
+body, so it can't be elided the same way.

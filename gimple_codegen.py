@@ -17331,8 +17331,82 @@ class GimpleGen:
             return self._cpp_raise_stmt(s, indent)
         if isinstance(s, ForStmt):
             return self._cpp_async_for_stmt(s, declared, indent)
+        if isinstance(s, WithStmt):
+            return self._cpp_with_stmt(s, declared, indent)
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
+
+    # Struct types this codegen recognizes as a compiler INTRINSIC scoped
+    # lock guard inside an async coroutine body (test_locks.mojo gap (2))
+    # rather than genuinely compiling the real struct's `__init__`/
+    # `__enter__`/`__exit__` bodies -- see `_cpp_with_stmt`'s own docstring
+    # for why eliding it entirely is provably safe in THIS runtime, not a
+    # shortcut. Mirrors `TaskGroup`/`create_task` already being
+    # reinterpreted as compiler intrinsics rather than real compiled
+    # structs, for the same "the real struct is deep external_call/Atomic-
+    # backed machinery entirely outside this narrow scalar-only async
+    # codegen's model" reason.
+    _ASYNC_NOOP_LOCK_GUARD_TYPES = frozenset({'BlockingScopedLock'})
+
+    def _cpp_with_stmt(self, s, declared: dict, indent: str) -> list[str]:
+        """`with BlockingScopedLock(lock): <body>` inside an async
+        coroutine body (test_locks.mojo's `inc()`'s own real shape,
+        formerly test_locks.mojo gap (2): `_cpp_stmt` had no `WithStmt`
+        case at all).
+
+        This project's async runtime (runtime/mojo_async_runtime.cpp) is
+        genuinely single-threaded and cooperative -- confirmed via a
+        direct grep: no `pthread`/`std::thread`/worker-pool anywhere in
+        that file. A coroutine's body therefore only ever yields control
+        to another coroutine at an explicit `co_await`; nothing can
+        interleave between two statements that contain no suspension
+        point. A SCOPED LOCK GUARD whose only job is mutual exclusion is
+        consequently a real, provable NO-OP for correctness in this
+        specific runtime model -- not a shortcut or an approximation:
+        there is no other coroutine that could ever actually contend for
+        the lock mid-body. This reinterprets `BlockingScopedLock` (see
+        `_ASYNC_NOOP_LOCK_GUARD_TYPES`) as a compiler-recognized intrinsic,
+        exactly like `TaskGroup`/`create_task` already are, rather than
+        genuinely compiling `BlockingSpinLock`'s real body (a deep
+        `external_call`/`Atomic`-backed struct -- see std/utils/lock.mojo
+        -- entirely outside this narrow scalar-only async codegen's
+        model). The guarded expression itself (`lock` in `BlockingScopedLock
+        (lock)`) is never evaluated at all: eliding the whole guard means
+        it's never referenced, so it doesn't even need to be threaded
+        through as a capture.
+
+        Safety is enforced, not just asserted: an `await` anywhere in the
+        protected body makes this an honest refusal instead of silently
+        eliding a guard that would have been load-bearing across a real
+        suspension point (where a DIFFERENT coroutine genuinely could run
+        while this one is suspended)."""
+        for item in s.items:
+            expr = item.expr
+            if not (isinstance(expr, CallExpr) and isinstance(expr.func, IdentExpr)
+                    and expr.func.name in self._ASYNC_NOOP_LOCK_GUARD_TYPES):
+                raise _UnsupportedAsyncShape(
+                    "`with` inside an async function body is only "
+                    "supported for a recognized no-op lock guard "
+                    f"({sorted(self._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
+                    f"{type(expr).__name__}")
+            if item.alias is not None:
+                raise _UnsupportedAsyncShape(
+                    "`with ... as name:` is not supported for an async "
+                    "lock-guard `with` (BlockingScopedLock has no usable "
+                    "return value to bind)")
+        if any(isinstance(n, AwaitExpr) for st in s.body for n in _walk_ast(st)):
+            raise _UnsupportedAsyncShape(
+                "`await` inside a `with BlockingScopedLock(...):` body is "
+                "not supported -- eliding the lock guard (this codegen's "
+                "own no-op optimization, safe only because nothing else "
+                "can interleave BETWEEN statements in this runtime's "
+                "single-threaded cooperative scheduler) would be UNSAFE "
+                "across a real suspension point, where another coroutine "
+                "genuinely could run")
+        lines: list[str] = []
+        for st in s.body:
+            lines.extend(self._cpp_stmt(st, declared, indent))
+        return lines
 
     def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         """`async for <var> in <call>():` -- the final step of the async/
