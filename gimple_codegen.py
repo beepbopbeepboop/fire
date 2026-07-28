@@ -8825,27 +8825,24 @@ class GimpleGen:
                 self._dict_val_types[np_cast] = self._dict_val_types[ov]
             ov = np_cast
 
-        # For member expressions like self.parent, try to resolve the actual struct type
-        if ot in ('int', 'int64_t') and isinstance(func.obj, MemberExpr):
+        # Try to resolve the actual type of the receiver by inspecting the
+        # member-expression chain (e.g. self.items → look up items's field type
+        # on self's struct).  Runs unconditionally so every struct field access
+        # gets a chance at the real type before the method-dispatch logic below.
+        if isinstance(func.obj, MemberExpr):
             resolved_type = self._resolve_member_expr_type(func.obj)
             if resolved_type:
                 ot = resolved_type
-
-        # Recover struct type from self parameter in method context
-        # If we're in a method and calling a method on self (or self.field), resolve the struct type
-        if 'self' in self.var_types and ot == 'int64_t':
-            self_type = self.var_types.get('self', 'int64_t')
-            if self_type.endswith(' *'):
-                # We're in a method with typed self — try to use that context
-                base_self_type = _struct_name_of(self_type)
-                if isinstance(func.obj, MemberExpr) and isinstance(func.obj.obj, IdentExpr) and func.obj.obj.name == 'self':
-                    # Method call on self.field — try to find field type and resolve
-                    self_struct_fields = self.struct_field_types.get(base_self_type, {})
-                    field_type = self_struct_fields.get(func.obj.member)
-                    if field_type:
-                        ot = field_type  # Use the resolved field type
-
-        # Milestone C step 3: obj.method(args) where `method` is a supported
+            elif ot.endswith(' *') and _struct_name_of(ot) not in self.struct_field_types:
+                # Member expression on an unknown struct — we can't resolve
+                # the field type, so treat the receiver as an opaque int64_t
+                # to enable the container-method coercion below (e.g. for
+                # self.items.append(Y) where items's List type is untracked).
+                ov_local = self._ensure_local(ot, ov)
+                ip = self._new_temp('int64_t')
+                self._emit(f'  {ip} = (int64_t){ov_local};')
+                ot = 'int64_t'
+                ov = ip
         # compiled generator METHOD on obj's struct type (self._generator_
         # method_api, keyed by (struct_name, method_name) — see that dict's
         # docstring in __init__) — constructs the coroutine, binding `self`
