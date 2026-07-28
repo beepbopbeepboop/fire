@@ -12345,11 +12345,10 @@ class GimpleGen:
                 kv_tmp = self._new_val('char *', f"{kv}")
                 kv = kv_tmp
             elif kt != 'char *':
-                # Runtime dict keys are always char *; coerce non-string keys
-                # (e.g. Int keys) so GIMPLE doesn't see int→pointer at the call.
-                kv_tmp = self._new_temp('char *')
-                self._safe_coerce_emit(kt, 'char *', kv, kv_tmp)
-                kv = kv_tmp
+                # Runtime dict keys are always char *; convert non-string keys
+                # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
+                # of C-casting the int to char* which produces NULL for 0.
+                kv = self._new_val('char *', f"mojo_str_from_int({kv})")
             if vt in _FLOAT_TYPES:
                 self._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
             elif vt == 'char *':
@@ -24418,7 +24417,7 @@ class GimpleGen:
             parts.append("void Parser___init__ (Parser *, MojoList *);")
             parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
             parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
-            parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
+            parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t, int64_t);  /* from mojo.py */")
         # Forward decls for the generic reflection dispatch (see the
         # "Generic reflection dispatch" block emitted earlier in this same
         # gen_module call, near the struct alloc helpers) — that block's
