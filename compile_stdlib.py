@@ -105,19 +105,39 @@ EXPECTED_FAILURES = {
         '— see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_'
         'silently_wrong.md',
 
-    # test_locks.mojo's blocker: `TaskGroup` (create_task/Task/RaisingTask/
-    # create_raising_task now have real codegen support — see
-    # test_raising_asyncrt.mojo, which passes as of the commit removing its
-    # own entry here) plus `with`-statement support inside an async body
-    # (not yet attempted anywhere in this codegen, generator or async) and
-    # `TaskGroup.create_task`/`.wait[...]`'s own composition semantics —
-    # still a real, substantial, not-yet-started feature.
+    # test_locks.mojo's blocker, updated this session: `TaskGroup` (as a
+    # real compiled intrinsic type -- `TaskGroup()`/`.create_task(...)`/
+    # `.wait[origin]()`, backed by the existing MojoList infrastructure)
+    # and mutable-capture-across-a-nested-loop-of-tasks now both work and
+    # are verified end-to-end via test_taskgroup.py's real 10,000-task
+    # stress test. What's STILL missing, confirmed by attempting the real
+    # file directly: (1) `with BlockingScopedLock(lock):` inside `inc()`'s
+    # own body -- `_cpp_stmt` (the shared generator/async body emitter)
+    # still has no `WithStmt` case at all; (2) capturing `lock`/`counter`
+    # (an `Atomic[DType.int64]`, a non-scalar STRUCT) mutably -- this
+    # codegen's mutable-capture mechanism (see bugs/CODEGEN_comptime_
+    # bracket_parametrized_function_calls_silently_wrong.md's "Update")
+    # only threads a SCALAR (int64_t/double/_Bool) capture through as a
+    # pointer parameter; a struct-typed capture needs the SAME scalar-only
+    # barrier lifted that `build_message`'s String-return gap (test_
+    # asyncrt.mojo) already needs, for a different reason; (3) `inc()` is
+    # CALLED from `test_atomic()`, a DIFFERENT nested (ordinary, lifted)
+    # closure than the one that declares its captures (`test_basic_lock`)
+    # — the general (non-async) closure-lifting mechanism has no notion of
+    # "this closure transitively needs a capture because it calls
+    # something that does", so `test_atomic()`'s own lifted body has no
+    # access to `lock`/`counter` at all. See that same bugs/ file's
+    # "Update — TaskGroup + real stress test" section for the full
+    # writeup.
     'test/runtime/test_locks.mojo':
-        'TaskGroup (create_task/Task/RaisingTask/create_raising_task now '
-        'have real codegen support — see test_raising_asyncrt.mojo) has no '
-        'codegen support at all yet, plus this file needs `with`-statement '
-        'support inside an async body, never attempted in this codegen for '
-        'generator or async bodies',
+        '`with BlockingScopedLock(...)` inside inc() (no WithStmt support '
+        'in the compiled coroutine body emitter), a mutable capture of a '
+        'non-scalar struct (Atomic[DType.int64]), and inc() being called '
+        'from a DIFFERENT nested closure than the one declaring its '
+        'captures (the general closure-lifter has no transitive-capture '
+        'notion) — TaskGroup itself and scalar mutable capture now work, '
+        'see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_'
+        'silently_wrong.md',
 }
 
 def get_stdlib_path():

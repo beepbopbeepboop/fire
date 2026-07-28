@@ -447,3 +447,118 @@ statement support inside a compiled coroutine body (`_cpp_stmt` still has
 no `WithStmt` case at all) — needed for `BlockingScopedLock`. `test_locks.
 mojo` itself is NOT yet passing; this update only lands the capture
 mechanism those two remaining pieces depend on.
+
+## Update — TaskGroup + real 10,000-task stress test, plus two separate real bugs found and fixed
+
+`TaskGroup` (test_locks.mojo Step 3) is now a real compiled intrinsic,
+reinterpreted exactly like `create_task`/`create_raising_task` already
+are (real Mojo's own `TaskGroup` in std/runtime/asyncrt.mojo is a
+genuinely deep struct — raw MLIR ops, an atomic counter, a `_Chain`
+low-level completion primitive, `List[_TaskGroupBox]` — nowhere near
+reachable by this codegen's general struct-compiling path):
+
+- `TaskGroup()` construction is intercepted in `_lower_call` (mirroring
+  `create_task`'s own early-interception pattern) and represented as a
+  plain `MojoList *` of int64_t-cast `MojoAsync *` handles — reusing the
+  EXISTING `mojo_list_new`/`mojo_list_append_int`/`mojo_list_get_int`/
+  `mojo_list_len` runtime infrastructure rather than inventing a parallel
+  dynamic-array type (CLAUDE.md's consolidation principle). `self.
+  _taskgroup_var_api` (name -> {'base', 'value_ctype'}) tags which
+  variables are really task groups, mirroring `self._async_var_api`'s
+  identical pattern.
+- `.create_task(<call>)` and `.wait[origin]()` (the bracket origin
+  argument is silently dropped — this codegen does no borrow-checking, so
+  it's genuinely unneeded — reaching `_lower_method_call` as a plain,
+  bracket-free `.wait()` via the EXISTING SubscriptExpr+MemberExpr
+  routing) are handled in `_lower_method_call`, right next to the
+  existing single-`Task`.`wait()` case they mirror. The resolve+
+  construct+schedule sequence (including capture-forwarding) was factored
+  out of the free `create_task(...)` call site into a new shared
+  `_resolve_and_start_task` helper — the SAME sequence, not a second copy
+  of it, now used by both call sites.
+- Every task added to ONE `TaskGroup` must compile to the SAME async
+  unit — an honest compile-time refusal (not silent wrongness) for the
+  genuinely heterogeneous case real Mojo's type-erased `_TaskGroupBox`
+  supports and this narrower reinterpretation doesn't; every real target
+  shape only ever adds one kind of task to a given group.
+- A real, hand-verified gap in the EXISTING nested-async-helper scoped-
+  push (`self._nested_async_api` -> `self._async_api`, added by the
+  create_task/await-composition work): it was only ever pushed around
+  `gen_func` for a top-level function's OWN body compile, never around
+  the closure-LIFTING loop (`_emit_closure_recursive`/`_gen_lifted_
+  closure`) for that SAME top-level function's OTHER nested (ordinary,
+  non-async) closures — so `tg.create_task(inc())` called from a
+  DIFFERENT sibling nested closure (not the one `gen_func` compiles
+  directly) found no entry for `inc` in `self._async_api` at all. Fixed
+  by moving the push earlier, to wrap both the closure-lifting loop and
+  `gen_func`.
+
+**Two SEPARATE, pre-existing bugs found and fixed** while building a real
+10,000-task stress-test repro (test_locks.mojo's own `for _ in
+range(maxI): for _ in range(maxJ): tg.create_task(inc())` shape, with
+`comptime maxI/maxJ` loop bounds):
+
+1. **Nested `for` loops reusing the SAME loop-variable name** (`for _ in
+   range(...): for _ in range(...): ...` — real Mojo/Python's extremely
+   common "don't care" idiom, and exactly test_locks.mojo's own shape)
+   silently corrupted the OUTER loop's iteration state: `_gen_for_range`
+   used the user-visible loop variable itself (`_`) as BOTH the loop's
+   own control/counter storage AND the per-iteration value exposed to the
+   body — since `self._declare_var`/the C variable list are NAME-keyed,
+   an inner loop sharing the outer loop's variable name reused the SAME
+   underlying storage, so the inner loop's own reset/final value corrupted
+   the outer loop's condition check on its next test after the inner loop
+   finished. Hand-verified: `for _ in range(100): for _ in range(100):
+   calls += 1` printed `100`, not `10000` — the outer loop silently ran
+   only ONE iteration. This is a genuinely different bug from the
+   already-known `_lower_in_impl` "'in' for char*" gap (see the bootstrap-
+   verify session's own notes) — a fresh discovery, not a re-hit of a
+   documented one. Fixed by decoupling loop CONTROL from the user-visible
+   variable entirely: a dedicated internal counter temp (always fresh,
+   never reused across nesting depths) drives the condition/increment,
+   and the user variable is simply assigned the counter's current value
+   once per iteration, at the top of the body — matching real Python/Mojo
+   semantics (reassigning the loop variable inside the body never affects
+   the loop's own iteration count) and fixing the collision regardless of
+   variable name, not just for `_`.
+2. **A local `comptime NAME = <value>` read as an ORDINARY runtime value**
+   (`comptime maxI = 100` then `range(0, maxI)`, test_locks.mojo's own
+   loop-bound idiom) silently substituted `0` — `_gen_stmt_ComptimeVarStmt`
+   folds the value into `self._comptime_vals`, but that dict was
+   previously consulted ONLY by `_eval_const` (comptime `if`/expression
+   contexts), never by the ordinary runtime `IdentExpr` read path
+   (`range(0, maxI)`'s own argument lowering) — falling through to that
+   path's generic "unknown identifier" placeholder, which silently emits
+   `0`. A REAL, hand-verified silent-miscompile risk, not just a narrow
+   refusal. Fixed by consulting `self._comptime_vals` in that fallback
+   too, before the placeholder.
+
+**Verified end-to-end** (real compile+link+run) via the new `test_
+taskgroup.py`: 100 tasks each incrementing a shared mutable capture via a
+`TaskGroup` (`100`), the full test_locks.mojo-shaped 10,000-task stress
+test with same-named nested `for _` loops and `comptime` bounds
+(`10000`, exactly — proving no lost/double-counted increments), and the
+nested-loop fix in isolation (also `10000`).
+
+**test_locks.mojo itself is STILL not passing** — attempting the real
+file directly surfaces three more, separate gaps: (1) `with
+BlockingScopedLock(lock):` inside `inc()` — `_cpp_stmt` has no `WithStmt`
+case at all (test_locks.mojo Step 4, not started); (2) `counter: Atomic[
+DType.int64]` is a non-scalar STRUCT capture — this codegen's mutable-
+capture mechanism only handles scalar (int64_t/double/_Bool) captures,
+the same "deliberately scalar-only throughout" barrier `build_message`
+(test_asyncrt.mojo) already needs lifted, for a different reason; (3)
+`inc()` is called from `test_atomic()`, a DIFFERENT nested (ordinary,
+lifted) closure than the one declaring its captures (`test_basic_lock`)
+— confirmed via a hand-written repro that this hits an honest, newly-
+added refusal (not a silent miscompile: `self.var_types` is checked
+before emitting `&name`) rather than a confusing raw gcc "undeclared
+identifier" error. The general (non-async) closure-lifting mechanism has
+no notion of "this closure transitively needs a capture because it calls
+something that does" — teaching it that is a real, structurally separate
+change to a DIFFERENT, already-complex subsystem, assessed as a genuine
+blocker for confident same-session completion rather than something to
+force. `compile_stdlib.py`'s `EXPECTED_FAILURES` entry for test_locks.
+mojo has been updated to describe these three remaining gaps precisely
+(TaskGroup and scalar mutable capture removed from its description, since
+both now work).

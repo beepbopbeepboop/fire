@@ -3075,6 +3075,12 @@ class GimpleGen:
         # particular handle uses, without re-deriving it from the (long
         # gone, by then) original create_task(...) CallExpr.
         self._async_var_api: dict[str, dict] = {}
+        # See `TaskGroup()`'s construction-interception docstring in
+        # `_lower_call`: name -> {'base', 'value_ctype'} for every Mojo
+        # variable holding a `TaskGroup` (represented as a plain `MojoList
+        # *` of int64_t-cast `MojoAsync *` handles) -- mirrors `self.
+        # _async_var_api`'s identical name-keyed side-table pattern.
+        self._taskgroup_var_api: dict[str, dict] = {}
         # Concatenated .cpp text (one C++20 translation unit) for every
         # supported generator in this module, or '' if none. Set at the very
         # end of gen_module, once the API is fully known — the caller
@@ -6203,6 +6209,25 @@ class GimpleGen:
         cname = self._c_names.get(name, name)
         if name in self.var_types:
             return ctype, cname
+        # A local `comptime NAME = <value>` (e.g. `comptime maxI = 100`,
+        # test_locks.mojo's own idiom for its stress-test loop bounds) is
+        # folded by `_gen_stmt_ComptimeVarStmt` into `self._comptime_vals`,
+        # but that dict was previously ONLY ever consulted by `_eval_const`
+        # (comptime `if`/expression contexts) -- an ORDINARY runtime read of
+        # the same name (e.g. `range(0, maxI)`, reached via this generic
+        # IdentExpr fallback, not a comptime-only context) fell all the way
+        # through to the "unknown identifier" placeholder below, silently
+        # substituting `0` for the comptime variable's REAL value -- a real,
+        # hand-verified silent-miscompile risk (`for _ in range(0, maxI):`
+        # ran ZERO iterations instead of the real 100 the source declared).
+        # Consulted here too, before the placeholder, so a comptime
+        # variable behaves like the ordinary compile-time constant it is
+        # regardless of which kind of expression context reads it.
+        _ct = getattr(self, '_comptime_vals', {}).get(name)
+        if isinstance(_ct, bool):
+            return '_Bool', self._new_val('_Bool', 'true' if _ct else 'false')
+        if isinstance(_ct, int):
+            return 'int64_t', self._new_val('int64_t', f'(int64_t){_ct}')
         # Unknown identifier (compile-time param, undeclared external, etc.).
         # Emit a placeholder so GCC doesn't see an undeclared reference.
         t = self._new_temp('int64_t')
@@ -7893,6 +7918,101 @@ class GimpleGen:
             result = self._new_val(vct, f"{base}_value ({handle_expr})")
             self._emit(f"  {base}_destroy ({handle_expr});")
             return vct, result
+
+        # Step I (create_task/Task/TaskGroup/RaisingTask project):
+        # `tg.create_task(<call>)` where `tg` is a `TaskGroup` (see
+        # `_lower_call`'s `TaskGroup()` construction docstring / `self.
+        # _taskgroup_var_api`'s own docstring). Constructs + schedules the
+        # task exactly like a bare `create_task(...)` (via the shared
+        # `_resolve_and_start_task` helper), then appends the resulting
+        # handle (cast to int64_t) onto the group's own `MojoList *` so
+        # `.wait()` (below) can later drain every task this group ever
+        # created. Every task added to ONE group must resolve to the SAME
+        # compiled async unit (`api['base']` must match whatever earlier
+        # `.create_task()` calls on this SAME group already established) --
+        # an honest compile-time refusal, not silent wrongness, for the
+        # genuinely heterogeneous case real Mojo's own type-erased
+        # `_TaskGroupBox` supports and this narrower reinterpretation
+        # doesn't (see that docstring for why this is an acceptable scope
+        # limit for every real target shape).
+        if (isinstance(_wait_obj, IdentExpr) and _wait_obj.name in self._taskgroup_var_api
+                and func.member == 'create_task' and len(node.args) == 1
+                and not getattr(node, 'kwargs', None)):
+            tg_api = self._taskgroup_var_api[_wait_obj.name]
+            _resolved = self._resolve_and_start_task(node.args[0])
+            if _resolved is None:
+                raise RuntimeError(
+                    "cannot compile module: TaskGroup.create_task(...) is "
+                    "only supported for a call to another compiled async "
+                    "function this module already compiled -- falling "
+                    "back to interpreting this module from source instead")
+            handle, api = _resolved
+            if tg_api['base'] is not None and tg_api['base'] != api['base']:
+                raise RuntimeError(
+                    "cannot compile module: this TaskGroup already holds "
+                    f"tasks of a different compiled async unit ({tg_api['base']!r} "
+                    f"vs {api['base']!r}) -- this codegen only supports a "
+                    "single, homogeneous task type per TaskGroup -- falling "
+                    "back to interpreting this module from source instead")
+            tg_api['base'] = api['base']
+            tg_api['value_ctype'] = api['value_ctype']
+            handle_i64 = self._new_val('int64_t', f"(int64_t){handle}")
+            self._emit(f"  mojo_list_append_int ({_wait_obj.name}, {handle_i64});")
+            return 'int64_t', self._new_val('int64_t', '(int64_t)0')
+
+        # `tg.wait[origin]()` -- the bracket origin argument is already
+        # dropped by the SubscriptExpr+MemberExpr routing a few thousand
+        # lines up in `_lower_call` (no threaded-comptime-param entry ever
+        # exists for `TaskGroup`'s intrinsic `wait`, so `extra_args` there
+        # is always empty for it) -- reached here as a plain, no-argument
+        # `.wait()` call, exactly like the ordinary `MojoAsync *` `.wait()`
+        # case above, just over every handle the group has accumulated
+        # instead of one. Drives Step A's SHARED scheduler to completion
+        # exactly ONCE (it's a single global scheduler regardless of which
+        # TaskGroup a task was created through, so one drive call finishes
+        # every pending task, group or not), then walks the group's own
+        # `MojoList *` (the same GIMPLE-safe goto-based length/index loop
+        # `_compr_list_loop` already uses for iterating a MojoList),
+        # translating/propagating any pending exception and destroying
+        # each handle in turn -- mirrors the ordinary single-task `.wait()`
+        # sequence above exactly, just looped.
+        if (isinstance(_wait_obj, IdentExpr) and _wait_obj.name in self._taskgroup_var_api
+                and func.member == 'wait' and not node.args):
+            tg_api = self._taskgroup_var_api[_wait_obj.name]
+            list_expr = _wait_obj.name
+            self._emit(f"  mojo_async_run_until_complete ();")
+            if tg_api['base'] is not None:
+                base = tg_api['base']
+                len64 = self._new_val('int64_t', f"mojo_list_len ({list_expr})")
+                idx64 = self._new_val('int64_t', "(int64_t)0")
+                bb_cond = self._new_bb(); bb_body = self._new_bb()
+                bb_post = self._new_bb(); bb_after = self._new_bb()
+                self._emit(f"  goto {bb_cond};")
+                self._emit_label(bb_cond)
+                cond_t = self._new_val('_Bool', f"{idx64} < {len64}")
+                self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+                self._emit_label(bb_body)
+                raw_h = self._new_val('int64_t', f"mojo_list_get_int ({list_expr}, {idx64})")
+                h_expr = self._new_val('MojoAsync *', f"(MojoAsync *){raw_h}")
+                self._emit(f"  {base}_translate_pending_exc ({h_expr});")
+                pending_t = self._new_val('_Bool', "mojo_exc_pending_get ()")
+                bb_pending = self._new_bb()
+                bb_ok = self._new_bb()
+                self._emit(f"  if ({pending_t}) goto {bb_pending}; else goto {bb_ok};")
+                self._emit_label(bb_pending)
+                self._emit(f"  mojo_exc_pending_set (0);")
+                self._emit(f"  {base}_destroy ({h_expr});")
+                self._emit("  mojo_raise ();")
+                self._emit_label(bb_ok)
+                self._emit(f"  {base}_destroy ({h_expr});")
+                self._emit(f"  goto {bb_post};")
+                self._emit_label(bb_post)
+                one64 = self._new_val('int64_t', "(int64_t)1")
+                nxt = self._new_val('int64_t', f"{idx64} + {one64}")
+                self._emit(f"  {idx64} = {nxt};")
+                self._emit(f"  goto {bb_cond};")
+                self._emit_label(bb_after)
+            return 'int64_t', self._new_val('int64_t', '(int64_t)0')
 
         # `super().method(args)` — resolve directly to the base struct's method
         # rather than falling through to the generic obj.method() dispatch below,
@@ -9991,6 +10111,38 @@ class GimpleGen:
         # like a bare `create_task(f(...))` -- an honest, documented
         # simplification (the hint's own contract permits this), not a
         # silent correctness gap.
+        # `TaskGroup()` (test_locks.mojo's own idiom: `var tg = TaskGroup();
+        # ...; tg.create_task(inc()); ...; tg.wait[origin]()`) -- real
+        # Mojo's own `TaskGroup` (std/runtime/asyncrt.mojo) is a genuinely
+        # deep struct (raw MLIR ops, an atomic counter, a `_Chain` low-
+        # level completion primitive, a `List[_TaskGroupBox]`) nowhere near
+        # reachable by this codegen's general (non-async) struct-compiling
+        # path -- reinterpreted here exactly like `create_task`/
+        # `create_raising_task` already are: not by compiling TaskGroup's
+        # REAL body, but as a small set of intrinsics this codegen
+        # understands directly. A TaskGroup is represented as a plain
+        # `MojoList *` of `(int64_t)` `MojoAsync *` handles (this project's
+        # EXISTING mojo_list_new/mojo_list_append_int/mojo_list_get_int/
+        # mojo_list_len infrastructure, reused rather than inventing a
+        # parallel dynamic-array type -- see CLAUDE.md's consolidation
+        # principle) -- `self._taskgroup_var_api` (name -> {'base',
+        # 'value_ctype'}, populated lazily by the FIRST `.create_task(...)`
+        # call on it, see `_lower_method_call`) tags which names are really
+        # task groups, mirroring `self._async_var_api`'s identical name-
+        # keyed "value -> api" side-table pattern for a bare `create_task`
+        # handle. Every task added to ONE group must compile to the SAME
+        # async unit (an honest compile-time refusal if a second, different
+        # one is ever added -- see `.create_task()`'s own check below) --
+        # real Mojo's TaskGroup allows heterogeneous tasks (type-erased via
+        # `_TaskGroupBox`), but every real target shape only ever adds ONE
+        # kind of task to a given group, so this narrower contract is
+        # honest (a hard refusal, not silent wrongness) rather than solving
+        # the fully general heterogeneous case.
+        if (isinstance(node.func, IdentExpr) and node.func.name == 'TaskGroup'
+                and not node.args and not getattr(node, 'kwargs', None)):
+            handle = self._call_expr('MojoList *', 'mojo_list_new', [])
+            self._taskgroup_var_api[handle] = {'base': None, 'value_ctype': None}
+            return 'MojoList *', handle
         _ct_kwargs = getattr(node, 'kwargs', None) or []
         if (isinstance(node.func, IdentExpr) and node.func.name == '_create_task'
                 and len(node.args) == 1 and len(_ct_kwargs) == 1
@@ -10033,46 +10185,9 @@ class GimpleGen:
             # (or a bracket-param-free call to a function that happens to
             # be comptime-parametrized) ever lets the OTHER pass claim it
             # first instead.
-            _acl_fallback = self._async_closure_api.get((self.current_func_name,
-                                                          getattr(inner.func, 'name', None))) \
-                if isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr) else None
-            if (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
-                    and (inner.func.name in self._async_api or _acl_fallback is not None)
-                    and not getattr(inner, 'kwargs', None)):
-                api = self._async_api.get(inner.func.name) or _acl_fallback
-                base = api['base']
-                arg_pairs = [self.lower_expr(a) for a in inner.args]
-                # Captured free variable(s) (see `_compile_nested_async_
-                # functions`'s own capture-computation, and `_gen_cpp_
-                # async_unit`'s `mut_capture_names` docstring for the by-
-                # reference case) are appended as extra trailing arguments
-                # here, exactly as the Mojo-level call site never spells
-                # them out itself -- mirrors the bracket-parametrized
-                # nested-closure call site's identical capture-forwarding
-                # a few thousand lines down (`_lower_call`'s SubscriptExpr+
-                # IdentExpr branch). A capture in `api['mut_capture_names']`
-                # is passed by ADDRESS (`&name`, via a proper GIMPLE temp --
-                # `-fgimple` doesn't allow a bare `&name` as an inline call
-                # argument expression) instead of by value, matching the
-                # pointer parameter type `_gen_cpp_async_unit` compiled that
-                # unit's signature with.
-                # `api['captures']` always stores each capture's PLAIN
-                # (dereferenced) ctype, e.g. "int64_t" -- never the pointer
-                # form -- so both this call site and `_gen_cpp_async_unit`'s
-                # own `extra_captures` construction derive the pointer type
-                # (`f"{ctype} *"`) the same way, in exactly one place each,
-                # rather than one of them baking "int64_t *" into the stored
-                # dict and the other stripping it back off.
-                _mut_names = api.get('mut_capture_names') or frozenset()
-                for _cap_name, _cap_ctype in (api.get('captures') or []):
-                    if _cap_name in _mut_names:
-                        _ptr_ctype = f"{_cap_ctype} *"
-                        _addr = self._new_val(_ptr_ctype, f"&{_cap_name}")
-                        arg_pairs.append((_ptr_ctype, _addr))
-                    else:
-                        arg_pairs.append(self.lower_expr(IdentExpr(name=_cap_name)))
-                handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
-                self._emit(f"  mojo_async_schedule_ready ({handle});")
+            _resolved = self._resolve_and_start_task(inner)
+            if _resolved is not None:
+                handle, api = _resolved
                 self._async_var_api[handle] = api
                 return 'MojoAsync *', handle
             # DELIBERATE, DOCUMENTED SIMPLIFICATION (not silent wrongness —
@@ -12706,6 +12821,11 @@ class GimpleGen:
                 self._generator_var_api[node.name] = self._generator_var_api[v]
             if actual_dst == 'MojoAsync *' and v in self._async_var_api:
                 self._async_var_api[node.name] = self._async_var_api[v]
+            # `var tg = TaskGroup()` -- mirrors the `MojoAsync *` case just
+            # above exactly (see `_lower_call`'s `TaskGroup()` construction
+            # docstring / `self._taskgroup_var_api`'s own docstring).
+            if actual_dst == 'MojoList *' and v in self._taskgroup_var_api:
+                self._taskgroup_var_api[node.name] = self._taskgroup_var_api[v]
             self._safe_coerce_emit(vtype, actual_dst, v, self._write_dest(node.name))
         else:
             ctype = self._resolve_type(node.type_ann)
@@ -14495,8 +14615,30 @@ class GimpleGen:
         start_t, start_v = self.lower_expr(start_expr)
         stop_t, stop_v  = self.lower_expr(stop_expr)
         step_t, step_v  = self.lower_expr(step_expr)
+        # A DEDICATED internal counter, never the user-visible loop variable
+        # `var` itself, drives this loop's own condition/increment — real
+        # Mojo/Python's own idiom `for _ in range(...): for _ in range(...):
+        # ...` (test_locks.mojo's exact shape, and the far more common
+        # "don't care" convention generally) reuses the SAME name `_` at
+        # every nesting depth, and `self._declare_var`/`self.var_types` are
+        # NAME-keyed -- using `var` itself as BOTH the loop's control state
+        # AND the user-visible per-iteration value meant an inner loop
+        # sharing the outer loop's variable name silently clobbered the
+        # OUTER loop's OWN iteration state (a real, hand-verified bug: `for
+        # _ in range(0, 100): for _ in range(0, 100): calls += 1` printed
+        # `100`, not `10000` -- the inner loop's `_ = 0` reset, then final
+        # `_ = 100`, corrupted the outer loop's condition check on its next
+        # test, terminating it after one outer iteration). A fresh internal
+        # temp (never reused across nesting depths, `_new_temp` always
+        # allocates a new name) decouples loop CONTROL from the user
+        # variable entirely -- `var` is simply assigned the counter's
+        # current value once per iteration, at the top of the body, for
+        # the body's own reads to see, exactly matching real Python/Mojo
+        # semantics (reassigning the loop variable inside the body never
+        # affects the loop's own iteration count).
+        ctr = self._new_temp('int64_t')
         # Coerce start/stop/step to int64_t — GIMPLE requires same types in binary ops
-        self._safe_coerce_emit(start_t, 'int64_t', start_v, var)
+        self._safe_coerce_emit(start_t, 'int64_t', start_v, ctr)
         if stop_t != 'int64_t':
             stop_tmp = self._new_temp('int64_t')
             self._safe_coerce_emit(stop_t, 'int64_t', stop_v, stop_tmp)
@@ -14518,17 +14660,18 @@ class GimpleGen:
             t_gt   = self._new_temp('_Bool')
             t_spos = self._new_temp('_Bool')
             cond_t = self._new_temp('_Bool')
-            self._emit(f"  {t_lt}   = {var} < {stop_v};")
-            self._emit(f"  {t_gt}   = {var} > {stop_v};")
+            self._emit(f"  {t_lt}   = {ctr} < {stop_v};")
+            self._emit(f"  {t_gt}   = {ctr} > {stop_v};")
             t_zero = self._new_val('int64_t', "(int64_t)0")
             self._emit(f"  {t_spos} = {step_v} > {t_zero};")
             self._emit(f"  {cond_t} = {t_spos} ? {t_lt} : {t_gt};")
         else:
-            cond_t = self._new_val('_Bool', f"{var} {cond_op} {stop_v}")
+            cond_t = self._new_val('_Bool', f"{ctr} {cond_op} {stop_v}")
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
+        self._emit(f"  {var} = {ctr};")
         self.loop_stack.append((bb_post, bb_after))
         for s in node.body:
             self.gen_stmt(s)
@@ -14537,8 +14680,8 @@ class GimpleGen:
         self._emit(f"  goto {bb_post};")
 
         self._emit_label(bb_post)
-        step_t = self._new_val('int64_t', f"{var} + {step_v}")
-        self._emit(f"  {var} = {step_t};")
+        step_t = self._new_val('int64_t', f"{ctr} + {step_v}")
+        self._emit(f"  {ctr} = {step_t};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
@@ -18465,6 +18608,86 @@ class GimpleGen:
         ]
         return '\n'.join(lines), value_ctype, base, [ct for _, ct in param_ctypes]
 
+    def _resolve_and_start_task(self, inner) -> tuple[str, dict] | None:
+        """Resolves `inner` (a bare-name `CallExpr`, e.g. `inc()`, `f(x,
+        y)`) against `self._async_api` / `self._async_closure_api`'s
+        fallback, and if resolvable, actually CONSTRUCTS + SCHEDULES the
+        task (`{base}_start(...)`, `mojo_async_schedule_ready(...)`) --
+        forwarding any captured free variable(s) as extra trailing
+        arguments (a mutated one by ADDRESS, via a proper GIMPLE temp;
+        `-fgimple` forbids a bare `&name` as an inline call-argument
+        expression -- see `_gen_cpp_async_unit`'s `mut_capture_names`
+        docstring for the by-reference-capture design this mirrors).
+        Returns `(handle, api)` on success, `None` if `inner` doesn't
+        resolve to a known compiled async unit this way (the caller is
+        responsible for its own fallback/refusal in that case -- this
+        method never raises for an unresolvable `inner`, only for a
+        genuinely malformed argument count mismatch it can't recover from
+        by construction).
+
+        Factored out of the free `create_task(...)`/`create_raising_task(
+        ...)` call-site lowering (the ONLY call site until `TaskGroup.
+        create_task(...)` needed the exact same resolve+construct+schedule
+        sequence a second time) -- CLAUDE.md's consolidation principle:
+        one shared implementation, not two independently-maintained
+        copies of this same, fairly intricate sequence."""
+        if not (isinstance(inner, CallExpr) and isinstance(inner.func, IdentExpr)
+                and not getattr(inner, 'kwargs', None)):
+            return None
+        _acl_fallback = self._async_closure_api.get((self.current_func_name, inner.func.name))
+        api = self._async_api.get(inner.func.name) or _acl_fallback
+        if api is None:
+            return None
+        base = api['base']
+        arg_pairs = [self.lower_expr(a) for a in inner.args]
+        # `api['captures']` always stores each capture's PLAIN
+        # (dereferenced) ctype, e.g. "int64_t" -- never the pointer form --
+        # so this call site and `_gen_cpp_async_unit`'s own `extra_
+        # captures` construction both derive the pointer type (`f"{ctype}
+        # *"`) the same way, in exactly one place each, rather than one of
+        # them baking "int64_t *" into the stored dict and the other
+        # stripping it back off.
+        _mut_names = api.get('mut_capture_names') or frozenset()
+        for _cap_name, _cap_ctype in (api.get('captures') or []):
+            if _cap_name in _mut_names:
+                # `&{_cap_name}` is only valid C when `_cap_name` is a
+                # plain local/parameter of the CURRENT C function being
+                # generated -- true when this call site is compiled
+                # directly inside the SAME enclosing function `inc`'s own
+                # capture was resolved against, but NOT when this call
+                # site is reached from a DIFFERENT, sibling nested closure
+                # (test_locks.mojo's real shape: `test_atomic()`, itself
+                # lifted via the ordinary/non-async closure mechanism,
+                # calls `inc()` without ever directly referencing `counter`
+                # itself -- the ordinary closure lifter never threads a
+                # transitively-needed capture like this through a calling
+                # closure that doesn't textually reference it). `self.
+                # var_types` holds every name actually in scope for
+                # whichever function is CURRENTLY being generated (params,
+                # locals, and a lifted closure's own threaded captures) --
+                # an honest compile-time refusal here (not a raw, confusing
+                # gcc "undeclared identifier" error) when `_cap_name` isn't
+                # one of them, rather than emitting a reference to a name
+                # this function's own C body was never given.
+                if _cap_name not in self.var_types:
+                    raise RuntimeError(
+                        "cannot compile module: create_task(...)'s callee "
+                        f"mutably captures {_cap_name!r}, which isn't in "
+                        "scope at this particular call site (calling a "
+                        "mutable-capturing async closure from a DIFFERENT "
+                        "nested closure than the one that declares the "
+                        "captured variable is not yet supported) -- "
+                        "falling back to interpreting this module from "
+                        "source instead")
+                _ptr_ctype = f"{_cap_ctype} *"
+                _addr = self._new_val(_ptr_ctype, f"&{_cap_name}")
+                arg_pairs.append((_ptr_ctype, _addr))
+            else:
+                arg_pairs.append(self.lower_expr(IdentExpr(name=_cap_name)))
+        handle = self._call_expr('MojoAsync *', f"{base}_start", arg_pairs)
+        self._emit(f"  mojo_async_schedule_ready ({handle});")
+        return handle, api
+
     def _resolve_kwargs_for_known_async_call(self, call) -> None:
         """Step I (create_task/Task/TaskGroup/RaisingTask project): if
         `call` is a CallExpr using ONLY keyword arguments (e.g.
@@ -21547,9 +21770,6 @@ class GimpleGen:
                     # preamble emission and the free-function forward-decl
                     # loop below, both gated the same way).
                     continue
-                for ci in self._all_closures.get(stmt.name, {}).values():
-                    _emit_closure_recursive(ci, stmt.name)
-                self._lambda_parts = []
                 # Step I: scoped push — temporarily expose this function's
                 # own nested async helpers (compiled earlier by
                 # gen_module's own _compile_nested_async_functions pass,
@@ -21562,6 +21782,22 @@ class GimpleGen:
                 # — see `finally`), so a later, unrelated top-level
                 # function never sees a stale entry belonging to a
                 # DIFFERENT enclosing function's same-named nested helper.
+                #
+                # Pushed BEFORE the closure-lifting loop just below too
+                # (not only around `gen_func`, its original, narrower
+                # scope) — test_locks.mojo's own real shape: `inc()` is
+                # nested directly in `test_basic_lock`, but CALLED (via
+                # `tg.create_task(inc())`) from `test_atomic()`, a
+                # DIFFERENT ordinary nested function ALSO declared inside
+                # `test_basic_lock` and compiled via the GENERAL (non-
+                # async) closure-LIFTING mechanism (`_emit_closure_
+                # recursive`/`_gen_lifted_closure`), a separate code path
+                # from `gen_func` that this push never used to cover — a
+                # real, hand-verified gap: `tg.create_task(inc())` inside a
+                # sibling lifted closure found no entry for `inc` in self.
+                # _async_api at all (the push hadn't happened yet), and hit
+                # `TaskGroup.create_task(...)`'s own "not a call to a
+                # known compiled async unit" refusal.
                 _nested_pushed = []
                 _prefix = f"{stmt.name}::"
                 for _qn, _info in self._nested_async_api.items():
@@ -21570,6 +21806,9 @@ class GimpleGen:
                         self._async_api[_nm] = _info
                         _nested_pushed.append(_nm)
                 try:
+                    for ci in self._all_closures.get(stmt.name, {}).values():
+                        _emit_closure_recursive(ci, stmt.name)
+                    self._lambda_parts = []
                     func_parts.append(self.gen_func(stmt))
                 finally:
                     for _nm in _nested_pushed:
