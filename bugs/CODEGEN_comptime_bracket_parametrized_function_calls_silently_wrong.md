@@ -562,3 +562,64 @@ force. `compile_stdlib.py`'s `EXPECTED_FAILURES` entry for test_locks.
 mojo has been updated to describe these three remaining gaps precisely
 (TaskGroup and scalar mutable capture removed from its description, since
 both now work).
+
+## Update — investigated (not fixed) the transitive-closure-capture gap; found it's deeper than a name-propagation fix
+
+Investigated whether gap (3) above (`test_atomic()` calling `inc()`
+without itself referencing `inc()`'s captured `lock`/`counter`) is
+fixable by simply widening `_scan_for_closures`'s free-variable
+computation for the CALLING closure (`test_atomic`) to transitively
+union in any REGISTERED async unit's own captures whenever the calling
+closure's body calls that unit by name — i.e. teach the general
+(non-async) closure-lifter "this closure needs variable X because it
+calls something that needs X", not full call-graph analysis (this
+project's own async-unit registration already gives an exact, flat
+name -> captures lookup, no graph traversal needed).
+
+That part is genuinely simple. But a SEPARATE, deeper problem surfaced
+first: does the GENERAL (non-async) closure-lifting mechanism even
+support a captured variable being MUTATED at all today? A minimal,
+hand-written, non-async repro answered this directly:
+
+```python
+def test_ordinary_mut() raises:
+    var counter = 0
+    def inc():
+        counter += 1
+    inc(); inc(); inc()
+    print(counter)
+```
+
+Compiles and links clean, but prints `0`, not `3` — real Mojo/Python
+semantics ("`inc` mutates the enclosing scope's `counter`") is silently
+NOT what this codegen's general closure lifter does; it captures
+`counter` (if at all) as a plain by-VALUE copy, with no by-reference
+capture mechanism of any kind. This is a genuinely SEPARATE, PRE-
+EXISTING, latent bug in the general closure system — independent of
+async, independent of TaskGroup, independent of this whole project —
+that nothing in this codebase's own test suite currently exercises or
+depends on (confirmed: no existing test covers a mutated closure
+capture), which is presumably why it's gone unnoticed.
+
+This changes the shape of gap (3): transitively PROPAGATING `inc`'s
+capture NAMES into `test_atomic`'s own free-variable set (the simple
+part) would still not be enough on its own -- `test_atomic` would need
+the GENERAL closure lifter to ALSO thread `lock`/`counter` through to it
+BY REFERENCE (a pointer), a capability that mechanism does not have at
+all today for ANY nested closure, sync or async. Building that is
+structurally the same kind of change this session's own async mutable-
+capture work already did (see the "Update — mutable (by-reference)
+closure capture" section above) — pointer-typed captured parameters,
+dereferenced reads/writes — but applied to a DIFFERENT, much more
+widely-used code path (`_gen_lifted_closure`/`_scan_for_closures`,
+exercised by every ordinary nested closure in the entire stdlib compile,
+not just async ones), which is real, additional regression surface this
+session's own async-only changes never touched.
+
+**Assessment: deeper than the simple transitive-name-propagation fix
+this update set out to try** — confirms the coordinator's own stated
+condition for stepping back (needs a new capability in a widely-shared
+subsystem, not just call-graph/name propagation). Not attempted further
+this session. `test_locks.mojo` remains blocked on all three gaps listed
+in the previous update; moving on to `test_tracing.mojo` next per the
+standing plan.
