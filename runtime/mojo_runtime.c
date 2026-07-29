@@ -887,7 +887,12 @@ char *mojo_c_getenv(char *name) {
  * Used by _ensure_bool_cond so `if some_char_star:` matches Python semantics
  * (a pointer-nullity check alone treats a non-null empty string as truthy). */
 int mojo_truthy_cstr(char *s) {
-    return s != NULL && s[0] != '\0';
+    /* A very small pointer (below typical page alignment) is almost certainly
+       a bool/small-int value that was cast to char* by the codegen — treating
+       it as a string would dereference address 0x1 (etc.) and SIGSEGV.
+       Guards against BUG-2026-045's "bool-as-char*" JIT crash. */
+    if ((int64_t)(intptr_t)s < 65536) return s != NULL;
+    return s[0] != '\0';
 }
 
 /* len(a_plain_string): real libc strlen() returns size_t, not int64_t —
