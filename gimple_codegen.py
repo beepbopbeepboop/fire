@@ -8948,7 +8948,7 @@ class GimpleGen:
             'add', 'discard', 'remove',
             'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
             'split', 'join', 'replace', 'find', 'lower', 'upper',
-            'format', 'encode',
+            'format', 'encode', 'count',
         ):
             ip = self._new_temp('int64_t')
             ov_local = self._ensure_local(ot, ov)
