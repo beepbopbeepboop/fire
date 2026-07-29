@@ -3221,6 +3221,12 @@ class GimpleGen:
         # discovery passes scan disjoint parent-container shapes and never
         # register the same FunctionDef twice.
         self._nested_async_api: dict[str, dict] = {}
+        # Per-struct-field element type tracking: struct_name -> field_name -> elem_type.
+        # Populated in _gen_stmt_AssignStmt during __init__, consulted by
+        # _lower_MemberExpr at field read sites.  NOT reset per function in
+        # _reset_func because a struct compiled in __init__ must be visible
+        # to code in _toplevel or any other function.
+        self._field_elem_types: dict[str, dict[str, str]] = {}
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -3647,8 +3653,12 @@ class GimpleGen:
         self._last_was_terminal: bool       = False
         # Container / layout state.
         self._elem_types:      dict[str, str]   = {}  # container var → element C type
-        self._nested_elem_types: dict[str, str] = {}  # container var → element type of lists within lists
+        self._nested_elem_types: dict[str, str] = {}
         self._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
+        # NOTE: _field_elem_types is intentionally NOT reset here — it stores
+        # per-struct metadata that must persist across function boundaries
+        # (set during __init__ field assignments, read at any later field
+        # access site).  Initialized once in __init__.
         # Actual type of int64_t-boxed pointers, keyed by temp/var name. MUST reset
         # per function: temp names (_tN) recycle, so a stale entry from one function
         # would mis-type a same-named temp in the next (e.g. an open() file handle
@@ -6896,6 +6906,17 @@ class GimpleGen:
         if node.member in field_map:
             field_type = field_map[node.member]
             t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
+            # Propagate element/dict-val type from stored field metadata so
+            # subscript/iteration later recovers the right element type instead
+            # of defaulting to int64_t (see BUG-2026-044).
+            if field_type == 'MojoList *':
+                stored = self._field_elem_types.get(struct_name, {}).get(node.member)
+                if stored:
+                    self._elem_types[t] = stored
+            elif field_type == 'MojoDict *':
+                stored = self._field_elem_types.get(struct_name, {}).get(node.member)
+                if stored:
+                    self._dict_val_types[t] = stored
             return field_type, t
         # A method referenced as a plain VALUE (not called here) — `f =
         # self.b`, `readline.set_completer(self.complete)` — rather than a
@@ -13509,6 +13530,14 @@ class GimpleGen:
                 struct_name = _struct_name_of(ot)
                 field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
                 self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
+                # Propagate elem/dict-val types from value to field name so
+                # later field loads (in _lower_MemberExpr) can recover the
+                # element type for subscript/list-iter dispatch — without this,
+                # f.scopes[0] on a list-of-dicts field always returns int64_t
+                # (see BUG-2026-044).  Keyed by field name (not variable name)
+                # since that's what _lower_MemberExpr looks up.
+                if field_type == 'MojoList *' and v in self._elem_types:
+                    self._field_elem_types.setdefault(struct_name, {})[node.target.member] = self._elem_types[v]
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
@@ -24037,6 +24066,8 @@ class GimpleGen:
                     "  if (val > 65536) {\n"
                     "    if (mojo_is_registered_list(val))\n"
                     "      return _mojo_repr_list((MojoList *)(intptr_t)val);\n"
+                    "    if (mojo_is_registered_dict(val))\n"
+                    "      return _mojo_repr_dict((MojoDict *)(intptr_t)val);\n"
                     "    int64_t _tag = mojo_read_type_tag_safe(val);\n"
                     f"{tag_cases_repr_elem}\n"
                     "    return mojo_repr_str((char *)(intptr_t)val);\n"

@@ -1195,6 +1195,13 @@ int mojo_is_bool_dict(MojoDict *d) {
     return mojo_set_contains_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
 }
 
+static MojoSet *_mojo_dict_registry = NULL;
+
+int mojo_is_registered_dict(int64_t addr) {
+    if (!_mojo_dict_registry || addr < 65536) return 0;
+    return mojo_set_contains_int(_mojo_dict_registry, addr);
+}
+
 MojoDict *mojo_dict_new(void)
 {
     MojoDict *d = malloc(sizeof(MojoDict));
@@ -1202,6 +1209,8 @@ MojoDict *mojo_dict_new(void)
     d->used     = 0;
     d->next_seq = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
+    if (!_mojo_dict_registry) _mojo_dict_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
     return d;
 }
 
