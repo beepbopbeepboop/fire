@@ -9119,6 +9119,35 @@ class GimpleGen:
                 self.lower_expr(extra_arg)
             return 'int64_t', t
 
+        # Unknown struct pointer with container method: use runtime dispatch
+        # instead of generating StructName_method(...) that doesn't exist.
+        # This handles e.g. a param reassigned `args = []` where var_types
+        # still shows the original type but the actual value is a MojoList*.
+        _sn = _struct_name_of(ot) if ot.endswith(' *') else None
+        if (_sn is not None
+                and (_sn not in self.struct_field_types
+                     or f'{_sn}_{method}' not in self.func_return_types)
+                and method in ('append', 'extend', 'sort', 'reverse', 'clear',
+                               'keys', 'values', 'items', 'get', 'update', 'pop',
+                               'add', 'discard', 'remove',
+                               'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
+                               'split', 'join', 'replace', 'find', 'lower', 'upper',
+                               'format', 'encode')):
+            obj64 = self._to_int64(ot, ov)
+            method_slit = self._intern_string(_c_escape(method))
+            method_key = self._new_val('char *', f"{method_slit}")
+            if node.args:
+                arg_type, arg_val = self.lower_expr(node.args[0])
+                arg64 = self._new_temp('int64_t')
+                self._safe_coerce_emit(arg_type, 'int64_t', arg_val, arg64)
+            else:
+                arg64 = self._new_val('int64_t', "(int64_t)0")
+            t = self._call_expr('int64_t', 'mojo_obj_call1',
+                            [('int64_t', obj64), ('char *', method_key), ('int64_t', arg64)])
+            for extra_arg in node.args[1:]:
+                self.lower_expr(extra_arg)
+            return 'int64_t', t
+
         # Struct method call: obj.method(args) → StructName_method(self, args)
         return self._lower_struct_method_call(ov, ot, method, node)
 
