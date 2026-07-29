@@ -422,7 +422,7 @@ char *mojo_repr_str(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_bool_to_str(int b);
-int mojo_type(int obj);
+int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);

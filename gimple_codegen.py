@@ -3228,6 +3228,8 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
+        self._return_elem_types: dict[str, str] = {}
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -3630,6 +3632,7 @@ class GimpleGen:
         # previously-compiled closure can never leak into an unrelated
         # function's body.
         self._gimple_mut_ptr: dict[str, str] = {}
+        self._struct_field_owners.clear()
         # ENCLOSING function's own locals that some nested closure captures
         # BY REFERENCE (name -> pointee ctype) -- see _seed_mut_captured_
         # local_types's docstring for why these are "boxed" (heap-
@@ -6271,11 +6274,6 @@ class GimpleGen:
             return self._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
         if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                   'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
-            # Dispatch on the statically-known scalar type instead of
-            # mojo_str's generic `void *` heuristic, which can't tell
-            # a real int value of 0 apart from a NULL pointer and
-            # prints "None" for it — e.g. f"col={tok.col}" on a
-            # token at column 0 (see mojo_str's own comment).
             nv = self._to_int64(et, ev)
             return self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
         if et in ('double', 'float'):
@@ -6945,6 +6943,13 @@ class GimpleGen:
                 stored = self._field_elem_types.get(struct_name, {}).get(node.member)
                 if stored:
                     self._dict_val_types[t] = stored
+            # Track struct field owner for container-type fields so that append
+            # operations can propagate element type info back to _field_elem_types.
+            if field_type in ('MojoList *', 'MojoDict *', 'MojoSet *') and isinstance(node.obj, IdentExpr) \
+                    and node.obj.name == 'self' and struct_name in self.struct_field_types:
+                if t not in self._struct_field_owners:
+                    self._struct_field_owners[t] = []
+                self._struct_field_owners[t].append((struct_name, node.member))
             return field_type, t
         # A method referenced as a plain VALUE (not called here) — `f =
         # self.b`, `readline.set_completer(self.complete)` — rather than a
@@ -7001,6 +7006,20 @@ class GimpleGen:
             # real -Wint-to-pointer-cast size mismatch when boxed directly —
             # widen through int64_t first, same as every other narrow-source
             # pointer cast in this file.
+            # Try to resolve the actual struct type first: if ov is known to
+            # hold a struct pointer (from _actual_types) and the struct has
+            # this field in struct_field_types, use direct field access instead
+            # of the runtime dispatch (which loses type info and forces int64_t
+            # return, breaking string comparisons downstream).
+            _resolved_field = None
+            if ov in self._actual_types:
+                _actual_sn = _struct_name_of(self._actual_types[ov])
+                if _actual_sn in self.struct_field_types and node.member in self.struct_field_types[_actual_sn]:
+                    _resolved_field = self.struct_field_types[_actual_sn][node.member]
+            if _resolved_field is not None:
+                _ptr = self._new_val(self._actual_types[ov], f'({self._actual_types[ov]}){ov}')
+                t = self._new_val(_resolved_field, f'{_ptr}->{_safe_field(node.member)}')
+                return _resolved_field, t
             if ot == 'int':
                 ov = self._new_val('int64_t', f'(int64_t){ov}')
             vp = self._new_val('void *', f'(void *){ov}')
@@ -7456,7 +7475,7 @@ class GimpleGen:
                         (lt == 'int64_t' and (rv_is_str_lit or rt == 'char *')) or
                         (rt == 'int64_t' and (lv_is_str_lit or lt == 'char *')))
             if uses_str:
-                def _to_char_star(typ, var):
+                def _to_char_star(typ, var, is_other_str_lit=False):
                     if typ == 'char *':
                         t2 = self._new_temp('char *'); self._emit(f'  {t2} = {var};'); return t2
                     # A raw single character (real C 'char', or an 'int'/'int64_t'
@@ -7467,15 +7486,20 @@ class GimpleGen:
                     # Build a real 1-char string instead, mirroring the same fix
                     # in _cast_for_list ('in' lowering). Found via
                     # mojo_compiler.py's own `c == "\\"` (c from `s[i]`).
-                    actual = self._actual_types.get(var)
-                    if typ == 'char' or (typ in ('int', 'int64_t') and not (actual and actual.endswith(' *'))):
-                        cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
-                        return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+                    # BUT: when the OTHER operand is a string literal (detected
+                    # by the caller via _is_str_lit), the int64_t MUST be a
+                    # char*-boxed pointer, not a character code — use direct
+                    # pointer cast instead of the character-to-string path.
+                    if not is_other_str_lit:
+                        actual = self._actual_types.get(var)
+                        if typ == 'char' or (typ in ('int', 'int64_t') and not (actual and actual.endswith(' *'))):
+                            cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
+                            return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                     ip = self._new_val('int64_t', f'(int64_t){var}')
                     cp = self._new_val('char *', f'(char *){ip}')
                     return cp
-                ls = _to_char_star(lt, lv)
-                rs = _to_char_star(rt, rv)
+                ls = _to_char_star(lt, lv, rv_is_str_lit)
+                rs = _to_char_star(rt, rv, lv_is_str_lit)
                 eq_t = self._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
                 t = self._new_temp('_Bool')
                 cmp = '== 0' if op == '==' else '!= 0'
@@ -8977,6 +9001,8 @@ class GimpleGen:
                 ot, ov = 'MojoDict *', dp
             elif method in ('append', 'extend', 'sort', 'reverse', 'clear'):
                 lp = self._new_val('MojoList *', f"(MojoList *){ip}")
+                if ov in self._struct_field_owners:
+                    self._struct_field_owners[lp] = list(self._struct_field_owners[ov])
                 ot, ov = 'MojoList *', lp
             elif method in ('add', 'discard', 'remove'):
                 sp = self._new_val('MojoSet *', f"(MojoSet *){ip}")
@@ -9148,6 +9174,21 @@ class GimpleGen:
             t = self._call_expr(ret, f'DispatchTable_{method}', [('DispatchTable *', dt)])
             return ret, t
 
+        # Boxed int64_t value that actually holds a struct pointer with a known method.
+        # Common when accessing methods on list elements (e.g. errors[0].kind_name())
+        # where the element type is known from _field_elem_types.
+        if ot in ('int64_t', 'int') and ov in self._actual_types:
+            _actual_ptr_type = self._actual_types[ov]
+            _sn_method = _struct_name_of(_actual_ptr_type)
+            _sig_key = f'{_sn_method}_{method}'
+            if _sn_method and _sig_key in self.func_return_types:
+                _obj = self._new_val(_actual_ptr_type, f'({_actual_ptr_type}){ov}')
+                arg_pairs = [(_actual_ptr_type, _obj)]
+                for a in node.args:
+                    arg_pairs.append(self.lower_expr(a))
+                t = self._call_expr(self.func_return_types[_sig_key], _sig_key, arg_pairs)
+                return self.func_return_types[_sig_key], t
+
         # Opaque Python object (int-typed): use mojo_obj_call1 for generic method dispatch
         if ot in ('int', 'int64_t') and not (isinstance(func.obj, IdentExpr)
                                                and func.obj.name in self.struct_field_types):
@@ -9173,6 +9214,14 @@ class GimpleGen:
         # This handles e.g. a param reassigned `args = []` where var_types
         # still shows the original type but the actual value is a MojoList*.
         _sn = _struct_name_of(ot) if ot.endswith(' *') else None
+        if _sn == 'MojoList':
+            return self._lower_list_method(ov, method, node.args)
+        if _sn == 'MojoDict':
+            return self._lower_dict_method(ov, method, node.args)
+        if _sn == 'MojoSet':
+            return self._lower_set_method(ov, method, node.args)
+        if _sn == 'MojoStr':
+            return self._lower_str_method(ov, method, node.args)
         if (_sn is not None
                 and (_sn not in self.struct_field_types
                      or f'{_sn}_{method}' not in self.func_return_types)
@@ -9274,6 +9323,13 @@ class GimpleGen:
             if at == 'char *':
                 self._emit_call('void', '', 'mojo_list_append_str', [('MojoList *', ov), ('char *', av)])
                 self._elem_types[ov] = 'char *'
+                # Propagate _field_elem_types for char * append (was missing
+                # — the str path had no propagation, only the int path did).
+                if ov in self._struct_field_owners:
+                    for _sn, _fn in self._struct_field_owners[ov]:
+                        if _sn not in self._field_elem_types:
+                            self._field_elem_types[_sn] = {}
+                        self._field_elem_types[_sn][_fn] = 'char *'
             else:
                 self._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
                 if at.endswith(' *') or (at == 'int64_t' and av in self._actual_types and self._actual_types[av].endswith(' *')):
@@ -9281,6 +9337,15 @@ class GimpleGen:
                     self._elem_types[ov] = actual_elem
                     if actual_elem == 'MojoList *' and av in self._elem_types:
                         self._nested_elem_types[ov] = self._elem_types[av]
+                    # Propagate to _field_elem_types when ov originated from a
+                    # struct field (e.g. self.errors). The field-access read path
+                    # in _lower_MemberExpr checks _field_elem_types to recover
+                    # element type info when the list is read back later.
+                    if ov in self._struct_field_owners:
+                        for _sn, _fn in self._struct_field_owners[ov]:
+                            if _sn not in self._field_elem_types:
+                                self._field_elem_types[_sn] = {}
+                            self._field_elem_types[_sn][_fn] = actual_elem
             return 'int', self._new_val('int', '0')
         if method == 'extend' and args:
             at, av = self.lower_expr(args[0])
@@ -9512,6 +9577,14 @@ class GimpleGen:
                 return 'int64_t', self._call_expr('int64_t', 'mojo_str_find_from',
                     [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
             return 'int64_t', self._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
+        if method == 'index' and arg_vals:
+            sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+            if len(arg_vals) >= 2:
+                start_type = arg_pairs[1][0] if len(arg_pairs) >= 2 else 'int64_t'
+                start_v = self._to_int64(start_type, arg_vals[1])
+                return 'int64_t', self._call_expr('int64_t', 'mojo_str_find_from',
+                    [('char *', cstr_ov), (sep_type, arg_vals[0]), ('int64_t', start_v)])
+            return 'int64_t', self._call_expr('int64_t', 'mojo_str_find', [('char *', cstr_ov), (sep_type, arg_vals[0])])
         if method == 'count' and arg_vals:
             sub_type = arg_pairs[0][0] if arg_pairs else 'char *'
             return 'int64_t', self._call_expr('int64_t', 'mojo_str_count', [('char *', cstr_ov), (sub_type, arg_vals[0])])
@@ -9697,7 +9770,12 @@ class GimpleGen:
             all_arg_pairs = arg_pairs if is_class_ref else [(ot, ov)] + arg_pairs
             return self._void_call(mangled, all_arg_pairs)
         all_arg_pairs = ([(ot, ov)] + arg_pairs) if not is_class_ref else arg_pairs
-        return ret_type, self._call_expr(ret_type, mangled, all_arg_pairs)
+        t = self._call_expr(ret_type, mangled, all_arg_pairs)
+        if mangled in self._return_elem_types:
+            self._elem_types[t] = self._return_elem_types[mangled]
+            if ret_type in ('int', 'int64_t'):
+                self._actual_types[t] = 'MojoList *'
+        return ret_type, t
 
     # ── Call expression lowering ──────────────────────────────────────────
 
@@ -11781,7 +11859,11 @@ class GimpleGen:
 
         if ret_type == 'void':
             return self._void_call(fname, arg_pairs)
-        return ret_type, self._call_expr(ret_type, fname, arg_pairs)
+        t = self._call_expr(ret_type, fname, arg_pairs)
+        if ret_type == 'MojoList *' and fname_raw in self._return_elem_types:
+            self._elem_types[t] = self._return_elem_types[fname_raw]
+            self._actual_types[t] = ret_type
+        return ret_type, t
 
     # ── Overload resolution (struct methods and constructors) ─────────────
 
@@ -13312,6 +13394,10 @@ class GimpleGen:
         `len(rest)`/`rest[0]` on the tuple-unpacked `rest` misread it as a
         MojoList* and segfaulted deep in mojo_list_get_int."""
         if dst != 'int64_t':
+            if v in self._struct_field_owners:
+                self._struct_field_owners[tname] = list(self._struct_field_owners[v])
+            if dst == 'MojoList *' and v in self._elem_types:
+                self._elem_types[tname] = self._elem_types[v]
             return
         if v in self._actual_types:
             self._actual_types[tname] = self._actual_types[v]
@@ -13323,6 +13409,8 @@ class GimpleGen:
                 self._dict_val_types[tname] = self._dict_val_types[v]
         elif vtype == 'char':
             self._actual_types[tname] = 'char'
+        if v in self._struct_field_owners:
+            self._struct_field_owners[tname] = list(self._struct_field_owners[v])
         if tname in self._actual_types:
             actual_type = self._actual_types[tname]
             if actual_type == 'MojoList *' and v in self._elem_types:
@@ -13848,6 +13936,8 @@ class GimpleGen:
                 self._emit(_RETURN)
         else:
             vtype, v = self.lower_expr(node.value)
+            if vtype == 'MojoList *' and v in self._elem_types:
+                self._return_elem_types[self.current_func_name] = self._elem_types[v]
             ret = self.func_ret_type
             if ret == 'void':
                 self._emit(_RETURN)
@@ -21208,12 +21298,26 @@ class GimpleGen:
                 already = set(self.struct_field_types[s.name].keys())
                 for method in s.methods:
                     pm = {}
+                    _defaults = getattr(method, 'param_defaults', {}) or {}
                     for pname, ptype in method.params:
                         if pname != 'self':
                             # Unannotated params hold object handles (pointer-width);
                             # default to int64_t so a field assigned from one isn't
                             # truncated to 32-bit int (size-mismatch cast on read).
-                            pm[pname] = self._resolve_type(ptype) if ptype else 'int64_t'
+                            if ptype:
+                                pm[pname] = self._resolve_type(ptype)
+                            elif pname in _defaults:
+                                # Infer type from the default value when no
+                                # annotation is provided (e.g. `file=""`).
+                                _dv = _defaults[pname]
+                                if isinstance(_dv, StringLiteral):
+                                    pm[pname] = 'char *'
+                                elif isinstance(_dv, BoolLiteral):
+                                    pm[pname] = '_Bool'
+                                else:
+                                    pm[pname] = 'int64_t'
+                            else:
+                                pm[pname] = 'int64_t'
                     new_fields = {}
                     _collect_self_assigns(method.body, pm, new_fields)
                     for fn, ft in new_fields.items():
@@ -23818,6 +23922,9 @@ class GimpleGen:
             if sn in self._emitted_allocs:
                 continue  # already emitted by an imported module
             self._emitted_allocs.add(sn)
+            alloc_name = f'_alloc_{sn}'
+            if alloc_name not in self.func_return_types:
+                self.func_return_types[alloc_name] = f'{sn} *'
             # Class-level attributes that are ALSO modeled as instance struct
             # fields (see struct_field_types['Parser']['_CONV_KWS'] etc. and
             # the "self-host hardcoded struct tables" memory note) need their
