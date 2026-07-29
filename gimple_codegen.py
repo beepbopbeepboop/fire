@@ -12123,6 +12123,11 @@ class GimpleGen:
                 else:
                     self._emit(f"  {ip} = (int64_t){ov_local};")
                 self._emit(f"  {dp} = (MojoDict *){ip};")
+                # Propagate dict value type from source (ov) so _dict_val_of
+                # below returns the correct value type (char * etc.) instead
+                # of defaulting to int64_t — fixes BUG-2026-043.
+                if ov in self._dict_val_types:
+                    self._dict_val_types[dp] = self._dict_val_types[ov]
                 # Ensure index is char * for dict access (all dict keys are strings in runtime)
                 idx_for_dict = iv
                 idx_type_for_dict = idx_type
@@ -12883,6 +12888,17 @@ class GimpleGen:
                 if real == 'char *':
                     aval = self._new_val('char *', f'(char *){aval}')
                     atype = 'char *'
+                elif real == 'MojoDict *':
+                    dp = self._new_val('MojoDict *', f'(MojoDict *){aval}')
+                    rv = self._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', dp)])
+                    aval = rv
+                    atype = 'char *'
+                elif real in ('MojoList *', 'MojoSet *'):
+                    lp = self._new_val(real, f'({real}){aval}')
+                    fn = '_mojo_repr_list' if real == 'MojoList *' else '_mojo_repr_set'
+                    rv = self._call_expr('char *', fn, [(real, lp)])
+                    aval = rv
+                    atype = 'char *'
             resolved_parts.append((atype, aval))
         parts = resolved_parts
         for i, (atype, aval) in enumerate(parts):
@@ -13328,6 +13344,16 @@ class GimpleGen:
                 # rejects the direct pointer/int64_t mismatch.
                 gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
                 self._safe_coerce_emit(vtype, gtype, v, field_ref)
+                # Propagate dict/list/set value-type tracking for global variables.
+                # Without this, _dict_val_types[name] is never set for globals,
+                # and d["key"] on a global dict falls back to mojo_dict_get_int
+                # instead of mojo_dict_get_str — see BUG-2026-043.
+                if vtype == 'MojoDict *':
+                    if v in self._dict_val_types:
+                        self._dict_val_types[tname] = self._dict_val_types[v]
+                elif vtype == 'MojoList *':
+                    if v in self._elem_types:
+                        self._elem_types[tname] = self._elem_types[v]
                 return
             # Genuine module-scope statement (we're generating THIS module's own
             # _toplevel()/_{module}_toplevel() body — see _in_toplevel_gen) whose
@@ -13364,6 +13390,15 @@ class GimpleGen:
                 # struct field's real declared C type, not the semantic one.
                 gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
                 self._safe_coerce_emit(vtype, gtype, v, field_ref)
+                # Propagate dict/list/set value-type tracking for module-level
+                # globals — the same fix as the _func_declared_globals branch above,
+                # but for the toplevel-gen path that module-level assignments take.
+                if vtype == 'MojoDict *':
+                    if v in self._dict_val_types:
+                        self._dict_val_types[tname] = self._dict_val_types[v]
+                elif vtype == 'MojoList *':
+                    if v in self._elem_types:
+                        self._elem_types[tname] = self._elem_types[v]
                 return
             # Regular local variable assignment
             if tname not in self.var_types:
