@@ -3227,6 +3227,7 @@ class GimpleGen:
         # _reset_func because a struct compiled in __init__ must be visible
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
+        self._field_dict_val_types: dict[str, dict[str, str]] = {}
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -6488,8 +6489,17 @@ class GimpleGen:
             else:
                 ctype = gtype
             t = self._new_temp(ctype)
-            self._actual_types[t] = gtype  # store Mojo type for later dispatch
-            if gtype == 'MojoDict *' and name in self._dict_val_types:
+            # Use the overridden actual type (set during global store, e.g.
+            # a MojoDict* stored in an int64_t global field) if available,
+            # falling back to the declared gtype.
+            if name in self._actual_types and self._actual_types[name].endswith(' *'):
+                self._actual_types[t] = self._actual_types[name]
+            else:
+                self._actual_types[t] = gtype  # store Mojo type for later dispatch
+            # Propagate dict value type even when gtype is int64_t (boxed
+            # pointer), so a MojoDict * stored as int64_t in a global still
+            # dispatches d["key"] to mojo_dict_get_str — see BUG-2026-044.
+            if name in self._dict_val_types:
                 self._dict_val_types[t] = self._dict_val_types[name]
             c_decl_type = self._global_c_decl_types.get(name, ctype)
             # Access global from module struct (use which module the global belongs to)
@@ -6913,6 +6923,10 @@ class GimpleGen:
                 stored = self._field_elem_types.get(struct_name, {}).get(node.member)
                 if stored:
                     self._elem_types[t] = stored
+                # Also propagate dict value type for list-of-dicts fields
+                dict_stored = self._field_dict_val_types.get(struct_name, {}).get(node.member)
+                if dict_stored:
+                    self._dict_val_types[t] = dict_stored
             elif field_type == 'MojoDict *':
                 stored = self._field_elem_types.get(struct_name, {}).get(node.member)
                 if stored:
@@ -12065,19 +12079,31 @@ class GimpleGen:
                 t = self._new_val('char *', f"mojo_list_get_str ({ov}, {idx64})")
                 return 'char *', t
             t = self._new_val('int64_t', f"mojo_list_get_int ({ov}, {idx64})")
-            # Track element type if the list contains pointers (lists, dicts, etc.)
-            # This is critical for nested subscripts: arr[0][1] needs to know what
-            # element type the result of arr[0] contains.
+            # Return the actual pointer type for pointer elements (MojoDict*,
+            # MojoList*, MojoSet*) so downstream consumers (subscript, method
+            # dispatch) see the real type instead of raw int64_t.  Without this,
+            # x = lst[0]; x["key"] on a list-of-dicts field fails because
+            # var_types[x] is int64_t and x["key"] dispatches on int64_t instead
+            # of MojoDict* — see BUG-2026-044.
             if elem and elem.endswith(' *'):
                 self._actual_types[t] = elem
-                # For MojoList*, track element type of the nested list
+                cast_t = self._new_val(elem, f'({elem}){t}')
+                self._actual_types[cast_t] = elem
+                # Propagate nested element types for MojoList* (list-of-lists)
                 if elem == 'MojoList *':
-                    # Check if the container (ov) has tracked nested element type
                     if ov in self._nested_elem_types:
+                        self._elem_types[cast_t] = self._nested_elem_types[ov]
                         self._elem_types[t] = self._nested_elem_types[ov]
                     else:
-                        # Unknown nested element type, default to int64_t
-                        self._elem_types[t] = 'int64_t'
+                        self._elem_types[t] = self._elem_types.get(ov, 'int64_t')
+                        if self._elem_types[t] in ('int64_t',) and ov in self._elem_types:
+                            self._elem_types[cast_t] = self._elem_types[ov]
+                # For MojoDict* elements, propagate dict value type from the
+                # container (list variable) so subsequent ["key"] subscript
+                # dispatches to mojo_dict_get_str instead of mojo_dict_get_int.
+                if elem == 'MojoDict *' and ov in self._dict_val_types:
+                    self._dict_val_types[cast_t] = self._dict_val_types[ov]
+                return elem, cast_t
             return 'int64_t', t
 
         if ot == 'MojoStr *':
@@ -12390,6 +12416,11 @@ class GimpleGen:
                 temp = self._new_val('char *', f'{ev_cast}')
                 ev_cast = temp
             self._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+            # Propagate dict value type from appended dict elements to the
+            # list temp, so subsequent list[0]["key"] knows the dict value
+            # type (char * vs int64_t vs double) — see BUG-2026-044.
+            if et == 'MojoDict *' and ev in self._dict_val_types:
+                self._dict_val_types[t] = self._dict_val_types[ev]
         return 'MojoList *', t
 
     def _lower_dict_literal(self, node: DictExpr) -> tuple[str, str]:
@@ -13420,6 +13451,16 @@ class GimpleGen:
                 elif vtype == 'MojoList *':
                     if v in self._elem_types:
                         self._elem_types[tname] = self._elem_types[v]
+                # Propagate _actual_types so the global load path (line 6481)
+                # sets the correct actual type instead of gtype (which may be
+                # int64_t).  Without this, a boxed MojoDict* or MojoList* stored
+                # in a global variable is loaded back as plain int64_t and the
+                # subscript dispatch falls through to the generic MojoList*
+                # cast path — see BUG-2026-044.
+                if vtype.endswith(' *') and v in self._actual_types:
+                    self._actual_types[tname] = self._actual_types[v]
+                elif v in self._actual_types:
+                    self._actual_types[tname] = self._actual_types[v]
                 return
             # Regular local variable assignment
             if tname not in self.var_types:
@@ -13538,6 +13579,11 @@ class GimpleGen:
                 # since that's what _lower_MemberExpr looks up.
                 if field_type == 'MojoList *' and v in self._elem_types:
                     self._field_elem_types.setdefault(struct_name, {})[node.target.member] = self._elem_types[v]
+                    # Also store the dict value type for list-of-dicts fields
+                    # so f.scopes[0]["key"] dispatches to mojo_dict_get_str
+                    # instead of mojo_dict_get_int.
+                    if self._elem_types[v] == 'MojoDict *' and v in self._dict_val_types:
+                        self._field_dict_val_types.setdefault(struct_name, {})[node.target.member] = self._dict_val_types[v]
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
