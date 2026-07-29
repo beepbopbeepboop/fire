@@ -5310,15 +5310,26 @@ class GimpleGen:
                         if node.value:
                             scan_expr(node.value)
                     elif isinstance(node, IfStmt):
+                        scan_expr(node.condition)
                         scan_nodes(node.then_body)
                         if node.else_body:
                             scan_nodes(node.else_body)
                         for _, elif_body in node.elifs:
                             scan_nodes(elif_body)
                     elif isinstance(node, (WhileStmt, ForStmt)):
+                        if isinstance(node, WhileStmt):
+                            scan_expr(node.condition)
+                        if isinstance(node, ForStmt):
+                            scan_expr(node.iterable)
                         scan_nodes(node.body)
                         if node.else_body:
                             scan_nodes(node.else_body)
+                    elif isinstance(node, (AugAssignStmt, MultiAssignStmt)):
+                        scan_expr(node.target)
+                        scan_expr(node.value)
+                    elif isinstance(node, VarDecl):
+                        if node.value:
+                            scan_expr(node.value)
                     elif isinstance(node, WithStmt):
                         # Scan the context expressions (e.g., open(input_file))
                         for item in node.items:
@@ -5326,9 +5337,12 @@ class GimpleGen:
                         scan_nodes(node.body)
                     elif isinstance(node, TryStmt):
                         scan_nodes(node.body)
-                        if hasattr(node, 'except_clauses'):
-                            for _, handler_body in node.except_clauses:
-                                scan_nodes(handler_body)
+                        for handler in node.handlers:
+                            if handler.exc_type:
+                                scan_expr(handler.exc_type)
+                            scan_nodes(handler.body)
+                        if node.else_body:
+                            scan_nodes(node.else_body)
                         if node.finally_body:
                             scan_nodes(node.finally_body)
 
@@ -21210,8 +21224,6 @@ class GimpleGen:
                         existing_ft = self.struct_field_types[s.name].get(fn)
                         can_override = (existing_ft == 'int' and ft.endswith(' *'))
                         if fn not in self.struct_field_types[s.name] or can_override:
-                            if ft == 'char *':
-                                ft = 'int'  # struct fields use boxed runtime representation
                             self.struct_field_types[s.name][fn] = ft
                             if fn not in already:
                                 s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
