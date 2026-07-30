@@ -8,5 +8,5 @@
     "PARSE_FAIL": 0,
     "COMPILE_FAIL_RESOLVED": 5
   },
-  "note": "All 100 files parsed successfully. All PARSE_FAIL bugs resolved. 5 COMPILE_FAIL bugs resolved: abc.py, opcode.py, token.py, selectors.py, reprlib.py (2026-07-30 codegen fixes)."
+  "note": "All 100 files parsed successfully. All PARSE_FAIL bugs resolved. 5 COMPILE_FAIL bugs resolved: abc.py, opcode.py, token.py, selectors.py, reprlib.py (2026-07-30 codegen fixes). Additional fix: MultiAssignStmt scan_nodes crash (2026-07-30)."
 }

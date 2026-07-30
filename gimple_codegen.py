@@ -5380,8 +5380,12 @@ class GimpleGen:
                         scan_nodes(node.body)
                         if node.else_body:
                             scan_nodes(node.else_body)
-                    elif isinstance(node, (AugAssignStmt, MultiAssignStmt)):
+                    elif isinstance(node, AugAssignStmt):
                         scan_expr(node.target)
+                        scan_expr(node.value)
+                    elif isinstance(node, MultiAssignStmt):
+                        for t in node.targets:
+                            scan_expr(t)
                         scan_expr(node.value)
                     elif isinstance(node, VarDecl):
                         if node.value:
