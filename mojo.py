@@ -253,16 +253,19 @@ def run_repl():
             break
 
 def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None, program_args=None):
-    """JIT compile and execute Mojo source code for ARM64."""
+    """JIT compile and execute Mojo source code for ARM64.
+    
+    Returns True on success, False on failure.
+    """
     try:
         from jit.arm64 import ARM64JIT
         jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
-        jit.compile_and_execute(src, filename=input_file, program_args=program_args)
-        jit.cleanup()
+        return bool(jit.compile_and_execute(src, filename=input_file, program_args=program_args))
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+        return False
 
 def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
     """Run the final link step for an executable — factored out of
@@ -555,8 +558,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
     # If JIT requested, compile and execute
     if jit:
-        jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
-        return
+        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
+        sys.exit(0 if ok else 1)
 
     # If build requested, compile to executable through the module-cache system
     # (link mode + per-import dylibs + CAS + reflection); fall back to the inline

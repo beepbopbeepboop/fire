@@ -6843,6 +6843,11 @@ class GimpleGen:
                 # Track element type so subscript uses mojo_list_get_str
                 self._elem_types[t] = 'char *'
                 return 'MojoList *', t
+            if module_name == 'sys' and node.member == 'path':
+                t = self._new_temp('MojoList *')
+                self._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
+                self._elem_types[t] = 'char *'
+                return 'MojoList *', t
 
             # Special handling for os.path attribute access
             if module_name == 'os' and node.member == 'path':
