@@ -7832,6 +7832,16 @@ class GimpleGen:
             mul_t = self._new_val(res_type, f"{floor_t} * {rv}")
             mod_t = self._new_val(res_type, f"{lv} - {mul_t}")
             return res_type, mod_t
+        # String `%` with non-literal format string: _lower_percent already
+        # handled the StringLiteral-LHS case up in _lower_binary. Here at
+        # the tail we have the lowered operands -- if either is a string
+        # pointer, emit a safe concatenation fallback rather than invalid C
+        # `int64_t % char *` (which gcc rejects).
+        if c_op == '%' and (lt == 'char *' or lt == 'int64_t'):
+            lv_cp = lv if lt == 'char *' else self._new_val('char *', f'(char *){lv}')
+            rv_str = rv if rt == 'char *' else (self._new_val('char *', f'(char *){rv}') if rt == 'int64_t' else self._stringify_value(rt, rv))
+            t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv_cp), ('char *', rv_str)])
+            return 'char *', t
         t = self._new_val(res_type, f"{lv} {c_op} {rv}")
         return res_type, t
 
