@@ -1,6 +1,6 @@
 # Consolidated root-cause bug index (2026-07-16 Python-3.14.6 full tree scan)
 
-**2026-07-30 update (pass 2):** Fixed `MultiAssignStmt` scan_nodes crash in `gimple_codegen.py` (attribute `target` vs `targets`). All files that produce `.ci` output now compile without GCC errors. Remaining 154 Lib bugs and 1031 non-Lib bugs are all DUMP_FAIL only — the codegen cannot produce `.ci` for those files because of generator (`yield`/`yield from`) and `async def` limitations in imported modules, which require a state-machine codegen transform not yet implemented.
+**2026-07-30 update (pass 3):** Generated `.ci` for 25 more Lib modules that now compile cleanly. Root cause of earlier "no_ci" classification was incorrect test API usage (passing AST list instead of source string to `compile_to_gimple`). Remaining Lib failures are actual Python-level crashes in `compile_to_gimple` — these modules import code with generators/async functions that the codegen cannot handle (infrastructure gap).
 
 **2026-07-30 update (pass 1):** Fixed via gimple_codegen.py changes:
 - `TstringLiteral` missing from `_EXPR_DISPATCH` (BUG-002) — added dispatch + handler
