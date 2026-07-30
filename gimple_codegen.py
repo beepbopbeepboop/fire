@@ -7174,6 +7174,7 @@ class GimpleGen:
                 t = field_tmp
             else:
                 t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
+            return field_type, t
 
     def _lower_bound_method_value(self, struct_name: str, method: str,
                                    self_type: str, self_val: str) -> tuple[str, str]:
