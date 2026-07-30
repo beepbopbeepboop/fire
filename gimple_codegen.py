@@ -3795,6 +3795,34 @@ class GimpleGen:
         for d in search_dirs:
             for ext in extensions:
                 mojo_paths.append(os.path.join(d, f"{module_name}{ext}"))
+        # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
+        # "pkg.helper") names a package-relative path, not a literal
+        # filename with dots in it — the loop above only ever tried the
+        # (non-existent) literal "pkg.helper.mojo"/"pkg.helper.py", so it
+        # silently found nothing for every dotted, non-std import and
+        # returned (None, []) below. That made `_imported_func_home` never
+        # get populated for the module's functions (Phase 0's caller, around
+        # gen_module's find_imports loop, only registers it when `code` is
+        # truthy), so a later call site that had bound the function to a
+        # plain variable (`x = m.helper_add`) recomputed an unqualified
+        # symbol (`__helper_add`) that nothing defines — the module was
+        # simply never compiled/inlined at all (BUG-2026-049). Mirror the
+        # interpreter's own dotted-import resolution here (see
+        # myinterpreter.py's `rel_path = module_name.replace('.', os.sep) +
+        # '.mojo'` / `rel_pkg_path` two lines below it): try BOTH the flat
+        # "pkg/helper.mojo" form and the package "pkg/helper/__init__.mojo"
+        # form, for every extension, in every search dir. Only applies to
+        # genuinely dotted names — a plain "helper" is unaffected (no '.' to
+        # split on), and "std.*" is already handled by its own dedicated
+        # ModuleLoader path just below.
+        if '.' in module_name:
+            _dotted_parts = module_name.split('.')
+            _rel_flat = os.sep.join(_dotted_parts)
+            _rel_pkg = os.path.join(os.sep.join(_dotted_parts), '__init__')
+            for d in search_dirs:
+                for ext in extensions:
+                    mojo_paths.append(os.path.join(d, f"{_rel_flat}{ext}"))
+                    mojo_paths.append(os.path.join(d, f"{_rel_pkg}{ext}"))
 
         # Cross the import/module boundary into the real stdlib: resolve std.* modules
         # to their .mojo source under STDLIB_PATH so we walk into (and compile) the
@@ -6728,6 +6756,71 @@ class GimpleGen:
         # Check if obj is a simple identifier (module access)
         if isinstance(node.obj, IdentExpr):
             module_name = node.obj.name
+
+            # `f.attr` read where `f` is a free function memoizing a value on
+            # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
+            # gen_module) for the full BUG-2026-049-adjacent story. Redirects
+            # to the synthesized global backing this attribute, exactly like
+            # `_class_attrs` does for `ClassName.attr` a little further down
+            # in this same method.
+            _fattrs = getattr(self, '_func_attrs', None)
+            if _fattrs and module_name in _fattrs and node.member in _fattrs[module_name]:
+                mangled = _fattrs[module_name][node.member]
+                gtype = self._global_var_types.get(mangled, 'int64_t')
+                t = self._new_val(gtype, mangled)
+                return gtype, t
+
+            # A free function reached through a module alias and used as a
+            # VALUE, not immediately called — `x = m.helper_add` (as opposed
+            # to `m.helper_add(...)`, which never reaches this method at all:
+            # `_lower_call` special-cases `isinstance(node.func, MemberExpr)`
+            # and routes straight to `_lower_method_call`/the import-aware
+            # call path BEFORE any operand is lowered as a plain value). This
+            # method has no such special-case, so `m.helper_add` used as a
+            # bare expression used to fall all the way through to the
+            # generic "opaque object, dynamic runtime getattr" branch further
+            # down (`_mojo_dispatch_getattr`) — a struct-instance reflection
+            # helper that has no idea `m` is a module marker or that
+            # "helper_add" names a real, statically-known function; it
+            # always returned a bogus non-pointer value. Whatever got stored
+            # in the target variable was later called (see `_lower_call`'s
+            # "local/global variable holding a function pointer" case,
+            # `_lower_fnptr_call`) as if it were a genuine function pointer —
+            # it never was one, hence BUG-2026-049's undefined-symbol link
+            # error (the SEPARATE, `_lower_named_call` fallback path that
+            # mis-fired instead, guessing the call target was a C function
+            # literally named after the Mojo variable).
+            #
+            # `module_name in self.imported_symbols` is true for ANY alias
+            # bound by `import ... as module_name` — see
+            # `_gen_stmt_ImportStmt`, which populates this dict for every
+            # import target regardless of whether the `import` statement
+            # itself sits at module top level or nested inside a function
+            # body (do_imports=True's Phase 0 `find_imports` scan already
+            # recurses into function bodies, so the module is genuinely
+            # compiled/inlined into this same translation unit by the time
+            # any function runs). `node.member in self.func_return_types` is
+            # true only for a real, statically-known function (populated for
+            # BOTH this module's own top-level defs and every transitively
+            # inlined imported module's defs, in gen_module's Phase 1 type
+            # table build) — so this only fires for a genuine function
+            # reference, not an arbitrary/unknown module attribute (which
+            # still falls through to the generic dynamic-dispatch fallback
+            # below, unchanged).
+            if (module_name in self.imported_symbols
+                    and node.member in self.func_return_types
+                    and node.member not in self.struct_field_types):
+                # Can't use a function name as a bare rvalue under -fgimple
+                # (same restriction the "C function name used as a value"
+                # case in _lower_IdentExpr already documents) — go through
+                # the same pre-declared-static-void* mechanism it uses
+                # (_funcptr_builtins_needed / `_funcptr_{c_name}`) rather
+                # than emitting an inline `(void *)csym` cast here.
+                csym = self._func_csym(node.member)
+                self._funcptr_builtins_needed.add(csym)
+                static_name = f'_funcptr_{csym}'
+                t = self._new_val('void *', f'{static_name}')
+                return 'void *', t
 
             # __mlir_attr.`literal` — a typed MLIR attribute used as a value
             # (integer constants like `0 : index`).  Lower to the constant.
@@ -11125,6 +11218,22 @@ class GimpleGen:
             pairs = [self.lower_expr(a) for a in node.args]
             return rt, self._call_expr(rt, fn, pairs)
         if fname_raw == 'getattr' and len(node.args) >= 2:
+            # `getattr(f, "_cached", None)` where `f` is a free function
+            # memoizing a value on itself (see `_func_attrs`'s pre-scan
+            # docstring, gen_module Phase 1) — read the real backing global
+            # instead of falling through to `_mojo_dispatch_getattr` (a
+            # struct-instance reflection helper; `f` boxed as a function
+            # pointer has no type tag it recognizes, so it always silently
+            # returned a bogus "not found" value — the memoization compiled
+            # without error but never actually cached anything).
+            _fattrs_g = getattr(self, '_func_attrs', None)
+            if (_fattrs_g and isinstance(node.args[0], IdentExpr)
+                    and node.args[0].name in _fattrs_g
+                    and isinstance(node.args[1], StringLiteral)
+                    and node.args[1].value in _fattrs_g[node.args[0].name]):
+                mangled = _fattrs_g[node.args[0].name][node.args[1].value]
+                gtype = self._global_var_types.get(mangled, 'int64_t')
+                return gtype, self._new_val(gtype, mangled)
             pairs = [self.lower_expr(a) for a in node.args[:2]]  # drop optional default
             return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         if fname_raw == 'type'    and len(node.args) == 1:
@@ -11186,7 +11295,26 @@ class GimpleGen:
         # variable to int64_t, same as it does for every other unfamiliar
         # struct pointer; _get_actual_type resolves that the same way
         # _lower_MemberExpr's own object-lowering path already does.
-        _fname_var_ctype = self.var_types.get(fname_raw, '')
+        # Fall back to the GLOBAL type table when fname_raw isn't a known
+        # local — a bare reference to a module-level global inside a
+        # function that never declared `global fname_raw` (no assignment to
+        # it in this function, only a read/call, so Python/Mojo scoping
+        # doesn't require the declaration) never gets seeded into
+        # `self.var_types` here (contrast `_gen_stmt_GlobalStmt`, which DOES
+        # seed it — see gen_module's `if name in self._global_var_types and
+        # name not in self.var_types: self.var_types[name] = ...`, but only
+        # runs for an explicit `global` statement). Without this fallback, a
+        # module-level global holding a function pointer obtained via
+        # `alias = m.some_func` (see `_lower_MemberExpr`'s module-alias
+        # function-value resolution) and later called from a DIFFERENT
+        # function than the one that assigned it — the common "lazy-init a
+        # global once, call it from anywhere" pattern, e.g. BUG-2026-049's
+        # `_helper_add = m.helper_add` in `ensure_helper()` then
+        # `_helper_add(...)` in `main()` — fell all the way through to
+        # `_lower_named_call` below, which just guesses the call target is a
+        # C function literally named after the Mojo variable (never true
+        # here) instead of recognizing it as a real function-pointer value.
+        _fname_var_ctype = self.var_types.get(fname_raw) or self._global_var_types.get(fname_raw, '')
         if self._get_actual_type(_fname_var_ctype, fname_raw) == 'MojoBoundMethod *':
             return self._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
 
@@ -11686,7 +11814,22 @@ class GimpleGen:
         n = len(arg_pairs)
         # Load the raw function pointer value.
         # For captured vars, _lower_IdentExpr reads from _env->name.
+        # For a module-level GLOBAL not shadowed by a same-named local (the
+        # `fname_raw not in self.var_types` half of the caller's ctype
+        # lookup — see _lower_call's `_global_var_types.get(...)` fallback,
+        # added for BUG-2026-049), the raw Mojo name is NOT a valid C
+        # identifier on its own: a global is stored in the `_root_globals`
+        # struct (or a per-module globals struct — see `_global_to_module`),
+        # not as a bare C variable, so `self._c_names.get(fname_raw,
+        # fname_raw)` below would emit a reference to an undeclared local
+        # named e.g. `_helper_add` instead of the real `_root_globals.
+        # _helper_add` field. Route through the SAME general IdentExpr
+        # lowering every other global read already uses (`_lower_IdentExpr`,
+        # ~line 6521 "Module-level global variable") instead of
+        # hand-rolling the field access here a second time.
         if fname_raw in self._captures and self._env_param:
+            fp_type, fp_raw = self.lower_expr(IdentExpr(name=fname_raw))
+        elif fname_raw not in self.var_types and fname_raw in self._global_var_types:
             fp_type, fp_raw = self.lower_expr(IdentExpr(name=fname_raw))
         else:
             fp_raw = self._c_names.get(fname_raw, fname_raw)
@@ -13645,6 +13788,26 @@ class GimpleGen:
             self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
+            # `f.attr = value` where `f` is a free function memoizing a
+            # value on itself -- see the `_func_attrs` pre-scan's docstring
+            # (gen_module, Phase 1) and `_lower_MemberExpr`'s matching read-
+            # side branch. Checked BEFORE `self.lower_expr(node.target.obj)`
+            # below: lowering a bare function-name identifier boxes it as a
+            # `void *` (a function can't be a bare rvalue under -fgimple),
+            # and this branch's normal struct-field-write path would then
+            # try to write through that `void *` as if it pointed at a real
+            # struct instance -- invalid, since a function has no fields
+            # (confirmed regression: jit/arm64.py's `_toolchain_id._cached =
+            # cached` / `_compiler_id._cached = cached`, GCC "request for
+            # member '_cached' in something not a structure or union").
+            _fattrs_w = getattr(self, '_func_attrs', None)
+            if (_fattrs_w and isinstance(node.target.obj, IdentExpr)
+                    and node.target.obj.name in _fattrs_w
+                    and node.target.member in _fattrs_w[node.target.obj.name]):
+                mangled = _fattrs_w[node.target.obj.name][node.target.member]
+                gtype = self._global_var_types.get(mangled, 'int64_t')
+                self._safe_coerce_emit(vtype, gtype, v, mangled)
+                return
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
                 # Opaque Python object (e.g. `s.field = val` where `s`'s
@@ -16494,12 +16657,27 @@ class GimpleGen:
            test_module_cache.py's test_module_qualified_struct_symbols
            "aliasing an imported struct" comment).
         """
+        # Every tier below can hand back a raw module_name — which, for a
+        # DOTTED package import (`import pkg.helper as m`, module_name ==
+        # "pkg.helper"), contains '.' characters that are not valid in a C
+        # identifier. Every OTHER qualifier-prefix computation in this file
+        # sanitizes the same way (`self.module_name.replace('.', '_')
+        # .replace('-', '_')` — see the several `_mod_id = ...` sites), so
+        # do the same here before returning: previously this tier-1 return
+        # handed back "pkg.helper" verbatim, producing an invalid C
+        # identifier like `pkg.helper_helper_add_...` for the imported
+        # module's OWN definition (BUG-2026-049 — caught once
+        # _compile_imported_module was fixed to actually find and inline a
+        # dotted submodule's file at all; before that fix this tier was
+        # never reached for a dotted import in the first place).
+        def _sanitize_qualifier(q):
+            return q.replace('.', '_').replace('-', '_') if q else q
         _cur_file = getattr(self, '_current_filename', None)
         if (_cur_file and _cur_file.endswith('.py') and os.path.commonpath(
                 [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR):
             return ''
         if bare_name in getattr(self, '_local_top_level_func_names', ()):
-            return self.module_name or ''
+            return _sanitize_qualifier(self.module_name) or ''
         own_home = getattr(self, '_own_imported_func_home', None)
         if own_home and bare_name in own_home:
             qualifier = own_home[bare_name]
@@ -16526,10 +16704,10 @@ class GimpleGen:
                     "statement lexically encloses it. Rename one of the two "
                     "functions, or import qualified (`import X` + "
                     "`X.func(...)`), to work around this.")
-            return qualifier
+            return _sanitize_qualifier(qualifier)
         home = getattr(self, '_imported_func_home', None)
         if home and bare_name in home:
-            return home[bare_name]
+            return _sanitize_qualifier(home[bare_name])
         return ''
 
     def _func_mangleable(self, name: str) -> bool:
@@ -21483,6 +21661,67 @@ class GimpleGen:
             # pattern below, for the free-function case).
             if isinstance(s, FunctionDef) and 'export' in (getattr(s, 'decorators', None) or []):
                 self._extra_no_mangle.add(s.name)
+
+        # Collect "memoize on the function object" attribute assignments —
+        # Python's `def f(): ...; cached = getattr(f, "_cached", None); ...;
+        # f._cached = cached; return cached` idiom (jit/arm64.py's own
+        # `_toolchain_id`/`_compiler_id`, first reached via BUG-2026-049's
+        # fix: `import jit.arm64` is a dotted import, previously never
+        # resolved/compiled at all — see that bug's fix notes). `f.attr = ..`
+        # used to fall through to `_lower_MemberExpr`'s "C function name used
+        # as a value" special case (a function name can't be a bare rvalue
+        # under -fgimple, so it's boxed as a `void *` via a pre-declared
+        # `_funcptr_...` static) — `f.attr = ..` then tried to treat that
+        # `void *` as a STRUCT POINTER and write through a `.attr` member,
+        # which GCC correctly rejects ("request for member in something not
+        # a structure or union"): a function has no real fields to write.
+        # Mirrors `_class_attrs` (StructDef class-body attributes, just
+        # above) exactly, but for a FREE FUNCTION's own attribute instead of
+        # a struct's: redirect to a synthesized global variable
+        # (`_funcattr_{func}__{attr}`) rather than inventing a new storage
+        # mechanism. Unlike `_class_attrs`, there's no class-body literal to
+        # read an initial value/type from — the attribute doesn't exist
+        # until the function's OWN body assigns it at runtime — so every
+        # such global is simply declared `int64_t` (boxed, zero-initialized
+        # by C's own static default), matching this file's existing
+        # "unknown/dynamic global boxed as int64_t" convention used
+        # pervasively elsewhere (see _lower_IdentExpr's global-read
+        # docstring). Must recurse into EVERY body shape a function can
+        # contain (If/Try/While/For), not just its top-level statements —
+        # `_toolchain_id._cached = cached` sits at top level here, but the
+        # general pattern (e.g. inside a `try:`) must still be found.
+        if not hasattr(self, '_func_attrs'):
+            self._func_attrs: dict[str, dict[str, str]] = {}
+        _own_top_level_func_names = {s.name for s in stmts if isinstance(s, FunctionDef)}
+
+        def _scan_func_body_for_self_attr(fname, body):
+            for _fstmt in body:
+                if (isinstance(_fstmt, AssignStmt)
+                        and isinstance(_fstmt.target, MemberExpr)
+                        and isinstance(_fstmt.target.obj, IdentExpr)
+                        and _fstmt.target.obj.name == fname):
+                    attr = _fstmt.target.member
+                    self._func_attrs.setdefault(fname, {})
+                    if attr not in self._func_attrs[fname]:
+                        mangled = f"_funcattr_{fname}__{attr}"
+                        self._func_attrs[fname][attr] = mangled
+                        self._global_var_types.setdefault(mangled, 'int64_t')
+                        self._global_c_decl_types.setdefault(mangled, 'int64_t')
+                elif isinstance(_fstmt, FunctionDef):
+                    pass  # a nested def's own `f.attr` (if any) is scanned when THAT def is visited below
+                elif isinstance(_fstmt, IfStmt):
+                    _scan_func_body_for_self_attr(fname, _fstmt.then_body)
+                    for _, _eb in _fstmt.elifs:
+                        _scan_func_body_for_self_attr(fname, _eb)
+                    if _fstmt.else_body:
+                        _scan_func_body_for_self_attr(fname, _fstmt.else_body)
+                elif isinstance(_fstmt, (WhileStmt, ForStmt, TryStmt)):
+                    _scan_func_body_for_self_attr(fname, _fstmt.body)
+
+        for s in stmts:
+            if isinstance(s, FunctionDef) and s.name in _own_top_level_func_names:
+                _scan_func_body_for_self_attr(s.name, s.body)
+
         #   Pass 1b: struct method annotated return types + param types (from current + imported modules)
         all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                     + self._imported_typedef_structs)
@@ -22699,7 +22938,32 @@ class GimpleGen:
                         self._global_var_types[_gname] = 'int64_t'
                 else:
                     qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                    self._global_var_types[_gname] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
+                    # A boolean-valued global (e.g. `_IS_DARWIN = platform.
+                    # system() == 'Darwin'`) must be recorded the SAME way
+                    # Phase 2b's struct-field emission (below, "elif qt ==
+                    # '_Bool': ... declare as `int`") declares it — as `int`,
+                    # not `_Bool` — or every READ of it inside a function
+                    # body compiled during Phase 2a (which happens BEFORE
+                    # Phase 2b runs and downgrades `_global_var_types` a
+                    # second time, too late to matter for already-compiled
+                    # bodies) declares its own local temp as `_Bool` while
+                    # loading from a field GCC sees declared `int`, tripping
+                    # `-fgimple`'s "non-trivial conversion in 'component_ref'"
+                    # (GIMPLE requires the temp's declared type to exactly
+                    # match the source lvalue's type, no implicit int/_Bool
+                    # coercion). Previously undetected: this only manifests
+                    # for a bool global that's genuinely READ from within ITS
+                    # OWN module's function bodies, and no such module ever
+                    # reached this compiler's do_imports=True closure before
+                    # BUG-2026-049's dotted-import fix (jit/arm64.py's own
+                    # `_IS_DARWIN`, reached via mojo.py's `import jit.arm64`
+                    # once dotted imports actually resolve).
+                    if qt.endswith(' *'):
+                        self._global_var_types[_gname] = qt
+                    elif qt == '_Bool':
+                        self._global_var_types[_gname] = 'int'
+                    else:
+                        self._global_var_types[_gname] = 'int64_t'
             elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
                 _pre_declared_globals.add(_scan_stmt.name)
                 if _scan_stmt.name not in self._global_to_module:
@@ -23835,6 +24099,34 @@ class GimpleGen:
             parts.append('')
         # Save for use in module init
         self._class_attr_inits = class_attr_inits
+
+        # Free-function "memoize on the function object" attribute globals
+        # (`_func_attrs` — see its pre-scan docstring, gen_module Phase 1,
+        # and `_lower_MemberExpr`/`_gen_stmt_AssignStmt`'s matching read/
+        # write branches). Emitted once per (function, attr) pair across the
+        # WHOLE transitive closure — `_emitted_funcattr_decls` (shared the
+        # same way `_emitted_ptr_helpers`/`_emitted_funcptr_builtins` are;
+        # see those fields' own sharing comments in `_compile_imported_
+        # module`) guards against a duplicate `int64_t` definition if two
+        # nested temp_gens both see the same already-inlined function.
+        # `static`, matching `class_attr_decls` immediately above: this is a
+        # single-C-file/whole-program compile (do_imports=True), so there's
+        # no cross-translation-unit sharing need, and `static` avoids ANY
+        # theoretical clash with an unrelated same-named global elsewhere.
+        if not hasattr(self, '_emitted_funcattr_decls'):
+            self._emitted_funcattr_decls = set()
+        _funcattr_decls = []
+        for _fn_name in sorted(getattr(self, '_func_attrs', {})):
+            for _attr in sorted(self._func_attrs[_fn_name]):
+                _mangled = self._func_attrs[_fn_name][_attr]
+                if _mangled in self._emitted_funcattr_decls:
+                    continue
+                self._emitted_funcattr_decls.add(_mangled)
+                _gtype = self._global_var_types.get(_mangled, 'int64_t')
+                _funcattr_decls.append(f"static {_gtype} {_mangled};")
+        if _funcattr_decls:
+            parts.extend(_funcattr_decls)
+            parts.append('')
 
         # Struct typedefs (dedup across modules, keep most complete definition)
         if self.emit_struct_defs:
