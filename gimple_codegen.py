@@ -5128,10 +5128,12 @@ class GimpleGen:
         needs_temp = is_field or is_deref
 
         def _simple_emit(dest, v, s, d):
-            # GIMPLE: integer constant assigned to int64_t needs explicit cast
+            # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
             if s == d:
                 if d == 'int64_t' and v.lstrip('-').isdigit():
                     self._emit(f'  {dest} = (int64_t){v};')
+                elif d == '_Bool' and v.lstrip('-').isdigit():
+                    self._emit(f'  {dest} = (_Bool){v};')
                 else:
                     self._emit(f'  {dest} = {v};')
             elif s.endswith(' *') and d in ('int', 'int64_t'):
@@ -6401,6 +6403,15 @@ class GimpleGen:
             acc_val_t = self._new_val('char *', f'{self._intern_string("")}')
             return 'char *', acc_val_t
         return 'char *', acc_val
+
+    def _lower_TstringLiteral(self, node) -> tuple[str, str]:
+        val = node.value
+        val, _ = self._decode_str_literal_text(val)
+        parts = self._parse_fstring_parts(val)
+        plain = ''.join(v for _, v in parts)
+        escaped = _c_escape(plain)
+        temp = self._new_val('char *', f'{self._intern_string(escaped)}')
+        return 'char *', temp
 
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
         """Emit a placeholder result for an operation codegen cannot lower.
@@ -10979,7 +10990,10 @@ class GimpleGen:
                     return 'int64_t', t
                 return 'int64_t', self._new_val('int64_t', '(int64_t)0')
         if not isinstance(node.func, IdentExpr):
-            return 'int', self._new_val('int', '0')
+            _debug_note('indirect call stubbed', type(node.func).__name__)
+            t = self._new_temp('int64_t')
+            self._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
+            return 'int64_t', t
 
         fname_raw = node.func.name
         # An async closure NESTED INSIDE THIS METHOD (device_context.mojo's
@@ -13826,7 +13840,7 @@ class GimpleGen:
                 self._safe_coerce_emit(vtype, gtype, v, mangled)
                 return
             ot, ov = self.lower_expr(node.target.obj)
-            if ot in ('int', 'int64_t'):
+            if ot in ('int', 'int64_t', 'void *'):
                 # Opaque Python object (e.g. `s.field = val` where `s`'s
                 # static type isn't narrowed past a runtime isinstance()
                 # check — this compiler doesn't track that): dispatch via
@@ -14913,6 +14927,9 @@ class GimpleGen:
             self._emit(f"  return {_return_value};")
         elif not _had_terminal:
             self._emit("  mojo_exc_pop ();")
+            if bb_finally:
+                for s in node.finally_body:
+                    self.gen_stmt(s)
             self._emit(f"  goto {bb_else if bb_else else bb_after};")
 
         # Reset terminal state for caller
@@ -15381,7 +15398,6 @@ class GimpleGen:
                     i += step
                 return
         if not unrolled:
-            # Skip emitting comment to avoid GIMPLE global-passing issues
             pass
 
     # ── for-range lowering ────────────────────────────────────────────────
@@ -15389,6 +15405,10 @@ class GimpleGen:
     def _gen_for_range(self, node: ForStmt):
         args = node.iterable.args
         var  = node.target
+
+        if isinstance(var, str) and var.startswith('('):
+            self._gen_for_iter(node)
+            return
 
         dynamic_step = False
         if len(args) == 1:
@@ -23378,8 +23398,8 @@ class GimpleGen:
                 func_parts.append('')
             elif isinstance(stmt, (ImportStmt, FromImportStmt)):
                 pass  # Imports processed in pre-pass; extern declarations generated in preamble
-            elif isinstance(stmt, (AssignStmt, AugAssignStmt, ExprStmt,
-                                   IfStmt, WhileStmt, ForStmt,
+            elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
+                                   ExprStmt, IfStmt, WhileStmt, ForStmt,
                                    TryStmt, WithStmt, PassStmt,
                                    BreakStmt, ContinueStmt, ReturnStmt,
                                    RaiseStmt, AssertStmt, VarDecl)):

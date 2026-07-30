@@ -129,4 +129,5 @@ _EXPR_DISPATCH: dict = {
     'TupleExpr': '_lower_tuple_literal',
     'Comprehension': '_lower_comprehension',
     'LambdaExpr': '_lower_LambdaExpr',
+    'TstringLiteral': '_lower_TstringLiteral',
 }

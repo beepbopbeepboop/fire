@@ -1,5 +1,16 @@
 # Consolidated root-cause bug index (2026-07-16 Python-3.14.6 full tree scan)
 
+**2026-07-30 update:** Fixed via gimple_codegen.py changes:
+- `TstringLiteral` missing from `_EXPR_DISPATCH` (BUG-002) — added dispatch + handler
+- `for` with tuple target on `range()` (BUG-013) — falls through to `_gen_for_iter`
+- Indirect call stub (BUG-027) — explicit `(int64_t)0` + `_debug_note` instead of silent `(int, 0)`
+- `MultiAssignStmt` dropped at top level (BUG-008) — added to top-level collector
+- `_Bool` non-trivial conversion — explicit `(_Bool)` cast for integer literals
+- `finally` body not run on normal try path (BUG-024) — inline finally body before `else`/`after`
+- `void *` member write (`_funcptr_X.attr = val`) — routed through `_mojo_dispatch_setattr`
+
+**RESOLVED (verified full compile):** `abc.py`, `opcode.py`, `token.py`, `selectors.py`, `reprlib.py`
+
 **2026-07-25 update:** All PARSE_FAIL categories fully resolved. Only COMPILE_FAIL and TIMEOUT remain.
 
 | Category | Root cause | Files affected | Report |
