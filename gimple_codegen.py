@@ -18085,10 +18085,10 @@ class GimpleGen:
                     and not getattr(s.value, 'kwargs', None)):
                 self_fields = getattr(self, '_cpp_gen_self_fields', None)
                 arg_ctype = _infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
-                if arg_ctype not in ('int64_t', 'double', '_Bool'):
+                if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
                     raise _UnsupportedGeneratorShape(
                         "print() argument must be a scalar int64_t/double/"
-                        "_Bool expression")
+                        "_Bool/char* expression")
                 arg_expr = self._cpp_expr(s.value.args[0])
                 fmt = {'int64_t': '"%lld\\n"', 'double': '"%g\\n"',
                        '_Bool': '"%s\\n"'}[arg_ctype]
@@ -18121,10 +18121,10 @@ class GimpleGen:
                 arg_exprs = []
                 for a in s.value.args:
                     actype = _infer_simple_expr_ctype(a, declared, self_fields, self._async_api)
-                    if actype not in ('int64_t', 'double', '_Bool'):
+                    if actype not in ('int64_t', 'double', '_Bool', 'char *'):
                         raise _UnsupportedAsyncShape(
                             f"calling captured function '{fname}': argument "
-                            "must be a scalar int64_t/double/_Bool expression")
+                            "must be a scalar int64_t/double/_Bool/char* expression")
                     ae = self._cpp_expr(a)
                     if actype != 'int64_t':
                         ae = f"(int64_t)({ae})"
@@ -18955,10 +18955,10 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled generators")
             ctype = self._param_ctype(pn, pt, fn)
-            if ctype not in ('int64_t', 'double', '_Bool'):
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
                 raise _UnsupportedGeneratorShape(
                     f"{fn.name}: generator parameter '{pn}' has unsupported "
-                    f"type {ctype!r} (only scalar int64_t/double/_Bool "
+                    f"type {ctype!r} (only int64_t/double/_Bool/char* "
                     "parameters are supported for compiled generators)")
             param_ctypes.append((pn, ctype))
         base = (f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
@@ -19355,12 +19355,12 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled async functions")
             ctype = self._param_ctype(pn, pt, fn)
-            if ctype not in ('int64_t', 'double', '_Bool'):
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
                 raise _UnsupportedAsyncShape(
                     f"{fn.name}: async function parameter '{pn}' has "
-                    f"unsupported type {ctype!r} (only scalar int64_t/"
-                    "double/_Bool parameters are supported for compiled "
-                    "async functions)")
+                    f"unsupported type {ctype!r} (only int64_t/"
+                    "double/_Bool/char* parameters are supported for "
+                    "compiled async functions)")
             param_ctypes.append((pn, ctype))
         # A NESTED async closure's captured free variable(s) (device_
         # context.mojo's `async def wrapper(...) capturing -> None:`,

@@ -2016,10 +2016,10 @@ def f(*args):
     # scope for the parameter-support step — see _gen_cpp_generator_unit's
     # "Parameters" comment (string/struct/pointer params cross the C++/C
     # boundary with lifetime/ownership questions deliberately deferred).
-    test_raises("generator_string_param_honest_fallback", """\
+    test("generator_string_param", """\
 def f(s: String):
     yield 1
-""", "generator function")
+""")
 
     # An UNANNOTATED generator parameter that is actually a string at its
     # call site must be refused exactly like the explicitly-annotated case
@@ -2042,11 +2042,11 @@ def f(s: String):
     # _gen_cpp_generator_unit's existing scalar-only refusal check
     # (`ctype not in ('int64_t', 'double', '_Bool')`) ever looks — no new
     # inference logic, just correct ordering.
-    test_raises("generator_unannotated_string_param_honest_fallback", """\
+    test("generator_unannotated_string_param", """\
 def g(s):
     yield s
 print(list(g("hi")))
-""", "generator function")
+""")
 
     # Async function (`async def`) honest-fallback: originally (before the
     # compiled-path async/await codegen project's Step B) this codegen had
@@ -3314,10 +3314,10 @@ async def f(x):
     return x
 """)
 
-    test_raises("async_function_with_nonscalar_param_honest_fallback", """\
+    test("async_function_with_nonscalar_param", """\
 async def f(x: String) -> String:
     return x
-""", "async function")
+""")
 
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
     # function>` (Step D) are both supported now — see
