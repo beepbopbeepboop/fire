@@ -1,21 +1,28 @@
 # Consolidated root-cause bug index (2026-07-16 Python-3.14.6 full tree scan)
 
-**2026-07-30 update (pass 3):** Generated `.ci` for 25 more Lib modules that now compile cleanly. Root cause of earlier "no_ci" classification was incorrect test API usage (passing AST list instead of source string to `compile_to_gimple`). Remaining Lib failures are actual Python-level crashes in `compile_to_gimple` — these modules import code with generators/async functions that the codegen cannot handle (infrastructure gap).
+> **2026-07-30 status:** ~60 COMPILE_FAIL bug reports removed after verification.
+> All Lib/ modules that can produce `.ci` output now compile without GCC errors.
+> The file counts in the table below are from the original scan — a full rescan
+> has not been performed since the fixes below. Remaining bug reports are for
+> modules that crash during `compile_to_gimple` itself (generator/async function
+> infrastructure gap, not GCC compilation errors).
 
-**2026-07-30 update (pass 1):** Fixed via gimple_codegen.py changes:
+**2026-07-30 fixes applied (see commits 74e9502, 12e9ebf, f93602b, 759623d):**
 - `TstringLiteral` missing from `_EXPR_DISPATCH` (BUG-002) — added dispatch + handler
 - `for` with tuple target on `range()` (BUG-013) — falls through to `_gen_for_iter`
 - Indirect call stub (BUG-027) — explicit `(int64_t)0` + `_debug_note` instead of silent `(int, 0)`
 - `MultiAssignStmt` dropped at top level (BUG-008) — added to top-level collector
+- `MultiAssignStmt` scan_nodes crash — `targets` vs `target` attribute
 - `_Bool` non-trivial conversion — explicit `(_Bool)` cast for integer literals
 - `finally` body not run on normal try path (BUG-024) — inline finally body before `else`/`after`
 - `void *` member write (`_funcptr_X.attr = val`) — routed through `_mojo_dispatch_setattr`
+- Missing `return` in `_lower_MemberExpr` else branch — `lower_expr` returned `None` for opaque struct member reads
 
-**RESOLVED (verified full compile):** `abc.py`, `opcode.py`, `token.py`, `selectors.py`, `reprlib.py`
+**RESOLVED (verified full compile):** abc, opcode, token, selectors, reprlib, cmd, colorsys, hashlib, hmac, io, numbers, operator, shlex, textwrap, wave, random, codeop, copy, copyreg, csv, curses/textpad, doctest, filecmp, fileinput, fnmatch, fractions, functools (Lib), getpass, gzip, lzma, netrc, ntpath, optparse, pickle, plistlib, posixpath, pty, queue, quopri, rlcompleter, sched, signal, smtplib, socket, socketserver, sre_compile, sre_constants, sre_parse, stat, string/templatelib, sysconfig, threading, timeit, trace, tracemalloc, warnings, webbrowser
 
 **2026-07-25 update:** All PARSE_FAIL categories fully resolved. Only COMPILE_FAIL and TIMEOUT remain.
 
-| Category | Root cause | Files affected | Report |
+| Category | Root cause | Files affected (2026-07-16 scan) | Report |
 |---|---|---|---|---|
 | COMPILE_FAIL | CC ERROR: 'X' has no member named 'X' | 379 | consolidated/COMPILE_FAIL_cc_error_x_has_no_member_named_x.md |
 | COMPILE_FAIL | CC ERROR: ld returned N exit status | 340 | consolidated/COMPILE_FAIL_cc_error_ld_returned_n_exit_status.md |
