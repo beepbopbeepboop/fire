@@ -2188,11 +2188,7 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     `_gen_cpp_async_generator_unit`)."""
     if not (fn.is_async and fn.is_generator):
         return False
-    if fn.params:
-        return False
     for n in _walk_ast(fn.body):
-        if isinstance(n, WithStmt):
-            return False
         if isinstance(n, YieldFromExpr):
             return False
         if isinstance(n, AwaitExpr):
@@ -20515,14 +20511,21 @@ class GimpleGen:
 
         Returns (cpp_text, value_ctype, base, param_ctypes) mirroring both
         predecessors' return shape (param_ctypes always `[]` this step)."""
-        if fn.params:
-            raise _UnsupportedAsyncShape(
-                f"{fn.name}: async generator parameters are not supported "
-                "yet (this step's scope is deliberately parameter-less, "
-                "matching every other step's own narrowest-shape-first "
-                "precedent)")
+        param_ctypes: list[tuple[str, str]] = []
+        for pn, pt in (fn.params or []):
+            if pn.startswith('*'):
+                raise _UnsupportedAsyncShape(
+                    f"{fn.name}: *args/**kwargs parameters not supported "
+                    "for compiled async generators")
+            ctype = self._param_ctype(pn, pt, fn)
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
+                raise _UnsupportedAsyncShape(
+                    f"{fn.name}: async generator parameter '{pn}' has "
+                    f"unsupported type {ctype!r} (only int64_t/"
+                    "double/_Bool/char* parameters are supported)")
+            param_ctypes.append((pn, ctype))
         base = f"_mojoasyncgen_{_safe_name(fn.name)}"
-        declared: dict[str, str] = {}
+        declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes}
         self._cpp_gen_self_struct = None
         self._cpp_gen_self_fields = None
         self._cpp_emit_kind = 'async_gen'
@@ -20590,7 +20593,7 @@ class GimpleGen:
             f"    if (cont) mojo_async_schedule_ready(cont.address());",
             f"    return std::noop_coroutine();",
             f"}}",
-            f"static {task} {impl} (void) {{",
+            f"static {task} {impl} ({', '.join(f'{_c_to_cpp_scalar_type(ct)} {pn}' for pn, ct in param_ctypes) or 'void'}) {{",
             *body_lines,
             f"    co_return;",
             f"}}",
@@ -20624,7 +20627,7 @@ class GimpleGen:
             f"    }}",
             f"}};",
         ]
-        return '\n'.join(lines), value_ctype, base, []
+        return '\n'.join(lines), value_ctype, base, param_ctypes
 
     # ── Module generation ─────────────────────────────────────────────────
 

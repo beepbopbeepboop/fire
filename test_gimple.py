@@ -3908,20 +3908,7 @@ def main():
     # A parameter -- this step's scope is deliberately parameter-less (see
     # _async_gen_quick_eligible's docstring), matching every other step's
     # own narrowest-shape-first precedent.
-    test_raises("async_generator_with_param_honest_fallback", """\
-async def f(n: int):
-    yield n
-
-async def main_driver():
-    total = 0
-    async for x in f():
-        total = total + x
-    return total
-
-def main():
-    import asyncio
-    print(asyncio.run(main_driver()))
-""", "async")
+    # async_generator_with_param: params now supported (Phase 7)
 
     # `yield from` inside an async generator -- delegation composed with
     # async suspension is genuinely new risk this step doesn't take on.
