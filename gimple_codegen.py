@@ -21643,7 +21643,66 @@ class GimpleGen:
         # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
         all_functions = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
+        # 'main' is kept a fixed, unqualified name on purpose
+        # (_NO_OVERLOAD_MANGLE) — it's THE program's entry point, renamed to
+        # _gimple_main/_{module}_main at emission (see gen_func) and looked
+        # up back under the bare key 'main' at every call site that
+        # redirects to it (_lower_call, _gen_stmt_ExprStmt). Those bare
+        # 'main' lookups into func_param_types/func_return_types (populated
+        # by the several passes below that iterate `all_functions` keyed by
+        # bare name — Pass 1, Pass 1.3c, the cross-call scalar-contract
+        # rebuild, Pass 2, ...) are only ever meant to mean THIS module's own
+        # main. But an inlined dependency (do_imports=True whole-program
+        # compile) can ALSO define its own top-level `def main():` (e.g. a
+        # self-test entry point) — its own FunctionDef node rides along in
+        # imported_stmts, appended AFTER stmts, so it's visited LAST and
+        # silently overwrites the importing module's own, correctly-
+        # registered 'main' entry in these bare-keyed dicts — even though
+        # the two modules' `main`s can have completely different
+        # arity/return type. A later call site padding missing args from a
+        # default (`def main(args=None): ...` called bare as `main()`) then
+        # looked up the WRONG (inlined dependency's) arity, found nothing to
+        # pad, and emitted a call with too few arguments against the real
+        # (correctly-aritied) _gimple_main definition — a hard GCC compile
+        # error (BUG-2026-051). An inlined dependency's own main is never
+        # called by anyone under the bare name 'main' (the call-site
+        # redirect logic is entirely module-local; that dependency's OWN
+        # internal self-reference to its own main is compiled by its own
+        # private, unshared temp_gen instance — see
+        # _compile_imported_module — which has its own, unaffected
+        # func_param_types/func_return_types dicts).
+        #
+        # `_is_foreign_main` guards ONLY the specific dict-population sites
+        # below (Pass 1, Pass 1.3c, the scalar-contract rebuild) — it does
+        # NOT filter `all_functions` itself. `all_functions` is also the
+        # source list for the cross-call scalar-contract pass's call-site
+        # scan (`_caller_bodies`, a few hundred lines down), which walks
+        # every function body — including main's — looking for calls whose
+        # argument types can pin down an unannotated callee parameter (e.g.
+        # `jit_compile_and_execute`'s own `src` param). Self-hosting this
+        # very file (do_imports=True compiling mojo.py, which imports
+        # gimple_codegen.py, myinterpreter.py, driver.py, jit/arm64.py — a
+        # genuinely circular dependency graph) means mojo.py's OWN real
+        # `main` (the one whose body contains the ONE call site to
+        # `jit_compile_and_execute`) legitimately rides along in more than
+        # one of those modules' own `imported_stmts` too, structurally
+        # unequal to whatever THIS particular temp_gen's own `stmts` holds
+        # (each module's own compile parses/rewrites independently). Actually
+        # dropping such an entry out of `all_functions` (an earlier version
+        # of this fix did exactly that) starved the scalar-contract scan of
+        # that one real call site in some module compiles, silently
+        # regressing `jit_compile_and_execute`'s inferred `src` type back to
+        # the naive `int64_t` default — caught by `make check-selfhost`
+        # (`build/system.o`'s two conflicting `jit_compile_and_execute`
+        # declarations). Guarding only the dict writes (which must stay
+        # module-local to fix BUG-2026-051) leaves the call-site scan
+        # untouched (harmless to see the same real call once per module that
+        # happens to carry a copy of it — same evidence, same conclusion).
+        def _is_foreign_main(s):
+            return isinstance(s, FunctionDef) and s.name == 'main' and s not in stmts
         for s in all_functions:
+            if _is_foreign_main(s):
+                continue
             if isinstance(s, FunctionDef) and s.return_type is not None:
                 self.func_return_types[s.name] = self._resolve_type(s.return_type)
             # Register parameter types (for call-site coercion via _emit_call)
@@ -21749,6 +21808,8 @@ class GimpleGen:
         #   Pass 2: infer return types for unannotated functions using
         #           already-seeded func_return_types for callee types
         for s in all_functions:
+            if _is_foreign_main(s):
+                continue
             if isinstance(s, FunctionDef) and s.return_type is None:
                 # Seed param types so _quick_type works for param names
                 for pname, ptype in s.params:
@@ -21976,6 +22037,8 @@ class GimpleGen:
         # argument coercion has the correct expected parameter types. Otherwise,
         # _emit_call defaults to converting pointers to int64_t, losing type info.
         for s in all_functions:
+            if _is_foreign_main(s):
+                continue
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
@@ -22108,6 +22171,8 @@ class GimpleGen:
         # Rebuild free-function param-type signatures so call-site coercion sees
         # the propagated scalar types (this must follow the propagation above).
         for s in all_functions:
+            if _is_foreign_main(s):
+                continue
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
