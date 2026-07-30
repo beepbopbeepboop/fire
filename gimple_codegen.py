@@ -17977,6 +17977,20 @@ class GimpleGen:
         raise _UnsupportedGeneratorShape(
             f"unsupported expression in generator body: {type(e).__name__}")
 
+    _cpp_fresh_name_counter: int = 0
+    def _cpp_fresh_name(self, prefix: str = "_mg_t") -> str:
+        """Generate a unique C++ variable name for the generator body."""
+        self._cpp_fresh_name_counter += 1
+        return f"{prefix}_{self._cpp_fresh_name_counter}"
+
+    def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str,
+                                   brk_var: str) -> list[str]:
+        """Like _cpp_stmt but intercepts BreakStmt to set brk_var = true before
+        breaking, so while/else can detect whether the loop exited via break."""
+        if isinstance(s, BreakStmt):
+            return [f"{indent}{brk_var} = true;", f"{indent}break;"]
+        return self._cpp_stmt(s, declared, indent)
+
     def _cpp_stmt(self, s, declared: dict, indent: str) -> list[str]:
         if isinstance(s, PassStmt):
             return []
@@ -18187,13 +18201,23 @@ class GimpleGen:
                 return [f"{indent}*{name} = *{name} {op} {val};"]
             return [f"{indent}{name} = {name} {op} {val};"]
         if isinstance(s, WhileStmt):
-            if s.else_body:
-                raise _UnsupportedGeneratorShape("while/else not supported")
             cond = self._cpp_expr(s.condition)
-            lines = [f"{indent}while ({cond}) {{"]
-            for inner in s.body:
-                lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
+            if s.else_body:
+                brk_var = self._cpp_fresh_name("_mg_brk")
+                lines = [f"{indent}bool {brk_var} = false;"]
+                lines.append(f"{indent}while ({cond}) {{")
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
+                lines.append(f"{indent}}}")
+                lines.append(f"{indent}if (!{brk_var}) {{")
+                for inner in s.else_body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+            else:
+                lines = [f"{indent}while ({cond}) {{"]
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
             return lines
         if isinstance(s, IfStmt):
             cond = self._cpp_expr(s.condition)
@@ -18603,9 +18627,9 @@ class GimpleGen:
         restriction from the catch-handler one above — a destructor isn't
         the coroutine function at all, so this one isn't specific to
         exception handling)."""
-        if node.else_body:
-            raise _UnsupportedGeneratorShape(
-                "try/else is not supported in a generator body")
+        # try/else: the else body runs when the try block completes without
+        # an exception. Tracked via the caught_flag set by any handler that
+        # fired — after the catch chain, emit else_body when !caught_flag.
 
         body_indent = indent
         closing = []
@@ -18734,6 +18758,13 @@ class GimpleGen:
                 lines.append(f"{handler_indent}    throw {caught_var};")
             lines.append(f"{handler_indent}}}")
         lines.append(f"{body_indent}}}")  # closes `if ({caught_flag})`
+
+        # try/else: runs when no exception occurred (caught_flag is false)
+        if node.else_body:
+            lines.append(f"{body_indent}if (!{caught_flag}) {{")
+            for es in node.else_body:
+                lines.extend(self._cpp_stmt(es, declared, body_indent + '    '))
+            lines.append(f"{body_indent}}}")
 
         lines.extend(closing)
         return lines
