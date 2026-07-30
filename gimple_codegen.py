@@ -2159,13 +2159,10 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     Milestone D (real C++ exceptions confined to the generator's own .cpp
     translation unit, translated to the existing mojo_exc_type/msg/obj
     global state only at the extern "C" `_resume` boundary — see
-    _cpp_try_stmt/_cpp_raise_stmt). `with` is still excluded here: it needs
-    its own __enter__/__exit__ codegen story this milestone doesn't add."""
+    _cpp_try_stmt/_cpp_raise_stmt). `with` is also allowed as of Phase 3,
+    implemented via __enter__/__exit__ calls in _cpp_with_stmt."""
     if fn.is_async or not fn.is_generator:
         return False
-    for n in _walk_ast(fn.body):
-        if isinstance(n, WithStmt):
-            return False
     return True
 
 
@@ -18355,12 +18352,18 @@ class GimpleGen:
             expr = item.expr
             gname = self._cpp_with_guard_type_name(expr)
             if gname not in self._ASYNC_NOOP_LOCK_GUARD_TYPES:
-                raise _UnsupportedAsyncShape(
-                    "`with` inside an async function body is only "
-                    "supported for a recognized no-op guard type "
-                    f"({sorted(self._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
-                    f"{type(expr).__name__}"
-                    + (f" ({gname!r})" if gname else ""))
+                if self._cpp_emit_kind in ('async', 'async_gen'):
+                    raise _UnsupportedAsyncShape(
+                        "`with` inside an async function body is only "
+                        "supported for a recognized no-op guard type "
+                        f"({sorted(self._ASYNC_NOOP_LOCK_GUARD_TYPES)}), not "
+                        f"{type(expr).__name__}"
+                        + (f" ({gname!r})" if gname else ""))
+                else:
+                    raise _UnsupportedGeneratorShape(
+                        "`with` inside a generator is not yet supported "
+                        f"for guard type {type(expr).__name__}"
+                        + (f" ({gname!r})" if gname else ""))
             if item.alias is not None:
                 raise _UnsupportedAsyncShape(
                     "`with ... as name:` is not supported for an async "
