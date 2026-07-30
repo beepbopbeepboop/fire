@@ -4922,15 +4922,19 @@ class GimpleGen:
                     self._emit(f'  {ct} = (int64_t){aval};')
                 coerced_args.append(ct)
             elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
-                vp = self._new_temp('void *')
-                cp = self._new_temp('char *')
-                if atype in ('int', 'char'):
-                    ip = self._new_val('int64_t', f'(int64_t){aval}')
-                    self._emit(f'  {vp} = (void *){ip};')
+                if atype == 'char':
+                    sv = self._call_expr('char *', 'mojo_char_to_str', [('char', aval)])
+                    coerced_args.append(sv)
                 else:
-                    self._emit(f'  {vp} = (void *){aval};')
-                self._emit(f'  {cp} = (char *){vp};')
-                coerced_args.append(cp)
+                    vp = self._new_temp('void *')
+                    cp = self._new_temp('char *')
+                    if atype in ('int',):
+                        ip = self._new_val('int64_t', f'(int64_t){aval}')
+                        self._emit(f'  {vp} = (void *){ip};')
+                    else:
+                        self._emit(f'  {vp} = (void *){aval};')
+                    self._emit(f'  {cp} = (char *){vp};')
+                    coerced_args.append(cp)
             elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
                 # If parameter expects pointer and we have int/int64_t, cast through void*
                 # This handles cases where int64_t is an opaque pointer (e.g., from globals)
@@ -5084,6 +5088,25 @@ class GimpleGen:
             return val
         t = self._new_val(ctype, f'{val}')
         return t
+
+    def _char_to_cstr(self, typ: str, val: str) -> tuple[str, str]:
+        """Convert a char-type value to char * for string operations.
+        Returns (new_type, new_val) — if typ is 'char', calls mojo_char_to_str.
+        If typ is 'int64_t' and actual type isn't a pointer, also converts.
+        Otherwise casts through (char *)(int64_t) for boxed pointers."""
+        if typ == 'char':
+            return 'char *', self._call_expr('char *', 'mojo_char_to_str', [('char', val)])
+        if typ in ('int', 'int64_t'):
+            actual = self._actual_types.get(val)
+            if not (actual and actual.endswith(' *')):
+                cv = self._new_val('char', f'(char){val}')
+                return 'char *', self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+            # Boxed pointer — cast through int64_t
+            ip = self._new_val('int64_t', f'(int64_t){val}')
+            return 'char *', self._new_val('char *', f'(char *){ip}')
+        if typ != 'char *':
+            return 'char *', self._new_val('char *', f'(char *){val}')
+        return typ, val
 
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
         """Emit `lhs = val` coercing src→dst; routes struct-field LHS and literal RHS
@@ -7588,7 +7611,7 @@ class GimpleGen:
                     # by the caller via _is_str_lit), the int64_t MUST be a
                     # char*-boxed pointer, not a character code — use direct
                     # pointer cast instead of the character-to-string path.
-                    if not is_other_str_lit:
+                    if not is_other_str_lit or typ == 'char':
                         actual = self._actual_types.get(var)
                         if typ == 'char' or (typ in ('int', 'int64_t') and not (actual and actual.endswith(' *'))):
                             cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
@@ -8163,10 +8186,7 @@ class GimpleGen:
             self._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
         elif rt == 'MojoDict *':
             # Ensure key is char * for dict operations (all dict keys are strings in runtime)
-            if xt != 'char *':
-                xv_cast = self._new_val('char *', f"(char *){xv}")
-                xv = xv_cast
-                xt = 'char *'
+            xt, xv = self._char_to_cstr(xt, xv)
             self._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
         elif rt == 'MojoSet *':
             # Route through _emit_call so global/_slit_ args are loaded into locals
@@ -9364,9 +9384,7 @@ class GimpleGen:
             if len(args) > 1:
                 _, _default_val = self.lower_expr(args[1])
             # Ensure key is char * for dict operations
-            if key_type != 'char *':
-                key_val = self._new_val('char *', f"(char *){key_val}")
-                key_type = 'char *'
+            key_type, key_val = self._char_to_cstr(key_type, key_val)
             val_type = self._dict_val_of(ov)
             if val_type == 'char *':
                 return 'char *', self._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (key_type, key_val)])
@@ -9382,9 +9400,7 @@ class GimpleGen:
             return 'int', self._new_val('int', '0')
         if method == 'pop' and args:
             key_type, key_val = self.lower_expr(args[0])
-            if key_type != 'char *':
-                key_val = self._new_val('char *', f"(char *){key_val}")
-                key_type = 'char *'
+            key_type, key_val = self._char_to_cstr(key_type, key_val)
             return 'int64_t', self._call_expr('int64_t', 'mojo_dict_pop_int', [('MojoDict *', ov), (key_type, key_val)])
         if method in ('copy',):
             return 'MojoDict *', self._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
@@ -9617,6 +9633,8 @@ class GimpleGen:
             cstr_ov = self._new_val('char *', f"(char *){ov}")
         else:
             cstr_ov = ov
+        if method == '__len__':
+            return 'int64_t', self._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
         if method == 'group':
             return 'char *', cstr_ov
         if method in ('as_c_string_slice', 'unsafe_cstr_ptr', 'unsafe_ptr', 'data'):
@@ -11155,7 +11173,9 @@ class GimpleGen:
         # (this codebase's strings are plain bytes, not full Unicode).
         if fname_raw == 'ord' and len(node.args) == 1:
             at, av = self.lower_expr(node.args[0])
-            if at != 'char *':
+            if at == 'char':
+                return 'int64_t', self._new_val('int64_t', f'(int64_t){av}')
+            if at not in ('char *', 'MojoStr *'):
                 av = self._new_val('char *', f'(char *){self._ensure_local(at, av)}')
             return 'int64_t', self._call_expr('int64_t', 'mojo_ord', [('char *', av)])
         if fname_raw == 'chr' and len(node.args) == 1:
@@ -12357,10 +12377,7 @@ class GimpleGen:
 
         if ot == 'MojoDict *':
             # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
-            if idx_type != 'char *':
-                idx_cast = self._new_val('char *', f"(char *){iv}")
-                iv = idx_cast
-                idx_type = 'char *'
+            idx_type, iv = self._char_to_cstr(idx_type, iv)
             val_ctype = self._dict_val_of(ov)
             if val_ctype == 'double':
                 t = self._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
@@ -12420,12 +12437,7 @@ class GimpleGen:
                 if ov in self._dict_val_types:
                     self._dict_val_types[dp] = self._dict_val_types[ov]
                 # Ensure index is char * for dict access (all dict keys are strings in runtime)
-                idx_for_dict = iv
-                idx_type_for_dict = idx_type
-                if idx_type != 'char *':
-                    idx_cast = self._new_val('char *', f"(char *){iv}")
-                    idx_for_dict = idx_cast
-                    idx_type_for_dict = 'char *'
+                idx_type_for_dict, idx_for_dict = self._char_to_cstr(idx_type, iv)
                 val_ctype = self._dict_val_of(dp)
                 if val_ctype == 'double':
                     t = self._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])
@@ -25068,7 +25080,7 @@ class GimpleGen:
             parts.append("void Parser___init__ (Parser *, MojoList *);")
             parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
             parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
-            parts.append("void jit_compile_and_execute (char *, int64_t, int64_t, int64_t, int64_t);  /* from mojo.py */")
+            parts.append("_Bool jit_compile_and_execute (char *, int64_t, int64_t, int64_t, int64_t);  /* from mojo.py */")
         # Forward decls for the generic reflection dispatch (see the
         # "Generic reflection dispatch" block emitted earlier in this same
         # gen_module call, near the struct alloc helpers) — that block's
