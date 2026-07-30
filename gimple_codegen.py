@@ -17357,13 +17357,31 @@ class GimpleGen:
         exempt by never going through struct-method mangling at all."""
         if struct_name == 'Span':
             return ''
+        # Every source below can hand back a raw module_name — which, for a
+        # DOTTED package import (`import pkg.helper as m`, module_name ==
+        # "pkg.helper"), contains '.' characters that are not valid in a C
+        # identifier. _func_qualifier (the free-function analog of this
+        # method) already sanitizes for exactly this reason (BUG-2026-049);
+        # this struct-method sibling was missed at the time, so a struct
+        # DEFINED in a dotted-package module (e.g. `transpiler.ast_rewrite`)
+        # got an unsanitized qualifier like "transpiler.ast_rewrite" here,
+        # producing an invalid C function name
+        # (`transpiler.ast_rewrite_Rewriter__rewrite_param_list_ids`) that
+        # GCC's parser chokes on at the literal '.' — and, once desynced,
+        # goes on to misparse unrelated later lines in the same function
+        # (BUG-2026-052: the "'transpiler' undeclared" errors reported deep
+        # inside a docstring are that parser desync, not a real reference to
+        # an undefined symbol). See _func_qualifier's own comment for the
+        # same fix applied to the free-function case.
+        def _sanitize_qualifier(q):
+            return q.replace('.', '_').replace('-', '_') if q else q
         _cur_file = getattr(self, '_current_filename', None)
         if (_cur_file and _cur_file.endswith('.py') and os.path.commonpath(
                 [os.path.abspath(_cur_file), _SELFHOST_DIR]) == _SELFHOST_DIR):
             return ''
         home = getattr(self, '_imported_struct_home', None)
         if home and struct_name in home:
-            return home[struct_name]
+            return _sanitize_qualifier(home[struct_name])
         # Only apply THIS module's own qualifier to a struct genuinely
         # declared in this file's own top-level stmts (see gen_module's
         # _local_struct_names) — never as a guess for a name this compile
@@ -17372,7 +17390,7 @@ class GimpleGen:
         # gate missed must stay unqualified (the historical, safe behavior)
         # rather than get mislabeled as belonging to this module.
         if struct_name in getattr(self, '_local_struct_names', ()):
-            return self.module_name or ''
+            return _sanitize_qualifier(self.module_name) or ''
         return ''
 
     def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str) -> str:
