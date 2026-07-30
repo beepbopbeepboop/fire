@@ -3070,7 +3070,7 @@ class GimpleGen:
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
                  emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
-                 no_mangle=()):
+                 no_mangle=(), relaxed_imports: bool = False):
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
@@ -3257,6 +3257,7 @@ class GimpleGen:
         self.emit_struct_defs = emit_struct_defs  # only main module emits struct typedefs; imported modules skip it
         self.emit_entry_points = emit_entry_points  # False for imported modules; suppress main/_gimple_main
         self.module_name = module_name  # used to name _{module_name}_toplevel
+        self.relaxed_imports = relaxed_imports  # when True, skip unsupported generator/async fns instead of failing
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
         # Logical struct/class name -> C-safe name, for structs named after a C
@@ -3861,7 +3862,8 @@ class GimpleGen:
                     # emit_struct_defs=False so only main module emits struct typedefs
                     # emit_entry_points=False so imported module doesn't emit main/_gimple_main
                     temp_gen = GimpleGen(do_imports=True, emit_str_pool=False, emit_struct_defs=False,
-                                         emit_entry_points=False, module_name=module_name)
+                                         emit_entry_points=False, module_name=module_name,
+                                         relaxed_imports=True)
                     temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._emitted_structs = self._emitted_structs
@@ -22715,16 +22717,28 @@ class GimpleGen:
                 _categories.append(
                     f"{', '.join(_async_gen)} (async generator function(s), "
                     "declared `async def` AND contain a `yield`/`yield from`)")
-            raise RuntimeError(
-                "cannot compile module: function(s) "
-                + "; ".join(_categories) +
-                " — this codegen compiles every function into a single "
-                "straight-line C function and has no suspend/resume "
-                "state-machine transform for generators, nor an event loop "
-                "/ suspend-resume codegen for async functions, yet, so "
-                "these cannot be represented as compiled C without "
-                "emitting silently wrong or broken code; falling back to "
-                "interpreting this module from source instead")
+            if self.relaxed_imports:
+                _debug_note('relaxed_imports: skipping unsupported functions',
+                            '; '.join(_categories))
+                # Register stub extern declarations for skipped functions so
+                # importing modules can at least reference them (they'll print
+                # a warning if actually called at runtime).
+                for _fn_name in _gen_only + _async_only + _async_gen:
+                    _csym = self._func_csym(_fn_name)
+                    _stub = f'#ifndef _MOJO_STUB_{_csym.upper()}\n#define _MOJO_STUB_{_csym.upper()}\nint64_t {_csym} (...);\n#endif'
+                    if _stub not in self._elaborated_externs:
+                        self._elaborated_externs.append(_stub)
+            else:
+                raise RuntimeError(
+                    "cannot compile module: function(s) "
+                    + "; ".join(_categories) +
+                    " — this codegen compiles every function into a single "
+                    "straight-line C function and has no suspend/resume "
+                    "state-machine transform for generators, nor an event loop "
+                    "/ suspend-resume codegen for async functions, yet, so "
+                    "these cannot be represented as compiled C without "
+                    "emitting silently wrong or broken code; falling back to "
+                    "interpreting this module from source instead")
 
         # ── Pass 1.3e: refresh return types now that param inference is final ──
         # "Pass 2" (above, executed earlier despite the lower number — it seeds
