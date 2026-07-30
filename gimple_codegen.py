@@ -3911,6 +3911,13 @@ class GimpleGen:
                     temp_gen._module_global_inits = self._module_global_inits  # share global inits
                     if hasattr(self, '_global_to_module'):
                         temp_gen._global_to_module = self._global_to_module  # share global -> module mapping
+                    # share: async/generator API tables across modules so
+                    # cross-module async composition (await on an async fn
+                    # defined in another module) can resolve the callee's
+                    # API without failing (Phase 5).
+                    temp_gen._async_api = self._async_api
+                    temp_gen._generator_api = self._generator_api
+                    temp_gen._generator_method_api = self._generator_method_api
                     code = temp_gen.gen_module(stmts)
 
                     # Store parsed stmts for this module so parent gens can access them
