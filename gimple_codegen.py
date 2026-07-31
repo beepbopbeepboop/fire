@@ -2427,6 +2427,13 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
     and is refused here, at the same single-source-of-truth chokepoint as
     every other unsupported generator-body shape."""
     call = n.value
+    # yield from over a plain collection: infer element type from the
+    # first element (int64_t default if unknown)
+    if isinstance(call, (ListExpr, TupleExpr)):
+        if call.elements:
+            et = _infer_simple_expr_ctype(call.elements[0])
+            return et if et is not None else 'int64_t'
+        return 'int64_t'
     if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
         return None
     if generator_api is None:
@@ -18936,6 +18943,13 @@ class GimpleGen:
         by test_gimple_generator_runner.py's
         yield_from_delegation_early_break_cleans_up_both_generators test."""
         call = yf.value
+        # `yield from <ListExpr/TupleExpr>` — delegate to a plain collection:
+        # emit `for (auto _yf_item : <collection>) { co_yield _yf_item; }`
+        if isinstance(call, (ListExpr, TupleExpr)):
+            coll = self._cpp_expr(call)
+            return [f"{indent}for (auto _yf_item : {coll}) {{",
+                    f"{indent}    co_yield _yf_item;",
+                    f"{indent}}}"]
         if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
             raise _UnsupportedGeneratorShape(
                 "`yield from` is only supported when delegating directly to "

@@ -2182,10 +2182,10 @@ async def f():
     # See test_generator_yield_from_delegation_compiles_via_cpp_path and its
     # neighboring still-out-of-scope-shape refusal tests, further below,
     # for the positive/narrower-negative coverage this step actually adds.
-    test_raises("generator_yield_from_honest_fallback", """\
+    test("generator_yield_from_list", """\
 def f():
     yield from [1, 2, 3]
-""", "generator function")
+""")
 
     # Milestone D: try/except/raise inside a generator body now compiles via
     # the C++20-coroutine path instead of falling back — see
