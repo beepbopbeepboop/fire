@@ -2438,15 +2438,16 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
             et = _infer_simple_expr_ctype(call.elements[0])
             return et if et is not None else 'int64_t'
         return 'int64_t'
-    if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
-        return None
     if generator_api is None:
         return None
-    api = generator_api.get(call.func.name)
-    if api is not None:
-        return api.get('value_ctype')
-    # yield from over a call to a non-generator function: the callee
-    # returns a collection, so the yielded values are strings (char*).
+    # yield from over a known compiled generator call: use its value type
+    if isinstance(call, CallExpr) and isinstance(call.func, IdentExpr):
+        api = generator_api.get(call.func.name)
+        if api is not None:
+            return api.get('value_ctype')
+    # yield from over anything else (a method call, a bare name, a
+    # non-generator function call returning a collection): the yielded
+    # values are strings (char*).
     return 'char *'
 
 
@@ -17822,9 +17823,7 @@ class GimpleGen:
             return f'"{escaped}"'
         if isinstance(e, IdentExpr):
             if e.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
-                raise _UnsupportedGeneratorShape(
-                    "bare `self` reference not supported in a generator "
-                    "method body (only self.<field> reads are supported)")
+                return "self"  # self is a struct pointer in generator methods
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
             # `mut_capture_names` docstring) is threaded through as a
             # pointer parameter -- every ordinary READ of its name must
@@ -17874,6 +17873,11 @@ class GimpleGen:
             if not e.elements: return '{}'
             inner = ', '.join(self._cpp_expr(el) for el in e.elements)
             return '{' + inner + '}' if len(e.elements) != 1 else '{' + inner + ',}'
+        if isinstance(e, WalrusExpr):
+            # `x := expr` assigns x and yields the value
+            name = e.name
+            val = self._cpp_expr(e.value)
+            return f"({name} = {val})"
         if isinstance(e, CallExpr):
             # Simple function call in generator body (e.g. os.path.join(a, b))
             if isinstance(e.func, MemberExpr):
@@ -18098,6 +18102,10 @@ class GimpleGen:
             # file for other purely-declarative, side-effect-free
             # statements.
             if isinstance(s.value, StringLiteral):
+                return []
+            # Bare identifier / tuple expression statements (e.g. `nonlocal
+            # n, found_zero` parsed as bare identifiers) — no runtime effect
+            if isinstance(s.value, (IdentExpr, TupleExpr)):
                 return []
             if isinstance(s.value, YieldExpr):
                 if self._cpp_emit_kind == 'async':
@@ -18970,17 +18978,13 @@ class GimpleGen:
             return [f"{indent}for (auto _yf_item : {coll}) {{",
                     f"{indent}    co_yield _yf_item;",
                     f"{indent}}}"]
-        if not isinstance(call, CallExpr) or not isinstance(call.func, IdentExpr):
-            raise _UnsupportedGeneratorShape(
-                "`yield from` is only supported when delegating directly to "
-                "a call to another generator function known to this same "
-                "compile (e.g. NOT `yield from [1, 2, 3]`, NOT `yield from "
-                "mod.gen()`)")
-        # `yield from <call>` where the callee is NOT a compiled generator:
-        # the callee returns a MojoList* collection — iterate it with an
-        # indexed loop, co_yield-ing each element as int64_t/char*.
-        sub_name = call.func.name
-        if sub_name not in self._generator_api:
+        # `yield from <expr>` where the value is a plain collection (any
+        # non-generator-call expression — a method chain, a bare name, etc.):
+        # iterate the MojoList* result with an indexed loop, co_yield-ing
+        # each element as char*.
+        is_gen_call = (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+                       and call.func.name in self._generator_api)
+        if not is_gen_call:
             result_var = self._cpp_fresh_name("_yf_result")
             coll_expr = self._cpp_expr(call)
             return [f"{indent}auto {result_var} = {coll_expr};",
