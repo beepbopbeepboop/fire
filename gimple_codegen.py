@@ -19160,11 +19160,13 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled generators")
             ctype = self._param_ctype(pn, pt, fn)
-            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                             'MojoDict *', 'MojoSet *'):
                 raise _UnsupportedGeneratorShape(
                     f"{fn.name}: generator parameter '{pn}' has unsupported "
-                    f"type {ctype!r} (only int64_t/double/_Bool/char* "
-                    "parameters are supported for compiled generators)")
+                    f"type {ctype!r} (only int64_t/double/_Bool/char*/"
+                    "MojoList*/MojoDict*/MojoSet* parameters are supported "
+                    "for compiled generators)")
             param_ctypes.append((pn, ctype))
         base = (f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
                 if struct_name is not None else f"_mojogen_{_safe_name(fn.name)}")
@@ -19560,7 +19562,8 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled async functions")
             ctype = self._param_ctype(pn, pt, fn)
-            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                             'MojoDict *', 'MojoSet *'):
                 raise _UnsupportedAsyncShape(
                     f"{fn.name}: async function parameter '{pn}' has "
                     f"unsupported type {ctype!r} (only int64_t/"
@@ -20686,7 +20689,8 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled async generators")
             ctype = self._param_ctype(pn, pt, fn)
-            if ctype not in ('int64_t', 'double', '_Bool', 'char *'):
+            if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                             'MojoDict *', 'MojoSet *'):
                 raise _UnsupportedAsyncShape(
                     f"{fn.name}: async generator parameter '{pn}' has "
                     f"unsupported type {ctype!r} (only int64_t/"
