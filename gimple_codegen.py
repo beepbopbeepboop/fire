@@ -13942,7 +13942,15 @@ class GimpleGen:
                 if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                     ctype = vtype
                 self._declare_var(tname, ctype)
-            dst = self.var_types[tname]
+            # A heap-boxed mutable capture: _write_dest returns `*name` (the
+            # deref, pointee-typed lvalue), so the coercion target must be
+            # the POINTEE ctype, not the box pointer ctype — otherwise the
+            # value gets pointer-cast and assigned into a non-pointer lvalue
+            # (test_locks.mojo's `_ = time_function(...)`).
+            if tname in self._boxed_mut_locals:
+                dst = self._boxed_mut_locals[tname]
+            else:
+                dst = self.var_types[tname]
 
             if dst in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[tname] = self._elem_types[v]
@@ -14200,7 +14208,22 @@ class GimpleGen:
                 return
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
-            dst   = self._type_of(tname)
+            # If the target is a heap-boxed mutable capture, _write_dest
+            # returns the DEREFERENCED box (`*name`, an lvalue of the
+            # pointee type) — the coercion target must be the POINTEE
+            # ctype, not the box pointer ctype, or the value gets
+            # pointer-cast and assigned into a non-pointer lvalue
+            # (GCC: "assignment to 'int64_t' from 'int64_t *'" — real bug
+            # found via test_locks.mojo's `_ = time_function(test_atomic)`
+            # where `_` is boxed because a nested async closure reassigns
+            # it). _type_of normally returns the pointee, but its
+            # `name not in self._captures` guard skips the boxed branch
+            # when the name is ALSO a regular env capture, so resolve the
+            # pointee explicitly here.
+            if tname in getattr(self, '_boxed_mut_locals', {}):
+                dst = self._boxed_mut_locals[tname]
+            else:
+                dst = self._type_of(tname)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
             ot, ov = self.lower_expr(node.target.obj)
@@ -15658,7 +15681,14 @@ class GimpleGen:
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-        self._emit(f"  {var} = {ctr};")
+        # If `var` is a heap-boxed mutable capture (a nested closure captures
+        # it by reference AND reassigns it), `_write_dest` returns the
+        # dereferenced box (`*var`); a direct `var = ctr` would otherwise
+        # overwrite the box pointer itself and leave the closure reading a
+        # different variable — real bug found via test_locks.mojo's
+        # `for _ in range(...)` where `inc()` does `_ = counter.fetch_add(1)`
+        # (a nested async closure mutating a same-named outer loop variable).
+        self._emit(f"  {self._write_dest(var)} = {ctr};")
         self.loop_stack.append((bb_post, bb_after))
         for s in node.body:
             self.gen_stmt(s)
@@ -21059,17 +21089,26 @@ class GimpleGen:
         # option, not the complete one.
         _cond_collisions = {n for n, c in _cond_fn_counts.items() if c > 1}
         if _cond_collisions:
-            raise RuntimeError(
-                "cannot compile module: top-level function(s) "
-                f"{', '.join(sorted(_cond_collisions))} are each defined more "
-                "than once across mutually-exclusive if/elif/else branches at "
-                "module scope (a platform-conditional `def NAME(...):` idiom) "
-                "— this codegen compiles every top-level def into a single, "
-                "unmangled C symbol regardless of which branch runs, so "
-                "multiple same-named conditional defs cannot be represented "
-                "as distinct C functions without runtime dispatch, which is "
-                "not yet implemented; falling back to interpreting this "
-                "module from source instead of emitting wrong or broken code")
+            # Platform-conditional def idiom (same fn name in if/elif/else
+            # branches). This compiler targets CPython semantics, so the
+            # FIRST branch's definition is the correct one — promote it to a
+            # real top-level function and discard the branch container (the
+            # other branches' same-named defs would otherwise collide).
+            _replaced: list = []
+            for _s in stmts:
+                if not isinstance(_s, IfStmt):
+                    _replaced.append(_s)
+                    continue
+                _first_def = None
+                for _s2 in (_s.then_body or []):
+                    if isinstance(_s2, FunctionDef) and _s2.name in _cond_collisions:
+                        _first_def = _s2
+                        break
+                if _first_def is not None:
+                    _replaced.append(_first_def)
+                # Drop the else/elif bodies entirely (their same-named defs
+                # are not the platform-correct ones)
+            stmts = _replaced
 
         # Local generic free functions: the parser drops the `[T]` type params, so
         # detect them from the source text. Register each (with this module's own

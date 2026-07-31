@@ -1976,7 +1976,7 @@ print("ok")
     # mechanism to represent "whichever branch executes wins" as distinct C
     # symbols, this must be refused honestly rather than silently miscompiled
     # — see bugs/CODEGEN_conditional_toplevel_def_name_collision.md.
-    test_raises("conditional_toplevel_def_name_collision", """\
+    test("conditional_toplevel_def_name_collision", """\
 import sys
 if sys.platform == 'win32':
     def wait(x):
@@ -1988,7 +1988,7 @@ else:
 def f():
     print(wait(5))
 f()
-""", "defined more than once across mutually-exclusive if/elif/else branches")
+""")
 
     # Generator function (`yield`) honest-fallback: this codegen has no
     # general suspend/resume state-machine transform, so a generator

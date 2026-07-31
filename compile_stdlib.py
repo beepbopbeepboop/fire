@@ -97,53 +97,20 @@ EXPECTED_FAILURES = {
     # elaborated fragment. See bugs/CODEGEN_comptime_bracket_parametrized_
     # function_calls_silently_wrong.md's own "dual C/C++ output" update.
 
-    # test_locks.mojo's blocker, updated this session: `TaskGroup` (as a
-    # real compiled intrinsic type -- `TaskGroup()`/`.create_task(...)`/
-    # `.wait[origin]()`, backed by the existing MojoList infrastructure),
-    # mutable-capture-across-a-nested-loop-of-tasks, general (non-async)
-    # `{mut}`-capture-spec closures, AND transitive capture propagation
-    # (`test_atomic()` calling `inc()` without itself textually
-    # referencing `inc()`'s own captured `lock`/`rawCounter`, plus the two
-    # further pre-existing bugs that transitive fix's own verification
-    # newly reached and fixed: a strict-`-fgimple` `_Bool`/`int` return-
-    # type mismatch on every `.wait()` call site's `mojo_exc_pending_get()`
-    # check, only reachable once `.wait()` could be called from inside a
-    # nested closure at all; and a `comptime NAME = ...` declared in an
-    # enclosing function not being visible to that function's OWN nested
-    # closures, since closures are compiled in a pre-pass before the
-    # enclosing function's own comptime-folding statement ever runs) now
-    # all work, verified end-to-end via test_taskgroup.py's real
-    # 10,000-task stress test and test_transitive_closure_capture.py. Also
-    # fixed: `with BlockingScopedLock(lock):` inside `inc()`'s own body --
-    # `_cpp_stmt` gained a `WithStmt` case that reinterprets
-    # `BlockingScopedLock` as a compiler-recognized no-op intrinsic (elides
-    # the whole guard), safe because this project's async runtime is
-    # genuinely single-threaded/cooperative (grep-confirmed: no pthread/
-    # std::thread anywhere in mojo_async_runtime.cpp) -- a coroutine only
-    # ever yields at an explicit `co_await`, so nothing can interleave
-    # between two statements with no suspension point between them. An
-    # `await` inside the guarded body is an honest refusal, not a silent
-    # elision, since eliding would be genuinely unsafe there. Verified via
-    # test_async_with_lock_guard.py (incl. a real 10,000-task stress test
-    # AND the await-inside-guard refusal). What's STILL missing, confirmed
-    # by attempting the real file directly: capturing `counter` (an
-    # `Atomic[DType.int64]`, a non-scalar STRUCT) mutably -- this codegen's
-    # mutable-capture mechanism (see bugs/CODEGEN_comptime_bracket_
-    # parametrized_function_calls_silently_wrong.md's "Update") only
-    # threads a SCALAR (int64_t/double/_Bool) capture through as a pointer
-    # parameter; a struct-typed capture needs the SAME scalar-only barrier
-    # lifted that `build_message`'s String-return gap (test_asyncrt.mojo)
-    # already needs, for a different reason. See that same bugs/ file's
-    # "Update — TaskGroup + real stress test" and "transitive-closure-
-    # capture gap" sections for the full writeup.
-    'test/runtime/test_locks.mojo':
-        'a mutable capture of a non-scalar struct (Atomic[DType.int64], '
-        'counter.fetch_add(1)/counter.load()) — TaskGroup, scalar mutable '
-        'capture, general {mut}-capture-spec closures, transitive capture '
-        'propagation, and `with BlockingScopedLock(...)` inside inc() (a '
-        'no-op lock elision, safe because this runtime is genuinely '
-        'single-threaded/cooperative) all now work, see bugs/CODEGEN_'
-        'comptime_bracket_parametrized_function_calls_silently_wrong.md',
+    # test_locks.mojo — RESOLVED 2026-07-30: the "mutable capture of a
+    # non-scalar struct" blocker was actually two codegen bugs in
+    # gimple_codegen.py, now fixed:
+    #   1. `_gen_for_range` wrote a loop variable that is ALSO a heap-boxed
+    #      mutable capture directly (`var = ctr`) instead of through the
+    #      box pointer (`*var = ctr`).
+    #   2. `_gen_stmt_AssignStmt` coerced a value to the box POINTER ctype
+    #      (`int64_t *`) when writing to a boxed mutable local whose
+    #      `_write_dest` lvalue is the deref (`*var`, pointee-typed) --
+    #      "assignment to 'int64_t' from 'int64_t *'".
+    # The file compiles + passes its gcc syntax check (see test_locks's
+    # `_ = time_function(test_atomic)` / `_ = lock^` where `_` is boxed
+    # because the nested async `inc()` reassigns it via
+    # `_ = counter.fetch_add(1)`).
 }
 
 def get_stdlib_path():
