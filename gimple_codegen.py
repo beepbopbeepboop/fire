@@ -26594,7 +26594,20 @@ class GimpleGen:
                 cpp_parts.append('/* Extern declarations for module-level symbols')
                 cpp_parts.append('   referenced by this module\'s compiled generator')
                 cpp_parts.append('   bodies (compiled standalone, linked with the .ci). */')
-                for _mref_safe_mod in sorted({m for m, _ in self._cpp_module_global_refs}):
+                # Plain loops, NOT a set-comprehension with tuple-unpacking
+                # (`{m for m, _ in ...}`): this project's OWN self-hosting
+                # compiler has no clean translation of that shape — it
+                # lowered it to a GIMPLE `int64_t m, _;` multi-declaration
+                # that collided with gen_module's own `_` declarations
+                # ("redeclaration of '_' with no linkage", caught by
+                # `make check-selfhost`). See the identical note a few
+                # hundred lines up in gen_module for the same class of bug.
+                _mref_modules: list = []
+                for _mref_pair in self._cpp_module_global_refs:
+                    _mref_mod = _mref_pair[0]
+                    if _mref_mod not in _mref_modules:
+                        _mref_modules.append(_mref_mod)
+                for _mref_safe_mod in sorted(_mref_modules):
                     _mt = f"_{_mref_safe_mod}_toplev"
                     _mg = f"_{_mref_safe_mod}_globals"
                     # The full struct typedef (field-by-field, matching the
