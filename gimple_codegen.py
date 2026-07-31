@@ -2391,6 +2391,10 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return 'char *'
         if known is not None and e.func.name in known:
             return known[e.func.name]
+    if isinstance(e, SliceExpr):
+        return 'char *'  # string slice produces a string
+    if isinstance(e, SubscriptExpr):
+        return 'char *'  # string subscript produces a char (string of len 1)
     if isinstance(e, AwaitExpr):
         # Step D (async-awaits-async composition): `await <call to another
         # compiled async function>` used as a value-producing sub-expression
@@ -2439,9 +2443,11 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
     if generator_api is None:
         return None
     api = generator_api.get(call.func.name)
-    if api is None:
-        return None
-    return api.get('value_ctype')
+    if api is not None:
+        return api.get('value_ctype')
+    # yield from over a call to a non-generator function: the callee
+    # returns a collection, so the yielded values are strings (char*).
+    return 'char *'
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
@@ -2495,7 +2501,11 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if ctype is None:
                 ctype = t
             elif ctype != t:
-                return None
+                # Prefer char* if either is a string (same as YieldExpr above)
+                if ctype == 'char *' or t == 'char *':
+                    ctype = 'char *'
+                else:
+                    return None
         elif isinstance(n, ReturnStmt):
             # Step B (compiled async codegen) reuses this same unify-across-
             # every-site walk for an async function's `return <expr>` sites
@@ -17862,6 +17872,11 @@ class GimpleGen:
         if isinstance(e, CallExpr):
             # Simple function call in generator body (e.g. os.path.join(a, b))
             if isinstance(e.func, MemberExpr):
+                # self.method(...) → self->method(...)  (struct pointer receiver)
+                if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'self' \
+                        and getattr(self, '_cpp_gen_self_struct', None):
+                    args = ', '.join(self._cpp_expr(a) for a in e.args)
+                    return f"self->{e.func.member}({args})"
                 obj = self._cpp_expr(e.func.obj)
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{obj}.{e.func.member}({args})"
@@ -18956,6 +18971,17 @@ class GimpleGen:
                 "a call to another generator function known to this same "
                 "compile (e.g. NOT `yield from [1, 2, 3]`, NOT `yield from "
                 "mod.gen()`)")
+        # `yield from <call>` where the callee is NOT a compiled generator:
+        # the callee returns a MojoList* collection — iterate it with an
+        # indexed loop, co_yield-ing each element as int64_t/char*.
+        sub_name = call.func.name
+        if sub_name not in self._generator_api:
+            result_var = self._cpp_fresh_name("_yf_result")
+            coll_expr = self._cpp_expr(call)
+            return [f"{indent}auto {result_var} = {coll_expr};",
+                    f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
+                    f"{indent}    co_yield mojo_list_get_str({result_var}, _i);",
+                    f"{indent}}}"]
         if call.kwargs:
             # Append keyword arguments as positional args at the end.
             # This is a simplification (correct only when kwargs match the
