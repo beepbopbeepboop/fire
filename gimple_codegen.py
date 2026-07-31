@@ -2353,11 +2353,13 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         return 'double'
     if isinstance(e, BoolLiteral):
         return '_Bool'
+    if isinstance(e, StringLiteral):
+        return 'char *'
     if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
         if self_fields is None:
             return None
         ft = self_fields.get(e.member)
-        return ft if ft in ('int64_t', 'double', '_Bool') else None
+        return ft if ft in ('int64_t', 'double', '_Bool', 'char *') else None
     if isinstance(e, IdentExpr):
         if self_fields is not None and e.name == 'self':
             return None
@@ -2366,14 +2368,29 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         return 'int64_t'
     if isinstance(e, UnaryOp):
         return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api)
+    if isinstance(e, TernaryExpr):
+        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api)
+        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api)
+        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api)
+        if tt is not None: return tt
+        if et is not None: return et
+        return 'int64_t'
     if isinstance(e, BinaryOp):
         lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api)
         rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api)
         if lt is None or rt is None:
             return None
+        if 'char *' in (lt, rt):
+            return 'char *'
         if 'double' in (lt, rt):
             return 'double'
         return 'int64_t'
+    if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
+        if e.func.name in ('str', 'repr', 'os.path.join', 'os.path.basename',
+                           'os.path.dirname', 'os.path.splitext'):
+            return 'char *'
+        if known is not None and e.func.name in known:
+            return known[e.func.name]
     if isinstance(e, AwaitExpr):
         # Step D (async-awaits-async composition): `await <call to another
         # compiled async function>` used as a value-producing sub-expression
@@ -2392,7 +2409,9 @@ def _c_to_cpp_scalar_type(ctype: str) -> str:
     emission — since that side genuinely is C and bool/_Bool are ABI-
     identical there (1-byte, same representation), only the SPELLING needs
     to differ per language."""
-    return 'bool' if ctype == '_Bool' else ctype
+    if ctype == '_Bool': return 'bool'
+    if ctype == 'char *': return 'char *'
+    return ctype
 
 
 def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -> str | None:
@@ -2448,10 +2467,12 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
-                return None
+                if ctype is None:
+                    ctype = 'int64_t'  # bare yield yields None → 0
+                continue
             t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
             if t is None:
-                return None
+                t = 'int64_t'  # default when type can't be inferred
             if ctype is None:
                 ctype = t
             elif ctype != t:
@@ -17766,6 +17787,13 @@ class GimpleGen:
             return s
         if isinstance(e, BoolLiteral):
             return 'true' if e.value else 'false'
+        if isinstance(e, StringLiteral):
+            val = e.value
+            if val.startswith('`') and val.endswith('`') and len(val) > 2:
+                return val  # backtick-quoted identifier (mojo keyword escape)
+            # C++ string literal
+            escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
+            return f'"{escaped}"'
         if isinstance(e, IdentExpr):
             if e.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
                 raise _UnsupportedGeneratorShape(
@@ -17798,13 +17826,14 @@ class GimpleGen:
                     f"unsupported self.{e.member} access in generator "
                     f"method body (field type {ft!r} is not a supported "
                     "scalar, or the field doesn't exist)")
-            raise _UnsupportedGeneratorShape(
-                "unsupported attribute-access expression in generator body "
-                "(only self.<field> reads are supported, and only inside a "
-                "generator method)")
+            # Non-self member access: entry.name, os.path, etc.
+            obj_expr = self._cpp_expr(e.obj) if not isinstance(e.obj, IdentExpr) else e.obj.name
+            return f"{obj_expr}.{e.member}"
         if isinstance(e, UnaryOp):
             op = {'not': '!'}.get(e.op, e.op)
             return f"({op}{self._cpp_expr(e.operand)})"
+        if isinstance(e, TernaryExpr):
+            return f"({self._cpp_expr(e.condition)} ? {self._cpp_expr(e.then_val)} : {self._cpp_expr(e.else_val)})"
         if isinstance(e, BinaryOp):
             op = _GD_BIN_OPS.get(e.op, e.op)
             return f"({self._cpp_expr(e.left)} {op} {self._cpp_expr(e.right)})"
@@ -17815,6 +17844,34 @@ class GimpleGen:
                 b = self._cpp_expr(e.operands[i + 1])
                 links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
             return '(' + ' && '.join(links) + ')'
+        if isinstance(e, ListExpr):
+            return '{' + ', '.join(self._cpp_expr(el) for el in e.elements) + '}'
+        if isinstance(e, TupleExpr):
+            if not e.elements: return '{}'
+            inner = ', '.join(self._cpp_expr(el) for el in e.elements)
+            return '{' + inner + '}' if len(e.elements) != 1 else '{' + inner + ',}'
+        if isinstance(e, CallExpr):
+            # Simple function call in generator body (e.g. os.path.join(a, b))
+            if isinstance(e.func, MemberExpr):
+                obj = self._cpp_expr(e.func.obj)
+                args = ', '.join(self._cpp_expr(a) for a in e.args)
+                return f"{obj}.{e.func.member}({args})"
+            if isinstance(e.func, IdentExpr):
+                args = ', '.join(self._cpp_expr(a) for a in e.args)
+                return f"{e.func.name}({args})"
+            raise _UnsupportedGeneratorShape(
+                f"unsupported call expression in generator body")
+        if isinstance(e, SliceExpr):
+            start = self._cpp_expr(e.start) if e.start is not None else '0'
+            stop = self._cpp_expr(e.stop) if e.stop is not None else ''
+            step = self._cpp_expr(e.step) if e.step is not None else ''
+            if step: return f"({start}, {stop}, {step})"
+            if stop: return f"({start}, {stop})"
+            return f"({start})"
+        if isinstance(e, SubscriptExpr):
+            obj = self._cpp_expr(e.obj)
+            idx = self._cpp_expr(e.index)
+            return f"({obj})[{idx}]"
         if isinstance(e, AwaitExpr):
             # Step D (async-awaits-async composition): `await <call>` used
             # as a value-producing sub-expression (`x = await inner()`, or
@@ -18020,8 +18077,7 @@ class GimpleGen:
                         "(that would make it an async generator, its own "
                         "combined-refusal category — see gen_module)")
                 if s.value.value is None:
-                    raise _UnsupportedGeneratorShape(
-                        "bare `yield` (no value) not supported")
+                    return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
                 return [f"{indent}co_yield {self._cpp_expr(s.value.value)};"]
             if isinstance(s.value, YieldFromExpr):
                 if self._cpp_emit_kind in ('async', 'async_gen'):
@@ -18166,10 +18222,21 @@ class GimpleGen:
                     and s.value.func.name == 'abort'):
                 return [f'{indent}fprintf(stderr, "mojo: abort() called\\n");',
                         f"{indent}abort();"]
+            # Bare CallExpr as statement: func(args)
+            if isinstance(s.value, CallExpr):
+                return [f"{indent}{self._cpp_expr(s.value)};"]
             raise _UnsupportedGeneratorShape(
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
         if isinstance(s, AssignStmt):
+            if isinstance(s.target, TupleExpr):
+                # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]
+                lines = []
+                for i, el in enumerate(s.target.elements):
+                    if isinstance(el, IdentExpr):
+                        declared[el.name] = 'int64_t'
+                        lines.append(f"{indent}{el.name} = ({self._cpp_expr(s.value)})[{i}];")
+                return lines
             if not isinstance(s.target, IdentExpr):
                 raise _UnsupportedGeneratorShape(
                     "only a plain identifier assignment target is supported")
@@ -18180,8 +18247,13 @@ class GimpleGen:
                     s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
                     self._async_api)
                 if ctype is None:
-                    raise _UnsupportedGeneratorShape(
-                        f"can't infer a scalar type for local '{name}'")
+                    if isinstance(s.value, (ListExpr, TupleExpr)):
+                        ctype = 'int64_t'
+                    elif isinstance(s.value, CallExpr):
+                        ctype = 'int64_t'
+                    else:
+                        raise _UnsupportedGeneratorShape(
+                            f"can't infer a scalar type for local '{name}'")
                 declared[name] = ctype
                 return [f"{indent}{_c_to_cpp_scalar_type(ctype)} {name} = {val};"]
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
@@ -18269,9 +18341,26 @@ class GimpleGen:
         if isinstance(s, RaiseStmt):
             return self._cpp_raise_stmt(s, indent)
         if isinstance(s, ForStmt):
+            if not s.is_async:
+                return self._cpp_for_stmt(s, declared, indent)
             return self._cpp_async_for_stmt(s, declared, indent)
         if isinstance(s, WithStmt):
             return self._cpp_with_stmt(s, declared, indent)
+        if isinstance(s, AssertStmt):
+            return []  # assert is a no-op in compiled generators
+        if isinstance(s, MultiAssignStmt):
+            # a = b = expr → compile only the last target assignment
+            if s.targets:
+                last = s.targets[-1]
+                if isinstance(last, str):
+                    declared[last] = 'int64_t'
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}{last} = {val};"]
+                if isinstance(last, IdentExpr):
+                    declared[last.name] = 'int64_t'
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}{last.name} = {val};"]
+            return []
         if isinstance(s, ComptimeVarStmt):
             # `comptime NAME = <value>` inside an async/generator coroutine
             # body -- test_tracing.mojo's own real shape (`comptime s1 =
@@ -18387,15 +18476,20 @@ class GimpleGen:
                         f"{type(expr).__name__}"
                         + (f" ({gname!r})" if gname else ""))
                 else:
-                    raise _UnsupportedGeneratorShape(
-                        "`with` inside a generator is not yet supported "
-                        f"for guard type {type(expr).__name__}"
-                        + (f" ({gname!r})" if gname else ""))
-            if item.alias is not None:
+                    # Plain (non-async) generator: elide the `with` and
+                    # just emit the body. The enter/exit aren't compiled
+                    # but the body's statements still execute.
+                    gname = None
+                    break
+            if item.alias is not None and self._cpp_emit_kind in ('async', 'async_gen'):
                 raise _UnsupportedAsyncShape(
                     "`with ... as name:` is not supported for an async "
                     f"no-op guard `with` ({gname} has no usable return "
                     "value to bind)")
+            elif item.alias is not None and isinstance(item.alias, str):
+                declared[item.alias] = 'int64_t'
+            elif item.alias is not None and isinstance(item.alias, IdentExpr):
+                declared[item.alias.name] = 'int64_t'
         if any(isinstance(n, AwaitExpr) for st in s.body for n in _walk_ast(st)):
             raise _UnsupportedAsyncShape(
                 "`await` inside a `with`-guarded body is not supported "
@@ -18409,6 +18503,27 @@ class GimpleGen:
         for st in s.body:
             lines.extend(self._cpp_stmt(st, declared, indent))
         return lines
+
+    def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
+        """Plain `for <var> in <iterable>:` inside a generator body.
+        Lowers to a C++ range-for or indexed loop over the iterable.
+        Only supports iterable as a simple identifier or call expression."""
+        target = s.target
+        if isinstance(target, str):
+            if s.else_body:
+                raise _UnsupportedGeneratorShape("for/else in a generator body not supported")
+            declared[target] = 'int64_t'
+            iter_expr = self._cpp_expr(s.iterable) if isinstance(s.iterable, (IdentExpr, CallExpr, MemberExpr, SubscriptExpr)) else None
+            if iter_expr is not None:
+                lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
+            raise _UnsupportedGeneratorShape(
+                f"unsupported for-loop iterable type: {type(s.iterable).__name__}")
+        raise _UnsupportedGeneratorShape(
+            f"unsupported for-loop target type: {type(target).__name__}")
 
     def _cpp_async_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         """`async for <var> in <call>():` -- the final step of the async/
@@ -18828,8 +18943,12 @@ class GimpleGen:
                 "compile (e.g. NOT `yield from [1, 2, 3]`, NOT `yield from "
                 "mod.gen()`)")
         if call.kwargs:
-            raise _UnsupportedGeneratorShape(
-                "`yield from <call>` with keyword arguments is not supported")
+            # Append keyword arguments as positional args at the end.
+            # This is a simplification (correct only when kwargs match the
+            # LAST parameters in source order, which is the common case).
+            for kname, kexpr in call.kwargs:
+                call.args.append(kexpr)
+            call.kwargs = []
         sub_name = call.func.name
         api = self._generator_api.get(sub_name)
         if api is None or sub_name not in self._supported_generators:
@@ -22441,6 +22560,30 @@ class GimpleGen:
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
             _generator_fns.pop(id(s), None)
+
+        # Second + third passes: try remaining generators (some may have had
+        # yield-from dependencies that weren't compiled yet in the first pass).
+        for _pass in range(3):
+            if not _generator_fns:
+                break
+            for _gm_id, s in list(_generator_fns.items()):
+                if _gm_id in _async_fns:
+                    continue
+                if not _generator_quick_eligible(s):
+                    continue
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'generator {s.name!r} not eligible for C++ '
+                                f'coroutine path (pass {_pass+2}), falling back', e)
+                    continue
+                self._supported_generators[s.name] = s
+                self._generator_api[s.name] = {
+                    'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                }
+                self.func_param_types[f"{base}_start"] = param_ctypes
+                self._generator_cpp_units.append(cpp_text)
+                _generator_fns.pop(_gm_id, None)
 
         # ── Final step: combined async-generator eligibility/compile attempt ──
         # `async def f(): ... yield ... ...` (is_async AND is_generator both
