@@ -1913,6 +1913,18 @@ _C_KEYWORDS = frozenset({
     'nullptr', 'constexpr', 'thread_local', 'static_assert', 'typeof_unqual',
 })
 
+# Identifiers that are valid C but are C++ KEYWORDS (a .cpp generator-body
+# translation unit must escape them `_kw_<name>` in its globals-struct field
+# names — `operator`, `new`, `class`, ... — while the .ci side, genuinely C,
+# keeps the raw name). See the generator .cpp globals-struct emission and
+# _cpp_expr's module-global field reference.
+_CPP_KEYWORD_FIELDS = frozenset({
+    'operator', 'new', 'delete', 'class', 'template', 'typename',
+    'namespace', 'public', 'private', 'protected', 'virtual', 'this',
+    'try', 'catch', 'throw', 'const', 'true', 'false', 'and', 'or',
+    'not', 'xor', 'bool', 'compl', 'nullptr',
+})
+
 # Extra identifiers that are valid C keywords in GCC but not in standard C keywords list
 # (e.g. GCC extension 'asm', C++ keywords that GCC treats as reserved in C mode)
 _C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
@@ -3216,6 +3228,18 @@ class GimpleGen:
         # can distinguish a char* string subscript (→ mojo_cstr_slice) from
         # a MojoList*/MojoDict* container subscript (→ raw `obj[idx]`).
         self._cpp_declared: dict | None = None
+        # Module-level symbols (globals + functions) referenced by compiled
+        # generator/async bodies, so the .cpp preamble can declare them
+        # extern (a generator body calling tokenize.py's `detect_encoding`
+        # or reading os.py's `sys` needs the mangled C symbol / globals
+        # struct field declared in its own TU). Keys: (module, global name)
+        # for globals; bare function names for functions.
+        self._cpp_module_global_refs: set[tuple[str, str]] = set()
+        self._cpp_module_func_refs: set[str] = set()
+        # Module-level global names collected by the lightweight pre-scan
+        # before the generator compile loop (Pass 1.3d-gen) — populated
+        # BEFORE _global_var_types (Phase 1.7), which runs later.
+        self._cpp_early_global_names: set[str] = set()
         # See _gen_cpp_async_unit's `enclosing_scope` param docstring: the
         # enclosing top-level function name for a bracket-parametrized
         # nested async def currently being compiled, so `_cpp_expr`'s
@@ -17891,6 +17915,38 @@ class GimpleGen:
             # as if it were the value.
             if e.name in self._cpp_mut_capture_names:
                 return f"(*{e.name})"
+            # Module-global reference: a name that isn't a declared local/
+            # param/capture but IS a known module-level global (in
+            # `_global_var_types`) resolves to the module globals struct
+            # field `_{module}_globals.<name>` — the exact field reference
+            # the ordinary GIMPLE path's _lower_IdentExpr emits. The .cpp
+            # preamble declares that struct + `extern` instance (see
+            # gen_module's generated_cpp assembly), so a generator body can
+            # read a module global like any ordinary compiled function.
+            if (self._cpp_declared is not None
+                    and e.name not in self._cpp_declared
+                    and (e.name in self._global_var_types
+                         or e.name in self._cpp_early_global_names)):
+                global_module = getattr(self, '_global_to_module', {}).get(
+                    e.name, self._current_module_ctx or "root")
+                safe_mod = _c_field_name(str(global_module)) if global_module else "root"
+                field = _c_field_name(e.name)
+                # Same C++-keyword escaping the .cpp globals-struct typedef
+                # uses (`operator`/`new`/... are fine in C, not in C++).
+                if field in _CPP_KEYWORD_FIELDS:
+                    field = f"_kw_{field}"
+                self._cpp_module_global_refs.add((safe_mod, e.name))
+                return f"_{safe_mod}_globals.{field}"
+            # A bare module-level function name referenced as a value (e.g.
+            # tokenize.py's `encode = detect_encoding`) — the generator body
+            # holds it as an opaque int64_t; the call site resolves the real
+            # mangled symbol separately (see the CallExpr IdentExpr case).
+            if (self._cpp_declared is not None
+                    and e.name not in self._cpp_declared
+                    and e.name in self.func_param_types
+                    and e.name not in self._global_var_types):
+                self._cpp_module_func_refs.add(e.name)
+                return f"(int64_t)&{self._func_csym(e.name)}"
             return e.name
         if isinstance(e, MemberExpr):
             # Generator-METHOD `self.<field>` read — the only attribute
@@ -18040,6 +18096,21 @@ class GimpleGen:
                     # Emit the underlying iterable; the consumer's loop
                     # unpacks (i, x) via the existing tuple-unpack path.
                     return args[0] if args else '0'
+                # A call to a module-level function (tokenize.py's
+                # `detect_encoding(readline)`, codecs.py's
+                # `getincrementalencoder(encoding)`) → the mangled C symbol
+                # the .c side defines, registered so the .cpp preamble emits
+                # the matching extern declaration. Falls through to the bare
+                # name only when the callee is an imported runtime/other-module
+                # function already declared in the .cpp preamble or a local
+                # callable param.
+                if (self._cpp_declared is not None
+                        and fname not in self._cpp_declared
+                        and fname in self.func_param_types
+                        and fname not in self._global_var_types
+                        and self._func_mangleable(fname)):
+                    self._cpp_module_func_refs.add(fname)
+                    return f"{self._func_csym(fname)}({', '.join(args)})"
                 return f"{fname}({', '.join(args)})"
             if isinstance(e.func, CallExpr):
                 # Call of a call result: f()(args)  →  (f())(args)
@@ -22931,6 +23002,47 @@ class GimpleGen:
         # strict improvement, not a new dependency risk, since ordinary
         # (non-generator) function bodies were always emitted this late
         # already (Phase 2a, further below).
+        #
+        # A generator BODY can reference module-level globals (`sys`, `os`,
+        # `_flags`, ...) and module-level functions (`detect_encoding`,
+        # ...). The full global pre-scan (Phase 1.7) runs later in gen_module,
+        # AFTER this loop, so a lightweight name-only pre-scan of module-level
+        # assignments and imports is run here first — enough for _cpp_expr to
+        # resolve a bare name as a module global (vs. a genuinely-undeclared
+        # local) and to register the symbol for the .cpp preamble's extern
+        # declarations.
+        for _gm_stmt in stmts:
+            if isinstance(_gm_stmt, AssignStmt) and isinstance(_gm_stmt.target, IdentExpr):
+                self._cpp_early_global_names.add(_gm_stmt.target.name)
+            elif isinstance(_gm_stmt, ImportStmt):
+                for _tm, _ta in _import_targets(_gm_stmt):
+                    self._cpp_early_global_names.add(_ta if _ta else _tm)
+            elif isinstance(_gm_stmt, FromImportStmt):
+                for _nm in getattr(_gm_stmt, 'names', []) or []:
+                    self._cpp_early_global_names.add(_nm)
+
+        # Imports nested inside module-scope try/if bodies (`try: import
+        # winreg as _winreg` — mimetypes.py's own shape; a `try:` around a
+        # platform-specific import) are module globals too, but the flat scan
+        # above misses them. Walk one level of try/if bodies.
+        def _scan_cpp_nested_imports(stmt_list):
+            for _gi in stmt_list:
+                if isinstance(_gi, (ImportStmt, FromImportStmt)):
+                    if isinstance(_gi, ImportStmt):
+                        for _tm, _ta in _import_targets(_gi):
+                            self._cpp_early_global_names.add(_ta if _ta else _tm)
+                    else:
+                        for _nm in getattr(_gi, 'names', []) or []:
+                            self._cpp_early_global_names.add(_nm)
+                elif isinstance(_gi, TryStmt):
+                    _scan_cpp_nested_imports(_gi.body or [])
+                    for _h in (_gi.handlers or []):
+                        _scan_cpp_nested_imports(getattr(_h, 'body', []) or [])
+                elif isinstance(_gi, IfStmt):
+                    _scan_cpp_nested_imports(_gi.then_body or [])
+                    if isinstance(_gi.else_body, list):
+                        _scan_cpp_nested_imports(_gi.else_body)
+        _scan_cpp_nested_imports(stmts)
         for s in stmts:
             if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                     and id(s) not in _async_fns):
@@ -26284,6 +26396,59 @@ class GimpleGen:
                         # does for every other `_Bool` in the .cpp text).
                         cpp_parts.append(_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
+            # Module-level symbols referenced by compiled generator bodies
+            # (see _cpp_expr's IdentExpr/CallExpr resolution): module globals
+            # need the module globals-struct typedef + extern instance (read
+            # as `_{module}_globals.<name>`), module functions need their
+            # mangled-C-symbol extern declaration — both in THIS .cpp TU,
+            # since it's compiled standalone and linked against the .ci's
+            # object (the generator body can't see the .c side's own
+            # declarations). Emission is opportunistic: a referenced name
+            # that isn't actually a known module global/function is skipped
+            # silently (the generator-body emitter only ever records a name
+            # it already confirmed exists in the corresponding dict).
+            if self._cpp_module_global_refs or self._cpp_module_func_refs:
+                cpp_parts.append('/* Extern declarations for module-level symbols')
+                cpp_parts.append('   referenced by this module\'s compiled generator')
+                cpp_parts.append('   bodies (compiled standalone, linked with the .ci). */')
+                for _mref_safe_mod in sorted({m for m, _ in self._cpp_module_global_refs}):
+                    _mt = f"_{_mref_safe_mod}_toplev"
+                    _mg = f"_{_mref_safe_mod}_globals"
+                    # The full struct typedef (field-by-field, matching the
+                    # .ci side's own globals struct — see Phase 1.7/2b's
+                    # `_module_globals` emission) so field reads like
+                    # `_root_globals.sys` compile; a forward-declared struct
+                    # alone would leave the instance incomplete. Field names
+                    # that are valid in C but are C++ keywords (`operator`,
+                    # `new`, ...) are escaped `_kw_<name>` — the .ci side can
+                    # keep the raw name (it genuinely is C), this .cpp copy
+                    # cannot (see the `_Bool`→`bool` spelling fix above: the
+                    # struct SHAPE is identical, only C++-invalid spellings
+                    # differ).
+                    cpp_parts.append(f'typedef struct {_mt} {{')
+                    for _gl in self._module_globals.get(
+                            'root' if _mref_safe_mod == 'root' else _mref_safe_mod, []):
+                        _gct = _gl[1].replace('_Bool', 'bool')
+                        _gfname = _c_field_name(_gl[0])
+                        if _gfname in _CPP_KEYWORD_FIELDS:
+                            _gfname = f"_kw_{_gfname}"
+                        cpp_parts.append(f'  {_gct} {_gfname};')
+                    cpp_parts.append(f'}} {_mt};')
+                    cpp_parts.append(f'extern struct {_mt} {_mg};')
+                for _fname in sorted(self._cpp_module_func_refs):
+                    try:
+                        _fsym = self._func_csym(_fname)
+                        _fret = self.func_return_types.get(_fname, 'int64_t')
+                        _fparams = self.func_param_types.get(_fname, [])
+                        _fret_cpp = _fret.replace('_Bool', 'bool')
+                        _fparam_str = ', '.join(
+                            p if p not in ('_Bool',) else 'bool' for p in _fparams)
+                        cpp_parts.append(
+                            f'extern "C" {_fret_cpp} {_fsym} '
+                            f'({_fparam_str});')
+                    except Exception:
+                        continue
+                cpp_parts.append('')
             for unit in self._generator_cpp_units:
                 cpp_parts.append(unit)
                 cpp_parts.append('')
