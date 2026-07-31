@@ -2589,7 +2589,7 @@ def main():
     # by _cpp_stmt's existing AssignStmt case, unchanged; confirms this
     # falls back to the honest whole-module refusal rather than silently
     # dropping the mutation.
-    test_raises("generator_method_self_mutation_honest_fallback", """\
+    test("generator_method_self_mutation", """\
 class Counter:
     def __init__(self, start: Int):
         self.value = start
@@ -2605,7 +2605,7 @@ def main():
     c = Counter(10)
     for x in c.countdown(3):
         print(x)
-""", "generator function")
+""")
 
     # Still-out-of-scope: a generator method calling ANOTHER method on self
     # (`self.helper()`) — that's a CallExpr, which the narrow .cpp expression

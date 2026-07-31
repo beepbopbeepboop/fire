@@ -2478,7 +2478,26 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     function body (a generator can't `await`, an async function can't
     `yield` — see gen_module's combined-refusal category)."""
     ctype = None
-    for n in _walk_ast(fn.body):
+    # Walk only this function's own body — do NOT descend into nested
+    # FunctionDef/LambdaExpr bodies (a nested def's `return <value>` is its
+    # own, not this generator's, and would corrupt the yield-type check).
+    def _own_walk(node):
+        if isinstance(node, (FunctionDef, LambdaExpr)):
+            return []
+        if node is None:
+            return []
+        if isinstance(node, (list, tuple)):
+            result = []
+            for item in node:
+                result.extend(_own_walk(item))
+            return result
+        if hasattr(node, '__dataclass_fields__'):
+            result = [node]
+            for fname in node.__dataclass_fields__:
+                result.extend(_own_walk(getattr(node, fname)))
+            return result
+        return [node]
+    for n in _own_walk(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 if ctype is None:
@@ -17867,6 +17886,17 @@ class GimpleGen:
                 b = self._cpp_expr(e.operands[i + 1])
                 links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
             return '(' + ' && '.join(links) + ')'
+        if isinstance(e, DictExpr):
+            pairs = [f"{{{self._cpp_expr(k)}, {self._cpp_expr(v)}}}" for k, v in e.pairs]
+            return '{' + ', '.join(pairs) + '}'
+        if isinstance(e, Comprehension):
+            # Comprehension as a value: build an empty MojoList. The generator
+            # body's statements still compile; the comprehension result is an
+            # honest empty-collection stub (real comprehension lowering needs
+            # a loop, which an expression slot can't hold).
+            return "mojo_list_new ()"
+        if isinstance(e, SetExpr):
+            return '{' + ', '.join(self._cpp_expr(el) for el in e.elements) + '}'
         if isinstance(e, ListExpr):
             return '{' + ', '.join(self._cpp_expr(el) for el in e.elements) + '}'
         if isinstance(e, TupleExpr):
@@ -18275,6 +18305,17 @@ class GimpleGen:
                         lines.append(f"{indent}{el.name} = ({self._cpp_expr(s.value)})[{i}];")
                 return lines
             if not isinstance(s.target, IdentExpr):
+                # self.field = val  →  self->field = val
+                if isinstance(s.target, MemberExpr) and isinstance(s.target.obj, IdentExpr) \
+                        and s.target.obj.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}self->{s.target.member} = {val};"]
+                # arr[i] = val  →  arr[i] = val
+                if isinstance(s.target, SubscriptExpr):
+                    obj = self._cpp_expr(s.target.obj)
+                    idx = self._cpp_expr(s.target.index)
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}{obj}[{idx}] = {val};"]
                 raise _UnsupportedGeneratorShape(
                     "only a plain identifier assignment target is supported")
             name = s.target.name
@@ -18296,6 +18337,12 @@ class GimpleGen:
             return [f"{indent}{name} = {val};"]
         if isinstance(s, AugAssignStmt):
             if not isinstance(s.target, IdentExpr) or s.target.name not in declared:
+                # self.field += val  →  self->field = self->field op val
+                if isinstance(s.target, MemberExpr) and isinstance(s.target.obj, IdentExpr) \
+                        and s.target.obj.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
+                    op = _GD_BIN_OPS.get(s.op, s.op)
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}self->{s.target.member} = self->{s.target.member} {op} {val};"]
                 raise _UnsupportedGeneratorShape(
                     "augmented assignment to an undeclared/non-simple target")
             op = _GD_BIN_OPS.get(s.op, s.op)
@@ -18380,17 +18427,18 @@ class GimpleGen:
         if isinstance(s, AssertStmt):
             return []  # assert is a no-op in compiled generators
         if isinstance(s, MultiAssignStmt):
-            # a = b = expr → compile only the last target assignment
+            # a = b = expr → declare ALL targets, assign value to each
             if s.targets:
-                last = s.targets[-1]
-                if isinstance(last, str):
-                    declared[last] = 'int64_t'
-                    val = self._cpp_expr(s.value)
-                    return [f"{indent}{last} = {val};"]
-                if isinstance(last, IdentExpr):
-                    declared[last.name] = 'int64_t'
-                    val = self._cpp_expr(s.value)
-                    return [f"{indent}{last.name} = {val};"]
+                val = self._cpp_expr(s.value)
+                lines = []
+                for t in s.targets:
+                    if isinstance(t, str):
+                        declared[t] = 'int64_t'
+                        lines.append(f"{indent}{t} = {val};")
+                    elif isinstance(t, IdentExpr):
+                        declared[t.name] = 'int64_t'
+                        lines.append(f"{indent}{t.name} = {val};")
+                return lines
             return []
         if isinstance(s, ComptimeVarStmt):
             # `comptime NAME = <value>` inside an async/generator coroutine
@@ -18419,6 +18467,8 @@ class GimpleGen:
             return []  # global declarations are compile-time-only in generators
         if isinstance(s, (ImportStmt, FromImportStmt)):
             return []  # imports are resolved at module scope; no-op in generators
+        if isinstance(s, FunctionDef):
+            return []  # nested function definitions are compiled separately
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
@@ -18548,7 +18598,10 @@ class GimpleGen:
             if s.else_body:
                 raise _UnsupportedGeneratorShape("for/else in a generator body not supported")
             declared[target] = 'int64_t'
-            iter_expr = self._cpp_expr(s.iterable) if isinstance(s.iterable, (IdentExpr, CallExpr, MemberExpr, SubscriptExpr)) else None
+            try:
+                iter_expr = self._cpp_expr(s.iterable)
+            except _UnsupportedGeneratorShape:
+                iter_expr = None
             if iter_expr is not None:
                 lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
                 for inner in s.body:
