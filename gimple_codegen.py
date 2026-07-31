@@ -3260,6 +3260,17 @@ class GimpleGen:
         # can distinguish a char* string subscript (→ mojo_cstr_slice) from
         # a MojoList*/MojoDict* container subscript (→ raw `obj[idx]`).
         self._cpp_declared: dict | None = None
+        # Per-coroutine (generator/async) list of declarations hoisted to that
+        # unit's function scope. Filled by the AssignStmt handler in
+        # `_cpp_stmt` whenever a local is first-assigned; emitted at the top
+        # of the coroutine's `impl` body (just after the `{`) BEFORE any
+        # `body_lines`. Hoisting to function scope lets a local first
+        # assigned inside a `try:`/`for:` body be read in a sibling `else:`/
+        # post-loop block (C++ coroutine frames outlive every block, and
+        # Python itself scopes locals to the whole function). None outside a
+        # coroutine-body compile. See `_gen_cpp_generator_unit` /
+        # `_gen_cpp_async_unit` for init/clear.
+        self._cpp_func_scope_decls: list[str] | None = None
         # Module-level symbols (globals + functions) referenced by compiled
         # generator/async bodies, so the .cpp preamble can declare them
         # extern (a generator body calling tokenize.py's `detect_encoding`
@@ -18857,7 +18868,20 @@ class GimpleGen:
                 if ctype is None:
                     ctype = 'int64_t'  # default for unknown-type locals
                 declared[name] = ctype
-                return [f"{indent}{_c_to_cpp_scalar_type(ctype)} {name} = {val};"]
+                # Hoist the declaration to the coroutine's top (function)
+                # scope so a local first-assigned inside a `try:`/`for:` body
+                # is still visible to a sibling `else:`/post-loop block (the
+                # exact mimetypes `ctype` / shelve-analogue failure mode).
+                # C++ coroutine frames outlive every block, so a function-
+                # scope local is sound and matches Python's function (not
+                # block) scoping. The inline text emitted here is now just the
+                # block-scoped ASSIGNMENT; the DECLARATION was deferred into
+                # `_cpp_func_scope_decls` (init/cleared per coroutine unit)
+                # and is emitted at the top of the impl body.
+                if self._cpp_func_scope_decls is not None:
+                    self._cpp_func_scope_decls.append(
+                        f"{_c_to_cpp_scalar_type(ctype)} {name};")
+                return [f"{indent}{name} = {val};"]
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
             # `mut_capture_names` docstring) is a pointer parameter -- the
             # WRITE must go through it (`*name = ...`), not overwrite the
@@ -19961,15 +19985,19 @@ class GimpleGen:
         self._cpp_gen_self_struct = struct_name
         self._cpp_gen_self_fields = self_fields
         self._cpp_declared = declared
+        func_decls: list[str] = []
+        self._cpp_func_scope_decls = []
         try:
             body_lines: list[str] = []
             for s in fn.body:
                 body_lines.extend(self._cpp_stmt(s, declared, '    '))
             value_ctype = _generator_yield_ctype(fn, declared, self._generator_api, self_fields)
+            func_decls = list(self._cpp_func_scope_decls)
         finally:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
             self._cpp_declared = None
+            self._cpp_func_scope_decls = None
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
@@ -20054,6 +20082,7 @@ class GimpleGen:
             f"    void return_void() {{}}",
             f"}};",
             f"static {task} {impl} ({cpp_sig}) {{",
+            *(f"    {d}" for d in func_decls),
             *body_lines,
             f"    co_return;",
             f"}}",
@@ -20449,6 +20478,8 @@ class GimpleGen:
         # compiles) -- see that AwaitExpr case's own comment.
         self._cpp_async_enclosing_scope = enclosing_scope
         self._cpp_declared = declared
+        func_decls: list[str] = []
+        self._cpp_func_scope_decls = []
         try:
             body_lines: list[str] = []
             for s in fn.body:
@@ -20505,12 +20536,14 @@ class GimpleGen:
                 annotated = self._resolve_type(fn.return_type) if fn.return_type else None
                 if annotated in ('int64_t', 'double', '_Bool'):
                     value_ctype = annotated
+            func_decls = list(self._cpp_func_scope_decls)
         finally:
             self._cpp_emit_kind = 'generator'
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
             self._cpp_async_enclosing_scope = None
             self._cpp_declared = None
+            self._cpp_func_scope_decls = None
             self._cpp_mut_capture_names = frozenset()
         if value_ctype is None:
             # A genuinely void-returning async function (declared `-> None`
@@ -20713,6 +20746,7 @@ class GimpleGen:
             f"    return std::noop_coroutine();",
             f"}}",
             f"static {task} {impl} ({cpp_sig}) {{",
+            *(f"    {d}" for d in func_decls),
             *body_lines,
             # Step I: an always-raising function's body (e.g. `raise
             # Error(...)` with no `return` anywhere at all — see the
