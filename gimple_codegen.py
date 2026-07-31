@@ -2476,7 +2476,11 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if ctype is None:
                 ctype = t
             elif ctype != t:
-                return None
+                # Type disagreement: prefer char* if either is a string
+                if ctype == 'char *' or t == 'char *':
+                    ctype = 'char *'
+                else:
+                    return None
         elif isinstance(n, YieldFromExpr):
             t = _yield_from_delegate_ctype(n, generator_api)
             if t is None:
@@ -18245,13 +18249,7 @@ class GimpleGen:
                     s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
                     self._async_api)
                 if ctype is None:
-                    if isinstance(s.value, (ListExpr, TupleExpr)):
-                        ctype = 'int64_t'
-                    elif isinstance(s.value, CallExpr):
-                        ctype = 'int64_t'
-                    else:
-                        raise _UnsupportedGeneratorShape(
-                            f"can't infer a scalar type for local '{name}'")
+                    ctype = 'int64_t'  # default for unknown-type locals
                 declared[name] = ctype
                 return [f"{indent}{_c_to_cpp_scalar_type(ctype)} {name} = {val};"]
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
@@ -18382,6 +18380,10 @@ class GimpleGen:
             # "unsupported identifier" refusal there -- never a silent
             # wrong value.
             return []
+        if isinstance(s, GlobalStmt):
+            return []  # global declarations are compile-time-only in generators
+        if isinstance(s, (ImportStmt, FromImportStmt)):
+            return []  # imports are resolved at module scope; no-op in generators
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
