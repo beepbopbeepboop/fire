@@ -7961,10 +7961,15 @@ class GimpleGen:
         # the tail we have the lowered operands -- if either is a string
         # pointer, emit a safe concatenation fallback rather than invalid C
         # `int64_t % char *` (which gcc rejects).
-        if c_op == '%' and (lt == 'char *' or lt == 'int64_t'):
-            lv_cp = lv if lt == 'char *' else self._new_val('char *', f'(char *){lv}')
+        # String `%` with a non-literal char* LHS (a variable/expression
+        # holding a format template — the StringLiteral-LHS case was already
+        # handled by _lower_percent in _lower_binary). Only route through the
+        # concatenation fallback when the LHS is a GENUINE string pointer;
+        # `int64_t % int64_t` must stay numeric modulo (treating it as string
+        # formatting broke real stdlib code like `value % range`).
+        if c_op == '%' and lt == 'char *':
             rv_str = rv if rt == 'char *' else (self._new_val('char *', f'(char *){rv}') if rt == 'int64_t' else self._stringify_value(rt, rv))
-            t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv_cp), ('char *', rv_str)])
+            t = self._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_str)])
             return 'char *', t
         t = self._new_val(res_type, f"{lv} {c_op} {rv}")
         return res_type, t
