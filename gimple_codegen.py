@@ -18622,14 +18622,27 @@ class GimpleGen:
         Only supports iterable as a simple identifier or call expression."""
         target = s.target
         if isinstance(target, str):
-            if s.else_body:
-                raise _UnsupportedGeneratorShape("for/else in a generator body not supported")
             declared[target] = 'int64_t'
             try:
                 iter_expr = self._cpp_expr(s.iterable)
             except _UnsupportedGeneratorShape:
                 iter_expr = None
             if iter_expr is not None:
+                if s.else_body:
+                    # for/else: the else body runs only when the loop
+                    # completes WITHOUT a `break` — mirror _cpp_stmt's
+                    # WhileStmt else handling with a shared break flag.
+                    brk_var = self._cpp_fresh_name("_mg_brk")
+                    lines = [f"{indent}bool {brk_var} = false;"]
+                    lines.append(f"{indent}for (auto {target} : {iter_expr}) {{")
+                    for inner in s.body:
+                        lines.extend(self._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
+                    lines.append(f"{indent}}}")
+                    lines.append(f"{indent}if (!{brk_var}) {{")
+                    for inner in s.else_body:
+                        lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
+                    return lines
                 lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
                 for inner in s.body:
                     lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
