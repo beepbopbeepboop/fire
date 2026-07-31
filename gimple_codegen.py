@@ -22899,11 +22899,36 @@ class GimpleGen:
         # Second pass for async functions NOT in top-level stmts (nested in
         # if/else/try bodies at module scope — e.g. types.py's `async def
         # _c(): pass` inside an `except ImportError:` handler). Iterate
-        # _async_fns directly, mirroring the generator multi-pass.
+        # _async_fns directly, mirroring the generator multi-pass. MUST
+        # exclude any async def nested INSIDE an ordinary top-level
+        # function's own body — those belong exclusively to the dedicated
+        # Step I (_compile_nested_async_functions) and async-closure
+        # discovery passes further below, which thread the enclosing
+        # function's scope, comptime bracket parameters, and captured free
+        # variables into _gen_cpp_async_unit. Compiling one here as a bare
+        # top-level-style unit silently drops all of that context (a real,
+        # hand-verified regression: this pass claimed test_asyncrt.mojo's
+        # comptime-parametrized `test_asyncrt_add[lhs: Int]` before the
+        # closure pass could, registering a wrong, param-less unit under
+        # the bare name and popping it out of `_async_fns`, so the closure
+        # pass never populated `_async_closure_api` and `await
+        # create_task(test_asyncrt_add[1](a))` fell through to the honest
+        # whole-module refusal).
+        _nested_in_fn_ids: set = set()
+        for _st in stmts:
+            if not (isinstance(_st, FunctionDef)
+                    and id(_st) not in _async_fns
+                    and id(_st) not in _generator_fns):
+                continue
+            for _nf in _walk_ast(_st):
+                if isinstance(_nf, FunctionDef):
+                    _nested_in_fn_ids.add(id(_nf))
         if _async_fns:
             for _gm_id, s in list(_async_fns.items()):
                 if _gm_id in _generator_fns:
                     continue  # async generator — separate path
+                if _gm_id in _nested_in_fn_ids:
+                    continue  # nested-in-function — Step I/closure pass's job
                 s.body = self._inline_single_use_task_composition(s.body)
                 self._normalize_await_kwargs(s.body)
                 if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
