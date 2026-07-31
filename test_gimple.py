@@ -2006,10 +2006,10 @@ f()
     # the still-out-of-scope shape used here instead (string/struct params
     # are covered separately by
     # generator_string_param_honest_fallback below).
-    test_raises("generator_varargs_param_honest_fallback", """\
+    test("generator_varargs_param", """\
 def f(*args):
     yield args
-""", "generator function")
+""")
 
     # A generator parameter typed as something other than a scalar
     # int64_t/double/_Bool (e.g. String) is also still explicitly out of

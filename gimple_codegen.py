@@ -24,7 +24,7 @@ from mojo_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt,
+    GlobalStmt, DelStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser,
@@ -11723,6 +11723,11 @@ class GimpleGen:
         if len(node.args) == 1:
             fn_type, fn_val = self.lower_expr(node.args[0])
             return 'int64_t', self._call_expr('int64_t', 'mojo_open_file', [(fn_type, fn_val)])
+        if not node.args:
+            # open() with no args — a bare `open` reference used as a value
+            # (e.g. tarfile's `fileobj = open` or `self._open`). Return a
+            # generic function-pointer-ish placeholder rather than crashing.
+            return 'int64_t', self._new_val('int64_t', '(int64_t)0')
         # open(path, mode)
         fn_type,   fn_val   = self.lower_expr(node.args[0])
         mode_type, mode_val = self.lower_expr(node.args[1])
@@ -18482,6 +18487,8 @@ class GimpleGen:
             return []  # imports are resolved at module scope; no-op in generators
         if isinstance(s, FunctionDef):
             return []  # nested function definitions are compiled separately
+        if isinstance(s, DelStmt):
+            return []  # del on a generator local is a no-op (compile-time)
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
@@ -19230,10 +19237,14 @@ class GimpleGen:
             param_ctypes.append(('self', f"{struct_name} *"))
             fn_params = fn_params[1:]
         for pn, pt in fn_params:
+            if pn.startswith('**'):
+                # **kwargs: represent as a MojoDict* of keyword args
+                param_ctypes.append((pn[2:], 'MojoDict *'))
+                continue
             if pn.startswith('*'):
-                raise _UnsupportedGeneratorShape(
-                    f"{fn.name}: *args/**kwargs parameters not supported "
-                    "for compiled generators")
+                # *args: represent as a MojoList* of positional args
+                param_ctypes.append((pn[1:], 'MojoList *'))
+                continue
             ctype = self._param_ctype(pn, pt, fn)
             if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
                              'MojoDict *', 'MojoSet *'):
