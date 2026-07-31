@@ -2406,8 +2406,24 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if known is not None and e.func.name in known:
             return known[e.func.name]
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
-        # `.format(...)` on a string literal (e.g. compileall.py's
-        # `print('Listing {!r}...'.format(dir))`) — mirrored from the
+        # Module-attribute call type inference: os.path.join → char* (the
+        # GIMPLE path's `os.path.*` handling types these as char*), math
+        # isnan/isinf/isfinite → _Bool. Without this, a local assigned from
+        # one in a generator body defaulted to int64_t and a later use as a
+        # string (yield, concat, subscript) emitted invalid C++.
+        if (isinstance(e.func.obj, MemberExpr)
+                and isinstance(e.func.obj.obj, IdentExpr)
+                and e.func.obj.obj.name == 'os' and e.func.obj.member == 'path'):
+            if e.func.member in ('join', 'basename', 'dirname', 'split', 'splitext',
+                                 'normpath', 'abspath', 'realpath'):
+                return 'char *'
+        if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'math':
+            if e.func.member in ('isnan', 'isinf', 'isfinite', 'isclose'):
+                return '_Bool'
+            if e.func.member in ('floor', 'ceil', 'fabs', 'sqrt', 'log', 'log10',
+                                 'exp', 'sin', 'cos', 'tan', 'fsum'):
+                return 'double'
+        # `.format(...)` on a string literal (e.g. compileall.py's        # `print('Listing {!r}...'.format(dir))`) — mirrored from the
         # ordinary GIMPLE path's identical `_lower_string_method_call`
         # stub, which types `.format()`/`.encode()`/`.decode()` as
         # char* (see _stub_result's docstring: a diagnosed stub, not a
@@ -18044,6 +18060,33 @@ class GimpleGen:
                 if e.func.member == 'format' and isinstance(e.func.obj, StringLiteral):
                     _debug_note('stubbed operation', 'generator-body str.format()')
                     return self._cpp_expr(e.func.obj)
+                # Known module-attribute calls — a module global object
+                # (os.path / math / sys, each an int64_t MojoDict* in this
+                # body model) followed by a STATICALLY-KNOWN member function.
+                # Mirrors the GIMPLE path's own os.path.* / math.* lowering:
+                # the module object itself is never dereferenced, the member
+                # call maps straight onto a runtime helper / math.h function.
+                # Without this, `os.path.join(a, b)` / `math.isnan(x)` emit
+                # as `_root_globals.os.path.join(...)` — invalid C++.
+                if isinstance(e.func.obj, MemberExpr) \
+                        and isinstance(e.func.obj.obj, IdentExpr) \
+                        and e.func.obj.obj.name == 'os' and e.func.obj.member == 'path':
+                    a = [self._cpp_expr(x) for x in e.args]
+                    if e.func.member == 'join' and len(a) >= 1:
+                        # os.path.join(a, b, ...) → nested mojo_path_join
+                        acc = a[0]
+                        for nxt in a[1:]:
+                            acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
+                        return acc
+                if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'math':
+                    a = [self._cpp_expr(x) for x in e.args]
+                    if e.func.member in ('isnan', 'isinf', 'floor', 'ceil', 'fabs',
+                                         'sqrt', 'log', 'log10', 'exp', 'sin',
+                                         'cos', 'tan', 'fsum', 'isfinite') and a:
+                        return f"std::{e.func.member}((double)({a[0]}))"
+                    if e.func.member == 'isclose' and len(a) >= 2:
+                        return (f"std::abs((double)({a[0]}) - (double)({a[1]})) "
+                                f"< 1e-9")
                 # self.method(...) → self->method(...)  (struct pointer receiver)
                 if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'self' \
                         and getattr(self, '_cpp_gen_self_struct', None):
@@ -18847,31 +18890,31 @@ class GimpleGen:
             # (index, value) pairs, each unpacked into a plain int64_t local).
             # Lowered as an indexed loop over the underlying list, assigning
             # the counter to the first target and each element to the second.
+            # Any OTHER tuple-target shape falls through to the string-target
+            # path below (which range-fors over the whole tuple-as-identifier,
+            # or refuses honestly) — unchanged from the pre-enumerate behavior.
             _names = [t.strip() for t in target[1:-1].split(',') if t.strip()]
-            if len(_names) != 2 or not (isinstance(s.iterable, CallExpr)
+            if len(_names) == 2 and (isinstance(s.iterable, CallExpr)
                     and isinstance(s.iterable.func, IdentExpr)
-                    and s.iterable.func.name == 'enumerate'):
-                raise _UnsupportedGeneratorShape(
-                    "unsupported tuple-target for-loop (only "
-                    "`for (a, b) in enumerate(iterable):` is supported)")
-            _src = self._cpp_expr(s.iterable.args[0]) if s.iterable.args else '0'
-            _names = [_n[1:] if _n.startswith('(') and _n.endswith(')') else _n
-                      for _n in _names]
-            _ctr = self._cpp_fresh_name("_mg_i")
-            lines = []
-            for _nm in _names:
-                if _nm not in declared:
-                    declared[_nm] = 'int64_t'
-                    lines.append(f"{indent}int64_t {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                         f"{_ctr} < mojo_list_len((MojoList *)({_src})); {_ctr}++) {{")
-            lines.append(f"{indent}    {_names[0]} = {_ctr};")
-            lines.append(f"{indent}    {_names[1]} = "
-                         f"mojo_list_get_int((MojoList *)({_src}), {_ctr});")
-            for inner in s.body:
-                lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
-            return lines
+                    and s.iterable.func.name == 'enumerate'
+                    and s.iterable.args):
+                _src = self._cpp_expr(s.iterable.args[0])
+                _ctr = self._cpp_fresh_name("_mg_i")
+                lines = []
+                for _nm in _names:
+                    if _nm not in declared:
+                        declared[_nm] = 'int64_t'
+                        lines.append(f"{indent}int64_t {_nm};")
+                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                             f"{_ctr} < mojo_list_len((MojoList *)({_src})); {_ctr}++) {{")
+                lines.append(f"{indent}    {_names[0]} = {_ctr};")
+                lines.append(f"{indent}    {_names[1]} = "
+                             f"mojo_list_get_int((MojoList *)({_src}), {_ctr});")
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
+            target = target[1:-1]
         if isinstance(target, str):
             target_was_declared = target in declared
             declared[target] = 'int64_t'
