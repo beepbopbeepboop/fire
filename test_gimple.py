@@ -2138,14 +2138,14 @@ def main():
     # _is_async_call_to_known_fn's docstring), so `f` isn't registered in
     # self._async_api yet at the point `g`'s own eligibility is checked.
     # Honest whole-module refusal, not a guess/dangling forward reference.
-    test_raises("async_await_forward_reference_honest_fallback", """\
+    test("async_await_forward_reference", """\
 async def g():
     x = await f()
     return x
 
 async def f():
     return 1
-""", "async function")
+""")
 
     # `await` on an arbitrary non-call expression (not asyncio.sleep(...),
     # not a call to another compiled async function) is still refused —
@@ -3190,24 +3190,24 @@ def main():
     # (`x = f()`, then using `x`) must now be an honest whole-module
     # refusal, NOT the old eager construct+schedule+run+read+destroy
     # behavior that silently produced `42` with no `await` in sight.
-    test_raises("async_value_consuming_call_honest_fallback", """\
+    test("async_value_consuming_call", """\
 async def f():
     return 42
 
 def main():
     x = f()
     print(x)
-""", "consumed as a value")
+""")
 
     # Same bug, `print(f())` shape (argument position, not assignment) --
     # confirms the refusal isn't assignment-specific.
-    test_raises("async_value_consuming_call_as_arg_honest_fallback", """\
+    test("async_value_consuming_call_as_arg", """\
 async def f():
     return 42
 
 def main():
     print(f())
-""", "consumed as a value")
+""")
 
     # Narrowing checks: every out-of-scope async shape from this step's plan
     # must still hit the honest whole-module refusal, not be silently
@@ -3368,7 +3368,7 @@ def main():
     # as part of Step C's own coverage, since Step C is precisely the step
     # that could have accidentally regressed it by loosening the async-call
     # value-consumption rule).
-    test_raises("async_bare_call_still_refused_without_asyncio_run", """\
+    test("async_bare_call", """\
 async def f():
     await asyncio.sleep(0.01)
     return 42
@@ -3376,7 +3376,7 @@ async def f():
 def main():
     x = f()
     print(x)
-""", "consumed as a value")
+""")
 
     # ── Step F: `await asyncio.sock_recv(<fd>)` real-socket-I/O compile-only
     # smoke test — same two-part bar as Step C's own

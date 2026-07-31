@@ -11212,39 +11212,22 @@ class GimpleGen:
         # Step B (revised — see bugs/CODEGEN_compiled_async_eager_execution_
         # semantic_mismatch.md): `f()` where `f` is a supported compiled
         # async function, with its result actually CONSUMED as a value
-        # (assigned, passed as an argument, printed, ...). Step B's first
-        # cut fused construct+schedule+run+read+destroy into this one
-        # expression's lowering — independently hand-verified against real
-        # CPython to be a genuine semantic bug: calling an async function
-        # NEVER runs its body immediately in real Python (or in this
-        # project's own interpreter's MojoCoroutine) — it only produces a
-        # not-yet-started coroutine object; getting a value out requires an
-        # explicit drive mechanism (`await`, or a top-level run driver),
-        # neither of which this codegen has yet. Rather than inventing an
-        # awkward partial "run it anyway" mechanism here, this step's scope
-        # is narrowed instead (the bug writeup's option (a)): the ONLY
-        # supported shape for a call to an async function is a bare,
-        # value-DISCARDING statement (`f()` alone — see
-        # _gen_stmt_ExprStmt's own async special case, which constructs and
-        # destroys WITHOUT ever scheduling it, so the body genuinely never
-        # runs). Any attempt to consume the result as a value — reached
-        # here — has no correct lowering yet, so this is an honest
-        # whole-module refusal instead of ever eagerly executing. Real
-        # `await`-driven consumption is deferred to the next step.
+        # (assigned, passed as an argument, ...). Calling an async function
+        # NEVER runs its body — it produces a not-yet-started coroutine
+        # object (real Python semantics; this project's own interpreter's
+        # MojoCoroutine matches). The correct lowering is therefore to
+        # CONSTRUCT the coroutine handle ({base}_start) and return it as a
+        # first-class MojoAsync* value — the body never runs until/unless
+        # something later drives it (await / a top-level driver). Used for
+        # real by types.py's metaprogramming idiom
+        # `async def _c(): pass; _c = _c()` (a coroutine object created for
+        # type(_c)/.close() without ever being run).
         if fname_raw in self._async_api:
-            raise RuntimeError(
-                "cannot compile module: call to async function "
-                f"{fname_raw!r} whose result is consumed as a value "
-                "(assigned, passed as an argument, printed, or otherwise "
-                "used) — this codegen has no `await`/top-level-run "
-                "mechanism yet to actually drive an async call to "
-                "completion, so eagerly running the coroutine here would "
-                "be semantically wrong (real Python never runs an async "
-                "function's body just from calling it — only `await` or "
-                "an explicit top-level driver does); only a bare, "
-                "value-discarding call (`f()` as its own statement) is "
-                "supported by this step — falling back to interpreting "
-                "this module from source instead")
+            api = self._async_api[fname_raw]
+            arg_pairs = [self.lower_expr(a) for a in node.args]
+            handle = self._call_expr('MojoAsync *', f"{api['base']}_start", arg_pairs)
+            self._async_var_api[handle] = api
+            return 'MojoAsync *', handle
         # next(g) where `g` is (or holds) a MojoGenerator* — the compiled-
         # generator "first-class value" gap (bugs/CODEGEN_compiled_generator_
         # not_first_class_value.md, second failure): previously `next` had NO
@@ -18759,6 +18742,15 @@ class GimpleGen:
         elif isinstance(val, IdentExpr) and self._is_exc_class_name(val.name):
             exc_name = val.name
         if exc_name is None:
+            # `raise e` where e is a handler-bound exception variable
+            # (bound as char* message in the handler body): throw a fresh
+            # _MojoCppExc carrying that message, so `except X: ... raise e
+            # from None` re-raises the specific caught exception rather than
+            # refusing the whole generator.
+            if isinstance(val, IdentExpr):
+                msg_cpp = self._cpp_expr(val)
+                return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
+                        f"(void *){msg_cpp} }};"]
             raise _UnsupportedGeneratorShape(
                 "unsupported `raise` value expression in generator body "
                 "(only `raise ExcName(...)`/`raise ExcName` with a "
@@ -22786,6 +22778,31 @@ class GimpleGen:
             _async_fns.pop(id(s), None)
             _generator_fns.pop(id(s), None)
 
+        # Second pass for async generators not in top-level stmts (nested in
+        # module-scope if/else/try bodies — types.py's `async def _ag():
+        # yield` inside an `except ImportError:` handler).
+        if _async_fns:
+            for _gm_id, s in list(_async_fns.items()):
+                if _gm_id not in _generator_fns:
+                    continue
+                if not _async_gen_quick_eligible(s, frozenset(self._async_api.keys())):
+                    continue
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = \
+                        self._gen_cpp_async_generator_unit(s)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'async generator {s.name!r} not eligible '
+                                '(pass 2)', e)
+                    continue
+                self._supported_async_gen[s.name] = s
+                self._async_gen_api[s.name] = {
+                    'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                }
+                self.func_param_types[f"{base}_start"] = param_ctypes
+                self._generator_cpp_units.append(cpp_text)
+                _async_fns.pop(_gm_id, None)
+                _generator_fns.pop(_gm_id, None)
+
         # ── Step B: compiled-async-function eligibility/compile attempt ────
         # Same shape as the generator loop just above (run this late, after
         # the cross-call scalar-contract inference, for the identical reason
@@ -22822,6 +22839,32 @@ class GimpleGen:
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
             _async_fns.pop(id(s), None)
+
+        # Second pass for async functions NOT in top-level stmts (nested in
+        # if/else/try bodies at module scope — e.g. types.py's `async def
+        # _c(): pass` inside an `except ImportError:` handler). Iterate
+        # _async_fns directly, mirroring the generator multi-pass.
+        if _async_fns:
+            for _gm_id, s in list(_async_fns.items()):
+                if _gm_id in _generator_fns:
+                    continue  # async generator — separate path
+                s.body = self._inline_single_use_task_composition(s.body)
+                self._normalize_await_kwargs(s.body)
+                if not _async_quick_eligible(s, frozenset(self._async_api.keys())):
+                    continue
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_async_unit(s)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'async function {s.name!r} not eligible '
+                                '(pass 2)', e)
+                    continue
+                self._supported_async[s.name] = s
+                self._async_api[s.name] = {
+                    'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                }
+                self.func_param_types[f"{base}_start"] = param_ctypes
+                self._generator_cpp_units.append(cpp_text)
+                _async_fns.pop(_gm_id, None)
 
         # Step I (create_task/Task/TaskGroup/RaisingTask project): async
         # functions NESTED inside an ordinary top-level function's own body
