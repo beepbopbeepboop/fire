@@ -18840,6 +18840,38 @@ class GimpleGen:
         Lowers to a C++ range-for or indexed loop over the iterable.
         Only supports iterable as a simple identifier or call expression."""
         target = s.target
+        if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
+            # `for (a, b) in enumerate(iterable):` — tuple-unpack loop target
+            # (statistics.py's `for n, x in enumerate(iterable, start=1):`,
+            # the one shape this scalar body model supports: enumerate's
+            # (index, value) pairs, each unpacked into a plain int64_t local).
+            # Lowered as an indexed loop over the underlying list, assigning
+            # the counter to the first target and each element to the second.
+            _names = [t.strip() for t in target[1:-1].split(',') if t.strip()]
+            if len(_names) != 2 or not (isinstance(s.iterable, CallExpr)
+                    and isinstance(s.iterable.func, IdentExpr)
+                    and s.iterable.func.name == 'enumerate'):
+                raise _UnsupportedGeneratorShape(
+                    "unsupported tuple-target for-loop (only "
+                    "`for (a, b) in enumerate(iterable):` is supported)")
+            _src = self._cpp_expr(s.iterable.args[0]) if s.iterable.args else '0'
+            _names = [_n[1:] if _n.startswith('(') and _n.endswith(')') else _n
+                      for _n in _names]
+            _ctr = self._cpp_fresh_name("_mg_i")
+            lines = []
+            for _nm in _names:
+                if _nm not in declared:
+                    declared[_nm] = 'int64_t'
+                    lines.append(f"{indent}int64_t {_nm};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len((MojoList *)({_src})); {_ctr}++) {{")
+            lines.append(f"{indent}    {_names[0]} = {_ctr};")
+            lines.append(f"{indent}    {_names[1]} = "
+                         f"mojo_list_get_int((MojoList *)({_src}), {_ctr});")
+            for inner in s.body:
+                lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
         if isinstance(target, str):
             target_was_declared = target in declared
             declared[target] = 'int64_t'
@@ -18885,6 +18917,37 @@ class GimpleGen:
             except _UnsupportedGeneratorShape:
                 iter_expr = None
             if iter_expr is not None:
+                # `for x in <identifier>` where the identifier is a
+                # CONTAINER-typed local/param (declared int64_t — this
+                # scalar body model boxes MojoList* as int64_t) but the body
+                # iterates it (locale.py's `_grouping_intervals(grouping)`
+                # `for interval in grouping:`, statistics.py's
+                # `_fail_neg(values)` `for x in values:`): range-for over an
+                # int64_t doesn't compile. Emit an indexed loop over the
+                # list's elements (mojo_list_len / mojo_list_get_int), the
+                # same element protocol a `yield from`-over-list already
+                # uses. Only fires when the iterable is a bare identifier
+                # (so `for x in <call>()`'s generator delegation is
+                # untouched) whose declared type is the boxed-int64_t
+                # container convention.
+                if (isinstance(s.iterable, IdentExpr)
+                        and self._cpp_declared is not None
+                        and s.iterable.name in self._cpp_declared
+                        and self._cpp_declared[s.iterable.name] == 'int64_t'):
+                    _itname = s.iterable.name
+                    _ctr = self._cpp_fresh_name("_mg_i")
+                    lines = []
+                    if not target_was_declared:
+                        lines.append(f"{indent}int64_t {target};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                 f"{_ctr}++) {{")
+                    lines.append(f"{indent}    {target} = "
+                                 f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
+                    for inner in s.body:
+                        lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
+                    return lines
                 if s.else_body:
                     # for/else: the else body runs only when the loop
                     # completes WITHOUT a `break` — mirror _cpp_stmt's
@@ -23024,7 +23087,9 @@ class GimpleGen:
         # Imports nested inside module-scope try/if bodies (`try: import
         # winreg as _winreg` — mimetypes.py's own shape; a `try:` around a
         # platform-specific import) are module globals too, but the flat scan
-        # above misses them. Walk one level of try/if bodies.
+        # above misses them. Also collect module-level ASSIGNMENTS nested in
+        # try/if bodies (locale.py's `except ImportError: CHAR_MAX = 127`
+        # fallback constants). Walk one level of try/if bodies.
         def _scan_cpp_nested_imports(stmt_list):
             for _gi in stmt_list:
                 if isinstance(_gi, (ImportStmt, FromImportStmt)):
@@ -23034,10 +23099,14 @@ class GimpleGen:
                     else:
                         for _nm in getattr(_gi, 'names', []) or []:
                             self._cpp_early_global_names.add(_nm)
+                elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
+                    self._cpp_early_global_names.add(_gi.target.name)
                 elif isinstance(_gi, TryStmt):
                     _scan_cpp_nested_imports(_gi.body or [])
                     for _h in (_gi.handlers or []):
                         _scan_cpp_nested_imports(getattr(_h, 'body', []) or [])
+                    if isinstance(getattr(_gi, 'finally_body', None), list):
+                        _scan_cpp_nested_imports(_gi.finally_body)
                 elif isinstance(_gi, IfStmt):
                     _scan_cpp_nested_imports(_gi.then_body or [])
                     if isinstance(_gi.else_body, list):
