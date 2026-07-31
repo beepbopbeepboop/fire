@@ -186,113 +186,116 @@ class ModuleLoader:
 
             exports = {}
 
+            def _scan_source(src_content):
+                """Extract fn/def exports from Mojo source text into exports dict."""
+                for line in src_content.split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    # Match 'fn name(...) -> Type:' or 'fn name(...)'
+                    if line.startswith('fn ') or line.startswith('def '):
+                        # Remove 'fn ' or 'def '
+                        is_fn = line.startswith('fn ')
+                        sig = line[3:] if is_fn else line[4:]
+
+                        # Extract function name and parameters
+                        if '(' not in sig or ')' not in sig:
+                            continue
+
+                        paren_start = sig.index('(')
+                        paren_end = sig.rindex(')')
+
+                        name_part = sig[:paren_start].strip()
+                        name = name_part.split()[-1] if name_part else ''
+                        # Strip generic parameters (e.g.,
+                        # 'listdir[PathLike]' → 'listdir')
+                        if '[' in name:
+                            name = name.split('[')[0]
+                        params_str = sig[paren_start + 1:paren_end].strip()
+
+                        if not name:
+                            continue
+
+                        # Extract return type
+                        return_type = 'int'  # default
+                        if '->' in sig:
+                            after_arrow = sig.split('->')[-1].split(':')[0].strip()
+                            return_type = after_arrow if after_arrow else 'int'
+
+                        # Extract parameters as list of (name, type) tuples
+                        _MOJO_PARAM_MODS = {'var', 'owned', 'inout', 'borrowed', 'mut',
+                                            'ref', 'out', 'copy', 'read', 'write'}
+                        parameters = []
+                        if params_str:
+                            for param in params_str.split(','):
+                                param = param.strip()
+                                if ':' in param:
+                                    param_name, param_type = param.split(':', 1)
+                                    # Strip Mojo mutability keywords from parameter name
+                                    words = param_name.strip().split()
+                                    words = [w for w in words if w not in _MOJO_PARAM_MODS]
+                                    param_name = words[-1] if words else '_p'
+                                    param_type = param_type.strip()
+                                    parameters.append((param_name, param_type))
+
+                        # Build C signature from extracted info
+                        c_return_type = self._mojo_type_to_c(return_type)
+                        c_params = []
+                        for pname, ptype in parameters:
+                            # Strip default values (e.g., 'String = ""' becomes 'String')
+                            if '=' in ptype:
+                                bare_type = ptype.split('=')[0].strip()
+                            else:
+                                bare_type = ptype
+                            c_type = self._mojo_type_to_c(bare_type)
+                            # A named parameter can never be typed 'void' in C
+                            # (only the sole, unnamed '(void)' no-args marker is
+                            # legal) -- e.g. a parameter annotated `: None`
+                            # resolves to 'void' via _mojo_type since that's the
+                            # correct RETURN-type mapping for NoneType, but is
+                            # invalid here. Box it the same way gimple_codegen.py's
+                            # own _param_ctype already does for the exact same
+                            # case ("A named PARAMETER can never be typed void").
+                            if c_type == 'void':
+                                c_type = 'int64_t'
+                            c_params.append(f"{c_type} {pname}")
+
+                        if name in exports:
+                            existing = exports[name]
+                            existing['signature'] = f"{existing['c_return_type']} {name} (...)"
+                            existing['c_parameters'] = []
+                            existing['parameters'] = []
+                            existing['variadic'] = True
+                            continue
+
+                        c_param_str = ', '.join(c_params) if c_params else 'void'
+                        c_signature = f"{c_return_type} {name} ({c_param_str})"
+
+                        exports[name] = {
+                            'return_type': return_type,
+                            'parameters': parameters,
+                            'c_return_type': c_return_type,
+                            'c_parameters': c_params,
+                            'signature': c_signature,
+                        }
+
             # Extract function definitions with full signatures
-            for line in content.split('\n'):
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
+            _scan_source(content)
 
-                # Match 'fn name(...) -> Type:' or 'fn name(...)'
-                if line.startswith('fn ') or line.startswith('def '):
-                    # Remove 'fn ' or 'def '
-                    is_fn = line.startswith('fn ')
-                    sig = line[3:] if is_fn else line[4:]
-
-                    # Extract function name and parameters
-                    if '(' not in sig or ')' not in sig:
-                        continue
-
-                    paren_start = sig.index('(')
-                    paren_end = sig.rindex(')')
-
-                    name_part = sig[:paren_start].strip()
-                    name = name_part.split()[-1] if name_part else ''
-                    params_str = sig[paren_start + 1:paren_end].strip()
-
-                    if not name:
-                        continue
-
-                    # Extract return type
-                    return_type = 'int'  # default
-                    if '->' in sig:
-                        after_arrow = sig.split('->')[-1].split(':')[0].strip()
-                        return_type = after_arrow if after_arrow else 'int'
-
-                    # Extract parameters as list of (name, type) tuples
-                    _MOJO_PARAM_MODS = {'var', 'owned', 'inout', 'borrowed', 'mut',
-                                        'ref', 'out', 'copy', 'read', 'write'}
-                    parameters = []
-                    if params_str:
-                        for param in params_str.split(','):
-                            param = param.strip()
-                            if ':' in param:
-                                param_name, param_type = param.split(':', 1)
-                                # Strip Mojo mutability keywords from parameter name
-                                words = param_name.strip().split()
-                                words = [w for w in words if w not in _MOJO_PARAM_MODS]
-                                param_name = words[-1] if words else '_p'
-                                param_type = param_type.strip()
-                                parameters.append((param_name, param_type))
-
-                    # Build C signature from extracted info
-                    c_return_type = self._mojo_type_to_c(return_type)
-                    c_params = []
-                    for pname, ptype in parameters:
-                        # Strip default values (e.g., 'String = ""' becomes 'String')
-                        if '=' in ptype:
-                            bare_type = ptype.split('=')[0].strip()
-                        else:
-                            bare_type = ptype
-                        c_type = self._mojo_type_to_c(bare_type)
-                        # A named parameter can never be typed 'void' in C
-                        # (only the sole, unnamed '(void)' no-args marker is
-                        # legal) -- e.g. a parameter annotated `: None`
-                        # resolves to 'void' via _mojo_type since that's the
-                        # correct RETURN-type mapping for NoneType, but is
-                        # invalid here. Box it the same way gimple_codegen.py's
-                        # own _param_ctype already does for the exact same
-                        # case ("A named PARAMETER can never be typed void").
-                        if c_type == 'void':
-                            c_type = 'int64_t'
-                        c_params.append(f"{c_type} {pname}")
-
-                    if name in exports:
-                        # Overloaded function: go fully variadic (bare `(...)`,
-                        # no leading typed param) so every call site — whatever
-                        # overload it actually resolves to — typechecks.
-                        #
-                        # This used to keep the FIRST overload's leading
-                        # parameter type (e.g. `(uint32_t uid, ...)`), which
-                        # looks more informative but is actively wrong: a call
-                        # site invoking a DIFFERENT overload (e.g.
-                        # `_getpw_macos(name: String)`, called with a char*)
-                        # got its argument force-coerced to that unrelated
-                        # first type — not just a cosmetic mismatch in the
-                        # extern text, since func_param_types (built from
-                        # c_parameters below) drives real call-site coercion
-                        # in _emit_call. A bare `(...)` gives c_parameters=[],
-                        # so _emit_call has no declared type to coerce
-                        # against and passes each argument through as its own
-                        # natural type — correct for whichever overload is
-                        # actually meant, instead of silently correct-looking
-                        # for only the first.
-                        existing = exports[name]
-                        existing['signature'] = f"{existing['c_return_type']} {name} (...)"
-                        existing['c_parameters'] = []
-                        existing['parameters'] = []
-                        existing['variadic'] = True
-                        continue
-
-                    c_param_str = ', '.join(c_params) if c_params else 'void'
-                    c_signature = f"{c_return_type} {name} ({c_param_str})"
-
-                    exports[name] = {
-                        'return_type': return_type,
-                        'parameters': parameters,
-                        'c_return_type': c_return_type,
-                        'c_parameters': c_params,
-                        'signature': c_signature,
-                    }
+            # Package fallback: when the primary source is __init__.mojo,
+            # also scan the same-named sibling file (common Mojo package
+            # pattern: std.os/__init__.mojo re-exports from os.mojo, etc.)
+            if path.endswith('__init__.mojo'):
+                pkg_dir = os.path.dirname(path)
+                base_name = os.path.basename(pkg_dir)
+                same_name_file = os.path.join(pkg_dir, f'{base_name}.mojo')
+                if os.path.isfile(same_name_file) and same_name_file != path:
+                    try:
+                        with open(same_name_file, 'r') as f:
+                            _scan_source(f.read())
+                    except Exception:
+                        pass
 
             self.loaded_modules[module_name] = exports
             return exports

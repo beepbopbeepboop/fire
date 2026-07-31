@@ -4339,28 +4339,61 @@ class GimpleGen:
                                 except Exception as e:
                                     _debug_note(f'cannot read module source {source!r}', e)
                                     msrc = ''
+                                _found = False
                                 if re.search(rf'\bstruct\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generic_structs.setdefault(sym, source)
+                                    _found = True
                                 elif re.search(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\[', msrc):
                                     self._imported_generics.setdefault(sym, source)
+                                    _found = True
                                 elif len(re.findall(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(', msrc)) > 1:
                                     self._imported_overloads.setdefault(sym, source)
+                                    _found = True
                                 elif re.search(rf'\bstruct\s+{re.escape(name)}\s*(\(|:)', msrc):
-                                    # A plain (non-generic) struct with no dylib
-                                    # to reflect off of — the whole module needs
-                                    # to be compiled and inlined the same way a
-                                    # do_imports=True build inlines everything,
-                                    # since there's no dylib to link its methods
-                                    # from. Queue the MODULE (not just this one
-                                    # struct) for a real _compile_imported_module
-                                    # pass in gen_module below — that's what
-                                    # actually generates method bodies, not just
-                                    # field-type registration. See BUG-2026-032:
-                                    # mojolib's cpp_parser/arena.mojo importing
-                                    # plain structs (IfStmt, IntegerLiteral, ...)
-                                    # from its sibling ast_nodes.mojo, neither on
-                                    # MOJO_PATH nor buildable as a dylib.
                                     self._link_inline_modules.add(stmt.module)
+                                    _found = True
+                                elif re.search(rf'\b(?:fn|def)\s+{re.escape(name)}\s*\(', msrc):
+                                    self._link_inline_modules.add(stmt.module)
+                                    _found = True
+                                # Package fallback: when the primary source is
+                                # __init__.mojo and the name wasn't found there,
+                                # search sibling .mojo files in the same package
+                                # directory (common Mojo package pattern:
+                                # __init__.mojo re-exports from sibling files
+                                # like os.mojo, dict.mojo, etc.).
+                                if not _found and source.endswith('__init__.mojo'):
+                                    _pkg_dir = os.path.dirname(source)
+                                    _name_re = re.escape(name)
+                                    if os.path.isdir(_pkg_dir):
+                                        for _sf in sorted(os.listdir(_pkg_dir)):
+                                            if (not _sf.endswith('.mojo')
+                                                    or _sf == '__init__.mojo'):
+                                                continue
+                                            _sibling = os.path.join(_pkg_dir, _sf)
+                                            try:
+                                                _smsrc = open(_sibling).read()
+                                            except Exception:
+                                                continue
+                                            if re.search(rf'\bstruct\s+{_name_re}\s*\[', _smsrc):
+                                                self._imported_generic_structs.setdefault(sym, _sibling)
+                                                _found = True
+                                                break
+                                            elif re.search(rf'\b(?:fn|def)\s+{_name_re}\s*\[', _smsrc):
+                                                self._imported_generics.setdefault(sym, _sibling)
+                                                _found = True
+                                                break
+                                            elif len(re.findall(rf'\b(?:fn|def)\s+{_name_re}\s*\(', _smsrc)) > 1:
+                                                self._imported_overloads.setdefault(sym, _sibling)
+                                                _found = True
+                                                break
+                                            elif re.search(rf'\bstruct\s+{_name_re}\s*(\(|:)', _smsrc):
+                                                self._link_inline_modules.add(stmt.module)
+                                                _found = True
+                                                break
+                                            elif re.search(rf'\b(?:fn|def)\s+{_name_re}\s*\(', _smsrc):
+                                                self._link_inline_modules.add(stmt.module)
+                                                _found = True
+                                                break
                             continue
                         if sym in seen:
                             continue
