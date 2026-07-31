@@ -2391,6 +2391,16 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return 'char *'
         if known is not None and e.func.name in known:
             return known[e.func.name]
+    if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
+        # `.format(...)` on a string literal (e.g. compileall.py's
+        # `print('Listing {!r}...'.format(dir))`) — mirrored from the
+        # ordinary GIMPLE path's identical `_lower_string_method_call`
+        # stub, which types `.format()`/`.encode()`/`.decode()` as
+        # char* (see _stub_result's docstring: a diagnosed stub, not a
+        # silent wrong answer). Without this, the print() argument-type
+        # check above would refuse the whole generator.
+        if e.func.member == 'format':
+            return 'char *'
     if isinstance(e, SliceExpr):
         return 'char *'  # string slice produces a string
     if isinstance(e, SubscriptExpr):
@@ -17929,6 +17939,14 @@ class GimpleGen:
         if isinstance(e, CallExpr):
             # Simple function call in generator body (e.g. os.path.join(a, b))
             if isinstance(e.func, MemberExpr):
+                # `.format(...)` on a string literal — mirrors the GIMPLE
+                # path's _lower_string_method_call stub (returns the format
+                # string itself, diagnosed via _debug_note; the interpolation
+                # isn't performed). compileall.py's `print('Listing
+                # {!r}...'.format(dir))` shape.
+                if e.func.member == 'format' and isinstance(e.func.obj, StringLiteral):
+                    _debug_note('stubbed operation', 'generator-body str.format()')
+                    return self._cpp_expr(e.func.obj)
                 # self.method(...) → self->method(...)  (struct pointer receiver)
                 if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'self' \
                         and getattr(self, '_cpp_gen_self_struct', None):
@@ -18251,7 +18269,7 @@ class GimpleGen:
                         "_Bool/char* expression")
                 arg_expr = self._cpp_expr(s.value.args[0])
                 fmt = {'int64_t': '"%lld\\n"', 'double': '"%g\\n"',
-                       '_Bool': '"%s\\n"'}[arg_ctype]
+                       '_Bool': '"%s\\n"', 'char *': '"%s\\n"'}[arg_ctype]
                 if arg_ctype == 'int64_t':
                     return [f"{indent}printf({fmt}, (long long){arg_expr});"]
                 if arg_ctype == '_Bool':
