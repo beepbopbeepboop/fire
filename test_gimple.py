@@ -2935,6 +2935,28 @@ def main():
 
     test_generator_returned_from_function_compiles_via_cpp_path()
 
+    # A `for` loop over a generator whose body does `in`/`not in` membership
+    # tests — bugs/CODEGEN_compiled_generator_not_first_class_value.md-adjacent
+    # .cpp emission. Python's `in`/`not in` operators are NOT emitted as infix
+    # tokens in the C++20-coroutine body (that would spell Python keywords
+    # `in`/`not in` directly into C++ — invalid: `not` is a C++ keyword and
+    # `in` is not an operator). The .cpp CompareChain lowers them through the
+    # same mojo_str_contains / mojo_list_contains_* helpers the GIMPLE path
+    # uses, gated on the container's declared C++ type. `'\0' in s` / `'\0'
+    # not in s` on a char * haystack is the exact shape that lit up mimetypes.py
+    # (`if '\\0' not in ctype`).
+    test("generator_in_not_in_membership_compiles_via_cpp_path", """\
+def gen(s):
+    if 'a' in s:
+        yield 1
+    if 'z' not in s:
+        yield 2
+
+def main():
+    for x in gen("abracadabra"):
+        print(x)
+""")
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

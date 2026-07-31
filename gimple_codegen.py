@@ -2826,6 +2826,22 @@ def _c_field_name(name: str) -> str:
     return safe
 
 
+# Opaque runtime struct types whose `X *` form is a real, forward-declared C++
+# type this compiler emits (so a module-global annotated with one — e.g.
+# `x: MojoDict = {}` — can be typed as a pointer to it in a globals struct).
+# A `X *` whose basename X is none of these AND not a user-defined mojo `struct`
+# (checked against self.struct_field_types at the call site) is an opaque
+# Python CLASS used only as a type annotation — emitting `X field;` would be
+# an undeclared type — so such globals are forced to `void *`. See
+# GimpleGen._cpp_known_ptr_struct.
+_CPP_OPAQUE_PTR_STRUCTS = frozenset({
+    'MojoList', 'MojoDict', 'MojoSet', 'MojoStr', 'MojoStrIter',
+    'MojoListIter', 'MojoDictIter', 'MojoSetIter',
+    'MojoGenerator', 'MojoAsync', 'MojoBoundMethod', 'PyObject',
+    'MojoCompletedProcess', 'MojoFileHandle',
+})
+
+
 def _import_targets(node) -> list:
     """All `(module, alias)` targets of an ImportStmt: the primary
     `node.module`/`node.alias` plus every extra comma-separated target from
@@ -17965,6 +17981,96 @@ class GimpleGen:
     # _UnsupportedGeneratorShape, which gen_module's pre-pass catches to fall
     # back to the existing honest whole-module refusal.
 
+    def _cpp_declared_type(self, node) -> str | None:
+        """C++ type of a node for `in`/`not in` dispatch, when it is a plain
+        local/param the coroutine-body `declared` map tracks (set on
+        self._cpp_declared by _cpp_stmt before emitting body statements).
+        Returns None for anything the body model can't statically type."""
+        if isinstance(node, IdentExpr):
+            if self._cpp_declared is not None:
+                return self._cpp_declared.get(node.name)
+        # A subscript of a known-typed container keeps the element type
+        # (e.g. a str/bytes element indexed off a char* stays char *).
+        if isinstance(node, SubscriptExpr) and isinstance(node.obj, IdentExpr):
+            bt = self._cpp_declared_type(node.obj)
+            if bt == 'char *':
+                return 'char'
+        return None
+
+    def _cpp_known_ptr_struct(self, g_mtype: str) -> bool:
+        """True iff `g_mtype` like `_DeprecatedGenericAlias *` references a real
+        opaque struct this translation unit declares — i.e. a runtime opaque
+        type in _CPP_OPAQUE_PTR_STRUCTS, or a user-defined mojo `struct` whose
+        typedef this compiler emitted (tracked in self.struct_field_types). A
+        `X *` whose basename is neither is an opaque Python CLASS used only as
+        a type annotation (typing._DeprecatedGenericAlias, etc.); emitting `X
+        field;` in the globals struct would be an undeclared-type compile error,
+        so callers force such fields to `void *` instead. Used during the
+        globals-struct assembly in gen_module."""
+        base = g_mtype
+        if base.endswith(' *'):
+            base = base[:-2]
+        base = base.strip().lstrip('*').strip()
+        if base in _CPP_OPAQUE_PTR_STRUCTS:
+            return True
+        return base in self.struct_field_types
+
+    def _cpp_in_link(self, a: str, a_node, b: str, b_node, negate: bool) -> str:
+        """Lower `a in b` / `a not in b` for the C++20-coroutine generator body,
+        mirroring the GIMPLE path's _lower_in_dispatch (mojo_runtime.h
+        membership helpers) rather than emitting Python's `in`/`not in`
+        keyword text, which is invalid C++ (`not` is a keyword and `in` is not
+        an operator). `a` is the element/needle, `b` is the container/haystack
+        — exactly the operand order the runtime helpers take."""
+        bt = self._cpp_declared_type(b_node)
+        at = self._cpp_declared_type(a_node)
+        if bt == 'char *':
+            # substring/char membership: mojo_str_contains(haystack, needle)
+            # The needle must be a char * — a bare indexed char (mojo_str_char_at
+            # result, typed 'char') is widened to a 1-char string first, the
+            # same coercion the GIMPLE path applies (mojo_char_to_str).
+            if at == 'char':
+                needle = f"mojo_char_to_str((char)({a}))"
+            else:
+                needle = f"(char *)({a})"
+            res = f"mojo_str_contains((char *)({b}), {needle})"
+        elif bt == 'MojoStr *':
+            res = f"mojo_str_contains((char *)({b}), (char *)({a}))"
+        elif bt == 'MojoList *':
+            # mojo_list_contains_{int,double,str}; pick the suffix from the
+            # list's recorded element type when known, else fall back to a
+            # generic int probe (honest: wrong-typed elements compare unequal
+            # at runtime rather than miscompiling). Mirrors _lower_in_dispatch's
+            # list-element-type resolution.
+            elem = None
+            if self._cpp_declared is not None and isinstance(b_node, IdentExpr):
+                elem = self._elem_types.get(b_node.name)
+            if elem in ('double',):
+                res = f"mojo_list_contains_double((MojoList *)({b}), (double)({a}))"
+            elif elem == 'char *' or at == 'char *':
+                res = f"mojo_list_contains_str((MojoList *)({b}), (char *)({a}))"
+            else:
+                res = f"mojo_list_contains_int((MojoList *)({b}), (int64_t)({a}))"
+        elif bt == 'MojoSet *':
+            if at == 'char *' or (at and at.endswith('char')):
+                res = f"mojo_set_contains_str((MojoSet *)({b}), (char *)({a}))"
+            else:
+                res = f"mojo_set_contains_int((MojoSet *)({b}), (int64_t)({a}))"
+        elif bt == 'MojoDict *':
+            # dict membership is keyed by string (all dict keys are char * in
+            # the runtime) — `a in d` tests key presence.
+            res = f"mojo_dict_contains((MojoDict *)({b}), (char *)({a}))"
+        else:
+            # Honest stub: we can't statically resolve the container's C++ type
+            # here, so emit a conservative 0 (matches the GIMPLE path's
+            # `/* TODO: 'in' for {rt} */` fallback — the module still COMPILES,
+            # behavior is simply "not present", same as the documented stopgap).
+            _debug_note("stubbed 'in'", f"unknown container type {bt!r} for `in`")
+            res = "0"
+        if negate:
+            res = f"(!({res}))"
+        return f"({res})"
+
     def _cpp_expr(self, e) -> str:
         if isinstance(e, IntLiteral):
             return str(e.value)
@@ -18085,14 +18191,34 @@ class GimpleGen:
                 if _is_str_operand(e.left) and _is_str_operand(e.right):
                     return (f"mojo_str_cat((char *)({self._cpp_expr(e.left)}), "
                             f"(char *)({self._cpp_expr(e.right)}))")
+            if e.op in ('in', 'not in'):
+                # `'x' not in s` is parsed as a BinaryOp (mojo_compiler.py),
+                # not a CompareChain — so the CompareChain 'in'/'not in' branch
+                # above never fires for the overwhelmingly common single-membership
+                # test. Reuse the same runtime-helper dispatch
+                # (_cpp_in_link: mojo_str_contains / mojo_list_contains_* /
+                # mojo_dict_contains / mojo_set_contains_*), keyed on the right
+                # operand's declared C++ type. `not in` is the negation.
+                # Without this the raw `in`/`not in` text was emitted into C++
+                # (`not` is a C++ keyword, `in` is not an operator) — mimetypes.py's
+                # `if '\\0' not in ctype:` is the exact failure.
+                a = self._cpp_expr(e.left)
+                b = self._cpp_expr(e.right)
+                return self._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in'))
             op = _GD_BIN_OPS.get(e.op, e.op)
             return f"({self._cpp_expr(e.left)} {op} {self._cpp_expr(e.right)})"
         if isinstance(e, CompareChain):
             links = []
             for i, op in enumerate(e.ops):
-                a = self._cpp_expr(e.operands[i])
-                b = self._cpp_expr(e.operands[i + 1])
-                links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
+                a_node = e.operands[i]
+                b_node = e.operands[i + 1]
+                a = self._cpp_expr(a_node)
+                b = self._cpp_expr(b_node)
+                if op in ('in', 'not in'):
+                    links.append(self._cpp_in_link(a, a_node, b, b_node,
+                                                   negate=(op == 'not in')))
+                else:
+                    links.append(f"({a} {_GD_BIN_OPS.get(op, op)} {b})")
             return '(' + ' && '.join(links) + ')'
         if isinstance(e, DictExpr):
             pairs = [f"{{{self._cpp_expr(k)}, {self._cpp_expr(v)}}}" for k, v in e.pairs]
@@ -25540,10 +25666,12 @@ class GimpleGen:
                 # Otherwise default to int64_t for numeric types
                 if gname in self._global_c_decl_types:
                     c_type = self._global_c_decl_types[gname]
-                elif g_mtype and g_mtype.endswith(' *'):
+                elif g_mtype and g_mtype.endswith(' *') \
+                        and self._cpp_known_ptr_struct(g_mtype):
                     c_type = g_mtype
                 else:
-                    c_type = g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t'
+                    c_type = 'void *' if (g_mtype and g_mtype.endswith(' *')) else (
+                        g_mtype if g_mtype and g_mtype in ('MojoDict *', 'MojoList *', 'MojoSet *', 'char *') else 'int64_t')
                 # Find the initialization expression from stmts
                 init_code = '0'
                 for stmt in _collect_global_stmts(all_global_scan):
