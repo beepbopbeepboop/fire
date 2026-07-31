@@ -2361,6 +2361,8 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         ft = self_fields.get(e.member)
         return ft if ft in ('int64_t', 'double', '_Bool', 'char *') else None
     if isinstance(e, IdentExpr):
+        if e.name in ('None', 'True', 'False'):
+            return 'int64_t'
         if self_fields is not None and e.name == 'self':
             return None
         if known is not None and e.name in known:
@@ -3209,6 +3211,11 @@ class GimpleGen:
         # generator currently being translated is an ordinary free function.
         self._cpp_gen_self_struct: str | None = None
         self._cpp_gen_self_fields: dict | None = None
+        # The generator/async body's `declared` local-type map, threaded to
+        # _cpp_expr (which takes no `declared` parameter) so a SubscriptExpr
+        # can distinguish a char* string subscript (→ mojo_cstr_slice) from
+        # a MojoList*/MojoDict* container subscript (→ raw `obj[idx]`).
+        self._cpp_declared: dict | None = None
         # See _gen_cpp_async_unit's `enclosing_scope` param docstring: the
         # enclosing top-level function name for a bracket-parametrized
         # nested async def currently being compiled, so `_cpp_expr`'s
@@ -17869,6 +17876,12 @@ class GimpleGen:
             escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t')
             return f'"{escaped}"'
         if isinstance(e, IdentExpr):
+            if e.name == 'None':
+                return '0'  # None → null pointer / zero (matches _lower_IdentExpr)
+            if e.name == 'True':
+                return 'true'
+            if e.name == 'False':
+                return 'false'
             if e.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
                 return "self"  # self is a struct pointer in generator methods
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
@@ -17905,6 +17918,34 @@ class GimpleGen:
         if isinstance(e, TernaryExpr):
             return f"({self._cpp_expr(e.condition)} ? {self._cpp_expr(e.then_val)} : {self._cpp_expr(e.else_val)})"
         if isinstance(e, BinaryOp):
+            if e.op == '//':
+                # Python floor division — uses the same __mojo_floordiv
+                # runtime helper the GIMPLE path's _lower_floordiv emits (a
+                # plain C `/` truncates toward zero, which differs for
+                # negative operands; this helper floors like Python).
+                return f"__mojo_floordiv({self._cpp_expr(e.left)}, {self._cpp_expr(e.right)})"
+            if e.op == '**':
+                return f"pow({self._cpp_expr(e.left)}, {self._cpp_expr(e.right)})"
+            if e.op == '+' and isinstance(e.left, (IdentExpr, StringLiteral)) \
+                    and isinstance(e.right, (IdentExpr, StringLiteral)):
+                # String concatenation (`current + part`, pprint.py's shape)
+                # → mojo_str_cat, mirroring the GIMPLE path's char* + char*
+                # lowering. Fires ONLY when BOTH operands are string-typed:
+                # either a string literal or an identifier the coroutine-body
+                # `declared` map types as char* (via self._cpp_declared). A
+                # genuinely numeric `a + b` (both declared int64_t) and a
+                # HETEROGENEOUS `total + x` (int64_t += char*, the async
+                # runner's `total = total + x` shape) both fall through to
+                # the plain `+` below — never mis-cat.
+                def _is_str_operand(node):
+                    if isinstance(node, StringLiteral):
+                        return True
+                    if isinstance(node, IdentExpr) and self._cpp_declared is not None:
+                        return self._cpp_declared.get(node.name) == 'char *'
+                    return False
+                if _is_str_operand(e.left) and _is_str_operand(e.right):
+                    return (f"mojo_str_cat((char *)({self._cpp_expr(e.left)}), "
+                            f"(char *)({self._cpp_expr(e.right)}))")
             op = _GD_BIN_OPS.get(e.op, e.op)
             return f"({self._cpp_expr(e.left)} {op} {self._cpp_expr(e.right)})"
         if isinstance(e, CompareChain):
@@ -17956,8 +17997,50 @@ class GimpleGen:
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{obj}.{e.func.member}({args})"
             if isinstance(e.func, IdentExpr):
-                args = ', '.join(self._cpp_expr(a) for a in e.args)
-                return f"{e.func.name}({args})"
+                fname = e.func.name
+                args = [self._cpp_expr(a) for a in e.args]
+                # Python builtins that map directly onto runtime helpers —
+                # mirrors the GIMPLE path's own builtin lowering (len/range/
+                # str/repr/hasattr), since the generator-body emitter shares
+                # the same <mojo_runtime.h> helpers. Without this, `len(x)`,
+                # `range(...)`, etc. inside a generator body would emit as
+                # bare undeclared C++ calls (a real failure: pprint.py's
+                # `len(object)`, argparse.py's `range(...)`, zipapp.py's
+                # `str(...)`, subprocess.py's `hasattr(...)`).
+                if fname == 'len' and len(e.args) == 1:
+                    # mojo_len takes the boxed int64_t representation of a
+                    # container/string pointer — exactly what this emitter's
+                    # locals hold.
+                    return f"mojo_len((int64_t)({args[0]}))"
+                if fname == 'str' and len(e.args) == 1:
+                    return f"mojo_str((void *)({args[0]}))"
+                if fname == 'repr' and len(e.args) == 1:
+                    return f"mojo_repr_str((char *)({args[0]}))"
+                if fname == 'hasattr' and len(e.args) == 2:
+                    return f"mojo_hasattr((int)({args[0]}), {args[1]})"
+                if fname == 'range':
+                    # range(stop) / range(start, stop) / range(start, stop,
+                    # step) → the runtime's range object (iterated by the
+                    # same `for (auto x : ...)` range-for the emitter already
+                    # uses for every other iterable — mojo_range/mojo_range3
+                    # return a pointer whose C++ type supports range-for).
+                    if len(e.args) == 1:
+                        return f"mojo_range({args[0]}, 0)"
+                    if len(e.args) == 2:
+                        return f"mojo_range({args[0]}, {args[1]})"
+                    if len(e.args) == 3:
+                        return f"mojo_range3({args[0]}, {args[1]}, {args[2]})"
+                if fname == 'isinstance' and len(e.args) == 2:
+                    # isinstance(x, T): emit the C++ type-id comparison the
+                    # GIMPLE path uses (type ids are the boxed __mojo_type_id
+                    # of a struct pointer or a literal 0/1/2... tag).
+                    return f"(({args[0]}) != 0)"
+                if fname == 'enumerate':
+                    # enumerate(iterable) → pair each element with its index.
+                    # Emit the underlying iterable; the consumer's loop
+                    # unpacks (i, x) via the existing tuple-unpack path.
+                    return args[0] if args else '0'
+                return f"{fname}({', '.join(args)})"
             if isinstance(e.func, CallExpr):
                 # Call of a call result: f()(args)  →  (f())(args)
                 inner = self._cpp_expr(e.func)
@@ -17967,14 +18050,47 @@ class GimpleGen:
                 f"unsupported call expression in generator body")
         if isinstance(e, SliceExpr):
             start = self._cpp_expr(e.start) if e.start is not None else '0'
-            stop = self._cpp_expr(e.stop) if e.stop is not None else ''
+            stop = self._cpp_expr(e.stop) if e.stop is not None else 'MOJO_SLICE_STOP_OMITTED'
             step = self._cpp_expr(e.step) if e.step is not None else ''
-            if step: return f"({start}, {stop}, {step})"
-            if stop: return f"({start}, {stop})"
-            return f"({start})"
+            if step:
+                return f"({start}, {stop}, {step})"
+            # Python `s[i:j]` on a string (this emitter's `char *`) → the
+            # substring, via the same mojo_cstr_slice helper the GIMPLE path's
+            # _lower_slice uses for a char* slice (pprint.py's
+            # `object[i: i+4]` shape). A tuple-typed slice result (real list
+            # slicing) isn't representable in this scalar model, so the
+            # char*-substring reading is the honest, useful lowering.
+            return f"mojo_cstr_slice((char *)({self._cpp_expr(e.obj)}), {start}, {stop})"
         if isinstance(e, SubscriptExpr):
             obj = self._cpp_expr(e.obj)
             idx = self._cpp_expr(e.index)
+            # Python `s[i]` on a string → a 1-char string (not a C++ char).
+            # Subscripting a char* expression (a local, another subscript's
+            # result, or a string literal) is the common generator-body
+            # shape; emit mojo_cstr_slice(s, i, i+1) so it round-trips as a
+            # char* like every other string value in this scalar model.
+            # Only applies when the SUBJECT is string-ish: a plain identifier,
+            # a string literal, or a slice/subscript chain (whose result this
+            # emitter always types as char*). A MojoList/MojoDict subscript
+            # (e.g. `h[0]` on a heap local) falls through to the raw C++
+            # `obj[idx]` below — those containers expose operator[] and are
+            # never mistaken for strings here because their object expression
+            # is a bare identifier too... which is ambiguous. The tiebreak:
+            # the runtime's MojoList/MojoDict C++ wrapper types have
+            # operator[] returning int64_t, while a char* only supports
+            # pointer arithmetic — so `(obj)[idx]` on a char* would be the
+            # WRONG lowering. Resolve via the declared type when known: this
+            # emitter's coroutine-body `declared` map is threaded through
+            # `self._cpp_declared` (set by _cpp_stmt before any body
+            # statement's own _cpp_expr calls).
+            if isinstance(e.obj, (IdentExpr, StringLiteral, SubscriptExpr, SliceExpr)):
+                if self._cpp_declared is not None and isinstance(e.obj, IdentExpr) \
+                        and self._cpp_declared.get(e.obj.name) == 'MojoList *':
+                    return f"({obj})[{idx}]"
+                if self._cpp_declared is not None and isinstance(e.obj, IdentExpr) \
+                        and self._cpp_declared.get(e.obj.name) == 'MojoDict *':
+                    return f"({obj})[{idx}]"
+                return f"mojo_cstr_slice((char *)({obj}), {idx}, ({idx}) + 1)"
             return f"({obj})[{idx}]"
         if isinstance(e, AwaitExpr):
             # Step D (async-awaits-async composition): `await <call>` used
@@ -18342,7 +18458,9 @@ class GimpleGen:
                 lines = []
                 for i, el in enumerate(s.target.elements):
                     if isinstance(el, IdentExpr):
-                        declared[el.name] = 'int64_t'
+                        if el.name not in declared:
+                            declared[el.name] = 'int64_t'
+                            lines.append(f"{indent}int64_t {el.name};")
                         lines.append(f"{indent}{el.name} = ({self._cpp_expr(s.value)})[{i}];")
                 return lines
             if not isinstance(s.target, IdentExpr):
@@ -18594,6 +18712,7 @@ class GimpleGen:
         while this one is suspended) -- true for BOTH guard types (a real
         lock's mutual exclusion AND a real trace span's start/end timing
         would both be observably wrong if silently elided across one)."""
+        _alias_decl_lines: list[str] = []
         for item in s.items:
             expr = item.expr
             gname = self._cpp_with_guard_type_name(expr)
@@ -18608,8 +18727,19 @@ class GimpleGen:
                 else:
                     # Plain (non-async) generator: elide the `with` and
                     # just emit the body. The enter/exit aren't compiled
-                    # but the body's statements still execute.
+                    # but the body's statements still execute. An `as name:`
+                    # alias IS still declared (as an opaque int64_t handle
+                    # — zipapp.py's `with open(archive, mode) as f:` yields
+                    # `f` later), so the body's references resolve; only the
+                    # enter/exit calls themselves are dropped.
                     gname = None
+                    _al = item.alias
+                    if _al is not None and isinstance(_al, str) and _al not in declared:
+                        declared[_al] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al};")
+                    elif _al is not None and isinstance(_al, IdentExpr) and _al.name not in declared:
+                        declared[_al.name] = 'int64_t'
+                        _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
                     break
             if item.alias is not None and self._cpp_emit_kind in ('async', 'async_gen'):
                 raise _UnsupportedAsyncShape(
@@ -18629,7 +18759,7 @@ class GimpleGen:
                 "single-threaded cooperative scheduler) would be UNSAFE "
                 "across a real suspension point, where another coroutine "
                 "genuinely could run")
-        lines: list[str] = []
+        lines: list[str] = list(_alias_decl_lines)
         for st in s.body:
             lines.extend(self._cpp_stmt(st, declared, indent))
         return lines
@@ -18640,7 +18770,45 @@ class GimpleGen:
         Only supports iterable as a simple identifier or call expression."""
         target = s.target
         if isinstance(target, str):
+            target_was_declared = target in declared
             declared[target] = 'int64_t'
+            # `for i in range(...)` → a plain indexed loop, mirroring the
+            # GIMPLE path's _gen_for_range. The C++20-coroutine body can't
+            # range-for over mojo_range()'s opaque void* — an explicit
+            # int64_t counter loop is the same semantics with no runtime
+            # range object at all. Handles range(stop), range(start, stop),
+            # and range(start, stop, step) with a constant step (positive or
+            # negative).
+            if (isinstance(s.iterable, CallExpr)
+                    and isinstance(s.iterable.func, IdentExpr)
+                    and s.iterable.func.name == 'range'
+                    and len(s.iterable.args) in (1, 2, 3)):
+                rargs = [self._cpp_expr(a) for a in s.iterable.args]
+                if len(rargs) == 1:
+                    start_e, stop_e, step_e = '0', rargs[0], '1'
+                elif len(rargs) == 2:
+                    start_e, stop_e, step_e = rargs[0], rargs[1], '1'
+                else:
+                    start_e, stop_e, step_e = rargs[0], rargs[1], rargs[2]
+                ctr = self._cpp_fresh_name("_mg_i")
+                # The loop variable must be a real C++ declaration (unlike
+                # the range-for path, where `for (auto i : ...)` declares it
+                # itself): emit `int64_t i;` up front — the first time, only
+                # — so both the in-loop assignment and any use AFTER the loop
+                # (Python loop variables escape the loop) reference a valid
+                # identifier. `declared` doubles as the "already declared in
+                # C++" tracker, so a target that was already a declared local
+                # (e.g. assigned before the loop) is NOT redeclared.
+                lines = []
+                if not target_was_declared:
+                    lines.append(f"{indent}int64_t {target};")
+                lines.append(f"{indent}for (int64_t {ctr} = {start_e}; "
+                             f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{")
+                lines.append(f"{indent}    {target} = {ctr};")
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
             try:
                 iter_expr = self._cpp_expr(s.iterable)
             except _UnsupportedGeneratorShape:
@@ -19358,6 +19526,7 @@ class GimpleGen:
         # module never sees stale self-method context.
         self._cpp_gen_self_struct = struct_name
         self._cpp_gen_self_fields = self_fields
+        self._cpp_declared = declared
         try:
             body_lines: list[str] = []
             for s in fn.body:
@@ -19366,6 +19535,7 @@ class GimpleGen:
         finally:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
+            self._cpp_declared = None
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
@@ -19844,6 +20014,7 @@ class GimpleGen:
         # emitter path never sets (unlike ordinary gen_func/gen_stmt
         # compiles) -- see that AwaitExpr case's own comment.
         self._cpp_async_enclosing_scope = enclosing_scope
+        self._cpp_declared = declared
         try:
             body_lines: list[str] = []
             for s in fn.body:
@@ -19905,6 +20076,7 @@ class GimpleGen:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
             self._cpp_async_enclosing_scope = None
+            self._cpp_declared = None
             self._cpp_mut_capture_names = frozenset()
         if value_ctype is None:
             # A genuinely void-returning async function (declared `-> None`
@@ -25911,6 +26083,7 @@ class GimpleGen:
                 '#include <coroutine>',
                 '#include <cstdint>',
                 '#include <cstdio>',
+                '#include <cmath>',
                 '#include <exception>',
                 '#include <functional>',
                 '#include <mojo_runtime.h>',
@@ -26097,7 +26270,19 @@ class GimpleGen:
                 for _gm_method_struct_name in sorted(_gm_struct_names_seen):
                     _td = self._struct_typedef_texts.get(_gm_method_struct_name)
                     if _td:
-                        cpp_parts.append(_td)
+                        # `_Bool` is a valid C99 type but NOT a valid C++
+                        # type name (`bool` is) — the .ci side keeps `_Bool`
+                        # (it genuinely is C); this .cpp copy must spell it
+                        # `bool` (ABI-identical, 1 byte, same representation).
+                        # The struct's own field types can legitimately be
+                        # `_Bool` because the same typedef is emitted into the
+                        # .ci/.c output (see the `_struct_typedef_texts`
+                        # docstring's "verbatim copy" comment above — that
+                        # verbatim-ness is about the SHAPE of the struct, not
+                        # this one type-name spelling, which must differ per
+                        # language exactly like _c_to_cpp_scalar_type already
+                        # does for every other `_Bool` in the .cpp text).
+                        cpp_parts.append(_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
             for unit in self._generator_cpp_units:
                 cpp_parts.append(unit)
