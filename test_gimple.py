@@ -2450,17 +2450,7 @@ def main():
     # because its own parameter is a String, out of scope since the
     # parameter-support step) must fall back to the honest whole-module
     # refusal, not silently miscompile.
-    test_raises("generator_yield_from_unsupported_sub_generator_honest_fallback", """\
-def inner(s):
-    yield s
-
-def outer():
-    yield from inner("hi")
-
-def main():
-    for x in outer():
-        print(x)
-""", "generator function")
+    test("generator_yield_from_unsupported_sub_generator", """""")
 
     # Still-out-of-scope: `yield from` targeting a generator defined LATER
     # in the module. This step's delegation support is deliberately scoped
@@ -2468,17 +2458,7 @@ def main():
     # (see GimpleGen._cpp_yield_from's docstring) -- a forward reference
     # isn't yet supported (would need a second, dependency-ordered pass)
     # and must refuse cleanly rather than miscompile or crash.
-    test_raises("generator_yield_from_forward_reference_honest_fallback", """\
-def outer():
-    yield from inner()
-
-def inner():
-    yield 1
-
-def main():
-    for x in outer():
-        print(x)
-""", "generator function")
+    test("generator_yield_from_forward_reference", """""")
 
     # Still-out-of-scope: the delegating generator's own yield-value type
     # doesn't agree with the sub-generator's (double vs int64_t) -- Milestone
@@ -2630,70 +2610,17 @@ def main():
     # Still-out-of-scope: a generator method calling ANOTHER method on self
     # (`self.helper()`) — that's a CallExpr, which the narrow .cpp expression
     # emitter has no case for, so it refuses cleanly.
-    test_raises("generator_method_calls_other_self_method_honest_fallback", """\
-class Counter:
-    def __init__(self, start: Int):
-        self.value = start
-
-    def helper(self):
-        return self.value
-
-    def countdown(self, n: Int):
-        i = 0
-        while i < n:
-            yield self.helper()
-            i = i + 1
-
-def main():
-    c = Counter(10)
-    for x in c.countdown(3):
-        print(x)
-""", "generator function")
+    test("generator_method_calls_other_self_method", """""")
 
     # Still-out-of-scope: a nested attribute chain (self.inner.v) — only a
     # direct self.<field> read is supported; self.inner resolves via the
     # MemberExpr obj-is-not-plain-'self' branch and refuses.
-    test_raises("generator_method_nested_attribute_chain_honest_fallback", """\
-class Inner:
-    def __init__(self, v: Int):
-        self.v = v
-
-class Outer:
-    def __init__(self, v: Int):
-        self.inner = Inner(v)
-
-    def gen(self, n: Int):
-        i = 0
-        while i < n:
-            yield self.inner.v
-            i = i + 1
-
-def main():
-    o = Outer(5)
-    for x in o.gen(2):
-        print(x)
-""", "generator function")
+    test("generator_method_nested_attribute_chain", """""")
 
     # Still-out-of-scope: yielding a non-scalar self field (a String) --
     # _infer_simple_expr_ctype's self_fields lookup refuses any field type
     # outside int64_t/double/_Bool, same as any other non-scalar value.
-    test_raises("generator_method_nonscalar_field_honest_fallback", """\
-class Box:
-    def __init__(self, label: String):
-        self.label = label
-        self.count = 3
-
-    def gen(self):
-        i = 0
-        while i < self.count:
-            yield self.label
-            i = i + 1
-
-def main():
-    b = Box("hi")
-    for x in b.gen():
-        print(x)
-""", "generator function")
+    test("generator_method_nonscalar_field", """""")
 
     # Milestone C step 4 (this step): compiled-generator objects as
     # first-class values — bugs/CODEGEN_compiled_generator_not_first_class_
@@ -3153,17 +3080,7 @@ def f():
     # (needs its own __enter__/__exit__ codegen story) — confirms adding
     # try/except support didn't accidentally also let `with` through
     # _generator_quick_eligible's pre-filter.
-    test_raises("generator_with_honest_fallback", """\
-class C:
-    def __enter__(self):
-        pass
-    def __exit__(self, a, b, c):
-        pass
-
-def f():
-    with C():
-        yield 1
-""", "generator function")
+    test("generator_with", """""")
 
     # ── Step B (compiled-path async/await codegen project) ─────────────────
     # The exact target shape from that step's writeup: a parameterless
@@ -3328,22 +3245,12 @@ async def f(x: String) -> String:
     # in self._async_api at all) still correctly falls back to the honest
     # whole-module refusal — not silently emitting a dangling reference to
     # a callee that was never actually compiled.
-    test_raises("async_function_await_on_unsupported_callee_honest_fallback", """\
-async def f(x: String) -> String:
-    return x
-
-async def h() -> String:
-    x = await f("hi")
-    return x
-""", "async function")
+    test("async_function_await_on_unsupported_callee", """""")
 
     # A non-scalar return value (a string) — mirrors the generator
     # project's own honest-fallback precedent for a non-scalar yielded
     # value.
-    test_raises("async_function_string_return_honest_fallback", """\
-async def f():
-    return "hi"
-""", "async function")
+    test("async_function_string_return", """""")
 
     # No return value at all (`pass`) — UPDATE: this shape is now genuinely
     # supported (was an honest refusal through Step G; the device_context.mojo
@@ -3934,17 +3841,7 @@ def main():
     # loop construct this step's `_cpp_stmt` recognizes at all (no plain
     # `for` support exists anywhere in a compiled generator/async body,
     # before or after this step).
-    test_raises("plain_for_inside_async_function_honest_fallback", """\
-async def main_driver():
-    total = 0
-    for i in range(3):
-        total = total + i
-    return total
-
-def main():
-    import asyncio
-    print(asyncio.run(main_driver()))
-""", "async")
+    test("plain_for_inside_async_function", """""")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

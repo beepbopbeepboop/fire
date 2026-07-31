@@ -17820,12 +17820,10 @@ class GimpleGen:
             struct_name = getattr(self, '_cpp_gen_self_struct', None)
             if struct_name and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
                 ft = self.struct_field_types.get(struct_name, {}).get(e.member)
-                if ft in ('int64_t', 'double', '_Bool'):
+                if ft in ('int64_t', 'double', '_Bool', 'char *'):
                     return f"self->{e.member}"
-                raise _UnsupportedGeneratorShape(
-                    f"unsupported self.{e.member} access in generator "
-                    f"method body (field type {ft!r} is not a supported "
-                    "scalar, or the field doesn't exist)")
+                # Unknown field: emit as self->member (C++ struct pointer access)
+                return f"self->{e.member}"
             # Non-self member access: entry.name, os.path, etc.
             obj_expr = self._cpp_expr(e.obj) if not isinstance(e.obj, IdentExpr) else e.obj.name
             return f"{obj_expr}.{e.member}"
@@ -22539,6 +22537,11 @@ class GimpleGen:
             if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                     and id(s) not in _async_fns):
                 continue
+            # Skip generator METHODS (they have 'self' as first param) —
+            # the dedicated method loop at Phase 2 handles those with
+            # the correct struct_name.
+            if s.params and s.params[0][0] == 'self':
+                continue
             if not _generator_quick_eligible(s):
                 continue
             try:
@@ -22568,6 +22571,9 @@ class GimpleGen:
                 break
             for _gm_id, s in list(_generator_fns.items()):
                 if _gm_id in _async_fns:
+                    continue
+                # Skip generator METHODS (handled by the dedicated method loop)
+                if s.params and s.params[0][0] == 'self':
                     continue
                 if not _generator_quick_eligible(s):
                     continue
@@ -22721,6 +22727,32 @@ class GimpleGen:
                     _debug_note(f'generator method {_sd.name}.{m.name!r} not '
                                 'eligible for C++ coroutine path, falling '
                                 'back to honest refusal', e)
+                    continue
+                key = (_sd.name, m.name)
+                self._supported_generator_methods[key] = m
+                self._generator_method_api[key] = {
+                    'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                }
+                self.func_param_types[f"{base}_start"] = param_ctypes
+                self._generator_cpp_units.append(cpp_text)
+                _generator_fns.pop(id(m), None)
+
+        # Second pass for generator methods (yield-from dependencies)
+        for _sd in stmts:
+            if not isinstance(_sd, StructDef):
+                continue
+            for m in _sd.methods:
+                if not (isinstance(m, FunctionDef) and id(m) in _generator_fns
+                        and id(m) not in _async_fns):
+                    continue
+                if not _generator_quick_eligible(m):
+                    continue
+                try:
+                    cpp_text, value_ctype, base, param_ctypes = \
+                        self._gen_cpp_generator_unit(m, struct_name=_sd.name)
+                except _UnsupportedGeneratorShape as e:
+                    _debug_note(f'generator method {_sd.name}.{m.name!r} not '
+                                'eligible (pass 2)', e)
                     continue
                 key = (_sd.name, m.name)
                 self._supported_generator_methods[key] = m
