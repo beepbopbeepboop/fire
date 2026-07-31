@@ -18205,6 +18205,20 @@ class GimpleGen:
                         and self._cpp_declared.get(e.obj.name) == 'MojoDict *':
                     return f"({obj})[{idx}]"
                 return f"mojo_cstr_slice((char *)({obj}), {idx}, ({idx}) + 1)"
+            # Subscripting a CALL RESULT whose declared return type is a
+            # container pointer: `detect_encoding(readline)[0]` where
+            # detect_encoding returns MojoList * (tokenize.py's exact shape —
+            # a 2-element (encoding, consumed) list). Emit the list element
+            # access (mojo_list_get_int for the boxed-int64_t element
+            # convention this body model uses), NOT a raw C++ `[...]` (a
+            # function-call expression can't be a subscript base in this
+            # model's spelling).
+            if (isinstance(e.obj, CallExpr)
+                    and isinstance(e.obj.func, IdentExpr)
+                    and e.obj.func.name in self.func_return_types
+                    and self.func_return_types[e.obj.func.name] == 'MojoList *'):
+                return (f"mojo_list_get_int((MojoList *)({obj}), "
+                        f"(int64_t)({idx}))")
             return f"({obj})[{idx}]"
         if isinstance(e, AwaitExpr):
             # Step D (async-awaits-async composition): `await <call>` used
@@ -18569,13 +18583,27 @@ class GimpleGen:
         if isinstance(s, AssignStmt):
             if isinstance(s.target, TupleExpr):
                 # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]
+                # When `expr` is a call to a module function returning a
+                # MojoList* (tokenize.py's `encoding, consumed =
+                # detect_encoding(readline)` — detect_encoding returns a
+                # 2-element list), the element access must be the runtime
+                # list getter, not a raw C++ `[...]` on a call expression.
+                _tup_val = self._cpp_expr(s.value)
+                _tup_is_list_call = (isinstance(s.value, CallExpr)
+                    and isinstance(s.value.func, IdentExpr)
+                    and s.value.func.name in self.func_return_types
+                    and self.func_return_types[s.value.func.name] == 'MojoList *')
                 lines = []
                 for i, el in enumerate(s.target.elements):
                     if isinstance(el, IdentExpr):
                         if el.name not in declared:
                             declared[el.name] = 'int64_t'
                             lines.append(f"{indent}int64_t {el.name};")
-                        lines.append(f"{indent}{el.name} = ({self._cpp_expr(s.value)})[{i}];")
+                        if _tup_is_list_call:
+                            lines.append(f"{indent}{el.name} = "
+                                         f"mojo_list_get_int((MojoList *)({_tup_val}), {i});")
+                        else:
+                            lines.append(f"{indent}{el.name} = ({_tup_val})[{i}];")
                 return lines
             if not isinstance(s.target, IdentExpr):
                 # self.field = val  →  self->field = val
