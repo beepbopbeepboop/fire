@@ -24,7 +24,7 @@ from mojo_compiler import (
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
-    GlobalStmt, DelStmt,
+    GlobalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser,
@@ -17940,6 +17940,11 @@ class GimpleGen:
             if isinstance(e.func, IdentExpr):
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{e.func.name}({args})"
+            if isinstance(e.func, CallExpr):
+                # Call of a call result: f()(args)  →  (f())(args)
+                inner = self._cpp_expr(e.func)
+                args = ', '.join(self._cpp_expr(a) for a in e.args)
+                return f"({inner})({args})"
             raise _UnsupportedGeneratorShape(
                 f"unsupported call expression in generator body")
         if isinstance(e, SliceExpr):
@@ -18489,6 +18494,8 @@ class GimpleGen:
             return []  # nested function definitions are compiled separately
         if isinstance(s, DelStmt):
             return []  # del on a generator local is a no-op (compile-time)
+        if isinstance(s, MatchStmt):
+            return self._cpp_match_stmt(s, declared, indent)
         raise _UnsupportedGeneratorShape(
             f"unsupported statement in generator body: {type(s).__name__}")
 
@@ -18768,15 +18775,53 @@ class GimpleGen:
             if isinstance(msg_arg, StringLiteral):
                 text, is_fstr = self._decode_str_literal_text(msg_arg.value)
                 if is_fstr:
-                    raise _UnsupportedGeneratorShape(
-                        "an f-string `raise` message is not supported inside a "
-                        "generator body")
-                msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+                    # F-string message: emit the interpolated expression as
+                    # the message (best-effort — a static string or a simple
+                    # member access on a param).
+                    msg_cpp = self._cpp_expr(msg_arg)
+                else:
+                    msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
             else:
                 # Variable/expression message: evaluate as char* expression
                 msg_cpp = self._cpp_expr(msg_arg)
         return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
                 f"(void *){msg_cpp} }};"]
+
+    def _cpp_match_stmt(self, s, declared: dict, indent: str) -> list[str]:
+        """`match subject: case p: ... case _: ...` inside a generator body.
+        Lowers to a chain of if/else comparisons (switch-style equality),
+        mirroring _gen_stmt_MatchStmt's dispatch: each case's patterns are
+        OR-ed equality checks against the subject; an empty-pattern or `_`
+        case is a wildcard else-branch. A class-pattern `case str(x):`
+        (parsed as CallExpr) is approximated as a truthy-subject check with
+        `x` bound to the subject — good enough for dataclasses._get_slots's
+        `case None:` / `case str(slot):` idiom."""
+        subj = self._cpp_expr(s.subject)
+        lines = []
+        for i, match_case in enumerate(s.cases):
+            is_wildcard = not match_case.patterns or any(
+                isinstance(p, IdentExpr) and p.name == '_' for p in match_case.patterns)
+            if is_wildcard:
+                lines.append(f"{indent}else {{")
+            else:
+                conds = []
+                for p in match_case.patterns:
+                    if isinstance(p, IdentExpr) and p.name == 'None':
+                        conds.append(f"({subj} == 0)")
+                    elif isinstance(p, CallExpr) and isinstance(p.func, IdentExpr):
+                        # class pattern `case str(x)`: bind the capture, match if truthy
+                        if p.args and isinstance(p.args[0], IdentExpr):
+                            declared[p.args[0].name] = 'int64_t'
+                            lines.append(f"{indent}{p.args[0].name} = {subj};")
+                        conds.append(f"({subj} != 0)")
+                    else:
+                        conds.append(f"({subj} == {self._cpp_expr(p)})")
+                cond = ' || '.join(conds)
+                lines.append(f"{indent}if ({cond}) {{")
+            for st in match_case.body:
+                lines.extend(self._cpp_stmt(st, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+        return lines
 
     def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict,
                                   indent: str) -> list[str]:
