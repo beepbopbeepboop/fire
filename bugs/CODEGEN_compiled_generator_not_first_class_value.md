@@ -1,3 +1,13 @@
+Status: **FIXED** (Pass 1.3f-gen cross-call generator-value contract: stored
+generators type `MojoGenerator *` locally, propagate onto unannotated callee
+params through call boundaries, record provenance for `_resume`/`_value`
+recovery in callee bodies; `_lower_named_call` types results of functions that
+return generators and seeds `_generator_var_api` from the underlying generator
+function's api. Assign-then-`for`, `next()` on an assigned var, pass-as-arg,
+return-from-fn, and the composed pass+return chain all compile, link, and run
+correctly — see test_gimple.py's generator_*_compiles_via_cpp_path tests and
+test_gimple_generator_runner.py's generator_*_through_function_boundary tests.)
+
 # CODEGEN: compiled generator objects aren't first-class values (can't assign to a variable, can't call next() directly)
 
 ## Discovery context

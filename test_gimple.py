@@ -2792,6 +2792,149 @@ def main():
 
     test_generator_next_on_assigned_var_compiles_via_cpp_path()
 
+    # Same milestone: a stored generator passed AS AN ARGUMENT to a
+    # function (`consume(g)` where `g = counter(3)`). Pass 1.3f-gen must
+    # re-observe the call site AFTER local-variable inference typed `g` as
+    # MojoGenerator* (the earlier cross-call scalar-contract pass ran before
+    # that and left the unannotated callee param defaulted to int64_t) and
+    # propagate the generator type onto the callee's param, so the `for`
+    # loop inside the callee drives _resume/_value instead of falling back.
+    # Asserts the param is declared `MojoGenerator *` and the callee's loop
+    # uses the _resume/_value API. bugs/CODEGEN_compiled_generator_not_
+    # first_class_value.md.
+    def test_generator_param_from_call_boundary_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def consume(g):
+    for x in g:
+        print(x)
+
+def main():
+    g = counter(3)
+    consume(g)
+"""
+        name = "generator_param_from_call_boundary_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume' not in c_src:
+            print(f"FAIL  {name}: expected the callee's for-loop over the "
+                  "param to drive the generator _resume/_value API")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_param_from_call_boundary_compiles_via_cpp_path()
+
+    # Same milestone: a generator RETURNED from a function
+    # (`def mk(): return counter(3)`), then consumed by the caller. The
+    # returned value's result temp must be typed MojoGenerator* with the
+    # underlying generator function's api recorded on it (via _lower_named_
+    # call's _fn_returns_generator lookup), so the caller's `for x in g:`
+    # drives the right _resume/_value pair. bugs/CODEGEN_compiled_generator_
+    # not_first_class_value.md.
+    def test_generator_returned_from_function_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def mk():
+    return counter(3)
+
+def main():
+    g = mk()
+    for x in g:
+        print(x)
+"""
+        name = "generator_returned_from_function_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume' not in c_src:
+            print(f"FAIL  {name}: expected the for-loop over the returned "
+                  "generator to drive the counter's _resume/_value API")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_returned_from_function_compiles_via_cpp_path()
+
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
     # method directly (`self.b()`) already worked; a bare method reference

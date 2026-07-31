@@ -566,6 +566,93 @@ def main():
     print("end")
 """, "0\n1\n2\nend\n")
 
+    # ── Milestone C final: generators crossing function-call boundaries ────
+    # bugs/CODEGEN_compiled_generator_not_first_class_value.md's stated
+    # remaining scope: a stored generator passed AS AN ARGUMENT to a
+    # function whose (unannotated) param is consumed by `for x in g:`.
+    # Before Pass 1.3f-gen, the call-site scalar contract observed `g`'s
+    # stale int64_t inference and the callee's param defaulted to int64_t,
+    # so the `for` loop hit the unsupported-iterable fallback (compile
+    # still succeeded, but the loop body silently never ran).
+    test_generator_stdout("generator_passed_as_argument", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def consume(g):
+    for x in g:
+        print(x)
+
+def main():
+    g = counter(3)
+    consume(g)
+""", "0\n1\n2\n")
+
+    # A generator RETURNED from a function (`def mk(): return counter(3)`)
+    # and consumed by the caller — the second first-class shape from the
+    # bug report's impact list. Before this step, a call to `mk()` got no
+    # MojoGenerator* typing at all on its result (only direct calls to the
+    # generator function itself did), so the outer `for` loop fell back.
+    test_generator_stdout("generator_returned_from_function", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def mk():
+    return counter(3)
+
+def main():
+    g = mk()
+    for x in g:
+        print(x)
+""", "0\n1\n2\n")
+
+    # The two boundary shapes COMPOSED: return a generator from one
+    # function, pass it into another, consume it there. Confirms the
+    # provenance chain (caller assignment -> callee param) resolves
+    # transitively rather than only for the immediate hop.
+    test_generator_stdout("generator_returned_then_passed_as_argument", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def mk():
+    return counter(3)
+
+def consume(g):
+    for x in g:
+        print(x)
+
+def main():
+    consume(mk())
+""", "0\n1\n2\n")
+
+    # next() on a generator that has crossed a function boundary — the
+    # callee drives _resume/_value on the passed-in param, and the SAME
+    # generator keeps yielding correctly in the caller afterward.
+    test_generator_stdout("generator_next_through_function_boundary", """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def consume(g):
+    print(next(g))
+    print(next(g))
+
+def main():
+    g = counter(3)
+    consume(g)
+    print(next(g))
+""", "0\n1\n2\n")
+
     # ── Milestone D: try/except/raise inside a compiled generator body ──────
     # (real C++ exceptions confined to the generator's own .cpp translation
     # unit, translated to the pre-existing mojo_exc_type/msg/obj global state

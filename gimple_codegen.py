@@ -12284,6 +12284,19 @@ class GimpleGen:
         if ret_type == 'MojoList *' and fname_raw in self._return_elem_types:
             self._elem_types[t] = self._return_elem_types[fname_raw]
             self._actual_types[t] = ret_type
+        # A function that RETURNS a generator (`def mk(): return counter(3)`,
+        # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
+        # generator function's api on the call's result temp (Pass 1.3f-gen
+        # pre-pass populates self._fn_returns_generator), so any later
+        # consumer of the value (`g = mk(); for x in g:`, `for x in mk():`,
+        # `consume(mk())`) recovers the right base/value_ctype exactly like a
+        # direct generator call's own call-site recording (see _lower_call's
+        # generator branch). See bugs/CODEGEN_compiled_generator_not_first_
+        # class_value.md.
+        if ret_type == 'MojoGenerator *':
+            _gf = self._fn_returns_generator.get(fname_raw)
+            if _gf is not None and _gf in self._generator_api:
+                self._generator_var_api[t] = self._generator_api[_gf]
         return ret_type, t
 
     # ── Overload resolution (struct methods and constructors) ─────────────
@@ -17143,6 +17156,29 @@ class GimpleGen:
                 self.var_types[safe_bare] = ctype
                 self._c_names[bare] = safe_bare
             param_strs.append(f"{ctype} {safe_bare}")
+
+        # A param typed `MojoGenerator *` by the cross-call generator-value
+        # contract (Pass 1.3f-gen) needs its generator's base/value_ctype
+        # extern "C" api recoverable inside the body (`for x in g:` /
+        # `next(g)`), but `_generator_var_api` is only populated at
+        # construction/assignment sites (see its docstring) and a param
+        # crossing a call boundary has no entry of its own. Seed it from the
+        # provenance recorded at the call site — the value flows
+        # `counter(3)` → `g` (in the caller) → `consume(g)` → this param.
+        # Keyed by the param's C name, which is what `_lower_IdentExpr`
+        # yields as the lowered value (so `_gen_for_iter`/`next` lookups
+        # find it). See bugs/CODEGEN_compiled_generator_not_first_class_
+        # value.md.
+        _pg_apis = self._param_generator_api.get(node.name, {})
+        for _pp, _pt in node.params:
+            _pb = _pp.lstrip('*')
+            if _pp.startswith('*'):
+                continue
+            _gf = _pg_apis.get(_pb)
+            if _gf is not None and self.var_types.get(_pb) == 'MojoGenerator *':
+                _api24 = self._generator_api.get(_gf)
+                if _api24 is not None:
+                    self._generator_var_api[self._cname(_pb)] = _api24
 
         params_str = ', '.join(param_strs) if param_strs else 'void'
         # Record that this function takes varargs so call sites can pack args
@@ -23860,6 +23896,229 @@ class GimpleGen:
                 for m in s.methods:
                     key = f"{s.name}_{m.name}"
                     self._inferred_var_types[key] = self._infer_local_var_types(m)
+
+        # ── Pass 1.3f-gen: cross-call generator-value contract ─────────────
+        # A compiled generator's `MojoGenerator *` result is only typed
+        # correctly for a LOCAL variable once Pass 1.3d-gen has populated
+        # self._generator_api AND Pass 1.3f has re-run local-variable type
+        # inference (see `_quick_type`'s generator-call branch) — Pass 1.3d's
+        # cross-call scalar contract ran BEFORE both, so a call site that
+        # passes a stored generator as an argument (`consume(g)` where
+        # `g = counter(3)`) observed `g`'s stale int64_t inference there and
+        # left the callee's unannotated param defaulted to int64_t (a `for x
+        # in g:` inside the callee then hit the unsupported-iterable
+        # fallback). Re-observe those call sites here with the corrected
+        # _inferred_var_types, and:
+        #   (a) propagate the unanimous `MojoGenerator *` type onto the
+        #       callee's unannotated param, mirroring exactly how Pass 1.3d
+        #       already propagates a unanimous `char *`/`double` (same
+        #       observe-per-call-site/apply-if-unanimous contract, run again
+        #       rather than added as a parallel narrow special case), AND
+        #   (b) record WHICH generator function made the value (provenance,
+        #       walked from the caller's own assignment statements, or
+        #       chained through a caller param a previous round already
+        #       resolved) so the callee's body can recover the concrete
+        #       `base`/`value_ctype` extern "C" API for `for x in g:` /
+        #       `next(g)`. The api is keyed per generator FUNCTION in
+        #       `self._generator_api`; a param crossing a call boundary has
+        #       no `_generator_var_api` entry of its own (that dict is only
+        #       populated at construction/assignment sites — see its
+        #       docstring), so the provenance is what lets gen_func seed one
+        #       for the param. Also records which functions RETURN a
+        #       generator (`def mk(): return counter(3)`) so a call to such a
+        #       function gets a `_generator_var_api` entry on its result too
+        #       (stored-generator/for-loop over `mk()` and `g = mk()` both
+        #       then work exactly like `counter(3)` itself). See
+        #       bugs/CODEGEN_compiled_generator_not_first_class_value.md.
+        self._param_generator_api: dict[str, dict[str, str]] = {}
+        self._fn_returns_generator: dict[str, str] = {}
+
+        def _walk_gen_prov(body, target_name, known_params):
+            """Return the single generator function name assigned to
+            `target_name` anywhere in `body` (recursively, skipping nested
+            defs), or None (never assigned a generator, or a conflict — two
+            different generator functions assigned to the same variable, or a
+            pass-through of a param whose own provenance is unresolved).
+            `known_params` maps a caller param already proven to hold a
+            generator to its function name, for the chained shape
+            `def outer(g): consume(g)`."""
+            found = None
+
+            def _scan(stmts):
+                nonlocal found
+                for st in stmts:
+                    val = None
+                    if isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr):
+                        if st.target.name == target_name:
+                            val = st.value
+                    elif isinstance(st, VarDecl) and st.name == target_name:
+                        val = st.value
+                    if val is not None:
+                        prov = None
+                        if isinstance(val, CallExpr) and isinstance(val.func, IdentExpr):
+                            if val.func.name in self._generator_api:
+                                prov = val.func.name
+                            else:
+                                prov = self._fn_returns_generator.get(val.func.name)
+                        elif isinstance(val, IdentExpr):
+                            prov = known_params.get(val.name)
+                        if prov is not None:
+                            if found is None:
+                                found = prov
+                            elif found != prov:
+                                found = '<conflict>'
+                        continue
+                    if isinstance(st, FunctionDef):
+                        continue
+                    for attr in ('then_body', 'else_body', 'body', 'finally_body'):
+                        sub = getattr(st, attr, None)
+                        if isinstance(sub, list):
+                            _scan(sub)
+                    for _eb_cond, _eb_body in (getattr(st, 'elifs', None) or []):
+                        _scan(_eb_body)
+                    for _h in (getattr(st, 'handlers', None) or []):
+                        hb = getattr(_h, 'body', None)
+                        if isinstance(hb, list):
+                            _scan(hb)
+
+            _scan(body)
+            return found
+
+        def _arg_generator_prov(caller_name, arg):
+            """The generator function name behind call-site argument `arg`
+            (typed `MojoGenerator *` in the caller), or None."""
+            if isinstance(arg, IdentExpr):
+                t = (self._inferred_var_types.get(caller_name, {}).get(arg.name)
+                     or self._inferred_param_types.get(caller_name, {}).get(arg.name))
+                if t != 'MojoGenerator *':
+                    return None
+                fn = _fn_by_name.get(caller_name)
+                if fn is not None:
+                    p = _walk_gen_prov(fn.body, arg.name,
+                                       self._param_generator_api.get(caller_name, {}))
+                    if p is not None:
+                        return p
+                # Not assigned in the caller's own body → a pass-through of
+                # one of the caller's own params (a prior round's provenance).
+                return self._param_generator_api.get(caller_name, {}).get(arg.name)
+            if isinstance(arg, CallExpr) and isinstance(arg.func, IdentExpr):
+                if arg.func.name in self._generator_api:
+                    return arg.func.name
+                return self._fn_returns_generator.get(arg.func.name)
+            return None
+
+        # Functions whose EVERY value-return is a known generator call
+        # (`def mk(): return counter(3)`) — used as provenance at call sites
+        # AND by _lower_named_call to seed a _generator_var_api entry on the
+        # call's result. Skipping nested FunctionDef bodies: only the
+        # function's OWN returns count.
+        for _rf in all_functions:
+            if not isinstance(_rf, FunctionDef):
+                continue
+            acc_rt = []
+
+            def _collect_rt(stmts2):
+                for _st in stmts2:
+                    if isinstance(_st, FunctionDef):
+                        continue
+                    if isinstance(_st, ReturnStmt) and _st.value is not None:
+                        acc_rt.append(_st.value)
+                    else:
+                        for attr in ('then_body', 'else_body', 'body', 'finally_body'):
+                            sub = getattr(_st, attr, None)
+                            if isinstance(sub, list):
+                                _collect_rt(sub)
+                        for _eb_cond, _eb_body in (getattr(_st, 'elifs', None) or []):
+                            _collect_rt(_eb_body)
+                        for _h in (getattr(_st, 'handlers', None) or []):
+                            hb = getattr(_h, 'body', None)
+                            if isinstance(hb, list):
+                                _collect_rt(hb)
+
+            _collect_rt(_rf.body)
+            rt_prov = None
+            for _rv in acc_rt:
+                if (isinstance(_rv, CallExpr) and isinstance(_rv.func, IdentExpr)
+                        and _rv.func.name in self._generator_api):
+                    if rt_prov is None:
+                        rt_prov = _rv.func.name
+                    elif rt_prov != _rv.func.name:
+                        rt_prov = '<conflict>'
+                else:
+                    rt_prov = '<conflict>'
+            if rt_prov not in (None, '<conflict>'):
+                self._fn_returns_generator[_rf.name] = rt_prov
+
+        _param_gen_obs: dict[str, dict[str, dict]] = {}  # callee -> {pname -> {fname: count}}
+        for _round in range(4):
+            _changed = False
+            for _cl_name, _cl_body in _caller_bodies:
+                _calls = []
+                self._calls_in_stmts(_cl_body, _calls)
+                for _call in _calls:
+                    if not isinstance(_call.func, IdentExpr):
+                        continue
+                    _callee = _call.func.name
+                    _pnames = _free_params.get(_callee)
+                    if not _pnames:
+                        continue
+                    for _i, _a in enumerate(_call.args):
+                        if _i >= len(_pnames):
+                            break
+                        prov = _arg_generator_prov(_cl_name, _a)
+                        if prov is None:
+                            continue
+                        _pobs = _param_gen_obs.setdefault(_callee, {})
+                        _fmap = _pobs.setdefault(_pnames[_i], {})
+                        _fmap[prov] = _fmap.get(prov, 0) + 1
+            for _callee, _pmap in _param_gen_obs.items():
+                _fn = _fn_by_name.get(_callee)
+                if _fn is None:
+                    continue
+                for _pname, _fmap in _pmap.items():
+                    _keys = []
+                    for _k in _fmap:
+                        _keys.append(_k)
+                    # Any generator-valued observation makes the param
+                    # genuinely `MojoGenerator *` (provenance is only ever
+                    # non-None for generator-typed call-site arguments), so
+                    # type it regardless of unanimity — a `for x in g:`
+                    # inside the callee will then dispatch on the right type
+                    # and (when no single provenance exists) refuse honestly
+                    # with "no known API" instead of the misleading int64_t
+                    # unsupported-iterable. Provenance is recorded ONLY for
+                    # a unanimous single generator function.
+                    _annot = None
+                    for _p, _pt in (_fn.params or []):
+                        if _p == _pname:
+                            _annot = _pt
+                            break
+                    if _annot is not None:
+                        continue  # respect an explicit annotation
+                    _cur = self._inferred_param_types.get(_callee, {}).get(_pname)
+                    if _cur not in (None, 'int', 'int64_t'):
+                        continue  # body evidence already picked a real type
+                    self._inferred_param_types.setdefault(_callee, {})[_pname] = 'MojoGenerator *'
+                    if len(_keys) == 1 and _keys[0] != '<conflict>':
+                        self._param_generator_api.setdefault(_callee, {})[_pname] = _keys[0]
+                    _changed = True
+            if not _changed:
+                break
+
+        # Rebuild free-function param-type signatures so call-site coercion
+        # (and the emitted declarations) see the propagated MojoGenerator *
+        # param types — must follow the propagation above, exactly like Pass
+        # 1.3d's own identical rebuild (gen_func's `_param_ctype` consults
+        # _inferred_param_types, so the emitted signature is right, but
+        # func_param_types is what _emit_call's argument coercion reads).
+        for s in all_functions:
+            if _is_foreign_main(s):
+                continue
+            if isinstance(s, FunctionDef):
+                if s.params and any(pn.startswith('*') for pn, _ in s.params):
+                    self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                else:
+                    self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
         # ── Phase 1.5: dispatch solving (static dispatch table planning) ───
         # Run DispatchSolver to identify dynamic dispatch patterns and plan
