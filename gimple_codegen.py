@@ -25651,6 +25651,25 @@ class GimpleGen:
                 global_decls.append(f"{ctype} {stmt.name};")
                 self._global_var_types[stmt.name] = ctype
                 self._global_c_decl_types[stmt.name] = ctype
+            elif isinstance(stmt, ImportStmt):
+                # `import X as Y` (esp. platform-conditional: `import posixpath
+                # as path` / `import ntpath as path` inside os.py's if/else)
+                # must register the bound name `Y` as a module-globals struct
+                # field. The non-recursive top-level scan above only sees imports
+                # at the very top level; _collect_global_stmts recurses into
+                # IfStmt/TryStmt/ForStmt bodies, so an import nested there was
+                # silently dropped — leaving `globals.path` referencing a field
+                # that was never emitted (bug: "struct _X_toplev has no member
+                # named 'path'"). Mirror the top-level ImportStmt handler here.
+                for _tm, _ta in _import_targets(stmt):
+                    local_name = _ta if _ta else _tm
+                    if local_name not in _declared_globals:
+                        _declared_globals.add(local_name)
+                        global_decls.append(f"int64_t {local_name};")
+                        self._global_var_types[local_name] = 'int64_t'
+                        self._global_c_decl_types[local_name] = 'int64_t'
+                        if local_name not in self._global_to_module:
+                            self._global_to_module[local_name] = current_mod_name
         # Skip emitting standalone global declarations — they'll be in module globals structs instead
         # if global_decls:
         #     parts.extend(global_decls)
