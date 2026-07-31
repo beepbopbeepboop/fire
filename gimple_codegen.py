@@ -3252,6 +3252,10 @@ class GimpleGen:
         # for globals; bare function names for functions.
         self._cpp_module_global_refs: set[tuple[str, str]] = set()
         self._cpp_module_func_refs: set[str] = set()
+        # Module-level function names (for variadic-unmangled calls like os.py's
+        # fspath) and the set of names needing a variadic extern in the .cpp.
+        self._cpp_module_fn_names: set[str] = set()
+        self._cpp_module_variadic_func_refs: set[str] = set()
         # Module-level global names collected by the lightweight pre-scan
         # before the generator compile loop (Pass 1.3d-gen) — populated
         # BEFORE _global_var_types (Phase 1.7), which runs later.
@@ -18092,6 +18096,26 @@ class GimpleGen:
                         and getattr(self, '_cpp_gen_self_struct', None):
                     args = ', '.join(self._cpp_expr(a) for a in e.args)
                     return f"self->{e.func.member}({args})"
+                # A member call on a MODULE-GLOBAL object whose member isn't a
+                # statically-known function (os.py's `sys.audit(...)`,
+                # compileall.py's `os.fspath(...)`, mimetypes.py's
+                # `_winreg.EnumKey(...)`, modulefinder.py's
+                # `dis._find_store_names(...)`): the module object is an
+                # opaque int64_t MojoDict* and its members are runtime-lookup
+                # methods this scalar body model can't dispatch. Mirror the
+                # GIMPLE path's _stub_result convention for an unknown
+                # module-member call: emit 0 (diagnosed via _debug_note) so
+                # the body still COMPILES, matching how the .ci side stubs
+                # the same shape (e.g. `int64_t.isnan() stubbed`) rather than
+                # emitting invalid `_root_globals.sys.audit(...)` C++.
+                if isinstance(e.func.obj, IdentExpr) \
+                        and self._cpp_declared is not None \
+                        and e.func.obj.name not in self._cpp_declared \
+                        and e.func.obj.name in self._cpp_early_global_names:
+                    _debug_note('stubbed operation',
+                                f'generator-body module-member call '
+                                f'{e.func.obj.name}.{e.func.member}()')
+                    return '0'
                 obj = self._cpp_expr(e.func.obj)
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{obj}.{e.func.member}({args})"
@@ -18141,19 +18165,35 @@ class GimpleGen:
                     return args[0] if args else '0'
                 # A call to a module-level function (tokenize.py's
                 # `detect_encoding(readline)`, codecs.py's
-                # `getincrementalencoder(encoding)`) → the mangled C symbol
-                # the .c side defines, registered so the .cpp preamble emits
-                # the matching extern declaration. Falls through to the bare
-                # name only when the callee is an imported runtime/other-module
-                # function already declared in the .cpp preamble or a local
-                # callable param.
+                # `getincrementalencoder(encoding)`, os.py's `fspath(top)`)
+                # → the C symbol the .c side defines (mangled for overloaded
+                # functions, bare for a simple one like fspath), registered
+                # so the .cpp preamble emits the matching extern declaration.
+                # A name that's BOTH a module global AND a callable (os.py's
+                # fspath: a module-level function whose name also lands in
+                # the globals struct) is still a function call here, not a
+                # global read. Falls through to the bare name only when the
+                # callee is an imported runtime/other-module function already
+                # declared in the .cpp preamble or a local callable param.
                 if (self._cpp_declared is not None
                         and fname not in self._cpp_declared
-                        and fname in self.func_param_types
-                        and fname not in self._global_var_types
+                        and (fname in self.func_param_types
+                             or fname in self._cpp_early_global_names)
                         and self._func_mangleable(fname)):
                     self._cpp_module_func_refs.add(fname)
                     return f"{self._func_csym(fname)}({', '.join(args)})"
+                # A call to a module-level function that ISN'T overload-mangled
+                # — a simple `def fspath(p): ...` whose name also lands in the
+                # globals struct (os.py's own `fspath(top)` shape; the .ci
+                # declares it `int64_t fspath (...);`, unmangled). Register it
+                # for a variadic extern in the .cpp preamble and call the bare
+                # symbol.
+                if (self._cpp_declared is not None
+                        and fname not in self._cpp_declared
+                        and fname in self._cpp_early_global_names
+                        and fname in self._cpp_module_fn_names):
+                    self._cpp_module_variadic_func_refs.add(fname)
+                    return f"{fname}({', '.join(args)})"
                 return f"{fname}({', '.join(args)})"
             if isinstance(e.func, CallExpr):
                 # Call of a call result: f()(args)  →  (f())(args)
@@ -23154,6 +23194,9 @@ class GimpleGen:
             elif isinstance(_gm_stmt, FromImportStmt):
                 for _nm in getattr(_gm_stmt, 'names', []) or []:
                     self._cpp_early_global_names.add(_nm)
+            elif isinstance(_gm_stmt, FunctionDef):
+                self._cpp_early_global_names.add(_gm_stmt.name)
+                self._cpp_module_fn_names.add(_gm_stmt.name)
 
         # Imports nested inside module-scope try/if bodies (`try: import
         # winreg as _winreg` — mimetypes.py's own shape; a `try:` around a
@@ -26588,6 +26631,13 @@ class GimpleGen:
                             f'({_fparam_str});')
                     except Exception:
                         continue
+                # Unmangled module-level functions (os.py's fspath): the .ci
+                # declares them `int64_t <name> (...);` — mirror that exact
+                # variadic extern in the .cpp so a generator body calling
+                # `fspath(top)` compiles (calls go through the same variadic
+                # symbol, ABI-identical to the .ci side's own extern).
+                for _vfn in sorted(self._cpp_module_variadic_func_refs):
+                    cpp_parts.append(f'extern "C" int64_t {_vfn} (...);')
                 cpp_parts.append('')
             for unit in self._generator_cpp_units:
                 cpp_parts.append(unit)
