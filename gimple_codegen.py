@@ -4573,6 +4573,7 @@ class GimpleGen:
         '_mojo_dispatch_is_dataclass': ('int',     ['void *']),
         '_mojo_dispatch_repr':       ('char *',    ['void *']),
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
+        'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -6447,6 +6448,23 @@ class GimpleGen:
             parts.append(('lit', ''.join(buf)))
         return parts
 
+    def _list_repr_fn(self, rav: str) -> str:
+        """Choose the list-repr runtime helper for a `MojoList *` value.
+
+        MojoList stores every element as a raw int64_t slot with no
+        per-element type tag, and the generic codegen-emitted `_mojo_repr_list`
+        reads each slot back via mojo_list_get_int. A list of doubles then
+        mis-reprs (or, when a bit pattern happens to look like a plausible heap
+        address, crashes inside `_mojo_generic_elem_repr` /
+        `mojo_read_type_tag_safe`). When this codegen already knows the element
+        type is double (self._elem_types, e.g. from a `[3.5, 2.5]` literal),
+        route to the double-aware runtime helper instead. Unknown/mixed element
+        types keep the generic repr — never regress the int/str/nested cases.
+        """
+        if self._elem_types.get(rav) == 'double':
+            return 'mojo_repr_list_doubles'
+        return '_mojo_repr_list'
+
     def _repr_value(self, rat: str, rav: str) -> str:
         """Convert an already-lowered (type, value) pair into a `char *` per
         Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
@@ -6454,7 +6472,7 @@ class GimpleGen:
         if rat == 'char *':
             return self._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
         if rat == 'MojoList *':
-            return self._call_expr('char *', '_mojo_repr_list', [('MojoList *', rav)])
+            return self._call_expr('char *', self._list_repr_fn(rav), [('MojoList *', rav)])
         if rat == 'MojoDict *':
             return self._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', rav)])
         if rat.endswith(' *') or rat == 'void *':
@@ -6784,6 +6802,12 @@ class GimpleGen:
             # dispatches d["key"] to mojo_dict_get_str — see BUG-2026-044.
             if name in self._dict_val_types:
                 self._dict_val_types[t] = self._dict_val_types[name]
+            # Same for the list element type of a boxed MojoList * global:
+            # without it, print()/repr() of a read-back list temp can't pick
+            # the double-aware repr (see _list_repr_fn) — found via
+            # `lst = [3.5, 2.5]; print(lst)` printing garbage/segfaulting.
+            if name in self._elem_types:
+                self._elem_types[t] = self._elem_types[name]
             c_decl_type = self._global_c_decl_types.get(name, ctype)
             # Access global from module struct (use which module the global belongs to)
             global_module = getattr(self, '_global_to_module', {}).get(name, self._current_module_ctx or "root")
@@ -13432,7 +13456,10 @@ class GimpleGen:
                     atype = 'char *'
                 elif real in ('MojoList *', 'MojoSet *'):
                     lp = self._new_val(real, f'({real}){aval}')
-                    fn = '_mojo_repr_list' if real == 'MojoList *' else '_mojo_repr_set'
+                    if real == 'MojoList *':
+                        fn = self._list_repr_fn(aval)
+                    else:
+                        fn = '_mojo_repr_set'
                     rv = self._call_expr('char *', fn, [(real, lp)])
                     aval = rv
                     atype = 'char *'
@@ -13447,7 +13474,7 @@ class GimpleGen:
                 # the raw boxed pointer as a decimal address — Python prints
                 # a real `[elem, ...]` repr. Reuse the reflection-generated
                 # list repr rather than a separate formatter.
-                rv = self._call_expr('char *', '_mojo_repr_list', [('MojoList *', aval)])
+                rv = self._call_expr('char *', self._list_repr_fn(aval), [('MojoList *', aval)])
                 self._emit(f'  {print_fn} ({rv});')
             elif atype == 'MojoDict *':
                 rv = self._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', aval)])
@@ -25625,7 +25652,14 @@ class GimpleGen:
                     elif ftype in ('double', 'float'):
                         val_expr = f'mojo_repr_float((double){fref})'
                     elif ftype == 'MojoList *':
-                        val_expr = f'_mojo_repr_list({fref})'
+                        # Double-aware repr when this field's element type is
+                        # tracked (see _field_elem_types): the generic
+                        # _mojo_repr_list mis-reprs (or crashes on) a list of
+                        # doubles. Unknown element type keeps the generic repr.
+                        if self._field_elem_types.get(sn, {}).get(fname) == 'double':
+                            val_expr = f'mojo_repr_list_doubles({fref})'
+                        else:
+                            val_expr = f'_mojo_repr_list({fref})'
                     elif ftype == 'MojoDict *':
                         val_expr = f'_mojo_repr_dict({fref})'
                     elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',

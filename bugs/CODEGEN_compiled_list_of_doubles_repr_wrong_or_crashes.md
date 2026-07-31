@@ -1,4 +1,6 @@
-# CODEGEN: compiled `repr()`/`print()` of a list containing doubles is wrong (and can crash)
+Status: **FIXED** (mojo_repr_list_doubles runtime helper + _list_repr_fn dispatch in gimple_codegen.py)
+
+# CODEGEN: compiled repr()/print() of a list containing doubles is wrong (and can crash)
 
 ## Discovery context
 

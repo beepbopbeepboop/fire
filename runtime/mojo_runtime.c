@@ -1803,6 +1803,30 @@ char *mojo_repr_float(double v) {
     return buffer;
 }
 
+char *mojo_repr_list_doubles(MojoList *l) {
+    /* Double-aware repr for a MojoList * whose element type is statically
+     * known (at codegen time, via gimple_codegen.py's _elem_types) to be
+     * double. MojoList stores every element as a raw int64_t slot with no
+     * per-element type tag, and the codegen-emitted generic
+     * _mojo_repr_list/_mojo_generic_elem_repr pair reads each slot back via
+     * mojo_list_get_int -- a double's IEEE-754 bit pattern then either
+     * prints as a nonsense integer or, when it happens to look like a
+     * plausible heap address, faults inside mojo_read_type_tag_safe. This
+     * mirrors _mojo_repr_list's exact structure (tuple parens, single-element
+     * trailing comma, [..] otherwise) but reads each slot via
+     * mojo_list_get_double and formats it with mojo_repr_float. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
