@@ -1,4 +1,6 @@
-# CODEGEN: a top-level `def` nested inside module-scope `if`/`else` is never actually compiled (link error)
+Status: **FIXED** (promote unique-named defs nested in module-scope if/elif/else into real top-level functions, extending the existing collision promotion in gen_module)
+
+# CODEGEN: a top-level  nested inside module-scope / is never actually compiled (link error)
 
 ## Background
 

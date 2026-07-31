@@ -21584,22 +21584,19 @@ class GimpleGen:
                         _cond_fn_counts[_s.name] = _cond_fn_counts.get(_s.name, 0) + 1
                     elif isinstance(_s, IfStmt):
                         _cond_worklist.append(_s)
-        # TODO(real fix, not this refusal): this and the broader
-        # bugs/CODEGEN_conditional_toplevel_def_never_compiled.md gap share
-        # one root cause — gen_module's top-level-function discovery never
-        # walks into IfStmt bodies at all, so a def nested there isn't
-        # registered as a real top-level function even when its name is
-        # unique. A durable fix needs to, for every FunctionDef found inside
-        # a module-level if/elif/else chain:
-        #   1. Register it in the same pre-pass structures (closure scan,
-        #      gen_func loop) that direct top-level FunctionDefs go through
-        #      a few hundred lines down, instead of leaving it to fall
-        #      through to _gen_stmt_FunctionDef's closure path with no
-        #      pre-pass ClosureInfo.
-        #   2. Give same-named defs from sibling branches distinct mangled C
+        # TODO(real fix, not this approximation): the promotion below
+        # handles BOTH the same-name collision case AND the single,
+        # non-duplicated `def` nested in a module-scope if/elif/else
+        # (bugs/CODEGEN_conditional_toplevel_def_never_compiled.md), by
+        # hoisting the first-branch def into a real top-level FunctionDef so
+        # it flows through the same pre-pass structures (closure scan, gen_
+        # func loop) a direct top-level def goes through. What it does NOT
+        # yet do — the durable fix's remaining half — is represent the
+        # branch-selectivity faithfully for COLLIDING names:
+        #   1. Give same-named defs from sibling branches distinct mangled C
         #      symbols (e.g. suffix by branch index), rather than the single
         #      unmangled name every direct top-level def gets.
-        #   3. Make each call site to that name dispatch at runtime between
+        #   2. Make each call site to that name dispatch at runtime between
         #      the mangled per-branch symbols, re-evaluating the same
         #      condition the def was originally guarded by (or, if the
         #      guarding condition is one this compiler can already resolve
@@ -21607,30 +21604,83 @@ class GimpleGen:
         #      special-cased anywhere else already — pick the matching
         #      branch's mangled symbol directly at compile time instead of
         #      emitting a runtime check).
-        # Until that exists, raising here (rather than silently emitting a
-        # dangling extern or picking an arbitrary branch) is the honest
-        # option, not the complete one.
+        # Until that exists, first-branch-wins (matching CPython semantics
+        # for the branch that RUNS) is the honest approximation, not the
+        # complete one.
         _cond_collisions = {n for n, c in _cond_fn_counts.items() if c > 1}
-        if _cond_collisions:
+        # A SINGLE, non-duplicated `def` nested in a module-scope
+        # if/elif/else is JUST as invisible to the pre-passes below (which
+        # only walk direct top-level FunctionDef entries in `stmts`, never
+        # IfStmt branches) as a collision-pair is — it would silently fall
+        # through to _gen_stmt_FunctionDef's closure path with no pre-pass
+        # ClosureInfo, emit no body, and leave every call site with a
+        # dangling extern that fails at LINK time (the `if sys.platform ==
+        # 'darwin': def greet(): ...` + `print(greet())` repro in
+        # bugs/CODEGEN_conditional_toplevel_def_never_compiled.md). Promote
+        # it to a real top-level statement exactly like the collision case
+        # above, first-branch-wins. Guard: never promote a name that ALSO
+        # has a direct top-level `def` in this module — hoisting it would
+        # create exactly the same-name C-symbol clash the collision case
+        # exists to catch (such a def stays exactly as broken as it was
+        # before, no regression).
+        _direct_toplevel_names = {s.name for s in stmts if isinstance(s, FunctionDef)}
+        _cond_unique = {n for n, c in _cond_fn_counts.items()
+                        if c == 1 and n not in _direct_toplevel_names}
+        _promote_names = _cond_collisions | _cond_unique
+        if _promote_names:
             # Platform-conditional def idiom (same fn name in if/elif/else
-            # branches). This compiler targets CPython semantics, so the
-            # FIRST branch's definition is the correct one — promote it to a
-            # real top-level function and discard the branch container (the
-            # other branches' same-named defs would otherwise collide).
+            # branches, or a single conditionally-defined helper). This
+            # compiler targets CPython semantics, so the FIRST branch's
+            # definition is the correct one — promote it to a real top-level
+            # function and discard the branch container (the other branches'
+            # same-named defs would otherwise collide). A top-level IfStmt
+            # whose branches contain no def to promote is left untouched —
+            # it's ordinary conditional top-level code, not a definition.
+            # Iterative explicit-stack traversal (first-occurrence defs
+            # across then/elif/else branches in execution order, recursing
+            # into NESTED IfStmts the same way the counting worklist above
+            # does — the two share one root cause: defs inside module-scope
+            # conditionals), NOT a self-recursive nested helper: a nested
+            # function calling itself does not survive self-host closure-
+            # lifting (same constraint the counting worklist above documents
+            # in full).
+            _already_promoted_names: set = set()
             _replaced: list = []
             for _s in stmts:
                 if not isinstance(_s, IfStmt):
                     _replaced.append(_s)
                     continue
-                _first_def = None
-                for _s2 in (_s.then_body or []):
-                    if isinstance(_s2, FunctionDef) and _s2.name in _cond_collisions:
-                        _first_def = _s2
-                        break
-                if _first_def is not None:
-                    _replaced.append(_first_def)
-                # Drop the else/elif bodies entirely (their same-named defs
-                # are not the platform-correct ones)
+                _promoted: list = []
+                _seen_names: set = set()
+                _stack: list = [([_s], 0)]
+                while _stack:
+                    _frame_body, _frame_idx = _stack[-1]
+                    if _frame_idx >= len(_frame_body):
+                        _stack.pop()
+                        continue
+                    _frame_stmt = _frame_body[_frame_idx]
+                    _stack[-1] = (_frame_body, _frame_idx + 1)
+                    if isinstance(_frame_stmt, FunctionDef):
+                        if (_frame_stmt.name in _promote_names
+                                and _frame_stmt.name not in _seen_names
+                                and _frame_stmt.name not in _already_promoted_names):
+                            _promoted.append(_frame_stmt)
+                            _seen_names.add(_frame_stmt.name)
+                            _already_promoted_names.add(_frame_stmt.name)
+                    elif isinstance(_frame_stmt, IfStmt):
+                        _nested_body = (_frame_stmt.then_body or [])
+                        for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                            _nested_body = _nested_body + _elif_body2
+                        if _frame_stmt.else_body:
+                            _nested_body = _nested_body + _frame_stmt.else_body
+                        _stack.append((_nested_body, 0))
+                if _promoted:
+                    _replaced.extend(_promoted)
+                    # Drop the branch container entirely (its non-promoted
+                    # defs and other statements are not the platform-correct
+                    # ones — mirroring the collision path above)
+                else:
+                    _replaced.append(_s)
             stmts = _replaced
 
         # Local generic free functions: the parser drops the `[T]` type params, so
