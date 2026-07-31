@@ -18646,16 +18646,16 @@ class GimpleGen:
         tag = self._exc_type_id(exc_name)
         msg_cpp = 'nullptr'
         if msg_arg is not None:
-            if not isinstance(msg_arg, StringLiteral):
-                raise _UnsupportedGeneratorShape(
-                    "only a literal string message is supported for "
-                    "`raise ExcName(msg)` inside a generator body")
-            text, is_fstr = self._decode_str_literal_text(msg_arg.value)
-            if is_fstr:
-                raise _UnsupportedGeneratorShape(
-                    "an f-string `raise` message is not supported inside a "
-                    "generator body")
-            msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+            if isinstance(msg_arg, StringLiteral):
+                text, is_fstr = self._decode_str_literal_text(msg_arg.value)
+                if is_fstr:
+                    raise _UnsupportedGeneratorShape(
+                        "an f-string `raise` message is not supported inside a "
+                        "generator body")
+                msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+            else:
+                # Variable/expression message: evaluate as char* expression
+                msg_cpp = self._cpp_expr(msg_arg)
         return [f"{indent}throw _MojoCppExc{{ (int64_t){tag}, {msg_cpp}, "
                 f"(void *){msg_cpp} }};"]
 
