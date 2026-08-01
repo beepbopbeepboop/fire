@@ -9049,6 +9049,29 @@ class GimpleGen:
                     arg_type, arg_val = self.lower_expr(node.args[0])
                     t = self._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                     return 'int', t
+                elif outer_member == 'isabs' and len(node.args) == 1:
+                    # os.path.isabs(p) → check if first char is '/'
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    if arg_type not in ('char *', 'void *'):
+                        arg_cast = self._new_temp('char *')
+                        self._emit(f'  {arg_cast} = (char *){arg_val};')
+                        arg_val = arg_cast
+                    t = self._new_temp('int')
+                    self._emit(f'  {t} = ({arg_val} != 0 && *{arg_val} == \'/\');')
+                    return 'int', t
+                elif outer_member == 'normpath' and len(node.args) == 1:
+                    # os.path.normpath(p) → stub: return p unchanged
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    return arg_type, arg_val
+                elif outer_member == 'isfile' and len(node.args) == 1:
+                    # os.path.isfile(p) → stub: return 0 (not a file)
+                    for a in node.args: self.lower_expr(a)
+                    return 'int', self._new_val('int', '0')
+                elif outer_member == 'relpath' and len(node.args) >= 1:
+                    # os.path.relpath(p) → stub: return p unchanged
+                    arg_type, arg_val = self.lower_expr(node.args[0])
+                    for a in node.args[1:]: self.lower_expr(a)
+                    return arg_type, arg_val
 
         # Handle module method calls: module_name.function(args)
         if isinstance(func.obj, IdentExpr):
@@ -9172,12 +9195,15 @@ class GimpleGen:
                 t = self._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
                 return 'char *', t
 
-            if module_name == 'gimple_codegen' and method_name in (
-                    'compile_to_gimple', 'compile_to_gimple_cached'):
+            if (module_name == 'gimple_codegen' and method_name in (
+                    'compile_to_gimple', 'compile_to_gimple_cached')):
                 # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
                 # compile_to_gimple_cached lowers to the SAME shim: caching is a
                 # Python-process concern; the self-hosted binary's subprocess
                 # fallback just compiles (same output, uncached).
+                #
+                # MOJO_NO_SHIM=1: call the compiled compile_to_gimple directly
+                # (native backend) instead of the C runtime shim (subprocess).
                 if len(node.args) >= 1:
                     src_type, src_val = self.lower_expr(node.args[0])
                     # Cast to char* if needed (legacy int-cast strings)
@@ -9214,7 +9240,12 @@ class GimpleGen:
                     elif 'filename' in kwarg_map:
                         fn_type, fn_val = self.lower_expr(kwarg_map['filename'])
                         filename_val = fn_val
-                    t = self._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
+                    if os.environ.get('MOJO_NO_SHIM'):
+                        # Native path: call compiled compile_to_gimple directly
+                        t = self._new_val('char *', f"compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
+                    else:
+                        # Subprocess path: call C runtime shim
+                        t = self._new_val('char *', f"gimple_codegen_compile_to_gimple ({src_val}, {do_imports_val}, {filename_val})")
                     return 'char *', t
 
             # Step C (compiled-path async/await codegen project):
@@ -27376,6 +27407,7 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     matching forward declaration for it. Link mode is a separate entry point —
     compile_to_gimple_linked — to avoid changing this ABI.)
     """
+    import sys; print(f"[TRACE-CG] compile_to_gimple ENTERED filename={filename!r} do_imports={do_imports} src_len={len(mojo_src)}", file=sys.stderr, flush=True)
     # One call here = one independent output artifact (this project's own
     # transitive-closure dumps included - the whole multi-file closure is one
     # call). Reset cross-file dedup state so it can't leak stale "already
@@ -27391,7 +27423,9 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     if do_imports:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
-    return gen.gen_module(stmts)
+    result = gen.gen_module(stmts)
+    print(f"[TRACE-CG] compile_to_gimple RETURNED len={len(result) if result else 0}", file=sys.stderr, flush=True)
+    return result
 
 
 def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,

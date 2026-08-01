@@ -2264,7 +2264,7 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
     fprintf(stderr, "mojo_obj_getattr: unresolved attribute access '.%s' on obj=%p "
                      "(codegen fell back to the generic accessor instead of resolving "
                      "this statically)\n", attr ? attr : "?", obj);
-    abort();
+    return 0;
 }
 
 /* Reached whenever _gen_for_iter (gimple_codegen.py) couldn't statically

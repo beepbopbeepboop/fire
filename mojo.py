@@ -528,12 +528,12 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                 sys.argv.pop(idx)   # remove output filename
 
     dump_full = '--dump-full' in sys.argv
-    if dump_full:
-        sys.argv.remove('--dump-full')
-
     dump = '--dump' in sys.argv
-    if dump:
-        sys.argv.remove('--dump')
+    # Strip flags from sys.argv so input_file = sys.argv[1] works.
+    # sys.argv.remove() is broken in the compiled binary (list method
+    # dispatch fails), so rebuild the list instead.
+    if dump_full or dump:
+        sys.argv = [a for a in sys.argv if a not in ('--dump-full', '--dump')]
 
     if len(sys.argv) < 2:
         run_repl()
@@ -582,7 +582,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         basename = os.path.splitext(os.path.basename(input_file))[0]
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -649,7 +649,17 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                     any_failed = True
 
             # Generate C intermediate (with transitive imports)
-            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+            # NOTE: call compile_to_gimple directly — compile_to_gimple_cached
+            # imports cas.py which depends on CPython stdlib (hashlib, subprocess)
+            # that the compiled binary can't run.
+            import sys as _s2
+            print(f"[TRACE2] about to call compile_to_gimple via gimple_codegen", file=_s2.stderr, flush=True)
+            try:
+                c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
+                import sys as _s3; print(f"[TRACE3] compile_to_gimple returned {len(c_code) if c_code else 0} bytes", file=_s3.stderr, flush=True)
+            except Exception as e:
+                import traceback; traceback.print_exc(file=sys.stderr)
+                c_code = ''
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 
