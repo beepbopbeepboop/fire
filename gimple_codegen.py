@@ -5548,6 +5548,7 @@ class GimpleGen:
             function_calls = []  # List of (function_name, arg_index)
             is_subscripted = False  # Track if parameter is used with [...]
             is_string_method = False  # Track if param.<str-only-method>(...) is called
+            is_iterated = False  # Track if parameter is used as for-loop iterable
 
             def scan_expr(expr):
                 """Recursively scan an expression."""
@@ -5631,6 +5632,7 @@ class GimpleGen:
 
             def scan_nodes(node_list):
                 """Recursively scan a list of statements."""
+                nonlocal is_iterated
                 for node in node_list:
                     if isinstance(node, AssignStmt):
                         scan_expr(node.target)
@@ -5651,6 +5653,10 @@ class GimpleGen:
                         if isinstance(node, WhileStmt):
                             scan_expr(node.condition)
                         if isinstance(node, ForStmt):
+                            # Detect `for x in <param>:` — evidence param is a list
+                            it = node.iterable
+                            if isinstance(it, IdentExpr) and it.name == param_name:
+                                is_iterated = True
                             scan_expr(node.iterable)
                         scan_nodes(node.body)
                         if node.else_body:
@@ -5682,12 +5688,12 @@ class GimpleGen:
                             scan_nodes(node.finally_body)
 
             scan_nodes(nodes)
-            return accessed_fields, function_calls, is_subscripted, is_string_method
+            return accessed_fields, function_calls, is_subscripted, is_string_method, is_iterated
 
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                fields_accessed, function_calls, is_subscripted, is_string_method = \
+                fields_accessed, function_calls, is_subscripted, is_string_method, is_iterated = \
                     analyze_param_usage(func.body, pname)
 
                 # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
@@ -5698,12 +5704,13 @@ class GimpleGen:
                 if is_polymorphic:
                     continue  # leave as int64_t (default for unannotated)
 
-                # If parameter is subscripted, it's indexable (list/dict/etc.) —
-                # UNLESS it's also called with a str-only method (STRING_ONLY_METHODS
-                # above), in which case indexing is char-by-char string scanning and
-                # the real type is char*, not MojoList*. Check subscript FIRST to
+                # If parameter is subscripted OR iterated (for x in param:), it's
+                # indexable (list/dict/etc.) — UNLESS it's also called with a
+                # str-only method (STRING_ONLY_METHODS above), in which case
+                # indexing is char-by-char string scanning and the real type is
+                # char*, not MojoList*. Check subscript/iteration FIRST to
                 # override generic function-call inference like len() either way.
-                if is_subscripted:
+                if is_subscripted or is_iterated:
                     inferred[pname] = 'char *' if is_string_method else 'MojoList *'
 
                 # If not subscripted, try to infer from function calls
@@ -18008,6 +18015,12 @@ class GimpleGen:
                 # is authoritative — use the struct pointer, not a type a sibling
                 # overload clobbered onto the shared base key.
                 ctype = f"{ptype.split('[', 1)[0].split('.')[0].strip()} *"
+            elif ptype is None and hasattr(self, '_inferred_param_types') and \
+                 method_full_name in self._inferred_param_types and \
+                 bare in self._inferred_param_types[method_full_name]:
+                # Unannotated param with usage-based inference (MojoList*, char*, etc.)
+                # takes precedence over hardcoded_params which may hold stale C types.
+                ctype = self._inferred_param_types[method_full_name][bare]
             elif (hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params)
                   and not (i == 0 and pname != 'self'
                            and hardcoded_params[i] == f"{struct_name} *")):
@@ -18016,13 +18029,7 @@ class GimpleGen:
                 # (e.g. static fetch_add(ptr) vs instance fetch_add(self) on Atomic).
                 ctype = hardcoded_params[i]
             else:
-                if ptype is None and hasattr(self, '_inferred_param_types'):
-                    if method_full_name in self._inferred_param_types and bare in self._inferred_param_types[method_full_name]:
-                        ctype = self._inferred_param_types[method_full_name][bare]
-                    else:
-                        ctype = self._resolve_type(ptype)
-                else:
-                    ctype = self._param_ctype(pname, ptype, node)
+                ctype = self._param_ctype(pname, ptype, node)
             self.var_types[bare] = ctype
             safe_bare = f'_kw_{bare}' if bare in _C_KEYWORDS or bare in _C_PARAM_EXTRA_KEYWORDS else bare
             if safe_bare != bare:
