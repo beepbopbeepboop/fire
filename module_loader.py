@@ -279,7 +279,10 @@ class ModuleLoader:
                                     parameters.append((param_name, param_type))
 
                         # Build C signature from extracted info
-                        c_return_type = self._mojo_type_to_c(return_type)
+                        try:
+                            c_return_type = self._mojo_type_to_c(return_type)
+                        except Exception:
+                            c_return_type = 'int64_t'
                         c_params = []
                         for pname, ptype in parameters:
                             # Strip default values (e.g., 'String = ""' becomes 'String')
@@ -287,7 +290,10 @@ class ModuleLoader:
                                 bare_type = ptype.split('=')[0].strip()
                             else:
                                 bare_type = ptype
-                            c_type = self._mojo_type_to_c(bare_type)
+                            try:
+                                c_type = self._mojo_type_to_c(bare_type)
+                            except Exception:
+                                c_type = 'int64_t'
                             # A named parameter can never be typed 'void' in C
                             # (only the sole, unnamed '(void)' no-args marker is
                             # legal) -- e.g. a parameter annotated `: None`
