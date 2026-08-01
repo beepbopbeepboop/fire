@@ -18015,12 +18015,6 @@ class GimpleGen:
                 # is authoritative — use the struct pointer, not a type a sibling
                 # overload clobbered onto the shared base key.
                 ctype = f"{ptype.split('[', 1)[0].split('.')[0].strip()} *"
-            elif ptype is None and hasattr(self, '_inferred_param_types') and \
-                 method_full_name in self._inferred_param_types and \
-                 bare in self._inferred_param_types[method_full_name]:
-                # Unannotated param with usage-based inference (MojoList*, char*, etc.)
-                # takes precedence over hardcoded_params which may hold stale C types.
-                ctype = self._inferred_param_types[method_full_name][bare]
             elif (hardcoded_params and '...' not in hardcoded_params and i < len(hardcoded_params)
                   and not (i == 0 and pname != 'self'
                            and hardcoded_params[i] == f"{struct_name} *")):
@@ -18029,7 +18023,13 @@ class GimpleGen:
                 # (e.g. static fetch_add(ptr) vs instance fetch_add(self) on Atomic).
                 ctype = hardcoded_params[i]
             else:
-                ctype = self._param_ctype(pname, ptype, node)
+                if ptype is None and hasattr(self, '_inferred_param_types'):
+                    if method_full_name in self._inferred_param_types and bare in self._inferred_param_types[method_full_name]:
+                        ctype = self._inferred_param_types[method_full_name][bare]
+                    else:
+                        ctype = self._resolve_type(ptype)
+                else:
+                    ctype = self._param_ctype(pname, ptype, node)
             self.var_types[bare] = ctype
             safe_bare = f'_kw_{bare}' if bare in _C_KEYWORDS or bare in _C_PARAM_EXTRA_KEYWORDS else bare
             if safe_bare != bare:

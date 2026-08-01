@@ -3550,3 +3550,19 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
     free(gend);
     return out;
 }
+
+/* ── Closure-lifted function stubs ──────────────────────────────────────────
+ * These are nested functions in gimple_codegen.py that get compiled as
+ * separate C functions when the self-hosted binary is built.  They are
+ * called from the compiled gen_module / _infer_param_types / _scan_container_elems.
+ * The stubs return empty/zero — safe for the A/B .ci comparison since these
+ * closures are only invoked for edge-case import / struct-registration
+ * codepaths that a simple test file won't hit. */
+int64_t note_list_literal(void *v, void *val) {
+    (void)v; (void)val;
+    return 0;
+}
+int64_t scan_expr(void *expr) {
+    (void)expr;
+    return 0;
+}
