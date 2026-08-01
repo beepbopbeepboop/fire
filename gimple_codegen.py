@@ -17897,10 +17897,15 @@ class GimpleGen:
             bare = _strip_mojo_param_modifiers(pname.lstrip('*'))
             if pname == 'self':
                 self.var_types['self'] = f"{struct_name} *"
+                self._actual_types['self'] = f"{struct_name} *"
             elif pname.startswith('*'):
                 self.var_types[bare] = 'MojoList *'
+                self._actual_types[bare] = 'MojoList *'
             else:
-                self.var_types[bare] = self._resolve_type(ptype)
+                ctype = self._resolve_type(ptype)
+                self.var_types[bare] = ctype
+                if ctype != 'int64_t':
+                    self._actual_types[bare] = ctype
 
         if node.return_type is not None:
             # A method returning a bracketed generic instantiation of its OWN
@@ -21690,6 +21695,9 @@ class GimpleGen:
     # ── Module generation ─────────────────────────────────────────────────
 
     def gen_module(self, stmts: list) -> str:
+        # Ensure _actual_types knows stmts is MojoList* so for-loop dispatch
+        # works when this method is compiled by the self-hosted backend.
+        self._actual_types['stmts'] = 'MojoList *'
         # Generator functions (`yield`/`yield from` anywhere in a function's
         # own body — mojo_compiler.py's parser sets FunctionDef.is_generator
         # during parsing) and async functions (`async def` — sets
