@@ -5057,6 +5057,7 @@ class GimpleGen:
         # execv to its 2-arg C signature so types coerce correctly.
         'waitpid':       ('int', ['int', 'int *', 'int']),
         'execv':         ('int', ['char *', 'char *']),
+        'execve':        ('int', ['char *', 'char *', 'char *']),
     }
 
     # Rename these C stdlib functions to mojo_* wrappers at call sites.
