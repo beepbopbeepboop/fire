@@ -186,6 +186,41 @@ class ModuleLoader:
 
             exports = {}
 
+            # C standard library function names that are already declared by
+            # our prelude headers (stdint/stdlib/string/math/stdio). Returning
+            # them from load_module would cause _emit_stdlib_import_externs to
+            # emit a conflicting extern (e.g. int64_t nan(void) vs double
+            # nan(const char *) from <math.h>).
+            _C_STDLIB_SKIP = frozenset({
+                'abort', 'exit', '_exit',
+                'malloc', 'calloc', 'realloc', 'free',
+                'memcpy', 'memmove', 'memset', 'memcmp', 'memchr',
+                'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy',
+                'strcat', 'strncat', 'strstr', 'strchr', 'strrchr',
+                'strtok', 'strerror', 'strdup', 'strndup',
+                'printf', 'fprintf', 'sprintf', 'snprintf',
+                'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell',
+                'fflush', 'fgets', 'fputs', 'feof', 'ferror', 'fileno',
+                'stdin', 'stdout', 'stderr',
+                'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2',
+                'sinh', 'cosh', 'tanh',
+                'sqrt', 'cbrt', 'pow', 'exp', 'log', 'log2', 'log10',
+                'ceil', 'floor', 'round', 'trunc',
+                'fabs', 'fmod', 'hypot',
+                'nan', 'nanf',
+                'rand', 'srand', 'abs',
+                'getenv', 'setenv', 'unsetenv',
+                'system', 'atexit',
+                'remove', 'rename',
+                'time', 'clock', 'difftime', 'mktime',
+                'localtime', 'gmtime', 'asctime', 'ctime', 'strftime',
+                'signal', 'raise',
+                'dlopen', 'dlsym', 'dlclose', 'dlerror',
+                'index', 'rindex',
+                'isalpha', 'isdigit', 'isalnum', 'isspace',
+                'isupper', 'islower', 'toupper', 'tolower',
+            })
+
             def _scan_source(src_content):
                 """Extract fn/def exports from Mojo source text into exports dict."""
                 for line in src_content.split('\n'):
@@ -207,14 +242,18 @@ class ModuleLoader:
                         paren_end = sig.rindex(')')
 
                         name_part = sig[:paren_start].strip()
-                        name = name_part.split()[-1] if name_part else ''
-                        # Strip generic parameters (e.g.,
-                        # 'listdir[PathLike]' → 'listdir')
-                        if '[' in name:
-                            name = name.split('[')[0]
+                        # Strip generic parameters first (e.g.,
+                        # 'listdir[PathLike]' → 'listdir') before
+                        # whitespace split, since generics contain no
+                        # spaces and would become the last token.
+                        _brk = name_part.find('[')
+                        if _brk >= 0:
+                            name = name_part[:_brk].strip().split()[-1]
+                        else:
+                            name = name_part.split()[-1] if name_part else ''
                         params_str = sig[paren_start + 1:paren_end].strip()
 
-                        if not name:
+                        if not name or name in _C_STDLIB_SKIP:
                             continue
 
                         # Extract return type

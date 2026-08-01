@@ -4125,6 +4125,7 @@ class GimpleGen:
             'exp', 'expf', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f',
             'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf',
             'abs', 'fabs', 'fabsf', 'fmod', 'fmodf',
+            'trunc', 'nan',
             'malloc', 'free', 'realloc', 'calloc',
             'pclose', 'popen', 'dlclose', 'dlopen', 'dlsym', 'dlerror',
             'printf', 'fprintf', 'sprintf', 'snprintf', 'scanf', 'sscanf',
@@ -4217,7 +4218,9 @@ class GimpleGen:
                         # module's claim on the same bare name in the shared
                         # _imported_func_home fallback.
                         self._note_own_func_home(sym, _qual)
-                if sym in seen or sym in _C_BUILTINS:
+                if sym in seen or sym in _C_BUILTINS or (
+                        sym in self._LIBC_DECLARED
+                        and sym not in self._NEEDS_SELF_EXTERN):
                     continue
                 info = exports.get(name)
                 if not info:
@@ -10236,6 +10239,10 @@ class GimpleGen:
         # site to inherit an extern from, so it hit "implicit declaration of
         # function 'fcntl'" on every cold-CAS-cache stdlib build.
         'dup', 'pipe', 'fcntl',
+        # fork/waitpid: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
+        # so _emit_stdlib_import_externs must not skip them (the new
+        # _LIBC_DECLARED check would otherwise suppress them).
+        'fork', 'waitpid',
     })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
@@ -10370,6 +10377,7 @@ class GimpleGen:
         'dlopen': ('void *', ['char *', 'int']),
         'dlsym': ('void *', ['void *', 'char *']),
         'waitpid': ('int', ['int', 'int *', 'int']),
+        'fork': ('int', []),
         'dup': ('int', ['int']),
         'dup2': ('int', ['int', 'int']),
         'pipe': ('int', ['int *']),
