@@ -17197,6 +17197,11 @@ class GimpleGen:
             else:
                 ctype = self._resolve_type(ptype)
             self.var_types[bare] = ctype
+            # Register in _actual_types so _get_actual_type resolves the real
+            # type for for-loop iterables and other dispatch paths.
+            if ctype != 'int64_t':
+                self._actual_types[bare] = ctype
+                import sys; print(f"[TRACE-PARAM] {node.name}.{bare} = {ctype}", file=sys.stderr, flush=True)
 
         # Seed the cross-call element-type contract for container params, so
         # param[i][j] reads the inner element with the right getter and return
