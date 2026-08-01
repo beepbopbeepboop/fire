@@ -5052,6 +5052,11 @@ class GimpleGen:
         '_char_replace_impl': ('int64_t', ['int64_t', 'int64_t', 'int64_t']),
         # id() is emitted as a static helper in _MOJO_UNIMPL_STUBS — suppress variadic stub
         'id':            ('int64_t', ['int64_t']),
+        # POSIX process functions — pad Mojo's 2-arg waitpid(pid, options)
+        # to the real 3-arg C signature (pid, &status, options); and pad
+        # execv to its 2-arg C signature so types coerce correctly.
+        'waitpid':       ('int', ['int', 'int *', 'int']),
+        'execv':         ('int', ['char *', 'char *']),
     }
 
     # Rename these C stdlib functions to mojo_* wrappers at call sites.
@@ -10239,10 +10244,10 @@ class GimpleGen:
         # site to inherit an extern from, so it hit "implicit declaration of
         # function 'fcntl'" on every cold-CAS-cache stdlib build.
         'dup', 'pipe', 'fcntl',
-        # fork/waitpid: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
+        # fork/waitpid/execv: headers (<unistd.h>/<sys/wait.h>) not in our prelude,
         # so _emit_stdlib_import_externs must not skip them (the new
         # _LIBC_DECLARED check would otherwise suppress them).
-        'fork', 'waitpid',
+        'fork', 'waitpid', 'execv',
     })
     _LIBC_DECLARED = {
         'printf', 'fprintf', 'snprintf', 'sprintf', 'puts', 'putchar', 'fputs',
@@ -10378,6 +10383,7 @@ class GimpleGen:
         'dlsym': ('void *', ['void *', 'char *']),
         'waitpid': ('int', ['int', 'int *', 'int']),
         'fork': ('int', []),
+        'execv': ('int', ['char *', 'char *']),
         'dup': ('int', ['int']),
         'dup2': ('int', ['int', 'int']),
         'pipe': ('int', ['int *']),
