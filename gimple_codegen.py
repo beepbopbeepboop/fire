@@ -6103,13 +6103,87 @@ class GimpleGen:
 
     # ── Type-inference pre-pass helpers ──────────────────────────────────
 
+    def _closure_info_for_ident(self, name: str):
+        """Resolve a bare identifier reference to the ClosureInfo of the
+        nested function it names, or None if `name` is not a closure in
+        scope. Checks the current function's own registered closures (a
+        closure referenced from its own enclosing body — e.g. `return add`
+        inside `make_adder`) and, while compiling a lifted closure or
+        lambda body, the ENCLOSING function's closures too (a sibling
+        nested function referenced as a value — the same scoping
+        `_lower_call`'s `_lower_outer_closure_call` already gets via
+        `_lambda_outer_closures`)."""
+        _cur = getattr(self, '_all_closures', {}).get(self.current_func_name, {})
+        ci = _cur.get(name)
+        if ci is not None:
+            return ci
+        return getattr(self, '_lambda_outer_closures', {}).get(name)
+
+    def _closure_value_locals(self, body: list) -> dict:
+        """Map local name → 'MojoBoundMethod *'/'void *' for the locals of a
+        function body that are assigned a nested-function (closure) VALUE
+        (`var f = inner`, `f = inner`), resolved from the closure's capture
+        shape (a capturing closure is a MojoBoundMethod*, a non-capturing
+        one a bare function pointer — see _lower_IdentExpr's closure-value
+        materialization). Used to seed return-type inference so it can see
+        through a local alias (`def make_both(): var f = inner; return f`),
+        which `_infer_local_var_types` can't (that pass never scans VarDecl
+        and runs before `_all_closures` is populated)."""
+        result: dict = {}
+
+        def _walk(stmts: list):
+            for st in stmts:
+                tgt = None
+                val = None
+                if isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr):
+                    tgt = st.target.name
+                    val = st.value
+                elif (isinstance(st, VarDecl) and isinstance(st.name, str)
+                        and ',' not in st.name and st.value is not None):
+                    tgt = st.name
+                    val = st.value
+                if tgt is not None and tgt not in result and isinstance(val, IdentExpr):
+                    _ci = self._closure_info_for_ident(val.name)
+                    if _ci is not None:
+                        result[tgt] = 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+                if isinstance(st, FunctionDef):
+                    continue
+                for attr in ('then_body', 'else_body', 'body', 'finally_body'):
+                    sub = getattr(st, attr, None)
+                    if isinstance(sub, list):
+                        _walk(sub)
+                for _eb_cond, _eb_body in (getattr(st, 'elifs', None) or []):
+                    _walk(_eb_body)
+                for _h in (getattr(st, 'handlers', None) or []):
+                    hb = getattr(_h, 'body', None)
+                    if isinstance(hb, list):
+                        _walk(hb)
+
+        _walk(body)
+        return result
+
     def _quick_type(self, node) -> str:
         """Estimate C type of an expression without emitting code."""
         if isinstance(node, IntLiteral):    return 'int64_t'
         if isinstance(node, FloatLiteral):  return 'double'
         if isinstance(node, BoolLiteral):   return '_Bool'
         if isinstance(node, StringLiteral): return 'char *'
-        if isinstance(node, IdentExpr):     return self.var_types.get(node.name, 'int64_t')
+        if isinstance(node, IdentExpr):
+            if node.name in self.var_types:
+                return self.var_types[node.name]
+            # A nested-function (closure) name referenced as a VALUE
+            # (`return add`, `var f = add`, `foo(add)`) — a capturing
+            # closure bundles its env with the lifted function pointer as a
+            # `MojoBoundMethod *` (see _lower_IdentExpr's closure-value
+            # materialization); a non-capturing one is a bare function
+            # pointer. Recognized here so return-type inference
+            # (`def make_adder(...): return add`) and call-site var typing
+            # (`var add5 = make_adder(5)`) see the real value shape instead
+            # of the int64_t default (which made `return add` return NULL).
+            _ci = self._closure_info_for_ident(node.name)
+            if _ci is not None:
+                return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+            return 'int64_t'
         if isinstance(node, BinaryOp):
             # 'in'/'not in' are missing from _CMP_OPS (generated_dispatch.py) —
             # real, pre-existing gap: falling through to
@@ -7174,6 +7248,34 @@ class GimpleGen:
         cname = self._c_names.get(name, name)
         if name in self.var_types:
             return ctype, cname
+        # A nested function (closure) referenced as a VALUE (`return add`,
+        # `var f = add`, `foo(add)`) — materialize a first-class callable
+        # instead of falling through to the unknown-identifier NULL
+        # placeholder below (which made `return add` return NULL and any
+        # later call through the value segfault). A capturing closure
+        # bundles its captured env with the lifted function pointer as a
+        # `MojoBoundMethod *` (`fn` + `self`), exactly the representation
+        # _lower_bound_method_value already uses, so a later call through
+        # the value (`add5(37)` → mojo_bound_method_call_1) can re-supply
+        # the env as the lifted function's implicit first argument
+        # (`make_adder_add(_env->n, x)`); a non-capturing closure needs no
+        # env and is a bare function pointer, matching _lower_LambdaExpr's
+        # value representation. Uses the same pre-declared static void*
+        # `_funcptr_<name>` var the function-value branches above use
+        # (GIMPLE forbids `&func_name` as an rvalue).
+        _ci = self._closure_info_for_ident(name)
+        if _ci is not None:
+            lifted = _ci.lifted_name
+            self._funcptr_builtins_needed.add(lifted)
+            fp = self._new_val('void *', f'_funcptr_{lifted}')
+            if _ci.env_struct:
+                env_void = self._new_val(
+                    'void *', f'(void *){self._closure_envs.get(name) or "0"}')
+                t = self._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
+                                    [('void *', fp), ('void *', env_void)])
+                self._bound_method_ret_types[t] = self.func_return_types.get(lifted, 'int64_t')
+                return 'MojoBoundMethod *', t
+            return 'void *', fp
         # A local `comptime NAME = <value>` (e.g. `comptime maxI = 100`,
         # test_locks.mojo's own idiom for its stress-test loop bounds) is
         # folded by `_gen_stmt_ComptimeVarStmt` into `self._comptime_vals`,
@@ -7924,20 +8026,31 @@ class GimpleGen:
         real-type cast dance `_lower_MemberExpr`'s object-lowering path uses
         for the identical situation.
         """
-        arg_pairs = [self.lower_expr(a) for a in node.args]
-        n = len(arg_pairs)
         bm_raw = self._c_names.get(fname_raw, fname_raw)
         if stored_ctype == 'MojoBoundMethod *':
-            bm = bm_raw
+            bm_type, bm = 'MojoBoundMethod *', bm_raw
         else:
             ip = self._ensure_local(stored_ctype, bm_raw)
             vp = self._new_val('void *', f'(void *){ip}')
             bm = self._new_val('MojoBoundMethod *', f'(MojoBoundMethod *){vp}')
+        ret_type = self._bound_method_ret_types.get(fname_raw, 'int64_t')
+        return self._lower_bound_method_call_value(bm, node, ret_type)
+
+    def _lower_bound_method_call_value(self, bm: str, node: CallExpr,
+                                        ret_type: str = 'int64_t') -> tuple[str, str]:
+        """Emit a call through an already-lowered `MojoBoundMethod *` VALUE
+        (`bm`), the value-based twin of _lower_bound_method_call (shared so
+        an arbitrary callable VALUE — `make_adder2(100)(2)`'s inner call
+        result, `f = self.b; f()` — dispatches through the same runtime
+        helper). `mojo_bound_method_call_N` re-supplies `bm->self` as the
+        lifted function's implicit first argument (the captured env / bound
+        receiver)."""
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        n = len(arg_pairs)
         widened = []
         for at, av in arg_pairs:
             widened.append(av if at == 'int64_t' else self._new_val('int64_t', f'(int64_t){av}'))
         helper = f'mojo_bound_method_call_{min(n, 4)}'
-        ret_type = self._bound_method_ret_types.get(fname_raw, 'int64_t')
         raw_t = self._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
                                  [('int64_t', w) for w in widened[:4]])
         if ret_type in ('int64_t', 'int'):
@@ -11854,6 +11967,30 @@ class GimpleGen:
                     return 'int64_t', t
                 return 'int64_t', self._new_val('int64_t', '(int64_t)0')
         if not isinstance(node.func, IdentExpr):
+            # Calling the RESULT of a call expression directly —
+            # `factory()(5)`, `make_adder2(100)(2)`, `pick(1)(x)` — where the
+            # inner call returns a first-class callable VALUE. Previously
+            # stubbed to 0 (silently wrong; returned 0 instead of calling).
+            # Dispatch on the inner value's type exactly like an ordinary
+            # identifier-backed call: a `MojoBoundMethod *` (a capturing
+            # closure / bound method bundle) re-supplies its env via
+            # mojo_bound_method_call_N; a bare function pointer
+            # (`void *`/int64_t-boxed, a non-capturing closure or free fn)
+            # goes through mojo_fnptr_call_N.
+            # ONLY a CallExpr callee (a genuine chained call) and a
+            # LambdaExpr callee (an immediately-invoked lambda — a real
+            # runtime callable value) are value-lowered here. A
+            # SubscriptExpr callee is a GENERIC TYPE/constructor expression
+            # (`Scalar[x.dtype](...)` — a comptime bracket argument, not a
+            # runtime value), whose eager value-lowering would miscompile
+            # (found via math.mojo's `Scalar[x.dtype](...)`); those keep the
+            # old stub.
+            if isinstance(node.func, (CallExpr, LambdaExpr)):
+                _callee_t, _callee_v = self.lower_expr(node.func)
+                if _callee_t == 'MojoBoundMethod *':
+                    return self._lower_bound_method_call_value(_callee_v, node)
+                if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
+                    return self._lower_fnptr_call_value(_callee_t, _callee_v, node)
             _debug_note('indirect call stubbed', type(node.func).__name__)
             t = self._new_temp('int64_t')
             self._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -12790,6 +12927,18 @@ class GimpleGen:
         else:
             fp_raw = self._c_names.get(fname_raw, fname_raw)
             fp_type = var_ctype
+        ret_type = self.func_return_types.get(fname_raw, 'int64_t')
+        return self._lower_fnptr_call_value(fp_type, fp_raw, node, ret_type)
+
+    def _lower_fnptr_call_value(self, fp_type: str, fp_raw: str, node: CallExpr,
+                                ret_type: str = 'int64_t') -> tuple[str, str]:
+        """Emit a call through an already-lowered function-pointer VALUE
+        (`fp_raw`, of C type `fp_type`), the value-based twin of
+        _lower_fnptr_call (shared so an arbitrary callable VALUE — e.g. the
+        result of a chained `factory()(5)` call expression — dispatches
+        through the same mojo_fnptr_call_N runtime helpers)."""
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        n = len(arg_pairs)
         # Cast to void * so the runtime helper receives a stable pointer type.
         if fp_type != 'void *':
             fp_void = self._new_val('void *', f'(void *){fp_raw}')
@@ -12805,7 +12954,6 @@ class GimpleGen:
         # Emit the runtime-helper call; helpers exist for 0..4 args.
         helper = f'mojo_fnptr_call_{min(n, 4)}'
         call_args = ', '.join([fp_void] + widened[:4])
-        ret_type = self.func_return_types.get(fname_raw, 'int64_t')
         raw_t = self._new_val('int64_t', f'{helper} ({call_args})')
         if ret_type in ('int64_t', 'int'):
             return ret_type, raw_t
@@ -14599,6 +14747,14 @@ class GimpleGen:
                 self._generator_var_api[node.name] = self._generator_var_api[v]
             if actual_dst == 'MojoAsync *' and v in self._async_var_api:
                 self._async_var_api[node.name] = self._async_var_api[v]
+            # `var f = <closure value>` (see _lower_IdentExpr's closure-value
+            # materialization): carry the closure's real return type along
+            # with the variable so a later `f()` (_lower_bound_method_call)
+            # narrows the result correctly — mirrors the AssignStmt path's
+            # identical propagation (see _track_pointer_actual_type's caller
+            # a few lines below this method).
+            if actual_dst == 'MojoBoundMethod *' and v in self._bound_method_ret_types:
+                self._bound_method_ret_types[node.name] = self._bound_method_ret_types[v]
             # `var tg = TaskGroup()` -- mirrors the `MojoAsync *` case just
             # above exactly (see `_lower_call`'s `TaskGroup()` construction
             # docstring / `self._taskgroup_var_api`'s own docstring).
@@ -15621,6 +15777,13 @@ class GimpleGen:
             # _lower_call's own identical guard a few hundred lines up for
             # the same fix already proven correct there.
             _var_ctype = self.var_types.get(raw_name, '')
+            if self._get_actual_type(_var_ctype, raw_name) == 'MojoBoundMethod *':
+                # A closure/bound-method VALUE stored in a local and called
+                # as a bare statement — mirrors _lower_call's identical
+                # guard, so `add5(37)` (value discarded) re-supplies the
+                # bundled env/receiver instead of being silently dropped.
+                self._lower_bound_method_call(raw_name, node.value, _var_ctype)
+                return
             if _var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
                 self._lower_fnptr_call(raw_name, _var_ctype, node.value)
                 return
@@ -18163,7 +18326,23 @@ class GimpleGen:
         if node.return_type is not None:
             ret_type = self._resolve_type(node.return_type)
         else:
-            ret_type = self._infer_return_type(node.body)
+            # Seed any local holding a closure VALUE (`var f = inner`) so
+            # `return f` infers the closure's real MojoBoundMethod*/void*
+            # shape instead of the int64_t default (which would make a
+            # capturing-closure return box the env+fnptr bundle as a bare
+            # scalar, corrupting the later call). Seeded temporarily: the
+            # body's own VarDecl statements re-declare their locals.
+            _closure_locals = self._closure_value_locals(node.body)
+            if _closure_locals:
+                _saved_vt_rt = self.var_types
+                self.var_types = dict(_saved_vt_rt)
+                for _cln, _clt in _closure_locals.items():
+                    if _cln not in self.var_types:
+                        self.var_types[_cln] = _clt
+                ret_type = self._infer_return_type(node.body)
+                self.var_types = _saved_vt_rt
+            else:
+                ret_type = self._infer_return_type(node.body)
             # Special case: main() should return int, not void
             if node.name == 'main' and ret_type == 'void':
                 ret_type = 'int64_t'
@@ -25961,6 +26140,44 @@ class GimpleGen:
                                 if not _ci.env_struct:
                                     _ci.env_struct = f"{_ci.lifted_name}_env"
                                 _changed = True
+
+        # ── Pass 3b: re-infer return types now that closures are registered ──
+        # `_scan_for_closures` (Pass 3) populated `_all_closures`, which is
+        # what lets `_quick_type` type a nested-function VALUE reference
+        # (`return add`) as MojoBoundMethod*/void* instead of the int64_t
+        # default every earlier return-type-inference pass (Pass 2 / Pass
+        # 1.3e) saw. Re-run the same inference here (mirroring Pass 1.3e's
+        # identical "refresh now that inputs are final" pattern, with
+        # current_func_name seeded per function so the closure lookup
+        # resolves) so an unannotated function whose body returns a closure
+        # — `def make_adder(n): ...; return add` — gets the real value type
+        # in func_return_types BEFORE Phase 2a, regardless of which
+        # function's body happens to be compiled first (a call site in any
+        # other function types its local from this entry).
+        for _p3b_s in all_functions:
+            if isinstance(_p3b_s, FunctionDef) and _p3b_s.return_type is None:
+                _saved_vt_3b = self.var_types
+                _saved_fcn_3b = self.current_func_name
+                self.current_func_name = _p3b_s.name
+                self.var_types = dict(_saved_vt_3b)
+                for pname, ptype in _p3b_s.params:
+                    bare = pname.lstrip('*')
+                    if pname.startswith('*'):
+                        self.var_types[bare] = 'MojoList *'
+                    elif ptype is None:
+                        self.var_types[bare] = (self._inferred_param_types.get(_p3b_s.name, {}).get(bare)
+                                                or self._resolve_type(ptype))
+                    else:
+                        self.var_types[bare] = self._resolve_type(ptype)
+                for _cln, _clt in self._closure_value_locals(_p3b_s.body).items():
+                    if _cln not in self.var_types:
+                        self.var_types[_cln] = _clt
+                inferred = self._infer_return_type(_p3b_s.body)
+                if _p3b_s.name == 'main' and inferred == 'void':
+                    inferred = 'int64_t'
+                self.var_types = _saved_vt_3b
+                self.current_func_name = _saved_fcn_3b
+                self.func_return_types[_p3b_s.name] = inferred
 
         # ── Phase 1.7: pre-scan global variable declarations ──────────────
         # Must run before Phase 2a so _lower_IdentExpr can find globals.
