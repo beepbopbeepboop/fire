@@ -19,6 +19,7 @@ MOJOC = os.path.join(HERE, 'mojoc')
 
 def run_python_dump(src_path: str, out_dir: str) -> str:
     """Run python3 mojo.py --dump on src_path, return path to .ci file."""
+    src_path = os.path.abspath(src_path)
     cmd = [sys.executable, os.path.join(HERE, 'mojo.py'), '--dump', src_path]
     subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True, timeout=60)
     basename = os.path.splitext(os.path.basename(src_path))[0]
@@ -28,6 +29,7 @@ def run_python_dump(src_path: str, out_dir: str) -> str:
 
 def run_native_dump(src_path: str, out_dir: str) -> str:
     """Run MOJO_NO_SHIM=1 mojoc --dump on src_path, return path to .ci file."""
+    src_path = os.path.abspath(src_path)
     env = os.environ.copy()
     env['MOJO_NO_SHIM'] = '1'
     # The compiled binary locates the project root via MOJO_HOME (else it
