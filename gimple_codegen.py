@@ -13,7 +13,8 @@ import zlib
 import dataclasses
 
 from mojo_compiler import (
-    IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, EllipsisLiteral,
+    IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
+    EllipsisLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
     ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator,
@@ -6660,9 +6661,56 @@ class GimpleGen:
 
     def lower_expr(self, node) -> tuple[str, str]:
         """Return (ctype, simple_rvalue). May emit temp assignments."""
-        handler_name = _EXPR_DISPATCH.get(type(node).__name__)
-        if handler_name:
-            return getattr(self, handler_name)(node)
+        # Static dispatch: an explicit isinstance chain (one branch per
+        # expression kind), NOT getattr(self, name)(node) on _EXPR_DISPATCH.
+        # getattr's dynamic indirect call compiles to a no-op when this file
+        # is itself compiled into the mojoc binary, silently lowering every
+        # expression to the zero fallback; the isinstance chain compiles to
+        # plain branch checks (the same pattern _cpp_stmt uses successfully).
+        if isinstance(node, IntLiteral):
+            return self._lower_IntLiteral(node)
+        elif isinstance(node, FloatLiteral):
+            return self._lower_FloatLiteral(node)
+        elif isinstance(node, BoolLiteral):
+            return self._lower_BoolLiteral(node)
+        elif isinstance(node, EllipsisLiteral):
+            return self._lower_EllipsisLiteral(node)
+        elif isinstance(node, StringLiteral):
+            return self._lower_StringLiteral(node)
+        elif isinstance(node, IdentExpr):
+            return self._lower_IdentExpr(node)
+        elif isinstance(node, WalrusExpr):
+            return self._lower_WalrusExpr(node)
+        elif isinstance(node, BinaryOp):
+            return self._lower_binary(node)
+        elif isinstance(node, CompareChain):
+            return self._lower_compare_chain(node)
+        elif isinstance(node, UnaryOp):
+            return self._lower_UnaryOp(node)
+        elif isinstance(node, CallExpr):
+            return self._lower_call(node)
+        elif isinstance(node, TernaryExpr):
+            return self._lower_TernaryExpr(node)
+        elif isinstance(node, MemberExpr):
+            return self._lower_MemberExpr(node)
+        elif isinstance(node, SubscriptExpr):
+            return self._lower_subscript(node)
+        elif isinstance(node, SliceExpr):
+            return self._lower_slice(node)
+        elif isinstance(node, ListExpr):
+            return self._lower_list_literal(node)
+        elif isinstance(node, DictExpr):
+            return self._lower_dict_literal(node)
+        elif isinstance(node, SetExpr):
+            return self._lower_set_literal(node)
+        elif isinstance(node, TupleExpr):
+            return self._lower_tuple_literal(node)
+        elif isinstance(node, Comprehension):
+            return self._lower_comprehension(node)
+        elif isinstance(node, LambdaExpr):
+            return self._lower_LambdaExpr(node)
+        elif isinstance(node, TstringLiteral):
+            return self._lower_TstringLiteral(node)
         _debug_note('unknown expression lowered to 0', type(node).__name__)
         self._emit(f"  /* TODO: unknown expr {type(node).__name__} */")
         t = self._new_val('int', "0")
@@ -14192,9 +14240,60 @@ class GimpleGen:
         # outer compound statement's line.
         body_start = len(self.body_lines) if node_kind not in self._COMPOUND_STMT_KINDS else None
 
-        handler_name = _STMT_DISPATCH.get(node_kind)
-        if handler_name:
-            getattr(self, handler_name)(node)
+        # Static dispatch: an explicit isinstance chain (one branch per
+        # statement kind), NOT getattr(self, name)(node) on _STMT_DISPATCH.
+        # getattr's dynamic indirect call compiles to a no-op when this file
+        # is itself compiled into the mojoc binary, silently dropping every
+        # statement body; the isinstance chain compiles to plain branch
+        # checks (the same pattern _cpp_stmt uses successfully).
+        if isinstance(node, PassStmt):
+            self._gen_stmt_PassStmt(node)
+        elif isinstance(node, VarDecl):
+            self._gen_stmt_VarDecl(node)
+        elif isinstance(node, AssignStmt):
+            self._gen_stmt_AssignStmt(node)
+        elif isinstance(node, AugAssignStmt):
+            self._gen_stmt_AugAssignStmt(node)
+        elif isinstance(node, MultiAssignStmt):
+            self._gen_stmt_MultiAssignStmt(node)
+        elif isinstance(node, ReturnStmt):
+            self._gen_stmt_ReturnStmt(node)
+        elif isinstance(node, IfStmt):
+            self._gen_stmt_IfStmt(node)
+        elif isinstance(node, WhileStmt):
+            self._gen_stmt_WhileStmt(node)
+        elif isinstance(node, ForStmt):
+            self._gen_stmt_ForStmt(node)
+        elif isinstance(node, BreakStmt):
+            self._gen_stmt_BreakStmt(node)
+        elif isinstance(node, ContinueStmt):
+            self._gen_stmt_ContinueStmt(node)
+        elif isinstance(node, ExprStmt):
+            self._gen_stmt_ExprStmt(node)
+        elif isinstance(node, AssertStmt):
+            self._gen_stmt_AssertStmt(node)
+        elif isinstance(node, RaiseStmt):
+            self._gen_stmt_RaiseStmt(node)
+        elif isinstance(node, TryStmt):
+            self._gen_stmt_TryStmt(node)
+        elif isinstance(node, WithStmt):
+            self._gen_stmt_WithStmt(node)
+        elif isinstance(node, FunctionDef):
+            self._gen_stmt_FunctionDef(node)
+        elif isinstance(node, ImportStmt):
+            self._gen_stmt_ImportStmt(node)
+        elif isinstance(node, FromImportStmt):
+            self._gen_stmt_FromImportStmt(node)
+        elif isinstance(node, ComptimeIfStmt):
+            self._gen_stmt_ComptimeIfStmt(node)
+        elif isinstance(node, ComptimeForStmt):
+            self._gen_stmt_ComptimeForStmt(node)
+        elif isinstance(node, ComptimeVarStmt):
+            self._gen_stmt_ComptimeVarStmt(node)
+        elif isinstance(node, GlobalStmt):
+            self._gen_stmt_GlobalStmt(node)
+        elif isinstance(node, MatchStmt):
+            self._gen_stmt_MatchStmt(node)
         else:
             _debug_note('unknown statement dropped', node_kind)
             self._emit(f"  /* TODO: {node_kind} */")
