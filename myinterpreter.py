@@ -1150,6 +1150,24 @@ class MojoClass:
                 init(interp, instance, *args, **kwargs)
             finally:
                 interp.scope = old_scope
+        elif args:
+            # Implicit memberwise constructor: a struct/class with NO explicit
+            # __init__ binds positional ctor args to its fields in declaration
+            # order — `struct Point: var x: Int; var y: Int; Point(3, 4)` sets
+            # x=3, y=4 (matches gimple_codegen's _synthesize_fieldwise_inits
+            # and real Mojo). Previously the interpreter ignored the args,
+            # leaving every field None ("unsupported operand +: None + None").
+            field_names = []
+            for f in self.fields:
+                if self.interpreter._is_instance(f, 'VarDecl'):
+                    field_names.append(f.name)
+                elif self.interpreter._is_instance(f, 'AssignStmt') \
+                        and self.interpreter._is_instance(f.target, 'IdentExpr'):
+                    field_names.append(f.target.name)
+            for i, a in enumerate(args):
+                if i < len(field_names):
+                    fname = field_names[i]
+                    setattr(instance, fname, a)
         return instance
 
     def __getitem__(self, item):
