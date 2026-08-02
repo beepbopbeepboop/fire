@@ -3240,6 +3240,7 @@ class GimpleGen:
         'hasattr': 'mojo_hasattr',
         'getattr': 'mojo_getattr',
         'setattr': 'mojo_setattr',
+        'delattr': 'mojo_delattr',
         'type': 'mojo_type',
         'max': 'mojo_max',
         'min': 'mojo_min',
@@ -4964,6 +4965,7 @@ class GimpleGen:
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
         'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
+        'mojo_delattr':          ('void',      ['void *', 'char *']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
         'mojo_re_sub_str':       ('char *',    ['char *', 'char *', 'char *']),
         'mojo_regex_sub_fn':     ('char *',    ['const ReNode *', 'const ReRange *', 'const ReClassInfo *',
@@ -7346,6 +7348,35 @@ class GimpleGen:
             return self._subst_idents(v, mapping)
         return v
 
+    def _is_known_field(self, member: str) -> bool:
+        """True if `member` is a field of at least one struct in
+        struct_field_types — i.e. a boxed handle carrying it is (very likely)
+        a real struct instance whose `.member` is a genuine field, not an
+        identity/type-value access. Used by _lower_MemberExpr to decide
+        whether a boxed scalar receiver should go through the runtime
+        tag-dispatch field read (A5 part 2) instead of the `.value`/opaque
+        identity shortcuts."""
+        for _fm in self.struct_field_types.values():
+            if member in _fm:
+                return True
+        return False
+
+    def _known_field_type(self, member: str) -> str | None:
+        """The static C type of `member` when it is a field of structs in
+        struct_field_types and ALL of them agree on that type; None if the
+        member is unknown or its type varies across structs (e.g. `value`:
+        int64_t in ReturnStmt/ExprStmt but char* in Token, double in
+        FloatLiteral, _Bool in BoolLiteral). A boxed handle's field read can
+        only be returned with a single static C type, so only fields with an
+        unambiguous type are typed here; the rest keep the int64_t default."""
+        _types = set()
+        for _fm in self.struct_field_types.values():
+            if member in _fm:
+                _types.add(_fm[member])
+        if len(_types) == 1:
+            return _types.pop()
+        return None
+
     def _lower_MemberExpr(self, node) -> tuple[str, str]:
         # `m.lastgroup` where m is a regex-match for-loop variable — see
         # _gen_for_regex_iter / regex_compile.py / BACKLOG-CODEGEN.md §4f.
@@ -7603,14 +7634,23 @@ class GimpleGen:
         # .value on void * or function pointer (DType/bracket-param typed as builtin 'type')
         # → extract the integer value. This handles e.g. `type.value` where `type` is a
         # bracket param of type `TraceCategory` that got lowered to a function pointer.
+        # IMPORTANT (A5 part 2): a boxed AST-node handle's `.value` (IntLiteral.value,
+        # Token.value, ReturnStmt.value, ...) is a REAL struct field, not an identity —
+        # reading it as identity here returned the node handle itself (self-host bug:
+        # `_lower_IntLiteral` compared `node` against INT64_MAX and formatted the handle
+        # as the literal value). Only take the identity shortcut when the receiver
+        # really IS the value (a void*/function-pointer-typed type/bracket param, or a
+        # receiver whose `.value` is a field of no known struct); otherwise fall through
+        # to the runtime tag dispatch below, which reads the field directly.
         if node.member == 'value' and ot in ('void *', 'int64_t', 'int'):
-            t = self._new_temp('int64_t')
-            if ot == 'void *':
-                vt = self._new_val('int64_t', f"(int64_t){ov}")
-                self._emit(f"  {t} = {vt};")
-            else:
-                self._emit(f"  {t} = (int64_t){ov};")
-            return 'int64_t', t
+            if ot == 'void *' or not self._is_known_field('value'):
+                t = self._new_temp('int64_t')
+                if ot == 'void *':
+                    vt = self._new_val('int64_t', f"(int64_t){ov}")
+                    self._emit(f"  {t} = {vt};")
+                else:
+                    self._emit(f"  {t} = (int64_t){ov};")
+                return 'int64_t', t
 
         # Special handling for .__name__ on type objects
         if node.member == '__name__':
@@ -7754,7 +7794,7 @@ class GimpleGen:
                 field_type = struct_name + ' *'
                 t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
             return field_type, t
-        elif ot in ('int', 'int64_t', 'void *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+        elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
             # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
             # A genuine 4-byte 'int' (as opposed to the 8-byte int64_t most
@@ -7776,7 +7816,41 @@ class GimpleGen:
                 _ptr = self._new_val(self._actual_types[ov], f'({self._actual_types[ov]}){ov}')
                 t = self._new_val(_resolved_field, f'{_ptr}->{_safe_field(node.member)}')
                 return _resolved_field, t
-            if ot == 'int':
+            # A5 part 2: boxed handle to a known AST/compiler struct — `node.member`
+            # is a REAL field of at least one struct in struct_field_types (IfStmt.
+            # condition, BinaryOp.left, IntLiteral.value, IfStmt.then_body, ...).
+            # The runtime _mojo_dispatch_getattr reads the field directly through the
+            # struct's typedef (`((IfStmt*)obj)->condition`), but returns it boxed as
+            # int64_t, which loses the field's static C type — downstream code then
+            # mis-handles it (e.g. `for s in node.then_body` saw an opaque int64_t and
+            # fell to mojo_unsupported_iter, so the if/else body never emitted; and a
+            # char*-typed field (Token.value) stayed boxed). Resolve the field's C
+            # type from struct_field_types and cast the dispatch result back through
+            # it, so member access on a boxed AST handle carries the real type. When
+            # the field's type is ambiguous across structs (e.g. `value`: int64_t in
+            # ReturnStmt/ExprStmt but char* in Token, double in FloatLiteral), the
+            # boxed int64_t default is kept (correct for the overwhelmingly common
+            # boxed-expression/IntLiteral use).
+            _boxed_ft = self._known_field_type(node.member)
+            if _boxed_ft is not None and _boxed_ft != 'int64_t':
+                if ot in ('int', 'char'):
+                    ov = self._new_val('int64_t', f'(int64_t){ov}')
+                vp = self._new_val('void *', f'(void *){ov}')
+                # _call_expr (not a bare _emit of `"member"`) so the member-name
+                # string literal goes through _emit_call's _slit conversion —
+                # an inline `"kind"` C literal in a __GIMPLE body is lowered by
+                # gcc to a plain INTEGER constant (the packed 4 bytes), not a
+                # `const char *` to the string, so the dispatch would strcmp the
+                # attribute against 0x646e696b ("kind" as an int) and crash.
+                raw = self._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                      [('void *', vp), ('char *', f'"{node.member}"')])
+                if _boxed_ft.endswith(' *'):
+                    t = self._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
+                else:
+                    t = self._new_temp(_boxed_ft)
+                    self._emit(f"  {t} = ({_boxed_ft}){raw};")
+                return _boxed_ft, t
+            if ot in ('int', 'char'):
                 ov = self._new_val('int64_t', f'(int64_t){ov}')
             vp = self._new_val('void *', f'(void *){ov}')
             return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr',
@@ -9765,7 +9839,32 @@ class GimpleGen:
         # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
         # Must intercept BEFORE the opaque-int coerce below, which would misidentify
         # 'join' as a string method and corrupt the class ref.
-        if ot == 'int' and isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
+        # The historical gate only matched `ot == 'int'` + `name in struct_field_types`.
+        # Two gaps in it, both of which made a REAL classmethod call silently fall
+        # through to the opaque-int coerce / string-`.join` special case below and
+        # miscompile:
+        #   (a) a class ref lowers to ('int64_t', 0) (see _lower_IdentExpr's class-ref
+        #       branch), never 'int' — so the `ot == 'int'` check never fired for a
+        #       genuine classmethod call at all;
+        #   (b) a classmethod that is a REAL compiled function
+        #       (`ClassName_method` ∈ func_return_types) must be resolved even when
+        #       the class's struct_field_types entry is empty of that method.
+        #       `TypeLattice.join(lt, rt)` (a plain helper class, no `join` field)
+        #       fell through, got its receiver cast to `char *`, and resolved
+        #       `.join` as a STRING method — `mojo_str_join(NULL, (MojoList*)lt)` —
+        #       a hard segfault (parts = the "int64_t" type-string literal read as
+        #       a list).
+        # Fix: gate on the METHOD being a real compiled function (`ot` in
+        # int/int64_t is the class-ref lowering), NOT on struct_field_types
+        # membership — that's what distinguishes a real classmethod from a
+        # hardcoded ctypes-structure shim (e.g. `_ReflectTable.in_dll` → a `char *`
+        # dlsym stub in the unimplemented-helpers preamble, which is NOT in
+        # func_return_types and must keep its historical opaque-int handling).
+        if (isinstance(func.obj, IdentExpr)
+                and func.obj.name not in self.var_types
+                and func.obj.name not in self._compiled_modules
+                and f"{func.obj.name}_{_safe_name(method)}" in self.func_return_types
+                and ot in ('int', 'int64_t')):
             struct_name = func.obj.name
             # _static_methods is keyed by the historical BARE mangled name
             # (populated elsewhere from source, never module-qualified), so
@@ -9785,6 +9884,16 @@ class GimpleGen:
                 arg_pairs = actual_args
             else:
                 arg_pairs = [(ot, ov)] + actual_args
+            # A call that omits a trailing DEFAULTED parameter (e.g.
+            # `P.call(func)` where `P.call(func, args=None)`) must still pass
+            # the full arity — P_call's C signature expects every param. Fill
+            # the missing trailing args with None (0), mirroring how a missing
+            # default is Python-`None` in the common self-host helper classes.
+            _ptypes = (self.func_param_types.get(mangled)
+                       or self.func_param_types.get(f"{struct_name}_{method}"))
+            if _ptypes and len(arg_pairs) < len(_ptypes):
+                for _pad_i in range(len(arg_pairs), len(_ptypes)):
+                    arg_pairs.append(('int64_t', self._new_val('int64_t', '(int64_t)0')))
             if ret_type == 'void':
                 return self._void_call(mangled, arg_pairs)
             t = self._call_expr(ret_type, mangled, arg_pairs)
@@ -10081,17 +10190,61 @@ class GimpleGen:
             return 'MojoList *', self._new_val('MojoList *', f"mojo_dict_items ({ov})")
         if method == 'get' and args:
             key_type, key_val = self.lower_expr(args[0])
+            default_ty = None
+            default_val = None
             if len(args) > 1:
-                _, _default_val = self.lower_expr(args[1])
+                default_ty, default_val = self.lower_expr(args[1])
             # Ensure key is char * for dict operations
             key_type, key_val = self._char_to_cstr(key_type, key_val)
             val_type = self._dict_val_of(ov)
             if val_type == 'char *':
-                return 'char *', self._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (key_type, key_val)])
+                raw = self._call_expr('char *', 'mojo_dict_get_str', [('MojoDict *', ov), (key_type, key_val)])
             elif val_type == 'double':
-                return 'double', self._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (key_type, key_val)])
+                raw = self._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (key_type, key_val)])
             else:
-                return 'int64_t', self._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (key_type, key_val)])
+                raw = self._call_expr('int64_t', 'mojo_dict_get_int', [('MojoDict *', ov), (key_type, key_val)])
+            if default_val is not None:
+                # dict.get(key, default) must return the default when the key
+                # is ABSENT — the plain mojo_dict_get_* helpers return 0/NULL
+                # for a missing key, so the previous lowering silently DROPPED
+                # the default (e.g. `BUILTIN_VALUE_MAP.get(fname_raw,
+                # _func_csym(fname_raw))` → 0/NULL for every non-builtin
+                # function name — a NULL `fname` that later crashed the
+                # `fname in self.imported_symbols` containment check). Fall
+                # back to the default when the raw get returns the absent
+                # sentinel (0/NULL), matching how this codebase everywhere
+                # treats 0 as the None/absent box. When the dict's value type
+                # isn't statically known (defaults to int64_t), the default
+                # argument's own type is the real result type. Lowered with
+                # explicit if/else basic blocks (NOT a `cond ? a : b`
+                # ternary): a GIMPLE cond_expr in a __GIMPLE body was silently
+                # miscompiled by gcc here (the compiled mojoc then emitted raw
+                # heap/static addresses as variable/type names), so the
+                # default-application is spelled as branch-and-assign.
+                result_type = val_type
+                if result_type not in ('char *', 'double', '_Bool'):
+                    result_type = default_ty if default_ty in ('char *', 'double', '_Bool') else 'int64_t'
+                raw_r = self._coerce_to_type(val_type, result_type, raw)
+                default_r = self._coerce_to_type(default_ty, result_type, default_val)
+                cond = self._ensure_bool_cond(result_type, raw_r)
+                t = self._new_temp(result_type)
+                bb_true = self._new_bb()
+                bb_false = self._new_bb()
+                bb_done = self._new_bb()
+                self._emit(f"  if ({cond}) goto {bb_true}; else goto {bb_false};")
+                self._emit_label(bb_true)
+                self._emit(f"  {t} = {raw_r};")
+                self._emit(f"  goto {bb_done};")
+                self._emit_label(bb_false)
+                self._emit(f"  {t} = {default_r};")
+                self._emit_label(bb_done)
+                return result_type, t
+            if val_type == 'char *':
+                return 'char *', raw
+            elif val_type == 'double':
+                return 'double', raw
+            else:
+                return 'int64_t', raw
         if method == 'update' and args:
             other_type, other_val = self.lower_expr(args[0])
             ov_cast = self._coerce_to_type('MojoDict *', 'MojoDict *', ov)
@@ -11984,6 +12137,12 @@ class GimpleGen:
         if fname_raw == 'setattr' and len(node.args) >= 3:
             pairs = [self.lower_expr(a) for a in node.args[:3]]
             return self._void_call('_mojo_dispatch_setattr', pairs)
+        if fname_raw == 'delattr' and len(node.args) >= 2:
+            # `del obj.attr` (myinterpreter.py's execute_DelStmt) — the compiled
+            # runtime has no dynamic attribute deletion (attributes are struct
+            # fields), so this is a documented no-op that still compiles/links.
+            pairs = [self.lower_expr(a) for a in node.args[:2]]
+            return self._void_call('mojo_delattr', pairs)
 
         # Struct constructors. Map a C-keyword struct name (`auto()`) to its
         # renamed registration (`_kw_auto`) so the constructor resolves.
@@ -12154,6 +12313,32 @@ class GimpleGen:
         _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
                      'list': '5', 'dict': '6', 'set': '7'}
         type_id = _TYPE_IDS.get(type_name, '0')
+        # Scalar isinstance by STATIC type. The runtime mojo_isinstance stub
+        # always returns 0 (false), so e.g. `isinstance(node.name, str)` was
+        # ALWAYS False for a char* name once compiled — every VarDecl's
+        # `isinstance(node.name, str)` guard (gimple_codegen.py's own
+        # `_gen_stmt_VarDecl`) then treated node.name as a non-string and
+        # formatted the char* as an integer, emitting raw heap addresses as
+        # variable/type names in the native .ci (A5 part 2). A char* IS str,
+        # an int64_t/int IS int, a MojoList* IS list, etc. — this codebase's
+        # representation makes the static C type a sound verdict. Only an
+        # ambiguous boxed int64_t falls through to the (still always-false)
+        # mojo_isinstance stub.
+        _SCALAR_TYPE_MATCH = {
+            'str':   ('char *', 'MojoStr *'),
+            'int':   ('int', 'int64_t', 'uint64_t', 'int8_t', 'int16_t', 'int32_t',
+                      'uint8_t', 'uint16_t', 'uint32_t', 'long', 'short', 'size_t', '_Bool'),
+            'float': ('double', 'float', '__fp16'),
+            'bool':  ('_Bool',),
+            'list':  ('MojoList *',),
+            'dict':  ('MojoDict *',),
+            'set':   ('MojoSet *',),
+        }
+        if type_name in _SCALAR_TYPE_MATCH:
+            if obj_type in _SCALAR_TYPE_MATCH[type_name]:
+                return self._new_val('_Bool', '(_Bool)1')
+            if obj_type not in ('int64_t', 'void *', ''):
+                return self._new_val('_Bool', '(_Bool)0')
         res = self._new_temp('int')
         if obj_type in ('char *', 'void *', 'MojoDict *', 'MojoList *', 'MojoSet *') or obj_type.endswith(' *'):
             iv  = self._new_val('int64_t', f'(int64_t){obj_val}')
@@ -13779,7 +13964,20 @@ class GimpleGen:
                 self._emit(f"  {gen0.target} = {int_ptr};")
         else:
             raw64 = self._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
-            self._emit(f"  {gen0.target} = ({elem}) {raw64};")
+            # The loop variable may have been first declared elsewhere in this
+            # function with a non-int64_t C type (e.g. `f` used as a string in
+            # one branch and as a node handle in `for f in node.fields` later —
+            # _declare_var is first-decl-wins). Assigning an int64_t element
+            # straight into a `char *` variable is a hard "makes pointer from
+            # integer" compile error; mirror _gen_for_list's identical
+            # coercion. A node handle boxed into a char*-declared var is a
+            # bit-pattern-preserving cast — the field-access lowering already
+            # reads boxed handles through the runtime tag dispatch.
+            target_type = self._type_of(gen0.target)
+            if target_type != 'int64_t':
+                self._safe_coerce_emit('int64_t', target_type, raw64, gen0.target)
+            else:
+                self._emit(f"  {gen0.target} = (int64_t) {raw64};")
         self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
@@ -16961,7 +17159,15 @@ class GimpleGen:
                 if var_type != 'int64_t':
                     self._safe_coerce_emit('int64_t', var_type, elem64, cvar)
                 else:
-                    self._emit(f"  {cvar} = ({elem}) {elem64};")
+                    # The loop var is (or was first declared as) a plain int64_t
+                    # box even when the list's tracked element type is a struct
+                    # pointer (e.g. `s` first used as an int64_t elsewhere, then
+                    # `for s in self._imported_typedef_structs` — _declare_var is
+                    # first-decl-wins). Casting to `(elem)` here — a struct
+                    # pointer — into an int64_t-typed var is a hard "makes
+                    # integer from pointer" error. Keep it boxed: the member
+                    # access on it goes through the runtime tag dispatch.
+                    self._emit(f"  {cvar} = (int64_t) {elem64};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)

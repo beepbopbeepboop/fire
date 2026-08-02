@@ -30,6 +30,10 @@ def run_native_dump(src_path: str, out_dir: str) -> str:
     """Run MOJO_NO_SHIM=1 mojoc --dump on src_path, return path to .ci file."""
     env = os.environ.copy()
     env['MOJO_NO_SHIM'] = '1'
+    # The compiled binary locates the project root via MOJO_HOME (else it
+    # falls back to CWD, which is a temp dir here — silently producing the
+    # 7-line "Python call failed" fallback stub). Pin it to the repo root.
+    env['MOJO_HOME'] = HERE
     # File must come FIRST: the compiled binary's argv parser uses
     # sys.argv[1] as the input and strips '--dump' by rebuilding the list
     # (list.remove is broken in the compiled binary).

@@ -3222,6 +3222,11 @@ void mojo_setattr(void *obj, char *attr, int64_t val) {
     (void)obj; (void)attr; (void)val;
 }
 
+void mojo_delattr(void *obj, char *attr) {
+    (void)obj; (void)attr;  /* no dynamic attribute deletion in the compiled
+                               runtime — attributes are struct fields */
+}
+
 void setattr(int obj, int attr, int value) {
     (void)obj; (void)attr; (void)value;
 }

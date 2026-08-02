@@ -429,6 +429,7 @@ int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 void mojo_setattr(void *obj, char *attr, int64_t val);
+void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
 char *mojo_int_literal_decimal(char *raw);
