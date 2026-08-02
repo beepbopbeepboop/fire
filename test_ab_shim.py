@@ -170,6 +170,192 @@ BUILTIN_TESTS = {
             var s: String = "hello world"
             print(len(s))
     """),
+    "while_loop": textwrap.dedent("""\
+        def main() -> Int:
+            var i: Int = 0
+            var total: Int = 0
+            while i < 10:
+                total = total + i
+                i = i + 1
+            return total
+    """),
+    "nested_func": textwrap.dedent("""\
+        def outer(x: Int) -> Int:
+            def inner(y: Int) -> Int:
+                return y * 2
+            return inner(x) + 1
+
+        def main() -> Int:
+            return outer(20)
+    """),
+    "struct_def": textwrap.dedent("""\
+        struct Point:
+            var x: Int
+            var y: Int
+
+        def main() -> Int:
+            var p = Point(3, 4)
+            return p.x + p.y
+    """),
+    "dict_ops": textwrap.dedent("""\
+        def main() -> Int:
+            var d = {"a": 1, "b": 2}
+            return d["a"] + d["b"]
+    """),
+    "fstring": textwrap.dedent("""\
+        def main():
+            var x: Int = 42
+            var s = f"value={x}"
+            print(s)
+    """),
+    "aug_assign": textwrap.dedent("""\
+        def main() -> Int:
+            var x: Int = 5
+            x += 3
+            x *= 2
+            return x
+    """),
+    "break_continue": textwrap.dedent("""\
+        def main() -> Int:
+            var total: Int = 0
+            for i in range(10):
+                if i == 2:
+                    continue
+                if i == 8:
+                    break
+                total = total + i
+            return total
+    """),
+    "string_concat": textwrap.dedent("""\
+        def main():
+            var a: String = "foo"
+            var b: String = "bar"
+            print(a + b)
+    """),
+    "tuple_ops": textwrap.dedent("""\
+        def main() -> Int:
+            var t = (10, 20, 30)
+            return t[0] + t[1] + t[2]
+    """),
+    "comprehension": textwrap.dedent("""\
+        def main() -> Int:
+            var items = [i * 2 for i in range(5)]
+            var total = 0
+            for x in items:
+                total = total + x
+            return total
+    """),
+    "class_methods": textwrap.dedent("""\
+        class Counter:
+            var count: Int
+
+            fn __init__(inout self):
+                self.count = 0
+
+            fn inc(inout self):
+                self.count += 1
+
+            fn get(self) -> Int:
+                return self.count
+
+        def main() -> Int:
+            var c = Counter()
+            c.inc()
+            c.inc()
+            c.inc()
+            return c.get()
+    """),
+    "try_except": textwrap.dedent("""\
+        def main() -> Int:
+            var x: Int = 0
+            try:
+                x = 5
+            except:
+                x = 0
+            return x
+    """),
+    "match_stmt": textwrap.dedent("""\
+        def main() -> Int:
+            var x: Int = 2
+            match x:
+                case 1:
+                    return 10
+                case 2:
+                    return 20
+                case _:
+                    return 0
+    """),
+    "global_var": textwrap.dedent("""\
+        var counter: Int = 0
+
+        def bump() -> Int:
+            global counter
+            counter += 1
+            return counter
+
+        def main() -> Int:
+            bump()
+            bump()
+            return bump()
+    """),
+    "recursive": textwrap.dedent("""\
+        def fib(n: Int) -> Int:
+            if n <= 1:
+                return n
+            return fib(n - 1) + fib(n - 2)
+
+        def main() -> Int:
+            return fib(10)
+    """),
+    "closure": textwrap.dedent("""\
+        def make_adder(n: Int):
+            def add(x: Int) -> Int:
+                return x + n
+            return add
+
+        def main() -> Int:
+            var add5 = make_adder(5)
+            return add5(37)
+    """),
+    "list_of_strings": textwrap.dedent("""\
+        def main():
+            var items = ["a", "b", "c"]
+            for s in items:
+                print(s)
+    """),
+    "string_methods": textwrap.dedent("""\
+        def main():
+            var s: String = "Hello World"
+            print(s.lower())
+            print(s.upper())
+            print(s.replace("World", "Mojo"))
+    """),
+    "nested_loops": textwrap.dedent("""\
+        def main() -> Int:
+            var total: Int = 0
+            for i in range(3):
+                for j in range(3):
+                    total = total + i * j
+            return total
+    """),
+    "list_append": textwrap.dedent("""\
+        def main() -> Int:
+            var items = [1, 2, 3]
+            items.append(4)
+            items.append(5)
+            var total = 0
+            for x in items:
+                total = total + x
+            return total
+    """),
+    "dict_iterate": textwrap.dedent("""\
+        def main() -> Int:
+            var d = {"a": 1, "b": 2, "c": 3}
+            var total = 0
+            for v in d.values():
+                total = total + v
+            return total
+    """),
 }
 
 

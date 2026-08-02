@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A/B + Interpreter Parity Plan — 100% Python Compatibility</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  h2 { margin-top: 2rem; border-bottom: 1px solid #ccc; padding-bottom: .2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; font-size: .92em; }
+  th { background: #f0f0f0; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  .note { background: #fffbe6; border-left: 4px solid #f0c000; padding: .6rem 1rem; margin: 1rem 0; }
+  .danger { background: #ffecec; border-left: 4px solid #c00; padding: .6rem 1rem; margin: 1rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .2rem 0; }
+</style>
+</head>
+<body>
+
+<h1>A/B + Interpreter Parity — 100% Python Compatibility</h1>
+<p><strong>Goal:</strong> (1) byte-identical <code>.ci</code> between <code>python3 mojo.py --dump X.mojo</code> and <code>MOJO_NO_SHIM=1 ./mojoc X.mojo --dump</code>; (2) runtime output parity between <code>python3 mojo.py run X.mojo</code> (interpreter) and <code>python3 mojo.py --jit X.mojo</code> (compiled); (3) all existing quality gates stay green after every change.</p>
+
+<h2>Architecture reality</h2>
+<p>Both <code>gimple_codegen.py</code> and <code>myinterpreter.py</code> dispatch on AST nodes via <code>getattr(self, f'handler_{type(node).__name__}')(node)</code>. As Python both work. But <code>mojoc</code> is gimple_codegen.py <em>compiled to C</em> — the <code>getattr(self, name)(node)</code> compiles to an indirect call stubbed to <code>(int64_t)0</code>, so <strong>every statement/expression body is dropped</strong> in the native output. This is the linchpin (Class B).</p>
+
+<h2>Five A/B divergence classes</h2>
+<table>
+<tr><th>#</th><th>Class</th><th>Cause</th><th>file:line (source)</th><th>Affected</th></tr>
+<tr><td>B</td><td>Dispatch no-op — all function bodies dropped, string pool empty</td><td><code>getattr(self, handler)(node)</code> indirect call stubbed to 0</td><td>gen_stmt 14195–14197; lower_expr 6661–6665; fallback 11655</td><td>all 7</td></tr>
+<tr><td>A</td><td><code>_mojo_type_name</code> fwd decl always emitted / table never emitted</td><td><code>if some_set:</code> / <code>not some_set:</code> on module-level set compiles to pointer-existence, not emptiness</td><td>27654; 26363; set def 1912</td><td>all 7</td></tr>
+<tr><td>C</td><td>Function unmangled + empty fwd-decl return type</td><td>list-comprehension lowering no-op; <code>(char)</code> pointer-truncation in dict-key lookup</td><td>23733; 27513; overload_suffix_for 17438</td><td>function_def, test_simple</td></tr>
+<tr><td>D</td><td>Missing AST struct typedefs / selfhost decls</td><td><code>__file__</code> = <code>"&lt;bootstrap&gt;"</code> → <code>_SELFHOST_DIR</code> = process CWD</td><td>23035; _SELFHOST_DIR 42</td><td>test_simple (CWD-dependent)</td></tr>
+<tr><td>E</td><td>Segfault on top-level statements</td><td>indirect-call no-op returns NULL fnptr, then call executes it</td><td>11655</td><td>top-level statements</td></tr>
+</table>
+
+<h2>Interpreter vs compiled semantic gaps</h2>
+<table>
+<tr><th>Construct</th><th>Interpreter</th><th>Compiled</th><th>Resolution</th></tr>
+<tr><td>LambdaExpr</td><td>missing (raises)</td><td>✓ <code>_lower_LambdaExpr</code> 12367</td><td>add interp <code>eval_LambdaExpr</code></td></tr>
+<tr><td>ImagLiteral</td><td>✓ <code>eval_ImagLiteral</code> 4152</td><td>missing (→ int 0)</td><td>add compiled <code>_lower_ImagLiteral</code></td></tr>
+<tr><td>MatchStmt capture</td><td>PEP-634 unbound-name capture 3620–3639</td><td>switch-equality + <code>_</code> only</td><td>align both to PEP-634 capture</td></tr>
+<tr><td>DelStmt</td><td>full 3427</td><td>silently dropped</td><td>compiled refuses honestly (interp is fallback)</td></tr>
+<tr><td>async for / async with</td><td>silently sync 3693, 3773</td><td>refuses</td><td>decide: both refuse or both implement (check test_generators/test_async_execution first)</td></tr>
+<tr><td>Unknown-node failure</td><td>raises NotImplementedError</td><td>silent <code>/* TODO */</code> / int 0</td><td>both refuse honestly with interp fallback</td></tr>
+</table>
+
+<h2>Track A — Native backend A/B parity (byte-identical .ci)</h2>
+<ol>
+<li><strong>A1. Static dispatch refactor (linchpin, Class B).</strong> Replace <code>getattr(self, handler_name)(node)</code> in <code>gen_stmt</code>/<code>lower_expr</code> with a compiled-friendly static dispatch: explicit <code>isinstance</code> chain (precedent: <code>_cpp_stmt</code> compiles cleanly). Keep handler bodies byte-identical; only change the dispatch seam. Verify Python-path output unchanged (diff the 7 A/B files before/after). Unblocks string pool / <code>_intern_string</code> / <code>_slit_</code>.</li>
+<li><strong>A2. Container-truthiness for module-level sets (Class A).</strong> Extend the existing <code>bool(container)</code> length-check fix (<code>_ensure_bool_cond</code>/<code>_lower_UnaryOp</code>) to module-level globals boxed as <code>int64_t</code>, so empty-set tests are correct.</li>
+<li><strong>A3. Comprehension no-op + char-truncation (Class C).</strong> Fix <code>[self._param_ctype(pn, pt, s) for pn, pt in s.params]</code> lowering (23733); fix <code>(char)</code> pointer-truncation in the <code>func_return_types.get(fn.name,...)</code> dict-key path (27513).</li>
+<li><strong>A4. Deterministic <code>_SELFHOST_DIR</code> (Class D).</strong> Make <code>__file__</code>-derived <code>_SELFHOST_DIR</code> a compile-time constant in the binary, not process CWD.</li>
+<li><strong>A5. Verify Class E.</strong> Top-level segfault should vanish once A1 lands; fix residual indirect-call paths if any.</li>
+</ol>
+<p><strong>Order:</strong> A1 first (unblocks everything), then A2–A4 independently, A5 as verification.</p>
+
+<h2>Track B — Interpreter parity + runtime harness (parallel)</h2>
+<ol>
+<li><strong>B1. Runtime-diff harness.</strong> New harness: run corpus via <code>mojo.py run</code> and <code>mojo.py --jit</code>, diff stdout+exit. Corpus: 7 A/B files → test_simple + builtins → stdlib tests. Wire into <code>make check</code>.</li>
+<li><strong>B2. Close interp-vs-compiled gaps</strong> (per the table above: LambdaExpr, ImagLiteral, MatchStmt capture, DelStmt, async for/with, failure mode alignment).</li>
+<li><strong>B3. Cross-path lockstep discipline.</strong> Apply each fix to BOTH paths with a cross-path test (pattern: <code>bugs/CHAINED_COMPARISON_WRONG_RESULT.md</code>). Add per-fix coverage to the runtime-diff harness.</li>
+</ol>
+
+<h2>Shared verification (every change)</h2>
+<ul>
+<li><code>test_gimple.py</code> 247/247, <code>test_module_cache.py</code> 76/76</li>
+<li><code>make check</code> (gimple + runner + modcache + selfhost)</li>
+<li><code>compile_stdlib.py</code> 664/664; from-scratch stdlib dylib (0 skip increase)</li>
+<li><code>test_runner.py</code>, <code>test_gimple_runner.py</code>, <code>test_gimple_generator_runner.py</code>, <code>test_gimple_async_runner.py</code></li>
+<li><code>test_stdlib.py</code> (interp + jit), <code>test_async_execution.py</code>, <code>test_generators.py</code>, <code>test_myinterpreter*.py</code></li>
+<li><strong>New:</strong> A/B byte-identity gate; runtime-diff (interp==jit) gate</li>
+</ul>
+
+<h2>Execution model</h2>
+<ul>
+<li>Two agents in parallel: Track A (native dispatch + divergence classes), Track B (interpreter parity + runtime harness).</li>
+<li>Independent file surfaces: Track A → <code>gimple_codegen.py</code>, <code>module_loader.py</code>, runtime; Track B → <code>myinterpreter.py</code>, new harness.</li>
+<li>After each landing: run the full shared gate; reconcile cross-track breakage.</li>
+<li>Land changes as separate commits per divergence class / semantic gap.</li>
+</ul>
+
+<h2>Risks / mitigations</h2>
+<ul>
+<li>Static dispatch refactor is large → change only the dispatch seam, never handler bodies; verify Python-path output byte-unchanged.</li>
+<li>Comprehension fix (A3) could ripple → isolate; rely on full gate.</li>
+<li>Interp async-refusal could break tests → check <code>test_generators.py</code>/<code>test_async_execution.py</code> before changing async for/with.</li>
+</ul>
+
+<h2>Progress log</h2>
+<table id="progress">
+<tr><th>Date</th><th>Item</th><th>Status</th></tr>
+<tr><td>2026-08-02</td><td>Plan written</td><td>done</td></tr>
+</table>
+
+</body>
+</html>
