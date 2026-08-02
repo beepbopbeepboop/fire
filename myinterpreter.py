@@ -158,7 +158,12 @@ class MojoFunction:
             func_scope.define(name, value)
 
         # Bind comptime params that have defaults but weren't provided
-        _pdl = getattr(self, 'param_defaults', None)
+        # (`self._pd` — the constructor stores param_defaults under that
+        # name, see __init__; reading the constructor argument's name here
+        # would always find nothing and silently drop every default value,
+        # which is exactly the bug this line fixed — see the LambdaExpr
+        # handler, whose `lambda x=5: ...` defaults rely on it working).
+        _pdl = getattr(self, '_pd', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
                 _found = False
@@ -3128,9 +3133,7 @@ class Interpreter:
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
         _pd = getattr(node, 'param_defaults', None)
-        _pdv = None
-        if _pd:
-            _pdv = [(k, self.eval_expr(v)) for k, v in _pd.items()]
+        _pdv = list(_pd.items()) if _pd else None
         func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
                              is_generator=getattr(node, 'is_generator', False),
                              is_async=getattr(node, 'is_async', False))
@@ -3692,6 +3695,23 @@ class Interpreter:
 
     def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
+        if getattr(node, 'is_async', False):
+            # `async for` — ForStmt.is_async (see mojo_compiler.py's
+            # docstring: a parser-only flag since Milestone 3a). Driving an
+            # async iterable's `__aiter__`/`__anext__` (and propagating a
+            # StopAsyncIteration) is a real protocol this interpreter has
+            # never implemented — running the loop body against the raw
+            # iterable synchronously would be silently-wrong behavior (the
+            # async generator's bodies would never even execute, exactly the
+            # trap MojoFunction._invoke already refuses for async generators
+            # under `async for`), so refuse loudly and honestly instead of
+            # pretending `async for` is a plain `for`.
+            raise NotImplementedError(
+                f"{self._loc(node)}'async for' is not yet supported by the "
+                f"interpreter — the __aiter__/__anext__/StopAsyncIteration "
+                f"protocol is a documented follow-up gap (see MojoFunction."
+                f"_invoke's async-generator refusal); use a plain 'for' loop "
+                f"or drive the async iterator's __anext__() manually")
         iterable = self.eval_expr(node.iterable)
 
         if not hasattr(iterable, '__iter__') and not hasattr(iterable, '__getitem__'):
@@ -3772,6 +3792,21 @@ class Interpreter:
 
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
+        if getattr(node, 'is_async', False):
+            # `async with` — WithStmt.is_async (see mojo_compiler.py's
+            # docstring: a parser-only flag since Milestone 3a). Entering
+            # via `await __aenter__()`/exiting via `await __aexit__()` is
+            # the async context-manager protocol this interpreter has never
+            # implemented — falling through to the synchronous
+            # __enter__/__exit__ path below would call methods an async
+            # context manager doesn't even define (AttributeError) or, worse,
+            # run a sync-protocol object's enter/exit in an async context,
+            # silently-wrong either way. Refuse loudly and honestly instead.
+            raise NotImplementedError(
+                f"{self._loc(node)}'async with' is not yet supported by the "
+                f"interpreter — the await __aenter__/__aexit__ protocol is a "
+                f"documented follow-up gap; use a plain 'with' or drive the "
+                f"context manager's async methods manually")
         if not node.items:
             for stmt in node.body:
                 self.execute(stmt)
@@ -3977,6 +4012,26 @@ class Interpreter:
         value = self.eval_expr(expr.value)
         self.scope.define(expr.name, value)
         return value
+
+    def eval_LambdaExpr(self, expr: N.LambdaExpr):
+        """`lambda <params>: <expr>` — an anonymous function. Returns a
+        MojoFunction whose body is the single statement `return <expr>` and
+        whose closure scope is the scope in effect where the lambda appears,
+        so the body can read enclosing locals just like a nested `def`.
+        Callable through the exact same eval_CallExpr/invoke path as any
+        other MojoFunction (was "No handler for LambdaExpr" — the compiled
+        path's `_lower_LambdaExpr` instead lifts the lambda to a named
+        function; a MojoFunction is this dialect's runtime equivalent).
+
+        Lambda params are `(name, default_expr)` pairs (see mojo_compiler.py's
+        lambda parser) — names come from `_extract_param_names`, defaults are
+        passed through as raw expression nodes and evaluated lazily by
+        `_invoke` exactly like a `def`'s defaults."""
+        params = self._extract_param_names(expr)
+        body = [N.ReturnStmt(value=expr.body)]
+        defaults = [(p[0], p[1]) for p in expr.params if p[1] is not None]
+        return MojoFunction('<lambda>', params, body, self.scope,
+                            param_defaults=defaults or None)
 
     def _current_yield_fn(self, expr):
         """The `yield_fn` of the generator/coroutine whose body is
