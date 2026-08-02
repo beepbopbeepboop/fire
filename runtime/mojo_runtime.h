@@ -307,6 +307,7 @@ typedef struct {
 MojoDict   *mojo_dict_new(void);
 int64_t    *mojo_dict_order_indices(MojoDict *d);
 void        mojo_dict_free(MojoDict *d);
+void        mojo_dict_clear(MojoDict *d);
 void        mojo_mark_dict_bool_values(MojoDict *d);
 int         mojo_is_bool_dict(MojoDict *d);
 
@@ -380,6 +381,7 @@ typedef struct {
 
 MojoSet *mojo_set_new(void);
 void     mojo_set_free(MojoSet *s);
+void     mojo_set_clear(MojoSet *s);
 
 void     mojo_set_add_int(MojoSet *s, int64_t v);
 void     mojo_set_add_str(MojoSet *s, char *v);

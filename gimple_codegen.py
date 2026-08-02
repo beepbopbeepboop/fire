@@ -1701,6 +1701,33 @@ def _compute_exc_descendants(all_struct_defs):
     return descendants
 
 
+def _class_attr_ctype(v) -> str | None:
+    """C pointer type for a container-valued class-body attribute initializer
+    (`MojoSet *` / `MojoDict *` / `MojoList *`), or None if the initializer
+    isn't a container value. Handles both container LITERALS (set `{...}`,
+    dict `{...}`, list `[...]`, tuple `(...)`) and container CONSTRUCTOR calls
+    (`set(...)`, `frozenset(...)`, `dict(...)`, `list(...)`, and the runtime
+    helpers) — the class-body `_X = frozenset({...})` pattern used all over
+    this file for membership-test class attrs. Mirrors the container
+    classification in `_collect_self_assigns` (CallExpr branch) so every site
+    agrees on one answer."""
+    if isinstance(v, SetExpr):
+        return 'MojoSet *'
+    if isinstance(v, DictExpr):
+        return 'MojoDict *'
+    if isinstance(v, (ListExpr, TupleExpr)):
+        return 'MojoList *'
+    if isinstance(v, CallExpr) and isinstance(v.func, IdentExpr):
+        cn = v.func.name
+        if cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
+            return 'MojoSet *'
+        if cn in ('dict', 'Dict', 'mojo_dict_new'):
+            return 'MojoDict *'
+        if cn in ('list', 'DynamicVector', 'mojo_list_new'):
+            return 'MojoList *'
+    return None
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'  # Default to 64-bit signed integer
@@ -4924,6 +4951,7 @@ class GimpleGen:
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
         'mojo_set_contains_str': ('int',       ['MojoSet *', 'char *']),
+        'mojo_set_clear':        ('void',      ['MojoSet *']),
         'mojo_set_contains_int': ('int',       ['MojoSet *', 'int64_t']),
         'mojo_hasattr':          ('int',        ['int', 'char *']),
         'mojo_obj_getattr':      ('int64_t',   ['void *', 'char *']),
@@ -10029,7 +10057,7 @@ class GimpleGen:
         if method in ('copy',):
             return 'MojoDict *', self._new_val('MojoDict *', f"mojo_dict_copy ({ov})")
         if method == 'clear':
-            self._emit(f"  mojo_dict_free ({ov});")
+            self._emit(f"  mojo_dict_clear ({ov});")
             return 'int', self._new_val('int', '0')
         if method == 'setdefault' and args:
             key_type, key_val = self.lower_expr(args[0])
@@ -10159,6 +10187,9 @@ class GimpleGen:
             return self._void_call('mojo_set_discard', [('MojoSet *', ov), ('int64_t', av64)])
         if method == 'copy':
             return 'MojoSet *', self._call_expr('MojoSet *', 'mojo_set_copy', [('MojoSet *', ov)])
+        if method == 'clear':
+            self._emit(f"  mojo_set_clear ({ov});")
+            return 'int', self._new_val('int', '0')
         return 'int', self._new_val('int', '0')
 
     def _lower_pointer_method(self, ov: str, ot: str, method: str, args: list) -> tuple:
@@ -12694,6 +12725,30 @@ class GimpleGen:
             at, av = arg_pairs[0]
             if at in ('int64_t', 'int', '_Bool'): return 'double', self._new_val('double', f'(double){av}')
             if at == 'double':                    return 'double', av
+
+        # bool(x) — Python truthiness is container LENGTH, not pointer
+        # identity (`bool([])`/`bool({})`/`bool(set())` are False even though
+        # each empty container's pointer is a real, non-NULL allocation). The
+        # generic `bool(...)` → `mojo_make_bool((int)ptr)` path compared
+        # pointer-non-nullness, so the self-hosted binary compiled `bool(empty
+        # container)` to True — a native-vs-Python divergence (same semantics
+        # `_ensure_bool_cond` already implements for if/while conditions via
+        # _CONTAINER_LEN_FN, but a bool() CALL was the one path that never
+        # used it). Mirror that here so both paths agree.
+        if fname_raw == 'bool' and len(arg_pairs) == 1:
+            _bt, _bv = arg_pairs[0]
+            if _bt in self._CONTAINER_LEN_FN:
+                # GIMPLE-valid statement form, identical to
+                # _ensure_bool_cond's own container branch (a bare
+                # `len != 0` expression typed int is rejected as a "bogus
+                # comparison result type").
+                _n = self._call_expr('int64_t', self._CONTAINER_LEN_FN[_bt],
+                                     [(_bt, _bv)])
+                _b = self._new_temp('_Bool')
+                _z = self._new_temp('int64_t')
+                self._emit(f'  {_z} = (int64_t)0;')
+                self._emit(f'  {_b} = {_n} != {_z};')
+                return '_Bool', _b
 
         if ret_type == 'void':
             return self._void_call(fname, arg_pairs)
@@ -23259,12 +23314,31 @@ class GimpleGen:
                             self._class_attrs[s.name][aname] = mangled
                             # Pre-populate _global_var_types so Phase 2a sees the correct type
                             v = field.value
-                            if isinstance(v, SetExpr):
-                                self._global_var_types[mangled] = 'MojoSet *'
-                            elif isinstance(v, DictExpr):
-                                self._global_var_types[mangled] = 'MojoDict *'
-                            elif isinstance(v, (ListExpr, TupleExpr)):
-                                self._global_var_types[mangled] = 'MojoList *'
+                            ctype = _class_attr_ctype(v)
+                            if ctype is not None:
+                                self._global_var_types[mangled] = ctype
+                                # A container-valued class-body attribute (e.g.
+                                # `_PRELUDE_GENERICS = {...}`) is ALSO an
+                                # instance struct field when read via `self.X`:
+                                # _lower_MemberExpr checks struct_field_types
+                                # (direct `self->X` read) BEFORE the _class_attrs
+                                # global redirect, so without an entry here the
+                                # self-reads scan defaulted the field to a
+                                # 32-bit `int` and _alloc_{s.name}'s seeding
+                                # guard (`field type == class-global type`)
+                                # skipped the seed — leaving the instance slot
+                                # as raw malloc garbage. The first
+                                # `self._X.items()` / `x in self._X` then
+                                # dereferenced that garbage (deterministic
+                                # SIGSEGV/SIGABRT; the _PRELUDE_GENERICS one
+                                # reproduced 100% with MallocGuardEdges=1).
+                                # Register the matching container type here so
+                                # the struct field is correct AND the alloc
+                                # seed fires (Python semantics: a fresh
+                                # instance's attr starts as the class value).
+                                cur = self.struct_field_types[s.name].get(aname)
+                                if cur is None or cur in ('int', 'int64_t'):
+                                    self.struct_field_types[s.name][aname] = ctype
                             elif isinstance(v, StringLiteral):
                                 self._global_var_types[mangled] = 'char *'
                             elif isinstance(v, (IntLiteral, BoolLiteral)):
@@ -24408,7 +24482,6 @@ class GimpleGen:
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
             _async_fns.pop(id(s), None)
-
         # Second pass for async functions NOT in top-level stmts (nested in
         # if/else/try bodies at module scope — e.g. types.py's `async def
         # _c(): pass` inside an `except ImportError:` handler). Iterate
@@ -26633,21 +26706,20 @@ class GimpleGen:
                     for field in s.fields:
                         if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr) and field.target.name == aname:
                             v = field.value
-                            if isinstance(v, SetExpr):
-                                ctype = 'MojoSet *'
+                            ctype = _class_attr_ctype(v)
+                            if ctype == 'MojoSet *':
                                 # Build init code: create set and add elements
                                 inits = [f"  {mangled} = mojo_set_new();"]
-                                for elt in v.elements:
+                                _set_elts = v.elements if isinstance(v, SetExpr) else []
+                                for elt in _set_elts:
                                     if isinstance(elt, StringLiteral):
                                         inits.append(f'  mojo_set_add_str ({mangled}, "{elt.value}");')
                                     elif isinstance(elt, IntLiteral):
                                         inits.append(f'  mojo_set_add_int ({mangled}, {elt.value});')
                                 class_attr_inits.extend(inits)
-                            elif isinstance(v, DictExpr):
-                                ctype = 'MojoDict *'
+                            elif ctype == 'MojoDict *':
                                 class_attr_inits.append(f"  {mangled} = mojo_dict_new();")
-                            elif isinstance(v, (ListExpr, TupleExpr)):
-                                ctype = 'MojoList *'
+                            elif ctype == 'MojoList *':
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             elif isinstance(v, StringLiteral):
                                 ctype = 'char *'
@@ -27354,12 +27426,20 @@ class GimpleGen:
         # closures, which an elaborated fragment with no async function of
         # its own never populates) — so this must ALSO pull in the header,
         # independent of the `_supported_async`/`_supported_async_closures`/
-        # `_nested_async_api` gate just below.
+        # `_nested_async_api` gate just below. NOTE: this gate's operands
+        # are deliberately plain `len(...)` ints rather than bare container
+        # truthiness — `bool(dictA or dictB or dictC or set_intersection)`
+        # compiles the `or` chain to a boxed int64_t (the dict/set types
+        # join to int64_t), and `bool(int64_t_holding_a_pointer)` compares
+        # pointer-non-nullness, so three EMPTY dicts plus an empty
+        # intersection still read as True — a native-vs-Python divergence
+        # (Python `bool({})` is False; the self-hosted binary's was True).
+        # Explicit lengths sidestep the boxing entirely.
         _needs_async_runtime_h = bool(
-            self._supported_async or self._supported_async_closures
-            or self._nested_async_api
-            or (self._funcptr_builtins_needed
-                & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}))
+            len(self._supported_async) or len(self._supported_async_closures)
+            or len(self._nested_async_api)
+            or len(self._funcptr_builtins_needed
+                  & {'mojo_coro_resume_generic', 'mojo_coro_destroy_generic'}))
         if _needs_async_runtime_h and not (self._supported_async or self._supported_async_closures
                                             or self._nested_async_api):
             parts.append('typedef struct MojoAsync MojoAsync;')

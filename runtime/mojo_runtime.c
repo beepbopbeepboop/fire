@@ -1247,6 +1247,27 @@ void mojo_dict_free(MojoDict *d)
     free(d);
 }
 
+/* dict.clear(): empty the dict IN PLACE, keeping the MojoDict struct (and the
+ * caller's pointer to it) valid — a `self.X.clear()` on a class/instance field
+ * frees keys+slots but leaves the dict object itself alive so the field stays
+ * a valid, reusable empty dict, exactly like Python. The previous lowering of
+ * `.clear()` called mojo_dict_free (destroying the dict and leaving every
+ * caller's field pointing at freed memory); the second `_reset_func()` on the
+ * same GimpleGen instance (one per function during gen_module) then freed the
+ * dangling pointer again — macOS libmalloc's "pointer being freed was not
+ * allocated" abort, the intermittent SIGABRT (heap-layout dependent, ~40%).
+ * Mirrors mojo_list_clear's in-place semantics (runtime/mojo_runtime.c:2601). */
+void mojo_dict_clear(MojoDict *d)
+{
+    if (!d) return;
+    for (int64_t i = 0; i < d->cap; i++) {
+        free(d->slots[i].key);
+        d->slots[i].key = NULL;
+    }
+    d->used = 0;
+    d->next_seq = 0;
+}
+
 static _DictSlot *_dict_find(MojoDict *d, char *key)
 {
     uint64_t h = _str_hash(key) % (uint64_t)d->cap;
@@ -1341,6 +1362,7 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
 
 static _DictSlot *_dict_lookup(MojoDict *d, char *key)
 {
+    if (!d || !d->cap || !d->slots) return NULL;
     uint64_t h = _str_hash(key) % (uint64_t)d->cap;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
@@ -1459,6 +1481,20 @@ void mojo_set_free(MojoSet *s)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
     free(s->slots);
     free(s);
+}
+
+/* set.clear(): empty the set IN PLACE, keeping the MojoSet struct (and the
+ * caller's pointer to it) valid — same rationale as mojo_dict_clear above. */
+void mojo_set_clear(MojoSet *s)
+{
+    if (!s) return;
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+        s->slots[i].tag = -1;
+        s->slots[i].val_i = 0;
+        s->slots[i].val_s = NULL;
+    }
+    s->used = 0;
 }
 
 static void _set_grow(MojoSet *s);
@@ -2181,7 +2217,8 @@ char *mojo_str_expandtabs(char *str, int tabsize) {
 }
 
 char *mojo_str_join(char *sep, MojoList *parts) {
-    if (!sep || !parts || parts->len == 0) return sep ? sep : "";
+    if (!parts || parts->len == 0) return "";
+    if (!sep) sep = "";
     size_t sep_len = strlen(sep);
     size_t total = 0;
     for (int64_t i = 0; i < parts->len; i++) {

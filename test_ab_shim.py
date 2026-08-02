@@ -30,7 +30,10 @@ def run_native_dump(src_path: str, out_dir: str) -> str:
     """Run MOJO_NO_SHIM=1 mojoc --dump on src_path, return path to .ci file."""
     env = os.environ.copy()
     env['MOJO_NO_SHIM'] = '1'
-    cmd = [MOJOC, '--dump', src_path]
+    # File must come FIRST: the compiled binary's argv parser uses
+    # sys.argv[1] as the input and strips '--dump' by rebuilding the list
+    # (list.remove is broken in the compiled binary).
+    cmd = [MOJOC, src_path, '--dump']
     result = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True,
                             timeout=120, env=env)
     if result.returncode != 0:
