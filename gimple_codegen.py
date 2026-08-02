@@ -6041,11 +6041,19 @@ class GimpleGen:
             # This function's OWN local is heap-boxed (a pointer variable,
             # `{ctype} * name`) because some nested closure captures it BY
             # REFERENCE -- see _seed_mut_captured_local_types's docstring.
-            # Dereference the pointer directly (no preload needed: unlike
+            # Dereference the pointer directly (no need to preload: unlike
             # `_gimple_mut_ptr` above, this name IS already a plain,
             # directly-named local pointer, not behind a struct
             # component_ref, so `*name` is already valid GIMPLE).
             return f'*{self._cname(name)}'
+        if name in getattr(self, '_func_declared_globals', ()) and name in self._global_var_types:
+            # `global x` declared in this function — write to the module
+            # globals struct, mirroring the AssignStmt write path's routing
+            # (otherwise AugAssign `x += 1` on a global emitted a LOCAL
+            # write, leaving the global unchanged: "counter undeclared").
+            global_module = getattr(self, '_global_to_module', {}).get(name, self._current_module_ctx or "root")
+            safe_module = _c_field_name(global_module) if global_module else "root"
+            return f"_{safe_module}_globals.{_c_field_name(name)}"
         return self._cname(name)
 
     def _seed_mut_captured_local_types(self, func_name: str):
@@ -27264,7 +27272,46 @@ class GimpleGen:
 
         all_global_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         for stmt in _collect_global_stmts(all_global_scan):
-            if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
+            if isinstance(stmt, VarDecl):
+                # Module-level `var NAME: T = value` — a real global, not just
+                # an AssignStmt. Without this, a top-level `var counter: Int = 0`
+                # was never registered in _global_var_types, so a function doing
+                # `global counter; counter += 1` emitted "counter undeclared"
+                # (gcc error) at compile time. Reuse the AssignStmt path by
+                # treating the VarDecl's name+value as the global definition.
+                gname = stmt.name
+                if gname in _declared_globals:
+                    continue
+                _declared_globals.add(gname)
+                _gv = stmt.value
+                if isinstance(_gv, (IntLiteral, BoolLiteral)):
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
+                elif isinstance(_gv, StringLiteral):
+                    global_decls.append(f"char * {gname};")
+                    self._global_var_types[gname] = 'char *'
+                    self._global_c_decl_types[gname] = 'char *'
+                elif isinstance(_gv, (ListExpr, TupleExpr)):
+                    global_decls.append(f"MojoList * {gname};")
+                    self._global_var_types[gname] = 'MojoList *'
+                    self._global_c_decl_types[gname] = 'MojoList *'
+                elif isinstance(_gv, DictExpr):
+                    global_decls.append(f"MojoDict * {gname};")
+                    self._global_var_types[gname] = 'MojoDict *'
+                    self._global_c_decl_types[gname] = 'MojoDict *'
+                elif isinstance(_gv, SetExpr):
+                    global_decls.append(f"MojoSet * {gname};")
+                    self._global_var_types[gname] = 'MojoSet *'
+                    self._global_c_decl_types[gname] = 'MojoSet *'
+                elif isinstance(_gv, IdentExpr) and _gv.name in self._global_var_types:
+                    global_decls.append(f"{self._global_var_types[_gv.name]} {gname};")
+                    self._global_c_decl_types[gname] = self._global_var_types[_gv.name]
+                else:
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
+            elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
                 gname = stmt.target.name
                 if gname in _declared_globals:
                     continue
