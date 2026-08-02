@@ -23312,7 +23312,264 @@ class GimpleGen:
             self.struct_boxed_fields['UnaryOp'] = {'operand'}
             self.struct_boxed_fields['TernaryExpr'] = {'condition', 'then_val', 'else_val'}
             self.struct_boxed_fields['MemberExpr'] = {'obj'}
-            self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+        self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+        # Literal/collection node boxed fields: the `value` of a child
+        # expression node is an int64_t handle to a nested AST node, not a
+        # raw integer (e.g. WalrusExpr.value, YieldExpr.value, AwaitExpr.value).
+        self.struct_boxed_fields['WalrusExpr'] = {'value'}
+        self.struct_boxed_fields['YieldExpr'] = {'value'}
+        self.struct_boxed_fields['YieldFromExpr'] = {'value'}
+        self.struct_boxed_fields['AwaitExpr'] = {'value'}
+
+        # ── AST statement/expression node fields (ALWAYS-ON, not gated) ──────
+        # The compiled `mojoc` binary reads AST-node fields off the parser's
+        # runtime objects (node.then_body, node.condition, node.body, ...) via
+        # struct_field_types-driven member lowering. Those reads happen for ANY
+        # input file, not just this repo's own self-host files — but
+        # `_is_selfhost_file` is False for a plain user file, so the block above
+        # (which registers only the 7 expression nodes CallExpr/BinaryOp/...)
+        # would be skipped and every statement-node field access would fall back
+        # to mojo_obj_getattr returning 0/NULL → garbage → segfault (the
+        # if_else.mojo `mojo_str_join(parts=NULL)` crash). Register them here,
+        # unconditionally, with the same C types the dataclass annotation-scan
+        # below derives (object→int64_t boxed, str→char *, list→MojoList *,
+        # dict→MojoDict *, bool→_Bool) so the baked struct layout matches.
+        self.struct_field_types['IfStmt'] = {
+            'condition': 'int64_t',
+            'then_body': 'MojoList *',
+            'elifs': 'MojoList *',
+            'else_body': 'MojoList *',
+        }
+        self.struct_field_types['WhileStmt'] = {
+            'condition': 'int64_t',
+            'body': 'MojoList *',
+            'else_body': 'MojoList *',
+        }
+        self.struct_field_types['ForStmt'] = {
+            'target': 'int64_t',
+            'iterable': 'int64_t',
+            'body': 'MojoList *',
+            'else_body': 'MojoList *',
+            'is_async': '_Bool',
+        }
+        self.struct_field_types['FunctionDef'] = {
+            'name': 'char *',
+            'params': 'MojoList *',
+            'return_type': 'int64_t',
+            'body': 'MojoList *',
+            'decorators': 'MojoList *',
+            'param_convs': 'MojoDict *',
+            'param_has_default': 'MojoDict *',
+            'param_defaults': 'MojoDict *',
+            'kwonly': 'MojoList *',
+            'comptime_params': 'MojoList *',
+            'is_generator': '_Bool',
+            'yield_bearing_node_ids': 'int64_t',
+            'is_async': '_Bool',
+        }
+        self.struct_field_types['ExprStmt'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['AssignStmt'] = {
+            'target': 'int64_t',
+            'value': 'int64_t',
+            'type_ann': 'int64_t',
+        }
+        self.struct_field_types['AugAssignStmt'] = {
+            'target': 'int64_t',
+            'op': 'char *',
+            'value': 'int64_t',
+        }
+        self.struct_field_types['ReturnStmt'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['VarDecl'] = {
+            'name': 'char *',
+            'type_ann': 'int64_t',
+            'value': 'int64_t',
+        }
+        self.struct_field_types['MultiAssignStmt'] = {
+            'targets': 'MojoList *',
+            'value': 'int64_t',
+        }
+        self.struct_field_types['BreakStmt'] = {}
+        self.struct_field_types['ContinueStmt'] = {}
+        self.struct_field_types['PassStmt'] = {}
+        self.struct_field_types['AssertStmt'] = {
+            'value': 'int64_t',
+            'msg': 'int64_t',
+            'is_comptime': '_Bool',
+        }
+        self.struct_field_types['RaiseStmt'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['TryStmt'] = {
+            'body': 'MojoList *',
+            'handlers': 'MojoList *',
+            'else_body': 'MojoList *',
+            'finally_body': 'MojoList *',
+        }
+        self.struct_field_types['WithStmt'] = {
+            'items': 'MojoList *',
+            'body': 'MojoList *',
+            'is_async': '_Bool',
+        }
+        self.struct_field_types['ImportStmt'] = {
+            'module': 'char *',
+            'alias': 'char *',
+            'extra': 'MojoList *',
+        }
+        self.struct_field_types['FromImportStmt'] = {
+            'module': 'char *',
+            'names': 'MojoList *',
+            'wildcard': '_Bool',
+        }
+        self.struct_field_types['ComptimeIfStmt'] = {
+            'condition': 'int64_t',
+            'then_body': 'MojoList *',
+            'elifs': 'MojoList *',
+            'else_body': 'MojoList *',
+        }
+        self.struct_field_types['ComptimeForStmt'] = {
+            'target': 'char *',
+            'iterable': 'int64_t',
+            'body': 'MojoList *',
+        }
+        self.struct_field_types['ComptimeVarStmt'] = {
+            'target': 'char *',
+            'value': 'int64_t',
+        }
+        self.struct_field_types['GlobalStmt'] = {
+            'names': 'MojoList *',
+        }
+        self.struct_field_types['DelStmt'] = {
+            'targets': 'MojoList *',
+        }
+        self.struct_field_types['MatchStmt'] = {
+            'subject': 'int64_t',
+            'cases': 'MojoList *',
+        }
+        self.struct_field_types['LambdaExpr'] = {
+            'params': 'MojoList *',
+            'body': 'int64_t',
+        }
+        self.struct_field_types['SubscriptExpr'] = {
+            'obj': 'int64_t',
+            'index': 'int64_t',
+            'attrs': 'MojoList *',
+        }
+        self.struct_field_types['SliceExpr'] = {
+            'obj': 'int64_t',
+            'start': 'int64_t',
+            'stop': 'int64_t',
+            'step': 'int64_t',
+        }
+        self.struct_field_types['Comprehension'] = {
+            'kind': 'char *',
+            'element': 'int64_t',
+            'key': 'int64_t',
+            'generators': 'MojoList *',
+        }
+        self.struct_field_types['IdentExpr'] = {
+            'name': 'char *',
+        }
+        # Literal and collection expression nodes — the compiled binary's own
+        # parser produces these for ANY input file, and unregistered fields
+        # fall back to mojo_obj_getattr → 0/NULL → garbage operands (e.g. the
+        # `0` in `x > 0` lowering to a node handle instead of int 0, crashing
+        # _lower_binary_tail's mojo_str_join). Register the full field sets.
+        self.struct_field_types['IntLiteral'] = {
+            'value': 'int64_t', 'raw': 'char *',
+        }
+        self.struct_field_types['FloatLiteral'] = {
+            'value': 'double',
+        }
+        self.struct_field_types['BoolLiteral'] = {
+            'value': '_Bool',
+        }
+        self.struct_field_types['EllipsisLiteral'] = {}
+        self.struct_field_types['NoneLiteral'] = {}
+        self.struct_field_types['StringLiteral'] = {
+            'value': 'char *',
+        }
+        self.struct_field_types['TstringLiteral'] = {
+            'value': 'char *',
+        }
+        self.struct_field_types['ImagLiteral'] = {
+            'value': 'double',
+        }
+        self.struct_field_types['TupleLiteral'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['TupleExpr'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['ListLiteral'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['ListExpr'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['SetLiteral'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['SetExpr'] = {
+            'elements': 'MojoList *',
+        }
+        self.struct_field_types['DictLiteral'] = {
+            'pairs': 'MojoList *',
+        }
+        self.struct_field_types['DictExpr'] = {
+            'pairs': 'MojoList *',
+        }
+        self.struct_field_types['WalrusExpr'] = {
+            'name': 'char *', 'value': 'int64_t',
+        }
+        self.struct_field_types['YieldExpr'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['YieldFromExpr'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['AwaitExpr'] = {
+            'value': 'int64_t',
+        }
+        self.struct_field_types['StructDef'] = {
+            'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
+            'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
+            'bases': 'MojoList *', '_fieldwise_ctor_synthesized': '_Bool',
+        }
+        self.struct_field_types['TraitDef'] = {
+            'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
+        }
+        # Boxed-object fields (int64_t handles to child AST nodes / values),
+        # mirroring the same-named entries in the gated block above. Must be
+        # recorded explicitly so repr()/getattr treat them as boxed handles
+        # rather than raw integers (see the _is_selfhost_file block's comment).
+        self.struct_boxed_fields['IfStmt'] = {'condition'}
+        self.struct_boxed_fields['WhileStmt'] = {'condition'}
+        self.struct_boxed_fields['ForStmt'] = {'target', 'iterable'}
+        self.struct_boxed_fields['FunctionDef'] = {'return_type', 'yield_bearing_node_ids'}
+        self.struct_boxed_fields['ExprStmt'] = {'value'}
+        self.struct_boxed_fields['AssignStmt'] = {'target', 'value', 'type_ann'}
+        self.struct_boxed_fields['AugAssignStmt'] = {'target', 'value'}
+        self.struct_boxed_fields['ReturnStmt'] = {'value'}
+        self.struct_boxed_fields['VarDecl'] = {'type_ann', 'value'}
+        self.struct_boxed_fields['MultiAssignStmt'] = {'value'}
+        self.struct_boxed_fields['AssertStmt'] = {'value', 'msg'}
+        self.struct_boxed_fields['RaiseStmt'] = {'value'}
+        self.struct_boxed_fields['ComptimeIfStmt'] = {'condition'}
+        self.struct_boxed_fields['ComptimeForStmt'] = {'iterable'}
+        self.struct_boxed_fields['ComptimeVarStmt'] = {'value'}
+        self.struct_boxed_fields['MatchStmt'] = {'subject'}
+        self.struct_boxed_fields['LambdaExpr'] = {'body'}
+        self.struct_boxed_fields['SliceExpr'] = {'obj', 'start', 'stop', 'step'}
+        self.struct_boxed_fields['Comprehension'] = {'element', 'key'}
+        # SubscriptExpr.attrs is a MojoList of (name, value) tuple-pairs, so it
+        # stays out of struct_boxed_fields; obj/index are already registered in
+        # the gated block above — keep them here too since this block is the one
+        # that runs for non-self-host user files.
+        self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
 
         # Snapshot of every struct name whose field list is already known at
         # this point — either a real stdlib type seeded just above (Span) or,
