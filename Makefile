@@ -305,7 +305,7 @@ preflight:
 FORCE:
 
 mojo.ci: $(MOJO_MAIN) FORCE
-	PYTHONPATH=. python3 mojo.py --dump $(MOJO_MAIN) 2>/dev/null
+	PYTHONPATH=. python3 mojo.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: mojo.ci
 	@mkdir -p build

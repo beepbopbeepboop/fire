@@ -41,6 +41,24 @@ from generated_dispatch import (
 
 _SELFHOST_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Function/method C symbols that the self-host forward-decl block
+# (gen_module's `_is_selfhost_file` gate) declares explicitly with concrete
+# signatures. The lazy auto-stub path (`_lower_named_call`'s `_is_unknown`
+# fallback) must NOT also emit a conflicting variadic `(...)` declaration for
+# these — two declarations of one symbol in one translation unit is a hard
+# GCC "conflicting types" error (confirmed via `make check-selfhost` /
+# `make check-runner`: the concrete decl comes from this block, the variadic
+# stub from the auto-stub path, and they collide). Keeping this list in sync
+# with the `_is_selfhost_file` block below is required for `make check`.
+_SELFHOST_HARDCODED_FUNCS = frozenset({
+    'Parser_parse_module',
+    'Parser___init__',
+    'Interpreter___init__',
+    'Interpreter_execute',
+    'jit_compile_and_execute',
+})
+
+
 # Sentinel stored in GimpleGen._own_imported_func_home when a bare free-
 # function name genuinely cannot be resolved to one home module within a
 # single compile unit — e.g. one file with two different nested scopes each
@@ -10464,7 +10482,8 @@ class GimpleGen:
                 and mangled not in self.func_return_types
                 and f'{struct_name}_{method}{_method_overload_suffix}' not in self.func_return_types
                 and f'{struct_name}_{method}' not in self.func_return_types
-                and mangled not in self._auto_stubbed):
+                and mangled not in self._auto_stubbed
+                and mangled not in _SELFHOST_HARDCODED_FUNCS):
             _stub_guard = f'_MOJO_STUB_{struct_name.upper()}_{method.upper()}'
             # A struct with at least one base class we couldn't resolve to a
             # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`
@@ -12547,11 +12566,15 @@ class GimpleGen:
 
         # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
         # that the parser skips). Without a declaration GCC gives "implicit function declaration".
+        # Skip the self-host hardcoded forward-declared symbols — gen_module's
+        # `_is_selfhost_file` block declares those concretely, and a variadic
+        # stub here would conflict ("conflicting types").
         _is_unknown = (fname_raw not in self.func_return_types
                        and fname_raw not in self.imported_symbols
                        and fname not in self._KNOWN_SIGS
                        and fname_raw not in self.BUILTIN_VALUE_MAP
-                       and fname_raw not in _C_RESERVED_FUNCS)
+                       and fname_raw not in _C_RESERVED_FUNCS
+                       and fname not in _SELFHOST_HARDCODED_FUNCS)
         if _is_unknown:
             _stub_key = f'_MOJO_STUB_{fname.upper()}'
             _stub_decl = f'#ifndef {_stub_key}\n#define {_stub_key}\nint64_t {fname} (...);\n#endif'
@@ -15321,11 +15344,15 @@ class GimpleGen:
                 self._emit_call(ret_type, '', fname, arg_pairs)
             else:
                 # Auto-stub completely unknown names (bracket params, implicit fnptrs)
+                # Skip the self-host hardcoded forward-declared symbols — the
+                # `_is_selfhost_file` block declares those concretely; a variadic
+                # stub here would conflict ("conflicting types").
                 _is_unknown_stmt = (raw_name not in self.func_return_types
                                     and raw_name not in self.imported_symbols
                                     and fname not in self._KNOWN_SIGS
                                     and raw_name not in self.BUILTIN_VALUE_MAP
-                                    and raw_name not in _C_RESERVED_FUNCS)
+                                    and raw_name not in _C_RESERVED_FUNCS
+                                    and fname not in _SELFHOST_HARDCODED_FUNCS)
                 if _is_unknown_stmt and fname not in self._auto_stubbed:
                     _stub_guard = f'_MOJO_STUB_{fname.upper()}'
                     _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {fname} (...);\n#endif'
