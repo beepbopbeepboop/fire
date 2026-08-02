@@ -652,11 +652,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             # NOTE: call compile_to_gimple directly — compile_to_gimple_cached
             # imports cas.py which depends on CPython stdlib (hashlib, subprocess)
             # that the compiled binary can't run.
-            import sys as _s2
-            print(f"[TRACE2] about to call compile_to_gimple via gimple_codegen", file=_s2.stderr, flush=True)
             try:
                 c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
-                import sys as _s3; print(f"[TRACE3] compile_to_gimple returned {len(c_code) if c_code else 0} bytes", file=_s3.stderr, flush=True)
             except Exception as e:
                 import traceback; traceback.print_exc(file=sys.stderr)
                 c_code = ''

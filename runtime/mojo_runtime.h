@@ -455,6 +455,10 @@ int64_t mojo_min(void *args);
 int64_t mojo_sum(void *args);
 void *mojo_sorted(void *iterable);
 void *mojo_reversed(void *iterable);
+MojoList *mojo_list_sorted_str(MojoList *src);
+MojoList *mojo_set_sorted(MojoSet *s);
+MojoList *mojo_dict_sorted_keys(MojoDict *d);
+MojoList *mojo_dict_items_sorted(MojoDict *d);
 
 /* Context manager protocol */
 int mojo_obj_enter(int obj);
@@ -522,6 +526,8 @@ char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
 char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
+char *mojo_str_rstrip_chars(char *str, char *chars);
+char *mojo_str_lstrip_chars(char *str, char *chars);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
 /* shlex.join(iterable): space-join, POSIX-quoting each element like CPython's

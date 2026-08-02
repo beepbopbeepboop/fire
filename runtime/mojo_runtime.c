@@ -462,6 +462,14 @@ int mojo_list_contains_str(MojoList *l, char *v)
 {
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
+        /* A NULL needle is a real `None`/NULL value, not an error: a tuple
+         * literal like `(None, '<conflict>')` stores None as a NULL element,
+         * and `rt_prov not in (None, '<conflict>')` (gimple_codegen.py's
+         * generator-provenance pass) legitimately probes it. Previously only
+         * `s` was guarded, so strcmp(s, NULL) segfaulted on the second
+         * iteration. Match Python: None == None. */
+        if (v == NULL)
+            return s == NULL ? 1 : 0;
         if (s && strcmp(s, v) == 0) return 1;
     }
     return 0;
@@ -507,6 +515,8 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
 
 MojoList *mojo_list_concat(MojoList *a, MojoList *b)
 {
+    if (!a) a = mojo_list_new();
+    if (!b) b = mojo_list_new();
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
@@ -2068,7 +2078,7 @@ char *string_strip(char *str) {
         start++;
     }
 
-    /* Nothing to strip — return as-is */
+    /* Nothing but whitespace — return as-is */
     if (!*start) { return str; }
 
     /* Find end (skip trailing whitespace) */
@@ -2077,19 +2087,22 @@ char *string_strip(char *str) {
         end--;
     }
 
-    /* Strip in place: shift content to front of buffer, NUL-terminate */
     size_t len = (end - start) + 1;
-    size_t orig_len = strlen(str);
-    if (start != str) {
-        memmove(str, start, len);
+    if (start == str && len == strlen(str)) {
+        return str;  /* nothing to strip */
     }
-    /* Only NUL-terminate if something changed; avoids writing to read-only
-       memory when the input is a string literal with nothing to strip. */
-    if (start != str || end != str + orig_len - 1) {
-        str[len] = '\0';
-    }
-
-    return str;
+    /* Return a fresh heap copy rather than stripping in place: the input may
+       be a read-only string literal (the generated preamble's interned
+       `static char * _slit_N` pointers), and the previous in-place
+       memmove/NUL-terminate wrote into that read-only memory — a real SIGBUS
+       whenever `.strip()` was called on a literal with leading/trailing
+       whitespace (e.g. gimple_codegen.py's own `self._emit('  _mojo_classattr_
+       init ();')` → `line.strip()` in `_emit`, which aborted the self-hosted
+       gen_func the moment function bodies actually started compiling). */
+    char *out = malloc(len + 1);
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out;
 }
 
 char *mojo_str_lstrip(char *str) {
@@ -2108,6 +2121,39 @@ char *mojo_str_rstrip(char *str) {
     while (end > out && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r'))
         end--;
     *end = '\0';
+    return out;
+}
+
+/* `.rstrip(chars)` — strip any trailing chars from the `chars` set, matching
+ * Python (the plain mojo_str_rstrip only strips whitespace and ignores a
+ * chars argument entirely, so `("MojoFunction *").rstrip(' *')` kept the
+ * asterisk — gimple_codegen.py's struct-typedef dependency check
+ * (`base_type = field_type.rstrip(' *')`) compared "MojoFunction *" against
+ * the struct-name keys and concluded no dependency existed, emitting structs
+ * out of dependency order in the self-hosted binary). */
+char *mojo_str_rstrip_chars(char *str, char *chars) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = (char *)malloc(len + 1);
+    if (!out) return str;
+    memcpy(out, str, len + 1);
+    char *end = out + len;
+    while (end > out && chars && strchr(chars, end[-1]))
+        end--;
+    *end = '\0';
+    return out;
+}
+
+char *mojo_str_lstrip_chars(char *str, char *chars) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *start = str;
+    while (*start && chars && strchr(chars, *start))
+        start++;
+    if (start == str) return str;
+    char *out = (char *)malloc(len - (start - str) + 1);
+    if (!out) return str;
+    strcpy(out, start);
     return out;
 }
 
@@ -3056,6 +3102,70 @@ void *mojo_sorted(void *iterable) {
         }
     }
     return dst;
+}
+
+/* String-aware `sorted()` variants. The generic mojo_sorted above compares
+ * the stored int64_t payloads — correct for int lists, but for a list whose
+ * elements are char* pointers (a dict's keys, a set of module names, ...) it
+ * orders by pointer VALUE, which is both non-deterministic across runs and
+ * different from Python's alphabetical `sorted(...)`. The codegen picks these
+ * by its own knowledge of the element type (see _lower_builtin_sorted), so the
+ * runtime never has to guess. */
+MojoList *mojo_list_sorted_str(MojoList *src) {
+    MojoList *dst = mojo_list_copy(src);
+    for (int64_t i = 0; i < dst->len; i++) {
+        for (int64_t j = i + 1; j < dst->len; j++) {
+            if (strcmp((char *)(uintptr_t)dst->data[i], (char *)(uintptr_t)dst->data[j]) > 0) {
+                int64_t tmp = dst->data[i];
+                dst->data[i] = dst->data[j];
+                dst->data[j] = tmp;
+            }
+        }
+    }
+    return dst;
+}
+
+MojoList *mojo_set_sorted(MojoSet *s) {
+    MojoList *out = mojo_list_new();
+    if (!s) return out;
+    int is_str = 0;
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag == 0)
+            mojo_list_append_int(out, s->slots[i].val_i);
+        else if (s->slots[i].tag == 1) {
+            mojo_list_append_str(out, s->slots[i].val_s);
+            is_str = 1;
+        }
+    }
+    return is_str ? mojo_list_sorted_str(out) : mojo_sorted(out);
+}
+
+MojoList *mojo_dict_sorted_keys(MojoDict *d) {
+    return mojo_list_sorted_str(mojo_dict_keys(d));
+}
+
+/* `sorted(d.items())` — a list of (key, value) 2-element sub-lists, sorted by
+ * KEY (string comparison on element 0), matching Python's lexicographic tuple
+ * ordering (keys are distinct so the key comparison decides every pair).
+ * `mojo_sorted`'s int64 payload sort would order the tuple POINTERS, a
+ * non-deterministic order that diverges from `python3 mojo.py --dump`
+ * (visible in generated struct-typedef field order, e.g.
+ * `for field_name, field_type in sorted(fields.items()):`). */
+MojoList *mojo_dict_items_sorted(MojoDict *d) {
+    MojoList *items = mojo_dict_items(d);
+    if (!items || items->len < 2) return items;
+    for (int64_t i = 0; i < items->len; i++) {
+        for (int64_t j = i + 1; j < items->len; j++) {
+            MojoList *a = (MojoList *)(uintptr_t)items->data[i];
+            MojoList *b = (MojoList *)(uintptr_t)items->data[j];
+            if (strcmp((char *)(uintptr_t)a->data[0], (char *)(uintptr_t)b->data[0]) > 0) {
+                int64_t tmp = items->data[i];
+                items->data[i] = items->data[j];
+                items->data[j] = tmp;
+            }
+        }
+    }
+    return items;
 }
 
 int64_t mojo_sum(void *args) {

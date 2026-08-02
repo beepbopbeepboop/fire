@@ -185,51 +185,72 @@ do) — fixed same day:**
    `_own_imported_func_home` dict (never shared across nested `temp_gen`s),
    checked ahead of the shared `_imported_func_home` fallback in
    `_func_qualifier`.
-3. A narrower RESIDUAL, found while fixing (2) and deliberately left
-   NOT-fully-fixed (a proper fix needs per-lexical-scope import tracking
-   this codegen doesn't have): ONE file with two different NESTED
-   (function-body-local) scopes each importing a same-named free function
-   from two DIFFERENT sibling modules (`def call_alpha(): from alpha_module
-   import f; ...` / `def call_beta(): from beta_module import f; ...` in
-   the SAME file) is genuinely ambiguous to `_own_imported_func_home`,
-   which is per-`GimpleGen`-INSTANCE, not per-lexical-scope — both nested
-   imports live in the same root instance. Before hardening, this silently
-   picked whichever sibling module was processed first (confirmed: printed
-   the SAME value from both call sites instead of two distinct ones) — a
-   real silent miscompile. Hardened (not fixed) by detecting the
-   same-instance conflict (`_note_own_func_home` marks the entry
-   `_AMBIGUOUS_FUNC_HOME` instead of keeping the first value) and having
-   `_func_qualifier` raise a clear, honest `RuntimeError` if that specific
-   ambiguous name is ever actually looked up — never silently miscompile,
-   even though this codegen still can't correctly COMPILE this shape
-   (workaround: rename one of the two functions, or use `import X` +
-   `X.func(...)` qualified access instead of `from X import func`). The
-   identical class of gap, via the analogous `_imported_struct_home`,
-   already existed and STILL exists for STRUCTS (confirmed unaffected by
-   this session — still a hard `redefinition` compile error, not hardened
-   to a clean refusal) — this is a general, pre-existing `do_imports=True`
-   architectural limitation, not novel to free functions, and a full fix
-   (for both structs and functions) is future work.
+ 3. A narrower RESIDUAL, found while fixing (2) and for a long time
+    deliberately left NOT-fully-fixed (a proper fix needed per-lexical-scope
+    import tracking this codegen didn't have): ONE file with two different
+    NESTED (function-body-local) scopes each importing a same-named free
+    function from two DIFFERENT sibling modules (`def call_alpha():
+    from alpha_module import f; ...` / `def call_beta(): from beta_module
+    import f; ...` in the SAME file) is genuinely ambiguous to
+    `_own_imported_func_home`, which is per-`GimpleGen`-INSTANCE, not
+    per-lexical-scope — both nested imports live in the same root instance.
+    Before hardening, this silently picked whichever sibling module was
+    processed first (confirmed: printed the SAME value from both call sites
+    instead of two distinct ones) — a real silent miscompile. Hardened by
+    detecting the same-instance conflict (`_note_own_func_home` marks the
+    entry `_AMBIGUOUS_FUNC_HOME` instead of keeping the first value) and
+    having `_func_qualifier` raise a clear, honest `RuntimeError` if that
+    specific ambiguous name is ever actually looked up — never silently
+    miscompile, even though the codegen couldn't correctly COMPILE this
+    shape (workaround: rename one of the two functions, or use `import X` +
+    `X.func(...)` qualified access instead of `from X import func`).
 
-   Also confirmed, separately and NOT fixed here (pre-existing on vanilla
-   master before any SB-1 work, unrelated to overload-mangling): aliased
-   free-function-VALUE imports (`from X import f as g`) never resolve
-   their call site to the real mangled symbol via `mojo.py build`'s
-   `do_imports=True` path at all (falls to a generic `(...)` vararg stub
-   that never links) — even for a single, non-colliding aliased import.
-   This is what stops the ORIGINAL coordinator-reported repro (two sibling
-   modules, top-level ALIASED imports) from fully linking+running
-   end-to-end even after the redefinition fix above: the redefinition is
-   gone, but the alias-call-site bug still blocks the final link. Real,
-   confirmed, but a different code path from anything SB-1 touches.
+    **FIXED FOR REAL (2026-08-01):** `GimpleGen` now tracks imports per
+    lexical scope — `_import_scope_stack` (a stack of `{bare_name ->
+    module_qualifier}` dicts; frame 0 is the module's own top-level scope,
+    every function/method body pushes its own frame) populated from this
+    module's own `from X import ...` statements
+    (`_emit_stdlib_import_externs` for top-level, `_gen_stmt_FromImportStmt`
+    + `_collect_body_import_bindings` pre-scan for function/method bodies),
+    with a later same-scope import shadowing an earlier one exactly like the
+    interpreter's `Scope.define`. `_func_qualifier` walks the stack
+    innermost-first, so a bare-name reference resolves to whichever module
+    its LEXICALLY-CLOSEST enclosing import statement bound it to. This also
+    fixes `std/memory/__init__.mojo`, whose two top-level imports of `alloc`
+    (`from .alloc import alloc` + `from .unsafe_pointer import alloc` — two
+    genuinely different sibling functions) used to trip the same
+    `_AMBIGUOUS_FUNC_HOME` refusal on the standalone-compile path; the
+    second top-level import now shadows the first, exactly as Mojo/Python
+    scoping dictates. The `test_sb1_ambiguous_same_scope_import_refuses_
+    not_miscompiles` test was updated accordingly:
+    `test_sb1_per_scope_import_distinct_modules` now asserts the nested-scope
+    shape COMPILES and the binary prints both distinct correct values
+    (112/223), matching the interpreter. The identical class of gap, via the
+    analogous `_imported_struct_home`, already existed and STILL exists for
+    STRUCTS (confirmed unaffected by this session — still a hard
+    `redefinition` compile error, not hardened to a clean refusal) — this is
+    a general, pre-existing `do_imports=True` architectural limitation, not
+    novel to free functions, and a full fix for structs is still future
+    work.
 
-   Regression tests: `test_sb1_mojo_build_cli_wrapper_modules` (real
-   `mojo.py build` CLI subprocess, wrapper-module shape, asserts distinct
-   correct results 112/223) and
-   `test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles` (asserts
-   the nested-scope case refuses cleanly rather than miscompiling, and that
-   `mojo.py run`'s separate interpreter implementation is unaffected), both
-   in `test_module_cache.py`.
+    Also confirmed, separately and NOT fixed here (pre-existing on vanilla
+    master before any SB-1 work, unrelated to overload-mangling): aliased
+    free-function-VALUE imports (`from X import f as g`) never resolve
+    their call site to the real mangled symbol via `mojo.py build`'s
+    `do_imports=True` path at all (falls to a generic `(...)` vararg stub
+    that never links) — even for a single, non-colliding aliased import.
+    This is what stops the ORIGINAL coordinator-reported repro (two sibling
+    modules, top-level ALIASED imports) from fully linking+running
+    end-to-end even after the redefinition fix above: the redefinition is
+    gone, but the alias-call-site bug still blocks the final link. Real,
+    confirmed, but a different code path from anything SB-1 touches.
+
+    Regression tests: `test_sb1_mojo_build_cli_wrapper_modules` (real
+    `mojo.py build` CLI subprocess, wrapper-module shape, asserts distinct
+    correct results 112/223) and
+    `test_sb1_per_scope_import_distinct_modules` (asserts the nested-scope
+    shape now compiles and prints both distinct, correct values 112/223,
+    matching the interpreter), both in `test_module_cache.py`.
 
 ---
 

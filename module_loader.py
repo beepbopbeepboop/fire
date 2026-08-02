@@ -7,6 +7,21 @@ import os
 import ctypes
 from pathlib import Path
 
+# C keywords / gcc-reserved identifiers that cannot be used as parameter
+# names in a generated extern (mirrors gimple_codegen._C_KEYWORDS +
+# _C_PARAM_EXTRA_KEYWORDS). The scanner sanitizes param names against these.
+_C_KEYWORDS = frozenset({
+    'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
+    'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if',
+    'inline', 'int', 'long', 'register', 'restrict', 'return', 'short',
+    'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union',
+    'unsigned', 'void', 'volatile', 'while',
+    '_Bool', '_Complex', '_Imaginary', '_Alignas', '_Alignof', '_Atomic',
+    '_Generic', '_Noreturn', '_Static_assert', '_Thread_local',
+    'nullptr', 'constexpr', 'thread_local', 'static_assert', 'typeof_unqual',
+    'asm', '__asm__', 'typeof', '__typeof__',
+})
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -223,6 +238,27 @@ class ModuleLoader:
 
             def _scan_source(src_content):
                 """Extract fn/def exports from Mojo source text into exports dict."""
+                # Pre-pass: count how many times each bare name is DEFINED
+                # (fn/def), including multi-line signatures. Names defined more
+                # than once are overloaded; the single-signature model can't
+                # represent them, so they are emitted as a variadic extern
+                # `name(...)` which accepts any call arity (the codegen's
+                # _resolve_overload handles real overloads for local functions;
+                # this only affects imported externs). Without this, a
+                # multi-line overload (e.g. std.math.iota's 3-param
+                # UnsafePointer version) is invisible to the single-line scan,
+                # leaving a wrong-arity extern that breaks its call sites.
+                _overloaded: set = set()
+                _name_counts: dict = {}
+                for _l in src_content.split('\n'):
+                    _l = _l.strip()
+                    if _l.startswith('fn ') or _l.startswith('def '):
+                        _n = _l[3:] if _l.startswith('fn ') else _l[4:]
+                        _n = _n.split('[')[0].split('(')[0].strip()
+                        if _n and _n not in _C_STDLIB_SKIP:
+                            _name_counts[_n] = _name_counts.get(_n, 0) + 1
+                _overloaded = {n for n, c in _name_counts.items() if c > 1}
+
                 for line in src_content.split('\n'):
                     line = line.strip()
                     if not line or line.startswith('#'):
@@ -284,27 +320,61 @@ class ModuleLoader:
                         except Exception:
                             c_return_type = 'int64_t'
                         c_params = []
-                        for pname, ptype in parameters:
-                            # Strip default values (e.g., 'String = ""' becomes 'String')
-                            if '=' in ptype:
-                                bare_type = ptype.split('=')[0].strip()
-                            else:
-                                bare_type = ptype
-                            try:
-                                c_type = self._mojo_type_to_c(bare_type)
-                            except Exception:
-                                c_type = 'int64_t'
-                            # A named parameter can never be typed 'void' in C
-                            # (only the sole, unnamed '(void)' no-args marker is
-                            # legal) -- e.g. a parameter annotated `: None`
-                            # resolves to 'void' via _mojo_type since that's the
-                            # correct RETURN-type mapping for NoneType, but is
-                            # invalid here. Box it the same way gimple_codegen.py's
-                            # own _param_ctype already does for the exact same
-                            # case ("A named PARAMETER can never be typed void").
-                            if c_type == 'void':
-                                c_type = 'int64_t'
-                            c_params.append(f"{c_type} {pname}")
+                        _star_idx = None
+                        for idx_p, (pname, ptype) in enumerate(parameters):
+                            if pname.startswith('*'):
+                                _star_idx = idx_p
+                                break
+                        # Sanitize C-keyword param names (asm, sizeof, etc.) the
+                        # same way gimple_codegen._safe_field does — the extern's
+                        # param list must be valid C. Inlined (no nested closure)
+                        # so the self-host compiler handles it.
+                        def _safe_pn(pn):
+                            if pn in _C_KEYWORDS:
+                                return '_kw_' + pn
+                            return pn
+                        if _star_idx is not None:
+                            # Fixed params come first, then the '...' packing
+                            # sentinel ONLY when *args is the last parameter.
+                            # If *args is followed by (keyword-only) params, the
+                            # single-signature model can't represent them after
+                            # '...' in C — drop the trailing params rather than
+                            # emit an invalid `(..., x)`.
+                            for (pname, ptype) in parameters[:_star_idx]:
+                                if '=' in ptype:
+                                    bare_type = ptype.split('=')[0].strip()
+                                else:
+                                    bare_type = ptype
+                                try:
+                                    c_type = self._mojo_type_to_c(bare_type)
+                                except Exception:
+                                    c_type = 'int64_t'
+                                if c_type == 'void':
+                                    c_type = 'int64_t'
+                                c_params.append(f"{c_type} {_safe_pn(pname)}")
+                            c_params.append('...')
+                        else:
+                            for pname, ptype in parameters:
+                                # Strip default values (e.g., 'String = ""' becomes 'String')
+                                if '=' in ptype:
+                                    bare_type = ptype.split('=')[0].strip()
+                                else:
+                                    bare_type = ptype
+                                try:
+                                    c_type = self._mojo_type_to_c(bare_type)
+                                except Exception:
+                                    c_type = 'int64_t'
+                                # A named parameter can never be typed 'void' in C
+                                # (only the sole, unnamed '(void)' no-args marker is
+                                # legal) -- e.g. a parameter annotated `: None`
+                                # resolves to 'void' via _mojo_type since that's the
+                                # correct RETURN-type mapping for NoneType, but is
+                                # invalid here. Box it the same way gimple_codegen.py's
+                                # own _param_ctype already does for the exact same
+                                # case ("A named PARAMETER can never be typed void").
+                                if c_type == 'void':
+                                    c_type = 'int64_t'
+                                c_params.append(f"{c_type} {_safe_pn(pname)}")
 
                         if name in exports:
                             existing = exports[name]
@@ -314,8 +384,19 @@ class ModuleLoader:
                             existing['variadic'] = True
                             continue
 
-                        c_param_str = ', '.join(c_params) if c_params else 'void'
-                        c_signature = f"{c_return_type} {name} ({c_param_str})"
+                        # Overloaded name (defined more than once in this file,
+                        # e.g. std.math.iota's several overloads): the single-
+                        # signature model can't represent all of them, so emit a
+                        # variadic extern `name(...)` that accepts any arity.
+                        # This is the LAST overload's return type; the first
+                        # single-line overload was parsed above but overloaded
+                        # names must be variadic to satisfy every call site.
+                        if name in _overloaded:
+                            c_signature = f"{c_return_type} {name} (...)"
+                            c_params = []
+                        else:
+                            c_param_str = ', '.join(c_params) if c_params else 'void'
+                            c_signature = f"{c_return_type} {name} ({c_param_str})"
 
                         exports[name] = {
                             'return_type': return_type,

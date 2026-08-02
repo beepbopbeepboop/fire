@@ -866,31 +866,34 @@ def test_sb1_mojo_build_cli_wrapper_modules(wd):
               repr(run.stdout))
 
 
-def test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles(wd):
-    """SB-1 follow-up, "never silently miscompile" guard: a narrower residual
-    found while fixing test_sb1_mojo_build_cli_wrapper_modules above — ONE
-    file with two different NESTED (function-body-local) scopes each
-    importing a same-named free function from two DIFFERENT sibling modules
-    (`def call_alpha(): from alpha_module import f; ...` / `def call_beta():
-    from beta_module import f; ...` in the SAME main.mojo) is a genuine
-    per-lexical-scope ambiguity this codegen has no machinery to resolve
-    (_own_imported_func_home is per-GimpleGen-INSTANCE, not per-scope — both
-    nested imports live in the same root instance). Before this fix, that
+def test_sb1_per_scope_import_distinct_modules(wd):
+    """SB-1 follow-up: ONE file with two different NESTED (function-body-local)
+    scopes each importing a same-named free function from two DIFFERENT
+    sibling modules (`def call_alpha(): from alpha_module import f; ...` /
+    `def call_beta(): from beta_module import f; ...` in the SAME main.mojo).
+    Real Mojo/Python scoping makes this genuinely UNAMBIGUOUS at the source
+    level — each `from X import f` binds `f` only within its own function
+    body (myinterpreter.py's Scope.define gives each function its own scope),
+    so `call_alpha`'s reference means alpha_module's `f` and `call_beta`'s
+    means beta_module's `f`.
+
+    Originally (commit that introduced `_note_own_func_home`'s
+    `_AMBIGUOUS_FUNC_HOME` marker) this codegen had NO per-lexical-scope
+    import tracking (`_own_imported_func_home` is per-GimpleGen-INSTANCE, not
+    per-scope — both nested imports live in the same root instance), so the
     ambiguity was silently resolved by picking whichever sibling module's
     registration happened first (module_stmts processed in sorted() order) —
-    a real silent-wrong-answer miscompile (confirmed: printed the SAME
-    value twice instead of two distinct ones). Fixed by detecting the
-    same-instance conflict (_note_own_func_home marking the entry
-    _AMBIGUOUS_FUNC_HOME instead of keeping the first value) and having
-    _func_qualifier raise a clear, honest RuntimeError if that specific
-    ambiguous name is ever actually looked up — never silently miscompile,
-    even though this codegen still can't correctly COMPILE this shape.
-    (The identical class of gap, via the analogous _imported_struct_home,
-    already existed and still exists for STRUCTS — confirmed still a hard
-    'redefinition' compile error, unaffected by this session's changes,
-    since struct qualification code was not touched — this is a general,
-    pre-existing do_imports=True architectural limitation, not novel to
-    free functions.)"""
+    a real silent-wrong-answer miscompile (confirmed: printed the SAME value
+    twice instead of two distinct ones), and the build was hardened to refuse
+    with a clear RuntimeError rather than silently miscompile.
+
+    FIXED FOR REAL: GimpleGen now tracks imports per lexical scope
+    (`_import_scope_stack` + `_collect_body_import_bindings` + the
+    `_gen_stmt_FromImportStmt` per-scope binding), so each function-body call
+    site resolves to the module its own `from X import f` bound `f` to —
+    exactly the shadowing the interpreter applies. The build now COMPILES
+    this shape correctly and the binary prints both distinct, correct values
+    (112 / 223), matching the interpreter path exactly."""
     src_alpha_module = "def sb1_probe_amb(x: Int64) -> Int64:\n    return x + 111\n"
     src_beta_module = "def sb1_probe_amb(x: Int64) -> Int64:\n    return x + 222\n"
     src_main = ("def call_alpha() raises -> Int64:\n"
@@ -915,26 +918,24 @@ def test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles(wd):
     r = subprocess.run(
         [sys.executable, os.path.join(HERE, 'mojo.py'), 'build', 'main.mojo'],
         cwd=proj, capture_output=True, text=True, timeout=120)
-    check("SB-1 ambiguous-scope: mojo.py build refuses (nonzero exit), doesn't "
-          "silently succeed with a wrong-answer binary",
-          r.returncode != 0, f"rc={r.returncode}")
-    check("SB-1 ambiguous-scope: refusal names the real cause (ambiguous "
-          "ambiguous free function), not an unrelated/confusing crash",
-          'ambiguous' in (r.stdout + r.stderr) and 'sb1_probe_amb' in (r.stdout + r.stderr),
-          r.stdout + r.stderr)
-    check("SB-1 ambiguous-scope: no executable is produced (honest failure, "
-          "not a silently-wrong one)",
-          not os.path.exists(exe))
+    check("SB-1 per-scope-import: mojo.py build succeeds (per-lexical-scope "
+          "tracking now resolves each function's own local import), doesn't "
+          "silently pick one module for both call sites",
+          r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+    check("SB-1 per-scope-import: an executable is produced",
+          os.path.exists(exe), 'no executable produced')
+    rr = subprocess.run([exe], capture_output=True, text=True, timeout=20)
+    check("SB-1 per-scope-import: the compiled binary gets BOTH distinct, "
+          "correct values (call_alpha -> alpha_module's f, call_beta -> "
+          "beta_module's f) — the shape that used to silently miscompile",
+          rr.stdout.strip().splitlines() == ['112', '223'], repr(rr.stdout))
     # The interpreter path (myinterpreter.py) is a completely separate
-    # implementation, unaffected by this compiled-path limitation — real
-    # Mojo/Python scoping makes this genuinely unambiguous at the source
-    # level (each `from X import f` shadows only within its own function
-    # body), so `mojo.py run` must still get both distinct, correct values.
+    # implementation; it must agree on the same two distinct, correct values.
     ri = subprocess.run(
         [sys.executable, os.path.join(HERE, 'mojo.py'), 'run', 'main.mojo'],
         cwd=proj, capture_output=True, text=True, timeout=20)
-    check("SB-1 ambiguous-scope: the INTERPRETER path (unaffected, separate "
-          "implementation) still gets both distinct, correct values",
+    check("SB-1 per-scope-import: the INTERPRETER path (separate "
+          "implementation) agrees, getting both distinct, correct values",
           ri.stdout.strip().splitlines() == ['112', '223'], repr(ri.stdout))
 
 
@@ -1009,7 +1010,7 @@ def main():
         test_cross_module_free_func_mangling_agrees(wd)
         test_sb1_cross_module_same_c_param_overload_mangling(wd)
         test_sb1_mojo_build_cli_wrapper_modules(wd)
-        test_sb1_ambiguous_same_scope_import_refuses_not_miscompiles(wd)
+        test_sb1_per_scope_import_distinct_modules(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()
