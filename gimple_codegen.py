@@ -3614,6 +3614,7 @@ class GimpleGen:
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
         self._struct_init_defaults: dict[str, dict] = {}  # struct -> __init__ param name -> default expr AST node (excl self)
+        self._func_param_defaults: dict[str, list] = {}  # mangled free-fn name -> [(param_name, default_ast), ...]
         # (struct_name, method_name) -> list of candidate overloads, each a dict:
         #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
         # Populated from the CURRENT file's own AST only (same-file resolution);
@@ -12972,6 +12973,26 @@ class GimpleGen:
         t = self._new_val(ret_type, f'({ret_type}){raw_t}')
         return ret_type, t
 
+    def _default_expr_to_pair(self, _dflt) -> tuple:
+        """Convert a default-arg expression AST node to a (ctype, rvalue) pair,
+        for padding a call site that omitted the argument. Mirrors the struct
+        ctor default handling in _build_call_args_for_candidate."""
+        if _dflt is None:
+            return ('int', '0')
+        if isinstance(_dflt, BoolLiteral):
+            return ('_Bool', '1' if _dflt.value else '0')
+        if isinstance(_dflt, StringLiteral):
+            return ('char *', f'"{_c_escape(_dflt.value)}"')
+        if isinstance(_dflt, (IntLiteral, FloatLiteral)):
+            return ('int', str(_dflt.value))
+        if isinstance(_dflt, (ListExpr, TupleExpr, SetExpr, DictExpr)):
+            return ('int64_t', '0')
+        if isinstance(_dflt, IdentExpr) and _dflt.name in ('True',):
+            return ('int', '1')
+        if isinstance(_dflt, IdentExpr) and _dflt.name in ('False', 'None'):
+            return ('int', '0')
+        return ('int', '0')
+
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         """Final dispatch for user-defined and C stdlib functions."""
         # C reserved function renaming
@@ -13049,8 +13070,24 @@ class GimpleGen:
             expected_params = self._KNOWN_SIGS[fname_raw][1]
         if expected_params and len(arg_pairs) < len(expected_params):
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
+            # Free-function param defaults: `def greet(name: String = "world")`
+            # called as `greet()` must pad with "world", not NULL/0.
+            _dflts = self._func_param_defaults.get(fname) or self._func_param_defaults.get(fname_raw) or []
+            _dflt_by_pos = {pn: _dv for pn, _dv in _dflts}
             while len(arg_pairs) < len(expected_params):
-                arg_pairs.append(kwarg_values.pop(0) if kwarg_values else ('int', '0'))
+                if kwarg_values:
+                    arg_pairs.append(kwarg_values.pop(0))
+                    continue
+                # Map the missing positional slot to its param name via the
+                # C-type-list position (param names aren't in expected_params).
+                _pos = len(arg_pairs)
+                _dv = None
+                if _dflts and _pos < len(_dflts):
+                    _dv = _dflts[_pos][1]
+                if _dv is not None:
+                    arg_pairs.append(self._default_expr_to_pair(_dv))
+                else:
+                    arg_pairs.append(('int', '0'))
 
         # int(s, base) — drop the base arg
         if fname_raw == 'int' and len(arg_pairs) > 1:
@@ -24480,6 +24517,16 @@ class GimpleGen:
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
+            # Record free-function param DEFAULTS keyed by the mangled name, so
+            # a call site that omits an argument can pad with the real default
+            # (`def greet(name: String = "world")` called as `greet()`) instead
+            # of NULL/0. `param_defaults` maps param name -> default expr AST.
+            if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
+                _dflts = getattr(s, 'param_defaults', None) or {}
+                if _dflts:
+                    _mangled = self._func_csym(s.name)
+                    self._func_param_defaults[_mangled] = [
+                        (pn, _dv) for pn, _dv in _dflts.items()]
             # A genuine user free function (FunctionDef node, not a libc extern):
             # eligible for overload-mangling its C symbol by parameter types.
             if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
