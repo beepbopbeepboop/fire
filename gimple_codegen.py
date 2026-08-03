@@ -23727,11 +23727,18 @@ class GimpleGen:
         # dir — and a path-only check would wrongly be False for a user
         # file, skipping the interpreter/AST struct registrations and
         # segfaulting on node.condition etc. Class D of the A/B list).
-        _compiled_selfhost = os.path.abspath(__file__) == "<bootstrap>" \
-            or __file__ == "<bootstrap>"
+        # Self-host detection is PATH-BASED only (repo files under
+        # _SELFHOST_DIR). The old `_compiled_selfhost` override
+        # (__file__ == "<bootstrap>") forced _is_selfhost_file True for EVERY
+        # file the compiled binary compiled, so a user file emitted the 26
+        # self-host-only struct registrations (Parser/Interpreter/Scope/Token/
+        # CallExpr/BinaryOp/... plus the _AutoStub*/_Mojo* helpers) as typedefs
+        # in its .ci — an A/B divergence (Python emits only the 53 ungated
+        # AST structs for a user file). Path-based detection keeps the gated
+        # self-host structs for repo files (byte-identical with Python's own
+        # self-host compile) while user files match Python's 53-struct set.
         _is_selfhost_file = bool(_cur_file) and (
-            _compiled_selfhost
-            or _cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))
+            _cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))
         if _is_selfhost_file:
             # Pre-populate known interpreter structs with their field types
             # This handles cases where field type inference from method bodies fails
