@@ -9984,11 +9984,32 @@ class GimpleGen:
         # handle falls back to mojo_obj_getattr -> NULL, so an isinstance+name
         # check never fires; `ov` is the reliable `'cls'` value from lower_expr.
         if (ov == 'cls' and self.current_func_name):
-            _cns = self.current_func_name.rsplit('_', 1)[0]
+            # Derive the enclosing struct name from current_func_name (the
+            # mangled `<Struct>_<method>` form). A single rsplit('_', 1) is
+            # WRONG when the METHOD name itself contains an underscore —
+            # `TypeLattice_join_all` (join_all is the method) rsplit to
+            # 'TypeLattice_join', so the `_cns`/`f'{_cns}_{method}'` checks
+            # below saw a phantom struct and never fired, and cls.join fell
+            # through to the string-`.join` path (mojo_str_join) — a hard
+            # segfault (parts = a class ref read as a list). Match the
+            # LONGEST `_`-separated prefix of current_func_name that names a
+            # real struct (in struct_field_types) or a compiled classmethod
+            # (`f'{prefix}_{method}'` in func_return_types). Longest-first
+            # so a struct whose own NAME contains `_` (e.g. My_Class) still
+            # resolves to the full name, not its leading fragment.
+            _cns = None
+            _parts = self.current_func_name.split('_')
+            for _k in range(len(_parts), 0, -1):
+                _cand = '_'.join(_parts[:_k])
+                if (_cand in self.struct_field_types
+                        or f'{_cand}_{method}' in self.func_return_types):
+                    _cns = _cand
+                    break
             # Accept both real structs AND plain helper classes (TypeLattice,
             # etc.) whose static/classmethods are compiled functions.
-            if (_cns in self.struct_field_types
-                    or f'{_cns}_{method}' in self.func_return_types):
+            if (_cns is not None
+                    and (_cns in self.struct_field_types
+                         or f'{_cns}_{method}' in self.func_return_types)):
                 ot = f"{_cns} *"
 
         # Check if the value is a temp variable — if so, get its real type from var_types
@@ -17097,7 +17118,15 @@ class GimpleGen:
         but likely wrong; this lowering does not try to detect that ahead
         of time.
         """
-        var = node.target if isinstance(node.target, str) else node.target.name
+        var = node.target
+        # NOTE: `node.target` is ALWAYS a plain Python str (see
+        # _parse_unpack_target in mojo_compiler.py) — the old
+        # `if isinstance(node.target, str) else node.target.name` split
+        # existed only because the field is typed `object`/boxed int64_t in
+        # struct_field_types, so in the COMPILED binary the isinstance fell
+        # to the always-false mojo_isinstance stub and `node.target.name`
+        # wrongly dispatched on the raw string bytes (a hard segfault).
+        # The parser contract guarantees the string form, so use it directly.
         text_type, text_val = self.lower_expr(node.iterable.args[0])
         if text_type != 'char *':
             text_val = self._new_val('char *', f'(char *){self._ensure_local(text_type, text_val)}')
@@ -17196,7 +17225,15 @@ class GimpleGen:
                 del self.decls[decls_mark:]
                 _debug_note('regex finditer lowering failed, falling back', e)
 
-        var = node.target if isinstance(node.target, str) else node.target.name
+        var = node.target
+        # NOTE: `node.target` is ALWAYS a plain Python str (see
+        # _parse_unpack_target in mojo_compiler.py and _gen_for_regex_iter's
+        # identical fix) — the old `if isinstance(node.target, str) else
+        # node.target.name` split existed only because the field is typed
+        # `object`/boxed int64_t in struct_field_types, so in the COMPILED
+        # binary the isinstance fell to the always-false mojo_isinstance stub
+        # and `node.target.name` wrongly dispatched on the raw string bytes
+        # (a hard segfault). The parser contract guarantees the string form.
         # `for f in dataclasses.fields(x): ... f.name ...` — _lower_method_call
         # (see there) already turns dataclasses.fields(x) into a real
         # MojoList* of field-name strings, so this flows through the normal
