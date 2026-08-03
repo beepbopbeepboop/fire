@@ -531,6 +531,9 @@ char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
 char *mojo_str_rstrip_chars(char *str, char *chars);
 char *mojo_str_lstrip_chars(char *str, char *chars);
+char *mojo_str_rjust(char *s, int64_t width, char *fill);
+char *mojo_str_ljust(char *s, int64_t width, char *fill);
+char *mojo_str_center(char *s, int64_t width, char *fill);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
 /* shlex.join(iterable): space-join, POSIX-quoting each element like CPython's

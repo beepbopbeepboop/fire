@@ -4788,6 +4788,9 @@ class GimpleGen:
         'llabs':                 ('int64_t',   ['int64_t']),
         'labs':                  ('int64_t',   ['int64_t']),
         'mojo_str_split':        ('MojoList *', ['char *', 'char *']),
+        'mojo_str_rjust':        ('char *',     ['char *', 'int64_t', 'char *']),
+        'mojo_str_ljust':        ('char *',     ['char *', 'int64_t', 'char *']),
+        'mojo_str_center':       ('char *',     ['char *', 'int64_t', 'char *']),
         'mojo_str_splitlines':   ('MojoList *', ['char *']),
         'mojo_str_count':        ('int64_t',    ['char *', 'char *']),
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
@@ -6478,7 +6481,14 @@ class GimpleGen:
         """Determine element C type for a list/set/tuple literal."""
         if not elements:
             return 'int64_t'
-        types = [self._quick_type(e) for e in elements]
+        # Explicit loop (NOT a comprehension): the self-hosted compiler has no
+        # lowering for `[f(x) for x in lst]` over a runtime MojoList (the
+        # comprehension emits a no-op, leaving `types` NULL -> join_all(NULL)
+        # segfault). List comprehension lowering only works for a small
+        # hardcoded set of shapes.
+        types = []
+        for _e in elements:
+            types.append(self._quick_type(_e))
         return TypeLattice.join_all(types) if types else 'int64_t'
 
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
@@ -6589,7 +6599,7 @@ class GimpleGen:
         if not is_fstring:
             return []
         out = []
-        for kind, text in self._parse_fstring_parts(val):
+        for kind, text, _spec, _conv in self._parse_fstring_parts(val):
             if kind != 'expr':
                 continue
             try:
@@ -6857,7 +6867,7 @@ class GimpleGen:
                 if i + 1 < len(inner) and inner[i+1] == '{':
                     buf.append('{'); i += 2; continue
                 if buf:
-                    parts.append(('lit', ''.join(buf))); buf = []
+                    parts.append(('lit', ''.join(buf), '', '')); buf = []
                 i += 1
                 depth = 1
                 expr_chars = []
@@ -6868,14 +6878,32 @@ class GimpleGen:
                     if depth > 0:
                         expr_chars.append(ch)
                     i += 1
-                expr_src = self._split_expr_format(''.join(expr_chars))
-                parts.append(('expr', expr_src))
+                expr_src = ''.join(expr_chars)
+                # Split the expression from its optional format spec /
+                # conversion (`{x:04d}` -> expr "x", spec "04d").
+                _spec = ''
+                _conv = ''
+                _depth = 0
+                for _k, _ch in enumerate(expr_src):
+                    if _ch in '([{':
+                        _depth += 1
+                    elif _ch in ')]}':
+                        _depth -= 1
+                    elif _ch == ':' and _depth == 0:
+                        _spec = expr_src[_k + 1:]
+                        expr_src = expr_src[:_k]
+                        break
+                    elif _ch == '!' and _depth == 0:
+                        _conv = expr_src[_k + 1:]
+                        expr_src = expr_src[:_k]
+                        break
+                parts.append(('expr', expr_src.strip(), _spec, _conv))
             elif c == '}' and i + 1 < len(inner) and inner[i+1] == '}':
                 buf.append('}'); i += 2
             else:
                 buf.append(c); i += 1
         if buf:
-            parts.append(('lit', ''.join(buf)))
+            parts.append(('lit', ''.join(buf), '', ''))
         return parts
 
     def _list_repr_fn(self, rav: str) -> str:
@@ -6991,6 +7019,48 @@ class GimpleGen:
             return self._call_expr('char *', 'mojo_repr_float', [('double', fv)])
         return self._call_expr('char *', 'mojo_str', [(et, ev)])
 
+    def _apply_fstring_spec(self, part_val: str, spec: str) -> str:
+        """Apply a format-spec mini-language subset (fill/align/width and
+        zero-padding, e.g. `{x:04d}`) to an already-stringified f-string
+        value, mirroring myinterpreter._apply_fstring_format_spec so the
+        compiled path and interpreter agree. Emits a runtime helper call.
+        """
+        # "0" prefix -> zero-pad right-aligned to the width
+        fill = ' '
+        align = None
+        i = 0
+        if len(spec) >= 2 and (spec[1] == '<' or spec[1] == '>' or spec[1] == '^'):
+            fill = spec[0]
+            align = spec[1]
+            i = 2
+        elif len(spec) >= 1 and (spec[0] == '<' or spec[0] == '>' or spec[0] == '^'):
+            align = spec[0]
+            i = 1
+        elif len(spec) >= 1 and spec[0] == '0':
+            fill = '0'
+            align = '>'
+            i = 1
+        width_digits = ''
+        while i < len(spec) and spec[i] >= '0' and spec[i] <= '9':
+            width_digits += spec[i]
+            i += 1
+        if not width_digits:
+            return part_val
+        # Emit a runtime call that pads part_val to the width using the fill
+        # char and alignment. Use a small inline approach: call mojo_str_rjust/
+        # mojo_str_ljust/center if available, else fall back to a runtime
+        # helper. Check for the runtime padding helpers:
+        width = int(width_digits)
+        if align == '<':
+            return self._call_expr('char *', 'mojo_str_ljust',
+                                   [('char *', part_val), ('int64_t', str(width)), ('char *', f'"{fill}"')])
+        if align == '^':
+            return self._call_expr('char *', 'mojo_str_center',
+                                   [('char *', part_val), ('int64_t', str(width)), ('char *', f'"{fill}"')])
+        # '>' (right-align) and '0' (zero-pad right) both rjust
+        return self._call_expr('char *', 'mojo_str_rjust',
+                               [('char *', part_val), ('int64_t', str(width)), ('char *', f'"{fill}"')])
+
     def _lower_StringLiteral(self, node):
         val = node.value
         # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
@@ -7008,8 +7078,8 @@ class GimpleGen:
         # F-string: for now, just extract literal parts and return as plain string
         # Full f-string formatting with snprintf requires static buffers, which aren't allowed in __GIMPLE
         parts = self._parse_fstring_parts(val)
-        if not parts or all(k == 'lit' for k, _ in parts):
-            plain = ''.join(v for _, v in parts)
+        if not parts or all(k == 'lit' for k, _v, _s, _c in parts):
+            plain = ''.join(v for k, v, _s, _c in parts)
             escaped = _c_escape(plain)
             temp = self._new_val('char *', f'{self._intern_string(escaped)}')
             return 'char *', temp
@@ -7017,7 +7087,7 @@ class GimpleGen:
         # For f-strings with expressions: build a concatenation of all parts
         # Lower each expression part and concatenate via mojo_str_cat
         acc_val = None
-        for kind, text in parts:
+        for kind, text, _spec, _conv in parts:
             if kind == 'lit':
                 if not text:
                     continue
@@ -7036,7 +7106,14 @@ class GimpleGen:
                     # mojo_obj_getattr's stub instead of the real rewrite.
                     expr_node = ast_rewriter.rewrite_node(expr_node)
                     et, ev = self.lower_expr(expr_node)
-                    part_val = self._stringify_value(et, ev)
+                    if _conv == 'r':
+                        # repr() the ORIGINAL typed value, not the stringified
+                        # one — _repr_value(et, ev) expects the raw value.
+                        part_val = self._repr_value(et, ev)
+                    else:
+                        part_val = self._stringify_value(et, ev)
+                    if _spec:
+                        part_val = self._apply_fstring_spec(part_val, _spec)
                 except Exception as e:
                     # The interpolation can't be lowered.  Dropping it would
                     # silently corrupt the program's output, so warn and keep
@@ -7065,7 +7142,7 @@ class GimpleGen:
         val = node.value
         val, _ = self._decode_str_literal_text(val)
         parts = self._parse_fstring_parts(val)
-        plain = ''.join(v for _, v in parts)
+        plain = ''.join(v for k, v, _s, _c in parts)
         escaped = _c_escape(plain)
         temp = self._new_val('char *', f'{self._intern_string(escaped)}')
         return 'char *', temp
@@ -9895,6 +9972,22 @@ class GimpleGen:
         ot, ov = self.lower_expr(func.obj)
         method = func.member
 
+        # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
+        # enclosing the current classmethod (current_func_name is e.g.
+        # `TypeLattice_join_all`). Without this, `cls` lowers to a boxed
+        # int64_t, `_struct_name_of('int64_t')` is 'int64_t', and `cls.join`
+        # falls into the generic `mojo_obj_call1` dispatch (which for a class
+        # ref is a NULL obj -> miscompile to mojo_str_join). Route it to the
+        # struct-method call so `TypeLattice_join(...)` is emitted.
+        if (isinstance(func.obj, IdentExpr) and func.obj.name == 'cls'
+                and ov == 'cls' and self.current_func_name):
+            _cns = self.current_func_name.rsplit('_', 1)[0]
+            # Accept both real structs AND plain helper classes (TypeLattice,
+            # etc.) whose static/classmethods are compiled functions.
+            if (_cns in self.struct_field_types
+                    or f'{_cns}_{method}' in self.func_return_types):
+                ot = f"{_cns} *"
+
         # Check if the value is a temp variable — if so, get its real type from var_types
         if ov.startswith('_t') and ov in self.var_types:
             ot = self.var_types[ov]
@@ -10748,6 +10841,22 @@ class GimpleGen:
         if isinstance(func.obj, IdentExpr) and func.obj.name in self.struct_field_types:
             struct_name = func.obj.name
             is_class_ref = True
+        elif isinstance(func.obj, IdentExpr) and func.obj.name == 'cls':
+            # `cls` is the classmethod receiver — resolve it to the struct
+            # enclosing the current classmethod (current_func_name is e.g.
+            # `TypeLattice_join_all` for a @classmethod inside TypeLattice).
+            # Without this, `cls.join(...)` inside a classmethod compiled to
+            # mojo_str_join (the `cls` receiver lowered to an opaque int and
+            # `.join` resolved as a string method) — a hard segfault once the
+            # self-host gate made these classmethod bodies actually compile.
+            _cn = self.current_func_name
+            _sn = _cn.rsplit('_', 1)[0] if _cn else ''
+            if (_sn in self.struct_field_types
+                    or f'{_sn}_{method}' in self.func_return_types):
+                struct_name = _sn
+                is_class_ref = True
+            else:
+                struct_name = _struct_name_of(ot)
         else:
             struct_name = _struct_name_of(ot)
             if struct_name == 'int' and method in ('set', '__call__'):
@@ -23561,8 +23670,18 @@ class GimpleGen:
 
         _cur_file = getattr(self, '_current_filename', None)
         _cur_abs = os.path.abspath(_cur_file) if _cur_file else ''
+        # Self-host detection: the compiled `mojoc` binary is ALWAYS the
+        # self-hosted compiler, regardless of which input file it compiles
+        # (its `__file__` is the literal "<bootstrap>", so _SELFHOST_DIR
+        # resolves to the process CWD — which differs from the input file's
+        # dir — and a path-only check would wrongly be False for a user
+        # file, skipping the interpreter/AST struct registrations and
+        # segfaulting on node.condition etc. Class D of the A/B list).
+        _compiled_selfhost = os.path.abspath(__file__) == "<bootstrap>" \
+            or __file__ == "<bootstrap>"
         _is_selfhost_file = bool(_cur_file) and (
-            _cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))
+            _compiled_selfhost
+            or _cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))
         if _is_selfhost_file:
             # Pre-populate known interpreter structs with their field types
             # This handles cases where field type inference from method bodies fails

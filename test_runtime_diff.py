@@ -295,6 +295,48 @@ BUILTIN_PROGRAMS = {
             bump()
             print(bump())
     """),
+    "exception_msg": textwrap.dedent("""\
+        def main():
+            try:
+                raise Error("boom")
+            except Error as e:
+                print("caught")
+    """),
+    "generator_simple": textwrap.dedent("""\
+        def gen():
+            yield 1
+            yield 2
+            yield 3
+
+        def main():
+            var g = gen()
+            print(g.__next__())
+            print(g.__next__())
+            print(g.__next__())
+    """),
+    "string_format": textwrap.dedent("""\
+        def main():
+            var x: Int = 42
+            var s = f"{x:04d}"
+            print(s)
+    """),
+    "nested_list": textwrap.dedent("""\
+        def main():
+            var matrix = [[1, 2], [3, 4]]
+            var total = 0
+            for row in matrix:
+                for v in row:
+                    total = total + v
+            print(total)
+    """),
+    "default_args": textwrap.dedent("""\
+        def greet(name: String = "world") -> String:
+            return name
+
+        def main():
+            print(greet())
+            print(greet("mojo"))
+    """),
 }
 
 

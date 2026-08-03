@@ -100,7 +100,11 @@
 <tr><td>2026-08-02</td><td>A2: container-truthiness for module-level sets (Class A)</td><td>pending</td></tr>
 <tr><td>2026-08-02</td><td>A3: comprehension no-op + char-truncation (Class C)</td><td>pending</td></tr>
 <tr><td>2026-08-02</td><td>A4: deterministic _SELFHOST_DIR (Class D)</td><td>pending (MOJO_HOME partial fix)</td></tr>
-<tr><td>2026-08-02</td><td>B1: runtime-diff harness (interp vs jit)</td><td>pending</td></tr>
+<tr><td>2026-08-02</td><td>B2c: module-level VarDecl globals + global write routing</td><td>done — runtime-diff 19/19</td></tr>
+<tr><td>2026-08-02</td><td>A2: container truthiness / Class A</td><td>verified resolved (set/dict/type-name byte-identical)</td></tr>
+<tr><td>2026-08-02</td><td>f-string format-spec (:{spec}) + default args + memberwise ctor</td><td>done — runtime-diff 23/23</td></tr>
+<tr><td>2026-08-02</td><td>B3: wire runtime-diff into make check</td><td>pending</td></tr>
+<tr><td>2026-08-02</td><td>Class D compiled-selfhost + cls.join classmethod receiver</td><td>IN PROGRESS — _compiled_selfhost re-applied; compiled cls.join still miscompiles to mojo_str_join (getattr on func.obj.name returns NULL for boxed IdentExpr handle); requires A5-style getattr resolution for IdentExpr.name inside _lower_method_call</td></tr>
 </table>
 </body>
 </html>

@@ -32,20 +32,29 @@ def run_native_dump(src_path: str, out_dir: str) -> str:
     src_path = os.path.abspath(src_path)
     env = os.environ.copy()
     env['MOJO_NO_SHIM'] = '1'
-    # The compiled binary locates the project root via MOJO_HOME (else it
-    # falls back to CWD, which is a temp dir here — silently producing the
-    # 7-line "Python call failed" fallback stub). Pin it to the repo root.
+    # The compiled binary's `__file__` is "<bootstrap>", so its self-host
+    # detection (`_SELFHOST_DIR = dirname(abspath(__file__))`) resolves to the
+    # process CWD. The self-host struct registration (AST nodes, interpreter
+    # types) is gated on that, so mojoc MUST run from the repo root — from a
+    # temp dir the gate is False and AST field access falls back to
+    # mojo_obj_getattr -> segfault (Class D of the A/B divergence list).
+    # MOJO_HOME is also set as a belt-and-suspenders (runtime project root).
     env['MOJO_HOME'] = HERE
     # File must come FIRST: the compiled binary's argv parser uses
     # sys.argv[1] as the input and strips '--dump' by rebuilding the list
     # (list.remove is broken in the compiled binary).
     cmd = [MOJOC, src_path, '--dump']
-    result = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True,
+    result = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True,
                             timeout=120, env=env)
     if result.returncode != 0:
         print(f"  NATIVE STDERR: {result.stderr[:2000]}", file=sys.stderr)
     basename = os.path.splitext(os.path.basename(src_path))[0]
     ci_path = os.path.join(out_dir, f'{basename}.ci')
+    # The binary writes the .ci to ITS cwd (HERE); move it to out_dir.
+    here_ci = os.path.join(HERE, f'{basename}.ci')
+    if os.path.exists(here_ci) and os.path.abspath(here_ci) != os.path.abspath(ci_path):
+        import shutil
+        shutil.move(here_ci, ci_path)
     return ci_path
 
 

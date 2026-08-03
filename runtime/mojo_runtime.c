@@ -2193,6 +2193,40 @@ char *mojo_str_lstrip_chars(char *str, char *chars) {
     return out;
 }
 
+static char *_str_pad(char *s, int64_t width, char *fill, int mode) {
+    /* mode: 0=rjust(right), 1=ljust(left), 2=center */
+    if (!s) s = (char *)"";
+    if (width < 0) width = 0;
+    size_t len = strlen(s);
+    if ((int64_t)len >= width) return s;
+    size_t pad = (size_t)width - len;
+    char fc = (fill && fill[0]) ? fill[0] : ' ';
+    size_t left = 0, right = 0;
+    if (mode == 0) { left = pad; }
+    else if (mode == 1) { right = pad; }
+    else { left = pad / 2; right = pad - left; }
+    char *out = (char *)malloc(width + 1);
+    if (!out) return s;
+    size_t p = 0;
+    for (size_t i = 0; i < left; i++) out[p++] = fc;
+    for (size_t i = 0; i < len; i++) out[p++] = s[i];
+    for (size_t i = 0; i < right; i++) out[p++] = fc;
+    out[p] = '\0';
+    return out;
+}
+
+char *mojo_str_rjust(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 0);
+}
+
+char *mojo_str_ljust(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 1);
+}
+
+char *mojo_str_center(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 2);
+}
+
 char *mojo_str_expandtabs(char *str, int tabsize) {
     if (!str) return str;
     if (tabsize <= 0) tabsize = 8;
