@@ -9979,8 +9979,11 @@ class GimpleGen:
         # falls into the generic `mojo_obj_call1` dispatch (which for a class
         # ref is a NULL obj -> miscompile to mojo_str_join). Route it to the
         # struct-method call so `TypeLattice_join(...)` is emitted.
-        if (isinstance(func.obj, IdentExpr) and func.obj.name == 'cls'
-                and ov == 'cls' and self.current_func_name):
+        # NOTE: key off `ov` (the lowered C name) rather than `func.obj.name`
+        # — in the compiled binary, reading `.name` on a boxed IdentExpr
+        # handle falls back to mojo_obj_getattr -> NULL, so an isinstance+name
+        # check never fires; `ov` is the reliable `'cls'` value from lower_expr.
+        if (ov == 'cls' and self.current_func_name):
             _cns = self.current_func_name.rsplit('_', 1)[0]
             # Accept both real structs AND plain helper classes (TypeLattice,
             # etc.) whose static/classmethods are compiled functions.
