@@ -18024,6 +18024,16 @@ class GimpleGen:
                 ctype = self._resolve_type(ptype)
         else:
             ctype = self._resolve_type(ptype)
+        # Compile-time string types (StaticString, StringLiteral, StringRef,
+        # StringSlice) are REAL strings in this codegen — a NUL-terminated
+        # `char *`. The general resolver boxes them as opaque int64_t handles
+        # (the libc-stub `int64_t StaticString(...)`), which breaks a param
+        # used as a string: `file_name[byte=0:i]` on a `file_name: StaticString`
+        # param then slices an int64_t and lowers to int64_t, and passing it to
+        # a String-taking ctor is a `makes pointer from integer` error. Mirror
+        # _imported_field_ctype's handling (std/pathlib/path.mojo:90).
+        if ptype in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
+            ctype = 'char *'
         if ctype == 'void':
             # _mojo_type('None') correctly maps NoneType -> void for RETURN
             # types, but a named PARAMETER can never be typed void in a
