@@ -39,9 +39,9 @@ demo:
 # + validate-all) is a separate, aspirational target — `make bootstrap` —
 # because stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is
 # not gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff)"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -76,6 +76,19 @@ check-selfhost: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py mojo
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
+
+# Interpreter-vs-JIT runtime parity: every program in the corpus must produce
+# identical stdout + exit code via `python3 mojo.py run` (interpreter) and
+# `python3 mojo.py --jit` (compiled). A JIT-COMPILE-FAILED is reported
+# distinctly (the compiled path falls back to the interpreter, which would
+# otherwise mask a divergence). Currently 23 pass, 1 JIT-COMPILE-FAILED
+# (generator_simple — the C++ coroutine frontier).
+check-runtimediff: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py test_runtime_diff.py
+	python3 checked_run.py check-runtimediff \
+		--extra gimple_codegen.py \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py \
+		--extra test_runtime_diff.py \
+		-- python3 test_runtime_diff.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).
