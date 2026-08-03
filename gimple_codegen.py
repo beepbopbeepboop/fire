@@ -15557,7 +15557,20 @@ class GimpleGen:
                 self._emit(_RETURN)
         else:
             vtype, v = self.lower_expr(node.value)
-            if vtype == 'MojoList *' and v in self._elem_types:
+            # Record the returned container's element type so CALL SITES can
+            # unpack/iterate it with the right accessor. The old condition
+            # required vtype == 'MojoList *' (only fired for `return <list
+            # variable>`); a TUPLE return (`return ctype, cval`, the codegen's
+            # own ubiquitous pattern — lower_expr/_lower_* all return
+            # (ctype, cval) string pairs) lowers with vtype = the tuple's
+            # ELEMENT type ('char *'), so it was never recorded and callers
+            # unpacked the tuple via mojo_list_get_int, reading char* pointers
+            # as int64_t and f-string-interpolating them as decimal addresses
+            # (every basic statement's variable/value names printed as garbage
+            # heap addresses in the native .ci). Just checking `v` is a tracked
+            # container is enough — the returned value's element type is what
+            # matters, regardless of how the value's own C type reads.
+            if v in self._elem_types:
                 self._return_elem_types[self.current_func_name] = self._elem_types[v]
             ret = self.func_ret_type
             if ret == 'void':
