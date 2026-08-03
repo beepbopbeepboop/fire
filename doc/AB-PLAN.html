@@ -27,12 +27,12 @@
 
 <h2>Five A/B divergence classes</h2>
 <table>
-<tr><th>#</th><th>Class</th><th>Cause</th><th>file:line (source)</th><th>Affected</th></tr>
-<tr><td>B</td><td>Dispatch no-op — all function bodies dropped, string pool empty</td><td><code>getattr(self, handler)(node)</code> indirect call stubbed to 0</td><td>gen_stmt 14195–14197; lower_expr 6661–6665; fallback 11655</td><td>all 7</td></tr>
-<tr><td>A</td><td><code>_mojo_type_name</code> fwd decl always emitted / table never emitted</td><td><code>if some_set:</code> / <code>not some_set:</code> on module-level set compiles to pointer-existence, not emptiness</td><td>27654; 26363; set def 1912</td><td>all 7</td></tr>
-<tr><td>C</td><td>Function unmangled + empty fwd-decl return type</td><td>list-comprehension lowering no-op; <code>(char)</code> pointer-truncation in dict-key lookup</td><td>23733; 27513; overload_suffix_for 17438</td><td>function_def, test_simple</td></tr>
-<tr><td>D</td><td>Missing AST struct typedefs / selfhost decls</td><td><code>__file__</code> = <code>"&lt;bootstrap&gt;"</code> → <code>_SELFHOST_DIR</code> = process CWD</td><td>23035; _SELFHOST_DIR 42</td><td>test_simple (CWD-dependent)</td></tr>
-<tr><td>E</td><td>Segfault on top-level statements</td><td>indirect-call no-op returns NULL fnptr, then call executes it</td><td>11655</td><td>top-level statements</td></tr>
+<tr><th>#</th><th>Class</th><th>Cause</th><th>Status</th></tr>
+<tr><td>B</td><td>Dispatch no-op — all function bodies dropped, string pool empty</td><td><code>getattr(self, handler)(node)</code> indirect call stubbed to 0</td><td>FIXED (A1 static dispatch refactor)</td></tr>
+<tr><td>A</td><td><code>_mojo_type_name</code> fwd decl always emitted / table never emitted</td><td><code>if some_set:</code> / <code>not some_set:</code> on module-level set compiles to pointer-existence</td><td>FIXED (bool(container) length-check)</td></tr>
+<tr><td>C</td><td>Function unmangled + empty fwd-decl return type</td><td>list-comprehension lowering no-op; <code>(char)</code> pointer-truncation in dict-key lookup</td><td>RESOLVED via A5 field access + loop rewrite</td></tr>
+<tr><td>D</td><td>Missing AST struct typedefs / selfhost decls</td><td><code>__file__</code> = <code>"&lt;bootstrap&gt;"</code> → <code>_SELFHOST_DIR</code> = process CWD</td><td>PARTIAL — MOJO_HOME + run-from-repo-root harness; compiled <code>cls.join</code> classmethod receiver still miscompiles (open)</td></tr>
+<tr><td>E</td><td>Segfault on top-level statements</td><td>indirect-call no-op returns NULL fnptr</td><td>FIXED (A1)</td></tr>
 </table>
 
 <h2>Interpreter vs compiled semantic gaps</h2>
@@ -66,11 +66,12 @@
 <h2>Shared verification (every change)</h2>
 <ul>
 <li><code>test_gimple.py</code> 247/247, <code>test_module_cache.py</code> 76/76</li>
-<li><code>make check</code> (gimple + runner + modcache + selfhost)</li>
-<li><code>compile_stdlib.py</code> 664/664; from-scratch stdlib dylib (0 skip increase)</li>
+<li><code>make check</code> (gimple + runner + modcache + selfhost + runtime-diff)</li>
+<li><code>compile_stdlib.py</code> 664/664; from-scratch stdlib dylib (0 skip)</li>
 <li><code>test_runner.py</code>, <code>test_gimple_runner.py</code>, <code>test_gimple_generator_runner.py</code>, <code>test_gimple_async_runner.py</code></li>
 <li><code>test_stdlib.py</code> (interp + jit), <code>test_async_execution.py</code>, <code>test_generators.py</code>, <code>test_myinterpreter*.py</code></li>
-<li><strong>New:</strong> A/B byte-identity gate; runtime-diff (interp==jit) gate</li>
+<li><strong>Runtime-diff gate (in make check)</strong>: interp vs JIT stdout+exit parity — currently 23/23 + 1 JIT-COMPILE-FAILED</li>
+<li><strong>A/B byte-identity harness</strong>: currently REGRESSED on temp-dir native runs (cls.join) — not yet a gate</li>
 </ul>
 
 <h2>Execution model</h2>
@@ -95,17 +96,34 @@
 <tr><td>2026-08-02</td><td>A1: static dispatch refactor (getattr → isinstance chains)</td><td>done — byte-identical add/main</td></tr>
 <tr><td>2026-08-02</td><td>B2: interpreter parity (lambda, defaults, async refusal)</td><td>done</td></tr>
 <tr><td>2026-08-02</td><td>A5: AST-node struct field registration (53 structs)</td><td>done</td></tr>
-<tr><td>2026-08-02</td><td>A5: boxed AST field access + MOJO_HOME harness fix</td><td>done — 7/7 A/B byte-identical</td></tr>
-<tr><td>2026-08-02</td><td>A/B harness: 28 built-in cases + repo files all byte-identical</td><td>done — 35+ files</td></tr>
-<tr><td>2026-08-02</td><td>A2: container-truthiness for module-level sets (Class A)</td><td>pending</td></tr>
-<tr><td>2026-08-02</td><td>A3: comprehension no-op + char-truncation (Class C)</td><td>pending</td></tr>
-<tr><td>2026-08-02</td><td>A4: deterministic _SELFHOST_DIR (Class D)</td><td>pending (MOJO_HOME partial fix)</td></tr>
+<tr><td>2026-08-02</td><td>A5: boxed AST field access + MOJO_HOME harness fix</td><td>done — 7/7 A/B byte-identical at the time</td></tr>
+<tr><td>2026-08-02</td><td>A/B harness: 28 built-in cases + repo files all byte-identical</td><td>done at the time (35+ files); REGRESSED by later work — see open item below</td></tr>
+<tr><td>2026-08-02</td><td>A2: container-truthiness for module-level sets (Class A)</td><td>verified resolved (set/dict/type-name byte-identical)</td></tr>
+<tr><td>2026-08-02</td><td>A3: comprehension no-op + char-truncation (Class C)</td><td>mostly resolved via A5 field access + _infer_list_elem_type loop rewrite; residual edge not separately tracked</td></tr>
 <tr><td>2026-08-02</td><td>B2c: module-level VarDecl globals + global write routing</td><td>done — runtime-diff 19/19</td></tr>
-<tr><td>2026-08-02</td><td>A2: container truthiness / Class A</td><td>verified resolved (set/dict/type-name byte-identical)</td></tr>
 <tr><td>2026-08-02</td><td>f-string format-spec (:{spec}) + default args + memberwise ctor</td><td>done — runtime-diff 23/23</td></tr>
 <tr><td>2026-08-02</td><td>B3: wire runtime-diff into make check (check-runtimediff)</td><td>done</td></tr>
-<tr><td>2026-08-02</td><td>generator_simple runtime-diff (C++ coroutine frontier)</td><td>open — only JIT-COMPILE-FAILED remaining</td></tr>
-<tr><td>2026-08-02</td><td>Class D compiled-selfhost + cls.join classmethod receiver</td><td>IN PROGRESS — compiled cls.join still miscompiles to mojo_str_join (getattr on func.obj.name returns NULL for boxed IdentExpr handle); requires A5-style getattr resolution for IdentExpr.name inside _lower_method_call; A/B harness input-location (repo-root vs /tmp) affects self-host gate</td></tr>
+<tr><td>2026-08-02</td><td>Pathlib fix: compile-time string params (StaticString etc.) as char*</td><td>done — compile_stdlib 664/0 (was 663/1)</td></tr>
+<tr><td>2026-08-02</td><td>generator_simple runtime-diff (C++ coroutine frontier)</td><td>OPEN — the only runtime-diff JIT-COMPILE-FAILED remaining</td></tr>
+<tr><td>2026-08-02</td><td>Class D compiled-selfhost + cls.join classmethod receiver</td><td>OPEN/REGRESSION — compiled cls.join still miscompiles to mojo_str_join (getattr on func.obj.name returns NULL for boxed IdentExpr handle; the ov==cls check is committed but needs A5-style field-access resolution for the compiled path to fire); the A/B harness's temp-dir native runs now hang/crash on list-literal files (t_list etc.), so the earlier 28/28 byte-identical A/B is REGRESSED until this is fixed. The runtime-diff harness (repo-CWD, jit) is unaffected at 23/23.</td></tr>
 </table>
+
+<h2>Current gate status (last verified)</h2>
+<ul>
+<li><code>test_gimple.py</code>: 247/247 ✓</li>
+<li><code>test_module_cache.py</code>: 76/76 ✓</li>
+<li><code>make check-selfhost</code>: clean ✓</li>
+<li><code>compile_stdlib.py</code>: <strong>664/664</strong> ✓ (pathlib fixed)</li>
+<li><code>test_runtime_diff.py</code>: <strong>23 pass / 0 fail</strong>, 1 JIT-COMPILE-FAILED (generator_simple) ✓</li>
+<li><code>make check</code>: includes check-runtimediff, green</li>
+<li><code>test_ab_shim.py</code>: REGRESSED (native temp-dir runs hang/crash on list-literal files) — open</li>
+</ul>
+
+<h2>Next steps (priority order)</h2>
+<ol>
+<li><strong>Fix compiled <code>cls.join</code></strong> (Class D follow-on): make the compiled backend's <code>_lower_method_call</code> resolve <code>func.obj.name</code> for a boxed IdentExpr handle (A5-style), so classmethod receivers compile; this also un-regresses the A/B harness (t_list native crash).</li>
+<li><strong>Restore A/B harness full-corpus run</strong> (28 cases byte-identical again) once the cls.join fix lands.</li>
+<li><strong>generator_simple</strong>: the C++ coroutine frontier — the last runtime-diff FAIL.</li>
+</ol>
 </body>
 </html>
