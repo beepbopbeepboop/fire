@@ -3463,6 +3463,12 @@ class GimpleGen:
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # dict.items()/values() result temp -> the dict's VALUE type. The
+        # runtime stores item pairs as [char* key, boxed value] (append_str +
+        # append_int — see mojo_dict_items), so the for-loop tuple branch needs
+        # the value slot's real type to pick get_str vs get_int; the key slot
+        # is always a string. Side-table pattern, like _generator_var_api.
+        self._dict_items_val_elems: dict[str, str] = {}
         # Pass 2c (container-return-elem pre-pass) scratch state: per-function
         # local container-element map + the struct whose methods are being
         # scanned (so `self.foo` resolves to the right {struct}_{method} key).
@@ -7149,6 +7155,12 @@ class GimpleGen:
         value" and previously only f-strings had it inline."""
         if et == 'char *':
             return ev
+        # A boxed char* (a string pointer stored in an int64_t var, e.g. a
+        # tuple-loop var read via get_str and boxed) — stringify as the string
+        # it points to, not its decimal address. Without this, f-strings /
+        # %s of such a value emitted `static char * <address> = "<address>"`.
+        if et in ('int', 'int64_t') and self._get_actual_type(et, ev) == 'char *':
+            return self._new_val('char *', f'(char *){ev}')
         if et == '_Bool':
             # Python str(True)/str(False) → "True"/"False", not the "1"/"0"
             # the int path below would produce.
@@ -8067,9 +8079,14 @@ class GimpleGen:
                 if dict_stored:
                     self._dict_val_types[t] = dict_stored
             elif field_type == 'MojoDict *':
-                stored = self._field_elem_types.get(struct_name, {}).get(node.member)
+                stored = self._field_dict_val_types.get(struct_name, {}).get(node.member)
                 if stored:
                     self._dict_val_types[t] = stored
+                elif node.member in self._dict_val_types:
+                    # Annotation-seeded value type (e.g. `self._str_pool:
+                    # dict[str, str]`) — carry it onto the field-read temp so
+                    # `.items()`/`d[k]` on the field pick the right accessor.
+                    self._dict_val_types[t] = self._dict_val_types[node.member]
             # Track struct field owner for container-type fields so that append
             # operations can propagate element type info back to _field_elem_types.
             if field_type in ('MojoList *', 'MojoDict *', 'MojoSet *') and isinstance(node.obj, IdentExpr) \
@@ -10569,7 +10586,13 @@ class GimpleGen:
         if method == 'values':
             return 'MojoList *', self._new_val('MojoList *', f"mojo_dict_values ({ov})")
         if method == 'items':
-            return 'MojoList *', self._new_val('MojoList *', f"mojo_dict_items ({ov})")
+            t = self._new_val('MojoList *', f"mojo_dict_items ({ov})")
+            # Record the dict's VALUE type on the item-list temp so the
+            # for-loop tuple branch can read the (boxed) value slot with the
+            # right accessor — the key slot is always a string (see
+            # _dict_items_val_elems's docstring).
+            self._dict_items_val_elems[t] = self._dict_val_of(ov)
+            return 'MojoList *', t
         if method == 'get' and args:
             key_type, key_val = self.lower_expr(args[0])
             default_ty = None
@@ -12869,7 +12892,14 @@ class GimpleGen:
             ov_t, ov_v = self.lower_expr(arg0.func.obj)
             ov_c = self._coerce_to_type(ov_t, 'MojoDict *', ov_v)
             for a in node.args[1:]: self.lower_expr(a)
-            return 'MojoList *', self._call_expr('MojoList *', 'mojo_dict_items_sorted', [('MojoDict *', ov_c)])
+            t = self._call_expr('MojoList *', 'mojo_dict_items_sorted', [('MojoDict *', ov_c)])
+            # Mirror .items(): the sorted item-list has the same [char* key,
+            # boxed value] pair shape — carry the dict's value type through.
+            # Look up from the ORIGINAL lowered value first (ov_c is a fresh
+            # coercion temp with no value-type entry of its own).
+            self._dict_items_val_elems[t] = (
+                self._dict_val_types.get(ov_v) or self._dict_val_types.get(ov_c) or 'int64_t')
+            return 'MojoList *', t
         at, av = self.lower_expr(arg0)
         for a in node.args[1:]: self.lower_expr(a)
         # Dispatch on the container type so `sorted(...)` matches Python's
@@ -12884,8 +12914,17 @@ class GimpleGen:
         if at == 'MojoDict *':
             return 'MojoList *', self._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
         if at == 'MojoList *' and self._elem_of(av) == 'char *':
-            return 'MojoList *', self._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
-        return 'MojoList *', self._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+            t = self._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
+        else:
+            t = self._call_expr('MojoList *', 'mojo_sorted', [(at, av)])
+        # sorted() only reorders — the result keeps the input's element /
+        # nested-element (tuple-pair) types, so a later `for x, y in
+        # sorted(lst):` tuple-target loop reads slots with the right accessor.
+        if at == 'MojoList *' and av in self._nested_elem_types:
+            self._nested_elem_types[t] = self._nested_elem_types[av]
+        if at == 'MojoList *' and av in self._elem_types:
+            self._elem_types[t] = self._elem_types[av]
+        return 'MojoList *', t
 
     def _lower_builtin_zip_n(self, node: CallExpr) -> tuple[str, str]:
         """zip(a, b, c, ...) with >2 args — chain as mojo_zip(mojo_zip(a, b), c, ...)."""
@@ -14192,6 +14231,13 @@ class GimpleGen:
                 temp = self._new_val('char *', f'{ev_cast}')
                 ev_cast = temp
             self._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+            # A list whose elements are TUPLES (`[(a, b), (c, d)]`) — record
+            # the tuple's own element type so a later `for x, y in lst:`
+            # tuple-target loop reads each slot with the right accessor
+            # (char* -> get_str, otherwise boxed int64 -> get_int). Set before
+            # _dict_items_val_elems so a dict-item tuple never lands here.
+            if et == 'MojoList *' and ev in self._elem_types and t not in self._dict_items_val_elems:
+                self._nested_elem_types.setdefault(t, self._elem_types[ev])
             # Propagate dict value type from appended dict elements to the
             # list temp, so subsequent list[0]["key"] knows the dict value
             # type (char * vs int64_t vs double) — see BUG-2026-044.
@@ -15027,6 +15073,23 @@ class GimpleGen:
     def _gen_stmt_PassStmt(self, node):
         return
 
+    def _annotation_dict_val_type(self, ann) -> str | None:
+        """`dict[K, V]` / `Dict[K, V]` annotation → the dict's VALUE C type,
+        else None. Seeds _dict_val_types so dict.items()/d[k] reads pick the
+        right accessor for a string-valued dict (without it, `self._str_pool:
+        dict[str, str]` in __init__ left the value type unknown, and the
+        self-hosted string-pool loop read the boxed value slot via get_int,
+        emitting `static char * <address> = "<address>"` instead of
+        `_slit_N = "text"`)."""
+        if isinstance(ann, str):
+            s = ann.strip()
+            if s.startswith('dict[') or s.startswith('Dict['):
+                inner = s.split('[', 1)[1].rstrip(']').strip()
+                parts = _split_top_level_commas(inner)
+                if len(parts) >= 2:
+                    return self._resolve_type(parts[1].strip())
+        return None
+
     def _gen_stmt_VarDecl(self, node):
         # `var name = value` where `name` is heap-boxed (some nested
         # closure captures it BY REFERENCE -- see _seed_mut_captured_
@@ -15131,6 +15194,9 @@ class GimpleGen:
         else:
             ctype = self._resolve_type(node.type_ann)
             self._declare_var(node.name, ctype)
+            _dv = self._annotation_dict_val_type(node.type_ann)
+            if _dv is not None:
+                self._dict_val_types[node.name] = _dv
         self._layout_hint = LayoutSolver.HEAP
 
     def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
@@ -15226,6 +15292,9 @@ class GimpleGen:
         vtype, v = self.lower_expr(node.value)
         if isinstance(node.target, IdentExpr):
             tname = node.target.name
+            _dv = self._annotation_dict_val_type(getattr(node, 'type_ann', None))
+            if _dv is not None:
+                self._dict_val_types[tname] = _dv
             folded = self._try_const_fold_str(node.value)
             if folded is not None:
                 self._const_str_locals[(self.current_func_name, tname)] = folded
@@ -15417,7 +15486,18 @@ class GimpleGen:
                 gtype = self._global_var_types.get(mangled, 'int64_t')
                 self._safe_coerce_emit(vtype, gtype, v, mangled)
                 return
+            _dv = self._annotation_dict_val_type(getattr(node, 'type_ann', None))
+            if _dv is not None:
+                self._dict_val_types[node.target.member] = _dv
             ot, ov = self.lower_expr(node.target.obj)
+            if _dv is not None:
+                # _dict_val_types is reset per function (_reset_func), so the
+                # annotation-seeded value type must ALSO live in the shared
+                # per-struct-field table for reads in OTHER functions to see
+                # it (the _lower_MemberExpr field-read propagates it onto the
+                # read temp). Keyed by the struct owning the field.
+                _dsn = _struct_name_of(ot)
+                self._field_dict_val_types.setdefault(_dsn, {})[node.target.member] = _dv
             if ot in ('int', 'int64_t', 'void *'):
                 # Opaque Python object (e.g. `s.field = val` where `s`'s
                 # static type isn't narrowed past a runtime isinstance()
@@ -15630,6 +15710,9 @@ class GimpleGen:
                 dst = self._type_of(tname)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
+            _dv = self._annotation_dict_val_type(getattr(node, 'type_ann', None))
+            if _dv is not None:
+                self._dict_val_types[node.target.member] = _dv
             ot, ov = self.lower_expr(node.target.obj)
             if ot in ('int', 'int64_t'):
                 # See the AssignStmt MemberExpr branch above for why this
@@ -17613,16 +17696,35 @@ class GimpleGen:
             # Get element as opaque int64_t for tuple unpacking below
             elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
             self._emit(f"  {val_var} = {elem64};")
-            # Emit tuple unpacking: (a, b, c) = val_var
+            # Emit tuple unpacking: (a, b, c) = val_var — read each slot with
+            # the accessor matching how the tuple was stored (get_str for
+            # string tuples, get_int for boxed values), like _gen_for_list's
+            # tuple branch; the old code read everything via get_int, so a
+            # string tuple's char* slots became decimal pointers.
             inner = raw_val[1:-1].strip()
             tuple_vars = self._split_top_level_comma(inner)
             tuple_ptr = self._new_val('MojoList *', f"(MojoList *){val_var}")
+            pair_elem = self._nested_elem_types.get(list_ptr, 'int64_t')
+            suf_inner = TypeLattice.list_suffix(pair_elem)
             for vi, vname in enumerate(tuple_vars):
                 if vname == '_':
                     continue
-                self._declare_var(vname, 'int64_t')
-                ti = self._new_val('int64_t', f"mojo_list_get_int ({tuple_ptr}, {vi})")
-                self._emit(f"  {vname} = {ti};")
+                cv = self._cname(vname)
+                self._declare_var(vname, pair_elem)
+                if suf_inner == 'str':
+                    ts = self._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {vi})")
+                    if self.var_types.get(vname, pair_elem) == 'char *':
+                        self._emit(f"  {cv} = {ts};")
+                    else:
+                        ip = self._new_val('int64_t', f"(int64_t){ts}")
+                        self._emit(f"  {cv} = {ip};")
+                        self._actual_types[vname] = 'char *'
+                else:
+                    ti = self._new_val('int64_t', f"mojo_list_get_int ({tuple_ptr}, {vi})")
+                    if self.var_types.get(vname, pair_elem) == 'int64_t':
+                        self._emit(f"  {cv} = {ti};")
+                    else:
+                        self._safe_coerce_emit('int64_t', self.var_types.get(vname, pair_elem), ti, cv)
         elif suf == 'double':
             self._emit(f"  {val_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
         elif suf == 'str':
@@ -17688,28 +17790,51 @@ class GimpleGen:
         if is_tuple:
             elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
             tuple_ptr = self._new_val('MojoList *', f"(MojoList *){elem64}")
+            # Pick the accessor PER ELEMENT. The old branch read every slot
+            # via mojo_list_get_str, which is right only for all-string pairs
+            # — a dict.items() pair is [char* key, BOXED value] (the runtime
+            # stores the value via append_int), so the boxed value slot read
+            # as a string printed the char* pointer as a decimal address (the
+            # self-hosted string pool emitted `static char * 35681302256`),
+            # and the char* key was lost to a plain int64_t (print() used
+            # %ld). dict-items keys are always strings; the value slot's type
+            # comes from the dict's value type. Homogeneous tuple-literal
+            # lists store every slot by the tuple's own element type
+            # (_nested_elem_types).
+            is_dict_items = it_val in self._dict_items_val_elems
+            value_elem = self._dict_items_val_elems.get(it_val) if is_dict_items else None
+            pair_elem = self._nested_elem_types.get(it_val, 'int64_t')
             for i, vn in enumerate(var_names):
-                # mojo_list_get_str returns char*, but vn's declared type may
-                # already be char* — e.g. it was first declared by an earlier,
-                # unrelated loop/comprehension over the same Python variable
-                # name in this function (`_declare_var` is first-decl-wins).
-                # Blindly boxing to int64_t here (the previous unconditional
-                # behavior) then assigned an int64_t value into an
-                # already-char*-declared variable — mirrors the same
-                # var/int64_t check the non-tuple branch below already does.
-                # `self._cname(vn)` (not bare vn): vn may be a C keyword, e.g.
-                # `for op, case in pairs:` — _declare_var already renamed its
-                # OWN declaration to `_case`, but every emit here still wrote
-                # the literal, un-renamed identifier ("expected expression
-                # before 'case'"). Found via mojolib BUG-2026-032:
-                # transpiler.mojo's `for case in cases:`.
-                cvn = self._cname(vn)
-                temp_str = self._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {i})")
-                if self._type_of(vn) == 'char *':
-                    self._emit(f"  {cvn} = {temp_str};")
+                # Declare each slot by its own element type (char* for a
+                # string slot) so a later use passes/returns the real type
+                # instead of a boxed int64_t. First-decl-wins may still leave
+                # an int64_t declaration from an earlier loop over the same
+                # name — the per-type assignment below boxes/coerces.
+                if is_dict_items:
+                    slot_elem = 'char *' if i == 0 else (value_elem or 'int64_t')
                 else:
-                    int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
-                    self._emit(f"  {cvn} = {int_ptr};")
+                    slot_elem = pair_elem
+                self._declare_var(vn, slot_elem)
+                cvn = self._cname(vn)
+                suf = TypeLattice.list_suffix(slot_elem)
+                vt = self.var_types.get(vn, slot_elem)
+                if suf == 'str':
+                    ts = self._new_val('char *', f"mojo_list_get_str ({tuple_ptr}, {i})")
+                    if vt == 'char *':
+                        self._emit(f"  {cvn} = {ts};")
+                    else:
+                        ip = self._new_val('int64_t', f"(int64_t){ts}")
+                        self._emit(f"  {cvn} = {ip};")
+                        # Recover the real string type on later reads (print(),
+                        # f-strings, method args) — otherwise the char* boxed
+                        # into the int64_t loop var reads as %ld (decimal addr).
+                        self._actual_types[vn] = 'char *'
+                else:
+                    raw = self._new_val('int64_t', f"mojo_list_get_int ({tuple_ptr}, {i})")
+                    if vt == 'int64_t':
+                        self._emit(f"  {cvn} = {raw};")
+                    else:
+                        self._safe_coerce_emit('int64_t', vt, raw, cvn)
         else:
             cvar = self._cname(var)
             suf = TypeLattice.list_suffix(elem)
