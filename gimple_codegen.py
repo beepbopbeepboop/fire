@@ -14773,13 +14773,13 @@ class GimpleGen:
         # confirmed via a genuinely minimal repro (any struct method calling
         # print() with 2+ args segfaults; single-arg print was unaffected
         # since it skips the separator/uses only the pooled user string).
-        def _emit_literal_print(escaped: str):
+        def _emit_literal_print(escaped: str, print_fn: str):
             slit = self._intern_string(escaped)
             t = self._new_val('char *', slit)
             self._emit(f'  {print_fn} ({t});')
 
         if not args:
-            _emit_literal_print('')
+            _emit_literal_print('', print_fn)
             return
         parts = [self.lower_expr(a) for a in args]
         # A dict/list-get result stored in a plain local is boxed generically
@@ -14844,8 +14844,8 @@ class GimpleGen:
                 self._emit(f'  {print_fn} ({t});')
                 self._emit(f'  free ({t});')
             if i < len(parts) - 1:
-                _emit_literal_print(' ')
-        _emit_literal_print('\\n')
+                _emit_literal_print(' ', print_fn)
+        _emit_literal_print('\\n', print_fn)
 
     # ── Compile-time constant evaluators (for comptime) ───────────────────
 
