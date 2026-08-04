@@ -15930,7 +15930,14 @@ class GimpleGen:
             has_more   = bool(elifs or node.else_body)
             next_false = self._new_bb() if has_more else bb_merge
             next_true  = self._new_bb()
-            _, ev = self.lower_expr(ec)
+            ec_t, ev = self.lower_expr(ec)
+            # Apply the same truthiness conversion as the main condition — the
+            # elif branch used to skip _ensure_bool_cond, so a char* elif
+            # (`elif result_var:` in _emit_call) compiled to a RAW POINTER
+            # truthiness test (`if (result_var)`), treating the empty string ""
+            # as truthy and emitting `  = call (...)` with an empty LHS (the
+            # list_ops/list_append corruption).
+            ev = self._ensure_bool_cond(ec_t, ev)
             self._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
             self._emit_label(next_true)
             for s in eb:
@@ -17069,7 +17076,8 @@ class GimpleGen:
         # elif chains
         for elif_cond, elif_body in elifs:
             self._emit_label(bb_false)
-            _, elif_cv = self.lower_expr(elif_cond)
+            elif_tt, elif_cv = self.lower_expr(elif_cond)
+            elif_cv = self._ensure_bool_cond(elif_tt, elif_cv)
             bb_elif_true = self._new_bb()
             if elifs.index((elif_cond, elif_body)) < len(elifs) - 1 or has_else:
                 bb_false = self._new_bb()
