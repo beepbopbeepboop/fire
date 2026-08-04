@@ -7155,7 +7155,15 @@ class GimpleGen:
             val = val[3:-3]
         elif len(val) >= 2 and ((val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'"))):
             val = val[1:-1]
-        return val, is_fstring
+        # Return the is_fstring flag as an EMPTY/non-empty STRING ("", "1")
+        # rather than a bool, so the (text, is_fstring) tuple is homogeneous
+        # [char*, char*] — the caller unpacks both slots via get_str (the
+        # tuple elem type), and a heterogeneous (str, bool) tuple would make
+        # Pass 2c infer elem 'int64_t' (it can't type the local `val` as
+        # char* with var_types empty), so the caller read val's pointer as an
+        # int and the string pool stored its address. All consumers treat
+        # is_fstring as truthiness, which "" vs "1" preserves exactly.
+        return val, ('1' if is_fstring else '')
 
     def _stringify_value(self, et: str, ev: str) -> str:
         """Convert an already-lowered (type, value) pair into a `char *` per
