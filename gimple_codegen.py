@@ -3474,7 +3474,17 @@ class GimpleGen:
         # scanned (so `self.foo` resolves to the right {struct}_{method} key).
         self._prepass_local_elems: dict[str, str] = {}
         self._prepass_struct: str | None = None
-        # Final step of the async/await codegen project: combined async
+        # Per-slot element types of a HETEROGENEOUS tuple literal temp (recorded
+        # when _lower_tuple_literal stores elements by their own type, e.g.
+        # `(name, func)` → [char*, void*]). Propagated to lists of such tuples
+        # so a `for name, func in funcs:` tuple-target loop reads each slot with
+        # the right accessor (get_str vs get_int) instead of the joined elem
+        # type ('char *') reading a boxed function pointer as a string.
+        self._tuple_slot_types: dict[str, list] = {}
+        # Loop VARIABLES holding a dict-item PAIR (`for item in d.items():`
+        # / the runtime-dispatch list branch) — `.key`/`.value` on such a var
+        # reads pair element 0/1, not an identity/field lookup.
+        self._dict_items_pairs: set = set()        # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
         # (_gen_cpp_async_generator_unit) is used rather than reusing either
@@ -7639,10 +7649,16 @@ class GimpleGen:
         if node.op == '+':
             return ot, ov
         c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
-        # Struct pointers can't be negated/inverted — coerce to int64_t first
+        # Struct pointers can't be negated/inverted — coerce to int64_t first.
+        # char* included: `-<char*>` is never valid Python (negating a string
+        # is a TypeError), but the runtime-dispatch for-loop lowers both a
+        # dict-key branch (loop var as char*) and a list-of-pairs branch for
+        # the same body — the dead dict branch must still COMPILE even though
+        # its `-item.value` (item = a char* key, `.value` → identity) is
+        # semantically meaningless.
         actual_ot = ot
         actual_ov = ov
-        if ot.endswith(' *') and ot not in ('void *', 'char *') and c_op in ('-', '~'):
+        if ot.endswith(' *') and c_op in ('-', '~'):
             ip = self._new_val('int64_t', f"(int64_t){ov}")
             actual_ot = 'int64_t'
             actual_ov = ip
@@ -9834,7 +9850,30 @@ class GimpleGen:
                         self._emit(f'  {arg_cast} = (char *){arg_val};')
                         arg_val = arg_cast
                     t = self._new_temp('int')
-                    self._emit(f'  {t} = ({arg_val} != 0 && *{arg_val} == \'/\');')
+                    # `p != 0 && *p == '/'` short-circuits (must not deref a
+                    # NULL p), so it CANNOT be a compact C `&&` expression —
+                    # -fgimple rejects `_t = (p != 0 && *p == '/')` ("expected
+                    # expression before '('"). Branch: p non-null (via
+                    # _ensure_bool_cond's pointer check) gates the deref.
+                    bb_true = self._new_bb(); bb_false = self._new_bb(); bb_merge = self._new_bb()
+                    nonnull = self._ensure_bool_cond('char *', arg_val)
+                    self._emit(f'  if ({nonnull}) goto {bb_true}; else goto {bb_false};')
+                    self._emit_label(bb_true)
+                    # GIMPLE: a memory deref must be its own statement — load
+                    # *p into a char temp, then compare (a bare `_t = (*p ==
+                    # '/')` is rejected: "expected expression before '('").
+                    ch = self._new_temp('char')
+                    self._emit(f'  {ch} = *{arg_val};')
+                    # GIMPLE: compare as ints (a char-vs-char-literal compare
+                    # is a "mismatching comparison operand types").
+                    ci = self._new_val('int', f'(int){ch}')
+                    eq = self._new_temp('_Bool')
+                    self._emit(f'  {eq} = {ci} == 47;')
+                    self._emit(f'  {t} = (int){eq};')
+                    self._emit(f'  goto {bb_merge};')
+                    self._emit_label(bb_false)
+                    self._emit(f'  {t} = (int)0;')
+                    self._emit_label(bb_merge)
                     return 'int', t
                 elif outer_member == 'normpath' and len(node.args) == 1:
                     # os.path.normpath(p) → stub: return p unchanged
@@ -12725,8 +12764,15 @@ class GimpleGen:
             return self._lower_bound_method_call(fname_raw, node, _fname_var_ctype)
 
         # Local variable (or captured variable) holding a function pointer.
-        # Emit a proper function-pointer call via a C cast.
-        if _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool'):
+        # Emit a proper function-pointer call via a C cast. Any name that is
+        # a LOCAL VARIABLE here (not a known function/builtin, which the
+        # dispatch above already handled) MUST be a function pointer — e.g.
+        # `func(self.interpreter)` where func came from a `for name, func in
+        # test_funcs:` tuple loop. Its declared type can be a misleading
+        # first-decl-wins `char *` (a sibling `_gen_for_dict` branch declared
+        # it for the dict-iteration arm), so treat any var-types local as a
+        # fnptr call rather than guessing it names a C function.
+        if (fname_raw in self.var_types) or (_fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool')):
             return self._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
 
         return self._lower_named_call(fname_raw, node)
@@ -14260,6 +14306,8 @@ class GimpleGen:
             # _dict_items_val_elems so a dict-item tuple never lands here.
             if et == 'MojoList *' and ev in self._elem_types and t not in self._dict_items_val_elems:
                 self._nested_elem_types.setdefault(t, self._elem_types[ev])
+                if ev in self._tuple_slot_types:
+                    self._tuple_slot_types[t] = self._tuple_slot_types[ev]
             # Propagate dict value type from appended dict elements to the
             # list temp, so subsequent list[0]["key"] knows the dict value
             # type (char * vs int64_t vs double) — see BUG-2026-044.
@@ -14342,6 +14390,12 @@ class GimpleGen:
         # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
         # single list-wide suffix would append-cast the pointer as a double.
         per_element = len(scalar_sufs) > 1
+        # Record per-slot element types when elements are stored by their own
+        # type — a later `for a, b in <list of these tuples>:` needs each
+        # slot's real accessor (get_str vs get_int). The joined `elem` is
+        # useless for a (char*, pointer) pair like `(name, func)`.
+        if per_element:
+            self._tuple_slot_types[t] = [et for _el, et, _ev in lowered if not (isinstance(_el, UnaryOp) and _el.op == '*')]
         for _el, et, ev in lowered:
             # A `*spread` element (`(el, *self.lower_expr(el))`, this codegen's
             # own pervasive comprehension pattern) must EXTEND the tuple with the
@@ -14521,8 +14575,19 @@ class GimpleGen:
             for i, vn in enumerate(var_names):
                 i64 = self._new_val('int64_t', f"(int64_t){i}")
                 sub_str = self._new_val('char *', f"mojo_list_get_str ({sub_list}, {i64})")
-                sub_val = self._new_val('int64_t', f"(int64_t){sub_str}")
-                self._emit(f"  {vn} = {sub_val};")
+                cv = self._cname(vn)
+                # Respect the var's declared type: a char*-declared loop var
+                # (first-decl-wins from an earlier loop over the same name)
+                # takes the char* directly — the old unconditional boxing
+                # assigned `(int64_t)get_str(...)` into a `char *` variable
+                # (hard GCC "makes pointer from integer" error, exposed by the
+                # dict-comprehension `{p: i for p, i in d.items()}` shape).
+                if self.var_types.get(vn, 'char *') == 'char *':
+                    self._emit(f"  {cv} = {sub_str};")
+                else:
+                    sub_val = self._new_val('int64_t', f"(int64_t){sub_str}")
+                    self._emit(f"  {cv} = {sub_val};")
+                    self._actual_types[vn] = 'char *'
             self._gen_compr_append(node, gen0, res, res_type, bb_post)
             self._emit(f"  goto {bb_post};")
             self._emit_label(bb_post)
@@ -14648,7 +14713,9 @@ class GimpleGen:
         tgt = gen0.target
         vt = self.var_types.get(tgt, 'char *')
         if vt in ('int64_t', 'int', 'int32_t'):
-            self._emit(f"  {tgt} = (int64_t)(uintptr_t) {key_tmp};")
+            vp = self._new_val('void *', f'(void *){key_tmp}')
+            box = self._new_val('int64_t', f'(int64_t){vp}')
+            self._emit(f"  {tgt} = {box};")
         else:
             self._emit(f"  {tgt} = (char *) {key_tmp};")
         self._gen_compr_append(node, gen0, res, res_type, bb_post)
@@ -14711,6 +14778,11 @@ class GimpleGen:
             self._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
             # Track element type so downstream for-loops use the right accessor
             self._elem_types[res] = et
+            # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
+            # the heterogeneous tuple's per-slot types so a later
+            # `for n, f in test_funcs:` reads each slot with the right accessor.
+            if et == 'MojoList *' and ev in self._tuple_slot_types:
+                self._tuple_slot_types[res] = self._tuple_slot_types[ev]
         elif node.kind == 'set':
             et, ev = self.lower_expr(node.element)
             if et == 'char *':
@@ -17844,6 +17916,7 @@ class GimpleGen:
             # (_nested_elem_types).
             is_dict_items = it_val in self._dict_items_val_elems
             value_elem = self._dict_items_val_elems.get(it_val) if is_dict_items else None
+            slot_types = self._tuple_slot_types.get(it_val)
             pair_elem = self._nested_elem_types.get(it_val, 'int64_t')
             for i, vn in enumerate(var_names):
                 # Declare each slot by its own element type (char* for a
@@ -17853,6 +17926,13 @@ class GimpleGen:
                 # name — the per-type assignment below boxes/coerces.
                 if is_dict_items:
                     slot_elem = 'char *' if i == 0 else (value_elem or 'int64_t')
+                elif slot_types is not None and i < len(slot_types):
+                    # Heterogeneous tuple-literal list: each slot stored by
+                    # its own type (`(name, func)` → [char*, void*]) — a
+                    # function-pointer slot must be read via get_int and kept
+                    # a pointer (not forced to the joined 'char *' elem, which
+                    # makes `func(...)` compile to a bogus direct call).
+                    slot_elem = slot_types[i]
                 else:
                     slot_elem = pair_elem
                 self._declare_var(vn, slot_elem)
@@ -17959,8 +18039,16 @@ class GimpleGen:
         if is_tuple:
             inner = var[1:-1].strip()
             var_names = [v.strip() for v in inner.split(',')]
-            for vn in var_names:
-                self._declare_var(vn, 'char *')
+            # First var is the KEY (char*); the rest are value slots, always
+            # 0/NULL in this runtime's dict-key iteration. Declare the value
+            # slots int64_t (not char*) so a sibling list-iteration branch over
+            # the same variable (e.g. the runtime-dispatch `for name, func in
+            # self.funcs:` where funcs is really a list of (name, fnptr)
+            # tuples) isn't first-decl-wins'd into char* — that made a
+            # function-pointer slot read as a string and `func(...)` compile to
+            # a bogus direct call.
+            for i, vn in enumerate(var_names):
+                self._declare_var(vn, 'char *' if i == 0 else 'int64_t')
         else:
             self._declare_var(var, 'char *')
         # If it_val is int64_t (boxed pointer), cast to MojoDict *
@@ -17987,7 +18075,9 @@ class GimpleGen:
             vn0 = var_names[0]
             vt0 = self.var_types.get(vn0, 'char *')
             if vt0 in ('int64_t', 'int', 'int32_t'):
-                self._emit(f"  {vn0} = (int64_t)(uintptr_t) {key_tmp};")
+                vp = self._new_val('void *', f'(void *){key_tmp}')
+                box = self._new_val('int64_t', f'(int64_t){vp}')
+                self._emit(f"  {vn0} = {box};")
             else:
                 self._emit(f"  {vn0} = (char *) {key_tmp};")
             for vn in var_names[1:]:
@@ -17999,7 +18089,9 @@ class GimpleGen:
         else:
             vt = self.var_types.get(var, 'char *')
             if vt in ('int64_t', 'int', 'int32_t'):
-                self._emit(f"  {var} = (int64_t)(uintptr_t) {key_tmp};")
+                vp = self._new_val('void *', f'(void *){key_tmp}')
+                box = self._new_val('int64_t', f'(int64_t){vp}')
+                self._emit(f"  {var} = {box};")
             else:
                 self._emit(f"  {var} = (char *) {key_tmp};")
         self.loop_stack.append((bb_post, bb_after))
