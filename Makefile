@@ -148,7 +148,6 @@ stdlib:
 stage1: clean-bootstrap
 	@mkdir -p stage1
 	@echo "=== Stage 1: Python → stage1/ ==="
-	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 	@FAILED=0; \
 	run_dump() { \
 	    out=$$(cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump "../$$1" 2>&1); \
@@ -170,10 +169,16 @@ stage1: clean-bootstrap
 	    run_dump $$f; \
 	done; \
 	if [ "$$FAILED" = "0" ]; then \
-	    echo "✓ Stage 1 complete"; \
+	    echo "✓ Stage 1 dump validation complete"; \
 	else \
 	    echo "✗ Stage 1 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 1: Python → stage1/ (transitive closure) ==="
+	# Generate the bootstrap .ci LAST: the --dump validation loop above also
+	# writes {basename}.ci for mojo.py (single-module, do_imports=False), which
+	# would otherwise clobber this transitive-closure .ci and leave stage2
+	# linking a skeleton with undefined symbols (py_tokenize etc.).
+	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 
 # ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
 mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
