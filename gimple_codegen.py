@@ -5604,10 +5604,19 @@ class GimpleGen:
             return 'char *', self._call_expr('char *', 'mojo_char_to_str', [('char', val)])
         if typ in ('int', 'int64_t'):
             actual = self._actual_types.get(val)
-            if not (actual and actual.endswith(' *')):
+            if actual == 'char':
                 cv = self._new_val('char', f'(char){val}')
                 return 'char *', self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
-            # Boxed pointer — cast through int64_t
+            # An int64_t dict key is a BOXED char* pointer in this codegen's
+            # storage convention (the runtime's dict keys are always strings),
+            # not a raw char byte — the OLD check (any int64_t with no pointer
+            # record → char) truncated a named local whose pointer type wasn't
+            # tracked (e.g. `name = node.name` from the A5 getattr) to a
+            # single byte, so `name in self.var_types` looked up the low byte
+            # of the pointer as the key and ALWAYS missed — every dict
+            # membership test silently returned False in the compiled binary
+            # (and `x in ...` reads fell back to the int64_t-0 default, so
+            # `return x` on a stored local returned 0).
             ip = self._new_val('int64_t', f'(int64_t){val}')
             return 'char *', self._new_val('char *', f'(char *){ip}')
         if typ != 'char *':
@@ -5633,7 +5642,7 @@ class GimpleGen:
             val.lstrip('-').replace('.','',1).isdigit())  # All numeric strings including single digits
         needs_temp = is_field or is_deref
 
-        def _simple_emit(dest, v, s, d):
+        def _simple_emit(dest: str, v: str, s: str, d: str):
             # GIMPLE: integer constant assigned to int64_t/_Bool needs explicit cast
             if s == d:
                 if d == 'int64_t' and v.lstrip('-').isdigit():
@@ -9344,8 +9353,13 @@ class GimpleGen:
         # (joined across other assignment sites in the same function) even
         # though every value actually stored in it here is a raw char byte.
         actual = self._actual_types.get(val)
-        if suf == 'str' and (elem_type == 'char'
-                              or (elem_type in ('int', 'int64_t') and not (actual and actual.endswith(' *')))):
+        # A genuine single char is 'char'-typed or tracked as 'char' in
+        # _actual_types (e.g. `c = s[i]` reassigned into an int64_t local).
+        # An int64_t with NO record is a BOXED char* pointer (the codegen's
+        # storage convention) — the old "no pointer record → char byte" check
+        # truncated it, appending the low byte of the pointer as a 1-char
+        # string instead of the boxed string it points to.
+        if suf == 'str' and (elem_type == 'char' or actual == 'char'):
             cval = val if elem_type == 'char' else self._new_val('char', f"(char){val}")
             return self._call_expr('char *', 'mojo_char_to_str', [('char', cval)])
         # str: cast int-cast strings (boxed pointers stored as int64_t) to char*
@@ -14321,6 +14335,17 @@ class GimpleGen:
         # single list-wide suffix would append-cast the pointer as a double.
         per_element = len(scalar_sufs) > 1
         for _el, et, ev in lowered:
+            # A `*spread` element (`(el, *self.lower_expr(el))`, this codegen's
+            # own pervasive comprehension pattern) must EXTEND the tuple with the
+            # spread's elements, not append the container handle as one element
+            # — the old append produced [el, <2-tuple handle>] (2 slots) where
+            # callers unpack 3 ([el, et, ev]), reading garbage for et/ev (the
+            # self-hosted compiled list-literal `[1, 2, 3]` emitted `_t3 = ;`
+            # with raw-address type names). Mirrors _lower_list_literal's
+            # identical _is_spread handling.
+            if isinstance(_el, UnaryOp) and _el.op == '*':
+                self._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
+                continue
             use = TypeLattice.list_suffix(et) if per_element else suf
             ev_cast = self._cast_for_list(et, ev, use)
             # GIMPLE: load global string literals into temp before function call

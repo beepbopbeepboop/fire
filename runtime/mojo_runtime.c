@@ -1194,6 +1194,11 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
 
 static uint64_t _str_hash(char *s)
 {
+    /* NULL keys (a missing-field sentinel from the A5 getattr fallback, or a
+     * 0/NULL boxed key) hash as the empty string instead of crashing the
+     * loop below. The codegen's boxed-int64 dict keys are char* pointers by
+     * convention, but a NULL pointer can legitimately reach a dict lookup. */
+    if (!s) s = "";
     uint64_t h = 14695981039346656037ULL;
     for (; *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ULL;
     return h;
