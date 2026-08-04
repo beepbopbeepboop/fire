@@ -12544,6 +12544,44 @@ class GimpleGen:
                 mangled = _fattrs_g[node.args[0].name][node.args[1].value]
                 gtype = self._global_var_types.get(mangled, 'int64_t')
                 return gtype, self._new_val(gtype, mangled)
+            # A5: `getattr(s, 'elifs', [])` / `getattr(handler, 'body', None)`
+            # on a BOXED AST handle. The generic path below drops the default
+            # arg and returns untyped int64_t, so `for _cond, elif_body in
+            # getattr(s, 'elifs', []):` saw an opaque int64_t and fell to
+            # mojo_unsupported_iter (the codegen's own structural walkers
+            # silently skipped every if/else body in the compiled binary).
+            # Mirror _lower_MemberExpr's A5 handling: when the attr names an
+            # unambiguous struct field, resolve its static C type and read it
+            # through the typedef. _mojo_dispatch_getattr returns 0 for a
+            # missing/unknown field, so a provided default (the codegen's own
+            # defensive `getattr(s, 'elifs', [])` pattern) is substituted.
+            if (isinstance(node.args[1], StringLiteral)
+                    and len(node.args) in (2, 3)):
+                _attr = node.args[1].value
+                _boxed_ft = self._known_field_type(_attr)
+                if _boxed_ft is not None:
+                    ot, ov = self.lower_expr(node.args[0])
+                    if ot in ('int', 'char'):
+                        ov = self._new_val('int64_t', f'(int64_t){ov}')
+                    vp = self._new_val('void *', f'(void *){ov}')
+                    raw = self._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                          [('void *', vp), ('char *', f'"{_attr}"')])
+                    if len(node.args) >= 3:
+                        dt, dv = self.lower_expr(node.args[2])
+                        if dt != 'int64_t':
+                            dv = self._new_val('int64_t', f'(int64_t){dv}')
+                        zero = self._new_val('int64_t', '(int64_t)0')
+                        # GIMPLE: the ?: condition must be a _Bool temp (an
+                        # inline `!=` in the selector is "bogus comparison
+                        # result type" / "expected ';' before '?'").
+                        cond = self._new_val('_Bool', f'{raw} != {zero}')
+                        raw = self._new_val('int64_t', f'{cond} ? {raw} : {dv}')
+                    if _boxed_ft.endswith(' *'):
+                        t = self._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
+                    else:
+                        t = self._new_temp(_boxed_ft)
+                        self._emit(f"  {t} = ({_boxed_ft}){raw};")
+                    return _boxed_ft, t
             pairs = [self.lower_expr(a) for a in node.args[:2]]  # drop optional default
             return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         if fname_raw == 'type'    and len(node.args) == 1:
