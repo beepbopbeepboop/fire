@@ -3463,6 +3463,11 @@ class GimpleGen:
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Pass 2c (container-return-elem pre-pass) scratch state: per-function
+        # local container-element map + the struct whose methods are being
+        # scanned (so `self.foo` resolves to the right {struct}_{method} key).
+        self._prepass_local_elems: dict[str, str] = {}
+        self._prepass_struct: str | None = None
         # Final step of the async/await codegen project: combined async
         # generators (`async def f(): ... yield ... ...` — is_async AND
         # is_generator both true). A THIRD, distinct promise type
@@ -6490,6 +6495,144 @@ class GimpleGen:
         for _e in elements:
             types.append(self._quick_type(_e))
         return TypeLattice.join_all(types) if types else 'int64_t'
+
+    # ── Pass 2c: container-return-element-type inference ──────────────────
+    # Populates self._return_elem_types to a fixpoint BEFORE any body is
+    # emitted. The emission-time recording in _gen_stmt_ReturnStmt only fires
+    # when a callee's own body is lowered, so a call site emitted earlier (the
+    # common self-host order: lower_expr at the top dispatches to the _lower_*
+    # helpers defined after it) never saw the callee's return element type and
+    # unpacked its (ctype, cval) tuple via mojo_list_get_int — reading the
+    # char* pair as decimal pointers. This scan is deliberately syntactic
+    # (mirrors _infer_return_type's approach) so it can run before emission.
+    def _quick_container_elem(self, node) -> str | None:
+        """Syntactic container ELEMENT type of a value expression, or None when
+        it can't be statically determined. Identifier elements resolve through
+        the current function's local container-element map (var_types is empty
+        during Pass 2c); call elements resolve through _return_elem_types so
+        the fixpoint propagates callee elem types to their callers."""
+        if isinstance(node, (ListExpr, TupleExpr, SetExpr)):
+            return self._prepass_list_elem(node.elements)
+        if isinstance(node, IdentExpr):
+            return self._prepass_local_elems.get(node.name)
+        if isinstance(node, CallExpr):
+            key = self._prepass_callee_key(node)
+            if key is not None:
+                return self._return_elem_types.get(key)
+        return None
+
+    def _prepass_list_elem(self, elements) -> str:
+        """Element type of a container literal for the pre-pass. Mirrors
+        _infer_list_elem_type but resolves identifier elements through the
+        local container-element map instead of var_types (empty during Pass
+        2c) — e.g. `return ctype, cval` where cval was unpacked from an
+        earlier char*-tuple call."""
+        if not elements:
+            return 'int64_t'
+        types = []
+        for e in elements:
+            le = self._quick_container_elem(e)
+            types.append(le if le is not None else self._quick_type(e))
+        return TypeLattice.join_all(types) if types else 'int64_t'
+
+    def _prepass_callee_key(self, node) -> str | None:
+        """Symbol key of a CallExpr's callee for the pre-pass's
+        _return_elem_types lookup — mirrors the bare {struct}_{method}
+        mangling the call sites and _gen_struct_method's current_func_name
+        both use ('self' resolves to the struct being pre-passed)."""
+        f = node.func
+        if isinstance(f, IdentExpr):
+            return f.name
+        if isinstance(f, MemberExpr) and isinstance(f.obj, IdentExpr) and f.obj.name == 'self':
+            if self._prepass_struct:
+                return f"{self._prepass_struct}_{f.member}"
+        return None
+
+    def _collect_local_container_elems(self, stmts) -> None:
+        """Populate self._prepass_local_elems from a function's assignments:
+        a named local holding a container literal / container-returning call,
+        or both halves of a `xt, xv = <container-returning call>` unpack."""
+        for node in stmts:
+            if isinstance(node, AssignStmt):
+                t, v = node.target, node.value
+                if isinstance(t, IdentExpr):
+                    e = self._quick_container_elem(v)
+                    if e is not None:
+                        self._prepass_local_elems[t.name] = e
+                elif isinstance(t, TupleExpr):
+                    # `xt, xv = <container-returning call>` — a tuple is
+                    # homogeneous at the C level, so both targets get the
+                    # container's element type. A literal RHS assigns each
+                    # element with its own type (skip).
+                    if not isinstance(v, (ListExpr, TupleExpr, SetExpr)):
+                        e = self._quick_container_elem(v)
+                        if e is not None:
+                            for sub in t.elements:
+                                if isinstance(sub, IdentExpr):
+                                    self._prepass_local_elems[sub.name] = e
+            elif isinstance(node, VarDecl):
+                if (isinstance(node.name, str) and ',' not in node.name
+                        and node.value is not None):
+                    e = self._quick_container_elem(node.value)
+                    if e is not None:
+                        self._prepass_local_elems[node.name] = e
+            elif isinstance(node, IfStmt):
+                self._collect_local_container_elems(node.then_body)
+                for _, eb in node.elifs:
+                    self._collect_local_container_elems(eb)
+                if node.else_body:
+                    self._collect_local_container_elems(node.else_body)
+            elif isinstance(node, (WhileStmt, ForStmt)):
+                self._collect_local_container_elems(node.body)
+            elif isinstance(node, TryStmt):
+                self._collect_local_container_elems(node.body)
+                for h in node.handlers:
+                    self._collect_local_container_elems(h.body)
+                if node.else_body:
+                    self._collect_local_container_elems(node.else_body)
+                if node.finally_body:
+                    self._collect_local_container_elems(node.finally_body)
+            elif isinstance(node, WithStmt):
+                self._collect_local_container_elems(node.body)
+
+    def _collect_return_elems(self, stmts, acc) -> None:
+        """Collect container element types of return values (structural walk
+        mirroring _collect_return_types)."""
+        for node in stmts:
+            if isinstance(node, ReturnStmt):
+                if node.value is not None:
+                    e = self._quick_container_elem(node.value)
+                    if e is not None:
+                        acc.append(e)
+            elif isinstance(node, IfStmt):
+                self._collect_return_elems(node.then_body, acc)
+                for _, eb in node.elifs:
+                    self._collect_return_elems(eb, acc)
+                if node.else_body:
+                    self._collect_return_elems(node.else_body, acc)
+            elif isinstance(node, (WhileStmt, ForStmt)):
+                self._collect_return_elems(node.body, acc)
+            elif isinstance(node, TryStmt):
+                self._collect_return_elems(node.body, acc)
+                for h in node.handlers:
+                    self._collect_return_elems(h.body, acc)
+                if node.else_body:
+                    self._collect_return_elems(node.else_body, acc)
+                if node.finally_body:
+                    self._collect_return_elems(node.finally_body, acc)
+            elif isinstance(node, WithStmt):
+                self._collect_return_elems(node.body, acc)
+
+    def _infer_return_elem_type(self, body) -> str | None:
+        """Infer the container ELEMENT type a function returns, or None when it
+        returns no statically-identifiable container. See _quick_container_elem."""
+        self._prepass_local_elems = {}
+        self._collect_local_container_elems(body)
+        acc = []
+        self._collect_return_elems(body, acc)
+        if not acc:
+            return None
+        return TypeLattice.join_all(acc)
 
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         """Infer local variable types from all assignments in function body.
@@ -10543,15 +10686,15 @@ class GimpleGen:
                     self._elem_types[ov] = actual_elem
                     if actual_elem == 'MojoList *' and av in self._elem_types:
                         self._nested_elem_types[ov] = self._elem_types[av]
-                    # Propagate to _field_elem_types when ov originated from a
-                    # struct field (e.g. self.errors). The field-access read path
-                    # in _lower_MemberExpr checks _field_elem_types to recover
-                    # element type info when the list is read back later.
-                    if ov in self._struct_field_owners:
-                        for _sn, _fn in self._struct_field_owners[ov]:
-                            if _sn not in self._field_elem_types:
-                                self._field_elem_types[_sn] = {}
-                            self._field_elem_types[_sn][_fn] = actual_elem
+                        # Propagate to _field_elem_types when ov originated from a
+                        # struct field (e.g. self.errors). The field-access read path
+                        # in _lower_MemberExpr checks _field_elem_types to recover
+                        # element type info when the list is read back later.
+                        if ov in self._struct_field_owners:
+                            for _sn, _fn in self._struct_field_owners[ov]:
+                                if _sn not in self._field_elem_types:
+                                    self._field_elem_types[_sn] = {}
+                                self._field_elem_types[_sn][_fn] = actual_elem
             return 'int', self._new_val('int', '0')
         if method == 'extend' and args:
             at, av = self.lower_expr(args[0])
@@ -13312,9 +13455,17 @@ class GimpleGen:
         if ret_type == 'void':
             return self._void_call(fname, arg_pairs)
         t = self._call_expr(ret_type, fname, arg_pairs)
-        if ret_type == 'MojoList *' and fname_raw in self._return_elem_types:
+        if fname_raw in self._return_elem_types:
+            # Annotated `-> tuple[...]` functions resolve to boxed int64_t (see
+            # _mojo_type), so unlike the MojoList*-typed case above the elem
+            # must be recorded for ANY ret_type — consumers resolve the boxed
+            # handle back via _actual_types. Keyed on the callee having a
+            # recorded return elem type, which only true container returns get.
             self._elem_types[t] = self._return_elem_types[fname_raw]
-            self._actual_types[t] = ret_type
+            if ret_type == 'MojoList *':
+                self._actual_types[t] = ret_type
+            elif ret_type in ('int', 'int64_t'):
+                self._actual_types[t] = 'MojoList *'
         # A function that RETURNS a generator (`def mk(): return counter(3)`,
         # typed `MojoGenerator *` by Pass 1.3e/1.3f) — record the underlying
         # generator function's api on the call's result temp (Pass 1.3f-gen
@@ -14876,14 +15027,14 @@ class GimpleGen:
             for i, n in enumerate(names):
                 if n == '_':
                     continue
-                self._declare_var(n, 'int64_t')
-                ip = self._new_val('int64_t', f"(int64_t){i}")
-                ti = self._new_temp('int64_t')
-                iv = self._new_val('int64_t', f"(int64_t){v}")
-                lp_cast = self._new_val('MojoList *', f"(MojoList *){iv}")
-                self._emit(f"  {ti} = mojo_list_get_int ({lp_cast}, {ip});")
-                # Use the C name (a target like `char` is renamed to `_char`).
-                self._emit(f"  {self._write_dest(n)} = {ti};")
+                # _tuple_elem_value resolves the element accessor from the
+                # (possibly int64_t-boxed) tuple's real element type, so a
+                # char*-tuple VarDecl declares real char* locals instead of
+                # storing pointer decimals in int64_t ones.
+                et, ev = self._tuple_elem_value(vtype, v, i)
+                self._declare_var(n, et)
+                self._safe_coerce_emit(et, self.var_types[n], ev, self._write_dest(n))
+                self._track_pointer_actual_type(n, self.var_types[n], ev, et)
             return
         if node.type_ann in self.struct_field_types and node.value is not None:
             layout = self._struct_layout.get(node.name, LayoutSolver.HEAP)
@@ -15026,35 +15177,12 @@ class GimpleGen:
                 # RHS is a single iterable — lower it, then index each element
                 vtype, v = self.lower_expr(node.value)
                 for i, tgt in enumerate(targets):
-                    idx64 = self._new_val('int64_t', f"(int64_t){i}")
-                    if vtype == 'MojoList *':
-                        elem_type = self._elem_of(v)
-                        suf = TypeLattice.list_suffix(elem_type)
-                        et = elem_type if elem_type != 'unknown' else 'int64_t'
-                        # mojo_list_get_int returns int64_t; for pointer elem types we must
-                        # store in int64_t first, then cast — GIMPLE rejects direct ptr assignment.
-                        if suf == 'int' and et not in ('int64_t', 'int', '_Bool'):
-                            raw = self._new_val('int64_t', f"mojo_list_get_int ({v}, {idx64})")
-                            ev = self._new_val(et, f"({et}){raw}")
-                        else:
-                            ev = self._new_val(et, f"mojo_list_get_{suf} ({v}, {idx64})")
-                    else:
-                        # RHS lowered to a non-MojoList* type (typically a
-                        # boxed int64_t pointer to a tuple returned by a
-                        # function call — `_loc_elem, _loc_nested, _loc_dict_val
-                        # = self._scan_container_elems(...)`, whose tuple return
-                        # the codegen can't type as MojoList*). The OLD fallback
-                        # assigned the WHOLE tuple pointer to EVERY target
-                        # (`_loc_elem = _loc_nested = _loc_dict_val = <tuple>`),
-                        # so element reads later treated a 3-dict MojoList as a
-                        # dict and crashed with garbage keys (mojo_dict_items on
-                        # the list). Python requires a tuple/unpack target's RHS
-                        # to be iterable, so indexing the boxed pointer as a
-                        # list is the correct lowering — mirrors the MojoList*
-                        # branch just above.
-                        lp = self._new_val('MojoList *', f"(MojoList *){v}")
-                        ev = self._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
-                        et = 'int64_t'
+                    # _tuple_elem_value resolves an int64_t-boxed tuple handle
+                    # (a call result — the codegen's own `-> tuple[str, str]`
+                    # annotated methods return these) to its real MojoList*
+                    # element type, so char* tuples unpack via get_str instead
+                    # of reading pointers as int64_t decimals.
+                    et, ev = self._tuple_elem_value(vtype, v, i)
                     self._assign_target(tgt, et, ev)
             return
         vtype, v = self.lower_expr(node.value)
@@ -17001,6 +17129,43 @@ class GimpleGen:
         if val in self.var_types and self.var_types[val] == 'int64_t' and val in self._actual_types:
             return self._actual_types[val]
         return ctype
+
+    def _tuple_elem_value(self, vtype: str, v: str, idx: int) -> tuple[str, str]:
+        """Read element `idx` of a tuple value (vtype, v), returning
+        (elem_ctype, value). A tuple literal lowers with vtype 'MojoList *';
+        a tuple RETURNED BY A CALL lowers with vtype 'int64_t' (the handle is
+        boxed — this codegen's own `-> tuple[str, str]` annotation resolves to
+        int64_t via _mojo_type), its real type only recoverable through
+        _actual_types. The old consumers only handled the MojoList* case, so
+        call-returned tuples were indexed with mojo_list_get_int — reading the
+        (ctype, cval) string-pair tuples this codegen returns everywhere as
+        decimal pointers. Resolve the actual type first, then pick the
+        accessor from the element type, mirroring the MojoList* branch."""
+        real = self._get_actual_type(vtype, v)
+        idx64 = self._new_val('int64_t', f"(int64_t){idx}")
+        if real == 'MojoList *':
+            elem = self._elem_of(v)
+            suf = TypeLattice.list_suffix(elem)
+            if vtype == real:
+                lp = v
+            else:
+                # The C storage is int64_t (boxed handle); cast to a real
+                # MojoList* temp before the accessor call, or GIMPLE rejects
+                # "passing int64_t where MojoList * expected".
+                lp = self._new_val('MojoList *', f"(MojoList *){v}")
+            if suf == 'str':
+                return 'char *', self._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+            if suf == 'double':
+                return 'double', self._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+            if elem in ('int64_t', 'int', '_Bool'):
+                return 'int64_t', self._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            # Pointer elem that isn't char* (e.g. a nested MojoList*): read the
+            # opaque int64_t then cast, matching the old 'int'-suffix handling.
+            raw = self._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            return elem, self._new_val(elem, f"({elem}){raw}")
+        # Non-container / untracked: index the boxed pointer as a plain int list
+        lp = self._new_val('MojoList *', f"(MojoList *){v}")
+        return 'int64_t', self._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
 
     def _emit_unsupported_iter(self, it_type: str, node=None) -> None:
         """Abort at runtime instead of silently running a for-loop body zero
@@ -24856,6 +25021,37 @@ class GimpleGen:
                                 _changed = True
                             self.var_types.clear()
             if not _changed:
+                break
+
+        #   Pass 2c: infer container RETURN ELEMENT types to a fixpoint, so a
+        #   call site emitted before the callee's own body (the common
+        #   self-host order — lower_expr dispatches to the _lower_* helpers
+        #   defined after it) still sees the callee's tuple/list return
+        #   element type. Populated statically here before any body is
+        #   emitted; _gen_stmt_ReturnStmt's dynamic recording stays as a
+        #   fallback for shapes this syntactic scan can't resolve.
+        for _pass2c_iter in range(8):
+            _c_changed = False
+            for s in all_functions:
+                if _is_foreign_main(s) or not isinstance(s, FunctionDef):
+                    continue
+                _ret_elem = self._infer_return_elem_type(s.body)
+                if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
+                    self._return_elem_types[s.name] = _ret_elem
+                    _c_changed = True
+            for s in all_structs_for_methods:
+                if isinstance(s, StructDef):
+                    self._prepass_struct = s.name
+                    for m in s.methods:
+                        if m.name == '__init__':
+                            continue
+                        _ret_elem = self._infer_return_elem_type(m.body)
+                        _key = f"{s.name}_{m.name}"
+                        if _ret_elem is not None and self._return_elem_types.get(_key) != _ret_elem:
+                            self._return_elem_types[_key] = _ret_elem
+                            _c_changed = True
+            self._prepass_struct = None
+            if not _c_changed:
                 break
 
         # ── Pass 2b-bis: register per-struct-method overload candidates ────
