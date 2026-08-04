@@ -252,7 +252,7 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None, program_args=None):
+def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None, program_args=None):
     """JIT compile and execute Mojo source code for ARM64.
     
     Returns True on success, False on failure.

@@ -29096,7 +29096,7 @@ class GimpleGen:
             parts.append("void Parser___init__ (Parser *, MojoList *);")
             parts.append("void Interpreter___init__ (Interpreter *, char *, MojoList *);")
             parts.append("int64_t Interpreter_execute (Interpreter *, int64_t);")
-            parts.append("_Bool jit_compile_and_execute (char *, int64_t, int64_t, int64_t, int64_t);  /* from mojo.py */")
+            parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from mojo.py */")
         # Forward decls for the generic reflection dispatch (see the
         # "Generic reflection dispatch" block emitted earlier in this same
         # gen_module call, near the struct alloc helpers) — that block's
