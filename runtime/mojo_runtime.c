@@ -533,6 +533,25 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     return r;
 }
 
+/* `del lst[start:stop]` — removes elements [start, stop) in place, shifting
+ * later elements down. Bound normalization mirrors mojo_list_slice exactly
+ * (same negative-index/omitted-stop/clamping rules), since both lower from
+ * the identical SliceExpr shape. */
+void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
+{
+    if (!l) return;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
+    if (start < 0) start = l->len + start;
+    if (stop  < 0) stop  = l->len + stop;
+    if (start < 0) start = 0;
+    if (stop > l->len) stop = l->len;
+    if (start >= stop) return;
+    int64_t n = stop - start;
+    for (int64_t i = start; i < l->len - n; i++)
+        l->data[i] = l->data[i + n];
+    l->len -= n;
+}
+
 MojoList *mojo_list_concat(MojoList *a, MojoList *b)
 {
     if (!a) a = mojo_list_new();
@@ -2615,9 +2634,32 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
 }
 
 int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
-    int64_t v = mojo_dict_get_int(d, key);
-    /* TODO: actually remove the entry; for now just return the value */
-    return v;
+    if (!d) return 0;
+    _DictSlot *sl = _dict_lookup(d, key);
+    if (!sl) return 0;
+    int64_t val = sl->val;
+    /* This table is plain linear-probing open addressing with NO tombstones
+     * (_dict_find/_dict_lookup stop scanning at the first empty slot), so
+     * just clearing this one slot would break the probe chain for any OTHER
+     * key that hashed to the same bucket and got pushed past it — a later
+     * lookup for that key would stop at the now-empty slot and report "not
+     * found" even though the key is still in the table. Correct in-place
+     * deletion needs Knuth's backward-shift algorithm; rebuilding the whole
+     * slot array from scratch (mirrors _dict_grow's own rehash loop, minus
+     * the size doubling) is simpler to get right and this table is never
+     * large enough for the O(cap) cost to matter. Preserves each surviving
+     * key's original `seq` so insertion-order dump/iteration is unaffected. */
+    int64_t old_cap = d->cap;
+    _DictSlot *old = d->slots;
+    d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
+    d->used = 0;
+    for (int64_t i = 0; i < old_cap; i++) {
+        if (old[i].key && strcmp(old[i].key, key) != 0)
+            _dict_set_raw_seq(d, old[i].key, old[i].val, old[i].seq);
+    }
+    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
+    free(old);
+    return val;
 }
 
 MojoDict *mojo_dict_copy(MojoDict *d) {

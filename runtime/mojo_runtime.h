@@ -200,6 +200,7 @@ void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
+void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 

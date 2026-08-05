@@ -5442,8 +5442,32 @@ class GimpleGen:
                     self._emit(f'  {ct} = (int64_t){aval};')
                 coerced_args.append(ct)
             elif ptype == 'char *' and atype in ('int', 'int64_t', 'char'):
-                if atype == 'char':
-                    sv = self._call_expr('char *', 'mojo_char_to_str', [('char', aval)])
+                # A raw single char whose DECLARED type was widened to
+                # int64_t (joining another assignment site in the same
+                # function — e.g. `qch = stmt[i]` in mojo_compiler.py's own
+                # `_process_nested_tstrings`) still has its real type
+                # tracked in _actual_types (actual_atype, resolved just
+                # above) even though the bare `atype` check below can't see
+                # it. Checking only `atype == 'char'` missed that case
+                # entirely and fell to the `else` branch's raw void*
+                # pointer-reinterpretation of the char's numeric byte value
+                # — passing e.g. `(char *)0x22` (a garbage address built
+                # from `"`'s ASCII code) to `_find_tstring_closing_quote`'s
+                # `quote_ch: str` parameter, which then could never actually
+                # match a real quote character, so `close` always came back
+                # -1 and the caller silently fell through to its "no t/f-
+                # string found" fallback. Confirmed via a from-scratch
+                # instrumented stage1.ci build: `_find_tstring_closing_
+                # quote_7a972f (stmt, i, _t42)`'s `_t42` was exactly this
+                # `(char *)(void *)qch` cast, not a real 1-char string.
+                if atype == 'char' or actual_atype == 'char':
+                    # `aval` itself is still C-declared as whatever `atype`
+                    # says (int64_t when widened) even though it's really a
+                    # char — cast it to a real `char` lvalue first so the
+                    # mojo_char_to_str call below isn't passing an int64_t
+                    # variable where GIMPLE expects an exact `char` match.
+                    cv = aval if atype == 'char' else self._new_val('char', f'(char){aval}')
+                    sv = self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                     coerced_args.append(sv)
                 else:
                     vp = self._new_temp('void *')
@@ -10624,6 +10648,24 @@ class GimpleGen:
         if ot == 'void *':
             return self._lower_file_method(ov, method, node.args)
 
+        # A raw single 'char' (this codegen's string-indexing/for-loop-over-
+        # a-string result — see _gen_for_cstr/_lower_slice's `char` return
+        # for `s[i]`) calling a str method (`c.isalnum()`, `c.isdigit()`,
+        # ...): box it to a real 1-char string first and reuse the char*
+        # method dispatch below rather than duplicating it. Without this,
+        # `ot == 'char'` fell through every dispatch branch to the generic
+        # struct-method fallback, which had no notion of a "char" struct
+        # and mangled the call into a bogus, never-defined extern symbol
+        # (e.g. `char_mojo_isalnum`) — an undefined-symbol LINK failure,
+        # not a silent wrong answer. Only reachable at all once
+        # _gen_for_cstr existed to compile `for c in some_str:` in the
+        # first place — found via gimple_codegen.py's OWN `_lower_external_
+        # call`, whose `cname = ''.join(... for c in cname)` self-hosts as
+        # exactly this shape.
+        if ot == 'char':
+            ov = self._call_expr('char *', 'mojo_char_to_str', [('char', ov)])
+            ot = 'char *'
+
         # char* string method calls
         if ot == 'char *':
             return self._lower_str_method(ov, method, node.args)
@@ -14562,8 +14604,11 @@ class GimpleGen:
 
     # ── Slice lowering ────────────────────────────────────────────────────
 
-    def _lower_slice(self, node: SliceExpr) -> tuple[str, str]:
-        ot, ov = self.lower_expr(node.obj)
+    def _lower_slice_bounds(self, node: SliceExpr) -> tuple[str, str]:
+        """Compute (start_v, stop_v) C expressions for a SliceExpr's bounds
+        — shared by _lower_slice (read a sub-range) and the DelStmt lowering
+        for `del container[a:b]` (remove a sub-range in place), since both
+        need the identical bound normalization."""
         if node.start is not None:
             _st, sv = self.lower_expr(node.start)
             # Use the REAL type lower_expr just gave `sv`, not _quick_type's
@@ -14593,6 +14638,11 @@ class GimpleGen:
             # `x[:-1]` (drop the last char/element) also produces; see
             # MOJO_SLICE_STOP_OMITTED's doc comment in mojo_runtime.h.
             stop_v = 'MOJO_SLICE_STOP_OMITTED'
+        return start_v, stop_v
+
+    def _lower_slice(self, node: SliceExpr) -> tuple[str, str]:
+        ot, ov = self.lower_expr(node.obj)
+        start_v, stop_v = self._lower_slice_bounds(node)
 
         if ot == 'MojoStr *':
             t = self._new_val('MojoStr *', f"mojo_str_slice ({ov}, {start_v}, {stop_v})")
@@ -14899,6 +14949,8 @@ class GimpleGen:
             self._compr_list_loop(node, gen0, res, res_type, it_val)
         elif it_type == 'MojoStr *':
             self._compr_str_loop(node, gen0, res, res_type, it_val)
+        elif it_type == 'char *':
+            self._compr_cstr_loop(node, gen0, res, res_type, it_val)
         elif it_type == 'MojoDict *':
             self._compr_dict_loop(node, gen0, res, res_type, it_val)
         elif it_type == 'MojoSet *':
@@ -15105,6 +15157,41 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
+    def _compr_cstr_loop(self, node, gen0, res, res_type, it_val):
+        """`[... for c in s]`/`(... for c in s)` where `s` is a plain
+        `char *` (this codegen's usual representation for an ordinary
+        Python str local — MojoStr* is a separate, less common wrapped-
+        string type _compr_str_loop already handles). Was completely
+        unsupported here (no 'char *' case in _lower_comprehension's
+        dispatch), matching _gen_for_iter's identical gap for a plain
+        `for c in s:` statement loop — see _gen_for_cstr's own docstring
+        for the real-world impact this had (mojo_compiler.py's own
+        `any(c in (...) for c in prefix)` silently evaluating empty/False
+        for every self-hosted-compiled program). Mirrors _compr_str_loop's
+        identical index-loop shape, just over mojo_strlen/_mojo_at_char
+        instead of mojo_str_len/mojo_str_char_at."""
+        self._declare_var(gen0.target, 'char')
+        len64 = self._new_val('int64_t', f'mojo_strlen ({it_val})')
+        idx64 = self._new_val('int64_t', '(int64_t)0')
+        bb_cond = self._new_bb(); bb_body = self._new_bb()
+        bb_post = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        cond_t = self._new_val('_Bool', f"{idx64} < {len64}")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        self._emit_label(bb_body)
+        self._ptr_helpers_needed.add('char')
+        addr = self._new_val('char *', f"_mojo_at_char ({it_val}, {idx64})")
+        self._emit(f"  {gen0.target} = *{addr};")
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        one64 = self._new_val('int64_t', "(int64_t)1")
+        st = self._new_val('int64_t', f"{idx64} + {one64}")
+        self._emit(f"  {idx64} = {st};")
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+
     def _compr_dict_loop(self, node, gen0, res, res_type, it_val):
         self._declare_var(gen0.target, 'char *')
         iter_t = self._new_temp('MojoDictIter *')
@@ -15176,7 +15263,21 @@ class GimpleGen:
                 self._emit_label(bb_next)
             self._emit_label(bb_append)
 
-        if node.kind == 'list':
+        if node.kind == 'list' or node.kind == 'generator':
+            # `_lower_comprehension` initializes a 'generator' comprehension
+            # identically to 'list' ("convert to list for simplicity" — see
+            # its own comment), but this method never got the matching
+            # 'generator' case added alongside 'list'/'set'/'dict' — so a
+            # bare generator expression's body silently appended NOTHING,
+            # leaving the backing list permanently empty regardless of the
+            # source iterable. Any consumer expecting to see per-element
+            # results (any()/all()/sum()/list(genexpr), or a `for` loop over
+            # a saved generator expression) saw an empty result instead —
+            # e.g. `any(c in (...) for c in prefix)` always evaluated
+            # False/0. Found chasing make bootstrap's verify byte-identity
+            # failures back through _gen_for_cstr's own motivating bug
+            # (mojo_compiler.py's `_process_nested_tstrings` uses exactly
+            # this any(genexpr) shape).
             et, ev = self.lower_expr(node.element)
             suf = TypeLattice.list_suffix(et)
             ev_cast = self._cast_for_list(et, ev, suf)
@@ -15567,6 +15668,8 @@ class GimpleGen:
             self._gen_stmt_GlobalStmt(node)
         elif isinstance(node, MatchStmt):
             self._gen_stmt_MatchStmt(node)
+        elif isinstance(node, DelStmt):
+            self._gen_stmt_DelStmt(node)
         else:
             _debug_note('unknown statement dropped', node_kind)
             self._emit(f"  /* TODO: {node_kind} */")
@@ -16473,6 +16576,119 @@ class GimpleGen:
             self._emit(f"  goto {bb_merge};")
 
         self._emit_label(bb_merge)
+
+    def _gen_stmt_DelStmt(self, node):
+        """`del a[b]`, `del a[b:c]`, `del a[b], c[d]` — one DelStmt per
+        statement, node.targets holding each comma-separated target (see
+        mojo_compiler.py's DelStmt docstring).
+
+        Previously COMPLETELY unimplemented: gen_stmt's dispatch chain had
+        no DelStmt case at all, so it silently fell through to the generic
+        "unknown statement dropped" fallback (a bare `/* TODO */` comment,
+        no-op). This was flat-out WRONG, not just incomplete, for
+        mojo_compiler.py's own `_process_nested_tstrings`: its
+        `del result[-len(prefix):]` (removing a stray prefix character
+        already appended to `result` char-by-char before the scanner
+        realized it was actually part of a string literal's prefix) never
+        ran once self-hosted, so that prefix character stayed in `result`
+        AND the string-with-its-own-prefix got appended right after it —
+        e.g. an f-string literal came out as `ff"..."` (the leading `f`
+        duplicated) in every self-hosted-compiled program, not just this
+        compiler's own source. Root-caused chasing `make bootstrap`'s
+        `verify` byte-identity failures back to actual token-level
+        corruption (confirmed via a minimal 3-line repro dumped through a
+        freshly-built stage2/mojo).
+
+        Only `del container[key-or-slice]` is implemented (list index/slice,
+        dict key, or — when the container's real type isn't known until
+        runtime, e.g. myinterpreter.py's own generic `del obj[idx]` in
+        execute_DelStmt — a runtime dispatch on the actual object, mirroring
+        _gen_for_iter's identical boxed-int64_t dict-vs-list dispatch). Bare
+        `del name` / `del obj.attr` are NOT reachable anywhere in this
+        codebase's own self-hosted closure (grep-confirmed across
+        mojo_compiler.py/myinterpreter.py/mojo.py/mojo_main.py/
+        module_loader.py/generated_dispatch.py) and would need much
+        broader "this variable/attribute can become undefined" plumbing to
+        support correctly in a compiled — not interpreted — target; left as
+        an explicit, logged gap rather than silently doing nothing for them
+        specifically.
+        """
+        for target in node.targets:
+            # A bare single-slice subscript (`x[a:b]`) parses as a SliceExpr
+            # with .obj attached directly, NOT wrapped in a SubscriptExpr —
+            # see mojo_compiler.py's own `_parse_postfix`: "if len(items) ==
+            # 1: if isinstance(only, SliceExpr): only.obj = expr; expr =
+            # only" (a single non-slice index DOES still wrap in
+            # SubscriptExpr — that path is unaffected). `del result[-len(
+            # prefix):]` (this method's own motivating bug) takes exactly
+            # this bare-SliceExpr shape, so it must be checked before (not
+            # inside) the SubscriptExpr branch below.
+            if isinstance(target, SliceExpr):
+                ot, ov = self.lower_expr(target.obj)
+                start_v, stop_v = self._lower_slice_bounds(target)
+                # Only lists support slice deletion (a dict has no notion of
+                # a slice) — an ambiguous/untracked boxed value is assumed to
+                # be a list here, mirroring _lower_slice's own MojoList*
+                # branch reasoning for the same ambiguity.
+                lp = ov if ot == 'MojoList *' else self._new_val(
+                    'MojoList *', f"(MojoList *){self._to_int64(ot, ov)}")
+                self._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
+                continue
+            if not isinstance(target, SubscriptExpr):
+                _debug_note('DelStmt target not supported (only container[key]/[slice])',
+                            type(target).__name__)
+                self._emit(f"  /* TODO: del {type(target).__name__} not supported */")
+                continue
+            ot, ov = self.lower_expr(target.obj)
+            if isinstance(target.index, SliceExpr):
+                start_v, stop_v = self._lower_slice_bounds(target.index)
+                lp = ov if ot == 'MojoList *' else self._new_val(
+                    'MojoList *', f"(MojoList *){self._to_int64(ot, ov)}")
+                self._emit(f"  mojo_list_del_slice ({lp}, {start_v}, {stop_v});")
+                continue
+            if ot == 'MojoDict *':
+                key_type, key_val = self.lower_expr(target.index)
+                key_type, key_val = self._char_to_cstr(key_type, key_val)
+                self._emit_call('int64_t', '', 'mojo_dict_pop_int',
+                                 [('MojoDict *', ov), (key_type, key_val)])
+            elif ot == 'MojoList *':
+                idx_type, idx_val = self.lower_expr(target.index)
+                idx64 = self._to_int64(idx_type, idx_val)
+                self._emit_call('int64_t', '', 'mojo_list_pop_at',
+                                 [('MojoList *', ov), ('int64_t', idx64)])
+            elif ot in ('int', 'int64_t', 'void *'):
+                # Fully dynamic: the container's real type isn't known until
+                # runtime (e.g. myinterpreter.py's `del obj[idx]`, where
+                # `obj` is whatever value the INTERPRETED program's own
+                # runtime object happens to be) — dispatch on the actual
+                # object, mirroring _gen_for_iter's identical boxed-int64_t
+                # "for x in <unknown container>:" dict-vs-list branch.
+                it64 = self._to_int64(ot, ov)
+                bb_dict = self._new_bb(); bb_not_dict = self._new_bb()
+                bb_list = self._new_bb(); bb_after = self._new_bb()
+                isd = self._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
+                self._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
+                self._emit_label(bb_not_dict)
+                isl = self._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
+                self._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_after};")
+                self._emit_label(bb_dict)
+                dp = self._new_val('MojoDict *', f"(MojoDict *){it64}")
+                dkey_type, dkey_val = self.lower_expr(target.index)
+                dkey_type, dkey_val = self._char_to_cstr(dkey_type, dkey_val)
+                self._emit_call('int64_t', '', 'mojo_dict_pop_int',
+                                 [('MojoDict *', dp), (dkey_type, dkey_val)])
+                self._emit(f"  goto {bb_after};")
+                self._emit_label(bb_list)
+                lp = self._new_val('MojoList *', f"(MojoList *){it64}")
+                lidx_type, lidx_val = self.lower_expr(target.index)
+                lidx64 = self._to_int64(lidx_type, lidx_val)
+                self._emit_call('int64_t', '', 'mojo_list_pop_at',
+                                 [('MojoList *', lp), ('int64_t', lidx64)])
+                self._emit(f"  goto {bb_after};")
+                self._emit_label(bb_after)
+            else:
+                _debug_note('DelStmt subscript on unsupported container type', ot)
+                self._emit(f"  /* TODO: del on {ot} not supported */")
 
     def _gen_stmt_MatchStmt(self, node):
         """`match subject: case p1: ... case p2, p3: ... case _: ...`
@@ -18162,6 +18378,8 @@ class GimpleGen:
                 self._gen_for_list(var, it_val, node.body)
             elif it_type == 'MojoStr *':
                 self._gen_for_str(var, it_val, node.body)
+            elif it_type == 'char *':
+                self._gen_for_cstr(var, it_val, node.body)
             elif it_type == 'MojoDict *':
                 self._gen_for_dict(var, it_val, node.body)
             elif it_type == 'MojoSet *':
@@ -18600,6 +18818,62 @@ class GimpleGen:
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         self._emit(f"  {self._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
+        self.loop_stack.append((bb_post, bb_after))
+        for s in body:
+            self.gen_stmt(s)
+        self.loop_stack.pop()
+        self._loop_depth -= 1
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        one = self._new_val('int64_t', "(int64_t)1")
+        st = self._new_val('int64_t', f"{idx_t} + {one}")
+        self._emit(f"  {idx_t} = {st};")
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+
+    def _gen_for_cstr(self, var: str, it_val: str, body: list):
+        """`for c in s:` where `s` is a plain `char *` (this codegen's usual
+        representation for an ordinary Python str local — MojoStr* is a
+        separate, less common wrapped-string type _gen_for_str already
+        handles). Was COMPLETELY UNSUPPORTED: no `it_type == 'char *'`
+        branch existed anywhere in _gen_for_iter's dispatch, so any such
+        loop silently fell through to the generic "unsupported iterable"
+        fallback (mojo_unsupported_iter — the body runs ZERO times, no
+        error). A striking real consequence: mojo_compiler.py's own
+        `_process_nested_tstrings` computes `needs_brace_aware_scan =
+        any(c in ('t','T','f','F') for c in prefix)` — a generator
+        expression over exactly this shape — which therefore ALWAYS
+        evaluated empty/False once self-hosted, so every self-hosted-
+        compiled f/t-string permanently took the "ordinary string" plain-
+        scan fallback instead of the intended brace-aware placeholder
+        path. That fallback still extracts the right CONTENT (found while
+        chasing make bootstrap's verify byte-identity failures: the
+        f-string prefix-doubling bug turned out to be `del`'s own
+        unimplemented-DelStmt gap, unrelated to this one) but skips the
+        placeholder substitution entirely, so every token's `col` after an
+        f/t-string in a self-hosted-compiled dump was computed against the
+        literal's real (longer) length instead of the short placeholder's,
+        permanently diverging from the interpreted stage1 dump's columns.
+        Mirrors _gen_for_str's identical index-loop shape, just over
+        mojo_strlen/_mojo_at_char instead of mojo_str_len/mojo_str_char_at.
+        """
+        self._declare_var(var, 'char')
+        len_t = self._new_val('int64_t', f"mojo_strlen ({it_val})")
+        idx_t = self._new_temp('int64_t')
+        self._emit(f"  {idx_t} = (int64_t)0;")
+
+        bb_cond  = self._new_bb(); bb_body  = self._new_bb()
+        bb_post  = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        cond_t = self._new_val('_Bool', f"{idx_t} < {len_t}")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+
+        self._loop_depth += 1
+        self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
+        self._ptr_helpers_needed.add('char')
+        addr = self._new_val('char *', f"_mojo_at_char ({it_val}, {idx_t})")
+        self._emit(f"  {self._cname(var)} = *{addr};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)

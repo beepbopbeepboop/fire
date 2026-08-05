@@ -232,6 +232,16 @@ stage2: stage2/mojo
 	else \
 	    echo "✗ Stage 2 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 2: stage2/mojo → stage2/ (transitive closure) ==="
+	# Generate the bootstrap .ci LAST, mirroring stage1's identical comment/
+	# ordering: the --dump loop above also writes mojo.ci (single-module,
+	# do_imports=False, from `run_dump $(MOJO_MAIN)`), which would otherwise
+	# clobber this transitive-closure .ci and leave `verify` comparing a full
+	# closure (stage1/mojo.ci) against a single-module skeleton
+	# (stage2/mojo.ci) — a real, permanent mismatch, not a codegen bug: this
+	# step was simply missing from stage2/stage3's targets even though
+	# stage1's has always had it.
+	cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump-full ../$(MOJO_MAIN)
 
 # ── Stage 3: idempotency check (same binary, fresh output dir) ───────────────
 stage3: stage2/mojo stage2
@@ -263,6 +273,9 @@ stage3: stage2/mojo stage2
 	else \
 	    echo "✗ Stage 3 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 3: stage2/mojo → stage3/ (transitive closure) ==="
+	# See stage2's identical step: same missing-step bug, same fix.
+	cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump-full ../$(MOJO_MAIN)
 
 # ── verify: all three stages identical for every generated file ───────────────
 verify: stage3

@@ -3505,6 +3505,19 @@ class Interpreter:
                 obj = self.eval_expr(target.obj)
                 idx = self.eval_expr(target.index)
                 del obj[idx]
+            elif self._is_instance(target, 'SliceExpr'):
+                # `del a[b:c]` — a bare single-slice subscript parses as a
+                # SliceExpr with .obj attached directly (mojo_compiler.py's
+                # `_parse_postfix` never wraps that shape in a SubscriptExpr;
+                # see gimple_codegen.py's _gen_stmt_DelStmt for the identical
+                # note), so this needs its own branch alongside SubscriptExpr
+                # above, not a variant of it. Mirrors eval_SliceExpr's own
+                # start/stop/step evaluation.
+                obj = self.eval_expr(target.obj)
+                start = self.eval_expr(target.start) if target.start else None
+                stop = self.eval_expr(target.stop) if target.stop else None
+                step = self.eval_expr(target.step) if target.step else None
+                del obj[start:stop:step]
             else:
                 raise NotImplementedError(f"{self._loc(target)}Cannot delete {type(target).__name__}")
         return None
