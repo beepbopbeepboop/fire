@@ -12889,6 +12889,25 @@ class GimpleGen:
         }
         if type_name in _SCALAR_TYPE_MATCH:
             if obj_type in _SCALAR_TYPE_MATCH[type_name]:
+                if obj_type.endswith(' *'):
+                    # A NULL pointer here means None (e.g. the "default"
+                    # branch of a dynamic getattr(obj, attr, None) on a
+                    # struct that doesn't have this field — see the A5
+                    # getattr-with-default lowering above, which types the
+                    # result by the FIELD NAME across all structs, not by
+                    # this particular object). isinstance(None, list) must
+                    # be False even though the static C type matches —
+                    # checking the static type alone made every such
+                    # "attribute absent" NULL look like a real empty-or-full
+                    # list, which then got pushed onto a caller's worklist
+                    # and iterated as if non-null (real bug: unbounded
+                    # memory growth / wild-pointer crash self-hosting a
+                    # large file, root-caused via _register_imported_structs
+                    # __collect's `getattr(st, attr, None)` +
+                    # `isinstance(sub, list)` walk).
+                    iv = self._new_val('int64_t', f'(int64_t){obj_val}')
+                    zero = self._new_val('int64_t', '(int64_t)0')
+                    return self._new_val('_Bool', f'{iv} != {zero}')
                 return self._new_val('_Bool', '(_Bool)1')
             if obj_type not in ('int64_t', 'void *', ''):
                 return self._new_val('_Bool', '(_Bool)0')
@@ -29693,22 +29712,59 @@ class GimpleGen:
         declaration when a CONCRETE prototype for the same function is also present
         (e.g. an elaborated instantiation forward-declares `get_defined_int (void)`
         while the import-decl pass emits `(...)`, which GCC reports as conflicting
-        types). The concrete prototype wins."""
+        types). The concrete prototype wins.
+
+        Deliberately plain string scanning (`.split`/`.find`/`.rfind`), NOT
+        regex `.finditer()`/`.findall()` — this codegen has no lowering for
+        either shape of for-loop (finditer needs a compile-time-known
+        module-level pattern var; findall has no lowering at all, confirmed
+        directly: `for w in pat.findall(s): ...` emits `mojo_unsupported_iter`
+        even outside self-hosting), so a loop here over either would silently
+        run zero times once this file compiles itself."""
         concrete = set()
-        _decl = re.compile(r'\bextern\s+[^;()]+?\b(\w+)\s*\(([^)]*)\)\s*;')
         for p in parts:
-            for mm in _decl.finditer(p):
-                if mm.group(2).strip() not in ('...', ''):
-                    concrete.add(mm.group(1))
+            for stmt in p.split(';'):
+                if 'extern' not in stmt:
+                    continue
+                paren = stmt.find('(')
+                if paren < 0:
+                    continue
+                close = stmt.rfind(')')
+                if close < paren:
+                    continue
+                params = stmt[paren + 1:close].strip()
+                head_toks = stmt[:paren].strip().split()
+                if not head_toks:
+                    continue
+                name = head_toks[-1].lstrip('*')
+                if params not in ('...', ''):
+                    concrete.add(name)
         if not concrete:
             return '\n'.join(parts)
-        _vardecl = re.compile(r'\bextern\s+[^;()]+?\b(\w+)\s*\(\s*\.\.\.\s*\)\s*;')
         kept = []
         for p in parts:
-            mm = _vardecl.search(p)
-            if mm and mm.group(1) in concrete:
-                continue  # concrete prototype elsewhere supersedes this variadic
-            kept.append(p)
+            drop = False
+            for stmt in p.split(';'):
+                if 'extern' not in stmt:
+                    continue
+                paren = stmt.find('(')
+                if paren < 0:
+                    continue
+                close = stmt.rfind(')')
+                if close < paren:
+                    continue
+                params = stmt[paren + 1:close].strip()
+                if params != '...':
+                    continue
+                head_toks = stmt[:paren].strip().split()
+                if not head_toks:
+                    continue
+                name = head_toks[-1].lstrip('*')
+                if name in concrete:
+                    drop = True
+                    break
+            if not drop:
+                kept.append(p)
         return '\n'.join(kept)
 
 
