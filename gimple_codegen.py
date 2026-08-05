@@ -3583,6 +3583,22 @@ class GimpleGen:
         # repr() must still render them as "True"/"False" like real Python
         # bools instead of falling into the plain-int branch and printing 0/1.
         self.struct_bool_fields: dict[str, set[str]] = {}
+        # struct name -> field names declared `object = None` (or bare
+        # `object`, no default_factory) in the real dataclass but hardcoded
+        # here to a concrete 'MojoList *'/'MojoDict *' ctype anyway (e.g.
+        # IfStmt.else_body, ImportStmt.extra, SubscriptExpr.attrs) — unlike a
+        # `: list = field(default_factory=list)` field (ALWAYS a real,
+        # possibly-empty list, never a genuine Python None), these can
+        # legitimately BE None. A NULL pointer is how that None is
+        # represented at the C level, but the generic 'MojoList *' repr
+        # branch (mirroring _mojo_repr_list's NULL-safe "[]"/"()"  for the
+        # boxed/ambiguous-type dispatch path, where NULL always means "empty
+        # container") can't tell that apart from a real empty list — so
+        # `else_body=None` (no else clause) was dumping as `else_body=[]`,
+        # a real, verify-visible divergence from Python's own dataclass
+        # repr(). Fields registered here get a NULL check printing "None"
+        # instead. See gen_module's per-struct hardcoded registration.
+        self.struct_nullable_container_fields: dict[str, set[str]] = {}
         # struct name -> id() of the first StructDef AST node whose fields were
         # merged into struct_field_types[name] — see gen_module's struct-field
         # scan. Must be shared across every temp_gen sub-compile the same way
@@ -5839,10 +5855,41 @@ class GimpleGen:
             is_subscripted = False  # Track if parameter is used with [...]
             is_string_method = False  # Track if param.<str-only-method>(...) is called
             is_iterated = False  # Track if parameter is used as for-loop iterable
+            # Track if a single-character subscript of the param (`param[i]`,
+            # directly or via a local it was assigned to, e.g. `c = param[i]`)
+            # is ever compared against a string literal (`c == '"'`) — a
+            # single char of a real Python list would be some non-string
+            # element, never legitimately `==`-compared to a quote-character
+            # string literal, so this is as unambiguous a "param is a string"
+            # signal as a str-only method call, just one indirection removed.
+            # Found chasing gimple_codegen's `_lower_slice`/`_decode_str_
+            # literal_text` quote-corruption bug back to its real source:
+            # mojo_compiler.py's own `_strip_string_prefix_and_quotes(raw)`
+            # does `prefix, rest = raw[:n], raw[n:]` (rest is a SLICE of the
+            # param, one step removed) then `first = rest[0]; ... if first ==
+            # '"' or first == "'": ...` (first is a subscript of THAT, two
+            # steps removed) — no str-only method call anywhere, so `raw`
+            # (only ever subscripted/sliced, directly or transitively) got
+            # inferred as MojoList*, and the caller's real char* argument got
+            # force-cast to a MojoList* pointer, corrupting every
+            # self-hosted string literal whose own content happens to
+            # start/end with a quote. Needs to trace through that whole
+            # subscript-of-a-slice-of-the-param chain, not just a single hop.
+            is_char_compared = False
+            # Every local known to hold a value sliced/subscripted (directly
+            # or transitively) FROM the param — `derived_from_param` answers
+            # "does this trace back to the param at all", `single_char_vars`
+            # (a subset) answers "and is this specific derivation a single
+            # CHARACTER (non-slice subscript), not another substring".
+            derived_from_param: set = {param_name}
+            single_char_vars: set = set()
+
+            def _is_single_char_literal(e):
+                return isinstance(e, StringLiteral) and len(e.value) <= 3  # quotes + <=1 char
 
             def scan_expr(expr):
                 """Recursively scan an expression."""
-                nonlocal is_subscripted, is_string_method
+                nonlocal is_subscripted, is_string_method, is_char_compared
                 if isinstance(expr, SubscriptExpr):
                     # Check if the base (after unwrapping nested subscripts) is the parameter
                     base = expr.obj
@@ -5864,6 +5911,15 @@ class GimpleGen:
                         accessed_fields.add(expr.member)
                     scan_expr(expr.obj)
                 elif isinstance(expr, BinaryOp):
+                    if expr.op == '==':
+                        for a, b in ((expr.left, expr.right), (expr.right, expr.left)):
+                            is_direct = (isinstance(a, SubscriptExpr)
+                                         and not isinstance(a.index, SliceExpr)
+                                         and isinstance(a.obj, IdentExpr)
+                                         and a.obj.name in derived_from_param)
+                            is_indirect = isinstance(a, IdentExpr) and a.name in single_char_vars
+                            if (is_direct or is_indirect) and _is_single_char_literal(b):
+                                is_char_compared = True
                     scan_expr(expr.left)
                     scan_expr(expr.right)
                 elif isinstance(expr, CompareChain):
@@ -5923,8 +5979,37 @@ class GimpleGen:
             def scan_nodes(node_list):
                 """Recursively scan a list of statements."""
                 nonlocal is_iterated
+                def _track_derivation(target, value):
+                    """`x = <subscript/slice of something already known to
+                    derive from param>` — propagate that knowledge to `x` too,
+                    so a chain like `rest = raw[n:]` then `first = rest[0]`
+                    (two hops from the param) is still recognized. Single-index
+                    subscripts additionally join single_char_vars (a single
+                    CHARACTER, eligible for the `== '"'`-style check);  slices
+                    only join derived_from_param (still a string/substring,
+                    not a lone char)."""
+                    if not isinstance(target, IdentExpr):
+                        return
+                    if (isinstance(value, SubscriptExpr)
+                            and not isinstance(value.index, SliceExpr)
+                            and isinstance(value.obj, IdentExpr)
+                            and value.obj.name in derived_from_param):
+                        single_char_vars.add(target.name)
+                        derived_from_param.add(target.name)
+                    elif (isinstance(value, SliceExpr)
+                            and isinstance(value.obj, IdentExpr)
+                            and value.obj.name in derived_from_param):
+                        derived_from_param.add(target.name)
                 for node in node_list:
                     if isinstance(node, AssignStmt):
+                        if isinstance(node.target, TupleExpr) and isinstance(node.value, TupleExpr):
+                            # `prefix, rest = raw[:n], raw[n:]` — pair up each
+                            # target/value slot, same as mojo_compiler.py's own
+                            # `_strip_string_prefix_and_quotes`.
+                            for t_el, v_el in zip(node.target.elements, node.value.elements):
+                                _track_derivation(t_el, v_el)
+                        else:
+                            _track_derivation(node.target, node.value)
                         scan_expr(node.target)
                         scan_expr(node.value)
                     elif isinstance(node, ExprStmt):
@@ -5978,13 +6063,14 @@ class GimpleGen:
                             scan_nodes(node.finally_body)
 
             scan_nodes(nodes)
-            return accessed_fields, function_calls, is_subscripted, is_string_method, is_iterated
+            return (accessed_fields, function_calls, is_subscripted, is_string_method,
+                    is_iterated, is_char_compared)
 
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                fields_accessed, function_calls, is_subscripted, is_string_method, is_iterated = \
-                    analyze_param_usage(func.body, pname)
+                (fields_accessed, function_calls, is_subscripted, is_string_method,
+                 is_iterated, is_char_compared) = analyze_param_usage(func.body, pname)
 
                 # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
                 is_polymorphic = any(
@@ -6001,7 +6087,7 @@ class GimpleGen:
                 # char*, not MojoList*. Check subscript/iteration FIRST to
                 # override generic function-call inference like len() either way.
                 if is_subscripted or is_iterated:
-                    inferred[pname] = 'char *' if is_string_method else 'MojoList *'
+                    inferred[pname] = 'char *' if (is_string_method or is_char_compared) else 'MojoList *'
 
                 # If not subscripted, try to infer from function calls
                 elif function_calls:
@@ -8811,14 +8897,33 @@ class GimpleGen:
                     # in _cast_for_list ('in' lowering). Found via
                     # mojo_compiler.py's own `c == "\\"` (c from `s[i]`).
                     # BUT: when the OTHER operand is a string literal (detected
-                    # by the caller via _is_str_lit), the int64_t MUST be a
-                    # char*-boxed pointer, not a character code — use direct
-                    # pointer cast instead of the character-to-string path.
-                    if not is_other_str_lit or typ == 'char':
-                        actual = self._actual_types.get(var)
-                        if typ == 'char' or (typ in ('int', 'int64_t') and not (actual and actual.endswith(' *'))):
-                            cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
-                            return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
+                    # by the caller via _is_str_lit), an UNTRACKED int64_t is
+                    # assumed to be a char*-boxed pointer, not a character
+                    # code — use direct pointer cast instead of the
+                    # character-to-string path (BUG-2026-048). That's only a
+                    # fallback guess for when nothing is actually known,
+                    # though — if _actual_types explicitly tracked this
+                    # variable as 'char' (see _track_pointer_actual_type),
+                    # that's direct evidence, not a guess, and must win
+                    # regardless of is_other_str_lit: mojo_compiler.py's own
+                    # `first = rest[0]; ... if first == '"' or first == "'":`
+                    # in _strip_string_prefix_and_quotes has `first` declared
+                    # int64_t (widened joining another assignment site) but
+                    # explicitly _actual_types-tracked as 'char' — the old
+                    # blanket "is_other_str_lit means pointer" skipped that
+                    # tracked evidence entirely, reinterpreting the quote
+                    # character's byte value as a garbage pointer and calling
+                    # mojo_cstr_cmp on it — corrupting every self-hosted
+                    # string literal whose content starts/ends with a quote
+                    # (found chasing make bootstrap's verify byte-identity
+                    # failures back to their real, non-cosmetic root cause).
+                    actual = self._actual_types.get(var)
+                    is_tracked_char = (actual == 'char')
+                    if typ == 'char' or is_tracked_char or (
+                            not is_other_str_lit and typ in ('int', 'int64_t')
+                            and not (actual and actual.endswith(' *'))):
+                        cv = var if typ == 'char' else self._new_val('char', f'(char){var}')
+                        return self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                     ip = self._new_val('int64_t', f'(int64_t){var}')
                     cp = self._new_val('char *', f'(char *){ip}')
                     return cp
@@ -24980,6 +25085,8 @@ class GimpleGen:
         self.struct_field_types['AssignStmt'] = {
             'target': 'int64_t',
             'value': 'int64_t',
+            'line': 'int64_t',
+            'col': 'int64_t',
             'type_ann': 'int64_t',
         }
         self.struct_field_types['AugAssignStmt'] = {
@@ -25086,7 +25193,7 @@ class GimpleGen:
         # `0` in `x > 0` lowering to a node handle instead of int 0, crashing
         # _lower_binary_tail's mojo_str_join). Register the full field sets.
         self.struct_field_types['IntLiteral'] = {
-            'value': 'int64_t', 'raw': 'char *',
+            'value': 'int64_t', 'line': 'int64_t', 'col': 'int64_t', 'raw': 'char *',
         }
         self.struct_field_types['FloatLiteral'] = {
             'value': 'double',
@@ -25144,7 +25251,8 @@ class GimpleGen:
         self.struct_field_types['StructDef'] = {
             'name': 'char *', 'fields': 'MojoList *', 'methods': 'MojoList *',
             'decorators': 'MojoList *', 'comptime_aliases': 'MojoDict *',
-            'bases': 'MojoList *', '_fieldwise_ctor_synthesized': '_Bool',
+            'bases': 'MojoList *', 'line': 'int64_t', 'col': 'int64_t',
+            '_fieldwise_ctor_synthesized': '_Bool',
         }
         self.struct_field_types['TraitDef'] = {
             'name': 'char *', 'methods': 'MojoList *', 'decorators': 'MojoList *',
@@ -25177,6 +25285,18 @@ class GimpleGen:
         # the gated block above — keep them here too since this block is the one
         # that runs for non-self-host user files.
         self.struct_boxed_fields['SubscriptExpr'] = {'obj', 'index'}
+
+        # Fields declared `object = None` (or bare `object`, no
+        # default_factory) in the real dataclass but hardcoded above to a
+        # concrete 'MojoList *' ctype — see struct_nullable_container_fields'
+        # own doc comment for why these need a NULL check in repr().
+        self.struct_nullable_container_fields['SubscriptExpr'] = {'attrs'}
+        self.struct_nullable_container_fields['IfStmt'] = {'else_body'}
+        self.struct_nullable_container_fields['WhileStmt'] = {'else_body'}
+        self.struct_nullable_container_fields['ForStmt'] = {'else_body'}
+        self.struct_nullable_container_fields['TryStmt'] = {'else_body', 'finally_body'}
+        self.struct_nullable_container_fields['ComptimeIfStmt'] = {'else_body'}
+        self.struct_nullable_container_fields['ImportStmt'] = {'extra'}
 
         # Snapshot of every struct name whose field list is already known at
         # this point — either a real stdlib type seeded just above (Span) or,
@@ -29131,6 +29251,7 @@ class GimpleGen:
                     continue
                 boxed = self.struct_boxed_fields.get(sn, set())
                 bool_fields = self.struct_bool_fields.get(sn, set())
+                nullable_containers = self.struct_nullable_container_fields.get(sn, set())
                 part_exprs = []
                 for fname, ftype in fields.items():
                     if fname == '__mojo_type_id':
@@ -29168,11 +29289,18 @@ class GimpleGen:
                         # _mojo_repr_list mis-reprs (or crashes on) a list of
                         # doubles. Unknown element type keeps the generic repr.
                         if self._field_elem_types.get(sn, {}).get(fname) == 'double':
-                            val_expr = f'mojo_repr_list_doubles({fref})'
+                            list_repr = f'mojo_repr_list_doubles({fref})'
                         else:
-                            val_expr = f'_mojo_repr_list({fref})'
+                            list_repr = f'_mojo_repr_list({fref})'
+                        if fname in nullable_containers:
+                            val_expr = f'({fref} ? {list_repr} : "None")'
+                        else:
+                            val_expr = list_repr
                     elif ftype == 'MojoDict *':
-                        val_expr = f'_mojo_repr_dict({fref})'
+                        if fname in nullable_containers:
+                            val_expr = f'({fref} ? _mojo_repr_dict({fref}) : "None")'
+                        else:
+                            val_expr = f'_mojo_repr_dict({fref})'
                     elif ftype in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
                                    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
                         val_expr = f'mojo_repr_int((int64_t){fref})'
