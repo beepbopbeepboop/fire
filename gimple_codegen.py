@@ -3648,6 +3648,15 @@ class GimpleGen:
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
         self._struct_init_defaults: dict[str, dict] = {}  # struct -> __init__ param name -> default expr AST node (excl self)
         self._func_param_defaults: dict[str, list] = {}  # mangled free-fn name -> [(param_name, default_ast), ...]
+        # free-fn name (both mangled and plain) -> index of its `**kwargs`
+        # parameter in the C signature. A `**kwargs` param is declared a real
+        # `MojoDict *` (see gen_func's param loop), so a call site passing
+        # LITERAL keyword arguments has to PACK them into a dict. Without this
+        # the padding loop in _lower_named_call just popped the first keyword
+        # argument's lowered VALUE into that slot and cast it — emitting
+        # `_t32 = (MojoDict *)_t31;` for `h(1, x=7, y=8)`, i.e. the integer 7
+        # reinterpreted as a dict pointer, which segfaults on first use.
+        self._func_kwargs_slot: dict[str, int] = {}
         # (struct_name, method_name) -> list of candidate overloads, each a dict:
         #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
         # Populated from the CURRENT file's own AST only (same-file resolution);
@@ -4986,6 +4995,7 @@ class GimpleGen:
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
+        'mojo_replace_argv':   ('void',    ['MojoList *']),
         'mojo_is_registered_list': ('int',     ['int64_t']),
         'mojo_is_registered_dict': ('int',     ['int64_t']),
         'mojo_set_new':          ('MojoSet *', []),
@@ -8618,6 +8628,22 @@ class GimpleGen:
             t = self._new_val('MojoList *', f"mojo_list_concat ({lv}, {rcast})")
             if lv in self._elem_types:
                 self._elem_types[t] = self._elem_types[lv]
+            return 'MojoList *', t
+
+        # <opaque int64_t> + MojoList * → mojo_list_concat. The MIRROR of the
+        # two cases above, for when it's the LEFT side whose type was lost:
+        # `path + [fname]` in ast_rewriter.py, where `path` is an untyped
+        # (boxed int64_t) parameter and the right side is a list literal.
+        # Adding a list to an integer is never meaningful arithmetic, so a
+        # MojoList* on either side makes this unambiguously a concat — without
+        # it we emitted a literal `path + _t38`, i.e. pointer arithmetic on a
+        # boxed handle, producing a garbage list that faulted later in
+        # mojo_str_join (A5-BUG.md section 1's bootstrap failure).
+        if op == '+' and rt == 'MojoList *' and lt in ('int', 'int64_t', 'void *'):
+            lcast = self._new_val('MojoList *', f"(MojoList *){lv}")
+            t = self._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rv})")
+            if rv in self._elem_types:
+                self._elem_types[t] = self._elem_types[rv]
             return 'MojoList *', t
 
         # MojoStr + MojoStr → mojo_str_concat
@@ -13561,7 +13587,18 @@ class GimpleGen:
             # called as `greet()` must pad with "world", not NULL/0.
             _dflts = self._func_param_defaults.get(fname) or self._func_param_defaults.get(fname_raw) or []
             _dflt_by_pos = {pn: _dv for pn, _dv in _dflts}
+            # `**kwargs` slot: pack the LITERAL keyword arguments into a real
+            # MojoDict (see _func_kwargs_slot). `f(**d)` forwarding is a
+            # different shape — the parser flattens the spread into a single
+            # positional arg, so it never reaches this padding loop.
+            _kw_slot = self._func_kwargs_slot.get(fname)
+            if _kw_slot is None:
+                _kw_slot = self._func_kwargs_slot.get(fname_raw, -1)
             while len(arg_pairs) < len(expected_params):
+                if _kw_slot >= 0 and len(arg_pairs) == _kw_slot:
+                    arg_pairs.append(('MojoDict *', self._pack_kwargs_dict(kwarg_dict)))
+                    kwarg_values = []
+                    continue
                 if kwarg_values:
                     arg_pairs.append(kwarg_values.pop(0))
                     continue
@@ -13794,6 +13831,37 @@ class GimpleGen:
             self._emit(f"  mojo_list_append_int ({lst}, {aval});")
         return ('MojoList *', lst)
 
+    def _pack_kwargs_dict(self, kwarg_pairs) -> str:
+        """Build a real MojoDict from a call site's LITERAL keyword arguments,
+        for a callee whose `**kwargs` parameter is a concrete `MojoDict *`
+        (see _func_kwargs_slot / gen_func's param loop).
+
+        `kwarg_pairs` maps each keyword name to its ALREADY-LOWERED
+        (ctype, value) pair — re-lowering here would emit the argument
+        expression's side effects a second time.
+
+        String values go through mojo_dict_set_str so the dict's own value
+        type is right (mojo_dict_set_int would store the char* as an integer
+        and later read it back as one). Everything else — ints, doubles,
+        pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+        matching how `d[k] = v` already lowers a subscript store."""
+        d = self._new_val('MojoDict *', 'mojo_dict_new ()')
+        _val_ty = ''
+        for kname in (kwarg_pairs or {}):
+            kt, kv = kwarg_pairs[kname]
+            _val_ty = kt if not _val_ty or _val_ty == kt else 'int64_t'
+            if kt == 'char *':
+                self._emit_call('void', '', 'mojo_dict_set_str',
+                                [('MojoDict *', d), ('char *', f'"{_c_escape(kname)}"'),
+                                 ('char *', kv)])
+            else:
+                self._emit_call('void', '', 'mojo_dict_set_int',
+                                [('MojoDict *', d), ('char *', f'"{_c_escape(kname)}"'),
+                                 (kt, kv)])
+        if _val_ty:
+            self._dict_val_types[d] = _val_ty
+        return d
+
     def _build_call_args_for_candidate(self, chosen: dict, args: list, kwargs: list | None,
                                        defaults: dict | None = None) -> list:
         """Build the C arg-value list (self excluded) for a resolved struct
@@ -13814,12 +13882,32 @@ class GimpleGen:
                 out.append(self.lower_expr(kw[pname]) if pname in kw else ('int', '0'))
             return out
         out = [self.lower_expr(a) for a in args]
+        # A `**kwargs` parameter is a concrete `MojoDict *` (see
+        # _gen_struct_method's param loop), so literal keyword arguments at
+        # the call site must be PACKED into a real dict. Otherwise the
+        # zero-padding below filled that slot with `(MojoDict *)0` and every
+        # `**kwargs` field read a null dict — the compiled-path half of the
+        # `for fname in pat.fields:` failure (A5-BUG.md section 1).
+        _kw_idx = -1
+        for _i, _pn in enumerate(chosen['param_names']):
+            if _pn.startswith('**'):
+                _kw_idx = _i
+                break
         for idx, pname in enumerate(chosen['param_names']):
             if pname not in kw:
                 continue
             while len(out) <= idx:
                 out.append(('int', '0'))
             out[idx] = self.lower_expr(kw[pname])
+        if _kw_idx >= 0:
+            _named = set(chosen['param_names'])
+            _rest = {}
+            for _kn in kw:
+                if _kn not in _named:
+                    _rest[_kn] = self.lower_expr(kw[_kn])
+            while len(out) <= _kw_idx:
+                out.append(('int', '0'))
+            out[_kw_idx] = ('MojoDict *', self._pack_kwargs_dict(_rest))
         while len(out) < chosen['max_arity']:
             _dflt = (defaults or {}).get(chosen['param_names'][len(out)]) if len(out) < len(chosen['param_names']) else None
             if isinstance(_dflt, BoolLiteral):
@@ -13900,6 +13988,27 @@ class GimpleGen:
                     while len(arg_pairs) <= pos:
                         arg_pairs.append(('int', '0'))
                     arg_pairs[pos] = self.lower_expr(kw[pname])
+                # `**kwargs`: pack every keyword that isn't a named parameter
+                # into a real MojoDict (see _pack_kwargs_dict). Without this
+                # the padding below left `(MojoDict *)0` in that slot, so
+                # `def __init__(self, t, **fields): self.fields = fields`
+                # stored a null dict — the compiled-path half of
+                # ast_rewriter's `for fname in pat.fields:` failure.
+                _kw_i = -1
+                for _i, _pn in enumerate(init_pnames):
+                    if _pn.startswith('**'):
+                        _kw_i = _i
+                        break
+                if _kw_i >= 0:
+                    _named = set(init_pnames)
+                    _rest = {}
+                    for _kn in kw:
+                        if _kn not in _named:
+                            _rest[_kn] = self.lower_expr(kw[_kn])
+                    _pos = _kw_i + 1  # +1 for self slot
+                    while len(arg_pairs) <= _pos:
+                        arg_pairs.append(('int', '0'))
+                    arg_pairs[_pos] = ('MojoDict *', self._pack_kwargs_dict(_rest))
             elif kwargs:
                 for _kn, kexpr in kwargs:
                     arg_pairs.append(self.lower_expr(kexpr))
@@ -14114,7 +14223,17 @@ class GimpleGen:
                 addr = self._new_val('char *', f"_mojo_at_char ({cp}, {idx64})")
                 t = self._new_val('char', f"*{addr}")
                 return 'char', t
-            if actual_type == 'MojoDict *':
+            # A STRING index proves the container is a dict even when its own
+            # type is opaque: no list is indexable by a string. `pat.fields`
+            # in ast_rewriter.py is exactly this — the A5 boxed-member read
+            # can't type it (Node.fields is a boxed int64_t while
+            # StructDef.fields is a MojoList*, so _known_field_type is
+            # ambiguous), and `pat.fields[fname]` with `fname` a dict key then
+            # fell to the MojoList* fallback below, reinterpreting the dict
+            # header as a list and faulting inside mojo_list_get_int.
+            _idx_is_str = (idx_type in ('char *', 'MojoStr *')
+                           or self._get_actual_type(idx_type, iv) == 'char *')
+            if actual_type == 'MojoDict *' or (_idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
                 # Dict subscript: int64_t → MojoDict *
                 dp = self._new_temp('MojoDict *')
                 ip = self._new_temp('int64_t')
@@ -15637,6 +15756,22 @@ class GimpleGen:
             self._track_pointer_actual_type(tname, dst, v, vtype)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
+            # `sys.argv = [...]` — a whole-list rebind. Reads lower to
+            # mojo_get_argv() (see _lower_MemberExpr's sys/argv case), so the
+            # write needs the matching runtime store or it is silently
+            # dropped: mojo.py's own CLI strips its `--dump`/`--dump-full`
+            # flags exactly this way before `input_file = sys.argv[1]`, and
+            # without this the compiled binary kept the unstripped argv and
+            # used the FLAG as the input filename (bootstrap stage 2/3 wrote
+            # `--dump.ci` instead of `<basename>.ci` for every file).
+            if (isinstance(node.target.obj, IdentExpr)
+                    and node.target.obj.name == 'sys'
+                    and node.target.member == 'argv'):
+                _av = v if vtype == 'MojoList *' else self._new_val(
+                    'MojoList *', f"(MojoList *){v}")
+                self._emit_call('void', '', 'mojo_replace_argv',
+                                [('MojoList *', _av)])
+                return
             # `f.attr = value` where `f` is a free function memoizing a
             # value on itself -- see the `_func_attrs` pre-scan's docstring
             # (gen_module, Phase 1) and `_lower_MemberExpr`'s matching read-
@@ -15881,6 +16016,22 @@ class GimpleGen:
                 dst = self._type_of(tname)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
         elif isinstance(node.target, MemberExpr):
+            # `sys.argv = [...]` — a whole-list rebind. Reads lower to
+            # mojo_get_argv() (see _lower_MemberExpr's sys/argv case), so the
+            # write needs the matching runtime store or it is silently
+            # dropped: mojo.py's own CLI strips its `--dump`/`--dump-full`
+            # flags exactly this way before `input_file = sys.argv[1]`, and
+            # without this the compiled binary kept the unstripped argv and
+            # used the FLAG as the input filename (bootstrap stage 2/3 wrote
+            # `--dump.ci` instead of `<basename>.ci` for every file).
+            if (isinstance(node.target.obj, IdentExpr)
+                    and node.target.obj.name == 'sys'
+                    and node.target.member == 'argv'):
+                _av = v if vtype == 'MojoList *' else self._new_val(
+                    'MojoList *', f"(MojoList *){v}")
+                self._emit_call('void', '', 'mojo_replace_argv',
+                                [('MojoList *', _av)])
+                return
             _dv = self._annotation_dict_val_type(getattr(node, 'type_ann', None))
             if _dv is not None:
                 self._dict_val_types[node.target.member] = _dv
@@ -25349,6 +25500,30 @@ class GimpleGen:
                     _mangled = self._func_csym(s.name)
                     self._func_param_defaults[_mangled] = [
                         (pn, _dv) for pn, _dv in _dflts.items()]
+            # Record the `**kwargs` slot so a call site with literal keyword
+            # arguments can pack them into a real dict — see _func_kwargs_slot.
+            # The C-signature index is the DECLARATION index: `*args` collapses
+            # to exactly one MojoList* slot when a `**kwargs` follows it (see
+            # _param_ctypes_for's has_kw pass-through), so positions line up.
+            if isinstance(s, FunctionDef):
+                _kw_i = -1
+                _ci = 0
+                _seen_star = False
+                for _pn, _pt in (s.params or []):
+                    if _pn.startswith('**'):
+                        _kw_i = _ci
+                        break
+                    if _pn.startswith('*'):
+                        if _seen_star:
+                            continue
+                        _seen_star = True
+                    _ci += 1
+                if _kw_i >= 0:
+                    self._func_kwargs_slot[s.name] = _kw_i
+                    try:
+                        self._func_kwargs_slot[self._func_csym(s.name)] = _kw_i
+                    except Exception:
+                        pass
             # A genuine user free function (FunctionDef node, not a libc extern):
             # eligible for overload-mangling its C symbol by parameter types.
             if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
@@ -25447,9 +25622,19 @@ class GimpleGen:
             if _is_foreign_main(s):
                 continue
             if isinstance(s, FunctionDef) and s.return_type is None:
-                # Seed param types so _quick_type works for param names
+                # Seed param types so _quick_type works for param names.
+                # `*args`/`**kwargs` are seeded under their BARE name (the
+                # body refers to `kw`, never `**kw`) and with the concrete
+                # container type gen_func gives them — otherwise `return kw`
+                # inferred the int64_t default and the caller read a
+                # MojoDict * back as a MojoList *.
                 for pname, ptype in s.params:
-                    self.var_types[pname] = self._resolve_type(ptype)
+                    if pname.startswith('**'):
+                        self.var_types[pname[2:]] = 'MojoDict *'
+                    elif pname.startswith('*'):
+                        self.var_types[pname[1:]] = 'MojoList *'
+                    else:
+                        self.var_types[pname] = self._resolve_type(ptype)
                 inferred = self._infer_return_type(s.body)
                 # Special case: main() should return int, not void
                 if s.name == 'main' and inferred == 'void':
@@ -28633,7 +28818,17 @@ class GimpleGen:
                 f"  void * _vp;\n"
                 f"  int64_t _tag;\n"
                 f"\nbb_2:\n"
-                f"  _vp = malloc (sizeof({sn}));\n"
+                # calloc, not malloc: a field with no initializer must read
+                # back as 0/NULL (this runtime's None), not as whatever the
+                # heap happened to hold. `struct Point: x: Int; y: Int` with
+                # no __init__ (test_struct.mojo) left BOTH fields garbage, and
+                # any pointer-typed field then fed a wild address to the
+                # generic repr/getattr dispatch — a NONDETERMINISTIC segfault
+                # (~25% of runs) that made `make bootstrap`'s stage 3 flaky.
+                # Zeroing is also what every reader here already assumes: the
+                # reflection helpers, _mojo_repr_*, and the `?:` None-guards
+                # all test a field against 0/NULL.
+                f"  _vp = calloc (1, sizeof({sn}));\n"
                 f"  _p = ({sn} *) _vp;\n"
                 f"  _tag = (int64_t){_struct_type_id(sn)};\n"
                 f"  _p->__mojo_type_id = _tag;\n"

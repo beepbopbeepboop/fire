@@ -175,12 +175,31 @@ class MojoFunction:
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
-        # Bind parameters to arguments
-        for i, param in enumerate(self.params):
-            if i < len(args):
-                func_scope.define(param, args[i])
+        # Bind parameters to arguments.
+        #
+        # `*args` / `**kwargs` catch-alls arrive here still carrying their
+        # stars (see _extract_param_names). Everything AFTER a `*` — whether
+        # a named `*rest` or a bare `*` separator — is keyword-only and must
+        # never consume a positional, exactly as in real Python.
+        _pos_i = 0
+        _seen_star = False
+        _var_pos_name = ''
+        _var_kw_name = ''
+        _consumed_kw = []
+        for param in self.params:
+            if param.startswith('**'):
+                _var_kw_name = param[2:]
+                continue
+            if param.startswith('*'):
+                _var_pos_name = param[1:]  # '' for a bare `*` separator
+                _seen_star = True
+                continue
+            if (not _seen_star) and _pos_i < len(args):
+                func_scope.define(param, args[_pos_i])
+                _pos_i += 1
             elif param in kwargs:
                 func_scope.define(param, kwargs[param])
+                _consumed_kw.append(param)
             else:
                 _found = False
                 if _pdl is not None:
@@ -190,6 +209,24 @@ class MojoFunction:
                             _found = True; break
                 if not _found:
                     func_scope.define(param, None)
+        # Leftover positionals -> `*rest`; leftover keywords -> `**kw`. Built
+        # with plain loops rather than a slice/comprehension: this file is
+        # itself self-hosted, and plain loops are what that compiler lowers
+        # reliably (see the MojoGeneratorObject single-return note above for
+        # the same class of concession).
+        if _var_pos_name:
+            _rest = []
+            _ri = _pos_i
+            while _ri < len(args):
+                _rest.append(args[_ri])
+                _ri += 1
+            func_scope.define(_var_pos_name, _rest)
+        if _var_kw_name:
+            _rest_kw = {}
+            for _kk in kwargs:
+                if _kk not in _consumed_kw:
+                    _rest_kw[_kk] = kwargs[_kk]
+            func_scope.define(_var_kw_name, _rest_kw)
 
         if self.is_generator and self.is_async:
             # `async def f(): yield x` — a real async generator. Python's
@@ -3085,7 +3122,15 @@ class Interpreter:
                             params.append(p_str)
                     else:
                         params.append(p_str)
-        return [p.lstrip('*') for p in params]
+        # Stars are DELIBERATELY preserved: `*args` / `**kwargs` are bound
+        # by _invoke, which is the only reader of MojoFunction.params, and
+        # it needs the marker to tell a catch-all from an ordinary
+        # parameter. Stripping here used to leave `_invoke` binding the
+        # literal name (`kwargs` -> None, `args` -> just the first extra
+        # positional), so `def __init__(self, t, **fields): self.fields =
+        # fields` stored None -- the root cause of ast_rewriter.py's
+        # `for fname in pat.fields:` finding nothing (A5-BUG.md section 1).
+        return params
 
     @staticmethod
     def _classify_params(node):

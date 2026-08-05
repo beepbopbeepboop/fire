@@ -100,6 +100,26 @@ MojoList *mojo_get_argv(void) {
     return _mojo_argv_list;
 }
 
+/* `sys.argv = [...]` — a REBIND of the whole list, which real Python programs
+ * genuinely do (mojo.py's own CLI strips its `--dump`/`--dump-full` flags this
+ * way before reading `input_file = sys.argv[1]`). Reads lower to
+ * mojo_get_argv() above; without a matching store the assignment was silently
+ * dropped, so the compiled binary kept seeing the unstripped argv and treated
+ * the flag itself as the input filename -- writing `--dump.ci` instead of
+ * `<basename>.ci` for every bootstrap stage-2/3 dump.
+ *
+ * Takes ownership of `lst` (it is the caller's freshly-built list) but does NOT
+ * free the previous list: elements of the old argv list are commonly still
+ * referenced by the new one (the usual shape is a filtered copy), so freeing it
+ * would leave those strings dangling. The old list is small, bounded by argc,
+ * and leaked at most once per rebind. `_mojo_argc`/`_mojo_argv` deliberately
+ * keep pointing at the real process argv -- they are the C-level view used by
+ * anything that needs the original vector. */
+void mojo_replace_argv(MojoList *lst) {
+    if (!lst) return;
+    _mojo_argv_list = lst;
+}
+
 /* ── Python integration ───────────────────────────────────────────────────
  * Print via Python's print() function using the C API.                    */
 #if USE_PYTHON

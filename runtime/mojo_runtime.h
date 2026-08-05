@@ -478,6 +478,7 @@ int int_items(int obj);
 /* Command-line arguments */
 void mojo_set_argv(int argc, const char **argv);
 MojoList *mojo_get_argv(void);
+void mojo_replace_argv(MojoList *lst);
 
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
