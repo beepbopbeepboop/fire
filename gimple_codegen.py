@@ -3536,6 +3536,14 @@ class GimpleGen:
         # here with a literal container gives _collect_self_assigns the real
         # C type AND guarantees the field is valid from construction.
         self._comptime_vals: dict = {}
+        # `comptime NAME = [T(...), T(...), ...]` — the raw ListExpr AST,
+        # recorded regardless of whether _eval_const can fold it (it can't:
+        # a Tuple(...) constructor call isn't a foldable scalar). Lets
+        # `for a, b in materialize[NAME]():` (real, in stdlib's own
+        # test_atof.mojo) be lowered by UNROLLING over the literal elements
+        # at compile time instead of needing a real runtime value for NAME —
+        # see _gen_for_iter's materialize[...] special case.
+        self._comptime_list_asts: dict = {}
         self._cb_statics: dict = {}
         self._cpp_reraise_stack: list = []
         self._class_attrs: dict = {}
@@ -11521,6 +11529,52 @@ class GimpleGen:
             return str(-node.operand.value)
         return ''
 
+    def _static_generic_return_ctype(self, func_name: str) -> str | None:
+        """Best-effort static return type for a generic free function this
+        codegen could not fully elaborate (see the call site's docstring for
+        why: implicit/inferred bracket params like `mut`/`origin` this
+        elaborator has no lifetime model for). Reads ONLY the function's own
+        `-> ReturnType:` annotation text from its defining module's source —
+        no monomorphization, no method extraction, just enough to tell an
+        opaque stub apart from a real container so a later `for x in
+        <this call>:` doesn't take the boxed dict/list runtime-dispatch path
+        (see _gen_for_iter) and declare the loop variable `char *` no matter
+        what the loop body actually does with it."""
+        src_path = self._imported_generics.get(func_name)
+        if not src_path:
+            return None
+        try:
+            text = open(src_path).read()
+        except OSError:
+            return None
+        m = re.search(rf'\b(?:fn|def)\s+{re.escape(func_name)}\s*\[', text)
+        if not m:
+            return None
+        # Scan forward tracking bracket/paren depth from the opening `[` of
+        # the comptime param list, through the `(...)` value param list, to
+        # find the return annotation right after the value params' closing
+        # `)` — bracket-aware because a real signature nests brackets inside
+        # brackets (`origin: Origin[mut=mut]`).
+        i = m.end() - 1
+        depth = 0
+        n = len(text)
+        while i < n:
+            c = text[i]
+            if c in '[(':
+                depth += 1
+            elif c in '])':
+                depth -= 1
+                if depth == 0 and c == ')':
+                    break
+            i += 1
+        else:
+            return None
+        rm = re.match(r'\s*(?:raises\s*)?->\s*([^:\n]+):', text[i + 1:i + 300])
+        if not rm:
+            return None
+        ctype = _mojo_type(rm.group(1).strip())
+        return ctype if ctype in ('MojoList *', 'MojoDict *', 'MojoSet *', 'Span *') else None
+
     def _elaborate_generic_call(self, node: CallExpr):
         """Elaborate a call to an imported generic into a concrete CAS-cached
         instantiation. Handles both the explicit form `Generic[TypeArgs](args)`
@@ -12433,6 +12487,35 @@ class GimpleGen:
                     return self._lower_bound_method_call_value(_callee_v, node)
                 if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                     return self._lower_fnptr_call_value(_callee_t, _callee_v, node)
+            # `SomeGeneric[ExplicitArg](args)` where SomeGeneric ALSO has
+            # implicit/inferred bracket params this elaborator can't bind
+            # (e.g. std.python.numpy.from_numpy_array[mut, //, dtype,
+            # origin] — only `dtype` is ever passed explicitly; `mut`/
+            # `origin` are inferred from the argument's own lifetime, which
+            # this codegen has no model for) never reaches
+            # _elaborate_generic_call's success path and falls all the way
+            # here. Stubbing to a bare int64_t 0 (below) is fine on its
+            # own, but a caller doing `for x in from_numpy_array(...):`
+            # then hits _gen_for_iter's boxed-dict/list runtime-dispatch
+            # fallback (the ONLY thing an opaque int64_t can mean there),
+            # which unconditionally declares the loop var `char *` (the
+            # dict-key type) — a hard C type error once the loop body uses
+            # it as anything else (`total: Float64 ... total += value`,
+            # real, in stdlib's test_numpy.mojo). Reading just the callee's
+            # OWN `-> ReturnType:` annotation and resolving its outer
+            # container shape (Span/List/Dict/Set) lets the stub return a
+            # well-typed NULL of the right pointer kind instead — the for
+            # loop then correctly takes the "no iterator protocol" path
+            # and drops the loop body (still functionally a stub, but one
+            # that compiles) rather than colliding types.
+            if isinstance(node.func, SubscriptExpr) and isinstance(node.func.obj, IdentExpr):
+                _static_ct = self._static_generic_return_ctype(node.func.obj.name)
+                if _static_ct is not None:
+                    for a in node.args: self.lower_expr(a)
+                    t = self._new_val(_static_ct, f'({_static_ct})0')
+                    _debug_note('un-elaboratable generic call statically-typed stub',
+                                (node.func.obj.name, _static_ct))
+                    return _static_ct, t
             _debug_note('indirect call stubbed', type(node.func).__name__)
             t = self._new_temp('int64_t')
             self._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -17400,6 +17483,8 @@ class GimpleGen:
         val = self._eval_const(node.value)
         if val is not None:
             self._comptime_vals[node.target] = val
+        if isinstance(node.value, ListExpr):
+            self._comptime_list_asts[node.target] = node.value
         return
 
     def _gen_stmt_GlobalStmt(self, node):
@@ -17853,6 +17938,49 @@ class GimpleGen:
                 del self.body_lines[body_mark:]
                 del self.decls[decls_mark:]
                 _debug_note('regex finditer lowering failed, falling back', e)
+
+        # `for a, b in materialize[LIST_CONST]():` — `materialize[T,//,value:T]
+        # (out result: T)` (std.builtin.value) just hands back its bracket
+        # VALUE param unchanged; LIST_CONST here is a `comptime NAME = [T(...),
+        # ...]` whose elements are ordinary constructor-call literals (a
+        # Tuple(...) call isn't scalar-foldable, so it never reaches
+        # self._comptime_vals — see _gen_stmt_ComptimeVarStmt). Rather than try
+        # to give `materialize` a real runtime elaboration (it has no concrete
+        # struct/function body to instantiate — its ENTIRE job is being a
+        # comptime-to-runtime identity), UNROLL the loop over the literal
+        # elements directly: each iteration's loop var(s) are assigned straight
+        # from that element's own literal sub-expressions, so `number`/
+        # `number_as_str` end up correctly typed (Float64/char*) instead of
+        # falling through to the boxed dict/list runtime-dispatch fallback,
+        # which can only ever produce one ambiguous type for both. Real, in
+        # stdlib's own test_atof.mojo (`for number, number_as_str in
+        # materialize[numbers_to_test]():`).
+        if (isinstance(it, CallExpr) and not it.args
+                and isinstance(it.func, SubscriptExpr)
+                and isinstance(it.func.obj, IdentExpr) and it.func.obj.name == 'materialize'
+                and isinstance(it.func.index, IdentExpr)
+                and it.func.index.name in self._comptime_list_asts):
+            list_ast = self._comptime_list_asts[it.func.index.name]
+            var0 = node.target
+            if isinstance(var0, str) and var0.startswith('(') and var0.endswith(')'):
+                tgt_names = [v.strip() for v in var0[1:-1].split(',')]
+            else:
+                tgt_names = [var0]
+            for el in list_ast.elements:
+                el_args = el.args if isinstance(el, CallExpr) else [el]
+                if len(el_args) < len(tgt_names):
+                    continue
+                for i, vn in enumerate(tgt_names):
+                    at, av = self.lower_expr(el_args[i])
+                    self._declare_var(vn, at)
+                    cvn = self._cname(vn)
+                    if self.var_types.get(vn, at) == at:
+                        self._emit(f"  {cvn} = {av};")
+                    else:
+                        self._safe_coerce_emit(at, self.var_types[vn], av, cvn)
+                for s in node.body:
+                    self.gen_stmt(s)
+            return
 
         var = node.target
         # NOTE: `node.target` is ALWAYS a plain Python str (see
@@ -19839,6 +19967,32 @@ class GimpleGen:
                 src = self._find_generic_source(st.module, nm, kind='struct')
                 if src:
                     self._imported_generic_structs.setdefault(local, src)
+        # A generic struct DEFINED IN THIS SAME FILE (`struct MoveOnlyList[T:
+        # ...]:` with no import at all — real, in stdlib's own
+        # test_ref_iteration.mojo) was never registered here: the loop above
+        # only ever looks at FromImportStmt. Elaborator.elaborate_generic_struct
+        # only needs the struct's own source TEXT (extract_struct_source does
+        # its own regex-based extraction), so the current file's own path
+        # works exactly like an imported module's — same lookup, same
+        # monomorphize-and-cache path, just skipping the "which file re-exports
+        # this" search entirely. Without this, `MoveOnlyList[MoveOnlyInt]()`'s
+        # `__next__`/`__iter__` stayed the UN-elaborated generic (T unresolved,
+        # boxed int64_t), so a `for ref x in list: x.value += 1` loop var's
+        # `.value` read hit a hard "not a structure or union" — the generic
+        # struct was never actually monomorphized for this type argument.
+        if self._current_filename and any(isinstance(st, StructDef) for st in stmts):
+            try:
+                _own_src = open(self._current_filename).read()
+            except OSError:
+                _own_src = ''
+            for st in stmts:
+                if not isinstance(st, StructDef):
+                    continue
+                if st.name in self._imported_generic_structs or st.name in self.struct_field_types:
+                    continue
+                if not re.search(rf'\bstruct\s+{re.escape(st.name)}\s*\[', _own_src):
+                    continue
+                self._imported_generic_structs.setdefault(st.name, self._current_filename)
 
     @staticmethod
     def _struct_method_overload_ids(stmt) -> list:
@@ -24240,6 +24394,20 @@ class GimpleGen:
         # Register imported generic structs (via re-export chains) so
         # Struct[Args](...) calls / nested generic-struct type args elaborate too.
         self._register_imported_generic_structs(stmts)
+
+        # Pre-scan MODULE-LEVEL `comptime NAME = [...]` list constants so
+        # `for a, b in materialize[NAME]():` (see _gen_for_iter's special
+        # case) has them available no matter which function is compiled
+        # first — a top-level ComptimeVarStmt is normally only recorded by
+        # _gen_stmt_ComptimeVarStmt when gen_stmt walks over IT, which for a
+        # module-level statement happens only as part of the toplevel-code
+        # pass; a function whose body is emitted BEFORE that pass runs would
+        # otherwise see an empty _comptime_list_asts even though the comptime
+        # list is textually declared earlier in the file (real, in stdlib's
+        # test_atof.mojo).
+        for _s in stmts:
+            if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
+                self._comptime_list_asts.setdefault(_s.target, _s.value)
 
         # This module's own top-level function names — used by _func_qualifier
         # (SB-1 fix) to tell a genuinely LOCAL definition (qualify with THIS
