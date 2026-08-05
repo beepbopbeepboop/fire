@@ -4974,6 +4974,8 @@ class GimpleGen:
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
+        'mojo_is_registered_list': ('int',     ['int64_t']),
+        'mojo_is_registered_dict': ('int',     ['int64_t']),
         'mojo_set_new':          ('MojoSet *', []),
         'mojo_set_add_str':      ('void',      ['MojoSet *', 'char *']),
         'mojo_set_add_int':      ('void',      ['MojoSet *', 'int64_t']),
@@ -17728,8 +17730,47 @@ class GimpleGen:
                     _debug_note('for loop dropped (no iterator protocol)', it_type)
                     self._emit_unsupported_iter(it_type, node)
             else:
-                _debug_note('for loop dropped (unsupported iterable)', it_type)
-                self._emit_unsupported_iter(it_type, node)
+                # A boxed int64_t iterable whose real container type wasn't
+                # statically tracked — e.g. `for fname in pat.fields:` in
+                # ast_rewriter.py, where `pat` is a boxed pattern Node and
+                # `.fields` is a MojoDict* read via the A5 boxed-member
+                # dispatch into an int64_t. The old behavior dropped the loop
+                # entirely (mojo_unsupported_iter, body runs zero times), so
+                # the compiled binary's ast_rewriter silently produced no
+                # discriminators and NO file could compile. The runtime
+                # registries distinguish a real dict/list, so branch to the
+                # right iterator instead.
+                #
+                # NOTE (known residual): this compiles loop bodies that were
+                # previously dropped, exposing the `item.key`/`item.value`
+                # pair-accessor gap (counter/interval/_unicode/string_slice
+                # stdlib modules regress) — see A5-BUG.md. Keep this patch in
+                # the tree as the starting point for resolving the frontier.
+                if it_type in ('int', 'int64_t', 'void *'):
+                    bb_dict = self._new_bb(); bb_list = self._new_bb()
+                    bb_not_dict = self._new_bb(); bb_not_list = self._new_bb()
+                    bb_after = self._new_bb()
+                    it64 = self._to_int64(it_type, it_val)
+                    isd = self._call_expr('int', 'mojo_is_registered_dict', [('int64_t', it64)])
+                    self._emit(f"  if ({isd}) goto {bb_dict}; else goto {bb_not_dict};")
+                    self._emit_label(bb_not_dict)
+                    isl = self._call_expr('int', 'mojo_is_registered_list', [('int64_t', it64)])
+                    self._emit(f"  if ({isl}) goto {bb_list}; else goto {bb_not_list};")
+                    self._emit_label(bb_not_list)
+                    self._emit_unsupported_iter(it_type, node)
+                    self._emit(f"  goto {bb_after};")
+                    self._emit_label(bb_dict)
+                    dp = self._new_val('MojoDict *', f"(MojoDict *){it64}")
+                    self._gen_for_dict(var, dp, node.body)
+                    self._emit(f"  goto {bb_after};")
+                    self._emit_label(bb_list)
+                    lp = self._new_val('MojoList *', f"(MojoList *){it64}")
+                    self._gen_for_list(var, lp, node.body)
+                    self._emit(f"  goto {bb_after};")
+                    self._emit_label(bb_after)
+                else:
+                    _debug_note('for loop dropped (unsupported iterable)', it_type)
+                    self._emit_unsupported_iter(it_type, node)
         finally:
             if is_dataclass_fields_loop:
                 self._dataclass_fields_vars.discard(var)
