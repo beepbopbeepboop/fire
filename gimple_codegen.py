@@ -8225,21 +8225,41 @@ class GimpleGen:
             t = self._new_val(gtype, f'{gname}')
             return gtype, t
         elif struct_name in self.struct_field_types and ot.endswith(' *'):
-            # Known struct type but unknown field — try to find another struct that has it
-            alt_struct = None
-            for sn, fm in self.struct_field_types.items():
-                if node.member in fm:
-                    alt_struct = sn
-                    break
-            if alt_struct:
-                field_type = self.struct_field_types[alt_struct][node.member]
-                cast_t = self._new_val(f'{alt_struct} *', f'({alt_struct} *){ov}')
-                t = self._new_val(field_type, f'{cast_t}->{_safe_field(node.member)}')
-            else:
-                # Fall back: assume pointer to same struct type
-                field_type = struct_name + ' *'
-                t = self._new_val(field_type, f'{ov}{op}{_safe_field(node.member)}')
-            return field_type, t
+            # Known struct type but unknown field. `ot` here can be WRONG:
+            # whole-function return-type inference unifies to ONE dominant
+            # concrete type even for a variable that legitimately holds many
+            # different AST-node subtypes across its callers (e.g. `expr =
+            # self._parse_expr_or_yield()` infers `YieldExpr *`, even though
+            # `_parse_expr_or_yield` can return ANY expression kind — real,
+            # in mojo_compiler.py's own `Parser._parse_stmt`). The OLD
+            # fallback here guessed "the first OTHER struct that happens to
+            # have a field with this name" and blindly cast to it — UNSOUND,
+            # since different structs' shared field names sit at DIFFERENT
+            # offsets (VarDecl/IdentExpr have `name` at 0x18, MojoClass at
+            # 0x30, FunctionDef at 0x48): a genuinely-IdentExpr object read
+            # through a MojoClass-shaped cast reads memory that isn't even
+            # part of this object's own allocation. Root-caused via
+            # A5-BUG.md's VarDecl.name corruption hunt — `if isinstance(expr,
+            # IdentExpr): name = expr.name` produced a small integer instead
+            # of a string, nondeterministically (nothing about WHICH wrong
+            # struct got picked depends on the actual runtime object, only on
+            # dict-iteration order over every struct this compile has ever
+            # seen). Use the same RUNTIME type-tag dispatch the ambiguous-
+            # boxed-int64_t case below already relies on instead of a
+            # compile-time guess — it doesn't need `ot` to be right at all,
+            # only the object's own tag to be one of the registered structs.
+            vp = self._new_val('void *', f'(void *){ov}')
+            _boxed_ft = self._known_field_type(node.member)
+            raw = self._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                  [('void *', vp), ('char *', f'"{node.member}"')])
+            if _boxed_ft is not None and _boxed_ft != 'int64_t':
+                if _boxed_ft.endswith(' *'):
+                    t = self._new_val(_boxed_ft, f'({_boxed_ft}){raw}')
+                else:
+                    t = self._new_temp(_boxed_ft)
+                    self._emit(f"  {t} = ({_boxed_ft}){raw};")
+                return _boxed_ft, t
+            return 'int64_t', raw
         elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
             # Opaque Python object typed as int, void *, or built-in container — use runtime attribute accessor
             # GIMPLE requires function args to be simple vars, not cast expressions
