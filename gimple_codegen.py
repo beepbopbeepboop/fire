@@ -8440,13 +8440,13 @@ class GimpleGen:
         if oth_t != 'char *':
             return None
         if slice_node.start is not None:
-            _, sv = self.lower_expr(slice_node.start)
-            start_v = self._to_int64(self._quick_type(slice_node.start), sv)
+            _st, sv = self.lower_expr(slice_node.start)
+            start_v = self._to_int64(_st, sv)
         else:
             start_v = '0'
         if slice_node.stop is not None:
-            _, ev = self.lower_expr(slice_node.stop)
-            stop_v = self._to_int64(self._quick_type(slice_node.stop), ev)
+            _et, ev = self.lower_expr(slice_node.stop)
+            stop_v = self._to_int64(_et, ev)
         else:
             stop_v = 'MOJO_SLICE_STOP_OMITTED'
         eq_t = self._call_expr('int', 'mojo_cstr_region_eq',
@@ -14460,13 +14460,29 @@ class GimpleGen:
     def _lower_slice(self, node: SliceExpr) -> tuple[str, str]:
         ot, ov = self.lower_expr(node.obj)
         if node.start is not None:
-            _, sv = self.lower_expr(node.start)
-            start_v = self._to_int64(self._quick_type(node.start), sv)
+            _st, sv = self.lower_expr(node.start)
+            # Use the REAL type lower_expr just gave `sv`, not _quick_type's
+            # static estimate — _quick_type(IntLiteral) always guesses
+            # 'int64_t', but _lower_UnaryOp('-', IntLiteral) actually emits a
+            # plain C `int`-typed temp for a negated literal (its "pointer
+            # negate" special-case only widens to int64_t for pointer
+            # operands). _to_int64 trusted the estimate and skipped the
+            # int->int64_t cast, so `groups[:-1]` on a struct method (any
+            # context where `_ensure_local` couldn't already coerce it)
+            # passed a bare 32-bit -1 where mojo_list_slice's `int64_t stop`
+            # expects one — GIMPLE calls don't do C's usual argument
+            # promotion, so the raw bits got zero-extended into
+            # 4294967295 instead of sign-extended into -1, `stop < 0` came
+            # back false, and the slice silently returned the WHOLE list
+            # instead of dropping the last element. Found via a from-scratch
+            # minimal repro (struct method + `lst[:-1]` comprehension) while
+            # chasing `make bootstrap`'s verify byte-identity failures.
+            start_v = self._to_int64(_st, sv)
         else:
             start_v = '0'
         if node.stop is not None:
-            _, ev = self.lower_expr(node.stop)
-            stop_v = self._to_int64(self._quick_type(node.stop), ev)
+            _et, ev = self.lower_expr(node.stop)
+            stop_v = self._to_int64(_et, ev)
         else:
             # Sentinel for "to end" — must NOT be a plain -1, which a real
             # `x[:-1]` (drop the last char/element) also produces; see
