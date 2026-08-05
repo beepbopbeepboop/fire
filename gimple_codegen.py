@@ -3469,6 +3469,18 @@ class GimpleGen:
         # the value slot's real type to pick get_str vs get_int; the key slot
         # is always a string. Side-table pattern, like _generator_var_api.
         self._dict_items_val_elems: dict[str, str] = {}
+        # `for item in <d.items()>:` — a SINGLE loop var bound to a whole
+        # dict-item PAIR (as opposed to the `for k, v in ...` tuple-target
+        # shape, which _gen_for_list unpacks slot-by-slot). Maps the loop
+        # VARIABLE name -> that dict's value type, so `_lower_MemberExpr`
+        # can answer `item.key` / `item.value` by reading pair slot 0 / 1
+        # with the right accessor. Without it, `.key`/`.value` fell through
+        # to the generic dynamic-getattr path, which has no notion of a pair
+        # and resolved them to 0/identity — so `-item.value` negated the
+        # pair handle or a char* key ("wrong type argument to unary minus" /
+        # a build2 ICE). Scoped to the loop body: saved/restored around it,
+        # exactly like _regex_match_vars and _dataclass_fields_vars.
+        self._dict_item_pair_vars: dict[str, str] = {}
         # Pass 2c (container-return-elem pre-pass) scratch state: per-function
         # local container-element map + the struct whose methods are being
         # scanned (so `self.foo` resolves to the right {struct}_{method} key).
@@ -7765,6 +7777,39 @@ class GimpleGen:
                                               [('const char * *', ctx['names_var']),
                                                ('int', str(ctx['ngroups'])),
                                                ('int64_t *', ctx['gstart_var'])])
+
+        # `item.key` / `item.value` where `item` is a `for item in d.items():`
+        # loop var — ONE var bound to the whole [key, value] pair (see
+        # _dict_item_pair_vars). The runtime pair is a 2-element MojoList:
+        # slot 0 is the key (always a string — mojo_dict_items appends it via
+        # append_str), slot 1 is the value, boxed per the dict's value type.
+        # Without this, both members fell through to the generic dynamic
+        # getattr (which knows nothing about pairs) and resolved to 0/an
+        # identity, so `-item.value` negated the pair handle or the char*
+        # key — a GIMPLE "wrong type argument to unary minus", or a build2
+        # ICE, in counter/interval/_unicode/string_slice (A5-BUG.md §1).
+        if (isinstance(node.obj, IdentExpr)
+                and node.obj.name in self._dict_item_pair_vars
+                and node.member in ('key', 'value')):
+            _pv_type = self._dict_item_pair_vars[node.obj.name]
+            _pv_raw = self._cname(node.obj.name)
+            _pair = self._new_val('MojoList *', f"(MojoList *){_pv_raw}")
+            if node.member == 'key':
+                return 'char *', self._new_val(
+                    'char *', f"mojo_list_get_str ({_pair}, 0)")
+            _suf = TypeLattice.list_suffix(_pv_type)
+            if _suf == 'str':
+                return 'char *', self._new_val(
+                    'char *', f"mojo_list_get_str ({_pair}, 1)")
+            if _suf == 'double':
+                return 'double', self._new_val(
+                    'double', f"mojo_list_get_double ({_pair}, 1)")
+            _raw = self._new_val('int64_t', f"mojo_list_get_int ({_pair}, 1)")
+            if _pv_type in ('int64_t', 'int', ''):
+                return 'int64_t', _raw
+            # A struct-pointer / other non-scalar value type: keep the real
+            # static type so a later field read or call resolves statically.
+            return _pv_type, self._new_val(_pv_type, f"({_pv_type}){_raw}")
 
         # `f.name` where f is a `for f in dataclasses.fields(x):` loop var —
         # see _gen_for_iter's is_dataclass_fields_loop handling. `f` is
@@ -17778,12 +17823,43 @@ class GimpleGen:
                     self._emit_label(bb_not_list)
                     self._emit_unsupported_iter(it_type, node)
                     self._emit(f"  goto {bb_after};")
+                    # `for item in <x>.items():` — even when `x`'s type is
+                    # unknown (a boxed int64_t, e.g. Counter.items() returning
+                    # an un-elaborated generic _DictEntryIter), the SYNTAX
+                    # says this yields key/value PAIRS, not bare keys. Iterate
+                    # the dict's items list rather than _gen_for_dict's keys,
+                    # so a single loop var binds the whole pair and
+                    # `item.key`/`item.value` resolve (see
+                    # _dict_item_pair_vars). Without this the dict branch bound
+                    # `item` to a char* key and `-item.value` hit a GIMPLE
+                    # "wrong type argument to unary minus" / a build2 ICE —
+                    # A5-BUG.md §1's residual, which regressed counter/
+                    # interval/_unicode/string_slice.
+                    _it_is_items = (
+                        isinstance(node.iterable, CallExpr)
+                        and isinstance(node.iterable.func, MemberExpr)
+                        and node.iterable.func.member == 'items'
+                        and not node.iterable.args
+                        and not (var.startswith('(') and var.endswith(')')))
                     self._emit_label(bb_dict)
                     dp = self._new_val('MojoDict *', f"(MojoDict *){it64}")
-                    self._gen_for_dict(var, dp, node.body)
+                    if _it_is_items:
+                        _pairs = self._new_val(
+                            'MojoList *', f"mojo_dict_items ({dp})")
+                        # Value type is genuinely unknown here (the receiver
+                        # never typed) — int64_t matches how mojo_dict_items
+                        # boxes the value slot.
+                        self._dict_items_val_elems[_pairs] = 'int64_t'
+                        self._gen_for_list(var, _pairs, node.body)
+                    else:
+                        self._gen_for_dict(var, dp, node.body)
                     self._emit(f"  goto {bb_after};")
                     self._emit_label(bb_list)
                     lp = self._new_val('MojoList *', f"(MojoList *){it64}")
+                    if _it_is_items:
+                        # An already-materialized items list: its elements are
+                        # the same [key, value] pairs.
+                        self._dict_items_val_elems[lp] = 'int64_t'
                     self._gen_for_list(var, lp, node.body)
                     self._emit(f"  goto {bb_after};")
                     self._emit_label(bb_after)
@@ -17843,6 +17919,11 @@ class GimpleGen:
         self._declare_var(idx_var, 'int64_t')
         if not val_is_tuple:
             self._declare_var(val_var, elem if elem else 'int64_t')
+        # Writes go through _cname (a target named after a C keyword is
+        # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
+        # a fresh temp in the tuple case, so _cname is a no-op there.
+        cidx_var = self._cname(idx_var)
+        cval_var = self._cname(val_var)
 
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int64_t')
@@ -17862,13 +17943,13 @@ class GimpleGen:
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         self.loop_stack.append((bb_post, bb_after))
 
-        self._emit(f"  {idx_var} = {idx_t};")
+        self._emit(f"  {cidx_var} = {idx_t};")
 
         suf = TypeLattice.list_suffix(elem) if elem else 'int'
         if val_is_tuple:
             # Get element as opaque int64_t for tuple unpacking below
             elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
-            self._emit(f"  {val_var} = {elem64};")
+            self._emit(f"  {cval_var} = {elem64};")
             # Emit tuple unpacking: (a, b, c) = val_var — read each slot with
             # the accessor matching how the tuple was stored (get_str for
             # string tuples, get_int for boxed values), like _gen_for_list's
@@ -17899,21 +17980,21 @@ class GimpleGen:
                     else:
                         self._safe_coerce_emit('int64_t', self.var_types.get(vname, pair_elem), ti, cv)
         elif suf == 'double':
-            self._emit(f"  {val_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
+            self._emit(f"  {cval_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
         elif suf == 'str':
             temp_str = self._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
             if self._type_of(val_var) == 'char *':
-                self._emit(f"  {val_var} = {temp_str};")
+                self._emit(f"  {cval_var} = {temp_str};")
             else:
                 int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
-                self._emit(f"  {val_var} = {int_ptr};")
+                self._emit(f"  {cval_var} = {int_ptr};")
         else:
             elem64 = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
             vt = self._type_of(val_var)
             if vt and vt != 'int64_t':
-                self._safe_coerce_emit('int64_t', vt, elem64, val_var)
+                self._safe_coerce_emit('int64_t', vt, elem64, cval_var)
             else:
-                self._emit(f"  {val_var} = {elem64};")
+                self._emit(f"  {cval_var} = {elem64};")
 
         for s in node.body:
             self.gen_stmt(s)
@@ -18047,9 +18128,29 @@ class GimpleGen:
                     # integer from pointer" error. Keep it boxed: the member
                     # access on it goes through the runtime tag dispatch.
                     self._emit(f"  {cvar} = (int64_t) {elem64};")
+        # `for item in <d.items()>:` binds ONE var to the whole [key, value]
+        # pair — record it (with the dict's value type) so `item.key` /
+        # `item.value` in the body read the right slot with the right
+        # accessor instead of falling to the generic dynamic getattr. Scoped
+        # to this loop body only, and restored after, so a same-named var in
+        # an enclosing/sibling scope is unaffected.
+        # No try/finally: a raise abandons the whole compile and this
+        # GimpleGen instance (see gen_func's identical reasoning), and
+        # try/except in a self-hosted method has broken this codegen's own
+        # return-type inference before.
+        _is_pair_var = (not is_tuple) and (it_val in self._dict_items_val_elems)
+        _had_pair = _is_pair_var and var in self._dict_item_pair_vars
+        _saved_pair = self._dict_item_pair_vars.get(var, '')
+        if _is_pair_var:
+            self._dict_item_pair_vars[var] = self._dict_items_val_elems[it_val]
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
+        if _is_pair_var:
+            if _had_pair:
+                self._dict_item_pair_vars[var] = _saved_pair
+            else:
+                self._dict_item_pair_vars.pop(var, None)
         self.loop_stack.pop()
         self._loop_depth -= 1
         self._emit(f"  goto {bb_post};")
@@ -18078,7 +18179,7 @@ class GimpleGen:
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-        self._emit(f"  {var} = mojo_str_char_at ({it_val}, {idx_t});")
+        self._emit(f"  {self._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -18130,30 +18231,41 @@ class GimpleGen:
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         key_tmp = self._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
+        # Every write goes through _cname: a loop variable whose Mojo name is a
+        # C keyword (`for char in s.codepoints():` — real, in stdlib's
+        # _unicode.mojo) is DECLARED as the renamed `_char` by _declare_var,
+        # and every read already resolves through _cname, but these writes used
+        # the raw name and emitted `char = (char *) _t10;` — a hard "expected
+        # expression before 'char'" parse error. Latent until the boxed
+        # dict/list runtime dispatch (A5-BUG.md §1) started generating this
+        # branch for real; _gen_for_list has always done this correctly.
         if is_tuple:
             # Assign key to first name, NULL (zero) to remaining names
             vn0 = var_names[0]
+            cvn0 = self._cname(vn0)
             vt0 = self.var_types.get(vn0, 'char *')
             if vt0 in ('int64_t', 'int', 'int32_t'):
                 vp = self._new_val('void *', f'(void *){key_tmp}')
                 box = self._new_val('int64_t', f'(int64_t){vp}')
-                self._emit(f"  {vn0} = {box};")
+                self._emit(f"  {cvn0} = {box};")
             else:
-                self._emit(f"  {vn0} = (char *) {key_tmp};")
+                self._emit(f"  {cvn0} = (char *) {key_tmp};")
             for vn in var_names[1:]:
+                cvn = self._cname(vn)
                 vt = self.var_types.get(vn, 'char *')
                 if vt in ('int64_t', 'int', 'int32_t'):
-                    self._emit(f"  {vn} = (int64_t)0;")
+                    self._emit(f"  {cvn} = (int64_t)0;")
                 else:
-                    self._emit(f"  {vn} = (char *)0;")
+                    self._emit(f"  {cvn} = (char *)0;")
         else:
+            cvar = self._cname(var)
             vt = self.var_types.get(var, 'char *')
             if vt in ('int64_t', 'int', 'int32_t'):
                 vp = self._new_val('void *', f'(void *){key_tmp}')
                 box = self._new_val('int64_t', f'(int64_t){vp}')
-                self._emit(f"  {var} = {box};")
+                self._emit(f"  {cvar} = {box};")
             else:
-                self._emit(f"  {var} = (char *) {key_tmp};")
+                self._emit(f"  {cvar} = (char *) {key_tmp};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -18186,7 +18298,7 @@ class GimpleGen:
 
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
-        self._emit(f"  {var} = mojo_set_iter_val_int ({iter_t});")
+        self._emit(f"  {self._cname(var)} = mojo_set_iter_val_int ({iter_t});")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -18401,7 +18513,7 @@ class GimpleGen:
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         val = self._new_val(vct, f"{base}_value ({gen_val})")
-        self._emit(f"  {var} = {val};")
+        self._emit(f"  {self._cname(var)} = {val};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -18484,7 +18596,7 @@ class GimpleGen:
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         if next_fn in self.func_return_types:
             nxt = self._new_val(elem_type, f"{next_fn} ({iter_var})")
-            self._emit(f"  {var} = {nxt};")
+            self._emit(f"  {self._cname(var)} = {nxt};")
         else:
             _debug_note('iterator loop body has no __next__', iter_base)
             self._emit(f"  /* TODO: no __next__ on {iter_base} */")
