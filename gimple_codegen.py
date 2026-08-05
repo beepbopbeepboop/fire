@@ -29721,10 +29721,31 @@ class GimpleGen:
         directly: `for w in pat.findall(s): ...` emits `mojo_unsupported_iter`
         even outside self-hosting), so a loop here over either would silently
         run zero times once this file compiles itself."""
+        def _is_extern_decl(stmt: str) -> bool:
+            # A genuine `extern ...;` declaration always has "extern" as the
+            # first token of ONE of its (possibly preprocessor-guard-
+            # prefixed) lines — checking the fragment for the bare
+            # SUBSTRING "extern" is not enough: a `#line N "path/to/
+            # test_external_call.mojo"` directive immediately followed by
+            # an ordinary function CALL statement (e.g. `std_testing___
+            # init___assert_false (_t5)`) also contains "extern" — as a
+            # substring of "external" in the source filename — which wrongly
+            # classified that CALL as a concrete prototype for
+            # `std_testing___init___assert_false`, causing the REAL
+            # variadic extern declarations for it to be dropped everywhere
+            # ("implicit declaration of function" once compiled). Real
+            # regression, found via compile_stdlib.py's
+            # test/ffi/test_external_call.mojo.
+            for line in stmt.split('\n'):
+                line = line.strip()
+                if line == 'extern' or line.startswith('extern ') or line.startswith('extern"'):
+                    return True
+            return False
+
         concrete = set()
         for p in parts:
             for stmt in p.split(';'):
-                if 'extern' not in stmt:
+                if not _is_extern_decl(stmt):
                     continue
                 paren = stmt.find('(')
                 if paren < 0:
@@ -29745,7 +29766,7 @@ class GimpleGen:
         for p in parts:
             drop = False
             for stmt in p.split(';'):
-                if 'extern' not in stmt:
+                if not _is_extern_decl(stmt):
                     continue
                 paren = stmt.find('(')
                 if paren < 0:
