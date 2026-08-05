@@ -6222,7 +6222,21 @@ class GimpleGen:
             # directly-named local pointer, not behind a struct
             # component_ref, so `*name` is already valid GIMPLE).
             return f'*{self._cname(name)}'
-        if name in getattr(self, '_func_declared_globals', ()) and name in self._global_var_types:
+        # A `global x` declaration inside a nested function, OR a plain
+        # top-level statement genuinely AT module scope (no `global` needed
+        # there — see _gen_stmt_AssignStmt's identical `_in_toplevel_gen`
+        # check, which this mirrors): both need the write routed to the
+        # module globals struct field, not a bare (never-declared) local.
+        # Missing the `_in_toplevel_gen` half of this meant ANY top-level
+        # augmented assignment to a global (`X += (4,)`, no enclosing
+        # function at all — real Python code, e.g. the stdlib's own
+        # _compat_pickle.py: `PYTHON2_EXCEPTIONS += ("WindowsError",)`)
+        # emitted a write to an undeclared bare local ("PYTHON2_EXCEPTIONS
+        # undeclared (first use in this function)") instead of the global —
+        # a hard compile failure, not just a silently-dropped update.
+        if (name in self._global_var_types
+                and (self._in_toplevel_gen
+                     or name in getattr(self, '_func_declared_globals', ()))):
             # `global x` declared in this function — write to the module
             # globals struct, mirroring the AssignStmt write path's routing
             # (otherwise AugAssign `x += 1` on a global emitted a LOCAL
@@ -13831,6 +13845,19 @@ class GimpleGen:
         expected_params = self.func_param_types.get(fname_raw, [])
         if not expected_params and fname_raw in self._KNOWN_SIGS:
             expected_params = self._KNOWN_SIGS[fname_raw][1]
+        elif not expected_params and fname in self._KNOWN_SIGS:
+            # `fname_raw` (the ORIGINAL Python name, e.g. 'eval') is never
+            # itself a _KNOWN_SIGS key — only its BUILTIN_VALUE_MAP-renamed
+            # C symbol ('mojo_eval') is. Python's 1-arg `eval(expr)` (the
+            # overwhelmingly common form; globals/locals default to the
+            # caller's own scope) called this renamed 3-arg C function with
+            # only 1 argument, a hard "too few arguments" compile error —
+            # found via Tools/build/generate_token.py's own `eval(string)`.
+            # mojo_eval's own globals/locals params are unused anyway (a
+            # documented eval() stub — real eval() can't run in a compiled
+            # C bootstrap), so padding with NULL below is exactly right,
+            # not just "doesn't crash."
+            expected_params = self._KNOWN_SIGS[fname][1]
         if expected_params and len(arg_pairs) < len(expected_params):
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
             # Free-function param defaults: `def greet(name: String = "world")`
@@ -13862,6 +13889,26 @@ class GimpleGen:
                     arg_pairs.append(self._default_expr_to_pair(_dv))
                 else:
                     arg_pairs.append(('int', '0'))
+
+        # exit(msg)/quit(msg): Python's builtin exit()/quit() (and
+        # sys.exit(), which redirects here the same way) accept an
+        # arbitrary object, not just an int — a string prints as an error
+        # message (exit code 1), matching real Python's SystemExit(msg)
+        # behavior on an uncaught exit. `exit`/`quit` are otherwise treated
+        # as a direct passthrough to libc's real `exit(int status)` (see
+        # _C_RESERVED_FUNCS), so `exit("some message")` — real code, e.g.
+        # Tools/build/generate_token.py's own `exit('\n'.join(...))` —
+        # passed a `char *` straight to libc exit(), a hard "makes integer
+        # from pointer without a cast" compile error, not just wrong
+        # behavior. A bare int arg (the common case) is unaffected: this
+        # only intercepts when the argument ISN'T already int-shaped.
+        if fname_raw in ('exit', 'quit') and len(arg_pairs) == 1:
+            _ex_t, _ex_v = arg_pairs[0]
+            if _ex_t not in ('int', 'int64_t', '_Bool'):
+                _msg = self._stringify_value(_ex_t, _ex_v)
+                self._emit_call('void', '', 'mojo_print_stderr', [('char *', _msg)])
+                self._emit("  exit (1);")
+                return 'int64_t', self._new_val('int64_t', '(int64_t)0')
 
         # int(s, base) — drop the base arg
         if fname_raw == 'int' and len(arg_pairs) > 1:
@@ -14792,11 +14839,34 @@ class GimpleGen:
             if kv.startswith('_slit_'):
                 kv_tmp = self._new_val('char *', f"{kv}")
                 kv = kv_tmp
-            elif kt != 'char *':
+            elif kt in ('int', 'int64_t', '_Bool'):
                 # Runtime dict keys are always char *; convert non-string keys
                 # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
                 # of C-casting the int to char* which produces NULL for 0.
                 kv = self._new_val('char *', f"mojo_str_from_int({kv})")
+            elif kt != 'char *':
+                # A non-scalar key (tuple, list, or other struct/pointer type
+                # — e.g. `{('a', 'b'): ...}`, real Python code found in the
+                # stdlib's own _compat_pickle.py) used to fall into the SAME
+                # mojo_str_from_int(kv) call above unconditionally: `kt !=
+                # 'char *'` is true for ANY non-string key, not just an int,
+                # so a tuple key's MojoList* pointer got passed to a
+                # function expecting int64_t — "makes integer from pointer
+                # without a cast", a hard GCC error, so the file never
+                # compiled at all. Use the general-purpose repr-based
+                # stringification instead: it already dispatches correctly
+                # per-type (MojoList*/MojoDict*/other struct/float), giving
+                # a value-based string distinct tuple/list contents won't
+                # collide on — close enough to Python's own structural
+                # hashing for this string-keyed runtime, and at least
+                # compiles and round-trips consistently. Deliberately NOT
+                # used for the plain int/bool case above: _repr_value's
+                # int path (mojo_repr_int) returns a shared static buffer,
+                # safe only because mojo_dict_set_str's callee immediately
+                # strdup()s it — mojo_str_from_int's own heap-allocated
+                # buffer is the already-proven-safe, unchanged behavior for
+                # by far the most common dict-key type.
+                kv = self._repr_value(kt, kv)
             if vt in _FLOAT_TYPES:
                 self._emit(f"  mojo_dict_set_double ({t}, {kv}, {vv});")
             elif vt == 'char *':
@@ -16339,6 +16409,25 @@ class GimpleGen:
             # pointee explicitly here.
             if tname in getattr(self, '_boxed_mut_locals', {}):
                 dst = self._boxed_mut_locals[tname]
+            elif (tname in self._global_var_types
+                    and (self._in_toplevel_gen
+                         or tname in getattr(self, '_func_declared_globals', ()))):
+                # Mirror _write_dest's own "is this write actually landing
+                # on the module globals struct?" check: _type_of only ever
+                # consults var_types (LOCAL variable types), never
+                # _global_var_types/_global_c_decl_types, so for a genuine
+                # module-level global (no enclosing function needed for a
+                # plain top-level statement — see _write_dest's identical
+                # `_in_toplevel_gen` check) it silently fell back to its
+                # generic 'int64_t' default. _write_dest's OWN lvalue is
+                # correctly typed (the real struct field, e.g. `char *`),
+                # so coercing the computed value as if the destination
+                # were int64_t produced a genuine, real type mismatch —
+                # "assignment to 'char *' from 'int64_t'" — for something
+                # as ordinary as a top-level `X += " world"` on a string
+                # global (found via Tools/build/generate_token.py's own
+                # `token_h_template += """..."""`).
+                dst = self._global_c_decl_types.get(tname, self._global_var_types[tname])
             else:
                 dst = self._type_of(tname)
             self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
@@ -17020,6 +17109,18 @@ class GimpleGen:
                     # _func_csym applies the overload suffix to match the definition.
                     fname = self.BUILTIN_VALUE_MAP.get(raw_name, self._func_csym(raw_name))
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
+
+            # exit(msg)/quit(msg) as a bare statement — see _lower_named_
+            # call's identical check (this is that fix's statement-level
+            # twin: a bare `exit("...")` line never reaches _lower_call at
+            # all, exactly like the kwarg-padding duplication noted above).
+            if raw_name in ('exit', 'quit') and len(arg_pairs) == 1:
+                _ex_t, _ex_v = arg_pairs[0]
+                if _ex_t not in ('int', 'int64_t', '_Bool'):
+                    _msg = self._stringify_value(_ex_t, _ex_v)
+                    self._emit_call('void', '', 'mojo_print_stderr', [('char *', _msg)])
+                    self._emit("  exit (1);")
+                    return
 
             # Handle keyword arguments for regular function calls
             kwargs = getattr(node.value, 'kwargs', []) or []
