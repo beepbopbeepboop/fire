@@ -16263,6 +16263,51 @@ class GimpleGen:
         # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
         if isinstance(node.target, TupleExpr):
             targets = node.target.elements
+            # Extended unpacking: one target may be starred (`*row, last =
+            # data` / `first, *rest = data` — real Python syntax, parses as
+            # UnaryOp(op='*', operand=<real target>) inside `elements`, see
+            # mojo_compiler.py). The starred target collects whatever's
+            # left over after the non-starred targets on either side have
+            # each claimed one element — mirrors the interpreter's
+            # identical before/star/after split in myinterpreter.py's
+            # _assign_target. Scoped to a MojoList*-typed RHS (the
+            # realistic real-world shape, e.g. Tools/c-analyzer's
+            # `*row, declaration = _render_known_row(decl)`); a starred
+            # target against a literal tuple RHS is rare enough in real
+            # source to leave unhandled here (falls through unchanged,
+            # same honest-if-unsupported posture as before this fix for
+            # that narrower shape).
+            _star_idx = None
+            for _si, _t in enumerate(targets):
+                if isinstance(_t, UnaryOp) and _t.op == '*':
+                    _star_idx = _si
+                    break
+            if _star_idx is not None:
+                vtype, v = self.lower_expr(node.value)
+                lp = v if vtype == 'MojoList *' else self._new_temp('MojoList *')
+                if vtype != 'MojoList *':
+                    self._emit(f"  {lp} = (MojoList *){v};")
+                before, after = targets[:_star_idx], targets[_star_idx + 1:]
+                star_target = targets[_star_idx].operand
+                n_before, n_after = len(before), len(after)
+                elem_type = self._elem_of(lp)
+                suf = TypeLattice.list_suffix(elem_type)
+                set_et = elem_type if elem_type != 'unknown' else 'int64_t'
+                for i, tgt in enumerate(before):
+                    idx64 = self._new_val('int64_t', f"(int64_t){i}")
+                    sev = self._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
+                    self._assign_target(tgt, set_et, sev)
+                total = self._new_val('int64_t', f"mojo_list_len ({lp})")
+                star_start = self._new_val('int64_t', f"(int64_t){n_before}")
+                star_stop = self._new_val('int64_t', f"{total} - {n_after}")
+                star_v = self._new_val('MojoList *', f"mojo_list_slice ({lp}, {star_start}, {star_stop})")
+                self._elem_types[star_v] = elem_type
+                self._assign_target(star_target, 'MojoList *', star_v)
+                for j, tgt in enumerate(after):
+                    idx64 = self._new_val('int64_t', f"{star_stop} + {j}")
+                    sev = self._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
+                    self._assign_target(tgt, set_et, sev)
+                return
             if isinstance(node.value, TupleExpr) and len(node.value.elements) == len(targets):
                 # RHS is a tuple literal — lower and assign each element individually
                 for tgt, rhs_expr in zip(targets, node.value.elements):

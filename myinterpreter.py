@@ -3644,13 +3644,44 @@ class Interpreter:
             idx = self.eval_expr(target.index)
             obj[idx] = value
         elif self._is_instance(target, 'TupleExpr') or self._is_instance(target, 'TupleLiteral'):
-            # Tuple unpacking: a, b, c = expr or (a, b, c) = expr
+            # Tuple unpacking: a, b, c = expr or (a, b, c) = expr. One
+            # element may be starred (`*row, last = data` / `first, *rest =
+            # data`, real Python extended-unpacking syntax) — the parser
+            # represents a starred target as UnaryOp(op='*', operand=<the
+            # real target>) inside `elements` (see mojo_compiler.py), a
+            # different representation from _bind_comprehension_target's
+            # comma-joined-STRING for-loop targets, so this needs its own
+            # star handling rather than delegating to that helper. The
+            # starred name collects whatever's left over after the
+            # non-starred names on either side of it have each claimed one
+            # value, matching Python's own semantics and mirroring
+            # _bind_comprehension_target's identical before/star/after
+            # split for the for-loop-target case.
             values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
             elements = target.elements
-            if len(values) != len(elements):
-                raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
-            for t, v in zip(elements, values):
-                self._assign_target(t, v)
+            star_idx = None
+            for i, e in enumerate(elements):
+                if self._is_instance(e, 'UnaryOp') and e.op == '*':
+                    star_idx = i
+                    break
+            if star_idx is None:
+                if len(values) != len(elements):
+                    raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
+                for t, v in zip(elements, values):
+                    self._assign_target(t, v)
+            else:
+                before, after = elements[:star_idx], elements[star_idx + 1:]
+                star_target = elements[star_idx].operand
+                n_before, n_after = len(before), len(after)
+                if len(values) < n_before + n_after:
+                    raise ValueError(
+                        f"{self._loc(target)}Cannot unpack {len(values)} values into "
+                        f"{len(elements)} targets (starred target needs at least {n_before + n_after})")
+                for t, v in zip(before, values[:n_before]):
+                    self._assign_target(t, v)
+                self._assign_target(star_target, values[n_before:len(values) - n_after])
+                for t, v in zip(after, values[len(values) - n_after:]):
+                    self._assign_target(t, v)
         else:
             raise NotImplementedError(f"{self._loc(target)}Cannot assign to {type(target).__name__}")
 
