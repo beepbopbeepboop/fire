@@ -18027,9 +18027,20 @@ class GimpleGen:
             # This allows code like os.path.basename() to work
             if local_name not in self.var_types:
                 self._declare_var(local_name, 'int64_t')
+                # `_declare_var` renames a C-keyword module name to a safe
+                # C identifier (e.g. `import struct` -> declares `_struct`,
+                # since `struct` is a reserved C keyword) but the marker
+                # assignment right below used the RAW `local_name` — a
+                # mismatch between what got declared and what got assigned
+                # to, producing literally invalid C ("struct = ...", parsed
+                # as an anonymous-struct declaration missing its `{`) —
+                # "expected '{' before '=' token". Route through _cname so
+                # the assignment targets the SAME (possibly renamed) C
+                # identifier the declaration used. Found via ctypes/util.py's
+                # own `import struct`.
                 # GIMPLE: an int64_t lvalue needs an int64_t-typed constant, not a
                 # bare `0` (which is `int`) — that is a non-trivial integer_cst.
-                self._emit(f"  {local_name} = (int64_t)0;  /* module marker */")
+                self._emit(f"  {self._cname(local_name)} = (int64_t)0;  /* module marker */")
 
 
     def _gen_stmt_FromImportStmt(self, node):
