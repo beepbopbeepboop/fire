@@ -16013,6 +16013,24 @@ class GimpleGen:
                 if not link: return False
                 left = right
             return True
+        # `sys.platform` — a genuinely compile-time-constant value for THIS
+        # host (matching this compiler's own CPython `sys.platform`, since
+        # that's the platform any `if sys.platform == 'X': def f(): ...`
+        # conditional-toplevel-def idiom is really being resolved for — see
+        # gen_module's "conditional toplevel def" promotion, whose own TODO
+        # comment names this exact gap: "if the guarding condition is one
+        # this compiler can already resolve statically... pick the matching
+        # branch... instead of" always picking the syntactically-first
+        # branch regardless of whether its condition is actually true. Without
+        # this, `_MS_WINDOWS = (sys.platform == 'win32')` folds to `None`
+        # (unresolvable) on every host, and the promotion logic's "first-
+        # branch-wins" fallback silently picks the WINDOWS-only branch's
+        # body even when compiling on macOS/Linux — found via Lib/
+        # importlib/_bootstrap_external.py's `if _MS_WINDOWS: def
+        # _path_join(...): ... else: def _path_join(...): ...`.
+        if (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)
+                and node.obj.name == 'sys' and node.member == 'platform'):
+            return sys.platform
         return None
 
     def _eval_const_bool(self, node) -> bool | None:
@@ -25346,6 +25364,23 @@ class GimpleGen:
         # `__collect_conditional_toplevel_defs`) the first time this was
         # written as `def _collect_conditional_toplevel_defs(...): ...
         # _collect_conditional_toplevel_defs(...)`.
+        #
+        # Pre-fold simple top-level constant assignments (e.g. `_MS_WINDOWS
+        # = (sys.platform == 'win32')`) into self._comptime_vals, the same
+        # dict real `comptime NAME = value` declarations populate — an
+        # ordinary module-level assignment whose RHS is itself compile-time
+        # foldable (now that _eval_const understands `sys.platform`) is
+        # semantically the same kind of constant for the platform-
+        # conditional-toplevel-def idiom below, which needs to resolve
+        # `if _MS_WINDOWS:`-style bare-name conditions, not just direct
+        # `if sys.platform == 'win32':` ones. `setdefault` only, matching
+        # the existing pre-fold pattern elsewhere in this file — never
+        # overwrites a genuine comptime declaration.
+        for _tls in stmts:
+            if (isinstance(_tls, AssignStmt) and isinstance(_tls.target, IdentExpr)):
+                _tlv = self._eval_const(_tls.value)
+                if _tlv is not None:
+                    self._comptime_vals.setdefault(_tls.target.name, _tlv)
         _cond_fn_counts: dict = {}
         _cond_worklist = [s for s in stmts if isinstance(s, IfStmt)]
         while _cond_worklist:
@@ -25451,11 +25486,50 @@ class GimpleGen:
                             _seen_names.add(_frame_stmt.name)
                             _already_promoted_names.add(_frame_stmt.name)
                     elif isinstance(_frame_stmt, IfStmt):
-                        _nested_body = (_frame_stmt.then_body or [])
-                        for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
-                            _nested_body = _nested_body + _elif_body2
-                        if _frame_stmt.else_body:
-                            _nested_body = _nested_body + _frame_stmt.else_body
+                        # If this IfStmt's own condition (and each elif's,
+                        # in order) is compile-time-resolvable (e.g. `if
+                        # sys.platform == 'win32':` — see _eval_const's
+                        # `sys.platform` case), use ONLY the single branch
+                        # CPython would actually execute on this host,
+                        # instead of blindly concatenating every branch and
+                        # letting first-occurrence-in-source-order win
+                        # regardless of truth value. Without this, `if
+                        # _MS_WINDOWS: def f(): ...(Windows body)... else:
+                        # def f(): ...(POSIX body)...` always promoted the
+                        # Windows body even when _MS_WINDOWS folds to False
+                        # on this (non-Windows) host — a silent WRONG-
+                        # runtime-behavior bug, not just a missed-compile
+                        # one. Falls back to the old "concatenate every
+                        # branch" behavior unchanged whenever the condition
+                        # isn't foldable, so non-constant conditionals are
+                        # unaffected. See bugs/COMPILE_FAIL_importlib__
+                        # bootstrap_external.md.
+                        _resolved = False
+                        _resolved_body = []
+                        _cond_val = self._eval_const_bool(_frame_stmt.condition)
+                        if _cond_val is True:
+                            _resolved = True
+                            _resolved_body = _frame_stmt.then_body or []
+                        elif _cond_val is False:
+                            _resolved = True
+                            for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                                _elif_val = self._eval_const_bool(_cond2)
+                                if _elif_val is True:
+                                    _resolved_body = _elif_body2 or []
+                                    break
+                                if _elif_val is None:
+                                    _resolved = False  # an unresolvable elif — fall back below
+                                    break
+                            else:
+                                _resolved_body = _frame_stmt.else_body or []
+                        if _resolved:
+                            _nested_body = _resolved_body
+                        else:
+                            _nested_body = (_frame_stmt.then_body or [])
+                            for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                                _nested_body = _nested_body + _elif_body2
+                            if _frame_stmt.else_body:
+                                _nested_body = _nested_body + _frame_stmt.else_body
                         _stack.append((_nested_body, 0))
                 if _promoted:
                     _replaced.extend(_promoted)
