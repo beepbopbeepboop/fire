@@ -70,6 +70,32 @@ specific instance no longer reproduces; see
 `fsutil.py` for why. `clsutil.py`'s instance above is confirmed live and
 independent of that other issue.)
 
+### Three more real-world instances (confirmed 2026-08-06), same root cause
+
+All three are the SAME underlying gap in a different guise: setting an
+attribute on a CLASS-OBJECT reference at module/class-body scope (not
+inside `__init__`, where ordinary `self.field = ...` scanning already
+registers a real struct field) — `cls.x = ...` inside a classmethod, or
+`SomeClass.x = ...` directly at module top level, referring to a class
+this codegen elsewhere treats as a real, known struct:
+
+- `Lib/collections/__init__.py`'s `OrderedDict.__new__`: `self =
+  dict.__new__(cls)` (an unmodeled `dict.__new__(cls)` call, so `self`'s
+  static type is opaque) followed by `self.__hardroot = _Link()` /
+  `self.__root = ...` — "request for member '__root' in something not a
+  structure or union".
+- `Lib/ctypes/__init__.py`: `c_ubyte.__ctype_le__ = c_ubyte.__ctype_be__ =
+  c_ubyte` at module top level, setting a NEW attribute directly on a
+  locally-defined class object (`c_ubyte`) outside any method — "request
+  for member '__ctype_le__'/'__ctype_be__' in something not a structure
+  or union".
+- `Lib/string/__init__.py`'s `Template.__init_subclass__`: `pat =
+  cls.pattern = re.compile(...)` — a classmethod's `cls` parameter, exact
+  same shape as the minimal repro above (`cls.__slot_names__ = ...`) —
+  "request for member 'pattern' in something not a structure or union".
+  (Also breaks `Lib/importlib/__init__.py`, which imports `string`
+  transitively.)
+
 ## What a real fix needs
 
 A genuine per-object dynamic attribute store (e.g. a runtime hash map keyed

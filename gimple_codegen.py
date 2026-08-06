@@ -21393,6 +21393,32 @@ class GimpleGen:
                         for nxt in a[1:]:
                             acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                         return acc
+                    # os.path.isdir/exists(p) — the GIMPLE path's own
+                    # os.path.* dispatch (_lower_call) already has these
+                    # wired to real runtime helpers (`marker` is an unused
+                    # leading int64_t param, an existing overload-
+                    # disambiguation convention, not this call's concern).
+                    # Before this, only `.join` was handled here; every
+                    # OTHER os.path.* member call (isdir/exists/isabs/...)
+                    # fell through to the generic MemberExpr fallback below,
+                    # which emitted the raw, invalid C++ `os.path.isdir(p)`
+                    # (`os` was never a real declared variable/namespace in
+                    # this scalar body model) — "'os' was not declared in
+                    # this scope". Found via Tools/build/update_file.py's
+                    # own `os.path.isdir(tmpfile)`.
+                    if e.func.member == 'isdir' and len(a) == 1:
+                        return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
+                    if e.func.member == 'exists' and len(a) == 1:
+                        return f"int_exists(0, (int64_t)(char *)({a[0]}))"
+                    # isfile/normpath/relpath: mirror the GIMPLE path's own
+                    # honest stubs for these exactly (isfile -> always
+                    # false; normpath/relpath -> identity), rather than
+                    # inventing different behavior for this narrower body
+                    # model.
+                    if e.func.member == 'isfile' and len(a) == 1:
+                        return '0'
+                    if e.func.member in ('normpath', 'relpath') and len(a) >= 1:
+                        return a[0]
                 if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'math':
                     a = [self._cpp_expr(x) for x in e.args]
                     if e.func.member in ('isnan', 'isinf', 'floor', 'ceil', 'fabs',
@@ -27190,7 +27216,16 @@ class GimpleGen:
                 self._cpp_early_global_names.add(_gm_stmt.target.name)
             elif isinstance(_gm_stmt, ImportStmt):
                 for _tm, _ta in _import_targets(_gm_stmt):
-                    self._cpp_early_global_names.add(_ta if _ta else _tm)
+                    # `import os.path` (no alias) binds the TOP-LEVEL
+                    # package name `os` in real Python, not the literal
+                    # dotted string "os.path" -- registering the latter
+                    # left bare `os` references in the generator body
+                    # unrecognized as a known global, falling through to
+                    # an undeclared C++ identifier ("'os' was not declared
+                    # in this scope") for any `os.replace(...)`-style call
+                    # not already special-cased as `os.path.*`. Found via
+                    # Tools/build/update_file.py's own `import os.path`.
+                    self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
             elif isinstance(_gm_stmt, FromImportStmt):
                 for _nm in getattr(_gm_stmt, 'names', []) or []:
                     self._cpp_early_global_names.add(_nm)
@@ -27209,7 +27244,9 @@ class GimpleGen:
                 if isinstance(_gi, (ImportStmt, FromImportStmt)):
                     if isinstance(_gi, ImportStmt):
                         for _tm, _ta in _import_targets(_gi):
-                            self._cpp_early_global_names.add(_ta if _ta else _tm)
+                            # Same `import a.b` (no alias) top-level-name
+                            # fix as the flat scan above.
+                            self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
                     else:
                         for _nm in getattr(_gi, 'names', []) or []:
                             self._cpp_early_global_names.add(_nm)
