@@ -8953,18 +8953,26 @@ class GimpleGen:
                 sv = self._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
                 return 'char *', self._call_expr('char *', 'mojo_str_cat', [('char *', sv), ('char *', rv2)])
 
-        # char * * int → string repetition (e.g., "  " * 3)
-        if op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t'):
+        # char * * int → string repetition (e.g., "  " * 3). Also accepts a
+        # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1
+        # pluralization idiom — err_count != 1 IS a real bool operand, not
+        # an int literal, so it previously missed this dispatch entirely
+        # and fell through to plain numeric `*`, "invalid operands to
+        # binary * (have 'char *' and 'int')" — found via Doc/tools/
+        # check-epub.py's `s = 's' * (err_count != 1)`).
+        if op == '*' and lt == 'char *' and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
             t = self._new_temp('char *')
             lv_local = self._ensure_local(lt, lv)
-            self._emit(f"  {t} = mojo_cstr_repeat ({lv_local}, {rv});")
+            rv64 = self._to_int64(rt, rv)
+            self._emit(f"  {t} = mojo_cstr_repeat ({lv_local}, {rv64});")
             return 'char *', t
 
         # int * char * → string repetition (flipped order)
-        if op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char *':
+        if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and rt == 'char *':
             t = self._new_temp('char *')
             rv_local = self._ensure_local(rt, rv)
-            self._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv});")
+            lv64 = self._to_int64(lt, lv)
+            self._emit(f"  {t} = mojo_cstr_repeat ({rv_local}, {lv64});")
             return 'char *', t
 
         # bare `char` * int → string repetition, e.g. `c * 3` where c is a
@@ -8981,17 +8989,19 @@ class GimpleGen:
         # meant triple-quoted strings/docstrings were never recognized at
         # all when this file compiles itself, cascading into a severe
         # performance blowup during self-hosted `--dump-full` of mojo.py).
-        if op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t'):
+        if op == '*' and lt == 'char' and rt in ('int', 'int64_t', 'uint64_t', '_Bool'):
             sv = self._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
             t = self._new_temp('char *')
-            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {rv});")
+            rv64 = self._to_int64(rt, rv)
+            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {rv64});")
             return 'char *', t
 
         # int * bare `char` → string repetition (flipped order)
-        if op == '*' and lt in ('int', 'int64_t', 'uint64_t') and rt == 'char':
+        if op == '*' and lt in ('int', 'int64_t', 'uint64_t', '_Bool') and rt == 'char':
             sv = self._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
             t = self._new_temp('char *')
-            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {lv});")
+            lv64 = self._to_int64(lt, lv)
+            self._emit(f"  {t} = mojo_cstr_repeat ({sv}, {lv64});")
             return 'char *', t
 
         # MojoList * * int → list repetition (e.g., [0] * n)
