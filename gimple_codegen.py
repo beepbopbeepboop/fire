@@ -21883,7 +21883,39 @@ class GimpleGen:
                     and isinstance(s.value.func, IdentExpr)
                     and s.value.func.name in self.func_return_types
                     and self.func_return_types[s.value.func.name] == 'MojoList *')
+                # A call to a name this codegen has no real signature for
+                # (e.g. `tempfile.mkstemp(...)` -- real Python's own
+                # tempfile module, unresolved by this compiler's tracked
+                # stdlib) lowers to a bare opaque scalar stub (`0`), not a
+                # real tuple/MojoList*. Subscripting that stub (`(0)[i]`)
+                # is invalid C++ ("invalid types 'int[int]' for array
+                # subscript") -- found via importlib/resources/_common.py's
+                # `fd, raw_path = tempfile.mkstemp(suffix=suffix)` inside a
+                # generator body. `_tup_val` is still emitted above (for
+                # any side effects a real call would have), just never
+                # subscripted; every target gets the same safe-stub 0
+                # every other unresolved-call site in this codegen already
+                # falls back to.
+                # Module-qualified calls (`tempfile.mkstemp(...)`) have a
+                # MemberExpr func, not a bare IdentExpr -- must be caught
+                # here too, not just the bare-name case _tup_is_list_call
+                # already checks.
+                if isinstance(s.value, CallExpr) and isinstance(s.value.func, IdentExpr):
+                    _tup_callee = s.value.func.name
+                elif isinstance(s.value, CallExpr) and isinstance(s.value.func, MemberExpr):
+                    _tup_callee = s.value.func.member
+                else:
+                    _tup_callee = None
+                _tup_is_unresolved_call = (_tup_callee is not None
+                    and not _tup_is_list_call
+                    and _tup_callee not in self.func_return_types
+                    and _tup_callee not in self._KNOWN_SIGS)
                 lines = []
+                if _tup_is_unresolved_call:
+                    # Still emit the call itself (discarding its bogus
+                    # scalar result) so any real side effect the actual
+                    # external function would have isn't silently dropped.
+                    lines.append(f"{indent}(void)({_tup_val});")
                 for i, el in enumerate(s.target.elements):
                     if isinstance(el, IdentExpr):
                         if el.name not in declared:
@@ -21892,6 +21924,8 @@ class GimpleGen:
                         if _tup_is_list_call:
                             lines.append(f"{indent}{el.name} = "
                                          f"mojo_list_get_int((MojoList *)({_tup_val}), {i});")
+                        elif _tup_is_unresolved_call:
+                            lines.append(f"{indent}{el.name} = 0;")
                         else:
                             lines.append(f"{indent}{el.name} = ({_tup_val})[{i}];")
                 return lines
