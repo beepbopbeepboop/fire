@@ -18087,38 +18087,94 @@ class GimpleGen:
         self._emit_label(bb_after)
 
     def _gen_stmt_WithStmt(self, node):
-        aliases = []
+        # `contexts` tracks the ORIGINAL context-manager value (`ctx_v`,
+        # `ctx_t`) for each item, separately from the user-visible bound
+        # name (`alias`, real Python's `with X() as v:` binds `v` to
+        # `X().__enter__()`'s RETURN value, not to the `X()` instance
+        # itself) — __exit__ must always be called on the context manager
+        # object, never on whatever __enter__ happened to return.
+        contexts = []
         for item in node.items:
             et, ev = self.lower_expr(item.expr)
-            alias  = None
+            ctx_t, ctx_v = et, ev
+            struct_name = _struct_name_of(et)
+            enter_fn    = self._struct_method_csym(struct_name, '__enter__', '')
+            has_enter = (enter_fn in self.func_return_types
+                         or f"{struct_name}___enter__" in self.func_return_types)
+            # __enter__'s return value, not the context manager itself, is
+            # what gets bound to the `as` target — previously this called
+            # __enter__ purely for its side effects and discarded the
+            # result, binding the alias to the raw ctx-manager object
+            # instead (the compiled-path analogue of the interpreter bug
+            # fixed in myinterpreter.py's execute_WithStmt — see bugs/
+            # INTERP_with_as_binding_for_loop_keyerror.md). Found via
+            # Tools/ftscalingbench/ftscalingbench.py's MyContextManager.
+            enter_ret_t = self.func_return_types.get(enter_fn, et) if has_enter else et
+            if has_enter and enter_ret_t == 'void':
+                # A void-returning __enter__ (a legitimate, common Mojo
+                # shape — no explicit return, side-effects only, e.g.
+                # test/tempfile/test_tempfile.mojo's TempEnvWithCleanup)
+                # has no value to capture; `void _t = f();` is invalid C.
+                # Call it as a statement instead. There is nothing
+                # meaningful to bind an `as` target to in this shape
+                # either — real code with a void __enter__ never uses one
+                # (this real-world file's own `with TempEnvWithCleanup
+                # (...):` has none) — fall back to the ctx manager value
+                # itself rather than crash if it somehow does.
+                self._emit_call('void', '', enter_fn, [(et, ctx_v)])
+                enter_v = ctx_v
+                enter_ret_t = et
+            elif has_enter:
+                enter_v = self._call_expr(enter_ret_t, enter_fn, [(et, ctx_v)])
+            else:
+                self._emit(f"  /* with: __enter__ ({struct_name}) */")
+                enter_v = ctx_v
+                enter_ret_t = et
             if item.alias is not None:
                 alias = item.alias if isinstance(item.alias, str) else item.alias.name
                 if alias not in self.var_types:
-                    self._declare_var(alias, et)
-                self._emit(f"  {alias} = {ev};")
-            else:
-                tmp = self._new_val(et, f"{ev}")
-                alias = tmp
-            struct_name = _struct_name_of(et)
-            enter_fn    = self._struct_method_csym(struct_name, '__enter__', '')
-            if enter_fn in self.func_return_types or f"{struct_name}___enter__" in self.func_return_types:
-                self._emit(f"  {enter_fn} ({alias});")
-            else:
-                self._emit(f"  /* with: __enter__ ({struct_name}) */")
-            aliases.append((alias, struct_name))
+                    self._declare_var(alias, enter_ret_t)
+                self._safe_coerce_emit(enter_ret_t, self.var_types[alias], enter_v, alias)
+            contexts.append((ctx_t, ctx_v, struct_name))
 
         def _emit_exits():
-            for al, sn in aliases:
+            for ct, cv, sn in contexts:
                 exit_fn = self._struct_method_csym(sn, '__exit__', '')
                 if exit_fn in self.func_return_types or f"{sn}___exit__" in self.func_return_types:
-                    self._emit(f"  {exit_fn} ({al});")
+                    # __exit__(self, exc_type, exc_val, exc_tb) — real
+                    # Python's protocol always passes 3 exception-info
+                    # args (None/None/None on the normal-exit path). This
+                    # codegen doesn't thread real per-with-statement
+                    # exception objects through to here on the exceptional
+                    # path either (both paths pass 0/0/0) — always calling
+                    # with the correct ARITY, matching whatever exception
+                    # info happens to be available, was previously simply
+                    # missing altogether ("too few arguments to function
+                    # ...__exit__; expected 4, have 1", a hard compile
+                    # failure, not just imprecise semantics).
+                    #
+                    # Real Mojo (unlike Python) does NOT require __exit__
+                    # to accept the 3 exception-info params — plain
+                    # resource-cleanup-only `def __exit__(self):` is a
+                    # legitimate, common shape too (e.g. std/io/io.mojo's
+                    # `_fdopen`). Padding unconditionally to 4 args broke
+                    # that shape ("too many arguments... expected 1, have
+                    # 4") — pad only up to however many params THIS
+                    # exit_fn's own real signature actually declares.
+                    _exit_params = self.func_param_types.get(exit_fn)
+                    if _exit_params is None:
+                        _exit_params = self.func_param_types.get(f"{sn}___exit__")
+                    _n_extra = max(len(_exit_params) - 1, 0) if _exit_params is not None else 3
+                    _extra_args = [('int64_t', '0')] * min(_n_extra, 3)
+                    ret_t = self.func_return_types.get(exit_fn, '_Bool')
+                    self._emit_call(ret_t, '', exit_fn, [(ct, cv)] + _extra_args)
                 else:
                     self._emit(f"  /* with: __exit__ ({sn}) */")
 
         has_exit = any(
             self._struct_method_csym(sn, '__exit__', '') in self.func_return_types
             or f"{sn}___exit__" in self.func_return_types
-            for _, sn in aliases)
+            for _, _, sn in contexts)
 
         if has_exit:
             sj_ret = self._new_temp('int')
