@@ -3866,6 +3866,36 @@ class Interpreter:
         """Execute continue statement."""
         raise ContinueException()
 
+    def _has_dunder(self, obj, name):
+        """Does `obj` implement dunder method `name`? For a MojoInstance
+        (an interpreted Mojo class), real Python `hasattr(obj, name)` is
+        always False for interpreted methods like `__enter__`/`__exit__` —
+        MojoInstance only exposes a FIXED set of dunders as real Python
+        methods (`__len__`/`__getitem__`/`__setitem__`/...), so anything
+        else defined by the underlying Mojo class (`self._mojo_class.
+        methods`) is invisible to plain `hasattr`/`getattr`. Route through
+        the class's own method table instead for MojoInstance; fall back to
+        plain `hasattr` for everything else (native Python-backed runtime
+        objects). See bugs/INTERP_with_as_binding_for_loop_keyerror.md:
+        `with SomeInterpretedClass() as x:` never actually called the
+        interpreted `__enter__`, silently using the un-entered instance
+        itself instead — found via a KeyError inside `MojoInstance.
+        __getitem__` (old-style `for` iteration protocol) because `x` was
+        the raw instance instead of whatever `__enter__` was supposed to
+        return."""
+        if isinstance(obj, MojoInstance):
+            return name in obj._mojo_class.methods
+        return hasattr(obj, name)
+
+    def _call_dunder(self, obj, name, *args):
+        """Call dunder method `name` on `obj`, dispatching through the
+        interpreted method table for a MojoInstance (mirrors _has_dunder;
+        see its docstring) or plain attribute access otherwise."""
+        if isinstance(obj, MojoInstance):
+            method = obj._mojo_class.methods[name]
+            return method(obj._mojo_class.interpreter, obj, *args)
+        return getattr(obj, name)(*args)
+
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
         if getattr(node, 'is_async', False):
@@ -3889,10 +3919,12 @@ class Interpreter:
             return None
 
         contexts = []
+        exc_occurred = False
         try:
             for item in node.items:
                 ctx = self.eval_expr(item.expr)
-                entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
+                entered = (self._call_dunder(ctx, '__enter__')
+                           if self._has_dunder(ctx, '__enter__') else ctx)
                 contexts.append((ctx, entered))
                 if item.alias:
                     # item.alias is the same comma-joined unpacking-target
@@ -3905,14 +3937,23 @@ class Interpreter:
             for stmt in node.body:
                 self.execute(stmt)
         except Exception as e:
+            # See the `finally` block below: this branch already calls
+            # __exit__ on every context itself (with real exception info),
+            # so `exc_occurred` tells `finally` not to call it AGAIN with
+            # (None, None, None) — the original code did both
+            # unconditionally, double-invoking every context manager's
+            # __exit__ on any exception.
+            exc_occurred = True
             for ctx, _ in reversed(contexts):
-                if hasattr(ctx, '__exit__') and ctx.__exit__(type(e), e, None):
+                if (self._has_dunder(ctx, '__exit__')
+                        and self._call_dunder(ctx, '__exit__', type(e), e, None)):
                     return None
             raise
         finally:
-            for ctx, _ in reversed(contexts):
-                if hasattr(ctx, '__exit__'):
-                    ctx.__exit__(None, None, None)
+            if not exc_occurred:
+                for ctx, _ in reversed(contexts):
+                    if self._has_dunder(ctx, '__exit__'):
+                        self._call_dunder(ctx, '__exit__', None, None, None)
         return None
 
     def execute_RaiseStmt(self, node):
