@@ -345,6 +345,12 @@ int64_t     MojoList_index(MojoList *l, int v);
 int64_t     mojo_obj_getattr(void *obj, char *attr);
 void        mojo_unsupported_iter(const char *type_name);
 
+/* Real `hash(x)` builtin -- see mojo_runtime.c's docstring above their
+ * definitions. mojo_hash_str for a statically-known string argument,
+ * mojo_hash for the generic (statically-opaque-type) fallback. */
+int64_t     mojo_hash_str(char *s);
+int64_t     mojo_hash(int64_t val);
+
 int         mojo_dict_contains(MojoDict *d, char *key);
 void        mojo_dict_print(MojoDict *d);
 int64_t     mojo_dict_len(MojoDict *d);

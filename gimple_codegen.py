@@ -13182,6 +13182,27 @@ class GimpleGen:
                 'int64_t', 'mojo_pow_mod',
                 [('int64_t', bv), ('int64_t', ev), ('int64_t', mv)])
 
+        # hash(x): was previously only a bare, never-defined forward
+        # declaration (`_util_pairs`'s preamble stub) — compiled fine but
+        # failed to LINK ("undefined symbols: _hash") the instant anything
+        # actually called it. Found via Modules/_decimal/tests/bignum.py's
+        # `xhash` (calls hash() on nothing directly, but sits alongside
+        # the pow(base, exp, mod) fix above in the same file/investigation)
+        # and importlib/metadata/_text.py. Dispatch on the STATICALLY known
+        # argument type when possible (matching Python's real hash(int) ==
+        # int for the common int case, real content hashing for a string)
+        # rather than always routing through the generic opaque-value
+        # fallback (mojo_hash, which can't tell a small int from a real
+        # string apart from a raw int64_t without a static type hint).
+        if fname_raw == 'hash' and len(node.args) == 1:
+            ht, hv = self.lower_expr(node.args[0])
+            if ht in ('int', 'int64_t', '_Bool'):
+                return 'int64_t', self._to_int64(ht, hv)
+            if ht in ('char *', 'MojoStr *'):
+                hv = self._stringify_value(ht, hv) if ht != 'char *' else hv
+                return 'int64_t', self._call_expr('int64_t', 'mojo_hash_str', [('char *', hv)])
+            return 'int64_t', self._call_expr('int64_t', 'mojo_hash', [('int64_t', self._to_int64(ht, hv))])
+
         # sum(list_of_doubles): the generic `mojo_sum` (BUILTIN_VALUE_MAP
         # below) always reads each MojoList slot via mojo_list_get_int and
         # returns int64_t -- for a list this codegen tracks (via

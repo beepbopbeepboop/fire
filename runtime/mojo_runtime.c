@@ -2412,6 +2412,42 @@ char *string_upper(char *str) {
     return upper;
 }
 
+/* Real `hash(x)` builtin. `hash` was previously only a bare, never-defined
+ * forward declaration in gimple_codegen.py's preamble (`_util_pairs`) —
+ * compiled fine but failed to LINK ("undefined symbols: _hash") the moment
+ * anything actually called it; found via Modules/_decimal/tests/bignum.py's
+ * `pow(10, exp, _PyHASH_MODULUS)` sibling code (`xhash`) and importlib/
+ * metadata/_text.py. mojo_hash_str hashes string CONTENT (reusing the same
+ * FNV-1a _str_hash already used by MojoDict/MojoSet's own hash table, for
+ * consistency — not real CPython's randomized SipHash, but stable across
+ * calls within one run, which is all any real use of hash() here needs).
+ * mojo_hash is the generic fallback for a statically-opaque argument
+ * (codegen dispatches to mojo_hash_str/returns the value directly for a
+ * STATICALLY known char* or int argument instead — see gimple_codegen.py's
+ * `fname_raw == 'hash'` case — this is only reached when the static type
+ * is unknown): mirrors _mojo_generic_elem_repr's existing heuristic for
+ * telling a boxed pointer apart from a small int with no type tag of its
+ * own (a real MojoList/MojoDict pointer has no stable content-based hash without
+ * walking every element, so those hash by identity/address instead,
+ * matching Python's own default object.__hash__ for unhashable-by-content
+ * types rather than raising).
+ */
+int64_t mojo_hash_str(char *s) {
+    return (int64_t)_str_hash(s);
+}
+
+int64_t mojo_hash(int64_t val) {
+    if (val == 0) return 0;
+    if (val > 65536) {
+        if (mojo_is_registered_list(val) || mojo_is_registered_dict(val))
+            return val;
+        if (mojo_read_type_tag_safe(val) != 0)
+            return val;
+        return mojo_hash_str((char *)(intptr_t)val);
+    }
+    return val;
+}
+
 /* ── Generic Python-object attribute accessor ──────────────────────────────
  * Reached whenever codegen couldn't statically resolve obj.attr to a real
  * struct field or a known stdlib call (see gimple_codegen.py's os.path.*
