@@ -3303,6 +3303,24 @@ class GimpleGen:
         # key off it consistently instead of re-deriving "is this a
         # supported generator" in four different places.
         self._supported_generators: dict[str, FunctionDef] = {}
+        # Name of every top-level generator/async function that FAILED to
+        # translate (raised _UnsupportedGeneratorShape after exhausting all
+        # retry passes) and was therefore stub-declared instead, under
+        # relaxed_imports (see gen_module's "leftover generators" handling).
+        # Phase 2a's ordinary body-gen loop must skip these names too, not
+        # just the successful ones in _supported_generators/_supported_async/
+        # _supported_async_gen — otherwise it falls through and compiles the
+        # SAME FunctionDef a second time as an ordinary (non-generator-aware)
+        # function, producing a real C definition that conflicts with the
+        # stub's own `int64_t NAME (...);` declaration ("conflicting types
+        # for 'NAME'; have 'void(void)'" — gen_func has no yield-statement
+        # handling, so the bogus ordinary compile silently drops every
+        # `yield` and infers void/no-params from whatever's left). Found via
+        # Modules/_decimal/tests/randfloat.py's test_boundaries (augmented
+        # assignment to a non-simple target — genuinely unsupported, not a
+        # retry-timing issue): reproduces even compiling that file alone,
+        # with no import chain involved at all.
+        self._unsupported_generator_names: set[str] = set()
         # name -> {'base': <mangled C symbol prefix>, 'value_ctype': <str>}
         # for every entry in _supported_generators — the exact extern "C" API
         # names/types the .c side forward-declares and calls into.
@@ -27858,6 +27876,9 @@ class GimpleGen:
                     _stub = f'#ifndef _MOJO_STUB_{_csym.upper()}\n#define _MOJO_STUB_{_csym.upper()}\nint64_t {_csym} (...);\n#endif'
                     if _stub not in self._elaborated_externs:
                         self._elaborated_externs.append(_stub)
+                    # See _unsupported_generator_names's docstring: Phase 2a
+                    # must not ALSO compile this name as an ordinary function.
+                    self._unsupported_generator_names.add(_fn_name)
             else:
                 raise RuntimeError(
                     "cannot compile module: function(s) "
@@ -28794,6 +28815,15 @@ class GimpleGen:
                     # declarations appear in this .c/.ci output (see the
                     # preamble emission and the free-function forward-decl
                     # loop below, both gated the same way).
+                    continue
+                if stmt.name in self._unsupported_generator_names:
+                    # See _unsupported_generator_names's docstring: this
+                    # generator/async function failed C++ translation and was
+                    # stub-declared instead (relaxed_imports). It must NOT
+                    # also get an ordinary body here — gen_func has no idea
+                    # how to lower `yield`, and a second, differently-shaped
+                    # definition of the same C symbol is a hard conflicting-
+                    # types compile error, not just wasted work.
                     continue
                 # Step I: scoped push — temporarily expose this function's
                 # own nested async helpers (compiled earlier by
@@ -30683,6 +30713,12 @@ class GimpleGen:
                 continue
             if (fn.name in self._supported_generators or fn.name in self._supported_async
                     or fn.name in self._supported_async_gen):
+                continue
+            if fn.name in self._unsupported_generator_names:
+                # See _unsupported_generator_names's docstring — already has
+                # its own `int64_t NAME (...);` stub declaration; do not ALSO
+                # forward-declare it here with a second, differently-shaped
+                # ordinary signature (a "conflicting types" compile error).
                 continue
             ret    = self.func_return_types.get(fn.name, 'int64_t')
             # If any param is *args, the call convention uses a packed MojoList*
