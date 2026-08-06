@@ -1798,6 +1798,19 @@ def _elem_type(ptr_type: str) -> str:
         return ptr_type.replace('*', '').strip()
     return 'int64_t'
 
+# Well-known Python str methods whose return type is unconditionally str/list
+# (never bool/int, unlike e.g. find()/startswith()) -- used ONLY to infer a
+# struct field's C type from a chained method call in its __init__ assignment
+# (`self.field = obj.attr.replace(...)`), where the call's func is a
+# MemberExpr (not a bare IdentExpr the generic CallExpr-name dispatch above
+# already recognizes) so it fell through to a blind 'int' default otherwise.
+_STR_RETURNING_METHODS = {
+    'replace', 'strip', 'lstrip', 'rstrip', 'lower', 'upper', 'format',
+    'zfill', 'capitalize', 'title', 'join', 'swapcase', 'expandtabs',
+    'casefold', 'center', 'ljust', 'rjust', 'removeprefix', 'removesuffix',
+}
+_LIST_RETURNING_METHODS = {'split', 'rsplit', 'splitlines'}
+
 _C_ID_MAP = {'char *': 'charptr', 'void *': 'voidptr', '_Bool': 'bool'}
 
 def _c_id(ctype: str) -> str:
@@ -15212,7 +15225,16 @@ class GimpleGen:
         self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
-        st = self._new_val('int', f"{gen0.target} + {step_v}")
+        # `gen0.target` is declared int64_t (line above); this increment
+        # temp must match exactly -- GIMPLE has no implicit int->int64_t
+        # widening across statements, so declaring it 'int' (32-bit) here
+        # produced "non-trivial conversion in 'var_decl'"/"type mismatch
+        # in binary expression" on the very next line's `{gen0.target} =
+        # {st};` for EVERY range-based comprehension (`[x for x in
+        # range(...)]` and friends), not just some narrow edge case.
+        # Found via pathlib/__init__.py's `tuple(self[i] for i in
+        # range(*idx.indices(len(self))))`.
+        st = self._new_val('int64_t', f"{gen0.target} + {step_v}")
         self._emit(f"  {gen0.target} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
@@ -26092,6 +26114,26 @@ class GimpleGen:
                                         ft = sname + ' *'
                                     elif cn in self.struct_field_types:
                                         ft = cn + ' *'
+                                    elif (isinstance(cfn, MemberExpr)
+                                          and cfn.member in _STR_RETURNING_METHODS):
+                                        # A chained method call (`loader.prefix.
+                                        # replace(...)`) has a MemberExpr func, not
+                                        # a bare IdentExpr, so `cn` above is always
+                                        # '' for it -- every one of these fell to
+                                        # the generic 'int' default below regardless
+                                        # of the method actually being one of
+                                        # Python's well-known ALWAYS-str-returning
+                                        # str methods. A field seeded 'int' here
+                                        # then gets a real `char *` value written
+                                        # into it (self.prefix = ...replace(...)),
+                                        # a struct-field type mismatch ("non-trivial
+                                        # conversion" family of GIMPLE errors) rather
+                                        # than a targeted fix -- found via importlib/
+                                        # resources/readers.py's ZipReader.__init__.
+                                        ft = 'char *'
+                                    elif (isinstance(cfn, MemberExpr)
+                                          and cfn.member in _LIST_RETURNING_METHODS):
+                                        ft = 'MojoList *'
                                     else:
                                         ft = 'int'
                                 else:
