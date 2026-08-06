@@ -5872,10 +5872,23 @@ class GimpleGen:
         inferred = {}
 
         # Map builtin/common functions to their first parameter type
+        # `len` deliberately excluded: passing a param to `len()` means it's
+        # a SIZED CONTAINER (str/list/dict/set/tuple — no single correct C
+        # type to default to), not that the param's own type IS `int` —
+        # that's len()'s RETURN type, not its argument's type. This entry
+        # used to wrongly infer 'int' for any unannotated parameter whose
+        # ONLY usage signal was `len(param)` (no subscript/iteration to
+        # otherwise identify it as MojoList*/char*), producing a compiled
+        # function whose parameter was declared `int` while every real
+        # caller passed a genuine pointer (str/list) argument — "passing
+        # argument 1 of '<fn>' makes integer from pointer without a cast".
+        # Found via Doc/includes/ndiff.py's `def main(args): ... if
+        # len(args) != 2: ...` (no subscript/for-loop over `args`
+        # anywhere in the function, so `len(args)` was the only signal,
+        # and this entry silently won).
         BUILTIN_PARAM_TYPES = {
             'open': 'char *',
             'mojo_open_file': 'char *',
-            'len': 'int',
             'print': 'char *',
             'str': 'int',
         }
@@ -17291,6 +17304,26 @@ class GimpleGen:
                 else:
                     _mod_id = self.module_name.replace('.', '_').replace('-', '_') if self.module_name else ''
                     fname = _safe_name(f"_{_mod_id}_main" if _mod_id else '_lib_main')
+                # Mirror the identical fix in _lower_call's own copy of this
+                # exact redirect guard: _emit_call below looks up expected
+                # param/return types under the RENAMED key (`fname`), but
+                # they were only ever registered under 'main' itself — so
+                # without this, `func_param_types.get(fname)` returned None,
+                # _emit_call had nothing to coerce arguments against, and a
+                # pointer argument (e.g. a MojoList* from `main(sys.argv[
+                # 1:])`) was passed straight into main's own int64_t
+                # parameter with NO cast at all — "passing argument 1 of
+                # '_gimple_main' makes integer from pointer without a cast"
+                # (a hard GIMPLE error, not just a warning). Found via
+                # Doc/includes/ndiff.py's/Tools/build/generate_token.py's/
+                # generate_re_casefix.py's own top-level `main(...)` calls
+                # (this bare-statement path, `_gen_stmt_ExprStmt`, not
+                # _lower_call — `main(...)` as its own statement, result
+                # discarded, never reaches _lower_call at all).
+                if 'main' in self.func_param_types and fname not in self.func_param_types:
+                    self.func_param_types[fname] = self.func_param_types['main']
+                if 'main' in self.func_return_types and fname not in self.func_return_types:
+                    self.func_return_types[fname] = self.func_return_types['main']
             else:
                 # Mirror the rename logic in _lower_call: only rename _C_RESERVED_FUNCS
                 # names when they are locally defined OR imported — otherwise keep the
