@@ -49,6 +49,31 @@ class Slot:
   cls.pattern = re.compile(...)`. (Also breaks `Lib/importlib/__init__.py`,
   which imports `string` transitively.)
 
+### More real-world instances confirmed 2026-08-06 (Sub-case C, same as `__del__._slotted`)
+
+- `Tools/scripts/var_access_benchmark.py`: `inner.__name__ =
+  'read_nonlocal'` (setting `__name__` on a closure/`BoundMethod` value —
+  a WRITE, same "fixed-layout runtime struct, unknown field" shape as the
+  doc's own `__del__._slotted = True` example) and separately reads
+  `f.__name__` on a `MojoBoundMethod` elsewhere in the same file
+  ("'MojoBoundMethod' has no member named '__name__'").
+- `Tools/build/umarshal.py` / `Tools/build/deepfreeze.py`: `retval.__dict__`
+  / `pprint.pprint(retval.__dict__)` where `retval`/the target is a KNOWN
+  user struct (`Code`) — "'Code' has no member named '__dict__'". This is
+  actually a THIRD variant, distinct from Sub-cases A-C: unlike `_slotted`
+  (a genuinely NEW, never-declared field) or `.pattern`/`.__slot_names__`
+  (opaque `cls`), `__dict__` here needs to return a real dict VIEW of the
+  struct's OWN ALREADY-KNOWN fields (matching Python's real `obj.__dict__`
+  semantics) — the fix doesn't need generic dynamic storage for this one
+  specifically, it could reuse the EXISTING `_mojo_dispatch_fields`/
+  `dataclasses.fields()` reflection machinery (already emits a
+  `_mojo_fieldnames_<struct>()` per known struct) extended to build a real
+  `MojoDict *` of name->value pairs instead of just a name list — worth
+  implementing as an easy, narrow special case for `__dict__`/`vars()` on
+  a struct with ALL-known fields, ahead of (or independent from) the full
+  generic-dynamic-storage plan below, which remains necessary for the
+  genuinely-new-attribute cases (Sub-cases A/B/C).
+
 ## What's ALREADY there (the key finding that shrinks this task)
 
 This codegen already has a generic runtime-dispatch choke point for
@@ -120,6 +145,23 @@ direct `->_slotted` access GCC then rejects because the struct genuinely
 has no such member.
 
 ## Implementation plan
+
+### Step 0 (independent, easiest, do first) — `__dict__`/`vars()` on a struct with all-known fields
+
+Doesn't need Steps 1-4's dynamic storage at all. `_mojo_dispatch_fields`/
+`_mojo_fieldnames_<struct>()` (gimple_codegen.py, emitted per reflect-
+eligible struct — see the `reflect_structs`/`tag_cases_fields` preamble
+emission near `_mojo_dispatch_getattr`) already returns a `MojoList *` of
+FIELD NAMES for `dataclasses.fields()`. Add a companion `_mojo_asdict_
+<struct>()` (or extend the existing one) that returns a real `MojoDict *`
+of name->value pairs instead, by reading each known field off the
+instance the same way `_mojo_getattr_<struct>` already does per-field —
+then route `obj.__dict__` (a MemberExpr with `.member == '__dict__'` on a
+value whose struct is known and reflect-eligible) and `vars(obj)` (the
+1-arg form) to call it. Confirmed real instances: Tools/build/umarshal.py
+Tools/build/deepfreeze.py's `retval.__dict__` where `retval: Code` (a
+known struct with statically-enumerable fields) — "'Code' has no member
+named '__dict__'".
 
 ### Step 1 — real per-object dynamic-attribute storage (runtime)
 
