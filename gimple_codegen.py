@@ -3267,6 +3267,9 @@ class GimpleGen:
         'reversed': 'mojo_reversed',
         '__builtins__': '0',
         'eval':         'mojo_eval',
+        'hex': 'mojo_hex',
+        'oct': 'mojo_oct',
+        'bin': 'mojo_bin',
     }
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
@@ -5104,7 +5107,15 @@ class GimpleGen:
         'getuid':                ('unsigned int', []),
         'getgid':                ('unsigned int', []),
         'sysconf':               ('long',        ['int']),
-        'hex':                   ('char *',      ['int64_t']),
+        # Python's hex()/oct()/bin() builtins -- real implementations in
+        # runtime/mojo_runtime.c, routed here via BUILTIN_VALUE_MAP. (The
+        # bare 'hex' name used to be declared as if it were a real libc
+        # function via _LIBC_DECLARED/_NEEDS_SELF_EXTERN -- no such libc
+        # function exists, so every caller of Python's hex() got an
+        # "undefined symbol 'hex'" LINK failure, not a compile error.)
+        'mojo_hex':              ('char *',      ['int64_t']),
+        'mojo_oct':              ('char *',      ['int64_t']),
+        'mojo_bin':              ('char *',      ['int64_t']),
         'serialize':             ('void',        []),
         'mojo_enumerate':        ('MojoList *', ['void *']),
         'mojo_zip':              ('void *',     ['void *', 'void *']),
@@ -10545,6 +10556,36 @@ class GimpleGen:
             if _gm_api is not None:
                 arg_pairs = [self.lower_expr(a) for a in node.args]
                 all_args = [(ot, ov)] + arg_pairs
+                # Pad missing trailing params with keyword args / real
+                # defaults — see the identical free-function generator-call
+                # padding in _lower_call's `fname_raw in self._generator_api`
+                # branch for the full rationale (same root cause: a keyword
+                # or defaulted argument was silently dropped, producing "too
+                # few arguments to function '<base>_start'"). `self` occupies
+                # slot 0 here, so padding starts from `all_args`, not
+                # `arg_pairs`.
+                _gm_kwargs = getattr(node, 'kwargs', []) or []
+                _gm_expected = self.func_param_types.get(f"{_gm_api['base']}_start", [])
+                if _gm_expected and len(all_args) < len(_gm_expected):
+                    _gm_kwarg_dict = {kn: self.lower_expr(ke) for kn, ke in _gm_kwargs}
+                    _gm_kwarg_values = list(_gm_kwarg_dict.values())
+                    _gm_dflts = self._func_param_defaults.get(f"{_gm_api['base']}_start", [])
+                    while len(all_args) < len(_gm_expected):
+                        if _gm_kwarg_values:
+                            all_args.append(_gm_kwarg_values.pop(0))
+                            continue
+                        # -1: `self` is slot 0 in all_args but has no entry
+                        # in param_defaults (defaults are keyed by the
+                        # ORIGINAL Python params, which exclude `self`).
+                        _pos = len(all_args) - 1
+                        _dv = _gm_dflts[_pos][1] if 0 <= _pos < len(_gm_dflts) else None
+                        if _dv is not None:
+                            all_args.append(self._default_expr_to_pair(_dv))
+                        else:
+                            all_args.append(('int', '0'))
+                else:
+                    for _, _ke in _gm_kwargs:
+                        self.lower_expr(_ke)
                 t = self._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
                 self._generator_var_api[t] = _gm_api
                 return 'MojoGenerator *', t
@@ -12774,6 +12815,38 @@ class GimpleGen:
             # existing coercion logic (int literal -> int64_t, etc.) apply
             # here with no separate/duplicated coercion code.
             arg_pairs = [self.lower_expr(a) for a in node.args]
+            # Pad missing trailing params with keyword args / real defaults,
+            # mirroring _lower_named_call's identical padding for ordinary
+            # functions (see its own comment on `greet()` vs `def greet(name
+            # = "world")`). Without this, a generator call omitting any
+            # keyword-or-defaulted param (e.g. `tokenize(src, filename=
+            # filename)`, real code in Tools/cases_generator/lexer.py) only
+            # ever passed the bare positional args straight through — the
+            # keyword argument was silently DROPPED entirely (this whole
+            # branch never even looked at `node.kwargs`) and no default
+            # value filled the gap either, producing a hard "too few
+            # arguments to function '<base>_start'" compile error since
+            # `<base>_start`'s real C signature has one slot per Python
+            # parameter, unconditionally.
+            _gen_kwargs = getattr(node, 'kwargs', []) or []
+            _gen_expected = self.func_param_types.get(f"{api['base']}_start", [])
+            if _gen_expected and len(arg_pairs) < len(_gen_expected):
+                _gen_kwarg_dict = {kn: self.lower_expr(ke) for kn, ke in _gen_kwargs}
+                _gen_kwarg_values = list(_gen_kwarg_dict.values())
+                _gen_dflts = self._func_param_defaults.get(f"{api['base']}_start", [])
+                while len(arg_pairs) < len(_gen_expected):
+                    if _gen_kwarg_values:
+                        arg_pairs.append(_gen_kwarg_values.pop(0))
+                        continue
+                    _pos = len(arg_pairs)
+                    _dv = _gen_dflts[_pos][1] if _pos < len(_gen_dflts) else None
+                    if _dv is not None:
+                        arg_pairs.append(self._default_expr_to_pair(_dv))
+                    else:
+                        arg_pairs.append(('int', '0'))
+            else:
+                for _, _ke in _gen_kwargs:
+                    self.lower_expr(_ke)
             t = self._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
             self._generator_var_api[t] = api
             return 'MojoGenerator *', t
@@ -26503,14 +26576,38 @@ class GimpleGen:
                     # add_function's *Ts-typed overloads in the real stdlib).
                     _star_idx = next((i for i, (pn, _pt) in enumerate(_params_no_self)
                                        if pn.startswith('*') and not pn.startswith('**')), None)
-                    real_params = [(pn, pt) for pn, pt in _params_no_self if not pn.startswith('*')]
+                    # A `**kwargs`-style param (double star) MUST stay in
+                    # real_params/param_names: _build_call_args_for_candidate
+                    # locates its slot by scanning param_names for a '**'-
+                    # prefixed entry (to pack literal keyword args into a
+                    # real MojoDict there) and param_ctypes already carries
+                    # a real 'MojoDict *' slot for it (_signature_ctypes
+                    # only strips the *args pack's OWN sentinel, never a
+                    # **kwargs one). Dropping it here (the old filter
+                    # stripped ANY '*'-prefixed name, single or double star)
+                    # desynced param_names/max_arity from param_ctypes by
+                    # exactly one slot — the resolved overload's call sites
+                    # then never emitted an argument for that trailing
+                    # MojoDict* param at all, a hard "too few arguments"
+                    # compile error (e.g. tkinter/font.py's `Font.__init__
+                    # (self, root=None, font=None, name=None, exists=False,
+                    # **options)` called as `Font(name=.., exists=True,
+                    # root=..)`).
+                    real_params = [(pn, pt) for pn, pt in _params_no_self
+                                   if not (pn.startswith('*') and not pn.startswith('**'))]
                     _defaults = m.param_has_default or {}
                     if _star_idx is not None:
                         _pre_star = _params_no_self[:_star_idx]
                         min_arity = sum(1 for pn, _pt in _pre_star if pn not in _defaults)
                         max_arity = float('inf')
                     else:
-                        min_arity = sum(1 for pn, _pt in real_params if pn not in _defaults)
+                        # A `**kwargs` slot is never itself required (real
+                        # Python: `f()` is always valid even when `f` takes
+                        # `**kwargs`) — exclude it from min_arity, but it
+                        # still occupies one real slot in max_arity (a
+                        # concrete MojoDict* parameter in the C signature).
+                        min_arity = sum(1 for pn, _pt in real_params
+                                         if pn not in _defaults and not pn.startswith('**'))
                         max_arity = len(real_params)
                     _all_ctypes = self._signature_ctypes(m.params, m, s.name)
                     param_ctypes = _all_ctypes[1:] if _has_self_first else _all_ctypes
@@ -26947,6 +27044,10 @@ class GimpleGen:
             # arguments for free, with no separate coercion logic written
             # for this path.
             self.func_param_types[f"{base}_start"] = param_ctypes
+            _gen_dflts = getattr(s, 'param_defaults', None) or {}
+            if _gen_dflts:
+                self._func_param_defaults[f"{base}_start"] = [
+                    (pn, dv) for pn, dv in _gen_dflts.items()]
             self._generator_cpp_units.append(cpp_text)
             _generator_fns.pop(id(s), None)
 
@@ -26974,6 +27075,10 @@ class GimpleGen:
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
+                _gen_dflts = getattr(s, 'param_defaults', None) or {}
+                if _gen_dflts:
+                    self._func_param_defaults[f"{base}_start"] = [
+                        (pn, dv) for pn, dv in _gen_dflts.items()]
                 self._generator_cpp_units.append(cpp_text)
                 _generator_fns.pop(_gm_id, None)
 
@@ -27195,6 +27300,10 @@ class GimpleGen:
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
+                _gen_dflts = getattr(m, 'param_defaults', None) or {}
+                if _gen_dflts:
+                    self._func_param_defaults[f"{base}_start"] = [
+                        (pn, dv) for pn, dv in _gen_dflts.items()]
                 self._generator_cpp_units.append(cpp_text)
                 _generator_fns.pop(id(m), None)
 
@@ -27221,6 +27330,10 @@ class GimpleGen:
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
+                _gen_dflts = getattr(m, 'param_defaults', None) or {}
+                if _gen_dflts:
+                    self._func_param_defaults[f"{base}_start"] = [
+                        (pn, dv) for pn, dv in _gen_dflts.items()]
                 self._generator_cpp_units.append(cpp_text)
                 _generator_fns.pop(id(m), None)
 
@@ -28771,7 +28884,6 @@ class GimpleGen:
             ('clamp',                  'int64_t clamp(...);'),
             ('isdir',                  'int isdir (char * path);'),
             ('serialize',              'void serialize(...);'),
-            ('hex',                    'char * hex(...);'),
             ('slice',                  'int64_t slice(...);'),
             ('_getpw_linux',           'int64_t _getpw_linux(...);'),
             ('_lstat_macos',           'int64_t _lstat_macos(...);'),

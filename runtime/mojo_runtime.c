@@ -3413,6 +3413,41 @@ char *mojo_str_from_int(int64_t v) {
     return out;
 }
 
+/* Python's hex()/oct()/bin() builtins: a signed 0x/0o/0b-prefixed string,
+ * sign BEFORE the prefix for negative values (hex(-26) == '-0x1a', not
+ * two's-complement) -- matching real Python exactly, not C's %x/%o. */
+char *mojo_hex(int64_t v) {
+    char buf[32];
+    if (v < 0) snprintf(buf, sizeof buf, "-0x%llx", (unsigned long long)(-v));
+    else       snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
+char *mojo_oct(int64_t v) {
+    char buf[32];
+    if (v < 0) snprintf(buf, sizeof buf, "-0o%llo", (unsigned long long)(-v));
+    else       snprintf(buf, sizeof buf, "0o%llo", (unsigned long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
+char *mojo_bin(int64_t v) {
+    char digits[70];
+    int i = 69;
+    digits[i--] = '\0';
+    unsigned long long u = (v < 0) ? (unsigned long long)(-v) : (unsigned long long)v;
+    if (u == 0) digits[i--] = '0';
+    while (u > 0) { digits[i--] = '0' + (int)(u & 1ULL); u >>= 1; }
+    char buf[80];
+    snprintf(buf, sizeof buf, "%s0b%s", (v < 0) ? "-" : "", digits + i + 1);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
 /* Arbitrary-precision digit-string -> decimal-string conversion, via
  * schoolbook "multiply existing decimal digits by base, add next digit"
  * (no division needed). Used ONLY so a compiled AST dump can print an
