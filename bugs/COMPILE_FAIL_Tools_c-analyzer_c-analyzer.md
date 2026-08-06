@@ -2,6 +2,20 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c-analyzer.py`
 
+Note (2026-08-05): the "conflicting types for '_gimple_main'" error shown
+below is now FIXED (commit 12ff719, see `bugs/hard/
+CODEGEN_aliased_external_import_no_backing_symbol.md`). Re-testing today,
+this file still fails to compile with two separate errors: an unrelated
+pre-existing bug in `Tools/c-analyzer/cpython/__main__.py`
+(`'cpython___main___fmt_summary_79c856' undeclared here`, not
+investigated), AND `Tools/c-analyzer/c-analyzer.py:7:3: error: implicit
+declaration of function 'main'` — the same external-package-import gap
+documented in `bugs/hard/CODEGEN_aliased_external_import_no_backing_symbol.md`
+(`from cpython.__main__ import parse_args, main, configure_logger` imports
+from a local sibling package this compiler's `load_module()` doesn't
+resolve). Left here as a regular (not "hard") report since it's a mix of
+two issues, only one of which is the aliased-import gap.
+
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
 ```

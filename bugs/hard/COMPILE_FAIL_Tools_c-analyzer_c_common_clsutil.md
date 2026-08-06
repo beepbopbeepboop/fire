@@ -1,6 +1,14 @@
-# COMPILE_FAIL: Tools/c-analyzer/c_common/clsutil.py
+# COMPILE_FAIL (hard): Tools/c-analyzer/c_common/clsutil.py
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/clsutil.py`
+
+Root cause: see `CODEGEN_dynamic_attribute_on_generic_object.md` in this
+directory (that file has the minimal test case). Summary: `Slot.
+__set_name__`'s `cls.__slot_names__ = []` sets a dynamic attribute on a
+generically-typed object (`cls: type`); this codegen has no `__dict__`-
+style dynamic attribute storage for non-struct objects at all. Re-confirmed
+reproducing as of 2026-08-05 (unchanged by commit 12ff719 — a different
+bug entirely).
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 

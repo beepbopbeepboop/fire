@@ -2,6 +2,16 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/check-c-globals.py`
 
+Note (2026-08-05): the "conflicting types for '_gimple_main'" error shown
+below is now FIXED (commit 12ff719, see `bugs/hard/
+CODEGEN_aliased_external_import_no_backing_symbol.md`). Re-testing today,
+this file still fails to compile, but now with a completely different,
+unrelated set of errors rooted in a transitively-imported module
+(`Tools/c-analyzer/c_common/logging.py` — a redefinition conflict plus
+"expected identifier or '(' before 'default'"). Not investigated as part
+of the aliased-import-as-main work; left here as a regular (not "hard")
+report since the remaining failure is an unrelated bug class.
+
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
 ```
