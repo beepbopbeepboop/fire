@@ -21474,6 +21474,37 @@ class GimpleGen:
                     # Emit the underlying iterable; the consumer's loop
                     # unpacks (i, x) via the existing tuple-unpack path.
                     return args[0] if args else '0'
+                if fname == 'iter' and len(e.args) == 1:
+                    # Mirrors the GIMPLE path's identical `iter(x)` handling
+                    # (_lower_call): the container is already iterable
+                    # (for-loops consume it directly in this scalar body
+                    # model too), so model the builtin as identity rather
+                    # than emitting an undefined `iter(...)` call. Before
+                    # this, `iter` fell through to the generic bare-name
+                    # call at the bottom of this block, an undeclared C++
+                    # identifier ("'iter' was not declared in this scope").
+                    return args[0]
+                if fname == 'callable' and len(e.args) == 1:
+                    # This scalar coroutine-body model has no runtime type
+                    # tag to genuinely check "is this value callable" for
+                    # an arbitrary opaque parameter (unlike a real object
+                    # system with reflectable type info) -- honestly
+                    # answering this would need a capability this codegen
+                    # doesn't have. Conservatively stub `true`: real call
+                    # sites overwhelmingly use `callable(x)` as a "was a
+                    # real function actually supplied" guard (`if not
+                    # callable(x): raise ...`), where a false positive here
+                    # just skips a validation branch rather than producing
+                    # a silently wrong VALUE — keeping the happy path
+                    # (actually calling `x`) working, which is what matters
+                    # for the overwhelming majority of real call sites.
+                    # Before this, `callable` fell through to the generic
+                    # bare-name call below, an undeclared C++ identifier.
+                    # Found via Tools/c-analyzer/c_common/iterutil.py's own
+                    # `if not callable(onempty): raise onEmpty`. `args[0]`
+                    # (computed above) is discarded but was already emitted
+                    # for any side effect its evaluation would have.
+                    return '1'
                 # A call to a module-level function (tokenize.py's
                 # `detect_encoding(readline)`, codecs.py's
                 # `getincrementalencoder(encoding)`, os.py's `fspath(top)`)
@@ -22398,11 +22429,22 @@ class GimpleGen:
                 # uses. Only fires when the iterable is a bare identifier
                 # (so `for x in <call>()`'s generator delegation is
                 # untouched) whose declared type is the boxed-int64_t
-                # container convention.
+                # container convention -- OR a real `MojoList *`-typed
+                # local/parameter (a generator function whose param is
+                # annotated/inferred as MojoList*, not boxed int64_t: e.g.
+                # `def _fix_read_default(row): for value in row: ...` where
+                # `row`'s C++ param type is the real pointer). Without this
+                # second case, the generic range-for fallback below emitted
+                # `for (auto value : row)` on a bare `MojoList *` pointer --
+                # C++ range-for needs ADL `begin`/`end` for the iterated
+                # expression's type, which don't exist for a raw pointer --
+                # "'begin' was not declared in this scope" / "'end' was not
+                # declared in this scope". Found via Tools/c-analyzer/
+                # c_common/tables.py's `_fix_read_default`.
                 if (isinstance(s.iterable, IdentExpr)
                         and self._cpp_declared is not None
                         and s.iterable.name in self._cpp_declared
-                        and self._cpp_declared[s.iterable.name] == 'int64_t'):
+                        and self._cpp_declared[s.iterable.name] in ('int64_t', 'MojoList *')):
                     _itname = s.iterable.name
                     _ctr = self._cpp_fresh_name("_mg_i")
                     lines = []
