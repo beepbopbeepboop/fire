@@ -2617,9 +2617,30 @@ class Parser:
                     nxt = self._peek(1)
                     is_kwarg = nxt.kind in ("ASSIGN", "EQUAL") or (
                         nxt.kind == "OP" and nxt.value == "=")
-                    if not is_kwarg:
-                        bases.append(t.value)
+                    if is_kwarg:
+                        self._advance()
+                        expect_name = False
+                        continue
+                    # A dotted base (`class Foo(module.Bar):`) — walk the
+                    # chain and keep the TRAILING name (the actual class),
+                    # not just the leading module-name token. Capturing
+                    # only the leading token made EVERY dotted base look
+                    # unresolvable downstream (gimple_codegen.py's
+                    # _structs_with_unresolved_base checks each captured
+                    # base name against this compile's own known
+                    # StructDefs — "module" is never one, even when the
+                    # real class "module.Bar" genuinely is, e.g.
+                    # `class _Dialog(commondialog.Dialog):` in
+                    # tkinter/filedialog.py, whose Dialog IS a real,
+                    # compiled struct from the imported commondialog
+                    # module) — see bugs/COMPILE_FAIL_tkinter_filedialog.md.
+                    last_name = t.value
                     self._advance()
+                    while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
+                        self._advance()  # consume DOT
+                        last_name = self._peek().value
+                        self._advance()  # consume NAME
+                    bases.append(last_name)
                     expect_name = False
                     continue
                 self._advance()

@@ -4227,6 +4227,26 @@ class GimpleGen:
                 for ext in extensions:
                     mojo_paths.append(os.path.join(d, f"{_rel_flat}{ext}"))
                     mojo_paths.append(os.path.join(d, f"{_rel_pkg}{ext}"))
+            # `from tkinter import commondialog` inside tkinter/filedialog.py
+            # itself: module_name is "tkinter.commondialog", but the
+            # IMPORTING file's own directory (in search_dirs) already IS
+            # ".../tkinter" — appending the full dotted path there doubles
+            # the package segment (".../tkinter/tkinter/commondialog.py",
+            # which doesn't exist), so the loop above never finds it. If a
+            # search dir's own trailing path component matches the dotted
+            # name's LEADING component, also try the dotted path's
+            # remaining suffix directly under that dir (treating the dir
+            # as already representing that first package level). See
+            # bugs/COMPILE_FAIL_tkinter_filedialog.md.
+            if len(_dotted_parts) > 1:
+                _suffix_parts = _dotted_parts[1:]
+                _rel_suffix_flat = os.sep.join(_suffix_parts)
+                _rel_suffix_pkg = os.path.join(os.sep.join(_suffix_parts), '__init__')
+                for d in search_dirs:
+                    if os.path.basename(os.path.normpath(d)) == _dotted_parts[0]:
+                        for ext in extensions:
+                            mojo_paths.append(os.path.join(d, f"{_rel_suffix_flat}{ext}"))
+                            mojo_paths.append(os.path.join(d, f"{_rel_suffix_pkg}{ext}"))
 
         # Cross the import/module boundary into the real stdlib: resolve std.* modules
         # to their .mojo source under STDLIB_PATH so we walk into (and compile) the
@@ -25634,6 +25654,27 @@ class GimpleGen:
                 for stmt in node_list:
                     if isinstance(stmt, FromImportStmt):
                         modules_to_compile.add(stmt.module)
+                        # `from PACKAGE import SUBMODULE` (e.g. `from
+                        # tkinter import commondialog`) — real Python
+                        # resolves the imported NAME as a submodule FILE
+                        # (tkinter/commondialog.py), not a name looked up
+                        # inside tkinter/__init__.py, so compiling just
+                        # `stmt.module` alone never pulls in commondialog's
+                        # own struct/function defs (e.g. `Dialog`, whose
+                        # methods a same-transitive-closure subclass like
+                        # tkinter/filedialog.py's `_Dialog(commondialog.
+                        # Dialog)` needs merged in — see bugs/
+                        # COMPILE_FAIL_tkinter_filedialog.md). Try each
+                        # imported name as a dotted submodule path too, in
+                        # addition to the bare module — _compile_imported_
+                        # module already resolves dotted names via its own
+                        # existing search-path logic, and silently finds
+                        # nothing (a no-op) for the overwhelmingly common
+                        # case where the imported name is genuinely just a
+                        # symbol inside the module rather than a submodule
+                        # file.
+                        for _fn, _fa in (stmt.names or []):
+                            modules_to_compile.add(f"{stmt.module}.{_fn}")
                     elif isinstance(stmt, ImportStmt):
                         for _m, _a in _import_targets(stmt):
                             modules_to_compile.add(_m)
