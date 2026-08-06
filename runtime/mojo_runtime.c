@@ -3413,6 +3413,21 @@ char *mojo_str_from_int(int64_t v) {
     return out;
 }
 
+/* Python's divmod(a, b) builtin: (a // b, a % b) as a real 2-tuple, using
+ * the SAME floor-division adjustment __mojo_floordiv (mojo_runtime.h) uses
+ * for `//`, so the remainder here is always consistent with that quotient
+ * (same sign as b) -- not C's truncating a % b. */
+MojoList *mojo_divmod(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    q -= (a % b != 0 && (a ^ b) < 0);
+    int64_t r = a - q * b;
+    MojoList *out = mojo_list_new();
+    mojo_mark_as_tuple(out);
+    mojo_list_append_int(out, q);
+    mojo_list_append_int(out, r);
+    return out;
+}
+
 /* Python's hex()/oct()/bin() builtins: a signed 0x/0o/0b-prefixed string,
  * sign BEFORE the prefix for negative values (hex(-26) == '-0x1a', not
  * two's-complement) -- matching real Python exactly, not C's %x/%o. */

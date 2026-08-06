@@ -3270,6 +3270,7 @@ class GimpleGen:
         'hex': 'mojo_hex',
         'oct': 'mojo_oct',
         'bin': 'mojo_bin',
+        'divmod': 'mojo_divmod',
     }
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
@@ -5116,6 +5117,7 @@ class GimpleGen:
         'mojo_hex':              ('char *',      ['int64_t']),
         'mojo_oct':              ('char *',      ['int64_t']),
         'mojo_bin':              ('char *',      ['int64_t']),
+        'mojo_divmod':           ('MojoList *',  ['int64_t', 'int64_t']),
         'serialize':             ('void',        []),
         'mojo_enumerate':        ('MojoList *', ['void *']),
         'mojo_zip':              ('void *',     ['void *', 'void *']),
@@ -12914,6 +12916,39 @@ class GimpleGen:
                     return vct, result
                 _debug_note('next() on MojoGenerator* with no known _generator_var_api entry '
                             '(unreachable in normal use — see assign-then-next() propagation)', av)
+        # next(g, default) — same MojoGenerator* driving as the 1-arg form
+        # above, but exhaustion returns `default` instead of raising
+        # StopIteration (real Python semantics: the 2-arg form is exactly
+        # how callers opt OUT of the exception — e.g. importlib/resources/
+        # _itertools.py's `first_value = next(it, default)`). Before this,
+        # the 2-arg form fell through to the SAME declared-but-never-
+        # defined variadic `next(...)` stub the 1-arg form used to hit
+        # (undefined symbol at link time), since the check above only
+        # matched `len(node.args) == 1`.
+        if fname_raw == 'next' and len(node.args) == 2:
+            at, av = self.lower_expr(node.args[0])
+            at = self._get_actual_type(at, av)
+            if at == 'MojoGenerator *':
+                api = self._generator_var_api.get(av)
+                if api is not None:
+                    base, vct = api['base'], api['value_ctype']
+                    resumed = self._new_val('_Bool', f"{base}_resume ({av})")
+                    result = self._new_temp(vct)
+                    bb_ok = self._new_bb(); bb_exhausted = self._new_bb(); bb_merge = self._new_bb()
+                    self._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
+                    self._emit_label(bb_ok)
+                    ok_val = self._new_val(vct, f"{base}_value ({av})")
+                    self._safe_coerce_emit(vct, vct, ok_val, result)
+                    self._emit(f"  goto {bb_merge};")
+                    self._emit_label(bb_exhausted)
+                    # `default` is only evaluated on the exhausted branch —
+                    # real Python semantics (a non-trivial default expr must
+                    # not run when the iterator actually yields a value).
+                    dt, dv = self.lower_expr(node.args[1])
+                    self._safe_coerce_emit(dt, vct, dv, result)
+                    self._emit(f"  goto {bb_merge};")
+                    self._emit_label(bb_merge)
+                    return vct, result
         # A local variable of a callable struct type, invoked like a function:
         # obj(args) → obj.__call__(args).
         if (fname_raw in self.var_types and fname_raw not in self.func_return_types
@@ -28841,7 +28876,6 @@ class GimpleGen:
             ('swap',    'void swap(...);'),    # FIXME: should be void swap(int64_t *a, int64_t *b) [takes pointer arguments boxed as int64_t]; variadic so both int and pointer call sites typecheck
             ('op',      'int64_t op(...);'),
             ('U128',    'int64_t U128(...);'),
-            ('divmod',  'int64_t divmod(...);'),  # FIXME: returns MojoList * (tuple) boxed as int64_t [should be MojoList *divmod(int64_t, int64_t)]; variadic so both int and pointer call sites typecheck
             # Pointer: guarded so it's suppressed if the struct typedef was already emitted
             ('Pointer', '#ifndef _MOJO_POINTER_STRUCT_DEF\nint64_t Pointer(...);\n#endif'),
             # Commonly used Mojo stdlib types/constructors — forward-declared as variadic
