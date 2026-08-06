@@ -6305,7 +6305,7 @@ class GimpleGen:
                 # _gen_lifted_closure) -- dereference it so the write
                 # lands on the outer local itself, not a private copy.
                 return f'*{mut_ptr[name]}'
-            return f'{self._env_param}->{name}'
+            return f'{self._env_param}->{_c_field_name(name)}'
         if name in self._boxed_mut_locals:
             # This function's OWN local is heap-boxed (a pointer variable,
             # `{ctype} * name`) because some nested closure captures it BY
@@ -7667,7 +7667,7 @@ class GimpleGen:
                 # `_write_dest`'s identical special case for writes.
                 t = self._new_val(ctype, f'*{mut_ptr[name]}')
             else:
-                t = self._new_val(ctype, f'{self._env_param}->{name}')
+                t = self._new_val(ctype, f'{self._env_param}->{_c_field_name(name)}')
             return ctype, t
         # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
         _BUILTIN_TYPE_NAMES = frozenset({
@@ -18306,18 +18306,18 @@ class GimpleGen:
                     # the by-value branch below rather than emit something
                     # silently wrong.
                     ptr_val = self._new_val(f"{vtype} *", self._cname(vname))
-                    self._emit(f"  {env_var}->{vname} = {ptr_val};")
+                    self._emit(f"  {env_var}->{_c_field_name(vname)} = {ptr_val};")
                 # If vname is captured in the current function's own env, read from _env->vname.
                 elif vname in self._captures and self._env_param:
                     # GIMPLE: cannot use component_ref directly as RHS of struct store;
                     # load into a temp first.
-                    tmp = self._new_val(vtype, f"{self._env_param}->{vname}")
-                    self._emit(f"  {env_var}->{vname} = {tmp};")
+                    tmp = self._new_val(vtype, f"{self._env_param}->{_c_field_name(vname)}")
+                    self._emit(f"  {env_var}->{_c_field_name(vname)} = {tmp};")
                 else:
                     # Use _safe_coerce_emit to handle int→int64_t and other conversions.
                     local_type = self.var_types.get(vname, vtype)
                     cname = self._write_dest(vname)  # resolve capture path if nested
-                    self._safe_coerce_emit(local_type, vtype, cname, f"{env_var}->{vname}")
+                    self._safe_coerce_emit(local_type, vtype, cname, f"{env_var}->{_c_field_name(vname)}")
             self._closure_envs[node.name] = env_var
         else:
             self._closure_envs[node.name] = ''
@@ -19768,7 +19768,7 @@ class GimpleGen:
                 _ptr_ctype = f"{self._captures[_mn]} *"
                 _ptr_var = f"_mutptr_{_mn}"
                 self._declare_var(_ptr_var, _ptr_ctype)
-                self._emit(f"  {_ptr_var} = {self._env_param}->{_mn};")
+                self._emit(f"  {_ptr_var} = {self._env_param}->{_c_field_name(_mn)};")
                 self._gimple_mut_ptr[_mn] = _ptr_var
         for stmt in node.body:
             self.gen_stmt(stmt)
@@ -30227,7 +30227,7 @@ class GimpleGen:
                             # pointer field instead of a value copy -- see
                             # ClosureInfo.mut_names.
                             field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
-                            parts.append(f"  {field_ctype} {vname};")
+                            parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                         parts.append(f"}} {ci.env_struct};")
                         parts.append('')
                         self._emitted_structs.add(ci.env_struct)
@@ -31091,7 +31091,7 @@ class GimpleGen:
                             # pointer field instead of a value copy -- see
                             # ClosureInfo.mut_names.
                             field_ctype = f"{vtype} *" if vname in ci.mut_names else vtype
-                            parts.append(f"  {field_ctype} {vname};")
+                            parts.append(f"  {field_ctype} {_c_field_name(vname)};")
                         parts.append(f"}} {ci.env_struct};")
                         parts.append('')
                         self._emitted_structs.add(ci.env_struct)
