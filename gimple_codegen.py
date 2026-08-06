@@ -3626,6 +3626,15 @@ class GimpleGen:
         # every emission site routes the name through _func_csym for consistency.
         self._mangled_funcs: set[str] = set()
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
+        # Names imported (under their alias, if any) from a module
+        # load_module() couldn't resolve (e.g. real Python's `os`/`sys`, or
+        # any external/relative package outside this compiler's own tracked
+        # Mojo stdlib/test set) -- tracked ONLY so the aliased-`main` guards
+        # below know "this name really was imported from somewhere, even if
+        # unresolved" and skip redirecting its call to the synthesized entry
+        # point. Deliberately kept separate from `imported_symbols` itself
+        # (see gen_module's FromImportStmt except-handler for why).
+        self._unresolved_import_aliases: set[str] = set()
         # Persists across every gen_module() call for this instance (once per
         # file during whole-program/transitive-closure flattening) so an
         # unresolved-import stub/definition for a given C symbol name is only
@@ -10609,9 +10618,25 @@ class GimpleGen:
         if method == 'copy':
             return ot, ov
 
+        # `.get(<float literal>)` on an opaque/unresolved int64_t receiver is
+        # never real dict.get(key) usage (dict keys are essentially never
+        # float literals in real Python) -- it's the AsyncResult.get(timeout)/
+        # Queue.get(timeout)-style call (e.g. multiprocessing's `res.get(0.02)`,
+        # a module this compiler doesn't model so `res` falls back to opaque
+        # int64_t). The unconditional MojoDict coercion below then cast the
+        # float timeout to `char *` as if it were a string dict key --
+        # `(char *)0.02` is not a valid C cast (float->pointer), a hard GIMPLE
+        # "cannot convert to a pointer type" error, not just a wrong answer.
+        # Exclude only this narrow, unambiguous shape; every other `.get()`
+        # call keeps going through the dict-coercion path below unchanged.
+        _get_float_timeout = (
+            method == 'get' and len(node.args) == 1
+            and isinstance(node.args[0], FloatLiteral)
+        )
+
         # ── Opaque int → coerce to appropriate container type FIRST ──────────
         # Must happen before container-type checks so the casted type is seen below.
-        if ot in ('int', 'int64_t') and method in (
+        if ot in ('int', 'int64_t') and not _get_float_timeout and method in (
             'keys', 'values', 'items', 'get', 'update', 'pop', 'copy',
             'append', 'extend', 'sort', 'reverse', 'clear',
             'add', 'discard', 'remove',
@@ -12834,7 +12859,8 @@ class GimpleGen:
         # _gimple_main/_lib_main mismatches the synthesized stub's signature
         # and produces "conflicting types for '_gimple_main'".
         if (fname_raw == 'main' and self.current_func_name != 'main'
-                and fname_raw not in self.imported_symbols):
+                and fname_raw not in self.imported_symbols
+                and fname_raw not in self._unresolved_import_aliases):
             if self.emit_entry_points:
                 fname_raw = '_gimple_main'
             else:
@@ -17089,7 +17115,8 @@ class GimpleGen:
             # 'main' (e.g. `from foo import main; main()`) to the
             # synthesized entry point — only this module's own main.
             if (raw_name == 'main' and self.current_func_name != 'main'
-                    and raw_name not in self.imported_symbols):
+                    and raw_name not in self.imported_symbols
+                    and raw_name not in self._unresolved_import_aliases):
                 if self.emit_entry_points:
                     fname = _safe_name('_gimple_main')
                 else:
@@ -26115,8 +26142,52 @@ class GimpleGen:
                             sym_info = exports.get(name, {})
                             _register_sym(sym_name, name, sym_info)
                 except Exception:
-                    # Gracefully ignore module load errors
+                    # Gracefully ignore module load errors — but still
+                    # record each imported NAME (under its alias, if any)
+                    # as *having been imported at all*, even with no real
+                    # type info. Without this, `from os import getcwd as
+                    # main` (a real, common shape: importing a C-stdlib-
+                    # backed module this compiler's own load_module()
+                    # doesn't resolve at all — it's scoped to THIS
+                    # compiler's own tracked Mojo stdlib/test set, raising
+                    # "Only stdlib and test imports supported: os") left
+                    # no record whatsoever of 'main' having been imported,
+                    # so the "is this call site's `main()` really calling
+                    # an aliased IMPORT, or genuinely this module's own
+                    # entry point?" check elsewhere (`fname_raw not in
+                    # self.imported_symbols`) wrongly concluded "not an
+                    # import" and redirected the call to `_gimple_main` —
+                    # producing a bogus, wrongly-typed second definition of
+                    # the real entry point ("conflicting types for
+                    # '_gimple_main'"). Found via tkinter/__main__.py's own
+                    # `from . import _test as main; main()` (a relative
+                    # import hitting the identical module-load-failure
+                    # path here).
+                    #
+                    # Deliberately NOT added to `self.imported_symbols`
+                    # itself: half a dozen OTHER call-lowering checks
+                    # (`_lower_opaque_ctor`'s uppercase-constructor guard,
+                    # the scalar-ctor guard, both auto-stub-unknown-name
+                    # guards) treat "not in imported_symbols" as "safe to
+                    # treat this bare name as a locally-stubbable opaque
+                    # constructor / auto-stub extern". An entry here has no
+                    # real signature behind it, so it doesn't actually
+                    # satisfy any of those paths -- it only suppressed
+                    # them, leaving calls like `from concurrent.futures
+                    # import ProcessPoolExecutor` + `ProcessPoolExecutor(
+                    # max_workers=jobs)` (build_stdlib_dylib.py) with NO
+                    # declaration at all ("implicit declaration of function
+                    # 'ProcessPoolExecutor'" — a real check-selfhost
+                    # regression this exact fix introduced the first time
+                    # it used `self.imported_symbols` directly). A separate,
+                    # narrow set — consulted ONLY by the aliased-main
+                    # checks below — fixes the original bug without
+                    # touching any of those unrelated call-lowering paths.
                     _debug_note('module load failed while registering imports')
+                    if not s.wildcard:
+                        for _fb_name, _fb_alias in s.names:
+                            _fb_sym = _fb_alias if _fb_alias else _fb_name
+                            self._unresolved_import_aliases.add(_fb_sym)
 
         # Register user function return types (from current + imported modules)
         #   Pass 1: annotated return types (authoritative)
