@@ -20221,11 +20221,23 @@ class GimpleGen:
             # it silently never runs at all.
             if getattr(self, '_has_toplevel_code', False) and getattr(self, '_toplevel_calls_main', False):
                 lines.append(f"  _toplevel ();")
-                lines.append(f"  {ret_type} result = 0;")
+                lines.append(f"  int result = 0;")
             elif getattr(self, '_has_toplevel_code', False):
                 lines.append(f"  _toplevel ();")
                 call_args = ', '.join(['0'] * len(param_strs))
-                lines.append(f"  {ret_type} result = {safe} ({call_args});")
+                # `def main() -> None:` (real, common — e.g. Tools/build/
+                # generate_sbom.py) makes `ret_type` here 'void'. `void
+                # result = ...;` is invalid C ("variable or field 'result'
+                # declared void") -- a void function's call has no value to
+                # capture in the first place. Call it as a bare statement
+                # and keep `result` as a real `int` process exit code (this
+                # wrapper's own C `main()` always returns `int`, regardless
+                # of what the compiled Python `main()` itself returns).
+                if ret_type == 'void':
+                    lines.append(f"  {safe} ({call_args});")
+                    lines.append(f"  int result = 0;")
+                else:
+                    lines.append(f"  {ret_type} result = {safe} ({call_args});")
             else:
                 # `def main(args=None):` (a legitimate, common pattern — the
                 # file's own `if __name__ == '__main__': sys.exit(main())`
@@ -20242,7 +20254,13 @@ class GimpleGen:
                 # Found via mojolib BUG-2026-032: transpiler.mojo's
                 # `def main(args=None):`.
                 call_args = ', '.join(['0'] * len(param_strs))
-                lines.append(f"  {ret_type} result = {safe} ({call_args});")
+                # See the identical `ret_type == 'void'` guard above (`def
+                # main() -> None:`) -- same fix, same reason.
+                if ret_type == 'void':
+                    lines.append(f"  {safe} ({call_args});")
+                    lines.append(f"  int result = 0;")
+                else:
+                    lines.append(f"  {ret_type} result = {safe} ({call_args});")
             lines.append(f"#if USE_PYTHON")
             lines.append(f"  Py_Finalize ();")
             lines.append(f"#endif")
