@@ -11591,6 +11591,18 @@ class GimpleGen:
             self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
         if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
             is_class_ref = True
+        # A @staticmethod called THROUGH AN INSTANCE (`obj.my_staticmethod()`
+        # — real Python allows this; the instance is simply not passed,
+        # unlike an ordinary/classmethod call) still needs no implicit
+        # receiver arg, exactly like the class-name-call path above already
+        # special-cases via `_static_methods`. The `full_param_list[0] !=
+        # "{struct_name} *"` heuristic just above can't detect this for a
+        # TRULY zero-parameter static method (`full_param_list` itself is
+        # empty, so the `and full_param_list` guard short-circuits) — found
+        # via Tools/ftscalingbench/ftscalingbench.py's `obj.my_staticmethod()`
+        # ("too many arguments... expected 0, have 1").
+        if not is_class_ref and f"{struct_name}_{_safe_name(method)}" in self._static_methods:
+            is_class_ref = True
         expected_non_self = len(full_param_list) - (0 if is_class_ref else 1)
         if full_param_list and len(arg_pairs) < expected_non_self:
             while len(arg_pairs) < expected_non_self:
