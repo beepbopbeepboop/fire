@@ -14043,6 +14043,17 @@ class GimpleGen:
         else:
             # _func_csym applies the same overload suffix the definition used.
             fname = self.BUILTIN_VALUE_MAP.get(fname_raw, self._func_csym(fname_raw))
+        if fname == 'main' and fname_raw in self._unresolved_import_aliases:
+            # See bugs/hard/CODEGEN_aliased_external_import_no_backing_
+            # symbol.md: `from X import Y as main; main()` — 'main' is kept
+            # a fixed, unmangled C name for THIS module's own synthesized
+            # entry point (see the NO_OVERLOAD_MANGLE note above), so an
+            # imported name that merely happens to be ALIASED to 'main'
+            # must never be emitted (stub or call) under that same literal
+            # C symbol — "conflicting types for 'main'; have
+            # 'int(int, const char **)'" otherwise. Mirrors _C_RESERVED_
+            # FUNCS's own definition/call-site rename chokepoint pattern.
+            fname = '_unresolved_import_main'
         ret_type = self.func_return_types.get(fname_raw, 'int64_t')
 
         # Auto-stub completely unknown names (e.g. bracket params like `cmp_fn: fn(T,T)->Bool`
@@ -14058,7 +14069,28 @@ class GimpleGen:
                        and fname not in _SELFHOST_HARDCODED_FUNCS)
         if _is_unknown:
             _stub_key = f'_MOJO_STUB_{fname.upper()}'
-            _stub_decl = f'#ifndef {_stub_key}\n#define {_stub_key}\nint64_t {fname} (...);\n#endif'
+            if fname_raw in self._unresolved_import_aliases:
+                # See bugs/hard/CODEGEN_aliased_external_import_no_backing_
+                # symbol.md: a name imported from a module load_module()
+                # couldn't resolve (relative import, or a real external/
+                # unmodeled package) will NEVER get a real definition
+                # anywhere in this compile — unlike the ordinary "unknown
+                # name" case just below (ret_type=int64_t bare forward
+                # decl), which is fine because it's typically a same-TU
+                # forward reference that a real definition follows later.
+                # A bare decl here just moves the failure to link time
+                # ("undefined symbols for architecture arm64"), exactly
+                # the same shape _lower_struct_method_call's own auto-stub
+                # path already hit and fixed (weak definition instead of
+                # decl-only) for the analogous "inherited from an
+                # unmodeled base class" case.
+                _stub_decl = (f'#ifndef {_stub_key}\n#define {_stub_key}\n'
+                              f'__attribute__((weak)) int64_t {fname} (...) '
+                              f'{{ mojo_print ((char *)"{fname_raw}: unavailable in compiled mode '
+                              f'(imported from an unresolved external/relative module)"); '
+                              f'return (int64_t)0; }}\n#endif')
+            else:
+                _stub_decl = f'#ifndef {_stub_key}\n#define {_stub_key}\nint64_t {fname} (...);\n#endif'
             if _stub_decl not in self._elaborated_externs:
                 self._elaborated_externs.append(_stub_decl)
         if fname in self._KNOWN_SIGS:
@@ -17401,6 +17433,11 @@ class GimpleGen:
                 else:
                     # _func_csym applies the overload suffix to match the definition.
                     fname = self.BUILTIN_VALUE_MAP.get(raw_name, self._func_csym(raw_name))
+                if fname == 'main' and raw_name in self._unresolved_import_aliases:
+                    # See _lower_named_call's identical branch and
+                    # bugs/hard/CODEGEN_aliased_external_import_no_backing_
+                    # symbol.md.
+                    fname = '_unresolved_import_main'
             arg_pairs = [self.lower_expr(a) for a in node.value.args]
 
             # exit(msg)/quit(msg) as a bare statement — see _lower_named_
@@ -17473,7 +17510,21 @@ class GimpleGen:
                                     and fname not in _SELFHOST_HARDCODED_FUNCS)
                 if _is_unknown_stmt and fname not in self._auto_stubbed:
                     _stub_guard = f'_MOJO_STUB_{fname.upper()}'
-                    _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {fname} (...);\n#endif'
+                    if raw_name in self._unresolved_import_aliases:
+                        # See _lower_named_call's identical branch (and
+                        # bugs/hard/CODEGEN_aliased_external_import_no_
+                        # backing_symbol.md) — a name imported from a
+                        # module load_module() couldn't resolve never gets
+                        # a real definition anywhere in this compile, so a
+                        # bare forward decl here just moves the failure to
+                        # an undefined-symbol link error instead.
+                        _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                                 f'__attribute__((weak)) int64_t {fname} (...) '
+                                 f'{{ mojo_print ((char *)"{raw_name}: unavailable in compiled mode '
+                                 f'(imported from an unresolved external/relative module)"); '
+                                 f'return (int64_t)0; }}\n#endif')
+                    else:
+                        _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {fname} (...);\n#endif'
                     if _stub not in self._elaborated_externs:
                         self._elaborated_externs.append(_stub)
                     self._auto_stubbed.add(fname)
