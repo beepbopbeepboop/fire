@@ -13085,6 +13085,45 @@ class GimpleGen:
                 et = '_Bool'
             return 'char *', self._stringify_value(et, ev)
 
+        # str(bytes_obj, encoding[, errors]): real Python's bytes-decode
+        # form. This codegen has no real `bytes` type (bytes-like values are
+        # already represented as plain `char *`, same as str -- see
+        # BACKLOG-CODEGEN.md/bugs/hard's own notes on bytes()), so decoding
+        # is a no-op: the first argument already IS the decoded string.
+        # Before this, the 2/3-arg form fell through to the generic call
+        # path, which still routed to the 1-arg `mojo_str(void *)` runtime
+        # helper with 2-3 arguments -- "too many arguments to function
+        # 'mojo_str'; expected 1, have 2/3" -- found via encodings/idna.py's
+        # `str(label, "ascii")` and encodings/punycode.py's `str(text[:pos],
+        # "ascii", errors)`. `encoding`/`errors` are still evaluated (for
+        # any side effects a real decode call would have), just discarded.
+        if fname_raw == 'str' and len(node.args) in (2, 3):
+            et, ev = self.lower_expr(node.args[0])
+            for _extra in node.args[1:]:
+                self.lower_expr(_extra)
+            if et != 'char *':
+                ev = self._stringify_value(et, ev)
+            return 'char *', ev
+
+        # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
+        # form -- integer semantics, entirely distinct from the ordinary
+        # 2-arg pow(x, y) (which stays real-valued, routed to libc's own
+        # `pow(double, double)` via _KNOWN_SIGS below). Before this, the
+        # 3-arg form fell through to that SAME 2-arg libc signature —
+        # "too many arguments to function 'pow'; expected 2, have 3" —
+        # found via Modules/_decimal/libmpdec/literature/fnt.py's and
+        # Modules/_decimal/tests/bignum.py's own `pow(base, exp, mod)`.
+        if fname_raw == 'pow' and len(node.args) == 3:
+            bt, bv = self.lower_expr(node.args[0])
+            et, ev = self.lower_expr(node.args[1])
+            mt, mv = self.lower_expr(node.args[2])
+            bv = self._to_int64(bt, bv)
+            ev = self._to_int64(et, ev)
+            mv = self._to_int64(mt, mv)
+            return 'int64_t', self._call_expr(
+                'int64_t', 'mojo_pow_mod',
+                [('int64_t', bv), ('int64_t', ev), ('int64_t', mv)])
+
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {
             'str':       ('char *',  'mojo_str'),

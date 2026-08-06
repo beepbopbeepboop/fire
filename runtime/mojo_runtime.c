@@ -3428,6 +3428,27 @@ MojoList *mojo_divmod(int64_t a, int64_t b) {
     return out;
 }
 
+/* Python's 3-arg pow(base, exp, mod) builtin: modular exponentiation via
+ * right-to-left binary exponentiation (square-and-multiply), all-integer --
+ * distinct from the ordinary 2-arg pow(x, y), which stays real-valued
+ * (libc's own pow(double, double)). `exp` is assumed non-negative (real
+ * Python raises for a negative exponent here too; this codegen has no
+ * exception path out of a runtime helper, so a negative exponent just
+ * yields 0 rather than looping incorrectly). */
+int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod) {
+    if (mod == 0) return 0;
+    int64_t neg = mod < 0;
+    int64_t m = neg ? -mod : mod;
+    int64_t result = 1 % m;
+    int64_t b = ((base % m) + m) % m;
+    while (exp > 0) {
+        if (exp & 1) result = (result * b) % m;
+        b = (b * b) % m;
+        exp >>= 1;
+    }
+    return neg && result != 0 ? result - m : result;
+}
+
 /* Python's hex()/oct()/bin() builtins: a signed 0x/0o/0b-prefixed string,
  * sign BEFORE the prefix for negative values (hex(-26) == '-0x1a', not
  * two's-complement) -- matching real Python exactly, not C's %x/%o. */
