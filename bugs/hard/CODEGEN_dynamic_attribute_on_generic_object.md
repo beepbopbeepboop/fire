@@ -2,14 +2,17 @@
 
 ## Status
 
-Unfixed. This is a missing capability (real `__dict__`-style dynamic
-attribute storage for non-struct objects), not a targeted bug — implementing
-it is a new feature, not a patch to one call site.
+Unfixed. Concrete implementation plan below (2026-08-06), building on
+existing runtime-dispatch infrastructure this codegen already has —
+smaller in scope than the original "new feature from scratch" framing
+suggested. Not yet implemented (new runtime storage + several codegen
+call sites — real, multi-step work, not a one-line patch).
 
 ## Symptom
 
 `request for member 'X' in something not a structure or union` (GCC
-`-fgimple` error).
+`-fgimple` error), or (a second, distinct shape — see "Sub-case C" below)
+`'MojoBoundMethod' has no member named 'X'`.
 
 This codegen models attribute access (`obj.field`) as a real C struct-field
 read/write, which requires knowing `obj`'s concrete struct layout ahead of
@@ -17,9 +20,7 @@ time. When `obj`'s static type can't be resolved to a known struct — most
 commonly a bare, unannotated parameter whose real runtime type is something
 generic like a class object (`type`) or a closure/function value — it falls
 back to a generic `int64_t`/opaque representation with **no** attribute
-storage at all. Setting or reading an attribute on it by name (Python's real
-`__dict__` semantics — you can attach a brand-new, previously-unseen
-attribute to *any* object at runtime) has nothing to lower to.
+storage at all.
 
 ## Minimal repro
 
@@ -34,72 +35,229 @@ class Slot:
         slotnames.append(name)
 ```
 
-`cls` is the descriptor protocol's second `__set_name__` argument — its real
-type is `type` (whatever class this `Slot` was placed on), erased by this
-codegen to a generic/opaque value with no field table. Compiling this
-(`gcc -fgimple -fsyntax-only` on the generated C, or `python3 mojo.py build
-dynamic_attr_repro.mojo`) fails with:
+## Real-world files exposing this (all confirmed live, 2026-08-06)
 
-```
-dynamic_attr_repro.mojo:6:6: error: request for member '__slot_names__' in something not a structure or union
-```
-
-A second, related instance in the same real file: `__del__._slotted = True`
-sets an attribute on a locally-defined closure (`__del__`) — same root
-cause (attribute set on a generic, non-struct value), surfaces as:
-
-```
-clsutil.py:83:7: error: 'MojoBoundMethod' has no member named '_slotted'
-```
-
-## Real-world file exposing this
-
-`Tools/c-analyzer/c_common/clsutil.py`'s `Slot.__set_name__` /
-`Slot._ensure___del__` (both reproduce today, confirmed via direct
-`python3 mojo.py build`):
-
-```
-Tools/c-analyzer/c_common/clsutil.py:39:6: error: request for member '__slot_names__' in something not a structure or union
-Tools/c-analyzer/c_common/clsutil.py:83:7: error: 'MojoBoundMethod' has no member named '_slotted'
-```
-
-(Originally reported via a similar-looking symptom in
-`Tools/c-analyzer/c_common/fsutil.py`'s `exc.filename` access — that
-specific instance no longer reproduces; see
-`CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`'s note on
-`fsutil.py` for why. `clsutil.py`'s instance above is confirmed live and
-independent of that other issue.)
-
-### Three more real-world instances (confirmed 2026-08-06), same root cause
-
-All three are the SAME underlying gap in a different guise: setting an
-attribute on a CLASS-OBJECT reference at module/class-body scope (not
-inside `__init__`, where ordinary `self.field = ...` scanning already
-registers a real struct field) — `cls.x = ...` inside a classmethod, or
-`SomeClass.x = ...` directly at module top level, referring to a class
-this codegen elsewhere treats as a real, known struct:
-
+- `Tools/c-analyzer/c_common/clsutil.py` — `Slot.__set_name__`'s
+  `cls.__slot_names__` (opaque `cls` param, Sub-case A/B below) AND
+  `Slot._ensure___del__`'s `__del__._slotted = True` (Sub-case C below,
+  `'MojoBoundMethod' has no member named '_slotted'`).
 - `Lib/collections/__init__.py`'s `OrderedDict.__new__`: `self =
-  dict.__new__(cls)` (an unmodeled `dict.__new__(cls)` call, so `self`'s
-  static type is opaque) followed by `self.__hardroot = _Link()` /
-  `self.__root = ...` — "request for member '__root' in something not a
-  structure or union".
+  dict.__new__(cls)` (opaque `self`) then `self.__hardroot = _Link()`.
 - `Lib/ctypes/__init__.py`: `c_ubyte.__ctype_le__ = c_ubyte.__ctype_be__ =
-  c_ubyte` at module top level, setting a NEW attribute directly on a
-  locally-defined class object (`c_ubyte`) outside any method — "request
-  for member '__ctype_le__'/'__ctype_be__' in something not a structure
-  or union".
+  c_ubyte` at module top level, on a class object.
 - `Lib/string/__init__.py`'s `Template.__init_subclass__`: `pat =
-  cls.pattern = re.compile(...)` — a classmethod's `cls` parameter, exact
-  same shape as the minimal repro above (`cls.__slot_names__ = ...`) —
-  "request for member 'pattern' in something not a structure or union".
-  (Also breaks `Lib/importlib/__init__.py`, which imports `string`
-  transitively.)
+  cls.pattern = re.compile(...)`. (Also breaks `Lib/importlib/__init__.py`,
+  which imports `string` transitively.)
 
-## What a real fix needs
+## What's ALREADY there (the key finding that shrinks this task)
 
-A genuine per-object dynamic attribute store (e.g. a runtime hash map keyed
-by attribute name, attached to any object whose static type isn't a known
-struct) plus codegen support for reading/writing through it whenever static
-field resolution fails. This is a new object-model capability, not a
-one-off fix.
+This codegen already has a generic runtime-dispatch choke point for
+exactly this situation, emitted once per module
+(gimple_codegen.py:30332-30356):
+
+```c
+static int64_t _mojo_dispatch_getattr (void *obj, char *attr) {
+  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);
+  if (_tag == <known-struct-1-id>) return _mojo_getattr_<struct1>((...)obj, attr);
+  ... /* one line per known struct */
+  return mojo_obj_getattr(obj, attr);   /* <-- current dead end */
+}
+static void _mojo_dispatch_setattr (void *obj, char *attr, int64_t val) {
+  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);
+  if (_tag == <known-struct-1-id>) { _mojo_setattr_<struct1>(...); return; }
+  ...
+  mojo_setattr(obj, attr, val);          /* <-- current dead end */
+}
+```
+
+And **every** codegen call site that lowers `obj.attr` (read or write) on
+an opaquely/generically-typed value already routes through these two
+functions rather than emitting a direct field access — confirmed by
+reading the actual call sites, not assumed:
+
+- Read: gimple_codegen.py:8470 (`ot in ('int','int64_t','void *') or ot in
+  ('MojoList *', 'MojoDict *', ...)` branch of `_lower_MemberExpr`) and
+  :13251/:13270 (a second, similarly-gated read path).
+- Write: gimple_codegen.py:16496 (`ot in ('int', 'int64_t', 'void *')`
+  branch of the assignment lowering) and :16737 (an augmented-assignment
+  analogue).
+
+So sub-cases A and B below (opaque `cls`/`self`/class-object values) need
+**zero** new call sites in the lowering code — they already call into
+`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr`. The only missing piece
+is what those two functions do when no known-struct tag matches: today,
+`mojo_obj_getattr` (runtime/mojo_runtime.c:2424) unconditionally
+`fprintf`s a warning and returns 0, and `mojo_setattr`
+(runtime/mojo_runtime.c:3335) is a silent no-op. Neither has ever
+implemented real storage — this was always a deliberate stub, not a
+regression.
+
+## Sub-case C (`MojoBoundMethod` etc.): a separate, second gap
+
+`__del__._slotted = True` does NOT go through the opaque-fallback path
+above — `__del__` is a locally-defined closure, whose static type this
+codegen already resolves to a *known* runtime struct (`MojoBoundMethod`).
+The assignment lowering's `else` branch (gimple_codegen.py:16498-16502)
+handles "known concrete struct type" by looking up the field with a
+silent default:
+
+```python
+field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
+self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
+```
+
+For a user-defined Mojo class, a not-yet-seen field name here is fine —
+`struct_field_types[struct_name]` is itself mutable and gets new fields
+appended elsewhere as they're discovered (see `_collect_self_assigns`/
+`_scan_body_for_local_field_access`), and the struct's actual C layout
+grows to match (`target_def.fields.append(...)`, gimple_codegen.py:26503).
+But `MojoBoundMethod` (and similarly `MojoGenerator`, `MojoAsync`, any
+other **runtime-owned, fixed-layout C struct this codegen itself
+defines**, as opposed to a user's own Mojo class) has a hardcoded C struct
+definition in the runtime headers with no such extensibility — the
+`.get(..., vtype)` default silently assumes the field exists and emits a
+direct `->_slotted` access GCC then rejects because the struct genuinely
+has no such member.
+
+## Implementation plan
+
+### Step 1 — real per-object dynamic-attribute storage (runtime)
+
+Add to `runtime/mojo_runtime.c`, next to `mojo_obj_getattr`/`mojo_setattr`:
+
+```c
+/* obj-pointer -> its dynamic-attribute MojoDict, keyed by the pointer's
+ * hex text (reuses MojoDict's existing string-keyed hash table instead of
+ * writing a second, pointer-keyed hash table implementation from scratch
+ * for what is deliberately a RARE fallback path, not a hot one — see
+ * mojo_obj_getattr's own docstring on why this path is only reached when
+ * codegen couldn't resolve the access statically). Lazily allocated. */
+static MojoDict *_mojo_dynattr_objects = NULL;
+
+static void _mojo_dynattr_key(void *obj, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%p", obj);
+}
+
+int64_t mojo_obj_getattr(void *obj, char *attr) {
+    if (_mojo_dynattr_objects) {
+        char key[32];
+        _mojo_dynattr_key(obj, key, sizeof key);
+        int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+        if (handle) {
+            MojoDict *attrs = (MojoDict *)(intptr_t)handle;
+            if (mojo_dict_contains(attrs, attr))
+                return mojo_dict_get_int(attrs, attr);
+        }
+    }
+    mojo_raise_attribute_error(attr);   /* new — see Step 2 */
+    return 0;  /* unreached: mojo_raise_attribute_error longjmps/raises */
+}
+
+void mojo_setattr(void *obj, char *attr, int64_t val) {
+    if (!_mojo_dynattr_objects) _mojo_dynattr_objects = mojo_dict_new();
+    char key[32];
+    _mojo_dynattr_key(obj, key, sizeof key);
+    int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+    MojoDict *attrs;
+    if (handle) {
+        attrs = (MojoDict *)(intptr_t)handle;
+    } else {
+        attrs = mojo_dict_new();
+        mojo_dict_set_int(_mojo_dynattr_objects, key, (int64_t)(intptr_t)attrs);
+    }
+    mojo_dict_set_int(attrs, attr, val);
+}
+```
+
+Rename the doc comment above `mojo_obj_getattr` (currently says "there is
+no dynamic module/object system at runtime to look this up in" — no
+longer true once this lands) and update `mojo_runtime.h`'s declarations'
+own comments to match.
+
+This intentionally does NOT free `attrs` dicts when `obj` is freed — this
+codegen has no object-lifetime/refcounting/GC story anywhere else either
+(confirmed: no `free()` calls paired with any struct allocator in
+gimple_codegen.py's `_alloc_*` emission), so a leaked per-object dict is
+consistent with the rest of this runtime's existing memory model, not a
+new regression.
+
+### Step 2 — real AttributeError on a missing dynamic attribute
+
+`mojo_obj_getattr`'s current abort-with-fprintf behavior was appropriate
+for "codegen bug, should never happen" — but a MISSING dynamic attribute
+(`cls.__slot_names__` before it's ever been set) is exactly the case the
+bug's own minimal repro handles with `try/except AttributeError`, which
+this compiler's exception machinery already supports for other error
+paths (see `raise-never-worked-exception-hierarchy-fix` in memory — a
+real, working typed-exception system exists: `mojo_raise`/exception-
+hierarchy matching). Add a small `mojo_raise_attribute_error(char *attr)`
+helper (formats a real `AttributeError` message including the attribute
+name, calls the same `mojo_raise`-family entry point every other typed
+exception in this runtime uses) so `except AttributeError:` in compiled
+code around a missing dynamic attribute genuinely catches it — this is
+required for the bug's OWN minimal repro to behave correctly, not
+optional polish.
+
+### Step 3 — wire the two dispatch functions to use real storage
+
+`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr`'s fallthrough lines
+(gimple_codegen.py:30336, :30341) already call `mojo_obj_getattr`/
+`mojo_setattr` — Steps 1-2 make those calls do the right thing with **no
+codegen change needed at all** for sub-cases A/B (opaque `cls`/`self`/
+class-object values). This is the highest-leverage part of the plan.
+
+### Step 4 — Sub-case C: route fixed-layout runtime structs through dynamic dispatch too
+
+In the assignment-lowering `else` branch (gimple_codegen.py:16498-16502)
+and the parallel read-side "known struct" branch, add a check: is
+`node.target.member` (or `node.member` for reads) actually present in
+`self.struct_field_types.get(struct_name, {})`? If not, AND `struct_name`
+is one of this codegen's own fixed runtime-owned struct names (a small,
+enumerable set — `MojoBoundMethod`, `MojoGenerator`, `MojoAsync`, and any
+other struct this file itself defines in `_emit_struct_defs`/the runtime
+headers rather than one arising from a user's `class` statement — these
+are already distinguishable from user structs since user structs all
+appear in `struct_field_types` via `StructDef` processing, never
+hardcoded), fall back to the same `_mojo_dispatch_getattr`/
+`_mojo_dispatch_setattr` call emitted for the opaque case instead of a
+direct `->member` access. A **user-defined** class hitting an unknown
+field should keep its existing behavior (grow the struct, per
+`_collect_self_assigns`) — this new check must be scoped to the fixed-
+layout runtime set only, not user structs in general, or it would silently
+change today's (working) dynamic-field-growth behavior for ordinary Mojo
+classes into a slower dict-backed path for no reason.
+
+### Step 5 — verification
+
+1. The minimal repro (`dynamic_attr_repro.mojo` above) — `python3 mojo.py
+   build` compiles clean, and (new, since Step 2 makes this meaningful) a
+   `run`-mode test confirms the `try/except AttributeError` branch
+   actually fires on the first call and the `else` branch (fast path,
+   attribute already set) is hit on a second call with the same `cls`.
+2. `Tools/c-analyzer/c_common/clsutil.py`, `Lib/collections/__init__.py`,
+   `Lib/ctypes/__init__.py`, `Lib/string/__init__.py` (+ `Lib/importlib/
+   __init__.py` transitively) via `py314_harness.py`/direct `mojo.py
+   build` — confirm each file's specific error from this doc is gone (a
+   different, unrelated error is an acceptable outcome, per this
+   session's established norm; a clean compile is the ideal one).
+3. Full quality gate (test_gimple.py, test_module_cache.py, make
+   check-selfhost, from-scratch dylib rebuild, compile_stdlib.py -j8) —
+   this touches a preamble helper emitted into every module compiled with
+   `do_imports`/reflection support, so a regression here would be broad.
+4. Add a `test_gimple.py` case for the AttributeError-on-missing-dynamic-
+   attribute behavior specifically (Step 2) — this is genuinely new
+   observable behavior (previously: silent 0; now: a catchable
+   exception), not just "stops erroring at compile time".
+
+### Risk
+
+Low-to-moderate. Step 1-3 add a new runtime code path reached only when
+the existing tag-dispatch already falls through (today: a warning + wrong
+answer; after: real storage) — strictly additive, no existing passing
+behavior should change. Step 4 is the riskier piece: the "is this struct
+name one of the fixed runtime-owned ones" set must be enumerated
+carefully (miss one → same compile error persists for that struct; over-
+include a name that's ALSO sometimes used for a user struct — unlikely
+given this codegen's struct-name collision guards (`_struct_name_owner`)
+already prevent user/runtime name clashes, but worth double-checking
+before implementing).
