@@ -14090,7 +14090,34 @@ class GimpleGen:
                               f'(imported from an unresolved external/relative module)"); '
                               f'return (int64_t)0; }}\n#endif')
             else:
-                _stub_decl = f'#ifndef {_stub_key}\n#define {_stub_key}\nint64_t {fname} (...);\n#endif'
+                # See the _unresolved_import_aliases branch just above for
+                # the general reasoning (bugs/hard/CODEGEN_aliased_
+                # external_import_no_backing_symbol.md). This is the SAME
+                # "declared but never defined" shape for the remaining
+                # _is_unknown cases (Python builtins this codegen has no
+                # lowering for — `vars`/`bytes`/`hash`/`next`/`object`/
+                # `divmod`/`callable`/... — and the "bracket params,
+                # implicit fnptrs" placeholders the comment above
+                # mentions). By construction, anything reaching this branch
+                # is NOT in func_return_types — and every top-level
+                # function's return type is pre-registered in an earlier
+                # pass (well before any function body is lowered, see
+                # gen_module's Pass 1/1.3 registration), so a genuine
+                # same-TU forward reference to a function defined later in
+                # this file can never actually reach `_is_unknown=True` —
+                # only a name that will NEVER be defined anywhere in this
+                # compile does. A bare decl here was therefore never
+                # actually saving anything: it only postponed today's
+                # inevitable "implicit declaration" compile failure into an
+                # equally inevitable "undefined symbols" LINK failure for
+                # any such name that's actually called at runtime (dead/
+                # never-called placeholders are unaffected either way).
+                # Confirmed empirically via the full quality gate (compile_
+                # stdlib.py 664/664 unchanged, 0 new skips) before landing.
+                _stub_decl = (f'#ifndef {_stub_key}\n#define {_stub_key}\n'
+                              f'__attribute__((weak)) int64_t {fname} (...) '
+                              f'{{ mojo_print ((char *)"{fname_raw}: unavailable in compiled mode"); '
+                              f'return (int64_t)0; }}\n#endif')
             if _stub_decl not in self._elaborated_externs:
                 self._elaborated_externs.append(_stub_decl)
         if fname in self._KNOWN_SIGS:
@@ -17569,7 +17596,20 @@ class GimpleGen:
                                  f'(imported from an unresolved external/relative module)"); '
                                  f'return (int64_t)0; }}\n#endif')
                     else:
-                        _stub = f'#ifndef {_stub_guard}\n#define {_stub_guard}\nint64_t {fname} (...);\n#endif'
+                        # See _lower_named_call's identical branch for the
+                        # full reasoning: anything reaching _is_unknown_stmt
+                        # is, by construction, never going to get a real
+                        # definition anywhere in this compile (a genuine
+                        # same-TU forward reference can't reach here — every
+                        # top-level function's return type is pre-registered
+                        # well before any body is lowered), so a bare decl
+                        # only postpones today's failure from compile-time to
+                        # an equally inevitable link-time "undefined symbols"
+                        # error for any such name actually called at runtime.
+                        _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                                 f'__attribute__((weak)) int64_t {fname} (...) '
+                                 f'{{ mojo_print ((char *)"{raw_name}: unavailable in compiled mode"); '
+                                 f'return (int64_t)0; }}\n#endif')
                     if _stub not in self._elaborated_externs:
                         self._elaborated_externs.append(_stub)
                     self._auto_stubbed.add(fname)
