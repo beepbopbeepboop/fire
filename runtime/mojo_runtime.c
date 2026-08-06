@@ -3314,6 +3314,19 @@ int64_t mojo_sum(void *args) {
     return total;
 }
 
+/* sum() over a list this codegen tracks (via _elem_types) as holding
+ * doubles -- mojo_sum's plain mojo_list_get_int reads each slot's raw
+ * int64_t bit pattern, silently truncating/misreading every float
+ * element (found via Tools/lockbench/lockbench.py's `sum(values)` on a
+ * list of floats). */
+double mojo_sum_double(void *args) {
+    MojoList *l = (MojoList *)args;
+    double total = 0.0;
+    for (int64_t i = 0; i < l->len; i++)
+        total += mojo_list_get_double(l, i);
+    return total;
+}
+
 void *mojo_zip(void *a, void *b) {
     (void)a; (void)b;
     return mojo_list_new();

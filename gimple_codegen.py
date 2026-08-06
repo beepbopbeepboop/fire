@@ -5961,8 +5961,35 @@ class GimpleGen:
 
             def scan_expr(expr):
                 """Recursively scan an expression."""
-                nonlocal is_subscripted, is_string_method, is_char_compared
-                if isinstance(expr, SubscriptExpr):
+                nonlocal is_subscripted, is_string_method, is_char_compared, is_iterated
+                if isinstance(expr, Comprehension):
+                    # A list/set/dict/generator comprehension embedded inside
+                    # an expression (`sum(x**2 for x in values)`,
+                    # `[f(v) for v in values]` used as a call argument, ...)
+                    # has a structurally different shape (`.generators[i].
+                    # iterable`/`.element`/`.conditions`, not simple nested
+                    # expression fields) that this dispatch never recursed
+                    # into at all -- `values` being the comprehension's own
+                    # iterable was silently invisible to this whole
+                    # analysis, so a parameter used ONLY this way (no plain
+                    # `for x in values:` statement, no direct subscript)
+                    # got no type signal and defaulted to int64_t while
+                    # every real caller passed a genuine MojoList* — found
+                    # via Tools/lockbench/lockbench.py's `jains_fairness
+                    # (values)`, whose only two uses of `values` are
+                    # `sum(values)`/`len(values)` (no signal either, same
+                    # class of gap `len()` was already excluded from) and
+                    # `sum(x**2 for x in values)` (this exact shape).
+                    for gen in expr.generators:
+                        if isinstance(gen.iterable, IdentExpr) and gen.iterable.name == param_name:
+                            is_iterated = True
+                        scan_expr(gen.iterable)
+                        for cond in (gen.conditions or []):
+                            scan_expr(cond)
+                    if expr.key is not None:
+                        scan_expr(expr.key)
+                    scan_expr(expr.element)
+                elif isinstance(expr, SubscriptExpr):
                     # Check if the base (after unwrapping nested subscripts) is the parameter
                     base = expr.obj
                     while isinstance(base, SubscriptExpr):
@@ -13136,6 +13163,25 @@ class GimpleGen:
             return 'int64_t', self._call_expr(
                 'int64_t', 'mojo_pow_mod',
                 [('int64_t', bv), ('int64_t', ev), ('int64_t', mv)])
+
+        # sum(list_of_doubles): the generic `mojo_sum` (BUILTIN_VALUE_MAP
+        # below) always reads each MojoList slot via mojo_list_get_int and
+        # returns int64_t -- for a list this codegen tracks (via
+        # _elem_types, e.g. from a `[3.5, 2.5]` literal or a param inferred
+        # from float usage) as holding doubles, that silently misreads
+        # every element's raw int64_t bit pattern as if it were an integer
+        # instead of a float. Route to the double-aware runtime helper
+        # instead, mirroring _list_repr_fn's identical "route through
+        # _elem_types" pattern for repr(). Found via Tools/lockbench/
+        # lockbench.py's `sum(values)`/`sum(x**2 for x in values)` on a
+        # list of floats.
+        if fname_raw == 'sum' and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            if self._elem_types.get(av) == 'double':
+                acast = av if at == 'void *' else self._new_val('void *', f'(void *){av}')
+                return 'double', self._call_expr('double', 'mojo_sum_double', [('void *', acast)])
+            acast = av if at == 'void *' else self._new_val('void *', f'(void *){av}')
+            return 'int64_t', self._call_expr('int64_t', 'mojo_sum', [('void *', acast)])
 
         # Trivial builtins: lower_expr all args, call runtime fn
         _SIMPLE_BUILTINS = {
