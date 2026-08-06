@@ -29652,7 +29652,34 @@ class GimpleGen:
                     if qt.endswith(' *') or qt == 'char *':
                         global_decls.append(f"{qt} {gname};")
                         self._global_var_types[gname] = qt
-                        self._global_c_decl_types[gname] = qt
+                        # MojoDict*/MojoList*/MojoSet* globals are stored at
+                        # C level as BOXED int64_t everywhere else in this
+                        # codegen (see the "Pre-populate _global_c_decl_
+                        # types" pass a few hundred lines up, and every
+                        # global read/write site's own `gtype = self.
+                        # _global_c_decl_types.get(...)` lookup) -- char*
+                        # and other real-pointer globals are the only ones
+                        # that keep their raw pointer C type. This branch
+                        # used to set `_global_c_decl_types[gname] = qt`
+                        # (the RAW guessed pointer type) unconditionally,
+                        # clobbering the correct boxed 'int64_t' the
+                        # earlier pass had already set for exactly this
+                        # container-type case -- the struct field then got
+                        # declared e.g. `MojoList * __all__;` while every
+                        # assignment to it (via _gen_stmt_AssignStmt's own
+                        # _global_c_decl_types lookup) coerced the RHS DOWN
+                        # to int64_t first, an explicit int64_t-to-pointer
+                        # assignment with no cast — "assignment to
+                        # 'MojoList *' from 'int64_t' makes pointer from
+                        # integer without a cast". Found via Lib/__future__.py's
+                        # `__all__ = ["all_feature_names"] + all_feature_names`
+                        # (a list-concat BinaryOp `_quick_type` correctly
+                        # guesses as MojoList*, unlike a bare list/dict/set
+                        # LITERAL, which the OTHER branches above already
+                        # handled with the right boxing).
+                        self._global_c_decl_types[gname] = (
+                            'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                            else qt)
                     elif qt == '_Bool':
                         global_decls.append(f"int {gname};")
                         self._global_var_types[gname] = 'int'
