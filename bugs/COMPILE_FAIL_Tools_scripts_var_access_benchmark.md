@@ -4,6 +4,39 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; two DISTINCT issues, one already documented, one new:
+
+```
+error: 'MojoBoundMethod' has no member named '__name__'
+error: '_t5' undeclared (first use in this function); did you mean '_t4'?
+error: 'a' undeclared (first use in this function)
+```
+
+1. `'MojoBoundMethod' has no member named '__name__'` — this file is
+   ALREADY a confirmed real-world instance in
+   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s "More
+   real-world instances confirmed 2026-08-06" section (`inner.__name__
+   = 'read_nonlocal'` — a write — plus a separate read of `f.__name__`
+   elsewhere in this same file, both on `MojoBoundMethod` values). Not
+   re-investigated; see that doc for the fix plan.
+
+2. `'_t5' undeclared` / `'a' undeclared` — a SEPARATE, NOT previously
+   documented issue. `def read_instancevar(trials=trials, a=C(1)):`
+   has a struct-typed DEFAULT-valued parameter (`a=C(1)`), used only as
+   repeated bare discarded-value expression statements in the body
+   (`a.x;    a.x;    a.x; ...` — a micro-benchmark idiom for measuring
+   attribute-access speed). The generated C never declares `a` (or the
+   temp `_t5` presumably meant to hold the read `.x` value) in this
+   function at all, so both are "undeclared" at first use. Not
+   root-caused further within this session's time budget — plausibly a
+   dead-code/unused-value elimination pass over bare expression-
+   statement attribute reads interacting badly with a default-valued
+   struct parameter's own declaration emission. Worth a focused
+   follow-up: minimal repro would be `def f(a=SomeStruct()): a.x` with
+   no other use of `a` in the body.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function '_alloc_A':
