@@ -13833,6 +13833,36 @@ class GimpleGen:
         env_var  = self._closure_envs[fname_raw]
         ret_type = self.func_return_types.get(lifted, 'int64_t')
         arg_pairs = [self.lower_expr(a) for a in node.args]
+        # Pad missing positional args with the closure's own declared
+        # defaults (`def _inject(iterator=iterator, suffix=suffix): ...`
+        # called bare as `_inject()`) -- see the defaults registration in
+        # the closure-scan pass (Pass 3) for why nested closures need
+        # their own entry here rather than sharing the top-level
+        # free-function one.
+        expected_params = self.func_param_types.get(lifted, [])
+        user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
+        if user_param_count > len(arg_pairs):
+            kwargs = getattr(node, 'kwargs', []) or []
+            kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
+            _dflts = self._func_param_defaults.get(lifted) or []
+            while len(arg_pairs) < user_param_count:
+                _pos = len(arg_pairs)
+                _pname = _dflts[_pos][0] if _pos < len(_dflts) else None
+                if _pname is not None and _pname in kwarg_dict:
+                    arg_pairs.append(kwarg_dict[_pname])
+                elif _pos < len(_dflts):
+                    # Evaluate the default AST directly (self.lower_expr),
+                    # not the literal-only _default_expr_to_pair used for
+                    # top-level free functions: the extremely common
+                    # `def _inject(iterator=iterator, suffix=suffix): ...`
+                    # idiom binds the OUTER function's own live variable as
+                    # the default, and we're generating code for THIS call
+                    # site while still inside that outer function's own
+                    # body, so its scope (self.var_types) is exactly the
+                    # right context to resolve the identifier in.
+                    arg_pairs.append(self.lower_expr(_dflts[_pos][1]))
+                else:
+                    arg_pairs.append(('int', '0'))
         fname_c  = _safe_name(lifted)
         if env_var:
             # No slice inside the f-string: the self-hosted f-string parser
@@ -17500,10 +17530,26 @@ class GimpleGen:
                 # Subtract 1 for the env pointer that will be prepended
                 user_param_count = len(expected_params) - (1 if env_var and expected_params else 0)
                 if expected_params and len(arg_pairs) < user_param_count:
-                    kwarg_values = list(kwarg_dict.values())
+                    # Pad with the closure's own declared defaults before
+                    # falling back to a bare 0 -- see the registration in
+                    # the closure-scan pass (Pass 3) and _lower_closure_
+                    # call's identical padding for the expression-context
+                    # twin of this same call shape.
+                    _dflts = self._func_param_defaults.get(lifted) or []
                     while len(arg_pairs) < user_param_count:
-                        if kwarg_values:
-                            arg_pairs.append(kwarg_values.pop(0))
+                        _pos = len(arg_pairs)
+                        _pname = _dflts[_pos][0] if _pos < len(_dflts) else None
+                        if _pname is not None and _pname in kwarg_dict:
+                            arg_pairs.append(kwarg_dict[_pname])
+                        elif _pos < len(_dflts):
+                            # See _lower_closure_call's identical choice of
+                            # self.lower_expr over _default_expr_to_pair:
+                            # closure defaults commonly reference the
+                            # OUTER function's own live variables
+                            # (`iterator=iterator`), which needs real
+                            # expression lowering in the current (outer)
+                            # scope, not literal-only handling.
+                            arg_pairs.append(self.lower_expr(_dflts[_pos][1]))
                         else:
                             arg_pairs.append(('int', '0'))
                 fname_c  = _safe_name(lifted)
@@ -28658,6 +28704,29 @@ class GimpleGen:
                             _transitive_mut.add(_tn)
                 env_struct   = f"{lifted}_env" if captures else ""
                 ci           = ClosureInfo(lifted, env_struct, captures, inner)
+                # Register this closure's own param defaults keyed by its
+                # lifted name, mirroring the top-level free-function
+                # registration a few hundred lines up (`all_functions` only
+                # covers MODULE-LEVEL FunctionDefs, so a nested closure like
+                # `def _inject(iterator=iterator, suffix=suffix): ...`
+                # never got an entry there at all) -- without this,
+                # _lower_closure_call had no default values to pad with
+                # when a call site omits args relying on them (e.g. bare
+                # `_inject()`), producing a hard "too few arguments" C
+                # compile error instead of a working call.
+                # Loop variable deliberately NOT named `_dv`: `gen_module`
+                # (this method's enclosing scope) already uses `_dv` as a
+                # comprehension loop variable for the identical pattern a
+                # few hundred lines up (top-level free-function default
+                # registration) -- see this file's own documented self-
+                # host gotcha a few lines above (`v` reuse across two
+                # comprehensions in the same enclosing function breaks
+                # self-hosted compilation, confirmed here by an identical
+                # '_dv' undeclared error during make check-selfhost).
+                _inner_dflts = getattr(inner, 'param_defaults', None) or {}
+                if _inner_dflts:
+                    self._func_param_defaults[lifted] = [
+                        (_pn2, _dv2) for _pn2, _dv2 in _inner_dflts.items()]
                 # `{mut}`-capture-spec closures (`def inc() {mut}: counter
                 # += 1`) reassign a captured free variable -- detected the
                 # same way the async mutable-capture mechanism detects it
