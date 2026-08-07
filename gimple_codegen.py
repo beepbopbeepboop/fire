@@ -3799,6 +3799,18 @@ class GimpleGen:
         # (4.47M calls for a 36-module graph in Lib/contextlib.py).
         self._all_transitive_stmts_ordered: list = []
         self._all_transitive_stmts_ids: set = set()
+        # Phase 2 (same doc as above): per-top-level-statement memoization
+        # of the two `_walk_ast` sub-scans inside `_scan_body_for_local_
+        # field_access` (gen_module's 4th struct-field completeness pass).
+        # Keyed by id(stmt); shared by reference into every temp_gen the
+        # same way `_all_transitive_stmts_ordered` is, so a given top-level
+        # statement's own subtree is only ever walked once, tree-wide, no
+        # matter how many levels' (ever-growing) `imported_stmts` include
+        # it. See `_scan_stmt_var_candidates`/`_scan_stmt_member_candidates`
+        # for why the CACHED values are unfiltered syntactic candidates,
+        # not final filtered results.
+        self._field_scan_var_cache: dict = {}
+        self._field_scan_member_cache: dict = {}
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
@@ -4453,6 +4465,11 @@ class GimpleGen:
                     # pattern as _module_stmts itself, just above.
                     temp_gen._all_transitive_stmts_ordered = self._all_transitive_stmts_ordered
                     temp_gen._all_transitive_stmts_ids = self._all_transitive_stmts_ids
+                    # share: Phase 2 per-statement field-access-scan caches
+                    # (see their own declaration next to
+                    # _all_transitive_stmts_ordered in __init__).
+                    temp_gen._field_scan_var_cache = self._field_scan_var_cache
+                    temp_gen._field_scan_member_cache = self._field_scan_member_cache
                     temp_gen._extra_search_paths = self._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                     temp_gen.func_return_types = self.func_return_types  # share across gens
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
@@ -27336,40 +27353,93 @@ class GimpleGen:
                             if isinstance(st, StructDef)
                             and self._struct_name_owner.get(st.name) == id(st)}
 
-        def _scan_body_for_local_field_access(body, own_struct_name):
-            local_types = {}
-            for node in _walk_ast(body):
+        # Per-top-level-statement caches for the two `_walk_ast` sub-scans
+        # below (see bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+        # rescan.md, Phase 2). `_scan_body_for_local_field_access` used to
+        # call `_walk_ast(body)` twice on every invocation, and `body`
+        # (`imported_stmts` in particular) grows to O(total transitive tree
+        # size) at EVERY nesting level (see the doc's root-cause section) —
+        # summed over N levels that's O(N^2) total node visits. Since
+        # `_walk_ast(list_of_stmts)` is exactly the concatenation of
+        # `_walk_ast([s])` for each `s` in the list (no cross-statement
+        # state in `_walk_ast` itself), the expensive per-node walk of each
+        # INDIVIDUAL top-level statement's own subtree can be memoized by
+        # `id(stmt)` and reused verbatim across every later call that also
+        # includes that same statement object — shared by reference into
+        # every temp_gen exactly like `_all_transitive_stmts_ordered`
+        # (see its own sharing block in `_compile_imported_module`), so the
+        # memoization applies tree-wide, not just within one level.
+        #
+        # Care point: the CANDIDATES cached here are the raw syntactic
+        # matches only (VarDecl-with-annotation / `x = Ctor(...)` shape,
+        # MemberExpr-with-IdentExpr-obj minus dunder members) — NOT
+        # filtered by `ann in self.struct_field_types` / `not in
+        # self._selfhost_hardcoded_struct_names` / `!= own_struct_name`.
+        # Those three filters are all time-/call-dependent (struct_field_
+        # types grows monotonically as unrelated structs are discovered
+        # elsewhere during compilation; _selfhost_hardcoded_struct_names is
+        # a per-gen_module-call snapshot; own_struct_name is a per-call
+        # parameter) — baking them into the cache at first-visit time would
+        # silently and permanently miss any candidate whose governing
+        # struct becomes known only on a LATER call. Re-applying them fresh
+        # against the cached candidate list on every call (cheap — a plain
+        # list iteration, no `_walk_ast`) preserves the original's exact
+        # per-call semantics while still eliminating the repeated tree
+        # walk itself, which is what the profile shows dominating cost.
+        def _scan_stmt_var_candidates(stmt):
+            sid = id(stmt)
+            cached = self._field_scan_var_cache.get(sid)
+            if cached is not None:
+                return cached
+            cands = []
+            for node in _walk_ast(stmt):
                 if isinstance(node, VarDecl) and node.type_ann:
-                    ann = str(node.type_ann).strip()
-                    if (ann in self.struct_field_types and ann != own_struct_name
-                            and ann not in self._selfhost_hardcoded_struct_names):
-                        local_types[node.name] = ann
+                    cands.append((node.name, str(node.type_ann).strip()))
                 # `x = SomeStruct(...)` — no explicit annotation, but the
                 # constructor call itself pins the type just as well.
                 elif (isinstance(node, AssignStmt) and isinstance(node.target, IdentExpr)
-                      and isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr)
-                      and node.value.func.name in self.struct_field_types
-                      and node.value.func.name != own_struct_name
-                      and node.value.func.name not in self._selfhost_hardcoded_struct_names):
-                    local_types[node.target.name] = node.value.func.name
-            if not local_types:
-                return
-            for node in _walk_ast(body):
+                      and isinstance(node.value, CallExpr) and isinstance(node.value.func, IdentExpr)):
+                    cands.append((node.target.name, node.value.func.name))
+            self._field_scan_var_cache[sid] = cands
+            return cands
+
+        def _scan_stmt_member_candidates(stmt):
+            sid = id(stmt)
+            cached = self._field_scan_member_cache.get(sid)
+            if cached is not None:
+                return cached
+            cands = []
+            for node in _walk_ast(stmt):
                 if not (isinstance(node, MemberExpr) and isinstance(node.obj, IdentExpr)):
-                    continue
-                target_struct = local_types.get(node.obj.name)
-                if target_struct is None:
                     continue
                 fn = node.member
                 if fn.startswith('__') and fn.endswith('__'):
                     continue
-                if fn in self.struct_field_types[target_struct]:
-                    continue
-                self.struct_field_types[target_struct][fn] = 'int'
-                target_def = _struct_by_name.get(target_struct)
-                if target_def is not None and not any(
-                        isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
-                    target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                cands.append((node.obj.name, fn))
+            self._field_scan_member_cache[sid] = cands
+            return cands
+
+        def _scan_body_for_local_field_access(body, own_struct_name):
+            local_types = {}
+            for stmt in body:
+                for name, ann in _scan_stmt_var_candidates(stmt):
+                    if (ann in self.struct_field_types and ann != own_struct_name
+                            and ann not in self._selfhost_hardcoded_struct_names):
+                        local_types[name] = ann
+            if not local_types:
+                return
+            for stmt in body:
+                for obj_name, fn in _scan_stmt_member_candidates(stmt):
+                    target_struct = local_types.get(obj_name)
+                    if target_struct is None:
+                        continue
+                    if fn in self.struct_field_types[target_struct]:
+                        continue
+                    self.struct_field_types[target_struct][fn] = 'int'
+                    target_def = _struct_by_name.get(target_struct)
+                    if target_def is not None and not any(
+                            isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
+                        target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
 
         # `_walk_ast` already recurses into every nested FunctionDef/StructDef
         # method/if/try/loop body reachable from a statement list, so a single
