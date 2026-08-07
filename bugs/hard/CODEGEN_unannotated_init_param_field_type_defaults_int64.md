@@ -180,3 +180,24 @@ check-selfhost, from-scratch stdlib dylib rebuild, compile_stdlib.py -j8)
 — and, per point 4 above, should ALSO spot-check a few compiled stdlib
 binaries' actual runtime output before/after, since the existing gate
 cannot detect this bug's OWN symptom (wrong values, not failed compiles).
+
+## Real-world instances confirmed 2026-08-06
+
+- `Lib/importlib/resources/readers.py`'s `NamespaceReader.__init__(self,
+  namespace_path)`: unannotated `namespace_path` defaults to `int64_t`;
+  the real call site always passes a genuine path-like/iterable object.
+  The body does `map(self._resolve, namespace_path)` — iterating
+  `namespace_path` as a container — and the generated GIMPLE tries to
+  feed the `int64_t`-typed param through `map`'s iteration/spread
+  lowering, producing `error: non-trivial conversion in 'mem_ref'` at
+  the `self.path = MultiplexedPath(*filter(bool, map(self._resolve,
+  namespace_path)))` line. Confirmed by inspecting the generated `.ci`:
+  `void NamespaceReader___init__ (NamespaceReader *, int64_t)` (the
+  param declared `int64_t`) and, a few lines into the body, `str(
+  namespace_path)` lowered as `mojo_str_from_int(namespace_path)` —
+  the tell-tale "real value is a string/container, field typed
+  int64_t" signature this doc's own minimal repro also produces. See
+  `bugs/COMPILE_FAIL_importlib_resources_readers.md` for the full
+  build log this was found in. Not fixed here, for the same reason
+  nothing in this doc has been fixed — this is exactly the shared,
+  high-risk machinery this doc already flags.

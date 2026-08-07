@@ -4,6 +4,45 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/util.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error (line numbers now point at the generated `.ci`,
+not the real `.py`, since the malformed code is emitted after the last
+`#line` directive — cosmetic, not the bug):
+
+```
+error: expected declaration specifiers or '...' before '*' token
+error: '_lazymodule__dispatch_t' has no member named 'LazyModule___delattr__'
+error: expected '}' before '_LazyModule___delattr__'
+```
+
+Root-caused (this is the SAME underlying error the original stale doc
+already showed, at a different — now-shifted — location, confirming
+it's stable/reproducible): `_LazyModule(types.ModuleType)`'s
+`__getattribute__` does an ordinary attribute-delegation `return
+getattr(self, attr)`. This codegen's self-hosting-oriented
+`getattr(self, x)`-as-dispatch-table heuristic
+(`_analyze_getattr_pattern` in `gimple_codegen.py`, built for
+`myinterpreter.py`'s own `Interpreter.execute` vtable-style dispatch)
+mis-fires on this ordinary delegation call and, unable to parse a
+`prefix + something` name shape, falls back to "assume all of
+`_LazyModule`'s methods are dispatch targets" — including
+`__delattr__`/`__getattribute__` themselves. Since `_LazyModule`
+subclasses the opaque `types.ModuleType`, its `self` parameter's C type
+can't be resolved, so the synthesized dispatch-table typedef gets a
+function-pointer field with a missing type before `*self`
+(`void (*LazyModule___delattr__)( *self, int attr);`), an invalid C
+declaration GCC rejects — which then cascades into the "has no member"
+errors seen above.
+
+This is a genuinely NEW hard bug (not one of the previously documented
+ones) — written up in full, including a 3-option fix plan, as
+`bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md`.
+Not fixed here: the triggering machinery exists specifically to keep
+`make check-selfhost` working, so any fix needs verification against
+that gate specifically before being considered safe — left for a
+dedicated pass.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/importlib/util.py:63:35: error: expected declaration specifiers or '...' before '*' token

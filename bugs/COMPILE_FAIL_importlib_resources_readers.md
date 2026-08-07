@@ -4,6 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py:142:1: error: non-trivial conversion in 'mem_ref'
+```
+at `NamespaceReader.__init__`'s `self.path =
+MultiplexedPath(*filter(bool, map(self._resolve, namespace_path)))`.
+
+Root-caused: this is a confirmed real-world instance of the
+already-documented hard bug
+`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+— `__init__(self, namespace_path)`'s unannotated `namespace_path`
+parameter defaults to `int64_t` regardless of the real (iterable)
+argument type. Confirmed via the generated `.ci`: the parameter is
+declared `int64_t`, and an unrelated use of it a few lines earlier
+(`if 'NamespacePath' not in str(namespace_path)`) lowers `str(
+namespace_path)` as `mojo_str_from_int(namespace_path)` — the same
+"real value is a container/string, field typed int64_t" signature the
+hard bug doc's own minimal repro produces. `map(self._resolve,
+namespace_path)` then tries to iterate the wrongly-int64_t-typed
+param, producing the GIMPLE `mem_ref` conversion error. Added as a new
+confirmed instance to that hard-bug doc. Not fixed here, per that
+doc's own risk assessment (shared call-site/parameter type-inference
+machinery, high risk, not attempted this session).
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py: In function '_alloc_MultiplexedPath':
