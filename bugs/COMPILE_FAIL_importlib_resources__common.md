@@ -4,7 +4,34 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/_common.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Issue #1 below (`_wrap_spec` undefined at link) is now FIXED at its
+root cause — see `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+for the full writeup (`_parsed_import` couldn't resolve a leading-dot
+relative import like `._adapters` to its sibling file
+`importlib/resources/_adapters.py` in link mode). Confirmed via direct
+inspection of the generated C: the `wrap_spec` call site and its extern
+both now correctly read `__adapters_wrap_spec_<suffix>` (previously
+bare, unresolved `wrap_spec`), and `_adapters.py`'s full body
+(`SpecLoaderAdapter`/`TraversableResourcesLoader`/`CompatibilityFiles`)
+is now correctly inlined.
+
+**Still not PASS** — with `_adapters.py` now correctly resolved, its
+own transitive imports pull in BOTH `Lib/importlib/_abc.py` (module
+`_abc`) and `Lib/importlib/abc.py` (module `abc`) into the same
+translation unit, and their globals structs collide: `error:
+redefinition of '___abc_globals'`. This is the SAME class of bug as
+the explicitly out-of-scope `bugs/hard/CODEGEN_same_bare_name_struct_
+collision_across_modules.md` (task #141) — not chased further here,
+per the orchestrating session's explicit instruction to leave that
+class of bug alone.
+
+Issue #2 (`_next` / builtin `next()` on a generic iterator) is
+unaffected by the above fix and remains unfixed/undocumented as its own
+hard bug, as originally noted below.
+
+## Original status (2026-08-06, superseded above for the wrap_spec mechanism)
 
 Re-ran; the original GCC-warning dump below is STALE (compilation now
 gets further and fails at LINK time, not with these warnings). Current
