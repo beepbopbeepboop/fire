@@ -28963,9 +28963,67 @@ class GimpleGen:
 
         # ── Phase 1.7: pre-scan global variable declarations ──────────────
         # Must run before Phase 2a so _lower_IdentExpr can find globals.
+        #
+        # `if <platform-check>: X = [...] else: X = [...]` (the plain-
+        # assignment sibling of gen_module's own conditional-toplevel-def
+        # promotion a few hundred lines up -- e.g. Lib/importlib/
+        # _bootstrap_external.py's `if _MS_WINDOWS: path_separators =
+        # [...] else: path_separators = [...]`) was INVISIBLE to this
+        # pre-scan: the loop below only recognizes a plain top-level
+        # AssignStmt, never descending into an IfStmt's branches, so such
+        # a global never got a `_global_var_types`/`_elem_types` entry at
+        # all here. Flatten any top-level conditional whose condition
+        # resolves to a known platform-constant bool (mirroring the
+        # def-promotion pass's identical resolution logic) down to just
+        # its platform-correct branch's statements before scanning, the
+        # same way real CPython only ever executes ONE of the branches.
+        # Iterative explicit-stack traversal, NOT a self-recursive nested
+        # helper -- see the def-promotion pass's own identical comment on
+        # why (a nested function calling itself doesn't survive this
+        # file's own self-host closure-lifting).
+        def _flatten_resolved_conditionals(_root_list):
+            _out = []
+            _stack = [(_root_list, 0)]
+            while _stack:
+                _frame_body, _frame_idx = _stack[-1]
+                if _frame_idx >= len(_frame_body):
+                    _stack.pop()
+                    continue
+                _frame_stmt = _frame_body[_frame_idx]
+                _stack[-1] = (_frame_body, _frame_idx + 1)
+                if isinstance(_frame_stmt, IfStmt):
+                    _resolved = False
+                    _resolved_body = []
+                    _cond_val = self._eval_const_bool(_frame_stmt.condition)
+                    if _cond_val is True:
+                        _resolved = True
+                        _resolved_body = _frame_stmt.then_body or []
+                    elif _cond_val is False:
+                        _resolved = True
+                        for _cond2, _elif_body2 in (getattr(_frame_stmt, 'elifs', None) or []):
+                            _elif_val = self._eval_const_bool(_cond2)
+                            if _elif_val is True:
+                                _resolved_body = _elif_body2 or []
+                                break
+                            if _elif_val is None:
+                                _resolved = False
+                                break
+                        else:
+                            _resolved_body = _frame_stmt.else_body or []
+                    if _resolved:
+                        _stack.append((_resolved_body, 0))
+                    else:
+                        _out.append(_frame_stmt)
+                else:
+                    _out.append(_frame_stmt)
+            return _out
+
         _pre_declared_globals = set()
         _phase17_mod = self.module_name or "root"  # module name for _global_to_module mapping
-        for _scan_stmt in stmts + (imported_stmts if (self.do_imports or self.link_imports) else []):
+        _phase17_stmts = (_flatten_resolved_conditionals(stmts)
+                           + (_flatten_resolved_conditionals(imported_stmts)
+                              if (self.do_imports or self.link_imports) else []))
+        for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
                 # Track `X = re.compile("literal pattern")` so a later
@@ -28992,6 +29050,25 @@ class GimpleGen:
                     self._global_var_types[_gname] = 'MojoDict *'
                 elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
                     self._global_var_types[_gname] = 'MojoList *'
+                    # Record the element type too (_quick_type's own
+                    # SubscriptExpr case reads it from here) -- without
+                    # this, a LATER global initialized by indexing THIS
+                    # one (`path_separators = ['/']` then `path_sep =
+                    # path_separators[0]`) always fell through to
+                    # _quick_type's int64_t default, since only the
+                    # list's OWN type was ever recorded here, never what
+                    # it contains. `path_sep` then got declared int64_t
+                    # while every value ever stored in it was a real
+                    # char*, and `path_sep.join(...)` inside any function
+                    # compiled against that global's declared type
+                    # produced a hard "assignment to int64_t from char*"
+                    # mismatch (found via Lib/importlib/_bootstrap_
+                    # external.py's identical real-world shape).
+                    if _scan_stmt.value.elements:
+                        _elt = self._quick_type(_scan_stmt.value.elements[0])
+                        for _e in _scan_stmt.value.elements[1:]:
+                            _elt = TypeLattice.join(_elt, self._quick_type(_e))
+                        self._elem_types[_gname] = _elt
                 elif isinstance(_scan_stmt.value, SetExpr):
                     self._global_var_types[_gname] = 'MojoSet *'
                 elif isinstance(_scan_stmt.value, (IntLiteral, BoolLiteral)):
