@@ -4,6 +4,37 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; two distinct issues:
+
+```
+error: passing argument 1 of 'mojo_len' makes integer from pointer without a cast [-Wint-conversion]
+error: expected ')' before ';' token
+error: 'u' undeclared (first use in this function)
+```
+
+1. `len(t)` — a bare, discarded-value expression statement calling
+   `len()` on a for-loop variable `t`. Same general shape as the
+   "default-valued struct parameter used only via bare discarded
+   expression statements" gap already flagged in
+   `bugs/COMPILE_FAIL_Tools_scripts_var_access_benchmark.md` (there it
+   was attribute access, `a.x;`; here it's `len(t)` as a statement) —
+   plausibly the same underlying "value computed then discarded"
+   codegen path mishandling the operand's type. Not confirmed
+   identical, not investigated further.
+
+2. `expected ')' before ';' token` / `'u' undeclared` at/near a
+   `try: ... except ValueError as why: ... raise` block (bare re-raise)
+   — the reported source lines (381, 396, 398) don't obviously map to
+   text that would produce these specific errors (`name = name.split
+   ('.')[0]`, `except ValueError as why:`, bare `raise`), suggesting
+   line-number misattribution similar to `bugs/COMPILE_FAIL_importlib_util.md`'s
+   LazyModule case (generated code continuing past the last real `#line`
+   directive without resetting it). Not root-caused further.
+
+Neither fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py: In function '_mojo_dispatch_getattr':

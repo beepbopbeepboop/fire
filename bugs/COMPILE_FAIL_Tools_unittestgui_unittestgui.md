@@ -4,6 +4,28 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unittestgui/unittestgui.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+/Users/mrs/net/Python-3.14.6/Tools/unittestgui/unittestgui.py:462:1: error: invalid types in conversion to integer
+```
+
+at `self.text = self.canvas.create_text(totalWidth/2, height/2,
+anchor=tk.CENTER, text=percentString)` — a tkinter canvas call with a
+`text=<char *>` KEYWORD argument. `self.text` (the struct field) is
+declared `int` (plausible on its own — `create_text()` really does
+return an integer tkinter widget/item ID in real Python), but the
+`text=percentString` kwarg itself (a `char *` value going into what
+this codegen presumably boxes as a generic kwargs dict expecting
+`int64_t`-compatible values) is the more likely site of the actual
+"invalid types in conversion to integer" — not conclusively pinned to
+one specific line via the generated `.ci` (the `#line` directive
+nearest the error is a different, coincidental `self->text = 0;`
+default-init a few statements earlier, not the real call). Not
+root-caused further; not fixed.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/unittestgui/unittestgui.py: In function '_alloc_DiscoverSettingsDialog':
