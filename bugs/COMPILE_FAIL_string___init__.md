@@ -4,6 +4,29 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/string/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; the stale doc's `AttributeError: 'GimpleGen' object has no
+attribute '_struct_bases'` CRASH is FIXED (that attribute exists now —
+compilation gets much further). Current error:
+
+```
+error: request for member 'pattern' in something not a structure or union
+error: invalid conversion in gimple call
+```
+
+The first is ALREADY a confirmed real-world instance in
+`bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` (`Template.
+__init_subclass__`: `pat = cls.pattern = re.compile(...)` — opaque
+`cls` class-object parameter). Not re-investigated; see that doc's
+implementation plan. The second (`invalid conversion in gimple call`,
+`Lib/string/__init__.py:140`/`:162`) not investigated further this
+session — same generic shape as the two other still-open "invalid
+conversion in gimple call" sites already noted in
+`bugs/COMPILE_FAIL_importlib__bootstrap_external.md` (with/branch
+return-type unification, not root-caused there either); plausibly
+related but not confirmed.
+
 ```
 Error building: 'GimpleGen' object has no attribute '_struct_bases'
 Traceback (most recent call last):
