@@ -1,5 +1,16 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (updated 2026-08-07, LambdaExpr blocker root-caused, feature-sized, doc written)
+
+The `LambdaExpr` blocker noted just below (`get_files = (lambda *a,
+**k: _walk(*a, walk=_files, **k))`) has now been root-caused and
+folded into a proper hard-bug doc:
+`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` (2 confirmed
+occurrences — this file and `Lib/pickletools.py`'s `_genops`).
+Investigated and found to be feature-sized, not a narrow fix — see
+that doc's "Why this is feature-sized, not narrow" section. Not
+attempted here. This file's `iter_files` remains refused.
+
 ## Status (updated 2026-08-07)
 
 **NOT resolved** (task #140), despite the root-cause bug this doc
