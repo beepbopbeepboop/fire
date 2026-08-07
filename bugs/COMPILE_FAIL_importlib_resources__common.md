@@ -51,19 +51,17 @@ Root-caused both, NOT fixed (see below):
 
 ## Not fixed
 
-Both are real, narrow-looking gaps, but neither was attempted: #1 is
-cross-module import-resolution machinery (function-scoped imports are
-common throughout the stdlib — CPython's own style guide recommends
-them for deferred/circular-import avoidance, exactly as this file's own
-comment `# deferred for performance (python/cpython#109829)` states),
-and #2 touches builtin-call resolution for `next()`, which — unlike a
-`for` loop over a known container — isn't obviously narrow once a
-receiver can be an arbitrary Python iterator (itertools object,
-generator, custom `__next__`, ...). Both plausibly recur across many
-other stdlib files (function-scoped imports especially). Given this
-session's standing caution around call-resolution/type-inference
-changes with hard-to-predict blast radius, left undone for a dedicated
-pass rather than attempted here.
+Neither was attempted. #1 is now written up as a full hard bug —
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+— since `bugs/COMPILE_FAIL_Lib_runpy_request_for_member_module_in_something_not_a_structure_or_union.md`
+turned out to share the EXACT same mechanism (a second, independent
+confirmed instance), making this a genuine recurring gap, not a one-off.
+#2 touches builtin-call resolution for `next()`, which — unlike a `for`
+loop over a known container — isn't obviously narrow once a receiver
+can be an arbitrary Python iterator (itertools object, generator,
+custom `__next__`, ...); left undocumented as its own hard bug for now
+(only one confirmed instance so far) but flagged here for whoever picks
+up #1, since the two may share more machinery than currently known.
 
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)

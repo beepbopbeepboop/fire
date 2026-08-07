@@ -4,6 +4,36 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error (multiple identical occurrences):
+
+```
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:289:1: error: type mismatch in binary expression
+```
+
+at `ColumnSpec._parse`'s classmethod: `*values, _ = raw` (starred-target
+unpack) then `return cls(*values)` — calling the classmethod's own
+`cls` (an opaque, dynamically-typed class reference, boxed `int64_t`)
+with a SPREAD `*values` argument. Root-caused via the generated `.ci`:
+this lowers to `mojo_fnptr_call_1(cls_as_voidptr, (int64_t)values)` —
+the `MojoList *` holding the real per-element values gets cast whole
+to `int64_t` and passed as a SINGLE argument, rather than actually
+spreading its elements into separate call arguments. `cls(*values)`
+against a dynamic/opaque callable reference doesn't perform real
+argument spreading at all.
+
+Not fixed here — this is call-argument handling for a spread call
+against a DYNAMIC callable (as opposed to a statically-known
+constructor/function, which this codegen handles correctly elsewhere),
+one of the explicitly flagged high-risk categories (call-argument
+coercion) this session treats with extra caution. Plausibly related to
+(but a distinct shape from) `bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+— that doc covers a *declared* `*args`/`**kwargs` function being
+called with literal positional args; this is the mirror case, a
+spread *call site* against an opaque *callee*. Worth checking whether
+the two share a fix location before attempting either.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_dispatch_getattr':
