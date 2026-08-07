@@ -4,6 +4,45 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.p
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; 472 error lines, almost all inside a transitively-imported
+sibling, `Tools/c-analyzer/c_parser/info.py` (this file itself imports
+`from .info import ...` extensively). Representative errors:
+
+```
+error: 'c_parser_info__fmt_full_fe04a9' undeclared here (not in a function); did you mean '_funcptr_c_parser_info__fmt_full_fe04a9'?
+error: 'MojoBoundMethod' has no member named 'id'
+error: expected expression before ';' token
+error: request for member 'filename' in 'fileinfo', which is of non-class type 'int64_t'
+```
+
+Not fully root-caused given the sheer volume, but several DISTINCT,
+already-partially-understood mechanisms plausibly compound here:
+1. The same "function-as-value at module scope" gap already documented
+   in `bugs/COMPILE_FAIL_importlib__bootstrap_external.md` (the
+   `_funcptr_*` GCC suggestion is the same tell).
+2. `HighlevelParsedItem` (in `info.py`) subclasses namedtuple factories
+   AND defines its own `__getattr__` override (dynamic attribute
+   fallback: `def __getattr__(self, name): return self._extra[name]`)
+   — plausibly related to `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`.
+3. `__str__` does `self._str = next(self.render())` where `render()` is
+   a generator method — same `next()`-on-a-generic-iterator shape
+   already flagged (not yet a hard bug doc) in
+   `bugs/COMPILE_FAIL_importlib_resources__common.md`.
+4. `HighlevelParsedItem.id` property (`return self.parsed.id`) reads a
+   field through a chain that ends up typed `MojoBoundMethod *` instead
+   of the real class — plausibly the struct-field/return-type
+   inference gap this session's other hard bugs already describe.
+
+Given `info.py` itself isn't independently in this session's assigned
+range and the error count here makes isolating any ONE of these four
+candidates impractical within the time available, this file is left as
+a compound/cascading case rather than root-caused to one specific fix.
+Worth a dedicated follow-up session that starts from `info.py` directly
+(not this file) with a much longer time budget, informed by the four
+candidate mechanisms above.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.py: In function '_mojo_dispatch_getattr':
