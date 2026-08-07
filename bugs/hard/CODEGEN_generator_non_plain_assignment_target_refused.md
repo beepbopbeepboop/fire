@@ -1,5 +1,59 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (updated 2026-08-07, non-self-MemberExpr FIXED for the `sys.stderr`/`stdout`/`stdin` shape)
+
+**The specific confirmed non-`self`-`MemberExpr` occurrence (`sys.
+stderr = None`, `Lib/test/test_faulthandler.py`'s `check_stderr_none`)
+is now FIXED.** `_cpp_stmt`'s `AssignStmt` handling gained a narrow,
+structurally-scoped case for `sys.stderr`/`sys.stdout`/`sys.stdin` as
+an assignment target, ahead of the generic refusal.
+
+**Root cause / why this narrow shape (and only this shape) is safe to
+fix by eliding it:** `sys` has no real backing value ANYWHERE in this
+coroutine codegen — `_cpp_expr`'s `IdentExpr` case has no case at all
+for a bare module name (a bare `sys.stderr` READ outside one specific
+position already lowers to a nonsensical, undeclared `sys` C++
+identifier — confirmed by hand: `stderr = sys.stderr` inside a
+generator body still fails to compile, unchanged, a separate
+pre-existing gap on the READ side, not attempted here). The ONLY place
+this codegen gives `sys.stderr` any meaning at all is `_is_sys_stderr`/
+`_gen_print`'s structural, compile-time-only match of `file=sys.stderr`
+as a `print()` keyword argument — never a real runtime value. Given
+that, an assignment `sys.stderr = <val>` has nothing real to change:
+eliding it (after still evaluating the RHS for side effects, `(void)
+(val);`) can't discard any behavior this codegen could otherwise
+observe, and lets the surrounding function's OTHER statements be
+reached and judged on their own merits instead of refusing the whole
+function solely for this one line. This reasoning is intentionally
+narrow to `sys.{stderr,stdout,stdin}` specifically — every OTHER
+non-`self` `MemberExpr` assignment target (a real object's attribute)
+remains refused unchanged, since a real object might have an
+observable backing value elsewhere in the program that silent elision
+would corrupt.
+
+**Verification:** isolated repro (`sys.stderr = None; print("after")`
+inside a generator) now compiles to valid C++ (`g++ -std=c++20
+-fsyntax-only`, 0 errors) — previously refused at the eligibility gate.
+`check_stderr_none` itself, run through the real file, is no longer
+refused at the gate either — but does NOT fully compile end-to-end,
+confirmed via an isolated repro of its exact body: the SAME pattern as
+every other partial fix in this cluster (task #149's `imaplib.py`,
+task #150's original list-unpack fix on `gc_inspection.py`) — other,
+separate, pre-existing gaps in the same method remain: the `stderr =
+sys.stderr` READ (line 829, noted above), `self.assertRaises(...)`/
+`self.assertEqual(...)` (method calls on `self`, out of this narrow
+`self.<scalar field>`-reads-only model's scope), and `with ... as cm:`
+binding a method-call result. Confirmed via direct isolated compile:
+```
+error: use of undeclared identifier 'sys'        (stderr = sys.stderr)
+error: member reference base type 'int64_t' ...  (cm.exception)
+error: called object type 'int' is not a function ...  (self->assertEqual(...))
+```
+Full 5-part CLAUDE.md gate run and passed: `test_gimple.py` (247/247),
+`test_module_cache.py` (76/76), `make check-selfhost` clean, from-
+scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:` lines),
+`compile_stdlib.py -j8` (664/664, 0 unexpected — unchanged count).
+
 ## Status (updated 2026-08-07, new sub-case found: slice-assignment targets)
 
 **Third confirmed unsupported target shape, found while re-verifying
