@@ -9,6 +9,36 @@ one: `tkinter/filedialog.py`'s own `_Dialog(commondialog.Dialog)`
 inheritance couldn't even be resolved before, so this never got compiled
 far enough to reach the current failure.
 
+**2026-08-07**: repro re-confirmed reproducing byte-for-byte identically
+on current master (`python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/tkinter/filedialog.py` — same
+`conflicting types for 'tkinter_commondialog_Dialog___init__'`/`'Dialog'
+has no member named 'widgetName'/'parent'/'result'/'initial_focus'`
+errors as originally documented). Implementation deliberately NOT
+attempted this session: assessed the 4-step plan below against the
+current code (`_struct_name_owner` at gimple_codegen.py:3649, the
+registration loop at ~26765-26771, Phase 2a's per-StructDef method
+compile loop) and confirmed steps 1 and 3 are more tractable than the
+original write-up suggested (Phase 2a already iterates real `StructDef`
+objects with real `id()` identity, not just names, so "is this the
+`_struct_name_owner`-registered winner for its own bare name" is a
+cheap, local check at each struct's own method-compile site) — but step
+2 (propagating which-qualified-class a given VALUE resolves to, through
+to every later field-access site derived from it, for the general case
+where the disambiguating construction-site signal isn't locally
+available) is a genuinely broad dataflow problem, and the doc's own
+"Risk" section's warning — partial qualification "will just move the
+corruption to a different consumer instead of fixing it" — was judged a
+real, not theoretical, risk given this project's documented history of
+exactly this class of regression from narrower changes to adjacent
+shared machinery (see `bugs/COMPILE_FAIL_collections___init__.md`).
+Given the "moderate-to-high" risk this doc's own Risk section already
+assigns, and this being core struct-identity machinery "referenced by
+field access, method dispatch, reflection..., constructor lowering, and
+forward-declaration emission" (far broader blast radius than a
+preamble-only change), deferred to a dedicated pass with a larger time
+budget rather than attempting a partial version under time pressure.
+
 ## Symptom
 
 ```
