@@ -23,12 +23,11 @@ lambda-parsing bugs:**
    sibling gaps) — worth noting since `int` (C's native int, distinct
    from this codegen's usual `int64_t`) apparently isn't normalized
    before the allow-list check.
-3. `test.support`'s `iter_builtin_types`/`patch_list`: **new gap** —
-   "only a plain identifier assignment target is supported" — some
-   assignment inside these generator bodies targets something other than
-   a bare local (e.g. a tuple-unpack, subscript, or attribute target).
-   Single new gap, not yet independently confirmed elsewhere in this
-   cluster.
+3. `test.support`'s `iter_builtin_types`/`patch_list`: now
+   `bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`
+   (2 of that doc's 3 confirmed occurrences — the 3rd, and the one with
+   a fully-traced root cause, is `Lib/test/crashers/gc_inspection.py`'s
+   own generator `g`, one of this cluster's 41 target files).
 4. `test.support`'s `async_yield`: **new gap** — "`return <value>` inside
    a generator is not supported (a generator's `return` ends iteration
    with no value, unlike an ordinary function's `return`)" — Python's
