@@ -2,61 +2,44 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py`
 
-(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+## Status (updated 2026-08-06)
+
+Not fixed. Root cause identified but not resolved — a genuinely exotic,
+low-value pattern (whole file is 30 lines, two tiny classes).
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:40:11: warning: unused variable '_tag' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:45:11: warning: unused variable '_tag' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:50:11: warning: unused variable '_tag' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:65:11: warning: unused variable '_tag' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:74:13: warning: unused variable '_tag' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function 'FreezableDefaultDict___missing__':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:145:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:143:11: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:142:7: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function 'FreezableDefaultDict_freeze':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:30:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   30 |         return cls(*map(str.strip, text.split("=", 1)))
-      | ^   
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:28:11: warning: variable '_t3' set but not used [-Wunused-but-set-variable]
-   28 |     @classmethod
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:27:7: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
-   27 | class Pair(collections.namedtuple('Pair', 'name value')):
-      |       ^~~
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:26:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   26 | 
-      |          ^  
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py: In function 'Pair_parse':
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:43:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:41:11: warning: variable '_t13' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:40:10: warning: variable '_t12' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:39:11: warning: variable '_t11' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:38:14: warning: variable '_t10' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:37:10: warning: variable '_t9' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:36:10: warning: variable '_t8' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:35:10: warning: variable '_t7' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:34:11: warning: variable '_t6' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:33:11: warning: variable '_t5' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:32:10: warning: variable '_t4' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:31:11: warning: variable '_t3' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:30:10: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
-   30 |         return cls(*map(str.strip, text.split("=", 1)))
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:29:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   29 |     def parse(cls, text):
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py:31:1: error: invalid conversion in gimple call
-int64_t
+error: non-trivial conversion in 'mem_ref'
+```
+at:
+```python
+class FreezableDefaultDict(collections.defaultdict):
+    ...
 
-... (33 more lines)
+class Pair(collections.namedtuple('Pair', 'name value')):
+    @classmethod
+    def parse(cls, text):
+        return cls(*map(str.strip, text.split("=", 1)))
 ```
 
-Exit code: 1
-Elapsed: 10.26s
+Two unusual class-definition shapes in one tiny file:
+1. `FreezableDefaultDict(collections.defaultdict)` — subclassing a
+   BUILTIN container type directly.
+2. `Pair(collections.namedtuple('Pair', 'name value'))` — subclassing
+   the DYNAMICALLY-CONSTRUCTED RETURN VALUE of a factory function call,
+   not a real, statically-known class at all.
+
+The error surfaces inside `Pair.parse`'s `cls(*map(str.strip, ...))` —
+`cls` (opaque classmethod class-reference) constructing an instance of
+a base class this compiler never modeled as a real struct (since
+`collections.namedtuple(...)`'s return value isn't a class the compiler
+can see the shape of ahead of time) — generated C ends up dereferencing
+a `void`/`int64_t`-mismatched pointer (`_t14 = *_t10;`).
+
+Not investigated further or fixed — both patterns are rare/exotic
+relative to the file's small size and narrow value, and fixing either
+properly would need real support for subclassing dynamically-constructed
+types (a namedtuple factory's return value), which is a different and
+likely much harder problem than the struct-inheritance gaps already
+tracked (bugs/hard/CODEGEN_multiple_inheritance_duplicate_method_
+symbols.md covers ordinary multiple inheritance among statically-known
+classes, not this).
