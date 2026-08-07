@@ -22790,6 +22790,104 @@ class GimpleGen:
                         and s.target.obj.name == 'sys' and s.target.member in ('stderr', 'stdout', 'stdin'):
                     val = self._cpp_expr(s.value)
                     return [f"{indent}(void)({val});"]
+                # x[:] = value  (full-slice replace-in-place; real
+                # occurrences: Lib/test/support/__init__.py's patch_list
+                # (`orig[:] = saved`) and iter_builtin_types (`subs[:] =
+                # []`), both exactly this shape -- start=stop=step=None.
+                # `x[a:b] = y` parses to a bare SliceExpr TARGET (not
+                # wrapped in SubscriptExpr -- see mojo_compiler.py's
+                # `_parse_postfix`), so it falls into this MemberExpr/
+                # SubscriptExpr-shaped branch, not the arr[i]=val one
+                # above. Unlike the sys.stderr elision above, this is
+                # REAL correct behavior, not a no-op: a slice-assignment
+                # target must mutate the SAME MojoList* object in place
+                # (other references/aliases need to observe the change),
+                # so this lowers to genuine, pre-existing runtime helpers
+                # (mojo_list_clear + mojo_list_extend) rather than
+                # discarding the statement. Only the FULL-slice case
+                # (`x[:] = y`) is handled -- both real occurrences are
+                # exactly this shape; a bounded/stepped slice-assign
+                # (`x[a:b] = y`, `x[::2] = y`) needs real element-
+                # shifting splice support (mirroring what mojo_list_
+                # del_slice already does for deletion) and is a
+                # meaningfully bigger step, not attempted here since no
+                # real occurrence needs it -- falls through to the
+                # generic refusal below unchanged.
+                #
+                # Type guard, found by hand-verifying patch_list's own
+                # real body end-to-end (not just the eligibility gate):
+                # `saved = orig[:]` two lines above types `saved` as
+                # `char *` (`_infer_simple_expr_ctype`'s `if isinstance(e,
+                # SliceExpr): return 'char *'` -- this narrow model reads
+                # EVERY slice as a string, a separate pre-existing gap,
+                # see this doc's own notes on list-slice READS). Blindly
+                # reinterpret-casting a real char*/double/_Bool value to
+                # MojoList* and calling mojo_list_clear/extend on it would
+                # SYNTAX-compile (an explicit C-style pointer cast is
+                # always legal) but corrupt memory or crash at runtime --
+                # exactly the "silently wrong or broken code" this whole
+                # codegen otherwise refuses to emit.
+                #
+                # The TARGET (container being written into) stays
+                # permissive of an untracked/int64_t-default type -- same
+                # "ambiguous/untracked boxed value is assumed to be a
+                # list" heuristic the plain codegen path's DelStmt
+                # SliceExpr branch already uses, and in practice it's
+                # almost always a parameter (reliably typed from function
+                # entry, see param_ctypes seeding `declared` before any
+                # statement is processed).
+                #
+                # The RHS is held to a STRICTER bar -- exactly 'MojoList
+                # *', no ambiguous-default fallback -- because of a
+                # separate, confirmed hazard specific to a value:
+                # `_cpp_try_stmt` translates a `finally:` block's
+                # statements BEFORE the preceding `try:` block's (see its
+                # own body -- `finally_lines` is computed first), so a
+                # name first assigned inside the `try:` (like `saved`
+                # here) is NOT YET in `declared` at the point THIS
+                # statement (inside `finally:`) is translated -- it reads
+                # back as untracked (None), not as its eventual real type,
+                # even though that real type will end up being the
+                # definitively-wrong 'char *' once the try block is
+                # actually processed. Treating that untracked None as
+                # "assume list" here would be silently wrong for exactly
+                # patch_list's own real shape; requiring positive proof
+                # (declared[name] == 'MojoList *') instead means this
+                # exact case is refused (as it must be, since the RHS
+                # really is a string here) while a genuinely list-typed
+                # RHS identifier (resolved at a point in program order
+                # where its type IS already known) still gets the real
+                # fix.
+                if (isinstance(s.target, SliceExpr) and s.target.start is None
+                        and s.target.stop is None and s.target.step is None
+                        and isinstance(s.target.obj, IdentExpr)):
+                    obj_ct = (self._cpp_declared.get(s.target.obj.name)
+                              if self._cpp_declared is not None else None)
+                    if obj_ct not in (None, 'MojoList *', 'int64_t'):
+                        raise _UnsupportedGeneratorShape(
+                            "full-slice assignment target's declared type "
+                            f"({obj_ct!r}) is not a list")
+                    obj = self._cpp_expr(s.target.obj)
+                    obj_lp = obj if obj_ct == 'MojoList *' else f"((MojoList *)({obj}))"
+                    if isinstance(s.value, ListExpr) and not s.value.elements:
+                        # x[:] = []  -- an empty-list RHS lowers (via the
+                        # ListExpr case above) to a C++ brace-init-list
+                        # ('{}'), not a real MojoList*, so it can't be
+                        # passed to mojo_list_extend -- but "replace with
+                        # nothing" is just a clear, so this exact, real,
+                        # confirmed shape (iter_builtin_types) needs no
+                        # extend call at all.
+                        return [f"{indent}mojo_list_clear({obj_lp});"]
+                    if (isinstance(s.value, IdentExpr) and self._cpp_declared is not None
+                            and self._cpp_declared.get(s.value.name) == 'MojoList *'):
+                        val = self._cpp_expr(s.value)
+                        return [f"{indent}mojo_list_clear({obj_lp});",
+                                f"{indent}mojo_list_extend({obj_lp}, {val});"]
+                    # Any other RHS shape (a non-empty list/tuple literal,
+                    # a call result not statically known to be a
+                    # MojoList*, ...) has no safe representation to
+                    # extend from in this narrow model -- refuse honestly
+                    # rather than emit ill-typed/silently-wrong C++.
                 raise _UnsupportedGeneratorShape(
                     "only a plain identifier assignment target is supported")
             name = s.target.name
