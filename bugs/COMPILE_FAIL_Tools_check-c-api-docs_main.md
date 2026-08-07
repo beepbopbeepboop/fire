@@ -4,6 +4,52 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/check-c-api-docs/main.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+error: passing argument 1 of 'mojo_strlen' makes pointer from integer without a cast [-Wint-conversion]
+error: passing argument 1 of '_mojo_at_char' makes pointer from integer without a cast [-Wint-conversion]
+error: assignment to 'char *' from 'char' makes pointer from integer without a cast [-Wint-conversion]
+```
+
+at:
+```python
+to_check = [
+    (all_missing, "missing", found_undocumented(...)),
+    (all_found_ignored, "documented but ignored", found_ignored_documented(...)),
+]
+for name_list, what, message in to_check:
+    ...
+    for name in name_list:
+        print(f" - {name}")
+```
+
+Root-caused via the generated `.ci`: the OUTER for-loop's tuple-unpack
+target `name_list` (first slot of each 3-tuple, really a `list[str]`
+local variable `all_missing`/`all_found_ignored`) is declared `int64_t`
+and then treated as a STRING by the INNER `for name in name_list:`
+loop (`mojo_strlen(name_list)` / `_mojo_at_char(name_list, ...)` — the
+STRING-iteration helpers, not `mojo_list_len`/`mojo_list_get_str`).
+This looks like a gap in the SAME per-slot tuple-unpack type dispatch
+machinery already fixed once for a similar shape (see
+`bugs/COMPILE_FAIL_Doc_tools_check-warnings.md`, commit `9a2bb86`,
+`_compr_list_loop`) but for a DIFFERENT call site
+(`_gen_for_list`'s ordinary `for a, b, c in list_of_tuples:` — that
+fix's own commit message says this exact function was already correct
+for its own use case, so this looks like a separate remaining gap in
+it, not a full regression) — possibly specific to a 3-element tuple
+whose first slot is a plain variable reference (not a literal) holding
+a `list[str]`.
+
+Not fixed here — this session already attempted one seemingly-narrow
+type-inference fix elsewhere (the global dict-value-type Phase 1.7
+attempt, see `bugs/hard/CODEGEN_reset_func_wipes_global_container_type_inference.md`)
+that turned out broken in a non-obvious way; left for a dedicated,
+carefully-verified pass rather than risking a second rushed attempt in
+this same class of machinery.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/check-c-api-docs/main.py: In function '_mojo_dispatch_getattr':
