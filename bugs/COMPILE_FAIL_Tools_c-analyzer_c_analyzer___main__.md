@@ -4,6 +4,29 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+error: 'fmt_brief_0c85c9' undeclared here (not in a function); did you mean '_funcptr_fmt_brief_0c85c9'?
+error: 'fmt_full_0c85c9' undeclared here (not in a function)
+error: 'fmt_raw_79c856' undeclared here (not in a function)
+error: 'fmt_summary_0c85c9' undeclared here (not in a function); did you mean 'fmt_summary_section'?
+```
+
+Root-caused: `def fmt_raw/fmt_brief/fmt_summary/fmt_full(analysis):`
+are ordinary top-level functions, then referenced as VALUES (not
+called) in a module-level dispatch dict: `FORMATS = {'raw': fmt_raw,
+'brief': fmt_brief, 'summary': fmt_summary, 'full': fmt_full}`. This is
+a confirmed SECOND, independent real-world instance of the already-
+documented "`_write_atomic.__code__` at module scope" gap in
+`bugs/COMPILE_FAIL_importlib__bootstrap_external.md` (added there) —
+GCC's own suggested fix (`did you mean '_funcptr_fmt_brief_0c85c9'`)
+names the exact already-generated-but-unreferenced static function
+pointer this call site should use instead of the bare unmangled name.
+Not fixed here — see that doc.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.py: In function '_mojo_dispatch_getattr':

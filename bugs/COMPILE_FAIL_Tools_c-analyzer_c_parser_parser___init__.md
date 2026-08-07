@@ -4,6 +4,20 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current errors are all in a generated C++ file
+(`__init___gen.cpp`), e.g. `invalid conversion from 'MojoBoundMethod*'
+to 'int64_t'`, `'ParsedItem' was not declared in this scope`, `request
+for member 'filename' in 'fileinfo', which is of non-class type
+'int64_t'`. This module defines generator functions (`yield
+ParsedItem.from_raw(result)`, `yield result`, `yield srcinfo`, ...),
+compiled via this codegen's separate C++20-coroutine lowering path.
+Part of the separate, already-tracked compiled-generator/async-codegen
+project (tasks #95-135) — the untyped generator-param/local-type and
+sibling-name-resolution categories that project's scope already
+covers. Not investigated further here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__init__.py: In function '_mojo_dispatch_getattr':

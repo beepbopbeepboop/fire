@@ -4,6 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current errors are all in a generated C++ file (`info_gen.cpp`),
+e.g. `ISO C++ forbids comparison between pointer and integer`, `request
+for member 'render' in 'self->Analyzed::item', which is of non-class
+type 'int64_t'`, `'Analyzed' has no member named '_render_extra'`.
+`info.py` itself defines generator methods (`render`: `yield repr(self)`
+/ `yield from rendered`, etc.), compiled via this codegen's separate
+C++20-coroutine lowering path. Part of the separate, already-tracked
+compiled-generator/async-codegen project (tasks #95-135) — the
+untyped/misresolved generator-body member-access category that
+project's scope already covers. Not investigated further here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_dispatch_getattr':

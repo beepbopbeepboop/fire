@@ -68,6 +68,18 @@ opposed to inside another function's body, where a similar case —
 a closure/function value; this is the analogous MODULE-level gap, for a
 plain top-level function rather than a closure).
 
+Confirmed a second, independent real-world instance 2026-08-06 via
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md`:
+`Tools/c-analyzer/c_analyzer/__main__.py` defines `fmt_raw`/`fmt_brief`/
+`fmt_summary`/`fmt_full` as ordinary top-level functions, then builds a
+module-level dispatch dict from them as VALUES (`FORMATS = {'raw':
+fmt_raw, 'brief': fmt_brief, ...}`) — same "function name used as a
+bare VALUE at module scope" shape, same symptom (`'fmt_brief_0c85c9'
+undeclared here (not in a function); did you mean
+'_funcptr_fmt_brief_0c85c9'?` — GCC's own suggested fix names the exact
+already-generated-but-unused `_funcptr_*` static pointer this call site
+should have referenced instead of the bare name).
+
 ### NOT YET FIXED: "invalid conversion in gimple call" at lines 960, 1190
 
 ```
