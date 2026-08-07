@@ -4,6 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/logging/handlers.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/logging/handlers.py:1130:1: error: invalid conversion in gimple call
+```
+
+Line 1130 is a docstring line, not executable code — same line-number
+misattribution pattern seen elsewhere this session (generated code
+continuing past the last real `#line` directive without resetting it).
+Not root-caused further given the imprecise location; `bugs/COMPILE_FAIL_importlib__bootstrap_external.md`'s
+own still-open "invalid conversion in gimple call" sites (an
+if/else-branched `with` block returning from structurally different
+context-manager types) are a plausible same-shape candidate worth
+checking first in any follow-up, given the identical error text. Not
+fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/logging/handlers.py: In function '_mojo_dispatch_getattr':
