@@ -1,6 +1,37 @@
 # CODEGEN_generator_function: Lib/test/crashers/gc_inspection.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-07, `g` FULLY unblocked — both remaining gaps FIXED)
+
+**Both of the two gaps this doc's previous update found are now FIXED**
+(`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+newest status update has the full root-cause/fix detail for both):
+1. `marker = object()` now compiles — `_cpp_expr` gained a narrow
+   `object()`-as-unique-sentinel case.
+2. `[tup] = [x for x in gc.get_referrers(marker) if type(x) is tuple]`
+   now compiles — the tuple/list-unpack branch's `_tup_is_list_val`
+   check was widened to recognize a direct `Comprehension` RHS (routes
+   through `mojo_list_get_int` instead of an invalid raw subscript on
+   the `MojoList *` a comprehension lowers to).
+
+Confirmed via `MOJO_DEBUG=1 python3 mojo.py build .../gc_inspection.py`:
+**zero** "not eligible"/refusal lines for `g` now, and a direct g++
+compile of the generated `g` coroutine unit is clean.
+
+**The file's `mojo.py build` STILL fails overall**, but now for one,
+entirely unrelated, out-of-scope reason: `tuple(g())` at module top
+level —
+```
+/Users/mrs/net/Python-3.14.6/Lib/test/crashers/gc_inspection.py:32:3: error: too many arguments to function 'mojo_make_tuple'; expected 0, have 1
+```
+This is the PLAIN (non-coroutine) GIMPLE codegen path's `tuple(...)`
+builtin-call lowering (`_toplevel`, i.e. ordinary top-level-statement
+codegen) rejecting a 1-argument `tuple(<iterable>)` call — `mojo_make_
+tuple` apparently only supports the 0-argument form. Nothing to do
+with the generator/coroutine codegen this doc/cluster tracks; not
+investigated further here (a different task's territory — Track B /
+plain-GIMPLE-path work).
+
+## Status (updated 2026-08-07, superseded above)
 
 **Classification bug PARTIALLY FIXED** (`bugs/hard/CODEGEN_generator_
 non_plain_assignment_target_refused.md`, task #150) — `[tup] = [...]`

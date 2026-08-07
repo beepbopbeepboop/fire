@@ -1,5 +1,85 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (updated 2026-08-07, gc_inspection.py's `g` FULLY unblocked: Comprehension-RHS list-unpack + `object()` builtin, both FIXED)
+
+**`Lib/test/crashers/gc_inspection.py`'s `g` generator — this doc's
+OWN primary confirmed occurrence — now passes the eligibility gate
+AND compiles to valid, runnable C++ end-to-end.** Two more narrow,
+previously-undiagnosed gaps in the SAME function body were found and
+fixed while re-verifying this doc's "PARTIALLY FIXED" state against
+current master (the earlier `[tup] = [...]` list-unpack-target fix,
+task #150, was necessary but not sufficient for this file — see below):
+
+1. **`[tup] = [x for x in gc.get_referrers(marker) if type(x) is
+   tuple]` — the RHS is a bare `Comprehension`, not a `CallExpr` or
+   literal.** `_cpp_stmt`'s tuple/list-unpack branch only recognized a
+   `MojoList*`-returning CallExpr as needing the runtime list-getter
+   (`mojo_list_get_int`); any other RHS shape fell to the generic
+   `(<rhs>)[i]` raw-subscript emission. `_cpp_expr`'s own `Comprehension`
+   case (a pre-existing, documented "honest always-empty
+   `mojo_list_new()` stub", from task #145's sibling fix to the
+   separate `_quick_type` estimator) lowers a comprehension to a real
+   `MojoList *` value — so the unpack branch emitted `(mojo_list_new
+   ())[0]`, invalid C++ (`operator[]` on a struct pointer). Fixed:
+   `_tup_is_list_val` (renamed from `_tup_is_list_call`) now also
+   recognizes a direct `Comprehension` RHS and routes it through the
+   same `mojo_list_get_int` runtime getter the MojoList*-returning-call
+   case already used.
+2. **The identical shape reached through an intermediate local**
+   (`items = [x for x in ...]; [tup] = items`) surfaced a SECOND,
+   sibling gap while hand-verifying fix 1 in isolation: `_infer_simple_
+   expr_ctype` (the coroutine body's OWN local-type estimator — a
+   different function from `_quick_type`, which task #145 already fixed
+   for this same "Comprehension" AST shape) had no `Comprehension` case
+   either, so a first-assigned local holding a comprehension result
+   defaulted to `int64_t` while actually being assigned a `MojoList *`
+   — g++: "invalid conversion from 'MojoList*' to 'int64_t'". Fixed by
+   adding the missing `Comprehension` case (returns `'MojoList *'`,
+   mirroring `_cpp_expr`'s own lowering exactly) — the SAME root cause
+   as task #145, recurring in this file's OTHER, narrower type
+   estimator. `_tup_is_list_val` was further widened to also recognize
+   a plain-identifier RHS whose `self._cpp_declared` type is now
+   correctly `'MojoList *'` (mirrors the existing SliceExpr full-assign
+   branch's identical check), so the unpack-target lowering picks the
+   runtime getter for this indirect shape too.
+3. **`marker = object()`** — a bare CPython `object()` call, the
+   common "unique identity sentinel" idiom. `_cpp_expr`'s CallExpr
+   handling had no case for it at all; it fell to the generic bare-name
+   fallback and was emitted as a literal, undeclared `object()` C++
+   call ("'object' was not declared in this scope"). Fixed: a narrow
+   `fname == 'object' and not e.args` case (mirroring the immediately-
+   preceding `callable()` stub's style) returns a fresh, genuinely
+   unique-per-call sentinel (`(int64_t)(void *)malloc(1)`, deliberately
+   never freed, matching this codegen's existing "never frees explicitly"
+   convention) — chosen over a constant stub specifically because real
+   code's ENTIRE reliance on `object()` is identity-distinctness
+   (`is`/`==` comparisons); a constant would make every call compare
+   equal and silently break that.
+
+**Verification:** hand-verified via direct isolated repros (both the
+direct-Comprehension and intermediate-variable shapes) — `g++
+-std=c++20 -fsyntax-only` 0 errors, and a full `mojo.py build` +
+execution of each repro completes without crashing (prints the honest
+sentinel address and the honest `0` stub value for the always-empty
+comprehension's element access — expected, matches the pre-existing,
+documented "empty stub" semantics, not a new limitation). The REAL
+`gc_inspection.py` file: `MOJO_DEBUG=1 python3 mojo.py build
+.../gc_inspection.py` now shows **zero** "not eligible"/refusal lines
+for `g` at all (previously two independent ones). The file's `mojo.py
+build` STILL fails overall, but now for one, completely unrelated,
+out-of-scope reason: `tuple(g())` at module top level hits a plain-C
+(non-coroutine) GIMPLE-path bug (`too many arguments to function
+'mojo_make_tuple'; expected 0, have 1`) — `_toplevel`'s handling of
+`tuple(<generator>)`, nothing to do with the coroutine codegen this
+doc/task tracks. Not investigated further (Track B / a different
+task's territory).
+
+Full 5-part CLAUDE.md gate run and passed: `test_gimple.py` (247/247),
+`test_module_cache.py` (76/76), `make check-selfhost` clean, from-
+scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:` lines),
+`compile_stdlib.py -j8` (664/664, 0 unexpected — unchanged count, GCC
+CAS 664/664 hits on the verification rerun).
+
 ## Status (updated 2026-08-07, SliceExpr sub-case: `iter_builtin_types`'s `subs[:] = []` FIXED; `patch_list`'s `orig[:] = saved` correctly STILL refused, for a good reason)
 
 **Fixed the FULL-slice-assignment case** (`x[:] = value`, i.e.
