@@ -1,9 +1,13 @@
 # HARD BUG (non-generator, found while classifying the generator-codegen cluster): imported module's opaque "toplevel globals" struct is forward-declared incomplete and never given a matching full definition, so any `module.attr` access on it hard-fails
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-07, mechanism 2 now ALSO fixed)
+
+**Both mechanisms are now fixed.** See "Mechanism 2 fix (2026-08-07)"
+below for the second one, landed in a separate follow-up session from the
+mechanism-1 fix (whose original write-up is preserved below for context).
 
 Root-caused to completion. There are **two distinct mechanisms**
-producing the identical symptom, and only one of them is fixed here:
+producing the identical symptom:
 
 1. **Fixed**: a module whose globals were scanned (so its field layout
    is known, in `self._module_globals`) but whose overall compile never
@@ -198,29 +202,127 @@ without re-checking.
 5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
    failures (unchanged from baseline).
 
-## Not attempted (updated 2026-08-07 — see mechanism 2 above for the current, concrete version of this)
+## Mechanism 2 fix (2026-08-07)
 
-Mechanism 2 (struct definitions never hoisted, so a real definition that
-DOES exist later in the file doesn't help an earlier member-access site)
-is the dominant real-world cause for the files this doc was originally
-filed against, and is unfixed. A real fix needs:
-- A shared "already fully defined" set (module name → bool) so a
-  module's struct body is textually emitted (hoisted to early in the
-  file) exactly once, regardless of whether the first emitter is that
-  module's own official compile or an earlier-processed ancestor
-  referencing it.
-- The module's own official struct-emission code (`gen_module`, the
-  `if self._module_globals.get(current_mod_name):` block that builds
-  `typedef struct {typedef_name} {...}` + the instance with
-  initializers) needs to skip re-emitting the typedef body when an
-  ancestor already hoisted it, while still emitting the actual defining
-  instance (the one place that allocates real storage) — these two are
-  currently combined in one code block and need to be split.
-- Careful reasoning about TEXT emission order across the whole nested
-  `_compile_imported_module` recursion (each nested call produces a
-  complete, independent C-text chunk assembled bottom-up before being
-  embedded into its parent — "already emitted" must track real linear
-  text position, not just Python call order, which do not necessarily
-  coincide).
-- This is real, invasive, higher-risk surgery on `gen_module`'s core
-  struct-emission logic — deliberately not attempted in this pass.
+**Root cause, precisely identified** (via a temporary trace + direct .ci
+grep on `Lib/subprocess.py`): the "known-but-not-embedded" scenario the
+mechanism-1 fix already handled for a module's own DIRECT compile failure
+was too narrow. A module can be **fully, successfully compiled**
+(`self._module_stmts[mod]` populated) and still have its real struct
+definition text embedded **nowhere** in the final output, because text
+propagation is per-PARENT: a nested module's C text only reaches the root
+by being threaded, unmodified, through every ancestor's own
+`imported_code` list (`if code: imported_code.append(code)` in Phase 0).
+If ANY ancestor in that chain itself later fails outright — confirmed:
+`os.py` fails on a completely unrelated bug (`'relpath' is ambiguous`,
+NOT one of this session's tracked hard bugs) well AFTER its own Phase 0
+already successfully, recursively compiled `posixpath` -> `genericpath` —
+`os`'s entire returned `code` is discarded, taking its successfully-
+compiled descendants' text down with it, while those descendants' own
+entries in the SHARED `self._module_globals`/`self._module_stmts` dicts
+remain (they commit independently of what their parent does afterward).
+Confirmed directly: `grep -c "struct _genericpath_toplev {"` on
+subprocess.py's full ~14MB .ci output is **0** (only the incomplete stub,
+940 occurrences), and `Imported module: os` never appears in the output
+at all.
+
+Old mechanism-1 guard (`mod_str not in self._module_stmts`) can't
+distinguish this case from "will definitely be inlined, incomplete stub
+is fine" — `self._module_stmts` says "compiled successfully" but says
+nothing about whether the text actually survived its ancestor chain.
+
+**Fix**: drop the `self._module_stmts` guard entirely — reconstruct a
+full, field-matching struct from `self._module_globals` whenever the
+field list is known, unconditionally, in the "other referenced modules"
+forward-decl loop. Redefinition risk (this module's real definition MAY
+also independently appear later, if its ancestor chain didn't fail) is
+handled by a C preprocessor `#ifndef _MOJO_TOPLEV_GUARD_<safe_mod>` /
+`#define` / `#endif` pair around each `typedef struct {...} {...};`
+emission site — both this reconstruction site and the module's own
+"official" per-module emission site (`if self._module_globals.get(
+current_mod_name):`) use the identical guard-macro name (derived purely
+from the module's own C-safe name), so whichever occurrence ends up
+textually first in the final file is the one real definition and every
+other one is a harmless no-op — correct by construction regardless of
+emission order or how many places attempt it, no Python-side "already
+emitted" bookkeeping needed at all.
+
+**A real regression was found and fixed during verification, not just
+theorized**: the first version of this fix (guard added, but the
+reconstruction loop left in its ORIGINAL position — right after
+`all_modules_to_declare` is computed, well BEFORE the `struct_field_types`
+typedef block) dropped the targeted "invalid use of undefined type" count
+on `Lib/subprocess.py` from 26 to 0, but the file's TOTAL `gcc -fsyntax-
+only` error count went **UP**, 788 -> 1123 — new "unknown type name
+'_Unknown'"/`'_TupleType'`/`'_LazyAnnotationLib'`/etc. errors appeared.
+Root cause: a module's "known field" C type can itself be a pointer to a
+Mojo struct/class (`_Unknown *`, from `self.struct_field_types`, NOT the
+module-globals mechanism) — reconstructing the module-globals struct
+this early referenced those types before their own typedefs existed.
+Fixed by moving the entire `for mod_name in sorted(all_modules_to_
+declare):` loop to run AFTER the `struct_field_types` typedef block —
+the exact same position (and for the identical reason) `external_call[
+...]` prototypes and elaborated-instantiation externs already occupy,
+per their own pre-existing NOTE comments in the same preamble. After the
+move: `Lib/subprocess.py` 788 -> **762** total errors (a net DROP, not a
+wash) — the 26 targeted errors gone, zero new error categories introduced
+(confirmed via a full before/after diff of error-message categories, not
+just totals).
+
+### Verification against real files (2026-08-07, mechanism 2)
+
+`gcc -fsyntax-only` error counts (same flags `compile_stdlib.py` uses:
+`-fgimple -I<runtime> -fsyntax-only -D__MOJO_STDLIB_MODE__`), direct
+`compile_to_gimple(..., do_imports=True)` + dump to `.ci`, before
+(`git stash` on `gimple_codegen.py`, i.e. Phase-1-perf-only baseline) vs
+after (this fix):
+
+| file | "invalid use of undefined type" errors | total errors |
+|---|---|---|
+| `Lib/subprocess.py` | 26 -> **0** | 788 -> **762** |
+| `Lib/glob.py` | (present, per symptom list) -> **0** | n/a (no before count taken) |
+| `Lib/mailbox.py` | (present, per symptom list) -> **0** | n/a (no before count taken) |
+| `Lib/modulefinder.py` | (present, per symptom list) -> **0** | n/a (no before count taken) |
+
+A full diff of error-message *categories* (not just counts) between
+subprocess.py's before/after `gcc -fsyntax-only` output shows the ONLY
+difference is the exact disappearance of the 26 targeted "invalid use of
+undefined type" lines (24 `_genericpath_toplev` + 2 `_posixpath_toplev`)
+— every other error category (including the pre-existing, unrelated
+`functools.py`/`reprlib.py` "unknown type name 'partial'" errors, and the
+`os.py` "'relpath' is ambiguous" failure that blocks a full build of this
+file regardless of this fix) is untouched, count-for-count.
+
+Note: `subprocess.py` still cannot fully BUILD+LINK in this session
+regardless of this fix — `os.py` itself fails on the separate, unrelated
+"'relpath' is ambiguous" bug (not one of this session's tracked hard
+bugs), which is a hard blocker for any file that needs a working `os`
+module. This fix's scope and verification bar is specifically the
+`gcc -fsyntax-only` "invalid use of undefined type" error class, per the
+task's own framing — not full end-to-end build success for these
+specific files, which remains blocked on an unrelated issue.
+
+### Quality gate (2026-08-07, mechanism 2 fix)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean.
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
+   failures (unchanged from baseline).
+
+### Not attempted / out of scope
+
+- The `os.py` "'relpath' is ambiguous" failure (this session's own
+  concrete instance of transitively-imported same-named free functions
+  colliding) is a separate, unrelated bug blocking full build success for
+  `subprocess.py` and others — not investigated further here.
+- No attempt was made to also emit a REAL (non-`extern`) instance
+  definition for a module whose only text-propagation path is broken
+  (mechanism 2's scenario) — the `#ifndef`-guarded reconstruction here
+  only ever produces `extern struct {...} {...};` (a declaration, not a
+  defining instance), matching the pre-existing mechanism-1 technique
+  exactly. A module in this state would still fail at LINK time with an
+  undefined-symbol error for its `_<mod>_globals` instance if a full
+  build were ever attempted — out of scope per the `-fsyntax-only`-based
+  verification bar above; not otherwise investigated.

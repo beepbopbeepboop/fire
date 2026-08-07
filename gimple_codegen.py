@@ -30439,82 +30439,6 @@ class GimpleGen:
                 if _mn and not _mn.startswith('_') and '.' not in _mn:
                     all_modules_to_declare.add(_mn)
 
-        for mod_name in sorted(all_modules_to_declare):
-            # Skip declaring our own module as extern (sorted: deterministic .ci
-            # output, required for the bootstrap stage1==stage2==stage3 check)
-            # `mod_s = '' + mod_name` recovers the char*: the loop var arrives
-            # boxed as int64_t (a MojoSet element), and an f-string/str() on it
-            # would stringify its pointer VALUE instead of the name text
-            # (`str()` on an int64_t lowers to mojo_str_from_int — a numeric
-            # string that _c_field_name then strips to empty, producing the
-            # bogus `struct __toplev`).
-            mod_s = '' + mod_name
-            if mod_s == our_mod:
-                continue
-            # Ensure module names are valid C identifiers (replace dots → underscores)
-            mod_str = mod_s if mod_s else "root"
-            safe_mod = _c_field_name(mod_str) if mod_str else "root"
-            struct_name = f"_{safe_mod}_toplev"
-            global_var = f"_{safe_mod}_globals"
-            # If this OTHER module's real globals field list is already known
-            # (see bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
-            # defined.md) AND that module's own full struct definition will
-            # NOT already appear later in this SAME .ci — e.g. do_imports=
-            # True's Phase 0 recursively attempted to compile it via
-            # _compile_imported_module (which shares self._module_globals
-            # across the whole nested temp_gen tree — see that method's
-            # `temp_gen._module_globals = self._module_globals`), populating
-            # the globals scan, but the module's compile ultimately raised
-            # partway through (e.g. during function-body codegen, well after
-            # the early globals scan) so its own struct typedef+definition
-            # was never actually emitted as text anywhere — emit a REAL,
-            # field-matching struct typedef here instead of an incomplete
-            # stub, mirroring the identical reconstruction the C++ generator
-            # side already does from the same shared dict (see the
-            # `_cpp_module_global_refs` typedef-copy block further down in
-            # this method). A plain incomplete forward declaration only
-            # supports pointer-only uses of the extern instance; any real
-            # member access (`genericpath.something`) requires the type to be
-            # COMPLETE at the point of access, which C disallows for an
-            # incomplete type ("invalid use of undefined type"). Field order
-            # is deterministic (the populating scan always inserts in sorted
-            # name order — see the `for gname in sorted(_declared_globals)`
-            # loop below) so this reconstruction exactly matches the layout
-            # that module's own compile would emit for itself.
-            #
-            # Guarded by `mod_str not in self._module_stmts`: that dict is
-            # only populated (_compile_imported_module, right after `code =
-            # temp_gen.gen_module(stmts)` returns WITHOUT raising) once a
-            # module's compile fully succeeds — meaning its own real struct
-            # definition text (identical shape to what we'd reconstruct here)
-            # gets appended into `imported_code` and inlined later in this
-            # same file. Reconstructing a SECOND full definition here for
-            # that case is a hard "redefinition of struct or union" GCC
-            # error (caught by `make check-selfhost`, which self-hosts this
-            # very compiler and exercises exactly that fully-successful-
-            # inline path throughout) — for a module that WILL be fully
-            # inlined, the old incomplete-forward-declare (harmless: C allows
-            # any number of plain forward declarations before the one real
-            # definition) is what must still be emitted here, unchanged.
-            #
-            # Falls back to the old incomplete stub when the field list isn't
-            # known at all (e.g. do_imports=False's isolated per-file
-            # compiles, where no other module is ever recursively compiled)
-            # — same behavior as before this fix, not a regression for that
-            # mode either.
-            _known_fields = self._module_globals.get(mod_str)
-            if _known_fields and mod_str not in self._module_stmts:
-                parts.append(f'typedef struct {struct_name} {{')
-                for _kf_name, _kf_ctype, _ in _known_fields:
-                    parts.append(f'  {_kf_ctype} {_c_field_name(_kf_name)};')
-                parts.append(f'}} {struct_name};')
-                parts.append(f'extern struct {struct_name} {global_var};')
-            else:
-                # Forward-declare the struct type with gcc attribute to allow incomplete use
-                # AND the extern global instance
-                parts.append(f'struct {struct_name} __attribute__((incomplete));  /* extern module globals struct */')
-                parts.append(f'extern struct {struct_name} {global_var};')
-
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
         if self._current_filename:
@@ -30635,6 +30559,133 @@ class GimpleGen:
             parts.append("  return \"<type>\";")
             parts.append("}")
             parts.append('')
+
+        for mod_name in sorted(all_modules_to_declare):
+            # Skip declaring our own module as extern (sorted: deterministic .ci
+            # output, required for the bootstrap stage1==stage2==stage3 check)
+            # `mod_s = '' + mod_name` recovers the char*: the loop var arrives
+            # boxed as int64_t (a MojoSet element), and an f-string/str() on it
+            # would stringify its pointer VALUE instead of the name text
+            # (`str()` on an int64_t lowers to mojo_str_from_int — a numeric
+            # string that _c_field_name then strips to empty, producing the
+            # bogus `struct __toplev`).
+            mod_s = '' + mod_name
+            if mod_s == our_mod:
+                continue
+            # Ensure module names are valid C identifiers (replace dots → underscores)
+            mod_str = mod_s if mod_s else "root"
+            safe_mod = _c_field_name(mod_str) if mod_str else "root"
+            struct_name = f"_{safe_mod}_toplev"
+            global_var = f"_{safe_mod}_globals"
+            # If this OTHER module's real globals field list is already known
+            # (see bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
+            # defined.md) reconstruct a REAL, field-matching struct typedef
+            # here instead of an incomplete stub, mirroring the identical
+            # reconstruction the C++ generator side already does from the
+            # same shared dict (see the `_cpp_module_global_refs` typedef-
+            # copy block further down in this method). A plain incomplete
+            # forward declaration only supports pointer-only uses of the
+            # extern instance; any real member access (`genericpath.
+            # something`) requires the type to be COMPLETE at the point of
+            # access, which C disallows for an incomplete type ("invalid
+            # use of undefined type"). Field order is deterministic (the
+            # populating scan always inserts in sorted name order — see the
+            # `for gname in sorted(_declared_globals)` loop below) so this
+            # reconstruction exactly matches the layout that module's own
+            # compile would emit for itself.
+            #
+            # This whole `for mod_name in ...` loop is deliberately
+            # positioned AFTER the struct_field_types typedef block above
+            # (moved there 2026-08-07, "mechanism 2" fix — originally sat
+            # right after `all_modules_to_declare` is computed, well BEFORE
+            # struct_field_types): a known field's C type can itself be a
+            # pointer to a Mojo struct/class type (`_Unknown *`, `_TupleType
+            # *`, ...) that struct_field_types defines — reconstructing a
+            # full struct HERE, this early, before that typedef exists,
+            # produced a real, confirmed regression (`gcc -fsyntax-only`
+            # error count on Lib/subprocess.py went 788 -> 1123, "unknown
+            # type name '_Unknown'" etc., even though the TARGETED "invalid
+            # use of undefined type" error count did drop 26 -> 0) the first
+            # time this loop was widened to run unconditionally. Moving the
+            # whole loop to after struct_field_types (same place `external_
+            # call[...]` prototypes and elaborated-instantiation externs
+            # already live, for the identical reason — see their own NOTE
+            # comments near the top of this preamble) fixed it — see the doc
+            # (bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
+            # defined.md) for the exact before/after error-count breakdown.
+            #
+            # 2026-08-07 update (see the doc's "mechanism 2" section): the
+            # `mod_str not in self._module_stmts` restriction above (i.e.
+            # "only reconstruct when the module will NOT also get a real
+            # definition inlined later") turned out to be based on a false
+            # assumption — a module can be fully, successfully compiled
+            # (`self._module_stmts` populated) and STILL never have its own
+            # text actually embedded anywhere in THIS file's final output,
+            # because the TEXT propagation path is per-PARENT: a nested
+            # module's compiled C text only reaches the root's output by
+            # being threaded, unmodified, through every ancestor's own
+            # `imported_code` list — and if any ONE ancestor in that chain
+            # itself ultimately fails (e.g. `os.py` failing on an unrelated
+            # bug well after successfully, recursively compiling `posixpath`
+            # -> `genericpath` as part of its own Phase 0), that ancestor's
+            # ENTIRE returned code (including the successfully-compiled
+            # descendants nested within it) is discarded by the `if code:`
+            # guard around `imported_code.append(code)` — while the
+            # descendants' own entries in the SHARED `self._module_globals`/
+            # `self._module_stmts` dicts remain, since those commit
+            # independently of whatever their parent does afterward.
+            # Confirmed via direct .ci inspection on `Lib/subprocess.py`:
+            # `_genericpath_toplev`'s real definition (`struct
+            # _genericpath_toplev {`) appears NOWHERE in the ~14MB output
+            # (0 matches) despite `self._module_globals['genericpath']`
+            # being fully populated — because `os` (the only path by which
+            # subprocess reaches genericpath) fails outright on an unrelated
+            # "'relpath' is ambiguous" bug, so `Imported module: os` never
+            # appears in the output at all.
+            #
+            # There is no way to know, AT THIS POINT, whether the eventual
+            # real definition will actually make it into the final text —
+            # so this now ALWAYS reconstructs a full, field-matching struct
+            # whenever the field list is known, regardless of
+            # `self._module_stmts`, guarded by an `#ifndef`/`#define`
+            # preprocessor pair (using a name derived purely from the
+            # module's own C-safe name, so every emission site for the same
+            # module agrees on it) rather than by Python-side "has this
+            # already been emitted" bookkeeping — cheap, and correct by
+            # construction regardless of how many places (this loop, at
+            # however many ancestor levels reference this module; the
+            # module's own official per-module emission below) attempt to
+            # define the SAME struct, and regardless of which one ends up
+            # textually first. The module's own official emission (below,
+            # `if self._module_globals.get(current_mod_name):`) wraps its
+            # typedef in the identical guard for the same reason. Whichever
+            # occurrence is textually first in the final file wins; every
+            # later one is a preprocessor no-op — never a GCC "redefinition
+            # of struct or union" error, unlike the old Python-side
+            # `mod_str not in self._module_stmts` gate this replaces.
+            #
+            # Falls back to the old incomplete stub only when the field
+            # list isn't known at all (e.g. do_imports=False's isolated
+            # per-file compiles, where no other module is ever recursively
+            # compiled, or a module this level references that was never
+            # reached by ANY globals scan anywhere in the tree) — same
+            # behavior as before this fix, not a regression for that mode.
+            _known_fields = self._module_globals.get(mod_str)
+            if _known_fields:
+                _toplev_guard = f'_MOJO_TOPLEV_GUARD_{safe_mod}'
+                parts.append(f'#ifndef {_toplev_guard}')
+                parts.append(f'#define {_toplev_guard}')
+                parts.append(f'typedef struct {struct_name} {{')
+                for _kf_name, _kf_ctype, _ in _known_fields:
+                    parts.append(f'  {_kf_ctype} {_c_field_name(_kf_name)};')
+                parts.append(f'}} {struct_name};')
+                parts.append('#endif')
+                parts.append(f'extern struct {struct_name} {global_var};')
+            else:
+                # Forward-declare the struct type with gcc attribute to allow incomplete use
+                # AND the extern global instance
+                parts.append(f'struct {struct_name} __attribute__((incomplete));  /* extern module globals struct */')
+                parts.append(f'extern struct {struct_name} {global_var};')
 
         # extern decls for elaborated instantiations (generic functions + struct
         # methods). Emitted here, after the struct typedefs above, so struct-method
@@ -30966,11 +31017,25 @@ class GimpleGen:
             typedef_name = f"_{safe_name}_toplev"
 
             globals_struct_lines = []
-            # Emit struct typedef
+            # Emit struct typedef, guarded the identical way (same macro
+            # name, derived purely from `safe_name`) as the "other
+            # referenced modules" reconstruction above — see that block's
+            # comment (bugs/hard/COMPILE_FAIL_module_toplev_struct_never_
+            # fully_defined.md, "mechanism 2"). An ancestor level may have
+            # already emitted (or may later emit) a field-matching
+            # reconstruction of this exact struct before this module's own
+            # "official" text ends up positioned in the final file — the
+            # guard makes whichever occurrence is textually first the one
+            # real definition, with every other one a harmless no-op,
+            # regardless of emission order or how many places attempt it.
+            _toplev_guard = f'_MOJO_TOPLEV_GUARD_{safe_name}'
+            globals_struct_lines.append(f'#ifndef {_toplev_guard}')
+            globals_struct_lines.append(f'#define {_toplev_guard}')
             globals_struct_lines.append(f"typedef struct {typedef_name} {{")
             for gname, c_type, _ in globals_list:
                 globals_struct_lines.append(f"  {c_type} {_c_field_name(gname)};")
             globals_struct_lines.append(f"}} {typedef_name};")
+            globals_struct_lines.append('#endif')
             globals_struct_lines.append("")
 
             # Emit struct instance with initializers
