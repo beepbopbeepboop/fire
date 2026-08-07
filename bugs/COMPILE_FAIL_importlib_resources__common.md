@@ -4,7 +4,35 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/_common.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (RESOLVED 2026-08-07)
+
+**Builds and links successfully now.** `python3 mojo.py build
+.../_common.py` succeeds end-to-end, and `driver.compile_program(...)`
+(link mode) returns `rc=0` directly. BOTH undefined-symbol findings
+below are fixed by the SAME root-cause fix:
+
+- `_wrap_spec` (finding #1): fixed as part of
+  `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+  — see that doc for the full mechanism (a link-mode preamble branch
+  was emitting a bare, definition-less `extern` for a function-scoped
+  import whose defining module has no buildable C signature, instead
+  of the weak-stub-definition convention `do_imports=True` already
+  used for the identical situation).
+- `_next` (finding #2, `next(itertools.filterfalse(...))`): turned out
+  to be the EXACT SAME preamble branch, not a separate builtin-
+  resolution gap as originally guessed — `next` reaches
+  `self.imported_symbols` with no `'signature'` the same way an
+  unresolvable function-scoped import does, so the same fix covers it
+  incidentally. Confirmed fixed (`_next` now gets a weak stub instead
+  of a bare extern) without any additional change specific to
+  builtin-call resolution.
+
+Full 5-part quality gate passed (test_gimple.py 247/0,
+test_module_cache.py 76/0, check-selfhost clean, stdlib dylib rebuild 0
+skips, compile_stdlib.py 664/664 0 unexpected) — see the hard-bug doc
+for the actual gate output.
+
+## Status (updated 2026-08-06, historical — both link failures now fixed, see above)
 
 Re-ran; the original GCC-warning dump below is STALE (compilation now
 gets further and fails at LINK time, not with these warnings). Current
