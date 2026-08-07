@@ -23211,6 +23211,43 @@ class GimpleGen:
                 msg_cpp = self._cpp_expr(val)
                 return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
                         f"(void *){msg_cpp} }};"]
+            # `raise <MemberExpr>(...)` / bare `raise <MemberExpr>` — a
+            # DYNAMICALLY resolved exception class (real, recurring idiom:
+            # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
+            # plus test.support's run_with_locale/subst_drive — see
+            # CODEGEN_generator_raise_non_static_exception_class.md's three
+            # confirmed occurrences) has no statically-known class NAME to
+            # look up in _exc_type_id, so it can't get a real per-class tag
+            # the way `raise ExcName(...)` does. Rather than refuse the
+            # whole generator outright, fall back to the SAME untyped(0)/
+            # lenient-match representation `raise e` (a handler-bound
+            # IdentExpr, just above) already uses for the identical "don't
+            # statically know the exact class" situation — tag 0 is an
+            # existing, documented convention (see _cpp_try_stmt's own
+            # docstring: "untagged(0) lenient match on the first typed
+            # handler", and the ordinary GIMPLE path's identical handling
+            # around _gen_stmt_TryStmt), not a new one invented here. This
+            # necessarily loses precise except-type matching for a
+            # dynamically-resolved raise (an `except SpecificError:` may
+            # over-eagerly catch it) — an accepted, pre-existing tradeoff
+            # of this narrow scalar-only generator-body model, identical in
+            # kind to the one `raise e` already makes.
+            if isinstance(val, MemberExpr) or (
+                    isinstance(val, CallExpr) and isinstance(val.func, MemberExpr)):
+                msg_arg = val.args[0] if isinstance(val, CallExpr) and val.args else None
+                if msg_arg is not None:
+                    if isinstance(msg_arg, StringLiteral):
+                        text, is_fstr = self._decode_str_literal_text(msg_arg.value)
+                        if is_fstr:
+                            msg_cpp = self._cpp_expr(msg_arg)
+                        else:
+                            msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+                    else:
+                        msg_cpp = self._cpp_expr(msg_arg)
+                else:
+                    msg_cpp = 'const_cast<char *>("")'
+                return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
+                        f"(void *){msg_cpp} }};"]
             raise _UnsupportedGeneratorShape(
                 "unsupported `raise` value expression in generator body "
                 "(only `raise ExcName(...)`/`raise ExcName` with a "
