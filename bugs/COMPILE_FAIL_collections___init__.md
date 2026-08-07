@@ -2,7 +2,31 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07, Track B continuation session)
+
+A fresh build now stops EARLIER than all three issues below, at an
+honest generator-codegen refusal:
+
+```
+cannot compile module: function(s) __reversed__ (generator function(s),
+contain a `yield`/`yield from`) ...
+```
+
+`OrderedDict.__reversed__` (a generator method) hits the same scalar-
+yield/return-only limitation documented in `bugs/CODEGEN_generator_
+function_Lib_weakref.md`'s 2026-08-07 update and `bugs/hard/CODEGEN_
+generator_struct_typed_param_refused.md` (task #147, explicitly out of
+scope this session). Whether issues #1-#3 below are still live can't be
+re-confirmed without either fixing that generator limitation first or
+patching around it locally — not attempted, consistent with this
+session's scope. (Issue #2's dynamic-attribute findings may be at least
+PARTIALLY moot now — `bugs/hard/CODEGEN_dynamic_attribute_on_generic_
+object.md`'s Steps 1-4 landed earlier the same day and explicitly cover
+`MojoBoundMethod` as a "fixed-layout runtime struct" sub-case — but this
+wasn't independently re-verified since the build never reaches that far
+anymore.)
+
+## Status (updated 2026-08-06, historical — see above, a new earlier blocker now masks these)
 
 Multiple distinct issues, none yet fixed. Root-caused three of them; a
 fourth not yet investigated.
