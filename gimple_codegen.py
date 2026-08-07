@@ -3759,6 +3759,24 @@ class GimpleGen:
         # correct fix for a helper this genuinely optional.
         self._asdict_dispatch_needed: set = set()
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
+        # Flattened, incrementally-maintained mirror of the UNION of every
+        # list ever stored into `self._module_stmts` (see bugs/hard/
+        # PERF_nested_module_compile_walk_ast_quadratic_rescan.md, Phase 1)
+        # — shared by reference into every nested temp_gen exactly like
+        # `_module_stmts` itself (see `_compile_imported_module`'s sharing
+        # block). Appended to ONCE per statement, ever, right where
+        # `_module_stmts[module_name] = stmts` is set — so `gen_module`'s
+        # own Phase-0 reconciliation loop (which needs "every transitively
+        # compiled module's stmts not already in THIS level's local
+        # `imported_stmts`") can do a single incremental pass over this
+        # pre-flattened list instead of re-flattening the whole (by then
+        # much larger) `_module_stmts` dict from scratch at EVERY one of
+        # the N nesting levels in a transitive-import tree — that repeated
+        # O(current total tree size) re-flattening, happening once per
+        # level, is what the doc profiles as an O(N^2) `_walk_ast` blowup
+        # (4.47M calls for a 36-module graph in Lib/contextlib.py).
+        self._all_transitive_stmts_ordered: list = []
+        self._all_transitive_stmts_ids: set = set()
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
@@ -4407,6 +4425,12 @@ class GimpleGen:
                     temp_gen._global_inline_defs = self._global_inline_defs
                     temp_gen._emitted_allocs = self._emitted_allocs
                     temp_gen._module_stmts = self._module_stmts  # share: track all transitive stmts
+                    # share: incrementally-maintained flat mirror of
+                    # _module_stmts' union (see PERF_nested_module_compile_
+                    # walk_ast_quadratic_rescan.md Phase 1) — same sharing
+                    # pattern as _module_stmts itself, just above.
+                    temp_gen._all_transitive_stmts_ordered = self._all_transitive_stmts_ordered
+                    temp_gen._all_transitive_stmts_ids = self._all_transitive_stmts_ids
                     temp_gen._extra_search_paths = self._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                     temp_gen.func_return_types = self.func_return_types  # share across gens
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
@@ -4425,6 +4449,17 @@ class GimpleGen:
 
                     # Store parsed stmts for this module so parent gens can access them
                     self._module_stmts[module_name] = stmts
+                    # Incrementally extend the flat, pre-deduped mirror (see
+                    # PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+                    # Phase 1) — O(this module's own stmt count), done once
+                    # per module ever, instead of leaving every ancestor
+                    # level to re-flatten the whole (growing) _module_stmts
+                    # dict from scratch on its own way through gen_module.
+                    for _ts in stmts:
+                        _tsid = id(_ts)
+                        if _tsid not in self._all_transitive_stmts_ids:
+                            self._all_transitive_stmts_ids.add(_tsid)
+                            self._all_transitive_stmts_ordered.append(_ts)
 
                     # Return both code and parsed statements
                     return (code, stmts)
@@ -26035,12 +26070,26 @@ class GimpleGen:
             # Also collect stmts from transitively compiled modules (compiled by sub-temp-gens).
             # These may not be in imported_stmts if a sub-gen compiled them first (e.g. mojo_compiler
             # compiled via gimple_codegen before the outer gen could compile it directly).
+            #
+            # PERF (see bugs/hard/PERF_nested_module_compile_walk_ast_
+            # quadratic_rescan.md, Phase 1): iterate the incrementally-
+            # maintained flat `_all_transitive_stmts_ordered` list instead
+            # of re-flattening `self._module_stmts.items()` from scratch —
+            # identical final `imported_stmts` content (same dedup-by-id
+            # logic, same append order, since `_all_transitive_stmts_
+            # ordered` is itself built by walking each module's stmts in
+            # the same per-module order `_module_stmts.items()` would visit
+            # them, just accumulated once instead of re-derived at every
+            # nesting level), but O(this level's own delta) instead of
+            # O(current total tree size) — the repeated full re-flattening
+            # at every one of N nesting levels is what produced the O(N^2)
+            # `_walk_ast` blowup this doc profiles (4.47M calls for a
+            # 36-module graph in Lib/contextlib.py).
             already_in_stmts = set(id(s) for s in imported_stmts)
-            for mod_name, mod_stmts in self._module_stmts.items():
-                for s in mod_stmts:
-                    if id(s) not in already_in_stmts:
-                        imported_stmts.append(s)
-                        already_in_stmts.add(id(s))
+            for s in self._all_transitive_stmts_ordered:
+                if id(s) not in already_in_stmts:
+                    imported_stmts.append(s)
+                    already_in_stmts.add(id(s))
 
             # Imported types are now in self._imported_func_types and struct_field_types
 

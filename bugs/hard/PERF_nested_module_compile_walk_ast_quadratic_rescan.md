@@ -3,10 +3,83 @@
 ## Status
 
 Root cause CONFIRMED (2026-08-06, exact lines identified — not just inferred
-from profile shape as before). Concrete phased fix plan below. Not yet
-implemented — this is a real architectural change touching ~15 call sites
-with genuine ordering-sensitivity risk, deliberately not attempted in the
-same pass as the planning.
+from profile shape as before). Concrete phased fix plan below.
+
+**Phase 1 implemented and verified 2026-08-07** (see "Phase 1 implementation
+notes" below). Phase 2 (the real fix for the `_walk_ast` COUNT — memoizing
+the per-statement scan work of `_scan_body_for_local_field_access` and its
+~13 siblings, not just the list-construction work Phase 1 addresses) is
+NOT implemented — genuinely bigger, higher-risk surgery per-consumer,
+deliberately left for a dedicated follow-up (see the plan's own "Risk /
+why Phase 2 is real, not quick" section, unchanged).
+
+### Phase 1 implementation notes
+
+Implemented exactly as planned: a new pair of shared-by-reference
+containers (`self._all_transitive_stmts_ordered: list`,
+`self._all_transitive_stmts_ids: set`, declared next to
+`self._module_stmts` in `__init__`, shared into every nested `temp_gen`
+the same way `_module_stmts` is) is incrementally appended to, once per
+statement ever, right where `_compile_imported_module` sets
+`self._module_stmts[module_name] = stmts` on a successful compile. The
+O(current total tree size) reconciliation loop in `gen_module`'s
+`do_imports=True` Phase 0 (previously `for mod_name, mod_stmts in
+self._module_stmts.items(): for s in mod_stmts: ...`) now does a single
+incremental pass over the pre-flattened `_all_transitive_stmts_ordered`
+list instead, with the same id-based dedup against the current level's
+own `imported_stmts` as before. Because the flat list is built by
+appending each module's stmts in the exact same per-module order
+`_module_stmts.items()` iteration would visit them (dict insertion
+order), the final `imported_stmts` content and order at every level is
+byte-identical to before — a pure complexity improvement, not a
+behavior change. Confirmed via the full 5-part quality gate (below);
+`compile_stdlib.py -j8` in particular would have caught any change in
+`imported_stmts` content (it affects codegen output, which several of
+that suite's 664 files depend on being stable) and reports the identical
+664/664, 0-unexpected result as baseline.
+
+**Honest empirical finding on wall-clock impact**: a direct, uninstrumented
+timing comparison (`time.time()` around `gc.compile_to_gimple(src,
+do_imports=True, ...)`, `git stash` on `gimple_codegen.py` alone for the
+"before" run) on `Lib/contextlib.py` — the doc's own original profiling
+target — showed **no measurable difference**: ~44-45s both before and
+after Phase 1 alone (this run ultimately fails with an unrelated
+`async def`/coroutine-codegen "cannot compile" error after Phase 0
+completes, same failure point before and after, so the comparison is
+apples-to-apples). This is consistent with the plan's own prediction
+("Phase 1 alone should measurably cut wall time, though NOT fix the
+fundamental O(N²) `_walk_ast` total from Phase 2") in direction, but the
+magnitude on this specific file is smaller than "measurably cut" implied
+— Phase 2's per-statement memoization (still unimplemented) is where the
+doc's own profile says the actual `_walk_ast` call-count reduction (and
+therefore most of the wall-clock win) has to come from; Phase 1 alone
+only removes the redundant dict-to-list re-flattening step feeding into
+those scans, not the scans' own O(N²) repeated-visit cost. Landed anyway
+because it's a genuine, verified, zero-risk complexity improvement and a
+correctness-preserving prerequisite for Phase 2 (Phase 2's plan
+explicitly builds on `imported_stmts` having stable, well-understood
+provenance) — just not, on its own, sufficient to close out this bug or
+unblock the timeout-affected files (`Lib/poplib.py` was independently
+confirmed fast regardless, ~7s wall time — see below; `contextlib.py`
+itself was NOT observed to complete within a 60-90s budget before this
+change either, so no file's pass/fail status against a timeout harness
+changes as a result of Phase 1 alone).
+
+`Lib/poplib.py` (one of the doc's other named affected files) was
+re-checked directly: `python3 mojo.py build Lib/poplib.py` completes in
+~7s wall time (well within any reasonable timeout) — either it was never
+as badly affected as `contextlib.py`'s 36-module worst case, or an
+unrelated prior fix already improved it; not otherwise investigated
+further here.
+
+### Quality gate (2026-08-07, Phase 1)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean.
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
+   failures (unchanged from baseline).
 
 ## Symptom
 
