@@ -22757,6 +22757,39 @@ class GimpleGen:
                     idx = self._cpp_expr(s.target.index)
                     val = self._cpp_expr(s.value)
                     return [f"{indent}{obj}[{idx}] = {val};"]
+                # sys.stderr/stdout/stdin = val (task #150's remaining
+                # non-self-MemberExpr gap, e.g. test_faulthandler.py's
+                # `sys.stderr = None`): `sys` has no real backing value
+                # ANYWHERE in this narrow generator-body model -- _cpp_
+                # expr's IdentExpr case has no case at all for a bare
+                # module name, and _is_sys_stderr (this codegen's ONLY
+                # existing recognition of `sys.stderr`, used by _gen_
+                # print's `file=sys.stderr` kwarg match) treats it as a
+                # compile-time STRUCTURAL marker, never a real runtime
+                # value -- reading `sys.stderr` outside that one
+                # structural position is already unsupported (would
+                # lower to a bare, undefined `sys` C++ identifier via
+                # _cpp_expr's IdentExpr fallthrough). So there is no real
+                # "current stderr/stdout/stdin" value anywhere in this
+                # model for an assignment to actually change, and eliding
+                # the assignment can't discard any behavior this codegen
+                # could otherwise observe -- it just lets the surrounding
+                # function's OTHER statements be reached (and accepted or
+                # refused on their own separate merits) instead of the
+                # whole function being refused solely because of this one
+                # line. Still evaluates the RHS (mirrors the tuple-unpack
+                # branch's identical unresolved-call side-effect-discard
+                # pattern above). See CODEGEN_generator_non_plain_
+                # assignment_target_refused.md. Every OTHER non-self
+                # MemberExpr target (a real object's attribute) remains
+                # refused below -- unlike `sys`, a real object might have
+                # an observable backing value elsewhere, so silently
+                # eliding those would risk actually-wrong behavior, not
+                # just a no-op on an already-fictional value.
+                if isinstance(s.target, MemberExpr) and isinstance(s.target.obj, IdentExpr) \
+                        and s.target.obj.name == 'sys' and s.target.member in ('stderr', 'stdout', 'stdin'):
+                    val = self._cpp_expr(s.value)
+                    return [f"{indent}(void)({val});"]
                 raise _UnsupportedGeneratorShape(
                     "only a plain identifier assignment target is supported")
             name = s.target.name
