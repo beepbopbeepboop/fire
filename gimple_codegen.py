@@ -4924,6 +4924,8 @@ class GimpleGen:
         'mojo_str_splitlines':   ('MojoList *', ['char *']),
         'mojo_str_count':        ('int64_t',    ['char *', 'char *']),
         'mojo_str_rsplit':       ('MojoList *', ['char *', 'char *', 'int64_t']),
+        'mojo_str_partition':    ('MojoList *', ['char *', 'char *']),
+        'mojo_str_rpartition':   ('MojoList *', ['char *', 'char *']),
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
         'mojo_ord':              ('int64_t',    ['char *']),
@@ -11490,6 +11492,12 @@ class GimpleGen:
             return 'MojoList *', t
         if method == 'splitlines':
             t = self._call_expr('MojoList *', 'mojo_str_splitlines', [('char *', cstr_ov)])
+            self._elem_types[t] = 'char *'
+            return 'MojoList *', t
+        if method in ('partition', 'rpartition') and arg_vals:
+            sep_type = arg_pairs[0][0] if arg_pairs else 'char *'
+            fn = 'mojo_str_partition' if method == 'partition' else 'mojo_str_rpartition'
+            t = self._call_expr('MojoList *', fn, [('char *', cstr_ov), (sep_type, arg_vals[0])])
             self._elem_types[t] = 'char *'
             return 'MojoList *', t
         if method == 'replace' and len(arg_vals) >= 2:

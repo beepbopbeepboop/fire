@@ -1226,6 +1226,76 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
     return l;
 }
 
+/* Python str.partition(sep): split at the FIRST occurrence of sep, always
+ * returning a 3-element (head, sep, tail) result — (s, "", "") if sep isn't
+ * found. Previously had NO codegen lowering at all (fell to the generic
+ * "unknown char* method" stub, always returning a bare int64_t 0), so any
+ * `a, b, c = s.partition(x)` unpacked garbage/zero into all three targets —
+ * real bug found via importlib/metadata/__init__.py's PathDistribution.
+ * _name_from_stem: `name, sep, rest = filename.partition('-')`. */
+MojoList *mojo_str_partition(char *s, char *sep) {
+    MojoList *l = mojo_list_new();
+    if (!s) s = "";
+    if (!sep || !*sep) {
+        mojo_list_append_str(l, strdup(s));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        return l;
+    }
+    char *hit = strstr(s, sep);
+    if (!hit) {
+        mojo_list_append_str(l, strdup(s));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        return l;
+    }
+    size_t head_len = (size_t)(hit - s);
+    char *head = (char *)malloc(head_len + 1);
+    memcpy(head, s, head_len);
+    head[head_len] = '\0';
+    mojo_list_append_str(l, head);
+    mojo_list_append_str(l, strdup(sep));
+    mojo_list_append_str(l, strdup(hit + strlen(sep)));
+    return l;
+}
+
+/* Python str.rpartition(sep): split at the LAST occurrence of sep, always
+ * returning a 3-element (head, sep, tail) result — ("", "", s) if sep isn't
+ * found (note: the empty-result placement mirrors before "" "" s, the
+ * opposite of partition's s "" "" — real Python semantics). */
+MojoList *mojo_str_rpartition(char *s, char *sep) {
+    MojoList *l = mojo_list_new();
+    if (!s) s = "";
+    if (!sep || !*sep) {
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(s));
+        return l;
+    }
+    size_t sep_len = strlen(sep);
+    char *last_hit = NULL;
+    char *p = s;
+    char *hit;
+    while ((hit = strstr(p, sep)) != NULL) {
+        last_hit = hit;
+        p = hit + sep_len;
+    }
+    if (!last_hit) {
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(s));
+        return l;
+    }
+    size_t head_len = (size_t)(last_hit - s);
+    char *head = (char *)malloc(head_len + 1);
+    memcpy(head, s, head_len);
+    head[head_len] = '\0';
+    mojo_list_append_str(l, head);
+    mojo_list_append_str(l, strdup(sep));
+    mojo_list_append_str(l, strdup(last_hit + sep_len));
+    return l;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoDict — open-addressing hash map, string keys, int64_t slots
  * ═══════════════════════════════════════════════════════════════════════*/

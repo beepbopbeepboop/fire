@@ -259,6 +259,8 @@ MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_splitlines(char *s);
 int64_t mojo_str_count(char *s, char *sub);
 MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
+MojoList *mojo_str_partition(char *s, char *sep);
+MojoList *mojo_str_rpartition(char *s, char *sep);
 char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);
 int64_t mojo_strlen(char *s);
