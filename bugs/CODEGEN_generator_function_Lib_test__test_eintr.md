@@ -1,6 +1,48 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07, re-verified against tasks #146/#149/#150)
+
+Re-ran `MOJO_DEBUG=1 python3 mojo.py build .../_test_eintr.py` against
+current master. Of the 4 transitively-reached `test.support` gaps
+listed below (all pre-existing, none in `_test_eintr.py`'s own code):
+
+1. `run_with_locale`/`subst_drive` dynamic-`raise` gap
+   (`bugs/hard/CODEGEN_generator_raise_non_static_exception_class.md`,
+   task #149) — **the underlying hard bug is FIXED**, but these two
+   are unrelated to the specific case #149 fixed (a runtime-resolved
+   `raise self._imap.error(...)`-style member-expression exception
+   class) — not independently re-traced to confirm they're gone; the
+   overall "not eligible" refusal list (below) no longer names either
+   function, consistent with them now compiling past this gate.
+2. `force_color`'s plain-`int`-typed parameter — **STILL REFUSED,
+   unchanged**: `force_color: generator parameter 'color' has
+   unsupported type 'int'`. Unrelated to any of the 6 fixes.
+3. `iter_builtin_types`/`patch_list` — **STILL REFUSED**, but now
+   precisely root-caused (see update below) as a THIRD, distinct
+   "non-plain-assignment-target" sub-case (slice-subscript targets,
+   `x[:] = ...`) that task #150's fix did NOT cover (#150 only widened
+   tuple/list-*unpack* targets) — now documented as a new confirmed
+   sub-case in `bugs/hard/CODEGEN_generator_non_plain_assignment_
+   target_refused.md`.
+4. `async_yield`'s `return <value>` inside a generator — **STILL
+   REFUSED, unchanged**: `return <value> inside a generator is not
+   supported`. Unrelated to any of the 6 fixes; not yet a hard-bug doc
+   (single instance).
+
+Confirmed via direct source read (`Lib/test/support/__init__.py`):
+`patch_list`'s `orig[:] = saved` (line 1933) and `iter_builtin_types`'s
+`subs[:] = []` (line 2814) both parse to `mojo_compiler.py`'s
+`SliceExpr` target node, which `_cpp_stmt`'s `AssignStmt` case doesn't
+special-case (only `SubscriptExpr`/`TupleExpr`/`ListExpr`/self-`Member
+Expr` are handled) — falls through to the generic refusal, same
+symptom text as before but a different, now-understood root cause.
+
+`_test_eintr.py`'s own 2 generators still compile cleanly (no "not
+eligible" refusal for either); the file's own current errors remain the
+same unrelated lambda-argument parsing bugs noted below, out of scope
+for this cluster.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `request for member 'kill'` .cpp error no longer reproduces.
