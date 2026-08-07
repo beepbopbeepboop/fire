@@ -57,6 +57,15 @@ class Slot:
   doc's own `__del__._slotted = True` example) and separately reads
   `f.__name__` on a `MojoBoundMethod` elsewhere in the same file
   ("'MojoBoundMethod' has no member named '__name__'").
+- `Doc/tools/extensions/glossary_search.py` (Sphinx extension):
+  `app.env.glossary_terms = {}` / `hasattr(app.env, 'glossary_terms')` —
+  `app.env` is a `sphinx.environment.BuildEnvironment` instance from the
+  third-party `sphinx` package (unresolvable to this compiler, same as
+  `cls`/`self` being opaque in the doc's own Sub-case A/B examples above),
+  and the WHOLE POINT of this code is Sphinx's own documented extension
+  idiom of stashing arbitrary custom state on `app.env` via `hasattr`/
+  dynamic-attribute assignment. "request for member 'glossary_terms' in
+  something not a structure or union".
 - `Tools/build/umarshal.py` / `Tools/build/deepfreeze.py`: `retval.__dict__`
   / `pprint.pprint(retval.__dict__)` where `retval`/the target is a KNOWN
   user struct (`Code`) — "'Code' has no member named '__dict__'". This is
