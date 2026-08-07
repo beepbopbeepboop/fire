@@ -1,6 +1,22 @@
 # HARD BUG: a generator with a struct/class-typed parameter is refused outright, hard-failing the WHOLE top-level module (not a graceful per-function fallback)
 
-## Status
+## Status (re-verified 2026-08-07, still unfixed)
+
+Re-confirmed still reproducing identically against current master
+(after tasks #146/#149/#150/#151/#138/#145 all landed) — none of those
+6 fixes touch the parameter-type allow-list. `MOJO_DEBUG=1 python3
+mojo.py build .../Lib/dis.py` still shows the exact same refusal:
+`_get_instructions_bytes: generator parameter 'arg_resolver' has
+unsupported type 'ArgResolver *'`. Considered for this session's item
+3 (only-if-time-remains); NOT attempted — the analysis below already
+correctly scopes this as genuinely feature-sized (parameter-acceptance
+AND body-side struct-method-call support need to land together, or the
+failure just moves one step later per the "What a fix would need"
+section), not a narrow fix suitable for the remaining time budget in
+this pass. Left for a dedicated future session with a real time budget,
+per this project's guidance for tasks explicitly marked this way.
+
+## Status (original)
 
 Unfixed / not attempted — this is a deliberate, documented scope boundary
 in `_gen_cpp_generator_unit`/`_gen_cpp_async_unit`, not an accidental bug
