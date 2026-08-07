@@ -80,6 +80,40 @@ undeclared here (not in a function); did you mean
 already-generated-but-unused `_funcptr_*` static pointer this call site
 should have referenced instead of the bare name).
 
+**2026-08-07 follow-up (investigated, not fixed): these two instances
+are probably NOT the same root cause after all**, despite the
+identical symptom text. `_lower_IdentExpr` (`gimple_codegen.py`) DOES
+already have a general "C function name used as a value" branch (`if
+name in self.func_return_types and name not in self.var_types and
+... : ... self._funcptr_builtins_needed.add(c_name); static_name =
+f'_funcptr_{c_name}'; ...` — the exact mechanism GCC's own "did you
+mean" suggestion is pointing at) — a minimal repro of the c-analyzer
+shape (plain top-level functions, a module-level dict literal built
+from their bare names, both single-line and multi-line dict-literal
+forms) compiles CLEAN through this exact mechanism, no fix needed. The
+real difference: `Tools/c-analyzer/c_analyzer/__main__.py`'s
+`fmt_raw`/`fmt_brief`/`fmt_summary`/`fmt_full` are all GENERATOR
+functions (`yield`/`yield from` in their bodies), compiled through the
+SEPARATE C++20-coroutine lowering path this codegen uses for
+generators — a "value reference" to a generator function plausibly
+needs an analogous but DIFFERENT `_funcptr_*`-style mechanism specific
+to that path, which may not exist yet. That makes the c-analyzer
+instance part of the already-tracked, explicitly out-of-scope compiled-
+generator/async-codegen project (tasks #95-135), NOT the same bug as
+`_write_atomic` here (confirmed NOT a generator — no `yield` anywhere
+in its body) — `_write_atomic`'s own gap (an ordinary function, at
+module scope, referenced via `.{__code__}` MemberExpr chain rather
+than as a bare dict value) remains genuinely unexplained; the
+"`_closure_value_locals` has no module-level analogue" theory above
+was not confirmed either, given `_lower_IdentExpr`'s branch is generic
+(not local-scope-specific) and a bare-value repro passed clean — the
+`.{__code__}` MemberExpr wrapping (as opposed to a bare dict-literal
+value) is the one remaining structural difference not yet isolated.
+Left unfixed and not further chased this session; a future attempt
+should build a minimal `X.__code__`-shaped (not bare-dict-value-
+shaped) repro at module scope specifically, rather than assuming this
+doc's two examples share one cause.
+
 ### NOT YET FIXED: "invalid conversion in gimple call" at lines 960, 1190
 
 ```
