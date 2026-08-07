@@ -1,6 +1,16 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07, classified — doc reference now exists)
+
+**Classification: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`**
+— this file's `_genops`/`getpos = lambda: None` is that doc's own
+first confirmed occurrence (written 2026-08-07). Investigated there and
+assessed feature-sized (needs a new "callable-typed local variable"
+value category in the coroutine body model — see that doc's "Why this
+is feature-sized, not narrow" section); not re-attempted here, no new
+information found that would change that assessment.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, confirmed reproducing identically against current
 master (`2b0c4c5`) — the 2026-07-30 note's diagnosis was correct; this
