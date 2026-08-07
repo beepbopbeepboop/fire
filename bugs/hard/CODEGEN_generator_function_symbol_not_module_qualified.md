@@ -1,17 +1,100 @@
 # HARD BUG: compiled-generator free-function C symbols are never module-qualified, so two modules' same-named generators collide at compile
 
-## Status
+## Status (updated 2026-08-07)
 
-Unfixed. Root-caused 2026-08-06 while classifying the `CODEGEN_generator_
-function_Lib_*.md` cluster (tasks #95-135). Confirmed live on current
-master (`2b0c4c5`) via `Lib/os.py`'s real build. Not attempted — see "Why
-a fix needs care" below; this touches the same general symbol-naming area
-as the already-landed SB-1 fix (`bf96f55`/`13e6a5c`, "Module-qualify
-free-function C symbols to fix SB-1 overload collisions"), and that
-project's own history shows two rounds of real regressions from a first,
-confident-looking fix, so a parallel change to the *generator* naming
-scheme deserves the same care (its own dedicated verification pass), not
-a quick copy-paste.
+**FIXED** (task #146), scoped narrowly per the "Why a fix needs care"
+analysis below — root-caused 2026-08-06 while classifying the
+`CODEGEN_generator_function_Lib_*.md` cluster (tasks #95-135), fixed
+2026-08-07.
+
+`_gen_cpp_generator_unit`'s free-function `base` computation now calls
+`self._func_qualifier(fn.name)` — the SAME, already-proven SB-1
+machinery ordinary free functions use via `_func_csym` — exactly
+mirroring the existing pattern rather than inventing a new one, as this
+task's own framing suggested. `fn.name` at this call site is always one
+of the currently-compiling module's own top-level FunctionDefs (both
+callers iterate `stmts`/`_generator_fns`, themselves scoped to the
+module gen_module() is currently processing), so tier 1 of
+`_func_qualifier` (`_local_top_level_func_names`, purely per-instance,
+never shared-dict-dependent) always fires — the same "always
+authoritative for itself" guarantee ordinary functions already rely on.
+
+**Scope decision**: this fix deliberately does NOT touch call-site
+resolution (`self._generator_api[fname_raw]` — the ~11 read sites
+throughout this file). Investigation found this is unnecessary for the
+confirmed real-world case: `os.py`'s `walk` and the unrelated `walk`
+reachable via `threading.py` never call each other (confirmed: "both
+free functions in different files, no relation to each other"), and
+every one of the ~11 call-site reads does exactly ONE `self.
+_generator_api[fname_raw]` lookup, reused for both the extern "C"
+forward-declaration/param-types registration AND the actual call
+emission — so whatever that single dict read returns is automatically
+self-consistent at its own call site, regardless of qualification.
+Making `_gen_cpp_generator_unit`'s free-function base qualified is
+therefore sufficient on its own to eliminate the reported "conflicting
+types" collision; it does not need the call-site fix SB-1's own history
+needed (that one was necessary because ordinary-function call sites
+recompute their OWN qualifier independently at each use, creating a
+cross-site-disagreement risk generators' single-dict-read-per-site
+architecture doesn't have for the collision case that's actually
+occurred in the wild).
+
+The known, NOT-fixed-here residual: `self._generator_api` is still a
+single dict shared (by object identity, `temp_gen._generator_api =
+self._generator_api`) across every nested temp_gen in a `do_imports=
+True` whole-program compile, keyed by bare function name — so a
+CROSS-MODULE generator call (module A calling module B's same-bare-
+name generator while a third module's own same-name generator is also
+in scope) remains the same class of documented, accepted "first-
+registered-module-wins" limitation `_imported_func_home`'s own
+docstring already carries for ordinary functions (tier 3). Not
+exercised by any confirmed repro; not attempted here, per this bug's
+own preference for a narrowly-verified fix over a speculative,
+higher-risk rework of call-site resolution across ~11 sites with no
+concrete case forcing it.
+
+## Verification
+
+Hand-built minimal repro (two sibling `.mojo` files each with a
+top-level generator literally named `walk`, differing signatures,
+mirroring this doc's own "Minimal repro sketch"): confirmed the EXACT
+`error: conflicting types for '_mojogen_walk_start'` reproduces via
+`python3 mojo.py build main.mojo` on unfixed code, and is GONE (clean
+build, exit 0, runs and produces correct interleaved output) after this
+fix, for the direct-import (non-wrapper-indirection) shape.
+
+**Found while verifying, explicitly OUT OF SCOPE for this bug**: a
+wrapper-module variant of the same repro (mirroring test_module_cache.
+py's `test_sb1_mojo_build_cli_wrapper_modules` SB-1 CLI-test shape)
+still fails to LINK (`Undefined symbols ... __mojogen_mod_a_walk_start`)
+— but this is a pre-existing, unrelated gap: confirmed via `git stash`
+that the IDENTICAL wrapper-module shape ALSO fails to link on unfixed
+master even with NO naming collision at all (a solo, uniquely-named
+generator imported through one wrapper module already fails to link
+today). Compiled generator support through `do_imports=True`'s
+wrapper-module/multi-file-inlining path appears to have never worked at
+all for a generator reached only via import (as opposed to defined
+directly in the file being built) — a separate, broader gap than "the
+symbol isn't qualified," worth its own hard-bug doc in a future session,
+not attempted here.
+
+## Gate
+
+All five gates in CLAUDE.md's quality-gate section passed: `test_gimple.
+py` (247/247), `test_module_cache.py` (76/76), `make check-selfhost`
+clean, from-scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:`
+lines), `compile_stdlib.py -j8` (664/664, 0 unexpected — unchanged
+count).
+
+## Original diagnosis (unfixed-era notes, kept for history)
+
+Not attempted at the time — see "Why a fix needs care" below; this
+touches the same general symbol-naming area as the already-landed SB-1
+fix (`bf96f55`/`13e6a5c`, "Module-qualify free-function C symbols to
+fix SB-1 overload collisions"), and that project's own history shows
+two rounds of real regressions from a first, confident-looking fix, so
+a parallel change to the *generator* naming scheme deserved the same
+care (its own dedicated verification pass), not a quick copy-paste.
 
 ## Symptom
 

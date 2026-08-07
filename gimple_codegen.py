@@ -23782,8 +23782,54 @@ class GimpleGen:
                     "MojoList*/MojoDict*/MojoSet* parameters are supported "
                     "for compiled generators)")
             param_ctypes.append((pn, ctype))
-        base = (f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
-                if struct_name is not None else f"_mojogen_{_safe_name(fn.name)}")
+        if struct_name is not None:
+            base = f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
+        else:
+            # Module-qualify a free-function generator's C symbol exactly
+            # like an ordinary free function's (`_func_csym`/SB-1's
+            # `bf96f55`/`13e6a5c`) — before this, TWO UNRELATED generator
+            # functions in different modules sharing a bare name (`walk`
+            # is common: os.py's own 4-param `walk` vs. an unrelated
+            # 1-param `walk` reachable via threading.py) both mangled to
+            # the identical bare `_mojogen_walk_start`, producing a hard
+            # "conflicting types" GCC error across the whole-program
+            # compile the moment both were transitively reachable (real:
+            # `python3 mojo.py build .../Lib/os.py`) — see
+            # CODEGEN_generator_function_symbol_not_module_qualified.md.
+            # `_func_qualifier` is called here EXACTLY as `_func_csym` calls
+            # it for an ordinary function's definition: `fn.name` is always
+            # one of THIS gen_module() call's own top-level FunctionDefs at
+            # this call site (both callers below iterate `stmts`/
+            # `_generator_fns`, itself built from `_walk_ast(stmts)` scoped
+            # to the currently-compiling module), so tier 1
+            # (`_local_top_level_func_names`, this module's OWN top-level
+            # names) always fires here — the same purely-per-instance,
+            # never-shared-dict-dependent info `_func_qualifier`'s
+            # docstring documents as "always authoritative for itself, full
+            # stop". Every reader of the registered `base` (self.
+            # _generator_api[name]['base']) does a single dict read reused
+            # for both the extern "C" forward-declaration/param-types
+            # registration and the actual call, so whatever this returns is
+            # automatically self-consistent at every call site — no
+            # separate cross-module CALL-resolution fix is needed to close
+            # THIS bug (unlike SB-1's ordinary-function fix, which also had
+            # to fix call-site resolution): the confirmed real-world
+            # collision is between two functions that never call each
+            # other, purely a shared-symbol-name definition clash. A
+            # from-scratch `self._generator_api` cross-module CALL
+            # collision (module A calling module B's same-bare-name
+            # generator while a DIFFERENT module C's own same-name
+            # generator is also in scope) remains the same class of
+            # documented, accepted "first-registered-module-wins" residual
+            # limitation `_imported_func_home`'s own docstring already
+            # carries for ordinary functions (tier 3) -- not fixed here,
+            # not exercised by any confirmed repro, and not attempted per
+            # this bug's own documented preference for a narrowly-verified
+            # fix over a speculative, higher-risk rework of the
+            # shared-dict call-resolution machinery.
+            _gen_qualifier = self._func_qualifier(fn.name)
+            base = (f"_mojogen_{_gen_qualifier}_{_safe_name(fn.name)}"
+                    if _gen_qualifier else f"_mojogen_{_safe_name(fn.name)}")
         # Params are already "declared" locals as far as the body emitter is
         # concerned — a param can be read (`i = start`) or directly
         # reassigned/augmented (`start = start + 1`) without a fresh `Type
