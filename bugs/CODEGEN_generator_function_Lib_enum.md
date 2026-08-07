@@ -1,6 +1,27 @@
 # CODEGEN_generator_function: Lib/enum.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+One more non-generator, unrelated error found and fixed in a
+`Lib/subprocess.py`-transitive build of this file: `enum.py:1099:1:
+error: invalid conversion in gimple call` (~10 occurrences,
+`EnumType.__signature__`'s `from inspect import Parameter, Signature`
+function-scoped import, then `Signature(...)`/`Parameter(...)`
+constructor calls) — root cause was `_gen_stmt_FromImportStmt`
+defaulting an unknown imported symbol's return type to `'int'` instead
+of `'int64_t'` (mismatching the temp-declaration prescan and the
+"unavailable in compiled mode" stub generator, both of which already
+assumed `int64_t`). See `bugs/hard/CODEGEN_function_scoped_import_
+rettype_and_literal_cast_mismatches.md` (Mechanism 1) for the full
+writeup. Not re-verified against this file's OWN much larger error set
+described below (that was from a `do_imports=True` compile rooted at
+`enum.py` itself, a different transitive graph than subprocess.py's);
+the `Signature`/`Parameter`-as-bare-C-type-name issue documented in that
+same hard-bug doc's "Not fixed" section (found via `weakref.py`, not
+here) may also be relevant to this file's own `Signature`/`Parameter`
+usage — not cross-checked.
+
+## Status (updated 2026-08-06, own re-diagnosis unaffected by the above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `request for member 'value'` .cpp error no longer reproduces.

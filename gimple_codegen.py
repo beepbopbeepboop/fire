@@ -5027,10 +5027,23 @@ class GimpleGen:
     def _new_val(self, ctype: str, rhs: str) -> str:
         """Alloc a GIMPLE temp, emit `t = rhs`, return t."""
         t = self._new_temp(ctype)
-        # GIMPLE strict mode: integer constants are type 'int'; assigning to int64_t
-        # without an explicit cast is a 'non-trivial conversion in integer_cst' error.
-        if ctype == 'int64_t' and rhs.lstrip('-').isdigit():
-            self._emit(f'  {t} = (int64_t){rhs};')
+        # GIMPLE strict mode: a bare integer literal (e.g. `0`) is typed
+        # plain 'int' by the C frontend; assigning it to a temp declared
+        # with any OTHER scalar type without an explicit cast is a
+        # 'non-trivial conversion in integer_cst' error. 'int64_t' was the
+        # only case handled here historically; '_Bool' has the identical
+        # gap — confirmed via a real repro (`_new_val('_Bool', '0')`, used
+        # by `_isinstance_one_type`'s `isinstance(x, type)`-always-False
+        # stub and the `isinstance(x, (A, B, ...))` OR-accumulator seed)
+        # producing "_Bool / int / _tN = 0;" on Lib/typing.py's
+        # `_BaseGenericAlias.__mro_entries__`/`_GenericAlias._make_
+        # substitution` (~22 occurrences in a `mojo.py build
+        # Lib/subprocess.py` run) — GCC's C frontend does NOT apply the
+        # usual implicit int->_Bool conversion under `-fgimple`'s stricter
+        # verifier, same as it doesn't for int->int64_t. Both need the
+        # explicit cast.
+        if ctype in ('int64_t', '_Bool') and rhs.lstrip('-').isdigit():
+            self._emit(f'  {t} = ({ctype}){rhs};')
         else:
             self._emit(f'  {t} = {rhs};')
         return t
@@ -10312,6 +10325,29 @@ class GimpleGen:
                 return 'int64_t', self._new_val('int64_t', '(int64_t)0')
             self_type, self_val = self.lower_expr(IdentExpr(name='self', line=getattr(node, 'line', 0)))
             fake_obj_type = f"{base_name} *"
+            # `self`'s REAL declared C type is the DERIVED struct (e.g.
+            # `_LiteralGenericAlias *`), not `fake_obj_type` (the base
+            # struct pointer type used below purely for method-resolution
+            # bookkeeping in `_lower_struct_method_call`). Passing `self_val`
+            # unchanged used to lie to `_emit_call`'s own arg-coercion pass
+            # (gimple_codegen.py's `_emit_call`): since it saw the caller's
+            # claimed arg type (`fake_obj_type`) already equal the callee's
+            # declared param type (also `fake_obj_type`, i.e. `{base_name}
+            # *`), it skipped emitting any cast — producing a real C
+            # pointer-type mismatch at the call site GCC correctly flagged
+            # ("passing argument 1 ... from incompatible pointer type"),
+            # confirmed via a `super().__dir__()`/`__mro_entries__()`/
+            # `copy_with()` multi-level-inheritance repro against
+            # Lib/typing.py's `_LiteralGenericAlias`/`_SpecialGenericAlias`/
+            # `_CallableType`/etc. chains (~11 occurrences in a `mojo.py
+            # build Lib/subprocess.py` run). A base-class pointer cast is
+            # always a valid, safe C conversion (same struct-pointer-cast
+            # convention every OTHER method-dispatch site in this file
+            # already relies on for its own `(StructName *)obj_val` casts),
+            # so materialize it here instead of merely asserting it via the
+            # type label.
+            if self_type != fake_obj_type:
+                self_val = self._new_val(fake_obj_type, f"({fake_obj_type}){self_val}")
             return self._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
 
         # `coro._set_noop_callback()` / `coro^._take_handle()` — the two
@@ -18887,9 +18923,32 @@ class GimpleGen:
                     _scope[alias if alias else name] = _scope_qual
         for name, alias in node.names:
             symbol_name = alias if alias else name
-            # Use known signature if available
+            # Use known signature if available. Default to 'int64_t' (NOT
+            # 'int') for unknown symbols — this must match the fallback
+            # return type every other unknown-callee path in this file
+            # uses (e.g. func_return_types.get(fname, 'int64_t') at many
+            # call sites, and the unavailable-stub generator's own
+            # `int64_t <name> (...)` fallback signature below). A function-
+            # scoped `from mod import Name` (e.g. `from inspect import
+            # Parameter, Signature` inside enum.py's __signature__, `from
+            # _colorize import can_colorize` inside argparse.py's
+            # _set_color, `from struct import unpack` inside gettext.py's
+            # gettext) for a symbol with no _KNOWN_SIGS entry used to
+            # register 'int' here — but the call site's own SSA temp gets
+            # pre-declared 'int64_t' by the (separate, generic) prescan
+            # that seeds var/temp types, and the "unavailable in compiled
+            # mode" stub emitted for any never-linked symbol is ALSO
+            # declared to return 'int64_t'. The stale 'int' registration
+            # here was the only thing disagreeing with both, producing a
+            # real 'int'/'int64_t' GIMPLE type mismatch ("invalid
+            # conversion in gimple call") at the call site — confirmed via
+            # a minimal repro (`from _colorize import can_colorize` inside
+            # a method, then `if can_colorize(): ...`) and seen at scale
+            # across Lib/argparse.py (~15x), Lib/enum.py (~10x),
+            # Lib/gettext.py (~5x) in a `mojo.py build
+            # Lib/subprocess.py` run.
             sig = self._KNOWN_SIGS.get(symbol_name)
-            ret = sig[0] if sig else 'int'
+            ret = sig[0] if sig else 'int64_t'
             self.imported_symbols[symbol_name] = {
                 'module': node.module,
                 'return_type': ret,

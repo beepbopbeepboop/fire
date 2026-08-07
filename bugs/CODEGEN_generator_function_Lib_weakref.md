@@ -1,6 +1,32 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+New, NOT-yet-fixed finding from a `Lib/subprocess.py`-transitive build
+(35 errors attributed to this file): a real, confirmed bug, partially
+root-caused but not fixed — see `bugs/hard/CODEGEN_function_scoped_
+import_rettype_and_literal_cast_mismatches.md`'s "Not fixed" section
+for the full writeup. Two distinct findings:
+1. `#line` directives mislabel inherited-mixin-method text (confirmed:
+   `_collections_abc.py`'s `Mapping.__eq__`/`.items()`, inherited by
+   `WeakValueDictionary`) as if it were `weakref.py`'s own source, at
+   line numbers (700s-900s) that don't exist in the real 574-line
+   `weakref.py` — a diagnostics-only bug (the actual generated C logic
+   looked correct), but confusing enough to make this file's error
+   output nearly unreadable without cross-referencing line numbers by
+   hand against `_collections_abc.py`.
+2. `error: expected declaration specifiers or '...' before 'Parameter'/
+   'Signature'` (32 of the 35 errors) — `inspect.Parameter`/`Signature`
+   (locally-imported classes, not primitives) appearing as literal,
+   unmapped C type names in what looks like a declaration/parameter
+   list. Not traced to its exact emission site — ruled out `module_
+   loader.py`'s `.mojo`-only text-scan path (wrong file type, and its
+   own unknown-type fallback is `int64_t`, not the bare name), so the
+   real site is presumably in `gimple_codegen.py`'s own annotation-type
+   resolution for a scoped-imported class name; not located precisely
+   enough to fix in this pass.
+
+## Status (updated 2026-08-06, unaffected by the above — different transitive graph)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'k' was not declared` .cpp error no longer reproduces.

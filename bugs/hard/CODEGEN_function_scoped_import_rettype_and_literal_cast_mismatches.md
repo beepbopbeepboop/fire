@@ -1,0 +1,339 @@
+# HARD BUG (3 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls
+
+## Status (fixed 2026-08-07, Track B cross-cutting COMPILE_FAIL sweep)
+
+Follow-up to `bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
+defined.md`'s "Follow-up fix" section: once that doc's `os.py`
+`'relpath' is ambiguous` fix landed, `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/subprocess.py` stopped failing on that
+issue and exposed a different, much larger cluster of real GIMPLE type
+errors dominated by `Lib/argparse.py`, `Lib/typing.py`, `Lib/enum.py`,
+and `Lib/gettext.py`. This doc covers the investigation of that cluster
+and the three genuinely tractable, independent root causes found and
+fixed in it (a fourth, `Lib/weakref.py`'s cluster, was investigated but
+NOT fixed — see "Investigated, not fixed" below).
+
+All three fixes are in `gimple_codegen.py` only. Verified via the full
+5-part quality gate (below) — 0 regressions.
+
+## Symptom (baseline, before this session's fixes)
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/subprocess.py
+2>&1 | grep 'error:' | sort | uniq -c | sort -rn` — 785 total `error:`
+lines, dominated by:
+
+```
+  15 Lib/argparse.py:211:1: error: invalid conversion in gimple call
+  12 Lib/typing.py:1491:1: error: non-trivial conversion in 'integer_cst'
+  11 Lib/typing.py:1300:36: error: passing argument 1 of 'typing__is_dunder_...' makes integer from pointer without a cast
+  10 Lib/typing.py:1275:1: error: non-trivial conversion in 'integer_cst'
+  10 Lib/enum.py:1099:1: error: invalid conversion in gimple call
+   6 Lib/argparse.py:1493:9: error: request for member '_kw_default' in something not a structure or union
+   5 Lib/gettext.py:445:1: error: invalid conversion in gimple call
+   5 Lib/argparse.py:677:1: error: invalid types for 'trunc_mod_expr'
+   5 Lib/argparse.py:662:1: error: type mismatch in binary expression / non-trivial conversion in 'integer_cst'
+   5 Lib/argparse.py:587:8: error: assignment to 'int64_t' from 'MojoBoundMethod *' makes integer from pointer without a cast
+   5 Lib/argparse.py:522:14 / 329:16: error: invalid operands to binary % (have 'int64_t' and 'MojoDict *')
+   5 Lib/argparse.py:478:10: error: assignment to 'char *' from 'char' makes pointer from integer without a cast
+   4 Lib/argparse.py:1537:33: error: unexpected RHS for assignment before ';' token
+   3 Lib/typing.py:1651:48 / 1300:46 / 1300:39: error: passing argument 1 of ... from incompatible pointer type
+   1 Lib/weakref.py:6xx-8xx: error: expected declaration specifiers or '...' before 'Parameter'/'Signature' (35 occurrences total)
+```
+
+After the three fixes below: **720** total `error:` lines (-65). The
+`can_colorize`/`Signature`/`Parameter`/`unpack`-triggered "invalid
+conversion in gimple call" cluster (argparse.py ×15, enum.py ×10,
+gettext.py ×5 = 30) and ALL of typing.py's `_Bool`/`int` `integer_cst`
+errors (22) and `super()`-call pointer-type errors (12, cross-verified
+on an isolated `typing.py`-only compile: 14 errors -> 2) are gone.
+`Lib/subprocess.py` still does not fully build — the remaining cluster
+(argparse.py's `**kwargs` dict-subscript/closure-as-value/dynamic-%-
+format errors, weakref.py's mystery, two small unrelated typing.py
+errors) is either already covered by an explicitly-excluded bug area or
+was investigated and found not tractable in this pass — see "Not fixed"
+below.
+
+## Mechanism 1 (fixed): function-scoped `from mod import Name` defaults an unknown symbol's return type to `'int'`, disagreeing with every OTHER unknown-callee default in this file (`'int64_t'`)
+
+### Root cause
+
+`gimple_codegen.py`'s `_gen_stmt_FromImportStmt` (~line 18872) handles a
+**function-scoped** `from module import name1, name2` (e.g. `from
+inspect import Parameter, Signature` inside `enum.EnumType.
+__signature__`, `from _colorize import can_colorize` inside
+`argparse.HelpFormatter._set_color`, `from struct import unpack` inside
+`gettext.GNUTranslations._parse`) — a common Python idiom for lazy/
+optional imports. For a symbol with no `_KNOWN_SIGS` entry (i.e. not a
+handful of hardcoded runtime helpers), it registered:
+
+```python
+sig = self._KNOWN_SIGS.get(symbol_name)
+ret = sig[0] if sig else 'int'          # <-- WRONG default
+self.func_return_types[symbol_name] = ret   # (if not already present)
+```
+
+Every OTHER unknown-callee fallback in this file uses `'int64_t'` (e.g.
+`self.func_return_types.get(fname, 'int64_t')`, used at ~15 call sites
+across the file), and — critically — the "unavailable in compiled mode"
+weak-stub generator this codegen emits for any never-linked symbol ALSO
+declares its return type `int64_t` unconditionally. `_gen_stmt_
+FromImportStmt`'s `'int'` default was the ONLY thing in the whole
+pipeline disagreeing with that convention.
+
+Because a call site's own SSA temp is pre-declared with a DIFFERENT
+type than what `func_return_types` says at the moment the call itself
+is lowered (the temp-declaration prescan runs largely independently of
+per-statement lowering order), the mismatch surfaces as a real GIMPLE
+"invalid conversion in gimple call" — GCC's own `-fgimple` mode does
+NOT apply the ordinary C implicit-conversion rules real C compilation
+would (confirmed directly: `int64_t x; x = 0;` compiles fine under
+plain `-fgimple -fsyntax-only`, but a function `int64_t T (...)`
+assigned into an `int`-declared temp, or vice versa, does not).
+
+### Minimal repro
+
+```python
+class Foo:
+    def bar(self):
+        from _colorize import can_colorize
+        if can_colorize():
+            return 1
+        return 0
+```
+`python3 mojo.py build` on this (any `.py` file) fails:
+```
+error: invalid conversion in gimple call
+int
+
+int64_t
+
+_t1 = can_colorize ();
+```
+Confirmed directly in the generated `.ci`:
+```c
+#ifndef can_colorize
+__attribute__((weak)) int64_t can_colorize (...) { ...; return (int64_t)0; }
+#endif
+  int _t1;              /* WRONG: declared from func_return_types['can_colorize']='int' */
+  _t1 = can_colorize (); /* stub returns int64_t -- mismatch */
+```
+
+### Fix
+
+`gimple_codegen.py`, `_gen_stmt_FromImportStmt`: changed the fallback
+from `'int'` to `'int64_t'` — `ret = sig[0] if sig else 'int64_t'`.
+
+### Verification
+
+- Repro above: "invalid conversion in gimple call" gone (compile now
+  reaches the link stage; the synthetic repro's own link failure —
+  `_can_colorize` undefined — is a SEPARATE, pre-existing artifact of a
+  trivial standalone single-file build never actually linking a real
+  `_colorize` implementation, not something this fix touches or causes;
+  confirmed by reproducing the SAME link failure against the ORIGINAL,
+  unfixed code once the (unrelated, blocking) compile-stage error is
+  independently patched out for the check).
+- `Lib/subprocess.py` full build: the `can_colorize`/`Signature`/
+  `Parameter`/`unpack` "invalid conversion in gimple call" errors (30
+  occurrences across argparse.py/enum.py/gettext.py) are gone, 0 new
+  error categories introduced (785 -> 755 total errors).
+
+## Mechanism 2 (fixed): `_new_val`'s digit-literal auto-cast guard only covered `int64_t`, not `_Bool`
+
+### Root cause
+
+`gimple_codegen.py`'s `_new_val(ctype, rhs)` helper (~line 5027) already
+had a guard for the well-known "-fgimple requires an integer_cst's type
+to exactly match its assignment target" gap — but only for `int64_t`:
+
+```python
+if ctype == 'int64_t' and rhs.lstrip('-').isdigit():
+    self._emit(f'  {t} = (int64_t){rhs};')
+else:
+    self._emit(f'  {t} = {rhs};')
+```
+
+Two call sites pass `ctype='_Bool'` with a bare digit `rhs` —
+`_isinstance_one_type`'s `isinstance(x, type)`-always-False stub
+(`return self._new_val('_Bool', '0')`) and the `isinstance(x, (A, B,
+...))` tuple-of-types OR-accumulator's seed value (same call, ~line
+13905) — and neither got the cast, producing the identical class of
+GIMPLE error `_new_val`'s own `int64_t` branch was written to prevent,
+just for `_Bool` instead: `non-trivial conversion in 'integer_cst'`.
+
+Real-world trigger: `typing.py`'s `_BaseGenericAlias.__mro_entries__`
+(`if not isinstance(b, type): ...`) and `_GenericAlias._make_
+substitution` both call `isinstance(x, type)`, hitting the always-False
+stub twice each (once per code path through the function) — 22
+occurrences total in a `Lib/subprocess.py` build.
+
+### Fix
+
+Generalized the guard to cover both types that need it:
+```python
+if ctype in ('int64_t', '_Bool') and rhs.lstrip('-').isdigit():
+    self._emit(f'  {t} = ({ctype}){rhs};')
+```
+(Audited every other `_new_val(ctype, digit_literal)` call site in the
+file — all the rest already use `ctype='int'`, which matches a bare
+digit literal's own C type trivially, so no further cases needed the
+guard.)
+
+### Verification
+
+Isolated `Lib/typing.py`-only compile (`compile_to_gimple(src,
+do_imports=False)` + `gcc-mp-15 -fgimple -fsyntax-only`, faster
+iteration than a full `subprocess.py` build): 36 errors before this fix
+and Mechanism 3's fix combined -> 14 after Mechanism 2 alone (all 22
+`_Bool`/`int` `non-trivial conversion in 'integer_cst'` errors gone,
+confirmed by category, not just count) -> 2 after Mechanism 3 (below)
+is added on top.
+
+## Mechanism 3 (fixed): `super().method(...)` passes `self` typed as the DERIVED struct pointer while claiming (for lookup purposes only) it's the BASE struct pointer — `_emit_call`'s arg-coercion pass trusts the claim and never emits the actual cast
+
+### Root cause
+
+`gimple_codegen.py`'s `super().method(args)` lowering (~line 10305,
+inside the general method-call dispatcher) resolves the call directly
+to the base struct's own compiled method:
+
+```python
+self_type, self_val = self.lower_expr(IdentExpr(name='self', ...))
+fake_obj_type = f"{base_name} *"
+return self._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
+```
+
+`self_val` is the C identifier `self` — its REAL declared C type is the
+CURRENT (derived) struct, e.g. `_LiteralGenericAlias *`. `fake_obj_type`
+is used purely so `_lower_struct_method_call`'s method-name/return-type
+RESOLUTION machinery treats the call as if `self` were already the base
+type — but the label was never backed by an actual C-level cast.
+
+`_lower_struct_method_call` passes `(fake_obj_type, self_val)` as the
+call's first `(ctype, value)` arg pair straight through to `_emit_call`,
+whose arg-coercion loop (~line 5668) only emits a cast when the
+CALLER's claimed type and the CALLEE's declared param type visibly
+DIFFER (`ptype == atype` -> skip coercion). Since both were the SAME
+string (`fake_obj_type` == the base method's own declared first-param
+type, `{base_name} *`), the coercion pass saw "no mismatch" and passed
+`self` completely unchanged — producing a real C pointer-type mismatch
+GCC correctly flags: `passing argument 1 of '..._method' from
+incompatible pointer type`.
+
+Hits EVERY multi-level struct-inheritance chain with more than one
+`super().method(...)` call across levels — confirmed in `typing.py`'s
+`_LiteralGenericAlias -> _GenericAlias -> _BaseGenericAlias` and
+`_CallableType`/`_TupleType`/`_DeprecatedGenericAlias -> 
+_SpecialGenericAlias` chains (`__dir__`, `__mro_entries__`, `copy_with`
+— 12 occurrences in the `subprocess.py` build; 8 distinct call sites,
+isolated `typing.py`-only count).
+
+### Fix
+
+Materialize the cast instead of merely asserting it via the type label:
+```python
+self_type, self_val = self.lower_expr(IdentExpr(name='self', ...))
+fake_obj_type = f"{base_name} *"
+if self_type != fake_obj_type:
+    self_val = self._new_val(fake_obj_type, f"({fake_obj_type}){self_val}")
+return self._lower_struct_method_call(self_val, fake_obj_type, func.member, node)
+```
+A derived-to-base struct pointer cast is always valid C (the same
+struct-pointer-cast convention every other method-dispatch site in this
+file already relies on for its own `(StructName *)obj_val` casts).
+
+### Verification
+
+Isolated `Lib/typing.py`-only compile: 14 errors (after Mechanism 2's
+fix alone) -> **2** (only two small, unrelated, NOT-investigated errors
+remain — see "Not fixed" below). Full `Lib/subprocess.py` build: 755 ->
+**720** total errors (with Mechanism 2 landed in the same commit; the
+two fixes were verified together in the full-build count and
+individually in the isolated `typing.py`-only count above).
+
+## Not fixed / investigated only
+
+- **`Lib/weakref.py`'s 35-error cluster** (`expected declaration
+  specifiers or '...' before 'Parameter'/'Signature'`, plus a handful
+  of `unexpected RHS for assignment`/`implicit declaration of function
+  'deepcopy'` errors, plus 3 `'inspect_Signature_...' undeclared here`
+  errors): partially root-caused but NOT fixed. Two separate findings:
+  1. The `#line` directives attributing this text to `weakref.py` are
+     WRONG — `weakref.py` is genuinely only 574 lines, but errors are
+     reported at lines up to ~962. Direct comparison against
+     `Lib/_collections_abc.py` confirms the ACTUAL source: lines 819-822
+     of `_collections_abc.py` (`Mapping.__eq__`/`.items()`, inherited by
+     `WeakValueDictionary(_collections_abc.MutableMapping)`) match
+     line-for-line and statement-for-statement with the C emitted under
+     the WRONG `#line ... "weakref.py"` tag at .ci line ~307183. This
+     looks like an inherited-method "flattening" mechanism (copying a
+     mixin base class's method body into the subclass's own compiled
+     unit) that updates the `#line` NUMBER per source line but never
+     re-points the `#line` FILENAME to the mixin's own file
+     (`_collections_abc.py`) when it switches into that source. This
+     part is purely a diagnostics/line-attribution bug — the C logic
+     itself, inspected directly, looked semantically correct for
+     `Mapping.__eq__`.
+  2. The literal `Parameter`/`Signature` identifiers appearing directly
+     in what looks like a C declaration/parameter list (`expected
+     declaration specifiers or '...' before 'Parameter'`) is a
+     SEPARATE, NOT-yet-located bug — traced as far as ruling out
+     `module_loader.py`'s `.mojo`-source text-scan path (`_mojo_type_to_
+     c` there delegates to `gimple_codegen._mojo_type`, whose documented
+     unknown-type fallback is `int64_t`, not the bare literal name; also
+     that path only applies to `.mojo` files, not `.py` sources like
+     `inspect.py`/`weakref.py`). The actual site is presumably in
+     `gimple_codegen.py`'s own parameter/return-type-annotation
+     resolution for a type name that's a locally-imported class
+     (`Parameter`/`Signature` from `from inspect import Parameter,
+     Signature`) rather than a primitive — not located precisely enough
+     to propose a fix without further investigation. Flagged as a
+     follow-up; NOT attempted given the remaining time budget in this
+     session and the CLAUDE.md-documented history of narrowly-scoped
+     changes to this exact class of shared machinery causing
+     regressions.
+- **`Lib/argparse.py`'s `**kwargs` dict-subscript errors** (`request for
+  member '_kw_default' in something not a structure or union`, line
+  1493: `action.default = kwargs[action.dest]` inside `def
+  set_defaults(self, **kwargs)`) — this is the EXPLICITLY excluded
+  `bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+  (task #142) bug area per this session's assignment; not touched.
+- **`Lib/argparse.py`'s dynamic (non-literal) `%`-format-string errors**
+  (`invalid operands to binary % (have int64_t and MojoDict *)` at
+  lines 329/522 — `usage % {"prog": ...}`, `text % dict(prog=...)`;
+  `invalid types for 'trunc_mod_expr'` at 662/677/1329 — `' '.join(...)
+  % get_metavar(...)`): traced to `gimple_codegen.py`'s `_lower_percent`
+  (~line 9650), whose own docstring already documents this as a
+  DELIBERATE scope limit: "Only a *literal* format string on the LHS is
+  handled specially here... Anything else — including a `char *`
+  variable holding a dynamic template — falls through to the ordinary
+  numeric-modulo path below (pre-existing behavior, not made worse)."
+  Extending this to non-literal LHS values requires a genuine RUNTIME
+  `%`-format engine (parsing `%s`/`%d`/`%(name)s`/etc. directives out of
+  a template string not known until runtime, materializing a
+  `mojo_str_percent_format(fmt, args)`-shaped runtime helper) — a real
+  feature, not a bug-fix-sized change, and already flagged by the
+  existing docstring as affecting "~130 real stdlib files". Left alone
+  per this doc's own prior scoping decision; not re-litigated here.
+- **Two small, unrelated `Lib/typing.py` errors** (isolated-compile
+  count 2, both untouched by the three fixes above): `error: non-
+  register as LHS of unary operation` at a global-struct-field
+  assignment (`_root_globals._lazy_annotationlib = (struct
+  _LazyAnnotationLib *) _t2;`), and `error: '_TypedDictMeta' has no
+  member named '__orig_bases__'` (`td.__orig_bases__ = (TypedDict,)`
+  inside `TypedDict`'s `__new__`-ish construction). Neither investigated
+  beyond locating them — out of scope for this pass.
+
+## Quality gate (2026-08-07, all three fixes together)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed (unchanged from
+   baseline).
+2. `python3 test_module_cache.py` — 76 passed, 0 failed (unchanged).
+3. `make check-selfhost` — clean (`Results: 1 passed, 0 failed`, "✓
+   self-host compiles + links clean").
+4. From-scratch stdlib dylib rebuild (`rm -f build/libmojostdlib.dylib`
+   + `build_stdlib_dylib.build_stdlib(jobs=8)`) — clean, 0 `skip
+   <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — **664/664 passed, 0 unexpected
+   failures** (unchanged from baseline — no regression from any of the
+   three fixes).
