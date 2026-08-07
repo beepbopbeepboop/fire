@@ -3734,6 +3734,30 @@ class GimpleGen:
         # `compile_to_gimple_with_cpp`, `compile_linked`) right where each
         # already sets `gen._current_filename`.
         self._compiling_file_paths: set[str] = set()
+        # Non-empty iff SOME call site anywhere in the whole-program closure
+        # (root module or any transitively-imported one, all sharing this
+        # same set by reference exactly like `_emitted_ptr_helpers`/
+        # `_funcptr_builtins_needed` below already do) actually lowered an
+        # `obj.__dict__`/`vars(obj)` expression (see `_lower_MemberExpr`'s
+        # `__dict__` case and `_lower_call`'s `vars` case — Step 0 of
+        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md). Gates
+        # whether `_mojo_dispatch_asdict`/the per-struct `_mojo_asdict_<sn>`
+        # helpers get emitted at all: unlike `_mojo_dispatch_getattr`/
+        # `_mojo_dispatch_setattr`/`_mojo_dispatch_fields`/`_mojo_dispatch_
+        # is_dataclass` (unconditionally emitted into every compile, however
+        # trivial, since ANY module in a whole-program closure might call
+        # plain `getattr()`/`setattr()`/`dataclasses.fields()` on some other
+        # module's struct with no local trace of that call), `__dict__`/
+        # `vars()` are rare enough in practice, and this dispatcher new
+        # enough, that emitting it into a client whose own compile never
+        # once uses it just to keep it "unconditional like its siblings"
+        # regressed test_module_cache.py's real tiny-client-object byte
+        # budget (a link-mode client whose whole architectural point is
+        # staying tiny because bodies live in the shared dylib) — confirmed
+        # by removing this gate and watching that exact test fail. Real
+        # per-compile-unit gating, not a blanket "always emit", is the
+        # correct fix for a helper this genuinely optional.
+        self._asdict_dispatch_needed: set = set()
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
@@ -4341,6 +4365,7 @@ class GimpleGen:
                     temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
                     temp_gen._compiling_file_paths = self._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)
+                    temp_gen._asdict_dispatch_needed = self._asdict_dispatch_needed  # share: __dict__/vars() usage flag (see its own declaration)
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._struct_allocs_needed = self._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                     temp_gen._str_pool = self._str_pool
@@ -4988,6 +5013,7 @@ class GimpleGen:
         '_mojo_dispatch_getattr':    ('int64_t',   ['void *', 'char *']),
         '_mojo_dispatch_setattr':    ('void',      ['void *', 'char *', 'int64_t']),
         '_mojo_dispatch_fields':     ('MojoList *', ['void *']),
+        '_mojo_dispatch_asdict':     ('MojoDict *', ['void *']),
         '_mojo_dispatch_is_dataclass': ('int',     ['void *']),
         '_mojo_dispatch_repr':       ('char *',    ['void *']),
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
@@ -8439,6 +8465,26 @@ class GimpleGen:
 
         op = '->' if '*' in ot else '.'
         struct_name = _struct_name_of(ot)
+        # `obj.__dict__` on a value whose struct type is statically known
+        # (Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
+        # — a real MojoDict* view of the struct's OWN already-known fields,
+        # matching Python's `obj.__dict__` semantics (distinct from the
+        # Sub-cases A-C dynamic-storage problem that same doc's later steps
+        # cover: those are for attributes that DON'T exist as real fields at
+        # all; `__dict__` here is a read-out of fields that already do).
+        # Scoped to `struct_name in self.struct_field_types` — a genuinely
+        # known struct — so an opaque/generic receiver (int64_t, void *,
+        # no known layout) falls through to whatever this expression would
+        # otherwise resolve to instead of emitting a call for a struct type
+        # `_mojo_dispatch_asdict` (only defined for reflect-eligible known
+        # structs — see gen_module's "Generic reflection dispatch" block)
+        # has no real per-field case for. Real-world instances: Tools/build/
+        # umarshal.py and Tools/build/deepfreeze.py's `retval.__dict__`
+        # where `retval: Code`.
+        if node.member == '__dict__' and struct_name in self.struct_field_types:
+            self._asdict_dispatch_needed.add(1)
+            return 'MojoDict *', self._call_expr(
+                'MojoDict *', '_mojo_dispatch_asdict', [(ot, ov)])
         # Span/StringSlice's `mut` bracket-parameter isn't a real field of the
         # erased fat-pointer struct (see struct_field_types['Span'] and
         # _param_ctype's _span_mut_params bookkeeping) — resolve it from the
@@ -13335,6 +13381,19 @@ class GimpleGen:
             rt, fn = _SIMPLE_BUILTINS[fname_raw]
             pairs = [self.lower_expr(a) for a in node.args]
             return rt, self._call_expr(rt, fn, pairs)
+        # `vars(obj)` on a value whose struct type is statically known — same
+        # real MojoDict* field view as `obj.__dict__` just above in
+        # `_lower_MemberExpr` (see that call site's own comment; this is
+        # Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md,
+        # `vars()`/`__dict__` are the same operation in real Python). Scoped
+        # the same way: only when the argument's struct type is genuinely
+        # known, so an opaque/generic receiver falls through unchanged.
+        if fname_raw == 'vars' and len(node.args) == 1:
+            at, av = self.lower_expr(node.args[0])
+            if _struct_name_of(at) in self.struct_field_types:
+                self._asdict_dispatch_needed.add(1)
+                return 'MojoDict *', self._call_expr(
+                    'MojoDict *', '_mojo_dispatch_asdict', [(at, av)])
         if fname_raw == 'getattr' and len(node.args) >= 2:
             # `getattr(f, "_cached", None)` where `f` is a free function
             # memoizing a value on itself (see `_func_attrs`'s pre-scan
@@ -30738,6 +30797,7 @@ class GimpleGen:
                 get_lines = []
                 set_lines = []
                 name_lits = []
+                asdict_lines = []
                 for fname, ftype in fields.items():
                     if fname == '__mojo_type_id':
                         continue
@@ -30747,12 +30807,40 @@ class GimpleGen:
                             f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
                         set_lines.append(
                             f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                        asdict_lines.append(
+                            f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
                     else:
                         get_lines.append(
                             f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
                         set_lines.append(
                             f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                        asdict_lines.append(
+                            f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
                     name_lits.append(f'"{fname}"')
+                # `obj.__dict__`/`vars(obj)` on a struct with statically-known
+                # fields (Step 0 of bugs/hard/
+                # CODEGEN_dynamic_attribute_on_generic_object.md) — a real
+                # MojoDict* view of the struct's OWN fields, matching
+                # Python's `obj.__dict__` semantics, reusing this same
+                # per-struct field enumeration rather than a second,
+                # separately-maintained field list. Every value goes through
+                # mojo_dict_set_int (the same generic int64_t boxed-value
+                # convention every other MojoDict* this codegen builds
+                # already uses), matching how _mojo_getattr_{sn}/repr's own
+                # per-field access already treat pointer vs. scalar fields
+                # identically at the storage-representation level. Gated on
+                # `_asdict_dispatch_needed` (see its own declaration) —
+                # UNLIKE its getattr/setattr/fieldnames siblings just above
+                # (always emitted, however trivial), this one is genuinely
+                # optional per-compile and a real client-object-size
+                # regression (test_module_cache.py's "client object is
+                # tiny" check) confirmed it must not be unconditional.
+                asdict_part = (
+                    f"static MojoDict * _mojo_asdict_{sn} ({sn} *obj) {{\n"
+                    f"  MojoDict *_r = mojo_dict_new();\n"
+                    + "".join(asdict_lines) +
+                    f"\n  return _r;\n}}\n"
+                ) if self._asdict_dispatch_needed else ""
                 refl_parts.append(
                     f"static int64_t _mojo_getattr_{sn} ({sn} *obj, char *attr) {{\n"
                     + "\n".join(get_lines) +
@@ -30764,6 +30852,7 @@ class GimpleGen:
                     f"  MojoList *_r = mojo_list_new();\n"
                     + "".join(f'  mojo_list_append_str(_r, {nl});\n' for nl in name_lits) +
                     f"  return _r;\n}}\n"
+                    + asdict_part
                 )
             # Field-by-field repr() — mirrors Python's dataclass repr
             # ("ClassName(field1=..., field2=...)"). Before this, repr() on
@@ -30911,10 +31000,26 @@ class GimpleGen:
                 tag_cases_fields = "\n".join(
                     f'  if (_tag == {_struct_type_id(sn)}) return _mojo_fieldnames_{sn}();'
                     for sn in reflect_structs if self.struct_field_types.get(sn))
+                tag_cases_asdict = "\n".join(
+                    f'  if (_tag == {_struct_type_id(sn)}) return _mojo_asdict_{sn}(({sn} *)obj);'
+                    for sn in reflect_structs if self.struct_field_types.get(sn))
                 tag_set_literal = ", ".join(
                     str(_struct_type_id(sn)) for sn in reflect_structs if self.struct_field_types.get(sn))
                 if len(tag_set_literal) == 0:
                     tag_set_literal = "0"
+                # `_mojo_dispatch_asdict` (Step 0 of bugs/hard/
+                # CODEGEN_dynamic_attribute_on_generic_object.md) is, unlike
+                # its 4 siblings just below, gated on `_asdict_dispatch_
+                # needed` — see that flag's own declaration for why an
+                # unconditional-like-its-siblings emission regressed
+                # test_module_cache.py's tiny-client-object byte budget.
+                asdict_dispatch_part = (
+                    "static MojoDict * _mojo_dispatch_asdict (void *obj) {\n"
+                    "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n"
+                    + f"{tag_cases_asdict}\n"
+                    + "  return mojo_dict_new();\n"
+                    "}\n"
+                ) if self._asdict_dispatch_needed else ""
                 parts.append(
                     ("static int64_t _mojo_dispatch_getattr (void *obj, char *attr) {\n"
                      "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
@@ -30930,8 +31035,9 @@ class GimpleGen:
                        "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
                     + f"{tag_cases_fields}\n"
                     + ("  return mojo_list_new();\n"
-                       "}\n"
-                       "static int _mojo_dispatch_is_dataclass (void *obj) {\n"
+                       "}\n")
+                    + asdict_dispatch_part
+                    + ("static int _mojo_dispatch_is_dataclass (void *obj) {\n"
                        "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
                     + f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
                     + ("  if (_tag == 0) return 0;\n"
@@ -31442,6 +31548,8 @@ class GimpleGen:
         parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
         parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
         parts.append("static MojoList * _mojo_dispatch_fields (void *);")
+        if self._asdict_dispatch_needed:  # see that flag's own declaration
+            parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
         parts.append("static int _mojo_dispatch_is_dataclass (void *);")
         parts.append("static char * _mojo_dispatch_repr (void *);")
         parts.append("static char * _mojo_repr_list (MojoList *);")
