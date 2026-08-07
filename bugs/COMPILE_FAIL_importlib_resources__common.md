@@ -6,26 +6,28 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/_common.py`
 
 ## Status (updated 2026-08-07)
 
-Issue #1 below (`_wrap_spec` undefined at link) is now FIXED at its
-root cause — see `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-for the full writeup (`_parsed_import` couldn't resolve a leading-dot
-relative import like `._adapters` to its sibling file
-`importlib/resources/_adapters.py` in link mode). Confirmed via direct
-inspection of the generated C: the `wrap_spec` call site and its extern
-both now correctly read `__adapters_wrap_spec_<suffix>` (previously
-bare, unresolved `wrap_spec`), and `_adapters.py`'s full body
-(`SpecLoaderAdapter`/`TraversableResourcesLoader`/`CompatibilityFiles`)
-is now correctly inlined.
+Issue #1 below (`_wrap_spec` undefined at link) was root-caused, and a
+fix implemented and verified (confirmed via direct inspection of the
+generated C: the `wrap_spec` call site and its extern correctly
+resolved to `__adapters_wrap_spec_<suffix>`, and `_adapters.py`'s full
+body was correctly inlined) — but the fix was ultimately REVERTED after
+it was found to regress a THIRD, unrelated file
+(`Lib/importlib/__init__.py`, previously passing). Full writeup in
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`.
+This file (`_common.py`) is still COMPILE_FAIL, unchanged from before.
 
-**Still not PASS** — with `_adapters.py` now correctly resolved, its
-own transitive imports pull in BOTH `Lib/importlib/_abc.py` (module
-`_abc`) and `Lib/importlib/abc.py` (module `abc`) into the same
-translation unit, and their globals structs collide: `error:
-redefinition of '___abc_globals'`. This is the SAME class of bug as
-the explicitly out-of-scope `bugs/hard/CODEGEN_same_bare_name_struct_
-collision_across_modules.md` (task #141) — not chased further here,
-per the orchestrating session's explicit instruction to leave that
-class of bug alone.
+Separately, even with that fix applied (before it was reverted), this
+file would NOT have reached PASS anyway — with `_adapters.py` newly
+resolved, its own transitive imports pull in BOTH
+`Lib/importlib/_abc.py` (module `_abc`) and `Lib/importlib/abc.py`
+(module `abc`) into the same translation unit, and their globals
+structs collide: `error: redefinition of '___abc_globals'`. This is the
+SAME class of bug as the explicitly out-of-scope
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+(task #141) — not chased further here regardless, per the
+orchestrating session's explicit instruction to leave that class of bug
+alone. So this specific file was never going to be a P/F flip from
+that fix either.
 
 Issue #2 (`_next` / builtin `next()` on a generic iterator) is
 unaffected by the above fix and remains unfixed/undocumented as its own

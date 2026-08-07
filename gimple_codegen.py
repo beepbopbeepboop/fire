@@ -4379,65 +4379,11 @@ class GimpleGen:
                 if p not in self._extra_search_paths:
                     self._extra_search_paths.append(p)
 
-    def _module_search_candidates(self, module_name: str) -> list:
-        """Candidate file paths for `module_name`, in priority order — the
-        pure path-building half of `_compile_imported_module` (no
-        compiling, no side effects), factored out so a second caller
-        (`_parsed_import`'s link-mode sibling-file fallback, see its own
-        comment) can reuse the EXACT same search-order logic instead of a
-        parallel, drifting reimplementation. `_compile_imported_module`
-        itself now just consumes this list and does the existence-check +
-        compile loop.
-        """
-        # A LEADING-DOT relative import (`from ._adapters import wrap_spec`,
-        # `from ..pkg import x` — real Python relative-import syntax, as
-        # opposed to a plain flat name or an ABSOLUTE dotted package path
-        # like "pkg.helper") only ever means "resolved against the
-        # IMPORTING file's own directory/package nesting" — CWD, script_dir,
-        # and every other tier below are semantically meaningless for it
-        # (a relative import can't resolve to some unrelated search
-        # directory). Handled as an early, separate branch rather than
-        # falling into the generic `'.' in module_name` dotted-path logic
-        # below: that logic's `_dotted_parts = module_name.split('.')`
-        # produces a leading EMPTY component for a leading dot (e.g.
-        # `'._adapters'.split('.')` == `['', '_adapters']`), and the
-        # resulting `os.path.join(d, '/_adapters.py')`-shaped candidate is
-        # an ABSOLUTE path (a leading '/' from the empty first component)
-        # that silently discards `d` and never matches anything real —
-        # `_compile_imported_module('._adapters')` returned `(None, [])`
-        # for every relative import before this branch was added (real
-        # instance: `Lib/importlib/resources/_common.py`'s `from
-        # ._adapters import wrap_spec`, part of bugs/hard/CODEGEN_function_
-        # scoped_import_call_unresolved_at_link.md's fix). One leading dot
-        # = the importing file's own directory (its enclosing package);
-        # each additional dot goes up one more directory level — mirrors
-        # `_resolve_import_module_qualifier`'s identical dot-counting
-        # scheme (used for the SEPARATE lexical-scope qualifier tier),
-        # extended here to also try `.py` (that method only ever tried
-        # `.mojo`, fine for its own callers but not for locating a plain
-        # Python sibling file's actual source text/AST).
-        if module_name.startswith('.'):
-            _importer = getattr(self, '_current_filename', None)
-            if not _importer:
-                return []
-            _dots = len(module_name) - len(module_name.lstrip('.'))
-            _rest = module_name[_dots:]
-            _dir = os.path.dirname(os.path.abspath(_importer))
-            for _ in range(_dots - 1):
-                _parent = os.path.dirname(_dir)
-                if _parent == _dir:
-                    break
-                _dir = _parent
-            _rel_path = _rest.replace('.', os.sep)
-            _rel_candidates = []
-            for _ext in ('.py', '.mojo'):
-                if _rel_path:
-                    _rel_candidates.append(os.path.join(_dir, f"{_rel_path}{_ext}"))
-                    _rel_candidates.append(os.path.join(_dir, _rel_path, f"__init__{_ext}"))
-                else:
-                    _rel_candidates.append(os.path.join(_dir, f"__init__{_ext}"))
-            return _rel_candidates
+    def _compile_imported_module(self, module_name: str) -> tuple:
+        """Find and compile an imported .mojo module, extracting type information.
 
+        Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+        """
         # Get the directory where gimple_codegen.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -4550,15 +4496,6 @@ class GimpleGen:
                     mojo_paths.append(stdlib_file)
             except Exception as e:
                 _debug_note(f'stdlib path resolution failed for {module_name!r}', e)
-
-        return mojo_paths
-
-    def _compile_imported_module(self, module_name: str) -> tuple:
-        """Find and compile an imported .mojo module, extracting type information.
-
-        Returns (code: str, stmts: list) where stmts are parsed statements from the module.
-        """
-        mojo_paths = self._module_search_candidates(module_name)
 
         for path in mojo_paths:
             if os.path.exists(path):
@@ -21706,43 +21643,6 @@ class GimpleGen:
             try:
                 import imports as _imp
                 path = _imp.resolve_source(module) or self._resolve_test_relative_module(module)
-                if not path:
-                    # Neither of the above resolves a plain SIBLING .py file
-                    # sitting next to the file currently being compiled —
-                    # both are scoped to this project's own std/test module
-                    # namespaces, not an arbitrary external multi-file
-                    # Python project (e.g. compiling Python-3.14.6's own
-                    # Lib/runpy.py, which does `from pkgutil import
-                    # read_code` for its sibling Lib/pkgutil.py). do_imports
-                    # =True's inline pipeline already resolves exactly this
-                    # shape correctly via _compile_imported_module's own
-                    # importer-directory search; link mode's _exports()/
-                    # _register_link_imports (this method's only callers)
-                    # never had an equivalent fallback, so a function-scoped
-                    # `from pkgutil import read_code` used to fall through
-                    # to a "never resolved" registration with no signature,
-                    # which _func_csym then emitted as an UNQUALIFIED extern
-                    # (`extern int64_t read_code (...)`) instead of the real,
-                    # module-qualified symbol the inlined-fallback compile of
-                    # pkgutil.py actually defines (`pkgutil_read_code_...`)
-                    # — an honest compile that fails only at LINK time with
-                    # an undefined symbol (bugs/hard/CODEGEN_function_scoped_
-                    # import_call_unresolved_at_link.md). Reuse the exact
-                    # same importer-directory/CWD/script_dir search
-                    # `_compile_imported_module` already uses successfully
-                    # for this (via the shared `_module_search_candidates`
-                    # helper) rather than inventing a second, parallel path-
-                    # search implementation.
-                    # _module_search_candidates now understands BOTH a plain
-                    # sibling filename (the pkgutil case above) and a
-                    # leading-dot relative import (its own dedicated early
-                    # branch — see that method's docstring/comment for the
-                    # `from ._adapters import wrap_spec` real instance) —
-                    # one shared search-order implementation for both shapes.
-                    for _cand in self._module_search_candidates(module):
-                        if os.path.exists(_cand):
-                            path = _cand
-                            break
                 src = open(path).read() if path else ''
                 cache[module] = (path, src,
                                  ast_rewriter.rewrite(Parser(py_tokenize(src)).parse_module()) if src else None)

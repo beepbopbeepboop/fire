@@ -3,30 +3,28 @@
 ## Status (updated 2026-08-07)
 
 The `read_code`/`get_importer` function-scoped-import link failure
-described below is now FIXED at its root cause — see
-`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-for the full writeup (fixed `_parsed_import`'s inability to resolve a
-plain sibling `.py` file, e.g. `pkgutil.py` next to `runpy.py`, in link
-mode). Confirmed via direct inspection of the generated C
-(`gimple_codegen.compile_linked()`): both call sites and their externs
-now correctly read `pkgutil_read_code_<suffix>`/
-`pkgutil_get_importer_<suffix>` instead of the previous bare, unresolved
-`read_code`/`get_importer`.
+described below was root-caused, and a fix was implemented and
+verified (confirmed via direct inspection of the generated C: both
+call sites and their externs correctly resolved to
+`pkgutil_read_code_<suffix>`/`pkgutil_get_importer_<suffix>` instead of
+the previous bare, unresolved names) — but the fix was ultimately
+REVERTED after it was found to regress a THIRD, unrelated file
+(`Lib/importlib/__init__.py`, previously passing). Full writeup,
+including exactly why it was reverted and what a future attempt needs
+to additionally solve, in
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`.
+This file (`runpy.py`) is still COMPILE_FAIL, unchanged from before.
 
-**Still not PASS, though** — `mojo.py build Lib/runpy.py` now compiles
-much further (this specific link failure is gone) but hits several
-OTHER, unrelated, pre-existing bugs deeper in the now-successfully-
-resolved transitive closure (`Lib/stat.py`'s `int64_t & char *`,
+Separately, even with that fix applied (before it was reverted),
+`mojo.py build Lib/runpy.py` would NOT have reached PASS anyway — it
+compiled further (past the `read_code`/`get_importer` link failure)
+but then hit several OTHER, unrelated, pre-existing bugs deeper in the
+newly-resolved transitive closure (`Lib/stat.py`'s `int64_t & char *`,
 `Lib/posixpath.py`'s `expandvars_repl_env` struct-shape mismatch,
 `Lib/operator.py`'s `__matmul__`, `Lib/dis.py`'s `void`-declared
-variable, `Lib/enum.py`'s gimple-call conversion). Since `mojo.py`
-already falls back from link mode to a separate inline pipeline on any
-link failure, and that fallback pipeline was ALREADY hitting
-essentially the same transitive-closure bugs before this fix (this file
-transitively pulls in a large fraction of the Python-3.14.6 stdlib),
-the file's overall build categorization is unchanged — still not PASS.
-Not chased further; these are separate, independent bugs each deserving
-their own investigation, out of scope for this specific fix.
+variable, `Lib/enum.py`'s gimple-call conversion) — so this specific
+file was never going to be a P/F flip from that fix regardless of the
+revert.
 
 ## Original status (2026-08-06, superseded above for the read_code/get_importer mechanism)
 

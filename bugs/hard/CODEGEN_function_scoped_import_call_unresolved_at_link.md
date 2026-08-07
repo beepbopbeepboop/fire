@@ -1,6 +1,6 @@
 # HARD BUG: a function-scoped (local) `from X import Y` followed by calling `Y(...)` compiles clean but leaves an undefined symbol at LINK time
 
-## Status (updated 2026-08-07): ROOT CAUSE FIXED for link-mode's `_exports()`/`_parsed_import` sibling-file resolution — but NEITHER confirmed instance actually reaches PASS, both hit independent, deeper, unrelated bugs further into their transitive closure
+## Status (updated 2026-08-07): Root cause fully understood; a fix was implemented, verified against all 5 mandated gates clean, then REVERTED after independently discovering it regresses a THIRD, previously-passing file not covered by any of those 5 gates. NOT shipped. Still unfixed.
 
 Root-caused 2026-08-06 while investigating
 `bugs/COMPILE_FAIL_importlib_resources__common.md` and
@@ -8,40 +8,73 @@ Root-caused 2026-08-06 while investigating
 (two independent files, same mechanism). Originally left unattempted as
 cross-module import-resolution machinery with plausibly wide reach.
 
-Re-investigated 2026-08-07 and the actual root cause turned out to be
-narrower and more mechanical than the original "scan doesn't walk
-function bodies" hypothesis (see "Corrected root cause" below — the
-scan already DOES walk function bodies; the real bug is a step
-downstream of that). Fixed the narrow, well-isolated part: link mode's
-`_parsed_import`/`_exports()` had no way to locate a plain sibling `.py`
-file (absolute bare name like `pkgutil`, or a leading-dot relative
-import like `._adapters`) sitting next to the file currently being
-compiled — both are outside this project's own std/test module
-namespaces, which is all `imports.resolve_source`/
-`_resolve_test_relative_module` know how to resolve. Without a source
-path, `_register_link_imports` never found a real signature for the
-imported name, so `_func_mangleable`/`_func_qualifier` treated it as
-"never resolved" and the call site emitted a bare, unqualified name —
-while `do_imports=True`'s SEPARATE inline pipeline (reached only via
-mojo.py's link-mode-then-inline-fallback chain) resolves the very same
-sibling file fine via `_compile_imported_module`'s own importer-
-directory search, and DOES module-qualify the definition it inlines —
-hence the mismatch and the undefined symbol at link time.
+Re-investigated 2026-08-07: the original "scan doesn't walk function
+bodies" hypothesis was WRONG (see "Corrected root cause" below — the
+scan already walks function bodies fine; the real gap is one step
+earlier, in path resolution). A fix was implemented (see "Fix
+implemented, then reverted" below), and it correctly did what it was
+supposed to do — confirmed via direct C-output inspection for both
+known instances. It also passed the full mandated 5-step quality gate
+completely clean (test_gimple.py 247/247, test_module_cache.py 76/76,
+check-selfhost clean, from-scratch dylib rebuild 0 skips, compile_
+stdlib.py -j8 664/664 0 unexpected — byte-identical to baseline).
 
-**Important honest caveat**: fixing this narrow resolution gap does
-NOT make either of the two confirmed real-world instances reach a
-successful `mojo.py build`. Both files have their OWN, separate,
-unrelated COMPILE_FAIL bugs further into the now-successfully-resolved
-transitive closure (see "Verification" below for exactly what each one
-now hits instead). This fix is still being kept because (a) it is a
-genuine, narrow, correctly-isolated bug fix verified clean against the
-full 5-step quality gate with zero regression, (b) it removes a
-systematically-wrong behavior (silently emitting a WRONG unqualified
-extern for any function-scoped/relative import link mode can't
-resolve) that could affect files outside this specific corpus, and (c)
-per this session's own instructions, a value-adding fix is kept even
-without a P/F flip on the two known instances, as long as it's verified
-safe.
+**But it was reverted anyway**, for two compounding reasons discovered
+only after the gate passed clean:
+1. Neither of the two ORIGINAL confirmed instances (`runpy.py`,
+   `importlib/resources/_common.py`) actually reaches a passing
+   `mojo.py build` even with the fix — both have separate, unrelated,
+   deeper bugs newly reachable once their transitive closure resolves
+   correctly (see "What the fix actually achieves" below). Zero
+   observed P/F flips.
+2. Independently spot-checking OTHER already-passing COMPILE_FAIL docs
+   (routine practice, not triggered by any specific suspicion) found
+   that the fix **regresses `Lib/importlib/__init__.py` from a clean
+   PASS to a hard COMPILE_FAIL** — a file with NO known connection to
+   this bug, not touched by any of the fix's own testing. Root cause:
+   `importlib/__init__.py` does `from . import _bootstrap`, and the
+   SAME fix that correctly resolves `pkgutil`/`._adapters` ALSO now
+   resolves `_bootstrap.py` (previously silently unresolved and never
+   inlined at all) — but `_bootstrap.py` itself has its own pre-
+   existing, unrelated GIMPLE-type bug (`non-trivial conversion in
+   'integer_cst'` at line 393, a `char* -> int64_t` pointer/integer
+   mismatch at line 951) that was never reachable before because
+   `_bootstrap.py` was never actually compiled as part of this file's
+   closure. Confirmed via a direct before/after comparison (`git apply
+   -R`/`git apply` round-trip on the exact same fix patch): WITHOUT the
+   fix, `mojo.py build Lib/importlib/__init__.py` → rc=0, real `.o`
+   produced. WITH the fix, same command → rc=1, no `.o`, the
+   `_bootstrap.py` errors above.
+
+**None of the 5 mandated gates caught this** — `compile_stdlib.py`
+tests this project's own `std.*` Mojo modules (which resolve via real
+dylibs, never hitting this specific source-level fallback path),
+`check-selfhost` tests this compiler's own Python source (single-file,
+no sibling/relative multi-file imports of this shape), and
+`test_gimple.py`/`test_module_cache.py` are unit-level. The actual
+regression only showed up against the Python-3.14.6 COMPILE_FAIL
+corpus this task exists to improve — which is exactly why this task's
+own instructions call for re-verifying against the corpus itself, not
+just the prescribed gate, before calling anything done. Recorded here
+as a concrete instance of that principle, alongside this project's
+other two documented "passed compile_stdlib.py cleanly but still
+regressed something" incidents.
+
+**Conclusion**: this specific narrow fix is not viable as-is — its
+value (correctly resolving two more import shapes) is real, but its
+side effect (newly resolving OTHER previously-silently-unresolved
+sibling/relative imports across the ENTIRE Python-3.14.6 corpus, each
+of which may have its own independent, latent, never-before-reachable
+bug) makes its blast radius fundamentally larger than "two known
+files," and untestable in full without exhaustively re-running the
+ENTIRE corpus (60+ files, not just the 2 originally-confirmed
+instances) for every candidate fix — which is what actually caught
+this. Left unfixed. A future attempt should re-run the full COMPILE_FAIL
+corpus triage (not just the specific instances motivating the fix)
+before considering any fix here landable, precisely because this
+resolution path is shared by every unresolved sibling/relative import
+in the whole corpus, not just the 1-2 files that happen to demonstrate
+the symptom.
 
 ## Symptom
 
@@ -151,7 +184,7 @@ specifically an undefined symbol at LINK time (the extern's shape is
 internally self-consistent, it's just never actually defined anywhere
 in what THIS pipeline links).
 
-## Fix (2026-08-07)
+## Fix implemented, verified, then REVERTED (2026-08-07) — kept here for whoever attempts this next
 
 Two additive changes, `gimple_codegen.py`:
 
@@ -187,7 +220,22 @@ the EXISTING `_own_imported_func_home`/scope-stack-derived qualifier
 machinery (already correct) both just start working for these two
 shapes, exactly as they already did for every OTHER resolvable import.
 
-## Verification
+This fix (both changes above) was applied, committed, then fully
+REVERTED (`git apply -R` of the exact same patch) once the
+`importlib/__init__.py` regression below was found — it does NOT exist
+in the current tree. Described here in full so a future attempt
+doesn't have to re-derive it from scratch, but it should not be
+re-applied verbatim without ALSO solving the "silently-unresolved
+sibling import may hide an unrelated latent bug" problem described in
+the Status section above (e.g. by only inlining the resolved sibling
+module when a fast up-front syntax-only check shows it wouldn't hit a
+KNOWN class of GIMPLE-type error, or by making the newly-resolved
+inline-fallback path fail soft — falling back to the OLD "unresolved,
+stub it out" behavior — when the sibling module itself doesn't compile
+clean, rather than propagating its error up through the whole client
+build).
+
+## Verification (of the reverted fix, before it was reverted)
 
 Full 5-step quality gate, all clean:
 1. `test_gimple.py`: 247/247 passed.
@@ -244,16 +292,31 @@ resolved transitive closure**:
   session per the orchestrating session's explicit instructions. Not
   chased further here for the same reason.
 
-## Risk assessment (post-fix)
+## Risk assessment (revised, post-revert) — the "purely additive, so it's safe" reasoning was insufficient
 
-Confirmed LOW in practice, despite touching cross-module import
-resolution (a category this session otherwise treats as high-risk):
-the change is purely ADDITIVE (a new fallback tier, only ever consulted
-when BOTH pre-existing resolvers already returned nothing — it can only
-turn a previously-"never resolved" case into a resolved one, never
-change the answer for anything that already resolved via an existing
-tier) and the full 5-step gate, including the load-bearing `compile_
-stdlib.py -j8` regression check, came back with the EXACT same 664/664
-result as baseline. Kept despite not flipping either known instance to
-PASS, per this task's own guidance that a correctly-verified fix with
-real (if not immediately visible) value is worth keeping.
+The fix genuinely IS purely additive at the CODE level (a new fallback
+tier, only ever consulted when both pre-existing resolvers already
+returned nothing — it literally cannot change the answer for anything
+that already resolved via an existing tier), and the full 5-step gate
+came back byte-identical to baseline (664/664). Both of those are true
+and were not wrong. What was wrong was treating "purely additive at
+the code level" as equivalent to "safe" — being ADDITIVE only bounds
+what happens to imports that ALREADY resolved; it says nothing about
+what happens to the (potentially large) set of imports that used to
+resolve to NOTHING and now resolve to a REAL file with its own
+independent, previously-unreachable bugs. That set is exactly the
+"function-scoped or relative sibling import this compiler couldn't
+previously find" set — which, for a corpus the size of the full
+Python-3.14.6 stdlib/tools tree, is not a small, easily-enumerable set
+at all. The `importlib/__init__.py` regression is a direct instance of
+exactly this: previously-silent non-resolution accidentally acting as
+a firewall against `_bootstrap.py`'s own bug.
+
+Lesson for next time: for a fix whose whole nature is "resolve
+something that used to be unresolved," the load-bearing check is NOT
+"does the mandated 5-gate stay green" (necessary but insufficient) —
+it's "does the FULL COMPILE_FAIL corpus's pass count stay the same or
+improve," run before AND after, over the WHOLE corpus, not just the
+files that motivated the fix. That full-corpus re-triage is what
+actually caught this regression, well after the mandated gate had
+already passed clean.
