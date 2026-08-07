@@ -15358,6 +15358,37 @@ class GimpleGen:
             return self._lower_slice(node.index)
 
         ot, ov = self.lower_expr(node.obj)
+
+        # `self.prop[key]` where `prop` is a 0-arg property/method accessed
+        # without call syntax lowers `self.prop` alone to a deferred,
+        # uncalled `MojoBoundMethod *` value (see _lower_bound_method_
+        # value) — correct when the consuming context is itself a call
+        # (`self.prop()`), but a subscript is NOT a call: real Python
+        # auto-invokes `prop` (the property getter / bound method) first,
+        # THEN subscripts its actual return value. Left unhandled, the
+        # generic "opaque/unknown pointer type" fallback further below
+        # tried to treat the MojoBoundMethod* itself as an array base
+        # pointer (a `_mojo_at_MojoBoundMethod` GIMPLE pointer-arithmetic
+        # helper on a struct with no such element shape — "cannot convert
+        # to a pointer type" / "non-trivial conversion") and, worse,
+        # reinterpreted the subscript's STRING key as a raw integer byte
+        # offset. Confirmed via Lib/importlib/metadata/__init__.py's
+        # `Distribution.name`/`.version` properties, both `return self.
+        # metadata['Name']`/`self.metadata['Version']` where `metadata` is
+        # an inherited `@property` defined on the base class — the
+        # subscript's own object expression is a bare, uncalled bound
+        # method the same way any deferred `f = self.method` reference is.
+        if ot == 'MojoBoundMethod *':
+            ret_type = self._bound_method_ret_types.get(ov, 'int64_t')
+            raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                     [('MojoBoundMethod *', ov)])
+            if ret_type in ('int64_t', 'int'):
+                ot, ov = ret_type, raw_t
+            elif ret_type == 'void':
+                ot, ov = 'int', self._new_val('int', '0')
+            else:
+                ot, ov = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
+
         idx_type, iv  = self.lower_expr(node.index)
 
         if ot == 'MojoList *':

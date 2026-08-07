@@ -2,6 +2,51 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py`
 
+## Status (updated 2026-08-07, Track B continuation session)
+
+Prototyped a fix for issue #3 (CFUNCTYPE) in `_emit_call`: detect a
+callee param-type signature ending `[..., 'MojoList *', 'MojoDict *']`
+(the `*args`+`**kwargs` "forwarding pattern" shape) called with MORE
+loose positional args than `len(param_types)` — unambiguous proof the
+call site is NOT a spread-forward (which always passes exactly
+`len(param_types)` args) — and pack the excess into a real `MojoList *`
+(mirroring `_lower_varargs_pack`'s box-each-loose-value convention)
+instead of letting them fall through to raw positional coercion/overflow.
+This DID fix the `memmove`/`memset` repro cleanly and passed the FULL
+mandated gate (test_gimple.py 247/247, test_module_cache.py 76/76,
+`make check-selfhost` clean, from-scratch stdlib dylib rebuild 0 skips,
+`compile_stdlib.py -j8` 664/664 0 unexpected) with no regressions found
+in a spot-check of collections/__init__.py and subprocess.py.
+
+**Reverted without committing** — this is exactly task #142's held-back
+bug (`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`),
+explicitly out of scope for this session ("held back for separate,
+directly-supervised work due to prior regressions" — see that file's own
+extensive risk writeup, which pre-dates this attempt and already
+recommended almost exactly this fix shape). Recorded here in case it's
+useful groundwork for the supervised follow-up: the diff was a ~30-line
+addition to `_emit_call` (gimple_codegen.py, right before the existing
+`param_types[-1] == '...'` vararg-packing block), not a change to
+`_signature_ctypes` itself (i.e. it took the "fix belongs entirely on
+the CALL-SITE lowering side" direction the hard-bug doc recommended, via
+an arity-overflow signal rather than true spread-vs-literal AST
+detection — simpler than the doc's suggested approach, and it passed the
+same gate, but wasn't run through further scrutiny/multi-day soak before
+this session's explicit instruction to leave #142 alone took precedence).
+Not applied to the tree.
+
+With ctypes/__init__.py's CFUNCTYPE issue set aside again, a fresh build
+reveals the file's NEXT blocker past that point (previously masked by
+the compile error): `_load_library` is defined conditionally inside the
+class body (`if _os.name == "nt": def _load_library(...): ... else: def
+_load_library(...): ...` — only one survives at class-definition time),
+AND `CDLL.__init__` defines a NESTED CLASS (`class _FuncPtr(_CFuncPtr):
+_flags_ = self._func_flags_ ...`) inside its own body, referencing
+`self`. Both are dynamic-metaprogramming shapes this compiler doesn't
+special-case; link fails with `_PyDLL__FuncPtr`/`_PyDLL__load_library`
+undefined. Feature-sized, not investigated further — flagging for
+awareness, not a new task.
+
 ## Status (updated 2026-08-06)
 
 Multiple distinct issues found across two investigation passes (original
