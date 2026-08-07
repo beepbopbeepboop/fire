@@ -343,8 +343,18 @@ int64_t     mojo_list_index_str(MojoList *l, const char *v);
 int64_t     mojo_list_index_int(MojoList *l, int64_t v);
 int64_t     MojoList_index(MojoList *l, int v);
 
-/* Generic Python-object attribute accessor (used by GIMPLE codegen for opaque int nodes) */
+/* Generic Python-object attribute accessor (used by GIMPLE codegen for
+ * opaque int nodes) — real per-object dynamic-attribute storage, raises a
+ * genuine, catchable AttributeError on a miss. See mojo_runtime.c's own
+ * doc comment above the definition and bugs/hard/CODEGEN_dynamic_
+ * attribute_on_generic_object.md. */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
+/* Raises a real AttributeError for attribute `attr` — same runtime call
+ * sequence compiled `raise AttributeError(...)` itself lowers to, so a
+ * compiled `except AttributeError:` genuinely catches this. Used by
+ * mojo_obj_getattr on a miss; also usable directly by any other runtime
+ * helper that needs to raise the same typed exception. */
+void        mojo_raise_attribute_error(char *attr);
 void        mojo_unsupported_iter(const char *type_name);
 
 /* Real `hash(x)` builtin -- see mojo_runtime.c's docstring above their
@@ -437,6 +447,8 @@ char *mojo_bool_to_str(int b);
 int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
+/* Real per-object dynamic-attribute storage (see mojo_obj_getattr's own
+ * doc comment in mojo_runtime.c) — no longer a no-op. */
 void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);

@@ -337,6 +337,75 @@ def g(a, b):
 print(f"result: {g('a', 'b')}")
 """, "result: ab\n")
 
+    # 17. Dynamic-attribute Steps 1-4 (bugs/hard/CODEGEN_dynamic_attribute_
+    # on_generic_object.md): a genuinely NEW attribute set on an opaque
+    # object (real per-object storage, not a silent no-op) and a MISSING
+    # dynamic attribute raising a real, catchable AttributeError (not the
+    # old silent-0 stub) -- both required for this doc's own minimal repro
+    # (`try: x = cls.__slot_names__ except AttributeError: ...`) to behave
+    # correctly, not merely "stop erroring at compile time". Checks the
+    # first call takes the except branch (miss, initializes), and a SECOND
+    # call with the same object takes the fast path and sees the value the
+    # first call actually stored -- confirms mojo_setattr's storage is
+    # real and persists per-object, not just that mojo_raise_attribute_
+    # error fires once.
+    test_gimple_stdout("gimple_dynamic_attribute_real_storage_and_attributeerror", """\
+class Holder:
+    pass
+
+
+def get_or_init(cls):
+    try:
+        slotnames = cls.__slot_names__
+        print("fast path, got:", len(slotnames))
+    except AttributeError:
+        print("miss, initializing")
+        slotnames = cls.__slot_names__ = []
+    slotnames.append("x")
+    return slotnames
+
+
+def main():
+    h = Holder()
+    r1 = get_or_init(h)
+    print("after first call:", len(r1))
+    r2 = get_or_init(h)
+    print("after second call:", len(r2))
+
+
+main()
+""", "miss, initializing\nafter first call: 1\nfast path, got: 1\nafter second call: 2\n")
+
+    # 18. Sub-case C (bugs/hard/CODEGEN_dynamic_attribute_on_generic_
+    # object.md Step 4): a dynamic attribute set/read on a value whose
+    # static type resolved to one of this codegen's own FIXED-layout
+    # runtime structs (MojoBoundMethod, here -- a capturing closure) rather
+    # than an opaque int64_t/void*. Confirmed real instance: Tools/scripts/
+    # var_access_benchmark.py's `inner.__name__ = 'read_nonlocal'` / a
+    # later `f.__name__` read. Before this fix: a hard GCC "'MojoBoundMethod'
+    # has no member named '__name__'" compile failure (the write went
+    # through a raw `->__name__` field write no such C struct field exists
+    # for) -- not merely a wrong runtime value, an outright compile error.
+    test_gimple_stdout("gimple_dynamic_attribute_fixed_runtime_struct_bound_method", """\
+def make_closure():
+    captured = 10
+
+    def inner():
+        return captured + 1
+
+    return inner
+
+
+def main():
+    f = make_closure()
+    f.__name__ = "read_nonlocal"
+    print(f.__name__)
+    print(f())
+
+
+main()
+""", "read_nonlocal\n11\n")
+
 
 def main():
     gcc = find_gcc()

@@ -3,13 +3,182 @@
 ## Status
 
 **Step 0 implemented and verified 2026-08-06** (see "Step 0" below for
-what landed). Steps 1-4 (the genuinely-new-attribute dynamic-storage
-cases, Sub-cases A/B/C) remain unimplemented — concrete implementation
-plan below, building on existing runtime-dispatch infrastructure this
-codegen already has, smaller in scope than the original "new feature
-from scratch" framing suggested, but still real, multi-step work (new
-runtime storage + several codegen call sites), not attempted this
-session.
+what landed). **Steps 1-4 implemented and verified 2026-08-07** (see
+"Steps 1-4 implementation notes" below) — real per-object dynamic-
+attribute storage, a genuine catchable AttributeError on a miss, and
+Sub-case C (fixed-layout runtime structs like `MojoBoundMethod`) all now
+work end-to-end, confirmed via full compile+run repros (not just "stops
+erroring at compile time"). One residual gap found during real-world
+verification and deliberately NOT fixed here — see "Residual gap: caught
+exception objects" below.
+
+### Steps 1-4 implementation notes (2026-08-07)
+
+Implemented essentially as planned, in `runtime/mojo_runtime.c`/`.h` and
+`gimple_codegen.py`:
+
+- **Step 1 (runtime storage)**: `_mojo_dynattr_objects` (a lazily-
+  allocated `MojoDict *` keyed by the object pointer's hex text, reusing
+  `MojoDict`'s existing string-keyed hash table rather than a second
+  pointer-keyed one) + `_mojo_dynattr_key`, exactly as the plan's own
+  pseudocode. `mojo_setattr` now actually stores; `mojo_obj_getattr` now
+  actually reads.
+- **Step 2 (real AttributeError)**: `mojo_raise_attribute_error(char *
+  attr)`, mirroring the EXACT runtime call sequence compiled `raise
+  AttributeError(...)` itself lowers to (`_gen_stmt_RaiseStmt`:
+  `mojo_exc_type_set` + `mojo_exc_msg_set` + `mojo_exc_obj_set` +
+  `mojo_raise`) — including `mojo_exc_type_set`, which the plan's own
+  illustrative pseudocode omitted. Without it, only the lenient
+  untagged-exception fallback would match (correct for a single-handler
+  `except AttributeError:` by coincidence, but not a real match, and
+  wrong for a multi-handler try where `AttributeError` isn't the first
+  clause). The tag is `GimpleGen._exc_type_id('AttributeError')` —
+  `(zlib.crc32(b"AttributeError") & 0x7fffffff) or 1` = `1471495998`,
+  computed once via Python and hardcoded as `_MOJO_EXC_TAG_ATTRIBUTEERROR`
+  in the C runtime (this is a pure, deterministic function of the class
+  name string per `_exc_type_id`'s own docstring, so a value computed
+  once in Python and never revisited is safe as long as that function's
+  algorithm doesn't change — flagged in the C comment so it stays
+  discoverable if it ever does).
+- **Step 3 (wire the dispatch)**: needed zero codegen changes, confirmed
+  — `_mojo_dispatch_getattr`/`_mojo_dispatch_setattr`'s existing
+  fallthrough already called `mojo_obj_getattr`/`mojo_setattr` (Steps
+  1-2 alone make Sub-cases A/B work end to end).
+- **Step 4 (Sub-case C, fixed-layout runtime structs)**: new
+  `_FIXED_RUNTIME_STRUCT_NAMES = frozenset({'MojoBoundMethod',
+  'MojoGenerator', 'MojoAsync'})`, checked at THREE write-side call sites
+  (plain `AssignStmt` MemberExpr target, `AugAssignStmt` MemberExpr
+  target, AND `MultiAssignStmt`/chained-assignment MemberExpr targets —
+  see "A fourth call site found during verification" below for why the
+  third one was necessary) and one read-side site (`_lower_MemberExpr`'s
+  final "unknown struct field" fallback, which previously blindly emitted
+  a raw `->member` access GCC rejects for a struct with no such field).
+
+### A fourth call site found during verification, not in the original plan
+
+The doc's own minimal repro (`slotnames = cls.__slot_names__ = []`) is a
+**chained assignment** — Python's `a = b = c` shape, which this codegen
+lowers via a wholly separate function, `_gen_stmt_MultiAssignStmt`, not
+the single-target `_gen_stmt_AssignStmt` the plan's "gimple_codegen.py:
+16498-16502" line reference pointed at. Running the repro through
+`mojo.py build` immediately surfaced this: `MultiAssignStmt`'s own
+`MemberExpr`-target handling had **neither** the opaque-object dispatch
+(Sub-case A/B) **nor** the fixed-runtime-struct dispatch (Sub-case C) —
+it unconditionally emitted a raw `ov->field = v`, for every target type.
+Fixed by adding both checks there too, mirroring the single-target
+branch exactly (including the `continue` to skip the shared fallback
+write once handled). Worth flagging for anyone touching this dispatch
+class of check in the future: **there are (at least) three distinct
+write-side lowering functions for a `MemberExpr` target** (`AssignStmt`,
+`AugAssignStmt`, `MultiAssignStmt`), and a fix scoped to just one or two
+of them will compile clean for simple repros while silently missing the
+chained-assignment shape specifically — which is exactly the shape this
+bug's own canonical minimal repro uses.
+
+### A fifth gap found during verification: `.__name__`'s own special case
+
+`_lower_MemberExpr` has an EARLIER, unconditional special case for
+`node.member == '__name__'` (the `type(x).__name__` / AST-walker
+dispatch chokepoint, pre-existing and unrelated to this bug) that
+returns a hardcoded `"<type>"` placeholder string for ANY receiver type
+not in `self.struct_field_types` — including `MojoBoundMethod`,
+intercepting `f.__name__` reads BEFORE they ever reach Step 4's new
+fixed-runtime-struct branch further down the same function. Confirmed
+via the Sub-case C repro below: it compiled and ran fine but printed
+`<type>` instead of the dynamically-set name. Fixed narrowly: this
+special case now routes through the same `_mojo_dispatch_getattr` (cast
+back to `char *`, since `__name__` is always conceptually a string) when
+the receiver is opaque OR a fixed-runtime-struct name — every OTHER
+"not in struct_field_types" case (the special case's original, documented
+purpose) keeps the original `"<type>"` stub unchanged.
+
+### Residual gap: caught exception objects (found, NOT fixed)
+
+`Lib/pathlib/_os.py`'s `except OSError as err: ... err.filename = ...`
+(one of the doc's own confirmed real-world instances) is **still
+broken** after Steps 1-4 — a real, distinct gap, not a verification
+oversight. Traced via direct `.ci` inspection: the caught exception
+object (`err`) is lowered as a bare `mojo_exc_obj_get()` result cast
+directly to `char *` (`_t134 = (char *) _t133;`) — this runtime models
+an exception's "object" payload as a plain message string, not a real
+struct/object with its own identity. `err.filename = ...` therefore
+tries to write through a `char *`-typed receiver, which is neither
+Sub-case A/B (`ot` is `char *`, not `int`/`int64_t`/`void *`) nor
+Sub-case C (`char *` isn't a `_FIXED_RUNTIME_STRUCT_NAMES` member) — it's
+a genuinely different, third receiver-type shape this doc's Steps 1-4
+scope never covered. Deliberately not fixed here: broadening the opaque-
+dispatch condition to also match bare `char *` receivers would catch
+this case, but `char *` is used PERVASIVELY throughout this codegen for
+ordinary, unrelated string values — adding it to the same dispatch
+condition risks matching unintended cases far outside this bug's scope
+(this project's documented history of exactly this kind of narrowly-
+scoped-looking change to shared dispatch/type machinery causing
+hard-to-predict regressions — see `bugs/COMPILE_FAIL_collections___init__.md`
+— made a same-session broadening attempt feel unjustifiably risky without
+a much more careful, dedicated look at every other `ot in (...)` call
+site sharing that exact tuple literal). Confirmed via direct `.ci`
+inspection only (0 "structure or union" errors is the OTHER 4 confirmed-
+instance files' verification method below) — `pathlib/_os.py` itself was
+NOT re-verified against the full gate-style error-count comparison; it
+simply still shows the exact same 2 "request for member 'filename'/
+'filename2' in something not a structure or union" errors as before this
+session's changes, unchanged.
+
+### Verification against real-world files (2026-08-07)
+
+Direct `gimple_codegen.compile_to_gimple(..., do_imports=True)` +
+`gcc -fsyntax-only` (0 "request for member ... in something not a
+structure or union" errors is the pass criterion — a different,
+unrelated error is an acceptable/expected outcome per this session's
+established norm, since these are real, large, third-party files with
+many independent gaps):
+
+| file | doc's confirmed symptom | after Steps 1-4 |
+|---|---|---|
+| `Tools/c-analyzer/c_common/clsutil.py` | `cls.__slot_names__` (A/B) + `__del__._slotted` (C) | 0 "structure or union" errors (0 gcc errors at all); LINK fails on an unrelated, separate missing-symbol bug (`_Slot__ensure___del___lambda_1`, `_classonly_getter`) |
+| `Lib/collections/__init__.py` | `self.__hardroot = _Link()` on opaque `self` | 0 "structure or union" errors; 6 unrelated errors (redefinition, pointer-type mismatches) |
+| `Lib/ctypes/__init__.py` | `c_ubyte.__ctype_le__ = c_ubyte.__ctype_be__ = c_ubyte` on a class object | 0 "structure or union" errors; 2 unrelated "too many arguments" errors |
+| `Lib/string/__init__.py` | `cls.pattern = re.compile(...)` in `__init_subclass__` | 0 "structure or union" errors; 2 unrelated "invalid conversion in gimple call" errors |
+| `Tools/scripts/var_access_benchmark.py` | `inner.__name__ = ...` write + `f.__name__` read on `MojoBoundMethod` (Sub-case C) | 0 "structure or union"/"has no member named" errors; 2 unrelated "undeclared" errors |
+| `Lib/pathlib/_os.py` | `err.filename = ...` on a caught exception object | **UNCHANGED** — see "Residual gap" above, a genuinely different receiver-type shape |
+
+Two hand-written, self-contained repros were compiled AND RUN (not just
+syntax-checked) end to end, confirming actual runtime behavior, not just
+absence of a compile error — both also landed as permanent regression
+tests, `test_gimple_runner.py`'s `gimple_dynamic_attribute_real_storage_
+and_attributeerror` and `gimple_dynamic_attribute_fixed_runtime_struct_
+bound_method`:
+
+1. The doc's own minimal repro pattern (`try: x = cls.__slot_names__
+   except AttributeError: x = cls.__slot_names__ = []`), extended to call
+   twice with the SAME object: first call takes the `except` branch
+   (`mojo_raise_attribute_error` genuinely fires and is genuinely caught)
+   and initializes; second call takes the fast path and sees the value
+   the FIRST call actually stored (`mojo_setattr`'s storage is real and
+   persists per-object, not merely "no longer crashes"). Output matched
+   exactly: `miss, initializing` / `after first call: 1` / `fast path,
+   got: 1` / `after second call: 2`.
+2. Sub-case C: a capturing closure (`MojoBoundMethod *`) gets `.__name__`
+   set then read back, plus called — confirms both the write-side Step 4
+   fix AND the separate `__name__`-special-case fix (see above) together.
+   Output matched exactly: `read_nonlocal` / `11`.
+
+### Quality gate (2026-08-07, Steps 1-4)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed (including the
+   link-mode tiny-client-object size-budget check Step 0's own regression
+   was found through).
+3. `make check-selfhost` — clean.
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
+   failures (unchanged from baseline).
+6. `python3 test_gimple_runner.py` — 18 passed, 0 failed (16 pre-existing
+   + the 2 new regression tests above). Not one of the mandatory 5, but
+   the only suite in this repo that actually EXECUTES compiled output and
+   checks real stdout, which is what this fix's own correctness hinges
+   on (compiling clean is necessary but not sufficient — Step 0's own
+   `.__dict__`/`vars()` fix already documented this same distinction).
 
 ### Step 0 implementation notes
 
