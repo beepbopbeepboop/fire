@@ -1,6 +1,27 @@
 # COMPILE_FAIL: Lib/runpy.py — request for member '__module__' in something not a structure or union
 
-## Status (updated 2026-08-06)
+## Status (RESOLVED 2026-08-07)
+
+**Builds and links successfully now.** `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/runpy.py` succeeds end-to-end in ~7s
+(both `driver.compile_program`'s link mode directly, and the full CLI
+path). The link failure described below (`_get_importer`/`_read_code`
+undefined symbols) was root-caused and fixed in
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+— see that doc for the full mechanism and fix (two coordinated changes
+in `gimple_codegen.py`'s link-mode import-symbol registration/preamble
+logic). Full 5-part quality gate passed (test_gimple.py 247/0,
+test_module_cache.py 76/0, check-selfhost clean, stdlib dylib rebuild 0
+skips, compile_stdlib.py 664/664 0 unexpected).
+
+The separate `os.py: 'relpath' is ambiguous` informational note
+mentioned below (a transitively-imported `os.py` falling back to
+source interpretation due to a cross-module free-function-name
+collision) still appears during the build but does not block it — an
+intentional, already-implemented honest-refusal diagnostic, not
+investigated further as part of this fix.
+
+## Status (updated 2026-08-06, historical — link failure now fixed, see above)
 
 Re-ran (150s timeout, one retry with a longer background run that DID
 complete): current error is a LINK failure, not the stale `__module__`

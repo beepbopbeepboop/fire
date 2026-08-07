@@ -19108,10 +19108,33 @@ class GimpleGen:
             # Lib/subprocess.py` run.
             sig = self._KNOWN_SIGS.get(symbol_name)
             ret = sig[0] if sig else 'int64_t'
-            self.imported_symbols[symbol_name] = {
-                'module': node.module,
-                'return_type': ret,
-            }
+            # Don't clobber an entry link-mode's Phase 0 pre-pass
+            # (_register_link_imports, gen_module, self.link_imports=True
+            # only) already resolved to the real defining module's C
+            # signature — this statement-lowering path runs AFTER that
+            # pre-pass (it fires while walking the function BODY that
+            # contains this FromImportStmt, whereas Phase 0 runs before any
+            # body is walked at all), so an unconditional overwrite here
+            # DOWNGRADES an already-correctly-resolved entry (with a real
+            # 'signature'/'c_return_type', enough for the extern-decl
+            # preamble to link against the real symbol) back down to this
+            # bare 'module'+'return_type'-only shape, which the preamble's
+            # imported_symbols loop (~gimple_codegen.py:32472's "no
+            # 'signature' was ever attached" branch) reads as "never
+            # resolved to any real implementation" and emits a
+            # do_imports=False-mode bare `extern` with no real definition
+            # ever linked in — an undefined symbol at LINK time (confirmed
+            # via `Lib/runpy.py`'s function-scoped `from pkgutil import
+            # read_code`/`get_importer`, see bugs/hard/CODEGEN_function_
+            # scoped_import_call_unresolved_at_link.md). Only fall through
+            # to the bare-stub registration below when Phase 0 didn't
+            # already resolve this exact name to a real signature.
+            if not (isinstance(self.imported_symbols.get(symbol_name), dict)
+                    and 'signature' in self.imported_symbols[symbol_name]):
+                self.imported_symbols[symbol_name] = {
+                    'module': node.module,
+                    'return_type': ret,
+                }
             # Track in func_return_types so calls know the return type
             if symbol_name not in self.func_return_types:
                 self.func_return_types[symbol_name] = ret
@@ -32479,7 +32502,7 @@ class GimpleGen:
                 # real implementation.
                 ret_type = sym_info.get('return_type', 'int64_t')
                 ret_type = self._resolve_type(ret_type) if ret_type != 'unknown' else 'int'
-                if self.do_imports:
+                if self.do_imports or self.link_imports:
                     # do_imports=True is `mojo.py build`'s standalone-binary
                     # mode: every resolvable Mojo definition is inlined into
                     # this same translation unit and would already have hit
@@ -32493,6 +32516,39 @@ class GimpleGen:
                     # Emit an actual (weak) definition instead, matching the
                     # existing "unavailable in compiled mode" convention
                     # _stub_only_modules above uses for the same situation.
+                    #
+                    # link_imports=True (driver.py's dylib-based link mode)
+                    # is included here too, NOT just do_imports=True: reaching
+                    # this branch under link_imports means _register_link_
+                    # imports's own Phase 0 pre-pass (gen_module, which DOES
+                    # resolve real dylib/reflection signatures when one
+                    # exists) already looked at this exact name and could
+                    # NOT find a 'signature' for it either — e.g. a function-
+                    # scoped `from pkgutil import read_code` reaching a
+                    # plain untyped Python function pulled in via module_
+                    # loader's source-level fallback (no dylib, no type
+                    # annotations to build a C signature from). Unlike the
+                    # OLD `else` branch's "another sibling .o will define it
+                    # later" assumption below (genuinely true for compile_
+                    # stdlib.py's separately-compiled-.mojo-files workflow),
+                    # link mode has no such other translation unit for a
+                    # name Phase 0 already failed to resolve — the bare
+                    # `extern` this used to fall through to left a real,
+                    # unconditional undefined symbol at LINK time (confirmed
+                    # via `Lib/runpy.py`'s `from pkgutil import read_code`/
+                    # `get_importer` inside `_get_code_from_file`/`_run_path`
+                    # — see bugs/hard/CODEGEN_function_scoped_import_call_
+                    # unresolved_at_link.md). Routing link_imports through
+                    # this same weak-stub path makes its behavior consistent
+                    # with what a TOP-LEVEL import of the exact same
+                    # unresolvable name already got for free (the separate,
+                    # per-call-site `_is_unknown`/`_is_unknown_stmt` auto-
+                    # stub mechanism in `_lower_named_call`/`_gen_stmt_
+                    # ExprStmt` — never reached for the function-scoped case
+                    # because `_gen_stmt_FromImportStmt` had already
+                    # registered this name into `self.imported_symbols`,
+                    # marking it "known" before the call site's own lowering
+                    # ever ran its "is this genuinely unknown" check).
                     # Guard against re-emitting the SAME definition when
                     # another module elsewhere in this flattened program also
                     # imports the same never-resolved name (weak-symbol
@@ -32535,14 +32591,17 @@ class GimpleGen:
                     parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
                                   f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
                 else:
-                    # do_imports=False (e.g. build_module.py / compile_stdlib.py's
-                    # separately-compiled-module workflow): sibling modules are
-                    # compiled to their own .o and linked together afterward, so
-                    # an unresolved-here name may legitimately be defined in one
-                    # of those other translation units. Keep the historical
-                    # bare-extern behavior — turning this into a stub would
-                    # silently swallow real cross-module calls instead of
-                    # linking to their real definition.
+                    # do_imports=False AND link_imports=False (e.g.
+                    # build_module.py / compile_stdlib.py's separately-
+                    # compiled-.mojo-module workflow, NOT driver.py's dylib-
+                    # based link mode — that's handled above now): sibling
+                    # modules are compiled to their own .o and linked
+                    # together afterward, so an unresolved-here name may
+                    # legitimately be defined in one of those other
+                    # translation units. Keep the historical bare-extern
+                    # behavior — turning this into a stub would silently
+                    # swallow real cross-module calls instead of linking to
+                    # their real definition.
                     # Legacy format fallback: use pure variadic so callers can pass any args.
                     # GIMPLE mode treats () as "no params" (causing "too many args" errors),
                     # so we use (...) instead which accepts any number of arguments.

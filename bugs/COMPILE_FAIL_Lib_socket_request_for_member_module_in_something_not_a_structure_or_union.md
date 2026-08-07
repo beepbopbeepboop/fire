@@ -1,6 +1,25 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07, Track B continuation session)
+
+The PERF hard bug this doc previously matched
+(`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
+has since had its Phase 2 fix land — `Lib/socket.py` no longer times
+out: it now completes (via `mojo.py build`'s `build_executable`
+fallback path) in ~61s, generating 9.86 MB of C. It still does NOT
+build clean, but for a completely different reason: 670 real GCC
+errors, dominated (370/670, ~55%) by `'X' undeclared here ... did you
+mean 'argparse_X'/'ast_X'/...'` — this is
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+(task #141), explicitly excluded from this session's scope (already
+assessed as feature-sized/high-risk, not to be re-attempted without new
+information). Not investigated further here — see that doc for the
+mechanism. (`socket.py` was NOT re-tested against link mode/`driver.
+compile_program`, which might fare differently since it doesn't inline
+the whole transitive closure into one translation unit the way
+`build_executable`'s fallback does — left for a future session.)
+
+## Status (updated 2026-08-06, historical — perf timeout above now fixed, current blocker is different)
 
 Re-ran with a 150s timeout: got partway through (produced the usual
 `drop stale export` dylib-link noise, then an `os.py: 'relpath' is

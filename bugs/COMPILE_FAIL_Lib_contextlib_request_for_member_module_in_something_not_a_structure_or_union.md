@@ -1,6 +1,42 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07, Track B continuation session)
+
+The PERF hard bug this doc previously matched
+(`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`)
+has since had its Phase 2 fix land — `Lib/contextlib.py` no longer
+times out: `python3 mojo.py build .../contextlib.py` now completes in
+~11s. It still does NOT build, but for a completely different reason:
+a hard, honest `RuntimeError` refusal —
+
+```
+cannot compile module: function(s) __aenter__, __aenter__, __aenter__,
+__aexit__, __aexit__, __aexit__, __aexit__, _exit_wrapper, aclose,
+enter_async_context, inner (async function(s), declared `async def`)
+```
+
+`MOJO_DEBUG=1` shows the specific eligibility failures:
+`__aenter__: every 'return' must carry a scalar value (int64_t/double/
+_Bool), and all of them must agree on one consistent type` and
+`__aexit__: *args/**kwargs parameters not supported for compiled async
+functions`. This is the SAME class of limitation as
+`bugs/hard/CODEGEN_generator_struct_typed_param_refused.md` (task
+#147, explicitly out of scope per this session's assignment) and the
+tuple-yield generator refusal documented in `bugs/CODEGEN_generator_
+function_Lib_weakref.md`'s 2026-08-07 update — this codegen's C++20
+coroutine translation for generators/async functions only supports a
+narrow set of shapes (scalar yield/return values, no `*args`/`**kwargs`,
+a fixed list of scalar/container parameter types), and `contextlib.py`'s
+`@contextmanager`/`@asynccontextmanager`-heavy code hits several of
+those restrictions at once (non-scalar `__aenter__` return, variadic
+`__aexit__` params). Extending the coroutine codegen to support these
+shapes is a genuinely large feature (would need real boxing/type-
+erasure for non-scalar yield/return values and variadic-parameter
+support in the coroutine frame), matching the profile of the other
+generator/async-codegen limitations already flagged as out-of-scope for
+this session — NOT attempted here.
+
+## Status (updated 2026-08-06, historical — perf timeout above now fixed, current blocker is different)
 
 Re-ran with a 150s timeout: TIMED OUT again (no output at all before
 the timeout, not even the usual `drop stale export` dylib-link noise
