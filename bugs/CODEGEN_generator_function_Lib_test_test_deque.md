@@ -1,7 +1,30 @@
 # CODEGEN_generator_function: Lib/test/test_deque.py
 
-## Status
-**STILL FAILING** (2026-07-30) — generator .cpp: /tmp/db.cpp:105:36: error: 'SyntaxError' was not declared in. The generated generator C++ body does not compile standalone (gcc -fgimple on the .ci alone is not the real gate; mojo.py/test_gimple compile the companion .cpp).
+## Status (updated 2026-08-06)
+
+**STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
+2026-07-30 `'SyntaxError' was not declared` .cpp error no longer
+reproduces. `test_deque.py`'s own 2 generator sites (`yield 1` line 16,
+`yield next(task)` line 1012) do not appear in the current error list
+and have no "not eligible" refusal.
+
+**Classification: NOT a generator-codegen-cluster failure.** The file
+has ~80 current errors, almost all `error: unexpected RHS for assignment
+before ';' token` at dozens of distinct lines plus `error: implicit
+declaration of function 'deque'` — this codegen appears to be failing on
+an ordinary top-level construct used pervasively throughout this file
+(possibly `self.assertRaises(...)`-style context-manager assignment
+idioms, or the `deque(...)` constructor call itself colliding with a
+reserved/builtin name similar to `tokenize.py`'s `any`/`perror`
+collisions found elsewhere in this session's pass — not confirmed which,
+given the volume). Also present: the recurring comprehension/`_quick_
+type`-family "non-trivial conversion"/"type mismatch" pattern
+(`bugs/hard/CODEGEN_comprehension_return_type_defaults_int64.md`'s
+sibling family) at lines 332/438/834. None of this implicates the file's
+own 2 generators. Not investigated further — out of scope for this
+generator-codegen cluster; the `deque`-name-collision angle in
+particular looks worth a dedicated non-generator report given how many
+lines it affects.
 
 ## Build error
 
