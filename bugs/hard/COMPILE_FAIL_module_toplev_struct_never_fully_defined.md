@@ -313,10 +313,6 @@ specific files, which remains blocked on an unrelated issue.
 
 ### Not attempted / out of scope
 
-- The `os.py` "'relpath' is ambiguous" failure (this session's own
-  concrete instance of transitively-imported same-named free functions
-  colliding) is a separate, unrelated bug blocking full build success for
-  `subprocess.py` and others — not investigated further here.
 - No attempt was made to also emit a REAL (non-`extern`) instance
   definition for a module whose only text-propagation path is broken
   (mechanism 2's scenario) — the `#ifndef`-guarded reconstruction here
@@ -326,3 +322,34 @@ specific files, which remains blocked on an unrelated issue.
   undefined-symbol error for its `_<mod>_globals` instance if a full
   build were ever attempted — out of scope per the `-fsyntax-only`-based
   verification bar above; not otherwise investigated.
+
+## Follow-up fix: `os.py` "'relpath' is ambiguous" (2026-08-07)
+
+The `os.py` "'relpath' is ambiguous" failure flagged above as a separate,
+unrelated blocker has since been root-caused and fixed. Actual cause:
+`gen_module`'s param-defaults prepass iterated `ALL_FUNCTIONS` (this
+module's own stmts plus every transitively-inlined foreign `FunctionDef`)
+and called `_func_csym(s.name)` unconditionally to populate an auxiliary
+lookup table. `os.py` transitively inlines both `posixpath.py`'s and
+`ntpath.py`'s own `relpath(path, start=None)` (via its own `if 'posix' in
+_names: import posixpath as path / elif 'nt' in _names: import ntpath as
+path` branch) — two same-named top-level functions from different
+sibling modules, i.e. `_func_csym`'s own `AMBIGUOUS_FUNC_HOME` case —
+which made `_func_csym` raise even though this prepass only populates an
+auxiliary table, not a genuine bare-name call-site reference. Fixed with
+a `try`/`except` guard mirroring the identical pre-existing guard on the
+sibling `_func_kwargs_slot` registration a few lines below: if the
+function is never bare-called unqualified anywhere in the compile unit,
+skipping its table entry is harmless; if it IS bare-called, that call
+site's own resolution still raises the same honest refusal, untouched by
+this guard. Landed together with an unrelated `@=` (matrix-multiply
+augmented-assignment) lowering fix found in the same investigation
+(`operator.py`'s `imatmul`), both gate-verified (664/664, 0 unexpected).
+
+Confirmed via direct `mojo.py build` rerun: `Lib/os.py` and
+`Lib/operator.py` now both compile with 0 errors (only pre-existing
+unused-function warnings). `Lib/subprocess.py` still does not fully
+build — after this fix it hits a different, much larger, unrelated
+cluster of pre-existing errors in `argparse.py`/`typing.py`/`enum.py`/
+`gettext.py` (none of which are `os`/`relpath`-shaped), out of scope for
+this doc.
