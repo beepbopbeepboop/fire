@@ -1,6 +1,28 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild. Still correctly
+classified as **NOT a generator-codegen-cluster failure** —
+`_TemporaryFileWrapper.__iter__` still shows zero signal of a problem.
+The `struct _threading_toplev`/etc. pattern is GONE (fixed by
+`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`'s
+"mechanism 2" landing, same fix confirmed across several files this
+session) and the `stray '\'` textwrap.py tokenizer issue is also gone
+from this file's current error list. Remaining errors (13 total, all
+in tempfile.py's own non-generator code): repeated `expected identifier
+before numeric constant` (lines 64/200/250/376/423, plus 2 more further
+in) and `request for member 'name' in something not a structure or
+union` (lines 609/668/703), plus one `stray '\'`/`expected ';' before
+'_classattr_TextWrapper__letter'` at line 496 (the textwrap.py issue —
+apparently not fully gone, just reduced). Not investigated further here
+— out of scope for this generator-codegen cluster; the `expected
+identifier before numeric constant` repeating at several near-identical
+column offsets (24, 23, 17) looks like a real, possibly-narrow parser/
+codegen bug (worth a dedicated look by whoever picks up a non-generator
+pass on this file) but wasn't traced to a root cause in this session.
+
+## Status (updated 2026-08-06, superseded above — module_toplev pattern since independently fixed)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'_TemporaryFileCloser' does not name a type` .cpp error no

@@ -1,6 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild (both the full
+`mojo.py build` CLI path and a direct isolated
+`compile_to_gimple_with_cpp(..., do_imports=False)` call) — reproduces
+byte-for-byte identically, same `RuntimeError` message, still with NO
+per-function "not eligible" debug note for `parse`. The probable root
+cause below (a locally-nested class's generator METHOD never reaching
+the struct-registration/generator-method compile loop at all) was not
+traced further to full certainty this pass either — still flagged as
+the shape to confirm for whoever picks this up next. Not attempted as a
+fix (would need the struct-registration-scan trace this doc's own note
+already calls out, plus design work for compiling a function-body-local
+class at all — likely feature-sized once confirmed, given how much of
+this codegen's struct machinery assumes module/class-level struct
+registration).
+
+## Status (updated 2026-08-06, superseded above — re-verified, unchanged)
 
 **STILL FAILING**, confirmed reproducing against current master
 (`2b0c4c5`) — same top-level symptom as 2026-07-30 (`function(s) parse

@@ -1,6 +1,35 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild. `MOJO_DEBUG=1`
+still shows no "not eligible" refusal for any of ipaddress.py's own 14
+generator sites — still classified correctly as **NOT a generator-
+codegen-cluster failure**. The error SET has changed significantly since
+2026-08-06 though (down to 12 error lines from a much larger batch) —
+the `@property`-access-leaves-a-bound-method pattern
+(`'MojoBoundMethod' has no member named 'is_multicast'`) described below
+is GONE (apparently fixed elsewhere in the meantime). Current errors:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:325:17: error: expected ')' before ',' token
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:364:4: error: 'first' undeclared (first use in this function)
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:364:11: error: 'last' undeclared (first use in this function)
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:631:10: error: implicit declaration of function 'format'; did you mean 'normpath'? [-Wimplicit-function-declaration]
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:631:28: error: unexpected RHS for assignment before ';' token
+/Users/mrs/net/Python-3.14.6/Lib/ipaddress.py:2643:46: error: stray '\' in program
+```
+
+None are inside a generator body. Not investigated further here (still
+out of scope for this cluster) — the `:325`/`:364` pair looks like a
+parser/codegen mishandling of a multi-target or walrus-adjacent
+assignment (`first`/`last` never declared before use, plus a parse-
+level "expected ')' before ','" right before it), and the `:2643` stray-
+backslash error is the same textwrap.py-transitive tokenizer issue noted
+in codecs.py's/other files' docs — both worth a dedicated non-generator
+pass, not attempted here.
+
+## Status (updated 2026-08-06, superseded above — error set has since changed)
 
 **STILL FAILING**, but re-diagnosed against current master (`2b0c4c5`) —
 the 2026-07-30 `'IPv6Address' does not name a type` .cpp error no longer

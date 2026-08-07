@@ -2642,6 +2642,32 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                 if ctype is None:
                     ctype = 'int64_t'  # bare yield yields None → 0
                 continue
+            if isinstance(n.value, TupleExpr):
+                # `yield a, b, c` — a real multi-element tuple yield. The
+                # separate emission path (_cpp_stmt's YieldExpr case) has no
+                # real tuple-yield support: it emits the tuple as a raw
+                # braced-init-list (`co_yield {a, b, c};`) with NO regard for
+                # whatever scalar type this function's promise ends up using
+                # — invalid/mismatched C++ that fails with a confusing GCC
+                # syntax error attributed to the WRONG line (the malformed
+                # statement shifts every subsequent #line-unstamped line
+                # count), not an honest refusal. `_infer_simple_expr_ctype`
+                # correctly has no TupleExpr case (returns None — "don't
+                # know, refuse" per its own docstring), but the generic
+                # "default to int64_t when type can't be inferred" fallback
+                # just below silently overrides that signal for THIS shape,
+                # letting an unsupported tuple-yield generator sail through
+                # eligibility and reach `_cpp_stmt` emission at all. Return
+                # None here (skipping that default) so the caller's existing
+                # `if value_ctype is None: raise _UnsupportedGeneratorShape`
+                # check (_gen_cpp_generator_unit) does its job — the SAME
+                # graceful "not eligible for C++ coroutine path" fallback
+                # every other unsupported shape in this file already gets.
+                # Real: Lib/test/libregrtest/save_env.py's
+                # `resource_info`: `yield name, getattr(self, get_name),
+                # getattr(self, restore_name)`. See
+                # CODEGEN_generator_function_Lib_test_libregrtest_save_env.md.
+                return None
             t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
             if t is None:
                 t = 'int64_t'  # default when type can't be inferred
@@ -6845,6 +6871,32 @@ class GimpleGen:
                 if mod == 're' and meth == 'search': return 'int'
                 if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
                 if mod == 'sys': return 'int'
+                # dict.keys()/.values()/.items(): _lower_dict_method (below)
+                # lowers all three to a real `MojoList *` (mojo_dict_keys/
+                # _values/_items) — but this pre-pass had no case for them at
+                # all. Unlike the string-only methods just above, gating this
+                # on `self.var_types.get(mod)` doesn't work: this pre-pass
+                # (_collect_return_types/_infer_return_type, Pass 2b) runs
+                # BEFORE a function's own LOCAL variable types are known —
+                # `modules = {}` earlier in the SAME function body being
+                # scanned hasn't been recorded into var_types yet at this
+                # point (same blind spot the .read()/.readline() note above
+                # already documents for `with open(...) as f:`). Treated the
+                # same way as the "Unambiguous string-only methods" block
+                # just above instead: `.keys`/`.values`/`.items` are
+                # dict-view-only method NAMES in this codebase's supported
+                # subset (no other builtin container type has them), so
+                # unconditionally returning MojoList* here is safe by the
+                # same reasoning that block already uses. Real:
+                # Lib/modulefinder.py's `find_all_submodules` has an early
+                # bare `return` (None) followed by `return modules.keys()`;
+                # the wrong int64_t forward-declaration against a body that
+                # actually returns a MojoList* pointer produced GCC's honest
+                # `-fgimple` refusal ("invalid conversion in return
+                # statement"). See CODEGEN_generator_function_Lib_
+                # modulefinder.md.
+                if meth in ('keys', 'values', 'items') and not node.args:
+                    return 'MojoList *'
                 # Try as struct instance method call: resolve receiver type then look up mangled name
                 ot = self.var_types.get(mod, '')
                 if ot and ot.endswith(' *'):
@@ -24151,7 +24203,30 @@ class GimpleGen:
         if not is_gen_call:
             result_var = self._cpp_fresh_name("_yf_result")
             coll_expr = self._cpp_expr(call)
-            return [f"{indent}auto {result_var} = {coll_expr};",
+            # mojo_list_len/mojo_list_get_str both take a real `MojoList *`,
+            # but `coll_expr` isn't guaranteed to already BE one at the C++
+            # level: a `self.<field>` MemberExpr whose field type isn't one
+            # of the 4 known scalars (int64_t/double/_Bool/char *) falls to
+            # _cpp_expr's "Unknown field: emit as self->member" case, which
+            # returns the field access UNCAST — for a MojoList*-typed field,
+            # this codegen's own struct-field boxing convention (same one
+            # module globals use — see gen_module's preamble) stores it as
+            # a raw `int64_t`, so `auto {result_var} = self->field;` used to
+            # infer `result_var` as `long long int`, not `MojoList *`,
+            # producing g++ "invalid conversion from 'long long int' to
+            # 'MojoList*'" at both calls below. An explicit cast here is
+            # correct for every shape this branch reaches (the comment two
+            # lines up documents the whole branch's contract as "the value
+            # IS a plain collection" — i.e. always semantically a MojoList*
+            # already, whether or not its C++-level TYPE currently reflects
+            # that), and a cast from an already-correctly-typed `MojoList *`
+            # expression to itself is a no-op, so this can't regress any
+            # currently-working `yield from <expr>` shape. Real:
+            # Lib/test/libregrtest/runtests.py's `RunTests.iter_tests`:
+            # `yield from self.tests` (a MojoList* field). See
+            # CODEGEN_generator_function_Lib_test_libregrtest_runtests.md.
+            result_init = f"(MojoList *)({coll_expr})"
+            return [f"{indent}auto {result_var} = {result_init};",
                     f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
                     f"{indent}    co_yield mojo_list_get_str({result_var}, _i);",
                     f"{indent}}}"]

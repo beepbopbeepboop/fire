@@ -1,6 +1,34 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild. The
+`struct _subprocess_toplev`/`struct _genericpath_toplev` "undefined
+module-namespace pseudo-struct" errors quoted in the 2026-08-06 note
+below are GONE (consistent with `bugs/hard/COMPILE_FAIL_module_toplev_
+struct_never_fully_defined.md`'s "mechanism 2" fix having since landed).
+Confirmed `MOJO_DEBUG=1` still shows NO "not eligible" refusal for any
+of mailbox.py's own generators — all 5 `yield`/`yield from` sites still
+compile cleanly through the coroutine path, same as before.
+
+The build still fails, now on a large, entirely different batch of
+non-generator `.ci` errors (~1300+ error lines, dominated by repeats
+across mailbox.py's several near-identical mailbox-format subclasses):
+`mojo_open_file` called with 2 args where 1 is expected (mailbox.py's
+own `open(path, mode)`-shaped calls vs. this codegen's built-in
+`mojo_open_file`'s fixed 1-arg signature), `assignment to 'char *' from
+'int64_t'` at many sites in the 1470-1520 range, and repeated
+`non-trivial conversion in 'component_ref'`/`type mismatch in
+'pointer_diff_expr'` around lines 1299-1455. None of these are inside a
+generator body or involve `yield`/coroutine machinery — **still NOT a
+generator-codegen-cluster failure** — but this is a materially
+different (and much larger) error set than the 2026-08-06 snapshot, so
+not re-classified further here; worth a fresh, dedicated non-generator
+investigation (starting with the `mojo_open_file` arity mismatch, which
+looks like the most tractable/narrow of the batch) rather than folding
+into this doc.
+
+## Status (updated 2026-08-06, superseded above — struct_toplev errors since fixed)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'Mailbox'` .cpp error no longer reproduces. `mailbox.py` has
