@@ -4,6 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error is entirely in a transitively-imported sibling:
+
+```
+error: 'MojoList' has no member named 'co_argcount'
+error: 'MojoList' has no member named 'co_posonlyargcount'
+... (one per Code field)
+```
+
+Same root cause as `bugs/COMPILE_FAIL_Tools_build_umarshal.md`
+(`deepfreeze.py` imports `umarshal.py`): `Reader._r_object`'s big
+`if/elif` type-tag dispatch reuses one local variable `retval` across
+branches holding structurally different real types; the `Type.CODE`
+branch's `retval` loses its `Code *` identity to whatever the
+unification across all branches picks (`MojoList *`). Not fixed here
+— see that doc for the fuller trace and why a real fix needs per-branch
+local retyping rather than a narrow patch. Nothing specific to
+`deepfreeze.py` itself was found.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/build/umarshal.py: In function '_alloc_Code':
