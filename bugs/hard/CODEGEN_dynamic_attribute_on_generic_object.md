@@ -57,6 +57,11 @@ class Slot:
   doc's own `__del__._slotted = True` example) and separately reads
   `f.__name__` on a `MojoBoundMethod` elsewhere in the same file
   ("'MojoBoundMethod' has no member named '__name__'").
+- `Lib/importlib/__init__.py`'s `reload(module)`: `module.__spec__` read
+  AND written (`module.__spec__ = _bootstrap._find_spec(...)`) on the
+  bare, unannotated `module` parameter (any module object at the Python
+  level) — "request for member '__spec__' in something not a structure
+  or union".
 - `Doc/tools/extensions/glossary_search.py` (Sphinx extension):
   `app.env.glossary_terms = {}` / `hasattr(app.env, 'glossary_terms')` —
   `app.env` is a `sphinx.environment.BuildEnvironment` instance from the
