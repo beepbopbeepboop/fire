@@ -4,7 +4,24 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Investigated further: `fmt_raw`/`fmt_brief`/`fmt_summary`/`fmt_full`
+(referenced below as VALUES in the `FORMATS` dict) are all GENERATOR
+functions (`yield`/`yield from` in their bodies) — this is almost
+certainly an instance of the already-tracked, explicitly out-of-scope
+compiled-generator/async-codegen project (tasks #95-135)'s "a generator
+function used as a bare value" gap, NOT the same root cause as the
+`_write_atomic`-shaped case it was originally paired with in
+`bugs/COMPILE_FAIL_importlib__bootstrap_external.md` (confirmed via a
+direct repro: an ordinary, non-generator top-level function used as a
+module-level dict value compiles clean through this codegen's existing
+`_lower_IdentExpr` "function name used as a value" mechanism — no bug
+there). See that doc's 2026-08-07 follow-up for the full correction.
+Not fixed here; out of scope per this session's generator/async-codegen
+boundary.
+
+## Original status (2026-08-06)
 
 Re-ran; current error:
 
