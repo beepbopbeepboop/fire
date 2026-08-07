@@ -1,6 +1,30 @@
 # CODEGEN_generator_function: Lib/typing.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Two of this doc's previously-open patterns are now FIXED — see
+`bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md` for the full writeup:
+- The "comprehension/`_quick_type`-family 'non-trivial conversion'
+  pattern (lines 1275/1491)" mentioned below was actually
+  `_isinstance_one_type`'s `isinstance(x, type)`-always-False stub
+  emitting a bare `0` into a `_Bool`-declared temp (`_new_val`'s digit-
+  literal auto-cast guard only covered `int64_t`, not `_Bool` — that
+  doc's Mechanism 2). Fixed.
+- The "`passing argument 1 of '..._dir__' from incompatible pointer
+  type`" pattern was `super().method(...)` calls passing `self` typed
+  as the DERIVED struct pointer to a BASE class method expecting the
+  base struct pointer, with no actual C-level cast ever emitted (that
+  doc's Mechanism 3). Fixed — an isolated `typing.py`-only compile went
+  from 14 errors (with only Mechanism 2 fixed) to 2 once this landed
+  too.
+- Still open, untouched: the `module_toplev_struct_never_fully_defined`
+  cluster (per that doc's own status — check there for current state),
+  the textwrap.py tokenizer bug, `'_TypedDictMeta' has no member named
+  '__orig_bases__'`, and one `non-register as LHS of unary operation`
+  error (global-struct-field assignment) — none investigated further.
+
+## Status (updated 2026-08-06, PARTIALLY STALE — see above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-31 `_DeprecatedGenericAlias`/`_CallableType`/`_PlaceholderType`

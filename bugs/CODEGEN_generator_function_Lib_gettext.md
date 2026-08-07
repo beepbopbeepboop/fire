@@ -1,6 +1,20 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Of the 4 errors listed below, the `gettext.py:445:1: error: invalid
+conversion in gimple call` one is now FIXED — root cause was
+`_gen_stmt_FromImportStmt`'s wrong `'int'` default for an unknown
+function-scoped-imported symbol's return type (`from struct import
+unpack` inside `GNUTranslations._parse`, line 353); see
+`bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md` (Mechanism 1) for the full writeup. The other three
+(`mojo_strlen` pointer/int conversion at line 208, `trunc_mod_expr` at
+line 472 — the SAME dynamic-%-format-string gap documented as
+deliberately out-of-scope in that doc's "Not fixed" section — and
+`mojo_open_file` arg-count at line 554) are untouched, still open.
+
+## Status (updated 2026-08-06, PARTIALLY STALE — see above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'_token_pattern' was not declared` .cpp error no longer

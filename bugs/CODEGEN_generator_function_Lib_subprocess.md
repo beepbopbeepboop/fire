@@ -1,6 +1,22 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`'s
+`os.py` `'relpath' is ambiguous` follow-up fix landed, clearing the
+`_genericpath_toplev`/`_posixpath_toplev` cluster this doc previously
+pointed at. Re-running `python3 mojo.py build .../Lib/subprocess.py`
+now surfaces a different, much larger cluster (785 errors, dominated by
+`Lib/argparse.py`/`Lib/typing.py`/`Lib/enum.py`/`Lib/gettext.py`) — see
+`bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md` for the full investigation. Three of that cluster's root
+causes were fixed there (785 -> 720 errors); `subprocess.py` itself
+still does not fully build — see that doc's "Not fixed" section for
+what remains (argparse.py's excluded `**kwargs` bug, a dynamic-%-format
+gap already scoped out by design, and an unresolved `weakref.py`
+line-attribution + literal-type-name mystery).
+
+## Status (updated 2026-08-06, STALE — see above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `cast from 'Popen*' to 'int'` .cpp error no longer reproduces.
