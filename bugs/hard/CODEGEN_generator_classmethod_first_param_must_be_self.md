@@ -1,14 +1,129 @@
 # HARD BUG: a generator method's first parameter must be literally named `self` — a `@classmethod` generator (first param `cls`) is refused outright
 
-## Status
+## Status (updated 2026-08-07)
 
-Unfixed. Root-caused 2026-08-06 while classifying the
-`CODEGEN_generator_function_Lib_*.md` cluster (tasks #95-135) — found via
-`Lib/test/test_finalization.py`, one of this cluster's 41 target files.
-Not attempted — narrow-LOOKING (a literal string-equality check), but
-widening it correctly needs real design (see "What a fix needs" below),
-not a one-line change, so left for a dedicated pass per this task's
-guidance on the less-mature coroutine codegen path.
+**FIXED** (`gimple_codegen.py`, three call sites — see below). Root-caused
+2026-08-06 while classifying the `CODEGEN_generator_function_Lib_*.md`
+cluster (tasks #95-135) — found via `Lib/test/test_finalization.py`, one
+of this cluster's 41 target files.
+
+Implemented the "minimal safe fix" this doc originally sketched (widen
+the first-param check to also accept `cls`, refuse if the body actually
+touches `cls`) — plus TWO more instances of the identical root-cause
+pattern that turned up during implementation, not mentioned in the
+original write-up:
+
+1. `_gen_cpp_generator_unit`'s method-eligibility check (the one this
+   doc originally documented) now accepts `cls` as well as `self` for a
+   generator method's first parameter. When the first param is `cls`,
+   the method's body is scanned (`_walk_ast`) for ANY reference to `cls`
+   (bare, `cls.attr`, or `cls.method(...)`) — this codegen has no
+   class-level attribute/method-call story, so if `cls` is genuinely
+   used, the method is refused with an accurate message instead of
+   being silently accepted; if `cls` is provably unused, it's compiled
+   with an opaque, never-read `int64_t cls` placeholder parameter purely
+   to keep the emitted C++ signature's parameter count/position correct
+   (the method-call CallExpr lowering already passes the receiver
+   positionally, so nothing downstream depends on this parameter's name
+   or value).
+
+2. **Found while verifying fix #1 against a hand-built minimal repro**:
+   `gen_module`'s "second + third passes" free-function generator loop
+   (the one that retries generators with unresolved `yield from`
+   dependencies) has its OWN, separate `s.params[0][0] == 'self'` check
+   meant to skip generator METHODS (deferring them to the dedicated
+   per-struct method loop). Unlike the first-pass loop (which only ever
+   sees TOP-LEVEL `stmts`, so a real struct method can never reach it),
+   this loop iterates `_generator_fns` directly — a dict built from a
+   DEEP `_walk_ast(stmts)` scan, keyed by object identity — so it DOES
+   see nested struct methods, including classmethod generators. Before
+   this was widened to also recognize `'cls'`, a `@classmethod`
+   generator method slipped past this "skip" check entirely and got
+   compiled HERE instead, as if it were an ordinary free function
+   (`struct_name=None`, `cls` treated as a plain scalar parameter,
+   popped out of `_generator_fns` before the dedicated per-struct method
+   loop — where fix #1 lives — ever got a turn). This was silently wrong
+   two ways:
+   - The compiled unit registers under the bare function name in
+     `_generator_api`, which a `ClassName.method(...)` call site never
+     looks up (call sites for a generator METHOD only ever consult
+     `_generator_method_api`, keyed by `(struct_name, method)`) — so the
+     unit was simply dead, unreachable code.
+   - Worse: if the body ever read `cls.<attr>` (a REAL shape — see
+     `Lib/test/test_finalization.py`'s `test`, confirmed below),
+     `_cpp_expr`'s `MemberExpr` case falls to its "non-self member
+     access" branch (`obj_expr.member`) since the receiver isn't
+     literally named `self`, emitting `cls.attr` on a plain `int64_t
+     cls` parameter — INVALID C++ (member access on a scalar), a hard
+     g++ compile failure instead of a graceful source-level fallback.
+     Hand-verified: before this second fix, a classmethod generator
+     using `cls.count` (a struct field) produced `co_yield cls.count;`
+     against an `int64_t cls` parameter in the generated `.cpp` — after
+     the fix, it's correctly refused at the eligibility gate instead
+     (falls back to interpreting that one function from source, same as
+     any other not-yet-supported shape).
+
+3. The identical `s.params[0][0] == 'self'` check in the FIRST-pass
+   free-function loop was also widened to `('self', 'cls')` for
+   consistency/defense-in-depth even though it's provably dead for this
+   exact scenario today (that loop only iterates top-level `stmts`,
+   which a struct method can never appear in) — kept in sync so the two
+   checks don't silently diverge again.
+
+## Real-world impact correction
+
+This doc's ORIGINAL text claimed "`test`'s own body here doesn't
+actually touch `cls`" as the basis for expecting the minimal fix to make
+`Lib/test/test_finalization.py`'s `test` method compile. **That claim was
+wrong** — rereading the real source (`Lib/test/test_finalization.py`
+~line 54-70), `test`'s body reads `cls.del_calls`, `cls.tp_del_calls`,
+`cls.errors` (twice) repeatedly:
+```python
+@classmethod
+@contextlib.contextmanager
+def test(cls):
+    with support.disable_gc():
+        cls.del_calls.clear()
+        cls.tp_del_calls.clear()
+        NonGCSimpleBase._cleaning = False
+        try:
+            yield
+            if cls.errors:
+                raise cls.errors[0]
+        finally:
+            NonGCSimpleBase._cleaning = True
+            ...
+```
+So per item 1 above, `test` is (correctly) STILL refused post-fix — just
+with the new, accurate "@classmethod generator that references `cls` in
+its body is not supported" message instead of the old, misleading "must
+take `self`" one. Confirmed via `MOJO_DEBUG=1`: all 16 inherited-subclass
+refusals (`NonGCSimpleBase`, `SimpleBase`, `NonGC`, `NonGCResurrector`,
+`Simple`, `SimpleResurrector`, `SimpleSelfCycle`, `SelfCycleResurrector`,
+`SuicidalSelfCycle`, `SimpleChained`, `ChainedResurrector`,
+`SuicidalChained`, `LegacyBase`, `Legacy`, `LegacyResurrector`,
+`LegacySelfCycle`) now emit the corrected message, and the module still
+falls back to interpreting `test` from source (unchanged end-to-end
+outcome for THIS file: `compile_to_gimple` still raises the same
+whole-module "cannot compile module: function(s) test ..." — the fix's
+observable win for this exact file is entirely about the ACCURACY of the
+refusal reason and eliminating the C++ miscompile risk item 2 above
+found, not about newly compiling this file). A hand-built minimal repro
+with a `cls`-UNUSED classmethod generator (this doc's own "Minimal
+repro" below) DOES now compile successfully end-to-end (verified: g++
+`-fsyntax-only` on the generated `.cpp` returns 0), confirming the fix
+genuinely unblocks the case it was designed for — this file's `test`
+method just isn't an instance of that case, contrary to this doc's
+original (incorrect) claim.
+
+## Gate
+
+All five gates in CLAUDE.md's quality-gate section passed after this
+fix: `test_gimple.py` (247 passed, 0 failed), `test_module_cache.py` (76
+passed, 0 failed), `make check-selfhost` (self-host compiles + links
+clean), a from-scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:`
+lines), and `compile_stdlib.py -j8` (664/664 passed, 0 unexpected
+failures — same count as before this change).
 
 ## Symptom
 
