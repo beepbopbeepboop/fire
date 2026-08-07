@@ -15512,10 +15512,36 @@ class GimpleGen:
         target_str = gen0.target.strip()
         inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
         if ',' in inner_str:
-            # Tuple target: each element of the outer list is a sub-list (tuple)
+            # Tuple target: each element of the outer list is a sub-list
+            # (tuple). Mirrors _gen_for_list's identical, already-fixed
+            # per-slot logic (see its own comment for the history): pick
+            # the accessor PER SLOT via slot_types/_dict_items_val_elems/
+            # _nested_elem_types instead of assuming every slot is a
+            # string. The old code here read EVERY slot via
+            # mojo_list_get_str unconditionally, which round-trips a
+            # genuinely-numeric slot's bit pattern correctly (get_str then
+            # cast back to int64_t is value-preserving) but then always
+            # tagged the var `_actual_types[vn] = 'char *'` regardless —
+            # so a later arithmetic use (e.g. `range(a, a + b) for a, b in
+            # pairs` with pairs a list of int tuples) had `b` wrongly
+            # treated as a pointer by `_lower_binary_tail`'s `_actual_
+            # types.get(rv, ...)` lookup, producing "passing argument 2 of
+            # 'mojo_range' makes integer from pointer without a cast".
             var_names = [v.strip() for v in inner_str.split(',')]
-            for vn in var_names:
-                self._declare_var(vn, 'int64_t')
+            is_dict_items = it_val in self._dict_items_val_elems
+            value_elem = self._dict_items_val_elems.get(it_val) if is_dict_items else None
+            slot_types = self._tuple_slot_types.get(it_val)
+            pair_elem = self._nested_elem_types.get(it_val, 'int64_t')
+            slot_elems = []
+            for i, vn in enumerate(var_names):
+                if is_dict_items:
+                    se = 'char *' if i == 0 else (value_elem or 'int64_t')
+                elif slot_types is not None and i < len(slot_types):
+                    se = slot_types[i]
+                else:
+                    se = pair_elem
+                slot_elems.append(se)
+                self._declare_var(vn, se)
             len64 = self._new_val('int64_t', f'mojo_list_len ({it_val})')
             idx64 = self._new_val('int64_t', '(int64_t)0')
             bb_cond = self._new_bb(); bb_body = self._new_bb()
@@ -15528,21 +15554,24 @@ class GimpleGen:
             raw_elem = self._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
             sub_list = self._new_val('MojoList *', f"(MojoList *){raw_elem}")
             for i, vn in enumerate(var_names):
-                i64 = self._new_val('int64_t', f"(int64_t){i}")
-                sub_str = self._new_val('char *', f"mojo_list_get_str ({sub_list}, {i64})")
+                se = slot_elems[i]
                 cv = self._cname(vn)
-                # Respect the var's declared type: a char*-declared loop var
-                # (first-decl-wins from an earlier loop over the same name)
-                # takes the char* directly — the old unconditional boxing
-                # assigned `(int64_t)get_str(...)` into a `char *` variable
-                # (hard GCC "makes pointer from integer" error, exposed by the
-                # dict-comprehension `{p: i for p, i in d.items()}` shape).
-                if self.var_types.get(vn, 'char *') == 'char *':
-                    self._emit(f"  {cv} = {sub_str};")
+                suf = TypeLattice.list_suffix(se)
+                vt = self.var_types.get(vn, se)
+                if suf == 'str':
+                    sub_str = self._new_val('char *', f"mojo_list_get_str ({sub_list}, {i})")
+                    if vt == 'char *':
+                        self._emit(f"  {cv} = {sub_str};")
+                    else:
+                        sub_val = self._new_val('int64_t', f"(int64_t){sub_str}")
+                        self._emit(f"  {cv} = {sub_val};")
+                        self._actual_types[vn] = 'char *'
                 else:
-                    sub_val = self._new_val('int64_t', f"(int64_t){sub_str}")
-                    self._emit(f"  {cv} = {sub_val};")
-                    self._actual_types[vn] = 'char *'
+                    raw = self._new_val('int64_t', f"mojo_list_get_int ({sub_list}, {i})")
+                    if vt == 'int64_t':
+                        self._emit(f"  {cv} = {raw};")
+                    else:
+                        self._safe_coerce_emit('int64_t', vt, raw, cv)
             self._gen_compr_append(node, gen0, res, res_type, bb_post)
             self._emit(f"  goto {bb_post};")
             self._emit_label(bb_post)
