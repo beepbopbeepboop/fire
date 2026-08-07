@@ -4,6 +4,49 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; THREE distinct issues:
+
+```
+error: redefinition of 'cpu_count'
+error: invalid call to non-function before ';' token
+error: invalid operands to binary / (have 'char *' and 'int64_t')
+```
+
+1. `redefinition of 'cpu_count'` — `try: from os import
+   process_cpu_count as cpu_count / except ImportError: from os import
+   cpu_count`. Root-caused as a new hard bug (confirmed via a SECOND
+   independent instance, `Tools/ssl/multissltests.py`'s `urlopen`):
+   `bugs/hard/CODEGEN_try_except_import_fallback_both_branches_compiled.md`.
+
+2. `invalid call to non-function` at `def subdir(working_dir, *,
+   clean_ok=False): ... working_dir = working_dir(context)` —
+   `working_dir` is an unannotated parameter whose real call-site
+   argument is a CALLABLE (a function value), not a scalar. This
+   codebase's existing cross-call type-inference pass for unannotated
+   free-function params ("Pass 1.3d", see `bugs/hard/
+   CODEGEN_unannotated_init_param_field_type_defaults_int64.md`'s "Why
+   this doesn't affect free functions the same way" section) only
+   recognizes SCALAR contracts (`double`/`char *`); a callable-typed
+   parameter isn't one of those, so it still defaults to `int64_t`, and
+   calling that int64_t value as a function fails. Not investigated
+   further — plausibly a narrow addition to that same pass (recognize
+   "always called with a function/closure value" as another contract
+   kind) but not attempted given this session's caution around that
+   exact machinery.
+
+3. `invalid operands to binary / (have 'char *' and 'int64_t')` at
+   module-level `BUILD_DIR = CROSS_BUILD_DIR / sysconfig.get_config_var
+   ("BUILD_GNU_TYPE")` — `sysconfig.get_config_var(...)`'s return type
+   isn't modeled as `char *` (a real stdlib function whose signature
+   this compiler doesn't know), so it defaults `int64_t`, and the
+   subsequent `/` (path-join) sees `(char *, int64_t)` instead of
+   `(char *, char *)`. Not investigated further — a stdlib-signature
+   modeling gap, likely narrow but not chased down this session.
+
+None fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_dispatch_getattr':
