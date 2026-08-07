@@ -6827,6 +6827,39 @@ class GimpleGen:
         if isinstance(node, DictExpr):  return 'MojoDict *'
         if isinstance(node, SetExpr):   return 'MojoSet *'
         if isinstance(node, TupleExpr): return 'MojoList *'
+        if isinstance(node, Comprehension):
+            # `[x for x in y]`/`{k: v for ...}`/`{x for x in y}`/a
+            # generator-expression — a distinct AST node from the literal
+            # ListExpr/DictExpr/SetExpr cases just above (mojo_compiler.py),
+            # which this method had NO case for at all: falling through to
+            # the int64_t default at the bottom of this method while the
+            # REAL emission (_lower_comprehension, below) constructs and
+            # returns a real MojoList*/MojoDict*/MojoSet* pointer. For a
+            # function whose SOLE `return` is a bare comprehension (real:
+            # Lib/calendar.py's Calendar.monthdatescalendar and 5 sibling
+            # methods), this method is what populates the function's
+            # forward-declared return type (_collect_return_types) — a
+            # wrong int64_t declaration there, against a body that actually
+            # constructs/returns a pointer, produces GCC's honest
+            # `-fgimple` refusal ("non-trivial conversion in
+            # 'integer_cst'"/"type mismatch in binary expression"). Mirrors
+            # _lower_comprehension's own kind->type mapping exactly (a
+            # generator-expression is converted to a MojoList* there too,
+            # per that method's own "convert to list for simplicity"
+            # comment) rather than inventing a second, possibly-diverging
+            # mapping — an unrecognized kind falls to the SAME int64_t
+            # default this method already used for every other
+            # unmatched/unsupported node shape (matching
+            # _lower_comprehension's own TODO-kind fallback, which emits a
+            # plain scalar 0, not a pointer). See
+            # CODEGEN_comprehension_return_type_defaults_int64.md.
+            if node.kind == 'dict':
+                return 'MojoDict *'
+            if node.kind == 'set':
+                return 'MojoSet *'
+            if node.kind in ('list', 'generator'):
+                return 'MojoList *'
+            return 'int64_t'
         # A slice's type is the type of the object being sliced (mirrors _lower_slice:
         # list slice -> list, str slice -> str, plain pointer -> same pointer).
         if isinstance(node, SliceExpr): return self._quick_type(node.obj)

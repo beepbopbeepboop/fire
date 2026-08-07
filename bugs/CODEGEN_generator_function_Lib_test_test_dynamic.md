@@ -1,6 +1,14 @@
 # CODEGEN_generator_function: Lib/test/test_dynamic.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+`bugs/hard/CODEGEN_comprehension_return_type_defaults_int64.md` (task
+#145, referenced below re: line 161's error shape) is now fixed. This
+file's own mention was only ever a speculative "matches the shape"
+note (the exact triggering expression wasn't independently read from
+source), not re-investigated further here.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `invalid conversion from 'void*'` .cpp error no longer

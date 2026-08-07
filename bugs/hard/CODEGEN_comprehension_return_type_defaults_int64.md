@@ -1,17 +1,66 @@
 # HARD BUG: a function/method whose sole `return` is a bare list/dict/set comprehension gets its inferred return type wrongly defaulted to `int64_t`
 
-## Status
+## Status (updated 2026-08-07)
 
-Unfixed. Root-caused 2026-08-06 while classifying the `CODEGEN_generator_
-function_Lib_*.md` cluster (tasks #95-135) — found via `Lib/calendar.py`,
-whose own `Calendar.monthdatescalendar` (and 5 sibling methods) hit this
-directly. Confirmed live on current master (`2b0c4c5`). Not attempted:
-`_quick_type` is a large (~250-line), heavily-relied-upon, project-wide
-expression-type estimator used throughout return-type inference,
-call-argument coercion, and more — the exact class of "shared inference
-machinery" this session's standing guidance says to touch only with a
-dedicated, carefully-verified pass, not as a drive-by fix bundled into
-cluster classification work.
+**FIXED** (task #145), with the extra-careful verification this doc's
+own "What a fix needs" section called for (`_quick_type` is shared
+inference machinery — full 5-step gate re-run, not just the two fast
+unit-test suites). Root-caused 2026-08-06 while classifying the
+`CODEGEN_generator_function_Lib_*.md` cluster (tasks #95-135) — found
+via `Lib/calendar.py`, fixed 2026-08-07.
+
+Added exactly the `Comprehension` case this doc's own "What a fix
+needs" section described: `_quick_type` now returns `MojoDict *`/
+`MojoSet *`/`MojoList *` per `node.kind` (`dict`/`set`/`list` or
+`generator`, mirroring `_lower_comprehension`'s own kind->type mapping
+exactly — a generator-expression converts to a list there too, so this
+does the same rather than inventing a second, possibly-diverging
+mapping), instead of falling through to the method's int64_t default.
+An unrecognized `kind` still falls to int64_t, matching `_lower_
+comprehension`'s own TODO-kind fallback (a plain scalar 0, not a
+pointer) — no NEW unhandled-shape risk introduced beyond what emission
+itself already tolerates.
+
+## Verification
+
+Hand-verified via a real `mojo.py build` on this doc's own minimal
+repro (`Widget.make_rows`): confirmed via `git stash` that the exact
+documented `-fgimple` errors ("non-trivial conversion in
+'integer_cst'"/"type mismatch in binary expression") reproduce on
+unmodified code, and are GONE after this fix — clean build (exit 0),
+AND the compiled binary actually RUNS and returns a real, correctly-
+shaped nested-list result (not just a clean compile). A second,
+simpler repro (`return [i * i for i in range(n)]`) also builds and
+runs correctly.
+
+Noticed, NOT a regression: the printed values show `None` where `0`
+is expected (e.g. `[None, 1, 4, 9, 16]` instead of `[0, 1, 4, 9, 16]`)
+— confirmed via a THIRD, minimal repro (a plain top-level `items = [i
+* i for i in range(5)]; print(items)`, which never touches `_quick_
+type`'s new Comprehension case at all, since it's a local variable
+typed by the ordinary, always-correct emission-time lowering, not by
+return-type inference) that this is a separate, pre-existing "0 prints
+as None in a list" display/boxing quirk, unrelated to this fix.
+
+## Gate
+
+All five gates in CLAUDE.md's quality-gate section passed, including
+the extra care this doc's own "What a fix needs" section called for:
+`test_gimple.py` (247/247), `test_module_cache.py` (76/76), `make
+check-selfhost` clean, from-scratch `libmojostdlib.dylib` rebuild (0
+`skip <module>:` lines, same as before), `compile_stdlib.py -j8`
+(664/664, 0 unexpected — unchanged count). Also ran `test_gimple_
+generator_runner.py` (32/34, 2 pre-existing failures, confirmed
+identical via `git stash`) and `test_gimple_async_runner.py` (31/36, 5
+pre-existing failures, confirmed identical via `git stash`) as extra
+due diligence given this touches shared type-inference machinery used
+by both the generator and async codegen paths — no new failures in
+either.
+
+## Original diagnosis (unfixed-era notes, kept for history)
+
+Not attempted at the time — see "What a fix needs" below for the
+original scoping/risk analysis (still accurate; followed exactly).
 
 ## Why this belongs in this cluster (even though it isn't a coroutine bug)
 

@@ -11,10 +11,19 @@ identifier assignment target is supported" message at all (nor any
 `save_restore_warnings_filters` mention — that name wasn't found in
 this checkout's `Lib/test/test_support.py`, possibly moved/renamed
 since this doc's original 2026-08-06 pass, or reached via a different
-transitively-imported file not independently re-checked here). Items 2
-and 3 (the `MojoGenerator` incomplete-type error and the
-comprehension-return-type `_quick_type` pattern) are unrelated to this
-bug and not re-investigated in this pass.
+transitively-imported file not independently re-checked here).
+
+Item 3's hard-bug doc (`bugs/hard/CODEGEN_comprehension_return_type_
+defaults_int64.md`, task #145) is now ALSO fixed (`_quick_type` gained
+a `Comprehension` case) — but this file's own item-3 occurrence was
+only ever a SPECULATIVE "same general family" match (a variant
+`'component_ref'` GIMPLE-node error, not independently traced to a
+confirmed bare-`return`-comprehension shape in this file's own source),
+so whether this specific file's item-3 errors are actually gone is not
+re-confirmed here.
+
+Item 2 (the `MojoGenerator` incomplete-type error) is unrelated to
+either bug and not re-investigated in this pass.
 
 ## Status (updated 2026-08-06, superseded above)
 
