@@ -2518,20 +2518,83 @@ int64_t mojo_hash(int64_t val) {
     return val;
 }
 
-/* ── Generic Python-object attribute accessor ──────────────────────────────
+/* ── Generic Python-object dynamic-attribute storage ───────────────────────
  * Reached whenever codegen couldn't statically resolve obj.attr to a real
- * struct field or a known stdlib call (see gimple_codegen.py's os.path.*
- * block and ast_rewriter.py for the cases that ARE resolved statically —
- * there is no dynamic module/object system at runtime to look this up in).
- * Returning 0 here used to mean the caller silently got a null pointer and
- * crashed several calls later somewhere unrelated (see the os.environ bug
- * hunt). Aborting immediately, with the attribute name, turns that into an
- * instant, greppable failure at the actual missing-case site instead. */
+ * struct field (see gimple_codegen.py's `_mojo_dispatch_getattr`/
+ * `_mojo_dispatch_setattr`, which try every known struct's own tagged
+ * accessor first and fall through to these two only when no tag matches —
+ * a bare/opaque `cls`/`self`/third-party-object value, or a genuinely NEW
+ * attribute this compiler has no struct layout for; see bugs/hard/CODEGEN_
+ * dynamic_attribute_on_generic_object.md, Steps 1-3).
+ *
+ * Real per-object storage: obj-pointer -> its own dynamic-attribute
+ * MojoDict, keyed by the pointer's hex text (reuses MojoDict's existing
+ * string-keyed hash table rather than a second, pointer-keyed hash table
+ * implementation from scratch for what is deliberately a RARE fallback
+ * path, not a hot one — ordinary struct field access never reaches here).
+ * Lazily allocated (a program that never hits this path never allocates
+ * it). Intentionally never freed when `obj` itself is freed — this runtime
+ * has no object-lifetime/refcounting/GC story anywhere else either
+ * (no `free()` paired with any struct allocator in gimple_codegen.py's
+ * `_alloc_*` emission), so a leaked per-object dict here is consistent
+ * with the rest of this runtime's existing memory model, not a new
+ * regression. */
+static MojoDict *_mojo_dynattr_objects = NULL;
+
+static void _mojo_dynattr_key(void *obj, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%p", obj);
+}
+
+/* A real, catchable AttributeError — same runtime call sequence compiled
+ * `raise AttributeError(...)` itself lowers to (see gimple_codegen.py's
+ * _gen_stmt_RaiseStmt: mojo_exc_type_set + mojo_exc_msg_set +
+ * mojo_exc_obj_set + mojo_raise), so a compiled `except AttributeError:`
+ * around a missing dynamic attribute genuinely matches this, not just the
+ * lenient untagged-exception fallback. The tag is `gimple_codegen.py`'s
+ * own `GimpleGen._exc_type_id('AttributeError')` — `(zlib.crc32(b"Attrib
+ * uteError") & 0x7fffffff) or 1` — computed once in Python and hardcoded
+ * here rather than reimplementing CRC32 in C, since _exc_type_id is a
+ * pure, deterministic function of the class name string (documented on
+ * its own definition: stable across processes so the CAS content-cache
+ * doesn't see spurious id churn) and this runtime is compiled once,
+ * separately from any particular program's own GimpleGen instance. */
+#define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
+
+void mojo_raise_attribute_error(char *attr) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "AttributeError: %s", attr ? attr : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_ATTRIBUTEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* Reads a dynamically-set attribute from `obj`'s own per-object dict (see
+ * above). No matching struct-field tag AND no dynamic attribute of this
+ * name ever set on this exact object -> a real AttributeError, matching
+ * Python's own `obj.missing_attr` behavior (this is exactly the case the
+ * bug doc's own minimal repro's `try: ... except AttributeError:` idiom
+ * depends on). Previously: silently printed a warning and returned 0 —
+ * that behavior is preserved nowhere now; a program relying on the old
+ * "always returns 0" non-error needs updating (there was never a
+ * legitimate reason to depend on it — it was an unimplemented stub, not
+ * a documented feature). */
 int64_t mojo_obj_getattr(void *obj, char *attr) {
-    fprintf(stderr, "mojo_obj_getattr: unresolved attribute access '.%s' on obj=%p "
-                     "(codegen fell back to the generic accessor instead of resolving "
-                     "this statically)\n", attr ? attr : "?", obj);
-    return 0;
+    if (_mojo_dynattr_objects) {
+        char key[32];
+        _mojo_dynattr_key(obj, key, sizeof key);
+        int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+        if (handle) {
+            MojoDict *attrs = (MojoDict *)(intptr_t)handle;
+            if (mojo_dict_contains(attrs, attr))
+                return mojo_dict_get_int(attrs, attr);
+        }
+    }
+    mojo_raise_attribute_error(attr);
+    return 0;  /* unreached: mojo_raise_attribute_error always raises (mojo_raise
+                  either longjmps into an enclosing try, or exit(1)s if none is
+                  active — see mojo_raise's own doc comment) */
 }
 
 /* Reached whenever _gen_for_iter (gimple_codegen.py) couldn't statically
@@ -3438,8 +3501,26 @@ void *mojo_zip(void *a, void *b) {
     return mojo_list_new();
 }
 
+/* Sets a dynamic attribute on `obj`'s own per-object dict — see the
+ * `_mojo_dynattr_objects` block (mojo_obj_getattr, above) for the storage
+ * scheme this shares. Reached whenever codegen couldn't statically resolve
+ * `obj.attr = val` to a real struct field (bugs/hard/CODEGEN_dynamic_
+ * attribute_on_generic_object.md, Steps 1/3). Previously a silent no-op —
+ * `cls.__slot_names__ = []`-shaped code compiled but the assignment never
+ * actually stuck anywhere, so a later read saw nothing. */
 void mojo_setattr(void *obj, char *attr, int64_t val) {
-    (void)obj; (void)attr; (void)val;
+    if (!_mojo_dynattr_objects) _mojo_dynattr_objects = mojo_dict_new();
+    char key[32];
+    _mojo_dynattr_key(obj, key, sizeof key);
+    int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+    MojoDict *attrs;
+    if (handle) {
+        attrs = (MojoDict *)(intptr_t)handle;
+    } else {
+        attrs = mojo_dict_new();
+        mojo_dict_set_int(_mojo_dynattr_objects, key, (int64_t)(intptr_t)attrs);
+    }
+    mojo_dict_set_int(attrs, attr, val);
 }
 
 void mojo_delattr(void *obj, char *attr) {

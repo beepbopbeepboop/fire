@@ -2943,6 +2943,33 @@ _CPP_OPAQUE_PTR_STRUCTS = frozenset({
     'MojoCompletedProcess', 'MojoFileHandle',
 })
 
+# Runtime-owned, FIXED-layout C structs this codegen itself defines (in
+# runtime/mojo_runtime.h or its own emitted preamble), as opposed to a
+# struct arising from a user's own `class`/`struct` statement (those are
+# never hardcoded here — they're always discovered via StructDef
+# processing into `self.struct_field_types`, which is mutable/extensible:
+# a not-yet-seen field on a USER struct legitimately grows the struct, see
+# `_collect_self_assigns`). A fixed-layout runtime struct has no such
+# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
+# hardcoded in mojo_runtime.h, forever) — an attribute name that isn't one
+# of its real C fields must route through the same dynamic-attribute
+# dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
+# `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
+# bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md Step 4) instead
+# of a direct `->member` access GCC would reject outright ("has no member
+# named ..."). Confirmed real instance: `inner.__name__ = 'read_nonlocal'`
+# / `f.__name__` on a `MojoBoundMethod` (Tools/scripts/var_access_
+# benchmark.py) and `__del__._slotted = True` (Tools/c-analyzer/c_common/
+# clsutil.py). `MojoGenerator`/`MojoAsync` are included per the same doc's
+# plan even though both are fully opaque (`typedef struct MojoGenerator
+# MojoGenerator;`, no C-visible fields at all) and so are not confirmed to
+# ever reach this exact path in practice — harmless to list defensively;
+# see `_struct_name_owner`'s cross-module collision guard for why a user
+# struct can never collide with one of these names.
+_FIXED_RUNTIME_STRUCT_NAMES = frozenset({
+    'MojoBoundMethod', 'MojoGenerator', 'MojoAsync',
+})
+
 
 def _import_targets(node) -> list:
     """All `(module, alias)` targets of an ImportStmt: the primary
@@ -8486,6 +8513,32 @@ class GimpleGen:
                 return 'char *', t
             struct_name_check = _struct_name_of(ot)
             if struct_name_check not in self.struct_field_types:
+                # `f.__name__` on an opaque value (Sub-case A/B) or one of
+                # this codegen's own fixed-layout runtime structs (Sub-case
+                # C — MojoBoundMethod is the confirmed real case: a closure
+                # value with a dynamically-set `__name__`, see bugs/hard/
+                # CODEGEN_dynamic_attribute_on_generic_object.md) — route
+                # through the same dynamic-attribute dispatch used for any
+                # other not-a-real-field member, instead of the unconditional
+                # "<type>" placeholder below (which would silently discard
+                # whatever `__name__` was actually, explicitly set to via
+                # `inner.__name__ = "..."` — confirmed via Tools/scripts/
+                # var_access_benchmark.py). The "<type>" stub is preserved
+                # for every OTHER not-in-struct_field_types case (its
+                # original purpose: the `type(x).__name__`-shaped AST-walker
+                # dispatch chokepoint documented just above).
+                if ot in ('int', 'int64_t', 'void *') or struct_name_check in _FIXED_RUNTIME_STRUCT_NAMES:
+                    vp = self._new_val('void *', f'(void *){ov}' if ot != 'void *' else ov)
+                    raw = self._call_expr('int64_t', '_mojo_dispatch_getattr',
+                                    [('void *', vp), ('char *', '"__name__"')])
+                    # `__name__` is always conceptually a string — cast the
+                    # generic boxed-int64_t dispatch result back to char *
+                    # (mirrors the `_boxed_ft` cast-back pattern the plain
+                    # opaque-getattr call sites use just below in this same
+                    # function), so `print(f.__name__)` sees the real string
+                    # rather than its raw pointer bits as a number.
+                    t = self._new_val('char *', f'(char *){raw}')
+                    return 'char *', t
                 t = self._new_temp('char *')
                 self._emit(f'  {t} = {self._intern_string("<type>")};  /* {ot}.__name__ stubbed */')
                 return 'char *', t
@@ -8708,6 +8761,21 @@ class GimpleGen:
                 return _boxed_ft, t
             if ot in ('int', 'char'):
                 ov = self._new_val('int64_t', f'(int64_t){ov}')
+            vp = self._new_val('void *', f'(void *){ov}')
+            return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr',
+                            [('void *', vp), ('char *', f'"{node.member}"')])
+        elif struct_name in _FIXED_RUNTIME_STRUCT_NAMES:
+            # Step 4 (bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md):
+            # `ot` resolved to one of THIS codegen's own fixed-layout runtime
+            # structs (MojoBoundMethod, ...), and `node.member` isn't one of
+            # its real, hardcoded C fields — the generic "Unknown struct
+            # field" fallback just below would blindly emit `ov->member`,
+            # which GCC rejects outright for a struct with no such member
+            # ("'MojoBoundMethod' has no member named 'X'", the exact
+            # confirmed failure this branch fixes). Route through the same
+            # tag-dispatched runtime accessor the fully-opaque case above
+            # uses instead — real per-object dynamic-attribute storage
+            # (mojo_obj_getattr), not a direct field access.
             vp = self._new_val('void *', f'(void *){ov}')
             return 'int64_t', self._call_expr('int64_t', '_mojo_dispatch_getattr',
                             [('void *', vp), ('char *', f'"{node.member}"')])
@@ -16911,6 +16979,29 @@ class GimpleGen:
                 vp_tmp = self._new_val('void *', f"(void *){obj64}")
                 self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+            elif (_struct_name_of(ot) in _FIXED_RUNTIME_STRUCT_NAMES
+                  and node.target.member not in self.struct_field_types.get(_struct_name_of(ot), {})):
+                # Step 4 (bugs/hard/CODEGEN_dynamic_attribute_on_generic_
+                # object.md): `ot` is one of this codegen's own fixed-layout
+                # runtime structs (MojoBoundMethod, ...) and `node.target.
+                # member` isn't one of its real, hardcoded C fields — the
+                # direct-field-write path just below would blindly emit
+                # `ov->member = val`, which GCC rejects for a struct with no
+                # such member. Route through the same dynamic-attribute
+                # dispatch the fully-opaque branch above uses (real
+                # per-object storage via mojo_setattr), mirroring that
+                # branch's own emission exactly. Confirmed real instance:
+                # `inner.__name__ = 'read_nonlocal'` / `__del__._slotted =
+                # True` on a `MojoBoundMethod` value.
+                member_str = node.target.member
+                key_slit = self._intern_string(_c_escape(member_str))
+                key_tmp = self._new_val('char *', f"{key_slit}")
+                v64 = self._new_temp('int64_t')
+                self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                obj64 = self._to_int64(ot, ov)
+                vp_tmp = self._new_val('void *', f"(void *){obj64}")
+                self._emit_call('void', '', '_mojo_dispatch_setattr',
+                                [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
                 op = '->' if '*' in ot else '.'
                 struct_name = _struct_name_of(ot)
@@ -17144,6 +17235,22 @@ class GimpleGen:
                 # See the AssignStmt MemberExpr branch above for why this
                 # calls _mojo_dispatch_setattr, not the bare mojo_setattr
                 # runtime stub (a no-op fallback, not a real implementation).
+                member_str = node.target.member
+                key_slit = self._intern_string(_c_escape(member_str))
+                key_tmp = self._new_val('char *', f"{key_slit}")
+                v64 = self._new_temp('int64_t')
+                self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                vp_tmp = self._new_val('void *', f"(void *){ov}")
+                self._emit_call('void', '', '_mojo_dispatch_setattr',
+                                [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+            elif (_struct_name_of(ot) in _FIXED_RUNTIME_STRUCT_NAMES
+                  and node.target.member not in self.struct_field_types.get(_struct_name_of(ot), {})):
+                # Step 4 (bugs/hard/CODEGEN_dynamic_attribute_on_generic_
+                # object.md), augmented-assignment analogue of the plain
+                # AssignStmt MemberExpr branch above — same fixed-layout
+                # runtime struct (e.g. MojoBoundMethod), unknown field:
+                # route through dynamic-attribute dispatch instead of a
+                # direct `->member = v` GCC would reject.
                 member_str = node.target.member
                 key_slit = self._intern_string(_c_escape(member_str))
                 key_tmp = self._new_val('char *', f"{key_slit}")
@@ -17569,6 +17676,43 @@ class GimpleGen:
                 self._safe_coerce_emit(vtype, dst, v, self._write_dest(tname))
             elif isinstance(target, MemberExpr):
                 ot, ov = self.lower_expr(target.obj)
+                # `cls.__slot_names__ = value` etc. as ONE of a chained
+                # assignment's targets (`slotnames = cls.__slot_names__ =
+                # []`) — mirrors _gen_stmt_AssignStmt's single-target
+                # MemberExpr branch's own opaque-object/fixed-runtime-
+                # struct dispatch (bugs/hard/CODEGEN_dynamic_attribute_on_
+                # generic_object.md): this loop previously had NEITHER
+                # check at all, so a chained assignment onto an opaque
+                # `cls`/`self` value (Sub-case A/B) or a fixed-layout
+                # runtime struct like MojoBoundMethod (Sub-case C) always
+                # fell straight to the raw `->field = v` write below,
+                # regardless of `ot` — confirmed via this doc's own minimal
+                # repro (`slotnames = cls.__slot_names__ = []`, a chained
+                # assignment), which reached exactly this path.
+                if ot in ('int', 'int64_t', 'void *'):
+                    member_str = target.member
+                    key_slit = self._intern_string(_c_escape(member_str))
+                    key_tmp = self._new_val('char *', f"{key_slit}")
+                    v64 = self._new_temp('int64_t')
+                    self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                    obj64 = self._to_int64(ot, ov)
+                    vp_tmp = self._new_val('void *', f"(void *){obj64}")
+                    self._emit_call('void', '', '_mojo_dispatch_setattr',
+                                    [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+                    continue
+                sn = _struct_name_of(ot)
+                if (sn in _FIXED_RUNTIME_STRUCT_NAMES
+                        and target.member not in self.struct_field_types.get(sn, {})):
+                    member_str = target.member
+                    key_slit = self._intern_string(_c_escape(member_str))
+                    key_tmp = self._new_val('char *', f"{key_slit}")
+                    v64 = self._new_temp('int64_t')
+                    self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+                    obj64 = self._to_int64(ot, ov)
+                    vp_tmp = self._new_val('void *', f"(void *){obj64}")
+                    self._emit_call('void', '', '_mojo_dispatch_setattr',
+                                    [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+                    continue
                 op = '->' if '*' in ot else '.'
                 # Coerce to the field's real declared C type (mirrors
                 # _gen_stmt_AssignStmt's single-target MemberExpr branch just
@@ -17581,7 +17725,6 @@ class GimpleGen:
                 # gcc's -fgimple frontend rejects outright ("invalid
                 # conversion in gimple call"/assignment) — not merely a
                 # warning, a hard compile failure.
-                sn = _struct_name_of(ot)
                 field_type = self.struct_field_types.get(sn, {}).get(target.member, vtype)
                 self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(target.member)}")
             elif isinstance(target, SubscriptExpr):
