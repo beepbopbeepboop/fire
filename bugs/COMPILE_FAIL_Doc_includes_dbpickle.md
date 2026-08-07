@@ -2,61 +2,57 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
-(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+## Status (updated 2026-08-06)
+
+Root-caused; NOT fixed — requires implementing two substantial missing
+runtime features (`io.BytesIO`, `pickle.Pickler`/`Unpickler`), not a
+narrow bug. Low priority: this is a Doc/includes/ EXAMPLE script (doc
+illustration code), not real library/stdlib code.
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py: In function '_alloc_DBPickler':
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:49:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   49 | def main():
-      | ^~~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py: In function '_alloc_DBUnpickler':
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:63:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   63 |         cursor.execute("INSERT INTO memos VALUES(NULL, ?)", (task,))
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py: In function 'DBPickler_persistent_id':
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:221:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py: In function 'DBUnpickler___init__':
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:36:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   36 |         type_tag, key_id = pid
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:34:11: warning: variable '_t4' set but not used [-Wunused-but-set-variable]
-   34 |         # Here, pid is the tuple returned by DBPickler.
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:33:11: warning: variable '_t3' set but not used [-Wunused-but-set-variable]
-   33 |         # This method is invoked whenever a persistent ID is encountered.
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:32:11: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
-   32 |     def persistent_load(self, pid):
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:31:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   31 | 
-      |           ^  
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py: In function 'DBUnpickler_persistent_load':
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:48:1: warning: label 'bb_4' defined but not used [-Wunused-label]
-   48 | 
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:44:1: warning: label 'bb_5' defined but not used [-Wunused-label]
-   44 |             # Otherwise, the unpickler will think None is the object referenced
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:52:1: warning: label 'bb_3' defined but not used [-Wunused-label]
-   52 | 
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:75:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   75 |     # Update a record, just for good measure.
-      | ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:73:11: warning: variable '_t34' set but not used [-Wunused-but-set-variable]
-   73 |     pprint.pprint(memos)
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:72:11: warning: variable 'task' set but not used [-Wunused-but-set-variable]
-   72 |     print("Pickled records:")
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:71:11: warning: variable '_t33' set but not used [-Wunused-but-set-variable]
-   71 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py:70:11: warning: variable '_t32' set but not used [-Wunused-but-set-variable]
-... (169 more lines)
+error: cannot convert to a pointer type
+```
+at:
+```python
+file = io.BytesIO()
 ```
 
-Exit code: 1
-Elapsed: 5.29s
+## Root cause
+
+`io.BytesIO` has NO runtime support in this compiler at all (confirmed:
+zero references to `BytesIO`/`StringIO` anywhere in gimple_codegen.py).
+`io.BytesIO()` lowers as an unresolved dynamic member-call stub
+("`int64_t.BytesIO() stubbed`" in the generated C, `dbpickle.ci:1430`),
+returning a bare `int64_t`. `file` is later used in contexts requiring a
+real pointer (`DBPickler(file).dump(...)`, `file.seek(0)`,
+`DBUnpickler(file, conn).load()`), so a later inferred pointer type for
+`file` conflicts with the earlier `int64_t` stub value at its assignment
+— "cannot convert to a pointer type".
+
+Separately (not yet independently confirmed to compile past this point,
+since the build fails before reaching it), `pickle.Pickler`/
+`pickle.Unpickler` ALSO have zero runtime support (no references
+anywhere in gimple_codegen.py) — this example's whole point is the
+`persistent_id`/`persistent_load` custom-pickling protocol
+(`class DBPickler(pickle.Pickler): def persistent_id(self, obj): ...`),
+which would need real subclassable `Pickler`/`Unpickler` base-class
+support, not just a stub.
+
+For comparison: `sqlite3` (also used in this file, `sqlite3.connect`,
+`cursor.execute`, `cursor.fetchone()`) already has a REAL runtime binding
+(`mojo_sqlite3.h`, wired up via `_KNOWN_SIGS` at
+gimple_codegen.py:4957-4966) — `io.BytesIO`/`pickle.Pickler` would need
+equivalent from-scratch runtime + codegen work: a growable byte-buffer
+struct with `read`/`write`/`seek`/`getvalue`, and a real
+`pickle.Pickler`/`Unpickler` implementation supporting subclass
+overrides of `persistent_id`/`persistent_load`.
+
+## Priority note
+
+Not attempted — this is a genuinely new-feature-sized gap (two separate
+missing runtime subsystems), not a quick fix, and the specific file
+affected is Doc/includes/ EXAMPLE/illustration code (not real
+library/stdlib source), so its value relative to effort is low compared
+to other remaining bugs. Worth revisiting only if `io.BytesIO` or
+`pickle.Pickler`/`Unpickler` support becomes independently motivated by
+some OTHER, higher-value real stdlib file that needs the same feature.
