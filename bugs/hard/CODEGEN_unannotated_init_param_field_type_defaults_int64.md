@@ -181,6 +181,42 @@ check-selfhost, from-scratch stdlib dylib rebuild, compile_stdlib.py -j8)
 binaries' actual runtime output before/after, since the existing gate
 cannot detect this bug's OWN symptom (wrong values, not failed compiles).
 
+## Sibling gap: comprehension RHS also falls to the same `int`/`int64_t` default
+
+Confirmed 2026-08-06 via `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md`.
+`_collect_self_assigns` (the same function this doc's main root-cause
+section describes) dispatches on `node.value`'s AST type to guess a
+field's C type: `IdentExpr` → look up `param_types` (this doc's main
+finding), `IntLiteral`/`StringLiteral`/`BoolLiteral`/`DictExpr`/
+`(ListExpr, TupleExpr)`/`SetExpr`/`CallExpr` all get their own
+dedicated case — but a **comprehension** (`[x for x in y]`/
+`{x for x in y}`/`{k: v for k, v in y}`), a DIFFERENT AST node type
+than a literal `ListExpr`/`DictExpr`/`SetExpr`, matches NONE of these
+cases and falls to the same generic `else: ft = 'int'` fallback
+(gimple_codegen.py:26787-26788) as any other unrecognized shape.
+
+Real instance: `Tools/cases_generator/cwriter.py`'s `CWriter.__init__`:
+```python
+self.indents = [i * 4 for i in range(indent + 1)]
+```
+Field `indents` gets declared `int` (confirmed via the generated
+`.ci`'s struct typedef: `int indents;`, vs. the real value being a
+`MojoList *` pointer truncated through `(void*)→(int64_t)→(int)` casts
+to fit). Any later method reading `self.indents` as a list then hits
+`non-trivial conversion in 'integer_cst'` / `type mismatch in binary
+expression`.
+
+This is a distinct code path from the main `IdentExpr` case this doc
+focuses on (no `param_types` lookup involved at all — a comprehension
+is a computed expression, not a parameter reference), but the SAME
+function, the SAME class of risk, and a real fix would naturally want
+to add a comprehension case (`ListComp`/`SetComp`/`DictComp` — whatever
+`mojo_compiler.py` names these nodes) mapping to `MojoList
+*`/`MojoSet *`/`MojoDict *` respectively, alongside the existing
+literal-collection cases at gimple_codegen.py:26744-26749. Not
+attempted — flagging as a cheap addition to the SAME eventual fix this
+doc already describes, not a separate investigation.
+
 ## Real-world instances confirmed 2026-08-06
 
 - `Lib/importlib/resources/readers.py`'s `NamespaceReader.__init__(self,

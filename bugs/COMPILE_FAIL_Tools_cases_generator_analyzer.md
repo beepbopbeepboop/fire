@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error is entirely in a transitively-imported sibling,
+not this file's own code:
+
+```
+/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: non-trivial conversion in 'integer_cst'
+/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: type mismatch in binary expression
+```
+
+Root-caused in `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (a
+comprehension-assigned struct field defaulting to `int` instead of
+`MojoList *` — new sibling gap added to
+`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
+`analyzer.py` imports `lexer`/`cwriter` transitively; nothing specific
+to `analyzer.py` itself was found. Not fixed here — see that doc.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/lexer.py: In function '_alloc_Token':
