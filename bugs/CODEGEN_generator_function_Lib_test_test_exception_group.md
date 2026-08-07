@@ -1,6 +1,31 @@
 # CODEGEN_generator_function: Lib/test/test_exception_group.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+**Classification bug FIXED for the reported symptom** (`bugs/hard/
+CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`, task
+#138) — the root cause (a self-recursive `yield from` can never find
+itself in `self._generator_api` while its own body is still being
+compiled, since registration only happens after the whole compile
+succeeds) is fixed. Confirmed via a direct compile: the ~150-error
+cascade of malformed declarations this doc reported (`type defaults to
+'int'`, `conflicting types for 'mojo_list_append_int'`, etc.) is GONE
+— the plain `.ci` output now compiles cleanly with `gcc -fgimple
+-fsyntax-only` (0 errors, confirmed).
+
+**`leaf_generator` STILL does not fully compile end-to-end**, for
+OTHER, unrelated, pre-existing reasons in its own body (confirmed via
+a direct g++ compile of the `.cpp`): `tbs.append(...)` (a method call
+on an untyped param treated as a scalar `int64_t`), `exc.__traceback__`
+/`exc.exceptions` (attribute access on the same), and `yield exc, tbs`
+(a tuple yield, not a single scalar) are all out of this narrow
+generator-body model's scope — separate, pre-existing gaps, not
+introduced by this fix, and not attempted here. These now surface as
+ordinary, LOCALIZED g++ errors rather than a cascading, hard-to-read
+corruption — a real improvement in diagnosability even though the file
+doesn't fully compile yet.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `request for member 'append'` .cpp error no longer
