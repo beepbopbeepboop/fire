@@ -1,6 +1,22 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild. Still correctly
+classified as **NOT a generator-codegen-cluster failure** —
+`Shelf.__iter__` still compiles cleanly (no "not eligible" refusal), and
+`shelve.py`'s own source contributes ZERO errors to the build (down from
+1189 to 1038 total errors, all still in OTHER transitively-imported
+files). The `struct _locale_toplev`/`struct _threading_toplev`
+"undefined module-namespace pseudo-struct" pattern noted below is GONE
+(0 occurrences now — fixed by `bugs/hard/COMPILE_FAIL_module_toplev_
+struct_never_fully_defined.md`'s "mechanism 2" landing since
+2026-08-06/07, same fix already confirmed for glob.py/mailbox.py/
+modulefinder.py in this session). Not investigated further — the
+remaining 1038 errors are still entirely in shelve.py's transitive
+dependency closure (dbm backends, etc.), out of scope for this cluster.
+
+## Status (updated 2026-08-06, superseded above — struct_toplev errors since independently fixed)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `request for member 'keys'` .cpp error no longer reproduces.

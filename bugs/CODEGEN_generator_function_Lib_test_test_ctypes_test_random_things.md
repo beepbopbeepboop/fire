@@ -1,6 +1,19 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild — reproduces
+identically (line numbers shifted by a few lines but the same shape,
+same `cm.unraisable`/`int64_t` errors). Classification below unchanged
+and still accurate. This is the same "no real class-attribute/field-
+access story for non-`self` objects inside a generator body" limitation
+already tracked as architecturally broad in `bugs/hard/CODEGEN_
+generator_struct_typed_param_refused.md` (task #147) — a `with X() as
+local:` binding is a second entry point into the identical gap
+(alongside a plain parameter's own declared type). Not attempted here,
+consistent with this task's guidance to leave #147-shaped gaps alone.
+
+## Status (updated 2026-08-06, superseded above — re-verified, unchanged)
 
 **STILL FAILING**, confirmed reproducing against current master
 (`2b0c4c5`) — same symptom as 2026-07-30, now precisely classified.

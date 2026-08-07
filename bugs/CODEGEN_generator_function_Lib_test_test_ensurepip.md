@@ -1,6 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild — reproduces
+byte-for-byte identically. Classification unchanged: nested `class
+FakePip(): ...` inside `fake_pip`'s own generator body, genuinely
+feature-sized (would need real design work for where a nested type's
+layout/methods compile relative to the enclosing coroutine translation
+unit). Not attempted, matching this task's guidance for #147-shaped
+gaps. Still only one instance in this cluster — not promoted to a
+`bugs/hard/*.md` doc.
+
+## Status (updated 2026-08-06, superseded above — re-verified, unchanged)
 
 **STILL FAILING**, confirmed reproducing against current master
 (`2b0c4c5`) with a precisely identified, new gap.

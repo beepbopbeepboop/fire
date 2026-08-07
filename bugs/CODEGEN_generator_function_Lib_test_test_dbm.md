@@ -1,6 +1,15 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild. Still correctly
+classified as **NOT a generator-codegen-cluster failure** —
+`test_dbm.py`'s own generator still shows zero signal of a problem, and
+`test_dbm.py`'s own source still contributes ZERO errors (down to 31
+total errors from 39, all still in transitively-imported dependency
+files). Not investigated further — out of scope for this cluster.
+
+## Status (updated 2026-08-06, superseded above — error count has since dropped, same classification)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'dbm' was not declared` .cpp error no longer reproduces.

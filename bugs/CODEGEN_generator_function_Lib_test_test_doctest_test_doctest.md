@@ -1,6 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_doctest/test_doctest.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-verified against current master with a real rebuild — reproduces
+byte-for-byte identically (same two errors, same lines). Classification
+unchanged: both are the already-documented "outer-scope class name /
+untyped local not threaded into generator C++ scope" gap family (see
+`bugs/CODEGEN_generator_function_Lib_test_libregrtest_runtests.md` for
+the closest sibling instance, and `bugs/COMPILE_FAIL_ctypes_macholib_
+dyld.md`'s bullets 1/4 for the original two mechanisms). Not attempted
+— broad/shared inference machinery, not a narrow single-instance fix.
+
+## Status (updated 2026-08-06, superseded above — re-verified, unchanged)
 
 **STILL FAILING**, confirmed reproducing against current master
 (`2b0c4c5`) — same symptom family as 2026-07-30, still reaching the
