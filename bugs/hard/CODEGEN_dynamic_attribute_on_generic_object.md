@@ -2,11 +2,82 @@
 
 ## Status
 
-Unfixed. Concrete implementation plan below (2026-08-06), building on
-existing runtime-dispatch infrastructure this codegen already has —
-smaller in scope than the original "new feature from scratch" framing
-suggested. Not yet implemented (new runtime storage + several codegen
-call sites — real, multi-step work, not a one-line patch).
+**Step 0 implemented and verified 2026-08-06** (see "Step 0" below for
+what landed). Steps 1-4 (the genuinely-new-attribute dynamic-storage
+cases, Sub-cases A/B/C) remain unimplemented — concrete implementation
+plan below, building on existing runtime-dispatch infrastructure this
+codegen already has, smaller in scope than the original "new feature
+from scratch" framing suggested, but still real, multi-step work (new
+runtime storage + several codegen call sites), not attempted this
+session.
+
+### Step 0 implementation notes
+
+`obj.__dict__` (a `MemberExpr` with `.member == '__dict__'`, gated on
+`struct_name in self.struct_field_types` — i.e. only for a struct with
+statically-known fields, exactly Step 0's scope) and `vars(obj)` (the
+1-arg builtin call, same gating) both now lower to a call to a new
+`_mojo_dispatch_asdict(void *)` runtime-tag dispatcher, mirroring the
+existing `_mojo_dispatch_fields`/`_mojo_dispatch_getattr` machinery
+exactly. Each reflect-eligible struct gets a companion
+`_mojo_asdict_<StructName>(StructName *)` that builds a real `MojoDict *`
+of name→value pairs from the struct's own known fields (reusing the
+per-struct field loop that already builds `_mojo_getattr_<sn>`/
+`_mojo_setattr_<sn>`/`_mojo_fieldnames_<sn>`, not a second, separately-
+maintained field enumeration), boxing every value via `mojo_dict_set_int`
+— the same generic boxed-int64_t convention every other heterogeneous
+`MojoDict *`/`MojoList *` this codegen builds already uses (see
+`_mojo_generic_elem_repr`'s existing magnitude/registered-list-or-dict/
+type-tag heuristic, which is what actually makes
+`print(obj.__dict__)`/`pprint.pprint(retval.__dict__)` — the doc's own
+real-world confirmed use case — print correctly: `{'name': 'hello',
+'value': 42}`, not raw integers). Verified: a repro with `c.__dict__`
+and `vars(c)` both compiled and ran, printing the correct dict repr for
+a struct with a `char *` field and an `int64_t` field.
+
+**Known limitation, by design, not a regression**: reading an individual
+key back out of the resulting dict with a Python-level-typed expectation
+(`obj.__dict__["name"]` used as a string, printed directly rather than
+through the dict's own generic repr) prints the raw boxed int64_t
+(pointer bits interpreted as a number), because a single `MojoDict *`
+in this codegen has one static declared value type and there's no
+runtime type tag stored per-key. This is inherent to how EVERY
+heterogeneous/generic `MojoDict *`/`MojoList *` this codegen already
+builds works (reflection tables, `dataclasses.fields()`'s field-name
+list, etc.) — not something Step 0 introduces or could fix without a
+genuinely new per-value type-tagging scheme, well outside "Step 0,
+easiest, do first" scope. The confirmed real-world call sites
+(`Tools/build/umarshal.py`/`deepfreeze.py`'s `retval.__dict__`) only
+ever pass the whole dict to `pprint.pprint`, never re-subscript it with
+a typed expectation, so this limitation doesn't block them.
+
+**Gating to avoid a real regression found during verification**: an
+early version emitted `_mojo_dispatch_asdict` and its forward
+declaration unconditionally (matching its 4 siblings —
+`_mojo_dispatch_getattr`/`setattr`/`fields`/`is_dataclass`, which
+genuinely must stay unconditional since any module in a whole-program
+closure might call bare `getattr()`/`dataclasses.fields()` on another
+module's struct with no local trace of the call). Doing the same for
+`_mojo_dispatch_asdict` regressed `test_module_cache.py`'s "reflect:
+client object is tiny — bodies live in the dylib" size-budget check (a
+link-mode client whose whole architectural point is staying tiny). Fixed
+by gating both the per-struct `_mojo_asdict_<sn>` bodies and the
+`_mojo_dispatch_asdict` dispatcher (definition AND forward declaration)
+on a new shared flag, `GimpleGen._asdict_dispatch_needed` (a `set`, following
+this codegen's established "shared mutable container across nested
+temp_gens" pattern — see `_compiled_modules`/`_emitted_structs` etc.),
+set by the two new call sites during lowering and checked at emission
+time (which always happens after all lowering, so the flag is fully
+populated by then regardless of import nesting). Verified: with no
+`.__dict__`/`vars()` call anywhere in a compile, the dispatcher and its
+per-struct bodies are entirely absent from the output, and
+`test_module_cache.py`'s tiny-client-object check passes again.
+
+Full 5-part quality gate after Step 0: `test_gimple.py` (247/247),
+`test_module_cache.py` (76/76, including the size-budget check),
+`make check-selfhost` (pass), from-scratch stdlib dylib rebuild (0
+`skip <module>:` lines), `compile_stdlib.py -j8` (664/664, 0
+unexpected — see this doc's own commit for the exact run).
 
 ## Symptom
 
