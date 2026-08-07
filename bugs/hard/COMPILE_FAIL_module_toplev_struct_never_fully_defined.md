@@ -29,7 +29,12 @@ Lib/subprocess.py:1175:28:  error: invalid use of undefined type 'struct _posixp
 ```
 Also seen (different modules, same shape) in `Lib/shelve.py`'s
 transitive-dependency errors: `struct _locale_toplev`, `struct
-_threading_toplev`.
+_threading_toplev`; in `Lib/turtle.py` (`struct _selectors_toplev`); in
+`Lib/tempfile.py` (`struct _threading_toplev`, `struct _pprint_toplev`,
+`struct _io_toplev`, `struct __py_warnings_toplev`); in `Lib/weakref.py`
+(`struct _locale_toplev`); and in `Lib/typing.py` (`struct
+_tokenize_toplev`, `struct _inspect_toplev` — the largest RAW occurrence
+count of this pattern seen in this cluster, 60+ individual errors).
 
 ## Mechanism (traced this far)
 

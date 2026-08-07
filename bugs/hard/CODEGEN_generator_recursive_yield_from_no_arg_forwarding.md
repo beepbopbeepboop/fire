@@ -107,6 +107,47 @@ Whether the original `.filename` bug is itself still latent (fixed, or
 just masked) is unconfirmed — masked either way by this generator gap
 today.
 
+## Additional real occurrence (2026-08-06)
+
+Found again while classifying the `CODEGEN_generator_function_Lib_*.md`
+cluster (tasks #95-135): `Lib/test/test_exception_group.py`'s own
+`leaf_generator(exc, tbs=None)`:
+```python
+def leaf_generator(exc, tbs=None):
+    if tbs is None:
+        tbs = []
+    tbs.append(exc.__traceback__)
+    if isinstance(exc, BaseExceptionGroup):
+        for e in exc.exceptions:
+            yield from leaf_generator(e, tbs)
+    else:
+        yield exc, tbs
+    tbs.pop()
+```
+Same shape as this doc's own repro (recursive `yield from` to itself,
+with a defaulted extra parameter, `tbs=None`) — but here the failure
+mode is DIFFERENT from either of the two symptoms already documented
+above: instead of a clean whole-module refusal OR clean, isolated C++
+errors, this instance produces ~150 severely garbled/malformed
+declaration errors in the PLAIN `.ci` output itself (`error: type
+defaults to 'int' in declaration of ...`, `error: expected '=', ',',
+';', 'asm' or '__attribute__' before ':' token`, `error: conflicting
+types for 'mojo_list_append_int'` and other RUNTIME HELPER functions —
+suggesting the emission got badly desynchronized, likely missing a
+brace or falling out of a function body mid-emission) at
+`test_exception_group.py:574-598` (NOT inside a `_gen.cpp` file — this
+is the plain gcc-compiled `.ci`, meaning the malformed emission happens
+in whatever caller-side inline-driving-loop code consumes this
+generator, not in the coroutine `.cpp` unit itself). See
+`bugs/CODEGEN_generator_function_Lib_test_test_exception_group.md` for
+the full current error list. A third failure MODE for what's likely the
+same underlying "recursive yield-from with an extra parameter" root
+cause — worth noting for whoever picks this up that the blast radius
+isn't limited to a clean refusal or isolated errors; it can also corrupt
+the surrounding plain-C emission badly enough to cascade into completely
+unrelated-looking syntax errors against this codegen's own runtime
+helper declarations.
+
 ## What a real fix needs
 
 At minimum: (1) forward keyword-only arguments on recursive `yield from`
