@@ -6,12 +6,20 @@ Root cause CONFIRMED (2026-08-06, exact lines identified — not just inferred
 from profile shape as before). Concrete phased fix plan below.
 
 **Phase 1 implemented and verified 2026-08-07** (see "Phase 1 implementation
-notes" below). Phase 2 (the real fix for the `_walk_ast` COUNT — memoizing
-the per-statement scan work of `_scan_body_for_local_field_access` and its
-~13 siblings, not just the list-construction work Phase 1 addresses) is
-NOT implemented — genuinely bigger, higher-risk surgery per-consumer,
-deliberately left for a dedicated follow-up (see the plan's own "Risk /
-why Phase 2 is real, not quick" section, unchanged).
+notes" below).
+
+**Phase 2 implemented and verified 2026-08-07** (see "Phase 2 implementation
+notes" below) — for `_scan_body_for_local_field_access` specifically, the
+single biggest line in the original profile. This is a REAL, measured
+wall-clock win: `Lib/contextlib.py` (the doc's own worst-case profiling
+target) dropped from 44.2s (Phase 1 alone) to 10.9s; `Lib/socket.py` went
+from >120s (did not complete within a 2-minute cap — a confirmed timeout
+under any 60-90s harness budget) to 61.4s and now actually SUCCEEDS
+(previously never observed to finish). The other ~13 `imported_stmts`
+consumers listed in the original Phase 2 plan are NOT yet memoized —
+extending the same treatment to them, one at a time with independent
+verification, remains a valid follow-up if more perf headroom is needed
+(`socket.py`'s 61.4s is a big improvement but still not fast).
 
 ### Phase 1 implementation notes
 
@@ -80,6 +88,116 @@ further here.
 4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
 5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
    failures (unchanged from baseline).
+
+### Phase 2 implementation notes
+
+Implemented for exactly one consumer, `_scan_body_for_local_field_access`
+(gen_module's 4th struct-field completeness pass, the single biggest line
+in the original profile) — per the doc's own "one consumer at a time"
+guidance, the other ~13 `imported_stmts` consumers are untouched.
+
+The function used to call `_walk_ast(body)` twice per invocation (once to
+build a `name -> struct` `local_types` map from `VarDecl`/constructor-call
+sites, once to resolve `MemberExpr` field accesses against it), with
+`body` (`imported_stmts` in particular) growing to O(total transitive tree
+size) at every one of the N nesting levels — O(N^2) total node visits,
+exactly the profile's dominant cost.
+
+Since `_walk_ast(list_of_stmts)` is exactly the concatenation of
+`_walk_ast([s])` for each top-level statement `s` in the list (confirmed
+by reading `_walk_ast`'s own definition — no cross-statement state), the
+expensive per-node subtree walk of each INDIVIDUAL top-level statement can
+be memoized by `id(stmt)` and reused verbatim across every later call that
+also includes that same statement object, tree-wide — a new
+`self._field_scan_var_cache`/`self._field_scan_member_cache` pair, shared
+by reference into every `temp_gen` exactly like `_all_transitive_stmts_
+ordered` (same sharing block in `_compile_imported_module`).
+
+**The subtlety that made this non-trivial** (why a naive "skip already-
+visited nodes" memoization is NOT safe here, contrary to what the
+Phase-2-plan text's literal wording might suggest): three of the original
+filters applied while building `local_types` are NOT pure functions of the
+statement's own AST content — they're time-/call-dependent:
+- `ann in self.struct_field_types` — `struct_field_types` grows
+  monotonically as unrelated structs are discovered elsewhere during
+  compilation, so whether a given candidate type name counts as "a known
+  struct" can flip from false to true AFTER a statement was first visited.
+- `ann not in self._selfhost_hardcoded_struct_names` — a per-`gen_module`
+  -call snapshot (`frozenset(self.struct_field_types.keys())` taken at a
+  fixed point in that call), so it can differ across different calls/
+  instances even for the exact same statement.
+- `ann != own_struct_name` — an explicit per-call parameter (always `None`
+  at both of this function's current call sites, but not guaranteed to
+  stay that way).
+
+Caching the FILTERED result at first-visit time would silently and
+PERMANENTLY miss any candidate whose governing struct becomes known only
+on a later call — a real correctness regression, not just a missed
+optimization. The actual fix: the cache stores only the raw SYNTACTIC
+candidates (name/type-name pairs matching the `VarDecl`-with-annotation or
+`x = Ctor(...)` shape, and `MemberExpr`-with-`IdentExpr`-obj sites minus
+dunder members, which have no time-dependent filter and are safe to
+prefilter into the cache) — the three time-dependent filters above are
+still re-applied fresh, in full, on EVERY call, against the cached
+candidate list. This is a cheap plain-list iteration (no `_walk_ast`), and
+reproduces the original per-call semantics exactly: it's precisely a
+memoization of the expensive AST traversal, not a memoization of the
+filtered result.
+
+Also considered and rejected: making `local_types` itself a persistent,
+ever-growing shared dict (rather than freshly rebuilt from the current
+`body` on every call) to let the FIRST loop skip already-visited `VarDecl`
+nodes outright. Analysis showed this changes behavior in a real (if
+obscure) scenario: two co-incidentally-same-named local variables in
+UNRELATED statements from DIFFERENT modules, where the type-establishing
+one is compiled later than the accessing one — the current (both-before-
+and-after-this-fix) per-call-fresh-rebuild semantics guarantee eventual
+resolution once both are jointly present in some call's body (which the
+OUTERMOST/last call's `imported_stmts`, being the union of literally
+everything compiled anywhere in the tree, always achieves); a globally-
+persistent `local_types` with node-level skip does not have the same
+guarantee at INTERMEDIATE levels and could resolve a field earlier than
+before, changing that intermediate level's own generated code. Rejected
+in favor of the safer, provably-behavior-identical per-statement
+candidate-list caching described above.
+
+### Validation (2026-08-07, Phase 2)
+
+Direct `gimple_codegen.compile_to_gimple(src, do_imports=True, ...)`
+wall-clock timing (no profiler overhead), `git stash` on `gimple_codegen.py`
+alone for the "before" (Phase-1-only) run, same machine, same process:
+
+| file | before (Phase 1 only) | after (Phase 2) |
+|---|---|---|
+| `Lib/contextlib.py` | 44.23s (fails at the same unrelated async/coroutine-codegen point both before and after — apples to apples) | 10.90s (same failure point) |
+| `Lib/socket.py` | did not complete within a 2-minute cap (>120s — a confirmed timeout under any 60-90s harness budget) | 61.37s, **succeeds** (9.86 MB of generated C) |
+
+A `cProfile` run of the `contextlib.py` case after the fix shows
+`_scan_body_for_local_field_access`'s own cumulative time dropping from
+8.014s (35 calls, pre-fix baseline profile in the "Symptom" section above)
+to 2.486s (78 calls, post-fix) — consistent with the wall-clock win.
+
+Full 5-part quality gate, unchanged from Phase 1's baseline:
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean.
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
+   failures (unchanged from baseline).
+
+### Remaining work (not attempted)
+
+The other ~13 `imported_stmts` consumers in `gen_module` (`all_struct_
+defs`, `all_functions`, `all_structs_for_methods`, `all_scan`, `all_
+global_scan`, the method-dispatch scan, the mods scan, etc.) are still
+full `_walk_ast(imported_stmts)` passes, still O(N^2) tree-wide in
+principle — `socket.py`'s 61.4s (down from a >120s timeout, but still slow)
+is consistent with real remaining cost there. Each would need the same
+per-consumer classification (side-effect-free/shared-state-only vs.
+emits-per-visit-once, per the original plan's "Risk" section) before
+applying the same candidate-cache pattern — genuinely one-at-a-time,
+independently-verified work, not attempted here for time-budget reasons
+now that the single biggest offender is fixed.
 
 ## Symptom
 
