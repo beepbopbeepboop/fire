@@ -1,6 +1,34 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Re-ran; the TIMEOUT below is RESOLVED — `bugs/hard/PERF_nested_module_
+compile_walk_ast_quadratic_rescan.md`'s Phase 1+2 fixes (landed
+2026-08-07, independently of this doc) brought this file's compile
+time down enough to finish within a normal harness timeout and reach a
+real GCC error stage.
+
+Also fixed in this session: the first blocking error reached
+(`Lib/operator.py:118:9: error: implicit declaration of function
+'int64_t___matmul__'`, from `def matmul(a, b): return a @ b`'s
+untyped-param fallback) — `_lower_matmul`'s blind
+`{struct_name}___matmul__` call for a non-struct operand type. See
+`gimple_codegen.py`'s `_lower_matmul` and its inline comment for the
+fix (a guarded weak stub, mirroring an existing pattern used for
+unresolved-base-class method calls) — verified against the full 5-step
+gate, no full-corpus regression.
+
+**Still not PASS** — with both of the above resolved, the file now
+progresses much further but hits several OTHER, unrelated, pre-existing
+bugs in its transitive closure: `Lib/operator.py:270`'s `non-trivial
+conversion in 'var_decl'`, `Lib/operator.py:342`'s `expected expression
+before 'partial'`, `Lib/stat.py:179`'s `invalid operands to binary &`
+(int64_t vs char*), `Lib/posixpath.py`'s `expandvars_repl_env`
+struct-shape mismatch (`redefinition of...`/`'...' has no member
+named...`). None of these investigated further here — each is its own
+separate, independent bug.
+
+## Original status (2026-08-06, superseded above)
 
 Re-ran with a 150s timeout: got partway through (produced the usual
 `drop stale export` dylib-link noise, then an `os.py: 'relpath' is

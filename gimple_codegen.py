@@ -10010,6 +10010,46 @@ class GimpleGen:
 
         # Call __matmul__(self, other) method
         mangled = f"{struct_name}___matmul__"
+        # `struct_name` is only trustworthy as a "this really is a struct with
+        # its own __matmul__ method" signal when it names a KNOWN struct
+        # (self.struct_field_types) — an UNANNOTATED param (this codegen's
+        # generic fallback type for those is 'int64_t') left operand makes
+        # struct_name == 'int64_t' here, and blindly emitting a call to
+        # int64_t___matmul__ references a symbol nothing ever defines (real
+        # Python has no `int.__matmul__` either — `int @ int` raises
+        # TypeError at runtime, so this shape is genuinely never valid to
+        # call, only ever REACHED as dead code inside a polymorphic helper
+        # like `Lib/operator.py`'s `def matmul(a, b): return a @ b`, whose
+        # untyped params this compiler can't know are never actually ints).
+        # Confirmed via `mojo.py build` on both Lib/socket.py and
+        # Lib/runpy.py's transitive closures (both reach operator.py):
+        # "error: implicit declaration of function 'int64_t___matmul__'"
+        # (promoted to a hard error, not just a warning, under -fgimple).
+        # Mirror the established "no real definition will ever exist —
+        # emit a guarded WEAK stub instead of a bare forward decl" pattern
+        # already used for an unresolved-base-class method call a few
+        # hundred lines up (`_structs_with_unresolved_base` branch) rather
+        # than inventing new machinery.
+        if struct_name not in self.struct_field_types:
+            # Variadic signature (not a fixed `(int64_t, int64_t)`) — `lv`/
+            # `rv`'s actual GIMPLE types depend on whatever `lt`/`rt` this
+            # non-struct operand happened to infer to (could be `char *`,
+            # `double`, ... not necessarily `int64_t`), and this stub must
+            # accept the call as emitted below regardless. Mirrors the
+            # `(...)`-accepts-any-arity convention used throughout this
+            # file's other auto-stub generators for the same GIMPLE-mode
+            # reason (a fixed-arity `()` is "zero params" under -fgimple,
+            # not "unspecified", and rejects any real argument list).
+            _stub_guard = f'_MOJO_STUB_{_safe_name(mangled).upper()}'
+            _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                      f'__attribute__((weak)) int64_t {mangled} (...) '
+                      f'{{ mojo_print ((char *)'
+                      f'"{mangled}: unavailable in compiled mode (matmul on a '
+                      f'non-struct/unannotated operand)"); return (int64_t)0; }}\n#endif')
+            if _stub not in self._elaborated_externs:
+                self._elaborated_externs.append(_stub)
+            t = self._new_val('int64_t', f"{mangled} ({lv}, {rv})")
+            return 'int64_t', t
         result_type = self.func_return_types.get(mangled, 'int64_t')  # Default: assume int result
         t = self._new_val(result_type, f"{mangled} ({lv}, {rv})")
         return result_type, t
