@@ -1,13 +1,70 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
-## Status
+## Status (updated 2026-08-07)
 
-Unfixed. Root-caused 2026-08-06 while classifying the `CODEGEN_generator_
-function_Lib_*.md` cluster (tasks #95-135) — found in `Lib/test/crashers/
-gc_inspection.py`'s own generator `g` (one of this cluster's 41 target
-files), and independently confirmed twice more in `Lib/test/support`'s
-`iter_builtin_types`/`patch_list` (reached transitively while diagnosing
-`Lib/test/_test_eintr.py`). Not attempted — see "What a fix needs" below.
+**PARTIALLY FIXED** (task #150) — the list-pattern-unpack case
+specifically. Root-caused 2026-08-06 while classifying the
+`CODEGEN_generator_function_Lib_*.md` cluster (tasks #95-135) — found in
+`Lib/test/crashers/gc_inspection.py`'s own generator `g`, fixed
+2026-08-07.
+
+`_cpp_stmt`'s `AssignStmt` case widened its existing `isinstance(s.
+target, TupleExpr)` unpacking branch to `isinstance(s.target, (TupleExpr,
+ListExpr))` — `ListExpr` and `TupleExpr` share the exact same `.elements`
+field shape (see `mojo_compiler.py`), and `[a] = ...`/`[a, b] = ...` is
+semantically identical to `a, = ...`/`a, b = ...` (Python's other, less
+common unpacking-target spelling), so the EXISTING decomposition logic
+(already handling `MojoList*`-returning calls, unresolved-call stubs,
+and the plain-subscript fallback) applies completely unchanged — no new
+lowering logic was needed, just widening which target-node TYPE reaches
+it. This doc's own minimal repro (`[x] = [42]; print(x)` inside a
+generator) now passes the eligibility gate (previously refused with
+"only a plain identifier assignment target is supported").
+
+**NOT fixed, still refused** (per the "What a fix needs" section
+below, correctly identified at diagnosis time as a bigger, separate
+step): non-`self` `MemberExpr` assignment targets — e.g. `sys.stderr =
+None` (confirmed in `Lib/test/test_faulthandler.py`'s
+`check_stderr_none`). `self.field = val` and `arr[i] = val` (subscript)
+targets were ALREADY supported before this pass (found while
+implementing this fix — the doc's "What a fix needs" section slightly
+understated existing coverage here); only a MODULE-level or otherwise
+non-`self` attribute-assignment target remains unsupported. Not
+attempted — assigning into an arbitrary object's attribute (as opposed
+to reading `self.<scalar field>`, or writing `self.<field>` which IS
+supported) has no representation in this narrow scalar-only
+generator-body model, and is a meaningfully bigger step exactly as
+originally diagnosed.
+
+## Verification
+
+Hand-verified via `compile_to_gimple_with_cpp` + `g++ -fsyntax-only`:
+`[x] = [42]; print(x)` inside a generator now passes the eligibility
+gate. The exact literal-RHS shape in this specific micro-repro still
+hits a SEPARATE, PRE-EXISTING, unrelated gap in `_cpp_expr`'s `ListExpr`
+lowering (a literal list/tuple value lowers to a C++ brace-init-list,
+which isn't itself a subscriptable expression) — confirmed via `git
+stash` that the IDENTICAL gap already existed for `TupleExpr` targets
+with a literal tuple RHS (`(x,) = (42,)`) on unmodified code, so this
+is not a regression, just a pre-existing limitation this fix's target-
+shape widening now ALSO inherits unchanged (not worsened) for the list-
+target spelling. The realistic corpus shape this branch is actually
+exercised against (a `MojoList*`-returning function call as the RHS,
+e.g. tokenize.py's `encoding, consumed = detect_encoding(readline)`
+style) was already correctly handled before this fix for `TupleExpr`
+and is now handled identically for `ListExpr`.
+
+## Gate
+
+All five gates in CLAUDE.md's quality-gate section passed: `test_gimple.
+py` (247/247), `test_module_cache.py` (76/76), `make check-selfhost`
+clean, from-scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:`
+lines), `compile_stdlib.py -j8` (664/664, 0 unexpected — unchanged
+count).
+
+## Original diagnosis (unfixed-era notes, kept for history)
+
+Not attempted at the time — see "What a fix needs" below.
 
 ## Symptom
 

@@ -22565,8 +22565,23 @@ class GimpleGen:
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
         if isinstance(s, AssignStmt):
-            if isinstance(s.target, TupleExpr):
+            if isinstance(s.target, (TupleExpr, ListExpr)):
                 # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]
+                # A LIST-PATTERN target (`[tup] = [...]`, `[a, b] = [...]`)
+                # is Python's other, less common but real, unpacking-target
+                # spelling — semantically identical to the tuple-target
+                # case (both just bind N names from N elements; the target
+                # brackets vs. parens are a syntax choice, not a semantic
+                # one), and `ListExpr`/`TupleExpr` share the exact same
+                # `.elements` field shape (see mojo_compiler.py), so no
+                # separate branch is needed — just widen the isinstance
+                # check to accept both. Before this, `[tup] = [...]` (real:
+                # Lib/test/crashers/gc_inspection.py's own generator `g`)
+                # fell all the way through to the generic "only a plain
+                # identifier assignment target is supported" refusal below,
+                # even though the exact same decomposition this TupleExpr
+                # branch already does applies unchanged. See
+                # CODEGEN_generator_non_plain_assignment_target_refused.md.
                 # When `expr` is a call to a module function returning a
                 # MojoList* (tokenize.py's `encoding, consumed =
                 # detect_encoding(readline)` — detect_encoding returns a

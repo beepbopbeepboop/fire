@@ -1,6 +1,22 @@
 # CODEGEN_generator_function: Lib/test/test_support.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+Item 1's hard-bug doc (`bugs/hard/CODEGEN_generator_non_plain_
+assignment_target_refused.md`, task #150) is now PARTIALLY fixed —
+tuple/list-pattern-unpack targets no longer refuse; non-`self`
+attribute-assignment targets still do. Re-running `MOJO_DEBUG=1`
+against this file's current source no longer shows the "only a plain
+identifier assignment target is supported" message at all (nor any
+`save_restore_warnings_filters` mention — that name wasn't found in
+this checkout's `Lib/test/test_support.py`, possibly moved/renamed
+since this doc's original 2026-08-06 pass, or reached via a different
+transitively-imported file not independently re-checked here). Items 2
+and 3 (the `MojoGenerator` incomplete-type error and the
+comprehension-return-type `_quick_type` pattern) are unrelated to this
+bug and not re-investigated in this pass.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'LogCaptureHandler' was not declared` .cpp error no longer
