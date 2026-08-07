@@ -37,16 +37,12 @@ it's refused outright, and (same escalation pattern as
 module-level-reachable refusal like this hard-fails the WHOLE file's
 `mojo.py build`, not just this one generator method.
 
-**New, narrow gap — not yet folded into a hard-bug doc** (only one
-instance seen so far in this cluster; would need 2-3 more before writing
-a dedicated `bugs/hard/` doc per this task's own guidance). Distinct from
-the already-known 5-bullet dyld.py cluster and from the struct-param-
-refusal/symbol-collision/comprehension-return-type gaps found elsewhere
-in this session's pass. If this recurs (any `raise <dynamic-expression>
-(...)` inside a generator body — a real, if uncommon, Python idiom for
-libraries that store their own exception classes on `self`, as
-`imaplib.IMAP4`'s `error`/`abort`/`readonly` attributes do), fold into a
-new `bugs/hard/CODEGEN_generator_raise_non_static_exception_class.md`.
+**Now folded into `bugs/hard/CODEGEN_generator_raise_non_static_
+exception_class.md`** — confirmed recurring twice more (`test.support`'s
+`run_with_locale`/`subst_drive`, found while diagnosing
+`Lib/test/_test_eintr.py`), so promoted from "single instance" to a full
+hard-bug doc. See that doc for the shared root cause and fix-scope
+notes.
 
 Not fixed here — same reasoning as the sibling struct-param-refusal
 gap: a genuine coroutine-codegen scope boundary (exception-type
