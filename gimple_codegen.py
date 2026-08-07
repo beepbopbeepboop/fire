@@ -1002,6 +1002,31 @@ class DispatchSolver:
         # Value: DispatchTable
         tables_by_callees: dict = {}
 
+        # Reverse lookup: full C callee name -> the struct that actually
+        # owns it (self.struct_methods is struct_name -> {method_name:
+        # full_c_name}, populated at registration time — see its own
+        # declaration). Used below instead of guessing the owning struct
+        # by string-splitting the callee name on '_', which silently
+        # produces an EMPTY struct name for any struct whose real name
+        # itself starts with an underscore (a common Python "private name"
+        # convention — e.g. `inspect._ParameterKind`, whose mangled C
+        # callee name `_ParameterKind___copy__` splits on '_' to `''` as
+        # the first token). An empty struct name here produces malformed
+        # C in emit_typedef/emit_table_init (`( *self)` with no type
+        # before the pointer), a real GCC "expected declaration
+        # specifiers... before '*' token" error — found via Lib/weakref.py
+        # (pulls in inspect.py's `Parameter.ParameterKind` transitively)
+        # and root-caused in bugs/hard/CODEGEN_selfhost_getattr_dispatch_
+        # heuristic_misfires_on_ordinary_code.md's "what a real fix needs"
+        # option 3 ("defensively skip/warn rather than emit malformed C
+        # when a callee's inferred self type resolves empty") — this is
+        # that fix, plus resolving the struct name correctly instead of
+        # just skipping known-derivable cases.
+        _callee_to_struct: dict = {}
+        for _sname, _smethods in self.struct_methods.items():
+            for _mname, _full in _smethods.items():
+                _callee_to_struct[_full] = _sname
+
         for pattern_id, pattern in self.dispatch_patterns.items():
             if not pattern.possible_callees:
                 continue
@@ -1036,11 +1061,24 @@ class DispatchSolver:
                     # Convert parameter types to C
                     # Skip 'self' for methods (first param)
                     c_params = []
+                    _self_type_unresolved = False
                     for pname, ptype in params:
                         if pname == 'self':
-                            # For struct methods, infer the struct type
-                            # Try to extract from callee name (e.g., "Interpreter_execute_Module" → "Interpreter")
-                            struct_name = callee.split('_')[0] if '_' in callee else 'void'
+                            # For struct methods, infer the struct type.
+                            # Prefer the exact reverse lookup (correct
+                            # regardless of underscore-prefixed struct
+                            # names); fall back to the old name-splitting
+                            # heuristic only if the callee isn't in the
+                            # registry at all (shouldn't normally happen —
+                            # every dispatch-pattern callee comes FROM
+                            # struct_methods in the first place — but kept
+                            # as a harmless fallback for safety).
+                            struct_name = _callee_to_struct.get(callee, '')
+                            if not struct_name:
+                                struct_name = callee.split('_')[0] if '_' in callee else 'void'
+                            if not struct_name:
+                                _self_type_unresolved = True
+                                break
                             c_params.append(f"{struct_name} *self")
                         elif ptype:
                             # Map Python types to C types, use fallback for unresolved
@@ -1049,6 +1087,22 @@ class DispatchSolver:
                         else:
                             # No type annotation, default to int
                             c_params.append(f"int {pname}")
+
+                    # Defensive net: never emit a dispatch-table entry whose
+                    # `self` parameter type couldn't be resolved at all —
+                    # that's exactly the malformed-C shape this fix exists
+                    # to prevent (see the comment on _callee_to_struct
+                    # above). Dropping just this one callee from the table
+                    # is safe: this whole dispatch-table-inference
+                    # machinery is itself a heuristic (see the linked hard-
+                    # bug doc) that can over-broadly include callees having
+                    # nothing to do with a real dispatch table in the first
+                    # place; omitting an unresolvable one never changes
+                    # behavior for the genuine self-hosting dispatch
+                    # pattern this machinery was built for (every real
+                    # callee there resolves its `self` type without issue).
+                    if _self_type_unresolved:
+                        continue
 
                     # Join parameters
                     param_str = ', '.join(c_params) if c_params else "void"
@@ -7987,7 +8041,40 @@ class GimpleGen:
             return 'void *', t
         # Module-level global variable (persistent type known across functions).
         # Also catches `global x` declarations inside functions (_func_declared_globals).
-        if (name in self._func_declared_globals or name not in self.var_types) and name in self._global_var_types:
+        #
+        # A BARE (unqualified) identifier can only legitimately refer to a
+        # global belonging to THIS module — real Python scoping never lets
+        # a plain name resolve to some OTHER module's global (that needs
+        # `othermodule.name` qualification, handled entirely separately by
+        # MemberExpr lowering). `_global_var_types`/`_global_to_module` are
+        # shared, whole-transitive-tree-scoped dicts (populated once per
+        # name, first writer wins, across every module ever compiled in
+        # the closure — see gen_module's "Phase 1.7 pre-scan" and "Module-
+        # level globals" passes) — deliberately a superset for cross-
+        # module `mod.attr` MEMBER access to work regardless of which
+        # level first discovers a given module. Using that same superset
+        # to decide whether a BARE name is a global at all is wrong: if
+        # some OTHER module (anywhere in the whole closure) happens to
+        # ALSO declare a same-named top-level global, `_global_to_module`
+        # already recorded which module actually owns it — skip this
+        # branch (fall through to the ordinary "unknown identifier"
+        # placeholder below) unless it's OUR OWN module's global. Found
+        # via `mojo.py`'s self-host build: a lambda inside gimple_codegen.
+        # py's own `compile_to_gimple_cached` closing over its enclosing
+        # function's `filename` PARAMETER (an ordinary, if imperfectly-
+        # supported, closure capture — see the sibling `mojo_src`/
+        # `do_imports` captures right next to it, which already correctly
+        # fall through to the same placeholder) got misresolved as
+        # `_gimple_codegen_globals.filename` — a field gimple_codegen.py
+        # never declares — because `mojo_compiler.py`'s OWN unrelated
+        # top-level `filename = sys.argv[1] if ... else "<stdin>"` (inside
+        # its `if __name__ == "__main__":` block) is also named `filename`
+        # and is reachable via the whole-tree scan. See bugs/CODEGEN_
+        # generator_function_Lib_weakref.md.
+        _global_owner_mod = getattr(self, '_global_to_module', {}).get(name)
+        _this_mod = self.module_name or "root"
+        if (_global_owner_mod is None or _global_owner_mod == _this_mod) and \
+                (name in self._func_declared_globals or name not in self.var_types) and name in self._global_var_types:
             gtype = self._global_var_types[name]
             # Globals are stored at C level as int64_t (boxed pointers) except
             # for char * and simple int globals whose C type matches the Mojo type.
@@ -30013,9 +30100,34 @@ class GimpleGen:
 
         _pre_declared_globals = set()
         _phase17_mod = self.module_name or "root"  # module name for _global_to_module mapping
-        _phase17_stmts = (_flatten_resolved_conditionals(stmts)
+        _phase17_own_stmts = _flatten_resolved_conditionals(stmts)
+        _phase17_stmts = (_phase17_own_stmts
                            + (_flatten_resolved_conditionals(imported_stmts)
                               if (self.do_imports or self.link_imports) else []))
+        # OWNERSHIP (which module's globals struct a name lives in,
+        # `_global_to_module`) must only ever be claimed from a module's
+        # OWN top-level statements, never from `imported_stmts` (the
+        # whole-transitive-tree-visibility superset — see `imported_stmts`'
+        # own declaration/PERF doc). `_global_to_module` is a SHARED,
+        # first-writer-wins dict: if ownership could be claimed from
+        # `imported_stmts` too, then whichever module's OWN Phase 1.7 scan
+        # happens to run FIRST (compile order, not true ownership) would
+        # permanently claim any name it discovers anywhere in the closure
+        # — a real, confirmed bug (found via `mojo.py`'s own self-host
+        # build): `mojo_compiler.py`'s top-level `filename = ...` (inside
+        # its `if __name__ == "__main__":` block) got attributed to
+        # `gimple_codegen` (an unrelated module, merely compiled earlier
+        # in this particular closure) purely because gimple_codegen.py's
+        # OWN Phase 1.7 scan reached mojo_compiler.py's `filename` via
+        # `imported_stmts` before mojo_compiler.py's own temp_gen got a
+        # chance to register it correctly. `_global_var_types` (the type-
+        # only registry, still populated from the full `_phase17_stmts`
+        # below) is unaffected — this only narrows OWNERSHIP attribution,
+        # not type-visibility, so cross-module type inference for e.g. an
+        # inherited method spliced from a different origin module (see
+        # `_merge_struct_inheritance`) keeps working exactly as before.
+        # See bugs/CODEGEN_generator_function_Lib_weakref.md.
+        _phase17_own_ids = set(id(s) for s in _phase17_own_stmts)
         for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
@@ -30037,7 +30149,7 @@ class GimpleGen:
                 if _gname in _pre_declared_globals:
                     continue
                 _pre_declared_globals.add(_gname)
-                if _gname not in self._global_to_module:
+                if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
                     self._global_to_module[_gname] = _phase17_mod
                 if isinstance(_scan_stmt.value, DictExpr):
                     self._global_var_types[_gname] = 'MojoDict *'
@@ -31182,7 +31294,36 @@ class GimpleGen:
         _dispatch_set_names = {'_CMP_OPS'}
         _dispatch_names = _dispatch_dict_names | _dispatch_set_names
         _declared_globals = set()
-        all_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
+        # Scan ONLY this module's own top-level `stmts` here — NOT
+        # `imported_stmts`. `imported_stmts` is the whole-transitive-tree
+        # visibility list (see bugs/hard/PERF_nested_module_compile_walk_
+        # ast_quadratic_rescan.md's "Why the reconciliation loop exists"),
+        # deliberately a superset of every module compiled anywhere in the
+        # program so far — appropriate for struct/function *visibility*
+        # scans (all_struct_defs, all_functions, ...) but WRONG here: this
+        # scan's job is registering the CURRENT module's (`current_mod_name`)
+        # own globals-struct fields (`self._module_globals[current_mod_name]`
+        # below). Every module already independently registers its OWN
+        # globals under its OWN name via its own recursive `gen_module` call
+        # (each transitively-imported module gets its own `temp_gen` with
+        # `module_name=<that module>`, which runs this exact code with
+        # `current_mod_name` set correctly) — so re-scanning `imported_stmts`
+        # here was pure double-registration under the WRONG module name.
+        # Confirmed real bug (found via Lib/weakref.py's transitive-closure
+        # build, which pulls in a much larger module graph than earlier
+        # per-file tests): `_functools_toplev` ended up with fields like
+        # `BINBYTES`/`BOM32_BE` (pickle.py/codecs.py module-level globals)
+        # and `AsyncGenerator`/`Attribute` (ast.py/typing.py names) merged
+        # into functools.py's OWN globals struct, because `all_scan`/
+        # `all_global_scan` included every foreign top-level statement
+        # reachable via `imported_stmts` and attributed ANY matching
+        # AssignStmt/ImportStmt/VarDecl to `current_mod_name` regardless of
+        # which module it actually came from — a massive, real field-name
+        # cross-contamination across unrelated modules that (at weakref.py's
+        # transitive-closure scale) produced genuine GCC "redefinition"/
+        # type-mismatch errors cascading through the rest of the compile.
+        # See bugs/CODEGEN_generator_function_Lib_weakref.md.
+        all_scan = stmts
         for stmt in all_scan:
             if isinstance(stmt, FromImportStmt):
                 for alias in stmt.names:
@@ -31226,7 +31367,9 @@ class GimpleGen:
                     result.extend(_collect_global_stmts(_gs.else_body or []))
             return result
 
-        all_global_scan = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
+        # Same reasoning as `all_scan` just above: only this module's own
+        # top-level `stmts`, not the whole-tree `imported_stmts` superset.
+        all_global_scan = stmts
         for stmt in _collect_global_stmts(all_global_scan):
             if isinstance(stmt, VarDecl):
                 # Module-level `var NAME: T = value` — a real global, not just
@@ -31418,8 +31561,33 @@ class GimpleGen:
         #     parts.append('')
 
         # Populate _module_globals tracking from collected globals
-        # Build a map of global name -> module name for later lookup
-        self._global_to_module: dict[str, str] = {}
+        # Build a map of global name -> module name for later lookup.
+        #
+        # Do NOT reassign `self._global_to_module` to a fresh `{}` here —
+        # it's a SHARED, by-reference dict across every GimpleGen instance
+        # in the whole transitive-closure build (see its own declaration
+        # in __init__: "global_name -> module_name (shared)", and
+        # `_compile_imported_module`'s `temp_gen._global_to_module = self.
+        # _global_to_module` sharing). Reassigning the attribute here
+        # silently detaches THIS instance from that shared object going
+        # forward — every entry any OTHER module's Phase 1.7/this-same
+        # section wrote into the ORIGINAL dict stays correct there, but
+        # THIS instance's own later reads (in particular `_lower_
+        # IdentExpr`'s bare-identifier "does this name belong to some
+        # OTHER module" check, which runs during this SAME gen_module
+        # call's later statement-lowering phase) only ever see a narrow,
+        # freshly-rebuilt view containing just `current_mod_name`'s own
+        # globals — losing all ownership information about every other
+        # module's globals discovered via Phase 1.7 just above. Confirmed
+        # real bug (found via `mojo.py`'s own self-host build): removing
+        # this reassignment (this fix) plus scoping Phase 1.7's ownership
+        # writes to a module's own statements (that section's own fix,
+        # same commit) together resolve a same-symptom regression where a
+        # closure inside `gimple_codegen.py` capturing its own enclosing
+        # function's `filename` PARAMETER got misresolved as
+        # `_gimple_codegen_globals.filename` (a field gimple_codegen.py
+        # never declares — the real one lives in `mojo_compiler.py`). See
+        # bugs/CODEGEN_generator_function_Lib_weakref.md.
         for gname in sorted(_declared_globals):   # sorted: deterministic field order for bootstrap
             if gname in self._global_var_types:
                 g_mtype = self._global_var_types[gname]
@@ -32170,7 +32338,19 @@ class GimpleGen:
                     body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
                 else:
                     body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); return ({ret_type})0; }}'
-                parts.append(f"{ret_type} {cname} () {body}  /* stub from {module} */")
+                # Guarded with the SAME canonical `_MOJO_STUB_{NAME}` macro
+                # convention every other auto-stub generator in this file
+                # uses (see the "no signature" branch below, and
+                # `_lower_named_call`'s/`_gen_stmt_ExprStmt`'s `_is_unknown`
+                # auto-stub paths) — this specific branch used to be emitted
+                # completely UNGUARDED (no #ifndef at all), a latent
+                # duplicate-definition risk for the same reason the "no
+                # signature" branch below was fixed to use a matching guard
+                # (see that fix's own comment / bugs/CODEGEN_generator_
+                # function_Lib_weakref.md).
+                _stub_only_guard = f'_MOJO_STUB_{cname.upper()}'
+                parts.append(f"#ifndef {_stub_only_guard}\n#define {_stub_only_guard}\n"
+                              f"{ret_type} {cname} () {body}  /* stub from {module} */\n#endif")
                 continue
 
             # _func_csym applies the overload suffix for imported Mojo functions so
@@ -32250,7 +32430,35 @@ class GimpleGen:
                         body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); }}'
                     else:
                         body = f'{{ mojo_print ((char *)"{sym_name}: unavailable in compiled mode"); return ({ret_type})0; }}'
-                    parts.append(f"#ifndef {safe}\n__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
+                    # Guard name MUST be the canonical `_MOJO_STUB_{NAME}`
+                    # macro (not the bare `safe` symbol name) — this is the
+                    # SAME real symbol a completely separate auto-stub
+                    # mechanism (`_lower_named_call`'s/`_gen_stmt_ExprStmt`'s
+                    # `_is_unknown`/`_is_unknown_stmt` call-site auto-stub,
+                    # each per-`temp_gen`-instance, not deduped through the
+                    # module-global `_emitted_unresolved_stub_syms` set this
+                    # loop uses) can ALSO stub for the exact same unresolved
+                    # name (e.g. `get_cache_token`, imported via `from abc
+                    # import get_cache_token` in functools.py AND called at
+                    # a use site) — that mechanism already guards its own
+                    # emitted weak-definition text with `_MOJO_STUB_{NAME.
+                    # upper()}` (see its own `_stub_guard`/`_stub_key`
+                    # locals). Using a DIFFERENT guard string here (the bare
+                    # symbol name) meant cpp's `#ifndef` never recognized
+                    # the two occurrences as the same guard, so BOTH weak
+                    # function definitions survived into the same
+                    # translation unit — a real GCC "redefinition of X"
+                    # error (found via Lib/weakref.py's transitive-closure
+                    # build; confirmed via `get_cache_token`, doubly-stubbed
+                    # once here and once at the call site inside functools.py
+                    # — see bugs/CODEGEN_generator_function_Lib_weakref.md).
+                    # Matching the guard convention makes whichever
+                    # occurrence is textually first in the final .ci win,
+                    # exactly like every other `_MOJO_STUB_*`-guarded stub
+                    # in this file already relies on.
+                    _unresolved_guard = f'_MOJO_STUB_{safe.upper()}'
+                    parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
+                                  f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
                 else:
                     # do_imports=False (e.g. build_module.py / compile_stdlib.py's
                     # separately-compiled-module workflow): sibling modules are
