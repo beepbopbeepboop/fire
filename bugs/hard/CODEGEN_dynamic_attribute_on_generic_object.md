@@ -57,6 +57,12 @@ class Slot:
   doc's own `__del__._slotted = True` example) and separately reads
   `f.__name__` on a `MojoBoundMethod` elsewhere in the same file
   ("'MojoBoundMethod' has no member named '__name__'").
+- `Lib/importlib/_bootstrap.py`'s `PathFinder._resolve_filename`:
+  `sep = cls._SEP` / `sep = cls._SEP = '\\' if ... else '/'` inside a
+  classmethod — `cls` is the opaque implicit class-reference parameter,
+  `_SEP` a lazily-stashed class attribute via the `hasattr`/
+  `AttributeError`-catch idiom — "request for member '_SEP' in
+  something not a structure or union".
 - `Lib/importlib/__init__.py`'s `reload(module)`: `module.__spec__` read
   AND written (`module.__spec__ = _bootstrap._find_spec(...)`) on the
   bare, unannotated `module` parameter (any module object at the Python
