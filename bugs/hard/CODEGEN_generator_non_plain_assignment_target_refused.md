@@ -1,5 +1,43 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (updated 2026-08-07, new sub-case found: slice-assignment targets)
+
+**Third confirmed unsupported target shape, found while re-verifying
+this doc's fixed/unfixed state against the real `CODEGEN_generator_
+function_Lib_test__test_eintr.md` cluster file**: a SLICE-subscript
+assignment target (`orig[:] = saved`, `x[a:b] = y`) parses to
+`mojo_compiler.py`'s `SliceExpr` node, NOT `SubscriptExpr` — confirmed
+directly:
+```
+>>> parse("orig[:] = saved")
+AssignStmt(target=SliceExpr(obj=IdentExpr('orig'), start=None, stop=None, step=None), ...)
+```
+`_cpp_stmt`'s `AssignStmt` handling (gimple_codegen.py ~line 22755) only
+special-cases `isinstance(s.target, SubscriptExpr)` for the "already
+supported" arbitrary-index-assignment path (`arr[i] = val`) — a
+`SliceExpr` target falls through to the same generic "only a plain
+identifier assignment target is supported" refusal as the (now mostly
+understood) tuple/list-unpack and non-`self`-`MemberExpr` cases.
+Two independent real occurrences, both in `Lib/test/support/__init__.
+py`, both reached transitively (not themselves one of the 41 cluster
+target files, but both confirmed via `MOJO_DEBUG=1 python3 mojo.py
+build Lib/test/_test_eintr.py`):
+- `patch_list(orig)` (line 1933): `orig[:] = saved`
+- `iter_builtin_types()` (line 2794, inner loop): `subs[:] = []`
+
+Meets this project's "recurs ≥2 times" bar for a documented hard-bug
+sub-case (promoted here rather than a new file, since it's the same
+family — "AssignStmt target shape not yet handled" — as this doc's
+existing tuple/list-unpack and non-`self`-attribute cases). Not fixed
+in this pass; a real fix would lower `x[start:stop] = value` via
+whatever runtime slice-assignment helper the plain (non-generator)
+codegen path uses for the equivalent construct (not independently
+checked here whether one already exists) — likely a smaller, more
+self-contained step than the non-`self`-`MemberExpr` case below, since
+it's still "write into a container the generator itself owns a
+reference to," not "write into an arbitrary external object's
+attribute."
+
 ## Status (updated 2026-08-07)
 
 **PARTIALLY FIXED** (task #150) — the list-pattern-unpack case

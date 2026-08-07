@@ -14,16 +14,29 @@ since this doc's original 2026-08-06 pass, or reached via a different
 transitively-imported file not independently re-checked here).
 
 Item 3's hard-bug doc (`bugs/hard/CODEGEN_comprehension_return_type_
-defaults_int64.md`, task #145) is now ALSO fixed (`_quick_type` gained
-a `Comprehension` case) — but this file's own item-3 occurrence was
-only ever a SPECULATIVE "same general family" match (a variant
-`'component_ref'` GIMPLE-node error, not independently traced to a
-confirmed bare-`return`-comprehension shape in this file's own source),
-so whether this specific file's item-3 errors are actually gone is not
-re-confirmed here.
+defaults_int64.md`, task #145) is fixed in general (`_quick_type`
+gained a `Comprehension` case), but a real rebuild confirms this
+file's OWN item-3 occurrence is a DIFFERENT, still-open gap — the
+`'component_ref'` GIMPLE-node errors at lines 112/159/323/337 are
+**still present, unchanged**:
+```
+/Users/mrs/net/Python-3.14.6/Lib/test/test_support.py:112:1: error: non-trivial conversion in 'component_ref'
+/Users/mrs/net/Python-3.14.6/Lib/test/test_support.py:159:1: error: non-trivial conversion in 'component_ref'
+/Users/mrs/net/Python-3.14.6/Lib/test/test_support.py:323:1: error: non-trivial conversion in 'component_ref'
+/Users/mrs/net/Python-3.14.6/Lib/test/test_support.py:337:1: error: non-trivial conversion in 'component_ref'
+```
+The original 2026-08-06 note already correctly hedged this as only a
+"same general family, different GIMPLE node" match, not a confirmed
+instance of task #145's exact `Comprehension`-return shape — that
+hedge holds up: whatever produces a `'component_ref'` (rather than
+`'integer_cst'`/`'var_decl'`) non-trivial-conversion is a distinct
+decl/body type mismatch, not addressed by the `Comprehension` case
+added for task #145. Not root-caused further here (out of scope: not
+one of this file's own generators either way).
 
-Item 2 (the `MojoGenerator` incomplete-type error) is unrelated to
-either bug and not re-investigated in this pass.
+Item 2 (the `MojoGenerator` incomplete-type error, lines 227/300/320)
+is unrelated to either bug and still reproduces unchanged; not
+re-investigated in this pass.
 
 ## Status (updated 2026-08-06, superseded above)
 
