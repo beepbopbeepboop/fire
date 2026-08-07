@@ -30026,10 +30026,64 @@ class GimpleGen:
             safe_mod = _c_field_name(mod_str) if mod_str else "root"
             struct_name = f"_{safe_mod}_toplev"
             global_var = f"_{safe_mod}_globals"
-            # Forward-declare the struct type with gcc attribute to allow incomplete use
-            # AND the extern global instance
-            parts.append(f'struct {struct_name} __attribute__((incomplete));  /* extern module globals struct */')
-            parts.append(f'extern struct {struct_name} {global_var};')
+            # If this OTHER module's real globals field list is already known
+            # (see bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
+            # defined.md) AND that module's own full struct definition will
+            # NOT already appear later in this SAME .ci — e.g. do_imports=
+            # True's Phase 0 recursively attempted to compile it via
+            # _compile_imported_module (which shares self._module_globals
+            # across the whole nested temp_gen tree — see that method's
+            # `temp_gen._module_globals = self._module_globals`), populating
+            # the globals scan, but the module's compile ultimately raised
+            # partway through (e.g. during function-body codegen, well after
+            # the early globals scan) so its own struct typedef+definition
+            # was never actually emitted as text anywhere — emit a REAL,
+            # field-matching struct typedef here instead of an incomplete
+            # stub, mirroring the identical reconstruction the C++ generator
+            # side already does from the same shared dict (see the
+            # `_cpp_module_global_refs` typedef-copy block further down in
+            # this method). A plain incomplete forward declaration only
+            # supports pointer-only uses of the extern instance; any real
+            # member access (`genericpath.something`) requires the type to be
+            # COMPLETE at the point of access, which C disallows for an
+            # incomplete type ("invalid use of undefined type"). Field order
+            # is deterministic (the populating scan always inserts in sorted
+            # name order — see the `for gname in sorted(_declared_globals)`
+            # loop below) so this reconstruction exactly matches the layout
+            # that module's own compile would emit for itself.
+            #
+            # Guarded by `mod_str not in self._module_stmts`: that dict is
+            # only populated (_compile_imported_module, right after `code =
+            # temp_gen.gen_module(stmts)` returns WITHOUT raising) once a
+            # module's compile fully succeeds — meaning its own real struct
+            # definition text (identical shape to what we'd reconstruct here)
+            # gets appended into `imported_code` and inlined later in this
+            # same file. Reconstructing a SECOND full definition here for
+            # that case is a hard "redefinition of struct or union" GCC
+            # error (caught by `make check-selfhost`, which self-hosts this
+            # very compiler and exercises exactly that fully-successful-
+            # inline path throughout) — for a module that WILL be fully
+            # inlined, the old incomplete-forward-declare (harmless: C allows
+            # any number of plain forward declarations before the one real
+            # definition) is what must still be emitted here, unchanged.
+            #
+            # Falls back to the old incomplete stub when the field list isn't
+            # known at all (e.g. do_imports=False's isolated per-file
+            # compiles, where no other module is ever recursively compiled)
+            # — same behavior as before this fix, not a regression for that
+            # mode either.
+            _known_fields = self._module_globals.get(mod_str)
+            if _known_fields and mod_str not in self._module_stmts:
+                parts.append(f'typedef struct {struct_name} {{')
+                for _kf_name, _kf_ctype, _ in _known_fields:
+                    parts.append(f'  {_kf_ctype} {_c_field_name(_kf_name)};')
+                parts.append(f'}} {struct_name};')
+                parts.append(f'extern struct {struct_name} {global_var};')
+            else:
+                # Forward-declare the struct type with gcc attribute to allow incomplete use
+                # AND the extern global instance
+                parts.append(f'struct {struct_name} __attribute__((incomplete));  /* extern module globals struct */')
+                parts.append(f'extern struct {struct_name} {global_var};')
 
         # Emit initial #line directive at the start if we have a filename
         # This sets the context for all subsequent code
