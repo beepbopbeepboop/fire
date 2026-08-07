@@ -2,46 +2,17 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py`
 
-(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+## Status (updated 2026-08-06)
+
+Multiple distinct issues found across two investigation passes (original
+auto-scan, then a manual pass this session). None fixed yet.
+
+### 1. `type(self).__name__` used in `%`-formatting — `mojo_type` int/pointer mismatch
+
+Original auto-generated scan (error text preserved below). Not
+re-investigated this session — still open.
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function '_alloc_LibraryLoader':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:283:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-  283 |     if isinstance(cls, str):
-      | ^   
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function '_alloc_PyDLL':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:297:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-  297 | def pointer(obj):
-      | ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function '_alloc__PointerTypeCache':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:311:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-  311 |         try:
-      | ^   
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function 'create_string_buffer_0c5bb1':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:672:11: warning: variable '_t39' set but not used [-Wunused-but-set-variable]
-  672 |     elif sizeof(kind) == 4: c_uint32 = kind
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:669:11: warning: variable '_t36' set but not used [-Wunused-but-set-variable]
-  669 |     elif sizeof(kind) == 8: c_int64 = kind
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:652:11: warning: variable '_t21' set but not used [-Wunused-but-set-variable]
-  652 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:649:11: warning: variable '_t18' set but not used [-Wunused-but-set-variable]
-  649 |             return -2147221231 # CLASS_E_CLASSNOTAVAILABLE
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:632:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-  632 |     from _ctypes import _wstring_at_addr
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function 'CFUNCTYPE_07077a':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:102:10: warning: unused variable '_t23' [-Wunused-variable]
-  102 |     except KeyError:
-      |          ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:79:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   79 | 
-      |          ^  
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py: In function 'py_object___repr__':
 /Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:166:21: error: passing argument 1 of 'mojo_type' makes integer from pointer without a cast [-Wint-conversion]
   166 |             return "%s(<NULL>)" % type(self).__name__
       |                     ^~~~
@@ -52,11 +23,60 @@ In file included from __init__.ci:14:
   317 | int mojo_type(int obj);
       |               ~~~~^~~
 /Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:166:15: error: invalid operands to binary % (have 'char *' and 'char *')
-  166 |             return "%s(<NULL>)" % type(self).__name__
-      |               ^
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py:171:1: warning: label 'bb_5' defined but not used [-Wunused-label]
-... (1043 more lines)
 ```
 
-Exit code: 1
-Elapsed: 9.41s
+`py_object.__repr__` does `"%s(<NULL>)" % type(self).__name__` where
+`self` is a `py_object *`. `mojo_type()`'s C signature takes `int obj`
+(presumably a boxed/tagged representation) but is being called with the
+raw `py_object *` pointer directly — a call-site coercion gap for
+`type(x)` when `x` is a struct-typed local, not a generic/boxed value.
+Not yet root-caused further; likely related to `type()` builtin lowering
+choosing the wrong argument-passing convention for concrete struct
+pointer types vs boxed/dynamic values.
+
+### 2. `__ctype_le__`/`__ctype_be__` — dynamic-attribute hard bug instance
+
+```python
+def __ctype_le__(self):
+    ...
+    self.__ctype_le__ = ...
+```
+(pattern: a method assigns a NEW attribute onto `self` that wasn't part
+of the struct's original field set). This is an instance of
+bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md — tracked there,
+not a standalone fix.
+
+### 3. CFUNCTYPE / `(*args, **kwargs)`-signature functions called with literal (non-spread) arguments never get variadic packing
+
+```python
+def CFUNCTYPE(restype, *argtypes, **kw):
+    ...
+memmove = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)(_memmove_addr)
+```
+
+```
+error: too many arguments to function 'CFUNCTYPE_07077a'; expected 3, have 4
+```
+
+Root-caused 2026-08-06, minimally reproduced standalone (`make_thing
+(restype, *argtypes, **kw)` called as `make_thing(1, 2, 3, 4)` fails
+identically). Full technical root cause, generated-C evidence, and a
+concrete fix-direction plan are written up as a new hard bug:
+**bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md**.
+
+Summary: `_signature_ctypes` (gimple_codegen.py:19985) deliberately types
+a function's `*args` parameter as a concrete `MojoList *` (not the `...`
+packing sentinel) whenever the function ALSO has `**kwargs`, on the
+assumption every such function is only ever called via spread-forwarding
+(`f(*a, **k)`). This is correct for that idiom but wrong whenever a
+`(*args, **kwargs)`-declared function is instead called with ordinary
+literal positional arguments, as `CFUNCTYPE` is here. Not fixed — flagged
+as architecturally risky given this exact call-lowering area caused two
+broad compile_stdlib.py regressions elsewhere this session (see
+bugs/COMPILE_FAIL_collections___init__.md's `_tuplegetter` section); see
+the hard-bug doc for the full risk analysis and recommended fix shape.
+
+Not yet checked whether the original auto-scan's 1043-line truncated
+error log contains further, later errors beyond what's captured above —
+worth re-running a fresh `mojo.py build` pass once issues #1-3 are fixed,
+to see what (if anything) remains.
