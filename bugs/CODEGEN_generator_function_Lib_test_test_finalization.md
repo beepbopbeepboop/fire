@@ -1,40 +1,42 @@
 # CODEGEN_generator_function: Lib/test/test_finalization.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
 
-**STILL FAILING**, confirmed reproducing against current master
-(`2b0c4c5`), now precisely root-caused.
+**Classification bug FIXED, this file STILL FAILS to compile (expected
+— see below).** `bugs/hard/CODEGEN_generator_classmethod_first_param_
+must_be_self.md` — the hard-bug doc this file was classified against —
+is now fixed: `_gen_cpp_generator_unit`'s method-eligibility check (and
+two related call sites with the identical bug pattern, found while
+verifying the fix) now correctly recognize `cls` as a valid generator-
+method receiver name, not just `self`.
 
-**Classification: `bugs/hard/CODEGEN_generator_classmethod_first_param_
-must_be_self.md`** (new hard-bug doc, this file is its sole/primary
-occurrence, but with an unusually large 18x blast radius from one root
-cause — see the doc). The base method:
-```python
-@classmethod
-@contextlib.contextmanager
-def test(cls):
-    ...
-    yield
-    ...
-```
-is a `@classmethod` generator (first parameter `cls`, not `self`) —
-`_gen_cpp_generator_unit`'s method-eligibility check does a literal
-string-equality check against `'self'` and refuses ANY other first-
-parameter name outright. Because `test` is inherited by 17 different
-subclasses in this file (`Simple`, `SimpleBase`, `NonGC`,
-`NonGCResurrector`, `NonGCSimpleBase`, `Legacy`, `LegacyBase`,
-`LegacyResurrector`, `LegacySelfCycle`, `SimpleChained`,
-`SimpleResurrector`, `SimpleSelfCycle`, `SuicidalChained`,
-`SuicidalSelfCycle`, `SelfCycleResurrector`, `ChainedResurrector`,
-`Simple`) plus the module-level standalone `test`, ONE root cause
-produces 18 separate refusal messages.
+That hard-bug doc's ORIGINAL text speculated that THIS file's `test`
+method might newly compile once the check was widened, on the claim
+that `test`'s body "doesn't actually touch `cls`". That claim was
+**wrong** — `test`'s body (`Lib/test/test_finalization.py` ~line 54-70)
+reads `cls.del_calls`, `cls.tp_del_calls`, `cls.errors` repeatedly. Since
+this codegen has no class-level attribute-access story, `test` is
+(correctly) STILL refused post-fix — just with an accurate message now
+(`"a @classmethod generator that references `cls` in its body is not
+supported"`) instead of the old, misleading `"must take `self` as its
+first parameter"`. Confirmed via `MOJO_DEBUG=1 python3` against
+`compile_to_gimple` on this file's real source: all 16 inherited-
+subclass refusals now show the corrected message, and the module still
+raises the same whole-module `"cannot compile module: function(s) test
+..."` fallback as before the fix — no change in whether this SPECIFIC
+file compiles, only in the accuracy of why `test` is refused (and, per
+the hard-bug doc, eliminating a real C++-miscompile risk the old code
+path had for any classmethod generator that DOES reference `cls`,
+confirmed via a separate hand-built repro, not this file).
 
-Not fixed here — see the hard-bug doc's "What a fix needs" section for
-why a full fix needs more than relaxing the string check (though a
-narrower fix scoped to THIS file's specific case — where `test`'s body
-never actually references `cls` — looks plausible; not attempted in
-this pass per this task's preference for classification over
-speculative fixes to the less-mature coroutine codegen path).
+This file remains in `bugs/COMPILE_FAIL_*`-style "not yet compiling"
+territory, but no longer because of a compiler bug in the eligibility
+check — `test` is refused for the same fundamental reason a `self.
+other_method()` call inside an ordinary generator is refused: this
+narrow coroutine codegen step's attribute/method-access support is
+intentionally scoped to `self.<scalar field>` reads only, and has no
+class-level equivalent yet. That would be new, non-trivial scope (real
+design, not a one-line fix), not a bug — out of scope for this pass.
 
 ## Build error
 

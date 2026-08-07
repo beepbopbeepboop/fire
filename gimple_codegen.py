@@ -23716,15 +23716,53 @@ class GimpleGen:
         param_ctypes: list[tuple[str, str]] = []
         fn_params = list(fn.params or [])
         if struct_name is not None:
-            if not fn_params or fn_params[0][0] != 'self':
+            if not fn_params or fn_params[0][0] not in ('self', 'cls'):
                 raise _UnsupportedGeneratorShape(
-                    f"{fn.name}: a generator method must take `self` as its "
-                    "first parameter")
-            # Mirrors _gen_struct_method's own convention exactly (see that
-            # method's `self.var_types['self'] = f"{struct_name} *"`) — the
-            # SAME pointer type an ordinary compiled method's `self` already
-            # uses, not a new one.
-            param_ctypes.append(('self', f"{struct_name} *"))
+                    f"{fn.name}: a generator method must take `self` or "
+                    "`cls` as its first parameter")
+            if fn_params[0][0] == 'cls':
+                # @classmethod generator (conventionally-named `cls` first
+                # param, same name-convention basis the ordinary compiled
+                # path already uses for `cls.method(...)` resolution — see
+                # this file's CallExpr lowering, "`cls.method(...)` inside a
+                # @classmethod"). Unlike `self`, `cls` names the CLASS
+                # object, not an instance — this codegen has no class-level
+                # attribute/method-call story (self.<field> reads are the
+                # only attribute access _cpp_expr's MemberExpr case
+                # supports, and that's instance-scoped via
+                # struct_field_types), so a classmethod generator body that
+                # actually TOUCHES `cls` (bare, or `cls.x`, or `cls.m(...)`)
+                # must refuse here rather than let a bare `cls` int64_t
+                # placeholder reach _cpp_expr's MemberExpr "non-self member
+                # access" fallback, which would emit invalid C++ (member
+                # access on a scalar) and fail at the g++ compile stage
+                # instead of gracefully falling back to interpreting this
+                # function from source. Confirmed real-world case (see the
+                # CODEGEN_generator_classmethod_first_param_must_be_self.md
+                # hard-bug doc) never references `cls` in its body at all,
+                # so this is not merely a theoretical carve-out.
+                if any(isinstance(n, IdentExpr) and n.name == 'cls'
+                       for n in _walk_ast(fn.body)):
+                    raise _UnsupportedGeneratorShape(
+                        f"{fn.name}: a @classmethod generator that "
+                        "references `cls` in its body is not supported "
+                        "(no class-level attribute/method access exists "
+                        "yet for compiled generators)")
+                # `cls` is provably unused in the body (checked just above)
+                # -- an opaque, never-read int64_t placeholder keeps the
+                # emitted C++ signature's parameter COUNT/POSITION correct
+                # (call sites already pass the receiver positionally — see
+                # the method-call CallExpr lowering's `all_args = [(ot, ov)]
+                # + arg_pairs`, which doesn't care what this parameter's
+                # name or real value is) without inventing any new
+                # class-object representation.
+                param_ctypes.append(('cls', 'int64_t'))
+            else:
+                # Mirrors _gen_struct_method's own convention exactly (see that
+                # method's `self.var_types['self'] = f"{struct_name} *"`) — the
+                # SAME pointer type an ordinary compiled method's `self` already
+                # uses, not a new one.
+                param_ctypes.append(('self', f"{struct_name} *"))
             fn_params = fn_params[1:]
         for pn, pt in fn_params:
             if pn.startswith('**'):
@@ -27920,10 +27958,19 @@ class GimpleGen:
             if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                     and id(s) not in _async_fns):
                 continue
-            # Skip generator METHODS (they have 'self' as first param) —
-            # the dedicated method loop at Phase 2 handles those with
-            # the correct struct_name.
-            if s.params and s.params[0][0] == 'self':
+            # Skip generator METHODS (they have 'self', or 'cls' for a
+            # @classmethod generator, as first param) — the dedicated
+            # method loop at Phase 2 handles those with the correct
+            # struct_name. Widening this to also recognize 'cls' matters
+            # even though this particular loop only ever sees TOP-LEVEL
+            # `stmts` (a real struct method can't appear here) — kept in
+            # sync with the identical check in the "second + third passes"
+            # loop below purely so the two don't silently diverge; see that
+            # loop's own comment for why the 'cls' case is load-bearing
+            # THERE (that loop iterates ALL of `_generator_fns`, including
+            # nested struct methods, by identity — see
+            # CODEGEN_generator_classmethod_first_param_must_be_self.md).
+            if s.params and s.params[0][0] in ('self', 'cls'):
                 continue
             if not _generator_quick_eligible(s):
                 continue
@@ -27959,8 +28006,35 @@ class GimpleGen:
             for _gm_id, s in list(_generator_fns.items()):
                 if _gm_id in _async_fns:
                     continue
-                # Skip generator METHODS (handled by the dedicated method loop)
-                if s.params and s.params[0][0] == 'self':
+                # Skip generator METHODS (handled by the dedicated method
+                # loop) — this loop iterates `_generator_fns` directly
+                # (built from a DEEP `_walk_ast(stmts)` scan, keyed by
+                # object identity), so unlike the first-pass loop above
+                # (which only ever sees top-level `stmts`), this one DOES
+                # see nested struct methods, including @classmethod
+                # generators whose first param is conventionally `cls`, not
+                # `self`. Before this widened to also recognize 'cls', a
+                # @classmethod generator method slipped past this "skip"
+                # check, got compiled HERE as if it were an ordinary
+                # free function (struct_name=None, `cls` treated as a
+                # plain scalar parameter, popped out of `_generator_fns`
+                # before the dedicated per-struct method loop ever got a
+                # turn) — silently wrong for two reasons: (1) it registers
+                # under the bare function name in `_generator_api`, which
+                # a `ClassName.method(...)` call site never looks up (call
+                # sites for a generator METHOD only ever consult
+                # `_generator_method_api`, keyed by (struct_name, method)),
+                # so the compiled unit was simply dead code; worse, (2) if
+                # the body ever read `cls.<attr>` (a real shape — see
+                # Lib/test/test_finalization.py's `test`), `_cpp_expr`'s
+                # MemberExpr case falls to its "non-self member access"
+                # branch (obj_expr.member) since the receiver isn't
+                # literally named `self`, emitting `cls.attr` on a plain
+                # `int64_t cls` parameter — invalid C++, a hard g++
+                # compile failure instead of a graceful source fallback.
+                # See CODEGEN_generator_classmethod_first_param_must_be_
+                # self.md for the full root-cause writeup.
+                if s.params and s.params[0][0] in ('self', 'cls'):
                     continue
                 if not _generator_quick_eligible(s):
                     continue
