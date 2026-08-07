@@ -2510,6 +2510,26 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # check above would refuse the whole generator.
         if e.func.member == 'format':
             return 'char *'
+    if isinstance(e, Comprehension):
+        # A list/dict/set comprehension used as a plain local's RHS
+        # (`items = [x for x in ... ]`, as opposed to the already-handled
+        # "comprehension is the DIRECT RHS of a list/tuple-unpack target"
+        # shape in _cpp_stmt's AssignStmt case) — _cpp_expr's own
+        # Comprehension case (just above in this file) always lowers to a
+        # genuine `mojo_list_new ()` call, i.e. a real `MojoList *` value
+        # (an honest always-empty-collection stub, not a real loop
+        # translation — see that case's own comment), never a scalar.
+        # Before this, a first-assigned local's type fell through to the
+        # int64_t default below, so `_cpp_stmt` declared it `int64_t` while
+        # actually assigning it a `MojoList *` — g++: "invalid conversion
+        # from 'MojoList*' to 'int64_t' [-fpermissive]", plus a second,
+        # equally invalid `int64_t[int]` subscript error at any later
+        # `items[i]`/unpack use. Mirrors the identical, already-fixed gap
+        # in the separate main-path return-type estimator, `_quick_type`
+        # (task #145, bugs/hard/CODEGEN_comprehension_return_type_
+        # defaults_int64.md) — this is the same root cause recurring in
+        # this file's OTHER, narrower type estimator.
+        return 'MojoList *'
     if isinstance(e, SliceExpr):
         return 'char *'  # string slice produces a string
     if isinstance(e, SubscriptExpr):
@@ -22427,6 +22447,28 @@ class GimpleGen:
                     # (computed above) is discarded but was already emitted
                     # for any side effect its evaluation would have.
                     return '1'
+                if fname == 'object' and not e.args:
+                    # Bare `object()` — CPython's own common "unique
+                    # identity sentinel/marker" idiom (e.g.
+                    # `marker = object()`, later compared via `is`/`==`,
+                    # real occurrence: Lib/test/crashers/gc_inspection.py's
+                    # `g` generator). This scalar coroutine-body model has
+                    # no real object system to construct a genuine instance
+                    # of (a bare `object` has no attributes/methods a real
+                    # program could observe anyway), so the only property
+                    # real code actually depends on is honestly preserved:
+                    # each call returns a value distinct from every other
+                    # still-live one. A fresh 1-byte heap allocation's
+                    # address gives that for real (unlike a constant stub —
+                    # e.g. always `0` — which would make every `object()`
+                    # call compare equal, silently breaking any identity
+                    # check). Deliberately never freed, matching this
+                    # narrow model's existing "never frees anything
+                    # explicitly" convention throughout the coroutine path.
+                    # Before this, `object` fell through to the generic
+                    # bare-name call below, an undeclared C++ identifier
+                    # ("'object' was not declared in this scope").
+                    return "(int64_t)(void *)malloc(1)"
                 # A call to a module-level function (tokenize.py's
                 # `detect_encoding(readline)`, codecs.py's
                 # `getincrementalencoder(encoding)`, os.py's `fspath(top)`)
@@ -22912,6 +22954,34 @@ class GimpleGen:
                     and isinstance(s.value.func, IdentExpr)
                     and s.value.func.name in self.func_return_types
                     and self.func_return_types[s.value.func.name] == 'MojoList *')
+                # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
+                # Lib/test/crashers/gc_inspection.py's own `g` generator) also
+                # lowers, via _cpp_expr's own Comprehension case just above,
+                # to a genuine `MojoList *` value (`mojo_list_new ()` — an
+                # honest always-empty stub, same simplification as every
+                # other comprehension-as-value site in this codegen) — NOT a
+                # C aggregate/array that supports `operator[]`. Without this,
+                # the final `else` branch below emitted `(mojo_list_new
+                # ())[0]`, which g++ rejects outright ("invalid types
+                # 'MojoList*[int]' for array subscript"); route it through
+                # the same runtime getter the MojoList*-returning-call case
+                # above already uses instead.
+                # A plain identifier RHS that's already a known MojoList*
+                # local (e.g. `items = [x for x in ...]` two lines above,
+                # now typed 'MojoList *' by _infer_simple_expr_ctype's own
+                # Comprehension case — see that case's comment for the full
+                # chain) — same underlying value shape as the direct-
+                # Comprehension case just above, just reached through a
+                # variable instead of inline. Mirrors the identical
+                # `self._cpp_declared.get(name) == 'MojoList *'` check the
+                # SliceExpr/full-slice-assignment branch elsewhere in this
+                # method already uses for the same purpose.
+                _tup_is_list_ident = (isinstance(s.value, IdentExpr)
+                    and self._cpp_declared is not None
+                    and self._cpp_declared.get(s.value.name) == 'MojoList *')
+                _tup_is_list_val = (_tup_is_list_call
+                    or isinstance(s.value, Comprehension)
+                    or _tup_is_list_ident)
                 # A call to a name this codegen has no real signature for
                 # (e.g. `tempfile.mkstemp(...)` -- real Python's own
                 # tempfile module, unresolved by this compiler's tracked
@@ -22936,7 +23006,7 @@ class GimpleGen:
                 else:
                     _tup_callee = None
                 _tup_is_unresolved_call = (_tup_callee is not None
-                    and not _tup_is_list_call
+                    and not _tup_is_list_val
                     and _tup_callee not in self.func_return_types
                     and _tup_callee not in self._KNOWN_SIGS)
                 lines = []
@@ -22950,7 +23020,7 @@ class GimpleGen:
                         if el.name not in declared:
                             declared[el.name] = 'int64_t'
                             lines.append(f"{indent}int64_t {el.name};")
-                        if _tup_is_list_call:
+                        if _tup_is_list_val:
                             lines.append(f"{indent}{el.name} = "
                                          f"mojo_list_get_int((MojoList *)({_tup_val}), {i});")
                         elif _tup_is_unresolved_call:
