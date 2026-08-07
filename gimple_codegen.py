@@ -17204,7 +17204,18 @@ class GimpleGen:
         base_op = node.op[:-1]
         # For augmented assignments, use lower_expr with a fake BinaryOp to get proper type handling
         # This includes string concatenation, list concatenation, etc.
-        if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>'):
+        # '@' (matrix-multiply, `a @= b`) must go through this path too — it
+        # has no native C operator, so falling into the `else` branch below
+        # (which builds a raw `{lv} {c_op} {rv}` C expression via _BIN_OPS,
+        # whose .get(base_op, base_op) fallback returns the literal '@' verbatim
+        # since _BIN_OPS has no '@' entry) emitted a bare `@` token straight
+        # into the GIMPLE C output — invalid syntax ("stray '@' in program" /
+        # "expected ';' before 'b'", real repro: Lib/operator.py's
+        # `def imatmul(a, b): a @= b; return a`). Routing through lower_expr's
+        # BinaryOp path instead reaches _lower_binary's own `if node.op == '@':
+        # return self._lower_matmul(node)` case, the same dunder-dispatch
+        # `a.__matmul__(b)` lowering plain `a @ b` already uses.
+        if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '@'):
             fake  = BinaryOp(op=base_op, left=node.target, right=node.value)
             vtype, v = self.lower_expr(fake)
         else:
@@ -27897,9 +27908,38 @@ class GimpleGen:
             if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
                 _dflts = getattr(s, 'param_defaults', None) or {}
                 if _dflts:
-                    _mangled = self._func_csym(s.name)
-                    self._func_param_defaults[_mangled] = [
-                        (pn, _dv) for pn, _dv in _dflts.items()]
+                    # `s` ranges over ALL_FUNCTIONS (this module's own stmts
+                    # PLUS every transitively-inlined foreign FunctionDef —
+                    # see all_functions' own construction above), not just
+                    # bare-name-callable functions of THIS module. A foreign
+                    # function whose bare name is _AMBIGUOUS_FUNC_HOME (two
+                    # different sibling modules transitively inlined here
+                    # each define a same-named top-level function — e.g.
+                    # os.py inlining both posixpath.py's and ntpath.py's own
+                    # `relpath(path, start=None)` via its `if 'posix' in
+                    # _names: import posixpath as path / elif 'nt' in
+                    # _names: import ntpath as path` branch, neither of
+                    # which this prepass can statically pick between) would
+                    # make `_func_csym` raise here — even though this is
+                    # only building an auxiliary lookup TABLE keyed by the
+                    # mangled name, not a genuine bare-name call-site
+                    # reference. If `s`'s bare name is never actually called
+                    # unqualified anywhere in this compile unit, this table
+                    # entry is simply never looked up, so skipping it is
+                    # harmless; if it IS genuinely bare-called somewhere,
+                    # THAT call site's own `_func_csym`/`_func_qualifier`
+                    # resolution still raises the same honest refusal (this
+                    # guard does not touch that path, only this prepass's
+                    # own indexing). Mirrors the identical, already-
+                    # established guard on the sibling `_func_kwargs_slot`
+                    # registration a few lines below.
+                    try:
+                        _mangled = self._func_csym(s.name)
+                    except Exception:
+                        _mangled = None
+                    if _mangled:
+                        self._func_param_defaults[_mangled] = [
+                            (pn, _dv) for pn, _dv in _dflts.items()]
             # Record the `**kwargs` slot so a call site with literal keyword
             # arguments can pack them into a real dict — see _func_kwargs_slot.
             # The C-signature index is the DECLARATION index: `*args` collapses
