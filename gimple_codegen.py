@@ -3700,6 +3700,40 @@ class GimpleGen:
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
         self._emitted_allocs: set[str] = set()       # struct names for which _alloc_ was already emitted
         self._compiled_modules: set[str] = set()     # modules already compiled to avoid duplicates
+        # Absolute file paths currently being compiled anywhere in this whole-
+        # program flattening (root file plus every transitively-imported
+        # module), keyed by PATH rather than module NAME — a real self-
+        # shadowing import (e.g. `Lib/importlib/abc.py` doing a bare `import
+        # abc`, which real Python resolves to the DIFFERENT top-level
+        # `Lib/abc.py`) resolves under a name (`abc`) that is NOT yet claimed
+        # in `_compiled_modules` at the time it's looked up (only actually-
+        # imported module names get registered there, and the ROOT file being
+        # compiled never registers under its own basename), so name-based
+        # dedup alone doesn't catch it. `_compile_imported_module`'s own
+        # search-path order (importer_dir before any more-specific/absolute
+        # resolution — itself deliberate, see BUG-2026-014's comment on that
+        # function) then matches the FILE ITSELF as the first existing
+        # candidate for a same-basename bare import, so without this guard
+        # the whole module gets parsed and gen_module'd a second time under a
+        # second module_name, and every one of its top-level structs/
+        # functions is emitted twice into the one flattened translation unit
+        # — a hard "redefinition of X" GCC error for every single symbol in
+        # the file (see bugs/hard/
+        # CODEGEN_multiple_inheritance_duplicate_method_symbols.md, whose
+        # original multiple-inheritance/struct-merge hypothesis this
+        # superseded: the real, confirmed cause is this self-shadowing
+        # import, not the inheritance-merge machinery — `python3 mojo.py
+        # build Lib/importlib/abc.py` produced a genuinely WHOLE-FILE
+        # duplicate `#line 1 ".../abc.py"` section, not merely inflated
+        # per-class method lists). Shared by direct object reference across
+        # every nested temp_gen the same way `_compiled_modules` is (see
+        # `_compile_imported_module`'s sharing block) so a deeper indirect
+        # cycle (A imports B, B imports A) is caught too, not just a literal
+        # direct self-import. The root file's own path is seeded into this
+        # set by every root entry point (`compile_to_gimple`,
+        # `compile_to_gimple_with_cpp`, `compile_linked`) right where each
+        # already sets `gen._current_filename`.
+        self._compiling_file_paths: set[str] = set()
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
@@ -4262,11 +4296,29 @@ class GimpleGen:
 
         for path in mojo_paths:
             if os.path.exists(path):
+                _abspath = os.path.abspath(path)
+                if _abspath in self._compiling_file_paths:
+                    # This candidate resolves (by real file identity, not by
+                    # the module NAME being looked up) to a file already
+                    # being compiled somewhere in the current whole-program
+                    # closure — most commonly the ROOT file itself, reached
+                    # via a same-basename bare import real Python would have
+                    # resolved to a DIFFERENT top-level module (see
+                    # `_compiling_file_paths`'s own declaration for the full
+                    # importlib/abc.py story). Treat it exactly like real
+                    # Python treats a re-entrant import of a module already
+                    # mid-initialization: do NOT compile it again — skip this
+                    # candidate and keep trying the remaining search
+                    # locations, so a genuinely different, correctly-
+                    # resolvable module of the same bare name elsewhere on
+                    # the search path is still found.
+                    continue
                 modules_before = set(self._compiled_modules)
                 ptr_helpers_before = set(self._emitted_ptr_helpers)
                 emitted_structs_before = set(self._emitted_structs)
                 inline_defs_before = set(self._global_inline_defs)
                 emitted_allocs_before = set(self._emitted_allocs)
+                self._compiling_file_paths.add(_abspath)
                 try:
                     with open(path, 'r') as f:
                         source = f.read()
@@ -4288,6 +4340,7 @@ class GimpleGen:
                                          relaxed_imports=True)
                     temp_gen._current_filename = path  # Set filename for #line directives
                     temp_gen._compiled_modules = self._compiled_modules
+                    temp_gen._compiling_file_paths = self._compiling_file_paths  # share: path-identity self-import guard (see its own declaration)
                     temp_gen._emitted_structs = self._emitted_structs
                     temp_gen._struct_allocs_needed = self._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                     temp_gen._str_pool = self._str_pool
@@ -32052,6 +32105,13 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     stmts  = ast_rewriter.rewrite(_parsed)
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
+    # Seed the self-import guard with the ROOT file's own identity — see
+    # `_compiling_file_paths`'s declaration for why this is needed (a bare
+    # import elsewhere in this file that happens to share this file's own
+    # basename, e.g. `Lib/importlib/abc.py`'s `import abc`, must not resolve
+    # back to this same file and get compiled a second time).
+    if filename:
+        gen._compiling_file_paths.add(os.path.abspath(filename))
     if do_imports:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
@@ -32078,6 +32138,11 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports)
     gen._current_filename = filename
+    # Seed the self-import guard with the ROOT file's own identity — see
+    # `_compiling_file_paths`'s declaration and compile_to_gimple's matching
+    # seed just above for the full reasoning.
+    if filename:
+        gen._compiling_file_paths.add(os.path.abspath(filename))
     if do_imports:
         gen._record_sys_path_inserts(
             mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
@@ -32141,6 +32206,13 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(link_imports=True)
     gen._current_filename = filename
+    # Seed the self-import guard with the ROOT file's own identity — see
+    # `_compiling_file_paths`'s declaration and compile_to_gimple's matching
+    # seed for the full reasoning (link mode's own `_link_inline_modules`
+    # fallback recursion goes through the exact same `_compile_imported_
+    # module` path, so it needs the same guard).
+    if filename:
+        gen._compiling_file_paths.add(os.path.abspath(filename))
     # compile_to_gimple_cached's do_imports=True path already does this for
     # the root file being compiled — link mode never did, so a
     # sys.path.insert(...) in the *main* file itself (not a nested import)
