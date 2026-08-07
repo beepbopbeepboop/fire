@@ -4,39 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/_common.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-07): both link-level findings fixed, but file still not a full PASS — combined-state re-verified
+## Status (updated 2026-08-07, final): RESOLVED — builds and links clean
 
-Both undefined-symbol findings below were independently root-caused and
-fixed by two separately-developed, now-merged fixes — see
+**Confirmed via a direct rebuild in the final state: `python3 mojo.py
+build .../_common.py` succeeds, 0 errors.** Both undefined-symbol
+findings below (`_wrap_spec`, `_next`) are fixed by "Mechanism 1" of
 `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-for the full writeup of both mechanisms:
+(the link-mode preamble now emits a weak stub instead of a bare,
+definition-less `extern` for a function-scoped import with no buildable
+signature) — `_next` turned out to be the exact same preamble branch as
+`_wrap_spec`, not a separate builtin-resolution gap.
 
-- `_wrap_spec` (finding #1) and `_next` (finding #2, turned out to be
-  the exact same preamble branch as `_wrap_spec`, not a separate
-  builtin-resolution gap): fixed by that doc's "Fix #1" (the link-mode
-  preamble now emits a weak stub instead of a bare, definition-less
-  `extern` for a function-scoped import with no buildable signature).
-- `_wrap_spec`'s underlying leading-dot relative-import resolution gap
-  (`._adapters` -> `importlib/resources/_adapters.py`) was separately
-  fixed by that doc's "Fix #2" (`_parsed_import`/
-  `_module_search_candidates`).
-
-**Confirmed via a direct rebuild against the actual merged code
-(2026-08-07): still NOT a full `mojo.py build` PASS.** With Fix #2
-making `_adapters.py` genuinely resolve and inline (rather than Fix #1
-alone papering over it with a stub), `_adapters.py`'s own transitive
-imports pull in BOTH `Lib/importlib/_abc.py` (module `_abc`) and
-`Lib/importlib/abc.py` (module `abc`) into the same translation unit,
-and their globals structs collide:
-```
-error: redefinition of '___abc_globals'
-error: redefinition of '___abc_toplevel'
-```
-This is the SAME class of bug as the explicitly out-of-scope
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
-(task #141) / `bugs/hard/CODEGEN_cross_module_bare_import_name_collision.md`
-— not chased further here, per the orchestrating session's explicit
-instruction to leave that class of bug alone.
+A SEPARATE fix ("Mechanism 2" in that same doc, making `_parsed_import`
+genuinely resolve and inline `_adapters.py`'s real body instead of
+stubbing around it) was also implemented and briefly landed. With
+`_adapters.py` genuinely resolved, its own transitive imports pulled in
+BOTH `Lib/importlib/_abc.py` (module `_abc`) and `Lib/importlib/abc.py`
+(module `abc`) into the same translation unit, and their globals
+structs collided: `error: redefinition of '___abc_globals'` — the SAME
+class of bug as the explicitly out-of-scope `bugs/hard/CODEGEN_same_
+bare_name_struct_collision_across_modules.md` (task #141). That fix was
+separately reverted after being found to regress an unrelated THIRD
+file (`Lib/importlib/__init__.py`) — see the hard-bug doc's own Status
+section. With it reverted, this file no longer reaches the `_abc`/`abc`
+collision at all — Mechanism 1's stub-based approach never actually
+inlines `_adapters.py`'s real body, so that collision (real, but
+out-of-scope per task #141) is simply never reached by this file's own
+build.
 
 ## Original status (2026-08-06, superseded above for the wrap_spec mechanism)
 

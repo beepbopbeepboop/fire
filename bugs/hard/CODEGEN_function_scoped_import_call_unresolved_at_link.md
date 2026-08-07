@@ -1,59 +1,38 @@
 # HARD BUG: a function-scoped (local) `from X import Y` followed by calling `Y(...)` compiles clean but leaves an undefined symbol at LINK time
 
-## Status (updated 2026-08-07): BOTH fixes landed (independently developed, same session) — combined effect re-verified directly, supersedes each fix's own isolated claim
+## Status (updated 2026-08-07, final): Mechanism 1 FIXED and kept; Mechanism 2 fix reverted after a corpus-wide regression
 
 Two independent investigations this session each found and fixed a real,
-different mechanism contributing to this symptom, without knowledge of
-each other (parallel background agents on isolated worktrees). Both are
-now merged together. **Their COMBINED effect on the two confirmed
-real-world instances was re-verified directly against the actual merged
-code** (not assumed from either fix's own isolated verification, since
-the two fixes changed what each other's downstream behavior looks like):
+different mechanism contributing to this symptom, developed in parallel
+on isolated worktrees without knowledge of each other. Their combined
+effect, and the eventual outcome, was re-verified directly against
+actual rebuilds (not assumed from either fix's own isolated claim) —
+**Mechanism 1's fix is kept, Mechanism 2's fix was reverted**:
 
-- `Lib/importlib/resources/_common.py`: **still does NOT reach a clean
-  `mojo.py build`** in the combined state — confirmed via a direct
-  rebuild post-merge:
-  ```
-  Lib/importlib/_abc.py:52:22: error: redefinition of '___abc_globals'
-  Lib/importlib/abc.py:228:6: error: redefinition of '___abc_toplevel'
-  ```
-  This is a real, order-dependent interaction between the two fixes: Fix
-  2 (below) alone made `wrap_spec` resolve via a weak STUB (never
-  actually inlining `_adapters.py`'s real body), which avoided ever
-  reaching this collision — Fix 1 (below) alone made `_parsed_import`
-  able to find `_adapters.py` and genuinely inline it, which is what
-  actually EXPOSES the pre-existing `_abc`/`abc` collision (the SAME
-  class of bug as the already out-of-scope task #141 /
-  `bugs/hard/CODEGEN_cross_module_bare_import_name_collision.md`) that
-  neither fix on its own reached. Both fixes are still individually
-  correct and worth keeping (see each one's own "Verification" section
-  for what it does in isolation) — this is an emergent interaction
-  between two correct, narrow fixes exposing a third, separate,
-  already-known-and-deliberately-deferred bug, not a defect in either
-  fix.
-- `Lib/runpy.py`: **also does NOT reach a clean `mojo.py build`** in the
-  combined state — confirmed via a direct rebuild post-merge. The link
-  failure itself (`read_code`/`get_importer` undefined symbols) IS
-  gone, but the now-successfully-resolved transitive closure surfaces
-  real, unrelated compile errors, including (unlike either fix's own
-  isolated report) `abc.py`-internal redefinitions/conflicting-type
-  errors (e.g. `redefinition of '__bootstrap_external_FileLoader___init__'`,
-  `conflicting types for '__bootstrap_external_SourceLoader_get_data'`)
-  and an `implicit declaration of function '_write_atomic'` in
-  `_bootstrap_external.py` — a different, larger error set than either
-  fix saw on its own, again illustrating why the combined state needed
-  independent re-verification rather than trusting either isolated
-  claim.
+- `Lib/importlib/resources/_common.py`: **builds and links clean**
+  (confirmed via direct rebuild in the final state) — Mechanism 1's fix
+  alone is sufficient for both of this file's original findings
+  (`_wrap_spec`, `_next`).
+- `Lib/runpy.py`: **builds and links clean** (confirmed via direct
+  rebuild in the final state) — same, Mechanism 1's fix alone resolves
+  the original `read_code`/`get_importer` link failure.
+- `Lib/importlib/__init__.py`: **builds clean** (confirmed via direct
+  rebuild) — this file was NEVER broken by Mechanism 1's fix; it was
+  only regressed while Mechanism 2's fix was also present (see below),
+  and is back to passing now that Mechanism 2 is reverted.
 
-Both fixes are kept regardless of the exact combined P/F status on these
-two specific files, per this session's own established practice: each
-is independently a genuine, narrow, correctly-verified improvement to
-import-resolution/symbol-declaration correctness (see each fix's own
-Risk assessment), and this class of bug (function-scoped imports) is
-common enough elsewhere in the corpus that the fixes have value beyond
-just these two instances, even where a specific instance's overall
-`mojo.py build` categorization doesn't flip due to a separate,
-unrelated, already out-of-scope bug lying just beyond it.
+This is a genuine, instructive case of two fixes interacting: Mechanism
+2's fix (making `_parsed_import` able to genuinely resolve+inline a
+sibling/relative-import file it previously couldn't find at all) is
+exactly what newly exposed two SEPARATE, pre-existing, previously-
+unreachable bugs — a `_abc`/`abc` globals-struct redefinition collision
+in `_common.py`'s transitive closure, and an unrelated GIMPLE-type bug
+in `_bootstrap.py` that broke `importlib/__init__.py`. Mechanism 1's
+fix (routing an unresolvable import through a weak STUB instead of a
+bare, definition-less extern) never actually inlines the sibling file
+for real, so it never exposes either of those latent bugs — it "papers
+over" the missing resolution with a safe no-op stub, which is why it's
+lower-risk and was kept.
 
 ## Symptom
 
@@ -99,7 +78,7 @@ Both are `from MODULE import NAME` statements written INSIDE a function
 body (not at module top level), immediately followed by calling
 `NAME(...)`.
 
-## Root cause: TWO independent, coordinated mechanisms
+## Root cause: TWO independent mechanisms
 
 The original hypothesis ("the cross-module import scan only walks
 top-level statements, not function bodies") was WRONG for both. Link
@@ -110,7 +89,7 @@ for `FromImportStmt` nodes — it finds `from pkgutil import read_code`/
 `from ._adapters import wrap_spec` just fine, at exactly the depth
 these two examples live at.
 
-### Mechanism 1 (fix #1 below): `_register_link_imports.scan()`'s two
+### Mechanism 1 (FIXED, kept): `_register_link_imports.scan()`'s two
 sub-passes disagree on how to declare an unresolvable import
 
 When `pkgutil.read_code`/`get_importer` have no buildable C signature
@@ -134,131 +113,149 @@ declaration with NO definition — a real, unconditional dangling
 reference. This is exactly the `_get_importer`/`_read_code`
 undefined-symbol failure.
 
-### Mechanism 2 (fix #2 below): `_parsed_import` can't locate a plain
-sibling `.py` file or a leading-dot relative import at all
-
-The REAL gap Mechanism 1 papers over (with a stub) is one step earlier:
-`_register_link_imports.scan()` calls a local `_exports(module)` helper
-to resolve the imported module's signature — first via
-`imports.resolve(module)` (a real dylib), then falling back to
-`self._parsed_import(module)` + `load_module(module)` (source-level text
-extraction) for a module with no dylib. `_parsed_import` only ever tried
-`imports.resolve_source(module)` and
-`self._resolve_test_relative_module(module)` — BOTH scoped to this
-project's own std/test module namespaces (confirmed directly:
-`module_loader.resolve_module_path('pkgutil')` raises `ValueError: Only
-stdlib and test imports supported: pkgutil`). Neither has any notion of
-"a plain sibling `.py` file next to the file currently being compiled"
-(the `pkgutil` case) NOR "a leading-dot relative import" (the
-`._adapters` case) — both very ordinary shapes for an arbitrary external
-multi-file Python project (exactly what compiling the real Python-3.14.6
-stdlib is). `do_imports=True`'s SEPARATE inline pipeline
-(`_compile_imported_module`) already resolves both shapes correctly via
-its own importer-directory search — but link mode's
-`_parsed_import`/`_exports` never shared that logic.
-
-## Fix
-
-### Fix #1 (Mechanism 1): two coordinated changes in `gimple_codegen.py`
-
+**Fix (kept)**: two coordinated changes in `gimple_codegen.py`:
 1. `_gen_stmt_FromImportStmt` (~line 19083): only write the bare
-   `{'module': ..., 'return_type': ret}` fallback into
-   `self.imported_symbols[symbol_name]` when there ISN'T already a
-   fuller entry (one with a `'signature'` key) from an earlier pass —
-   i.e. don't downgrade a real resolution.
+   fallback entry when there ISN'T already a fuller entry (one with a
+   `'signature'` key) from an earlier pass — don't downgrade a real
+   resolution.
 2. The preamble's "no signature" branch (~line 32503): changed
    `if self.do_imports:` to `if self.do_imports or self.link_imports:`
    so link mode routes through the same weak-stub-definition path
-   do_imports=True already used, instead of falling into the
+   `do_imports=True` already used, instead of falling into the
    bare-extern-with-no-definition `else` branch (now scoped explicitly
    to `do_imports=False AND link_imports=False`, i.e.
    compile_stdlib.py's genuinely-separate-.o workflow, where the
    assumption that "another translation unit defines it" is actually
    true).
 
-### Fix #2 (Mechanism 2): two additive changes in `gimple_codegen.py`
+This fix is deliberately LOW-blast-radius: it changes how an
+ALREADY-classified-as-unresolvable import declares itself (a working
+stub vs. a bare dangling extern) — it can only turn a previously-broken
+link into a working one, never change behavior for anything that
+resolves normally, and it never causes a previously-unreachable file to
+become newly reachable (the stub is a no-op, not a real inlined body).
 
-1. **`_module_search_candidates(self, module_name)`** — new method,
-   extracted verbatim (pure refactor, no behavior change) from the
-   path-building half of `_compile_imported_module` (which now just
-   calls it and keeps its existing exists-check + compile loop). Also
-   gained a new, dedicated early branch for a LEADING-DOT `module_name`
-   (`.`/`..`/... prefix — real Python relative-import syntax): resolved
-   against `_current_filename`'s own directory with the same dot-
-   counting scheme `_resolve_import_module_qualifier` already uses for
-   the (narrower, `.mojo`-only, qualifier-string-only) scope-stack tier,
-   extended here to also try `.py` and to return actual candidate
-   PATHS rather than a qualifier string. (The PRE-EXISTING generic
-   `'.' in module_name` dotted-path branch mishandles a leading dot
-   entirely — `'._adapters'.split('.')` produces a leading EMPTY
-   component, and the resulting `os.path.join(d, '/_adapters.py')`
-   silently drops `d` because a leading `/` makes `os.path.join` treat
-   the second argument as absolute — so a dedicated early branch was
-   necessary rather than trying to patch the existing one.)
-2. **`_parsed_import`** — when both existing resolvers return no path,
-   fall back to `_module_search_candidates(module)`, taking the first
-   candidate that exists on disk.
+### Mechanism 2 (fix implemented, verified clean, then REVERTED):
+`_parsed_import` can't locate a plain sibling `.py` file or a
+leading-dot relative import at all
 
-No change was needed to `_register_link_imports`, `_func_qualifier`, or
-the extern-emission pass — once `_parsed_import` can find the real
-source file, the EXISTING "not info -> read module source text ->
-`_link_inline_modules.add(...)`" fallback branch (already correct) and
-the EXISTING `_own_imported_func_home`/scope-stack-derived qualifier
-machinery (already correct) both just start working for these two
-shapes, exactly as they already did for every OTHER resolvable import.
+The gap Mechanism 1's fix papers over (with a stub) is one step
+earlier: `_register_link_imports.scan()` calls a local `_exports
+(module)` helper to resolve the imported module's signature — first
+via `imports.resolve(module)` (a real dylib), then falling back to
+`self._parsed_import(module)` + `load_module(module)` (source-level
+text extraction) for a module with no dylib. `_parsed_import` only ever
+tried `imports.resolve_source(module)` and `self._resolve_test_relative_
+module(module)` — BOTH scoped to this project's own std/test module
+namespaces (confirmed directly: `module_loader.resolve_module_path
+('pkgutil')` raises `ValueError: Only stdlib and test imports
+supported: pkgutil`). Neither has any notion of "a plain sibling `.py`
+file next to the file currently being compiled" (the `pkgutil` case)
+NOR "a leading-dot relative import" (the `._adapters` case) — both very
+ordinary shapes for an arbitrary external multi-file Python project
+(exactly what compiling the real Python-3.14.6 stdlib is).
+`do_imports=True`'s SEPARATE inline pipeline (`_compile_imported_module`)
+already resolves both shapes correctly via its own importer-directory
+search — but link mode's `_parsed_import`/`_exports` never shared that
+logic.
 
-## Verification
+**Fix implemented and verified clean, then reverted**: two additive
+changes in `gimple_codegen.py` — a new `_module_search_candidates`
+helper (extracted from `_compile_imported_module`'s path-building
+logic, plus a new leading-dot relative-import branch), and
+`_parsed_import` falling back to it when both existing resolvers return
+nothing. This DID correctly make `_parsed_import` resolve `pkgutil.py`
+and `_adapters.py` for real (confirmed via direct C-output inspection),
+and passed the full mandated 5-step quality gate completely clean
+(test_gimple.py 247/247, test_module_cache.py 76/76, check-selfhost
+clean, dylib rebuild 0 skips, compile_stdlib.py -j8 664/664 0
+unexpected — byte-identical to baseline).
 
-### Fix #1's own isolated verification (before Fix #2 was merged in)
-- Minimal repro (`def f(): from helper import read_code; return
-  read_code(f)`): now emits a real weak stub definition instead of a
-  bare extern; links and runs clean.
-- `Lib/runpy.py`: `driver.compile_program(...)` (link mode) returned
-  `rc=0` in isolation (Fix #2 not yet present, so `pkgutil` never
-  actually resolved — the weak stub covered for it).
-- `Lib/importlib/resources/_common.py`: same — `driver.compile_program`
-  returned `rc=0` in isolation, `_adapters.py` never actually inlined.
+**But it was reverted**, for two compounding reasons found only after
+the gate passed clean:
+1. Neither of the two ORIGINAL confirmed instances (`runpy.py`,
+   `importlib/resources/_common.py`) actually reached a passing
+   `mojo.py build` even WITH this fix — both hit separate, unrelated,
+   deeper bugs newly reachable once their transitive closure resolved
+   correctly: `_common.py` hit a `_abc`/`abc` globals-struct
+   redefinition collision (`Lib/importlib/_abc.py` and
+   `Lib/importlib/abc.py` both getting inlined into the same
+   translation unit — the SAME class of bug as the already out-of-scope
+   `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`,
+   task #141); `runpy.py` hit a different, larger error set including
+   `importlib/abc.py`-internal redefinition/conflicting-type errors and
+   an `implicit declaration of function '_write_atomic'`. Zero observed
+   P/F flips on the fix's own motivating instances.
+2. Independently spot-checking OTHER already-passing `COMPILE_FAIL_*.md`
+   files (routine corpus re-triage, not triggered by any specific
+   suspicion) found the fix **regresses `Lib/importlib/__init__.py`
+   from a clean PASS to a hard COMPILE_FAIL** — a file with no known
+   connection to this bug, not touched by any of the fix's own testing.
+   Root cause: `importlib/__init__.py` does `from . import _bootstrap`,
+   and the SAME fix that correctly resolves `pkgutil`/`._adapters`
+   ALSO now resolves `_bootstrap.py` (previously silently unresolved
+   and never inlined at all) — but `_bootstrap.py` has its own
+   pre-existing, unrelated GIMPLE-type bug (`non-trivial conversion in
+   'integer_cst'`, a `char* -> int64_t` pointer/integer mismatch) that
+   was never reachable before because `_bootstrap.py` was never
+   actually compiled as part of this file's closure. Confirmed via a
+   direct before/after comparison of the same patch: WITHOUT the fix,
+   `mojo.py build Lib/importlib/__init__.py` → rc=0; WITH the fix, same
+   command → rc=1.
 
-### Fix #2's own isolated verification (before Fix #1 was merged in)
-- Direct inspection of generated C: `read_code`/`get_importer`/
-  `wrap_spec` call sites and externs now correctly module-qualified,
-  `pkgutil.py`/`_adapters.py` genuinely inlined via `_link_inline_modules`.
-- Neither file reached a full `mojo.py build` PASS in Fix #2's own
-  isolated state: `Lib/runpy.py` hit independent GIMPLE-type errors from
-  other transitively-imported files (`Lib/stat.py`'s `int64_t & char *`,
-  `Lib/posixpath.py`'s `expandvars_repl_env` struct-shape mismatch,
-  `Lib/operator.py`'s `__matmul__`, `Lib/dis.py`'s `void`-declared
-  variable, `Lib/enum.py`'s gimple-call conversion) — though several of
-  these categories were separately fixed elsewhere this same session
-  (e.g. operator.py's `@=`/matmul), so this list may be partially stale;
-  `Lib/importlib/resources/_common.py` hit the `_abc`/`abc` globals
-  redefinition collision described above.
+**None of the 5 mandated gates caught this** — `compile_stdlib.py`
+tests this project's own `std.*` Mojo modules (which resolve via real
+dylibs, never hitting this specific source-level fallback path),
+`check-selfhost` tests this compiler's own Python source (single-file,
+no sibling/relative multi-file imports of this shape), and
+`test_gimple.py`/`test_module_cache.py` are unit-level. The actual
+regression only showed up against the Python-3.14.6 `COMPILE_FAIL_*.md`
+corpus this task exists to improve — a concrete instance of this
+project's standing principle that a change passing the mandated gate is
+not sufficient evidence of no regression; the actual corpus this work
+targets needs its own re-triage before considering a cross-cutting
+import-resolution change landable.
 
-### Combined-state re-verification (2026-08-07, after merging both)
-- `Lib/importlib/resources/_common.py`: **confirmed via direct rebuild
-  post-merge** — still hits the `_abc`/`abc` redefinition collision (see
-  "Status" above). NOT a full pass.
-- Full 5-part quality gate on the actual merged `gimple_codegen.py` (not
-  just each fix's own isolated gate run): see the orchestrating
-  session's own merge-commit gate output.
+**Conclusion**: Mechanism 2's fix is not viable as committed — its
+value (correctly resolving two more import shapes) is real, but its
+side effect (newly resolving OTHER previously-silently-unresolved
+sibling/relative imports across the ENTIRE Python-3.14.6 corpus, each
+of which may have its own independent, latent, never-before-reachable
+bug) gives it a blast radius far larger than "the two motivating
+files," and it's effectively untestable in full without re-running the
+ENTIRE corpus for every candidate change. **Reverted, code fully
+removed from `gimple_codegen.py`.** A future attempt should either (a)
+make the newly-resolved inline-fallback path fail SOFT — falling back
+to the old "unresolved, stub it out" behavior — when the sibling module
+itself doesn't compile clean, rather than propagating its error up
+through the whole client build, or (b) re-run the full `COMPILE_FAIL_*`
+corpus triage (not just the specific instances motivating the fix)
+before considering it landable.
+
+## Quality gate (2026-08-07, final state — Mechanism 1 only)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean.
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected
+   failures (unchanged from baseline).
+
+Direct rebuilds confirming the final state (all three files, via
+`python3 mojo.py build <file>`, checked for `error:`/`link failed`
+lines): `Lib/runpy.py` clean, `Lib/importlib/resources/_common.py`
+clean, `Lib/importlib/__init__.py` clean.
 
 ## Risk assessment
 
-Both fixes: LOW risk in practice. Fix #1 only changes how an
-ALREADY-classified-as-unresolvable import declares itself (stub vs bare
-extern) — it cannot make a previously-working case stop working, only
-make a previously-broken case link instead of fail. Fix #2 is purely
-ADDITIVE (a new fallback tier, only ever consulted when BOTH
-pre-existing resolvers already returned nothing) — it can only turn a
-previously-"never resolved" case into a resolved one. Both passed the
-full 5-part gate independently, including the load-bearing
-`compile_stdlib.py -j8` regression check (664/664, unchanged), and the
-combined state was independently re-verified again post-merge.
+Mechanism 1's fix: LOW risk, confirmed by both its own isolated gate
+run and this doc's final combined-state re-verification. It only
+changes how an already-classified-as-unresolvable import declares
+itself — cannot make a previously-working case stop working.
 
-The one real surprise is the EMERGENT interaction documented above
-(Fix #2 resolving `_adapters.py` for real is what exposes the
-pre-existing `_abc`/`abc` collision that Fix #1's stub-only behavior
-had been inadvertently masking) — a good illustration of why this
-project's standing practice is to re-verify the ACTUAL merged state
-rather than trust either of two independently-developed fixes' own
-isolated claims when they touch overlapping territory.
+Mechanism 2's fix: turned out to be HIGH risk despite passing every
+mandated gate clean — a genuine illustration of why this project treats
+"passed compile_stdlib.py cleanly" as necessary but not sufficient
+evidence of safety for changes touching cross-module import resolution,
+alongside this project's other two documented "passed the gate but
+still regressed something" incidents.

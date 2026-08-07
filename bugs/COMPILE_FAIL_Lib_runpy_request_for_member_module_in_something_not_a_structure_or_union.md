@@ -1,28 +1,33 @@
 # COMPILE_FAIL: Lib/runpy.py — request for member '__module__' in something not a structure or union
 
-## Status (updated 2026-08-07): link failure FIXED, but file still not a full PASS — combined-state re-verified
+## Status (updated 2026-08-07, final): RESOLVED — builds and links clean
 
-The `read_code`/`get_importer` function-scoped-import LINK failure
-described below is fixed at its root cause by two independently-
-developed, now-merged fixes — see
+**Confirmed via a direct rebuild in the final state: `python3 mojo.py
+build Lib/runpy.py` succeeds, 0 errors.** The `read_code`/`get_importer`
+function-scoped-import LINK failure described below is fixed at its
+root cause by "Mechanism 1" of
 `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-for the full writeup of both mechanisms and why the combined state
-needed its own re-verification (the two fixes' isolated claims about
-this file disagreed with each other and with the actual combined
-result).
+(the link-mode preamble now emits a weak stub instead of a bare,
+definition-less `extern` for a function-scoped import with no buildable
+signature).
 
-**Confirmed via a direct rebuild against the actual merged code
-(2026-08-07): still NOT a full `mojo.py build` PASS.** The link failure
-itself is gone, but the now-successfully-resolved transitive closure
-(pkgutil.py's own body is now genuinely inlined) surfaces real,
-unrelated compile errors — including `Lib/importlib/abc.py`-internal
-redefinition/conflicting-type errors (e.g. `redefinition of
-'__bootstrap_external_FileLoader___init__'`) and an `implicit
-declaration of function '_write_atomic'` in `_bootstrap_external.py`.
-Not chased further here — these are separate, independent,
-already-partially-tracked bugs (the `abc.py` shape looks related to
-`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`'s
-class of issue) each deserving their own investigation.
+A SEPARATE fix ("Mechanism 2" in that same doc, making `_parsed_import`
+genuinely resolve and inline `pkgutil.py`'s real body instead of
+stubbing around it) was also implemented and briefly landed, and DID
+get past this file's original link failure too — but before reaching a
+full pass it surfaced a large, unrelated error set further into the
+now-successfully-resolved transitive closure (`Lib/importlib/abc.py`-
+internal redefinition/conflicting-type errors, an `implicit declaration
+of function '_write_atomic'`, plus earlier-suspected `Lib/stat.py`/
+`Lib/posixpath.py`/`Lib/operator.py`/`Lib/dis.py`/`Lib/enum.py` issues
+from an even earlier diagnosis pass). That fix was reverted after being
+found to regress an unrelated THIRD file
+(`Lib/importlib/__init__.py`) — see the hard-bug doc's own Status
+section for the full story. With it reverted, this file no longer
+reaches that deeper error set at all — Mechanism 1's stub-based
+approach never actually inlines `pkgutil.py`'s real body, so those
+deeper, unrelated bugs (real, but out of scope) are simply never
+reached by this file's own build.
 
 The separate `os.py: 'relpath' is ambiguous` informational note
 mentioned below (a transitively-imported `os.py` falling back to
