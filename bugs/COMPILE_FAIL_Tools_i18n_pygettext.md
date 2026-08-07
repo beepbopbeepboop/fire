@@ -4,6 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/i18n/pygettext.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+error: non-trivial conversion in 'var_decl'
+```
+at `def get_source_comments(source):` (an unannotated parameter,
+declared `int64_t` per the generated `.ci`'s `int64_t
+get_source_comments_0c85c9 (int64_t source)`). The function builds and
+returns a `MojoDict *` (`comments = mojo_dict_new()` ... eventually
+returned), but the C function signature declares `int64_t` as its
+return type — a return-type/param-type mismatch consistent with (but
+not conclusively pinned to) the general "unannotated parameter/field
+defaults to int64_t regardless of real usage" family already documented
+in `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+(that doc is about `__init__` fields specifically; this would be the
+analogous free-function RETURN-type gap if confirmed — not chased down
+far enough to be certain). Not fixed here.
+
 ```
 /Users/mrs/net/Python-3.14.6/Tools/i18n/pygettext.py: warning: f-string interpolation '{}' could not be compiled; emitting it as literal text (SyntaxError: 0:0: Unexpected EOF(''))
 /Users/mrs/net/Python-3.14.6/Tools/i18n/pygettext.py: warning: f-string interpolation '{}' could not be compiled; emitting it as literal text (SyntaxError: 0:0: Unexpected EOF(''))
