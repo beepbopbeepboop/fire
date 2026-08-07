@@ -13,13 +13,19 @@ per-object dynamic-attribute storage) — this file's `module.__spec__`
 read/write on a generically-typed `reload()` parameter now resolves
 through that machinery. Not independently re-diagnosed beyond
 confirming the build now succeeds; see that hard-bug doc for the actual
-fix.
+fix. Independently re-confirmed by two separate investigations the same
+day (both landed the same session).
 
 ## Status (updated 2026-08-06, historical — now resolved, see above)
 
-Root-caused; not fixed — instance of the tracked dynamic-attribute hard
-bug (bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md, task
-#136). Not attempted independently here.
+Was root-caused (not fixed) as of 2026-08-06 as an instance of the
+tracked dynamic-attribute hard bug (task #136). That hard bug's Steps
+1-4 (real per-object dynamic-attribute storage) landed 2026-08-07 in
+`bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`. Re-ran
+`python3 mojo.py build Lib/importlib/__init__.py` against current
+master — exits 0, produces a real `.o`. No independent fix was needed
+in this session; this doc is just catching up to reflect the upstream
+fix.
 
 ```
 error: request for member '__spec__' in something not a structure or union

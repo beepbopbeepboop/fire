@@ -2,11 +2,16 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/tools/extensions/glossary_search.py`
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07): FIXED — file now builds clean
 
-Root-caused; not fixed — instance of the tracked dynamic-attribute hard
-bug (bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md, task
-#136). Not attempted independently here.
+Was root-caused (not fixed) as of 2026-08-06 as an instance of the
+tracked dynamic-attribute hard bug (task #136). That hard bug's Steps
+1-4 (real per-object dynamic-attribute storage) landed 2026-08-07 in
+`bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`. Re-ran
+`python3 mojo.py build Doc/tools/extensions/glossary_search.py` against
+current master — exits 0, produces a real `.o`. No independent fix was
+needed in this session; this doc is just catching up to reflect the
+upstream fix.
 
 ```
 error: request for member 'glossary_terms' in something not a structure or union

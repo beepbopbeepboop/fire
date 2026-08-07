@@ -2,9 +2,14 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/abc.py`
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07): FIXED — file now builds clean
 
-Two issues found. **#1 is now FIXED.** #2 remains, separately tracked.
+Both issues are now fixed. Re-ran `python3 mojo.py build
+Lib/importlib/abc.py` against current master (after
+`bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s Steps 1-4
+landed 2026-08-07) — exits 0, produces a real `.o`. No fix was needed in
+this session; both root causes were already fixed elsewhere (see below),
+this doc is just catching up to reflect that.
 
 ### 1. FIXED — whole-file self-referential import duplicated every symbol
 
@@ -36,7 +41,7 @@ cause turned out not to be inheritance-specific).
 from ~26 errors (all `redefinition of 'abc_*'`, plus the 2 below) to
 exactly the 2 below.
 
-### 2. Dynamic-attribute hard-bug instance (#136, Sub-case C, already tracked) — still open, out of scope for the fix above
+### 2. Dynamic-attribute hard-bug instance (#136, Sub-case C, already tracked) — now FIXED via that hard bug's Steps 1-4 (2026-08-07)
 
 ```
 error: expected identifier before '__func__'

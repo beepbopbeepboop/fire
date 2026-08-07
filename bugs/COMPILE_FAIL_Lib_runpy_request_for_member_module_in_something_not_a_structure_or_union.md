@@ -1,27 +1,38 @@
 # COMPILE_FAIL: Lib/runpy.py — request for member '__module__' in something not a structure or union
 
-## Status (RESOLVED 2026-08-07)
+## Status (updated 2026-08-07): link failure FIXED, but file still not a full PASS — combined-state re-verified
 
-**Builds and links successfully now.** `python3 mojo.py build
-/Users/mrs/net/Python-3.14.6/Lib/runpy.py` succeeds end-to-end in ~7s
-(both `driver.compile_program`'s link mode directly, and the full CLI
-path). The link failure described below (`_get_importer`/`_read_code`
-undefined symbols) was root-caused and fixed in
+The `read_code`/`get_importer` function-scoped-import LINK failure
+described below is fixed at its root cause by two independently-
+developed, now-merged fixes — see
 `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-— see that doc for the full mechanism and fix (two coordinated changes
-in `gimple_codegen.py`'s link-mode import-symbol registration/preamble
-logic). Full 5-part quality gate passed (test_gimple.py 247/0,
-test_module_cache.py 76/0, check-selfhost clean, stdlib dylib rebuild 0
-skips, compile_stdlib.py 664/664 0 unexpected).
+for the full writeup of both mechanisms and why the combined state
+needed its own re-verification (the two fixes' isolated claims about
+this file disagreed with each other and with the actual combined
+result).
+
+**Confirmed via a direct rebuild against the actual merged code
+(2026-08-07): still NOT a full `mojo.py build` PASS.** The link failure
+itself is gone, but the now-successfully-resolved transitive closure
+(pkgutil.py's own body is now genuinely inlined) surfaces real,
+unrelated compile errors — including `Lib/importlib/abc.py`-internal
+redefinition/conflicting-type errors (e.g. `redefinition of
+'__bootstrap_external_FileLoader___init__'`) and an `implicit
+declaration of function '_write_atomic'` in `_bootstrap_external.py`.
+Not chased further here — these are separate, independent,
+already-partially-tracked bugs (the `abc.py` shape looks related to
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`'s
+class of issue) each deserving their own investigation.
 
 The separate `os.py: 'relpath' is ambiguous` informational note
 mentioned below (a transitively-imported `os.py` falling back to
 source interpretation due to a cross-module free-function-name
-collision) still appears during the build but does not block it — an
-intentional, already-implemented honest-refusal diagnostic, not
-investigated further as part of this fix.
+collision) no longer applies — that specific ambiguity was
+independently fixed earlier this session
+(`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`'s
+follow-up fix).
 
-## Status (updated 2026-08-06, historical — link failure now fixed, see above)
+## Original status (2026-08-06, superseded above for the read_code/get_importer mechanism)
 
 Re-ran (150s timeout, one retry with a longer background run that DID
 complete): current error is a LINK failure, not the stale `__module__`

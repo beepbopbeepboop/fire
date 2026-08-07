@@ -4,35 +4,41 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/_common.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (RESOLVED 2026-08-07)
+## Status (updated 2026-08-07): both link-level findings fixed, but file still not a full PASS — combined-state re-verified
 
-**Builds and links successfully now.** `python3 mojo.py build
-.../_common.py` succeeds end-to-end, and `driver.compile_program(...)`
-(link mode) returns `rc=0` directly. BOTH undefined-symbol findings
-below are fixed by the SAME root-cause fix:
+Both undefined-symbol findings below were independently root-caused and
+fixed by two separately-developed, now-merged fixes — see
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+for the full writeup of both mechanisms:
 
-- `_wrap_spec` (finding #1): fixed as part of
-  `bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
-  — see that doc for the full mechanism (a link-mode preamble branch
-  was emitting a bare, definition-less `extern` for a function-scoped
-  import whose defining module has no buildable C signature, instead
-  of the weak-stub-definition convention `do_imports=True` already
-  used for the identical situation).
-- `_next` (finding #2, `next(itertools.filterfalse(...))`): turned out
-  to be the EXACT SAME preamble branch, not a separate builtin-
-  resolution gap as originally guessed — `next` reaches
-  `self.imported_symbols` with no `'signature'` the same way an
-  unresolvable function-scoped import does, so the same fix covers it
-  incidentally. Confirmed fixed (`_next` now gets a weak stub instead
-  of a bare extern) without any additional change specific to
-  builtin-call resolution.
+- `_wrap_spec` (finding #1) and `_next` (finding #2, turned out to be
+  the exact same preamble branch as `_wrap_spec`, not a separate
+  builtin-resolution gap): fixed by that doc's "Fix #1" (the link-mode
+  preamble now emits a weak stub instead of a bare, definition-less
+  `extern` for a function-scoped import with no buildable signature).
+- `_wrap_spec`'s underlying leading-dot relative-import resolution gap
+  (`._adapters` -> `importlib/resources/_adapters.py`) was separately
+  fixed by that doc's "Fix #2" (`_parsed_import`/
+  `_module_search_candidates`).
 
-Full 5-part quality gate passed (test_gimple.py 247/0,
-test_module_cache.py 76/0, check-selfhost clean, stdlib dylib rebuild 0
-skips, compile_stdlib.py 664/664 0 unexpected) — see the hard-bug doc
-for the actual gate output.
+**Confirmed via a direct rebuild against the actual merged code
+(2026-08-07): still NOT a full `mojo.py build` PASS.** With Fix #2
+making `_adapters.py` genuinely resolve and inline (rather than Fix #1
+alone papering over it with a stub), `_adapters.py`'s own transitive
+imports pull in BOTH `Lib/importlib/_abc.py` (module `_abc`) and
+`Lib/importlib/abc.py` (module `abc`) into the same translation unit,
+and their globals structs collide:
+```
+error: redefinition of '___abc_globals'
+error: redefinition of '___abc_toplevel'
+```
+This is the SAME class of bug as the explicitly out-of-scope
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+(task #141) / `bugs/hard/CODEGEN_cross_module_bare_import_name_collision.md`
+— not chased further here, per the orchestrating session's explicit
+instruction to leave that class of bug alone.
 
-## Status (updated 2026-08-06, historical — both link failures now fixed, see above)
+## Original status (2026-08-06, superseded above for the wrap_spec mechanism)
 
 Re-ran; the original GCC-warning dump below is STALE (compilation now
 gets further and fails at LINK time, not with these warnings). Current
