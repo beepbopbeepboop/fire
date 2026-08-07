@@ -54,6 +54,10 @@ overall theme as this cluster's other gaps.)
   one of this cluster's 41 targets): `iter_builtin_types` and
   `patch_list` — target shape not independently read from source in
   this pass, only the refusal message observed.
+- `Lib/test/test_support.py`: `save_restore_warnings_filters` — target
+  shape not independently read from source in this pass. One of this
+  cluster's 41 target files; see `bugs/CODEGEN_generator_function_Lib_
+  test_test_support.md`.
 - `Lib/test/test_faulthandler.py`: `FaultHandlerTests.check_stderr_none`
   — `sys.stderr = None` (a MODULE-ATTRIBUTE assignment target, not a
   tuple/list unpack — confirms the refusal is general to ANY non-
