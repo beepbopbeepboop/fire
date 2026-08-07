@@ -4,6 +4,27 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/re/_compiler.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/re/_compiler.py:187:17: error: invalid operands to binary - (have 'int64_t' {aka 'long long int'} and 'MojoList *')
+```
+
+at `code[tail] = _len(code) - tail` (a local helper `_len` aliased
+from `len`, subtracting a loop/index variable `tail` from a computed
+length). `_len(code)` should resolve to `int64_t` (a length) and `tail`
+is used elsewhere as a plain index — but the error shows the RHS's
+right operand (`tail`) resolving to `MojoList *` here, suggesting
+`tail`'s inferred local-variable type is inconsistent across this
+function (typed as a list somewhere and as an int elsewhere) — not
+confirmed further, not investigated to the exact mechanism given
+session time constraints. Plausibly related to
+`bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md` or a
+similar local-variable-type-unification gap found elsewhere this
+session, but not confirmed. Not fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/re/_compiler.py: In function '_mojo_dispatch_getattr':

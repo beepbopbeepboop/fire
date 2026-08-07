@@ -12,6 +12,41 @@ unrelated set of errors rooted in a transitively-imported module
 of the aliased-import-as-main work; left here as a regular (not "hard")
 report since the remaining failure is an unrelated bug class.
 
+## Status (updated 2026-08-06)
+
+Re-ran; error set has changed again:
+
+```
+error: 'c_common_scriptutil_track_progress_compact_abc465' undeclared here (not in a function); did you mean '_funcptr_c_common_scriptutil_track_progress_compact_abc465'?
+error: assignment to 'int64_t' from 'MojoBoundMethod *' makes integer from pointer without a cast [-Wint-conversion]
+error: implicit declaration of function 'logging_configure_logger_dad6ee'; did you mean 'logging_configure_logger_7a6366'? [-Wimplicit-function-declaration]
+error: implicit declaration of function '_unresolved_import_main' [-Wimplicit-function-declaration]
+```
+
+At least 3 distinct issues compound here:
+1. The by-now-familiar "function-as-value at module scope" gap (3rd
+   confirmed instance this session — see
+   `bugs/COMPILE_FAIL_importlib__bootstrap_external.md`).
+2. `assignment to 'int64_t' from 'MojoBoundMethod *'` — a function
+   value (correctly resolved as `MojoBoundMethod *` here, unlike #1)
+   being stored into an int64_t-typed field/variable without the usual
+   boxing cast, possibly `logging.py`'s own field/parameter type
+   inference not expecting a callable value.
+3. A genuinely NEW observation: `logging_configure_logger_dad6ee` vs.
+   `logging_configure_logger_7a6366` — the CALL SITE and the REAL
+   DEFINITION of what should be the same logical function ended up
+   with DIFFERENT overload-mangling suffixes (`_dad6ee` vs `_7a6366`),
+   so the call references a symbol that doesn't exist even though a
+   same-named-but-differently-mangled one does. This suggests the
+   overload-selection/mangling logic can pick a different mangled
+   suffix for the SAME call shape depending on where in the compile
+   it's resolved — a real, if narrow-looking, consistency bug in the
+   overload-mangling mechanism, not investigated further here.
+
+Not fixed — all three plausibly touch shared, broad codegen machinery
+(#1/#3 especially: overload mangling is used everywhere a function name
+could be ambiguous). Left for a dedicated pass.
+
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
 ```

@@ -4,6 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/ssl/multissltests.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+error: redefinition of 'urlopen'
+```
+
+at:
+```python
+try:
+    from urllib.request import urlopen
+    from urllib.error import HTTPError
+except ImportError:
+    from urllib2 import urlopen, HTTPError
+```
+
+Root-caused as a new hard bug (this file is the FIRST of two confirmed
+instances; the second, `Tools/wasm/wasi/__main__.py`'s `cpu_count`,
+confirmed the pattern recurs):
+`bugs/hard/CODEGEN_try_except_import_fallback_both_branches_compiled.md`
+— both the `try` and `except` branches of a compatibility-shim import
+fallback get compiled and each contributes a competing definition for
+the same name; no equivalent of the existing `if <platform-check>:`
+branch-resolution logic exists for `try`/`except` import fallbacks. Not
+fixed here — see that doc for the fix plan.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Tools/ssl/multissltests.py: In function '_mojo_dispatch_getattr':

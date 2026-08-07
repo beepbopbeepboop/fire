@@ -4,6 +4,38 @@ Source file: `/Users/mrs/net/Python-3.14.6/Modules/getpath.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current errors:
+
+```
+error: assignment to 'int64_t' from 'char *' makes integer from pointer without a cast [-Wint-conversion]  (x6)
+error: passing argument 2 of 'search_up' from incompatible pointer type [-Wincompatible-pointer-types]  (x2)
+```
+
+Root-caused the first (and most common) group: every one is a chained/
+multi-target assignment —
+```python
+executable_dir = real_executable_dir = value.strip()
+...
+prefix = exec_prefix = ''
+```
+`_infer_local_var_types` (`gimple_codegen.py`), the pre-pass that
+determines a local variable's real declared C type, has NO case for
+`MultiAssignStmt` (`a = b = expr`) at all — only plain single-target
+`AssignStmt`. Every target of a chained assignment is invisible to it
+and falls through to the generic `int64_t` default. Written up as a
+new hard bug:
+`bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md` — this
+one is cleaner/narrower than most of this session's other findings
+(a single missing case in one well-contained function, not a multi-
+mechanism interaction), but not fixed here given this session's general
+caution about landing type-inference changes without dedicated
+verification time.
+
+The `search_up` argument-type errors (line 580/595) were not
+investigated further.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Modules/getpath.py: In function '_mojo_dispatch_getattr':

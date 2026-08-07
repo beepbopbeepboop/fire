@@ -4,6 +4,36 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+error: 'MojoBoundMethod' has no member named 'parent'
+error: expected expression before ';' token
+```
+
+at:
+```python
+@property
+def filename(self):
+    return pathlib.Path(self.root.filename).joinpath(self.at)
+...
+    return self.filename.parent   # (a different method, chains off the property)
+```
+
+Root-caused: `filename` is a `@property`. `self.filename.parent`
+resolves `self.filename` to the property's own `MojoBoundMethod *`
+VALUE (the getter itself, uncalled) rather than actually invoking the
+getter and using ITS result — so `.parent` is then looked up on a
+`MojoBoundMethod`, which has no such member. This looks like a gap
+specific to CHAINING an attribute access directly off a `@property`
+read (`self.prop.attr`) as opposed to a simple `x = self.prop`
+assignment (properties clearly work in general elsewhere in this
+codebase's passing stdlib compiles) — not confirmed further, not
+fixed. Minimal repro to try in a future session: `class C: @property
+def p(self): return SomeStruct() ... def f(self): return self.p.field`.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py: In function '_mojo_dispatch_getattr':

@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/logging/config.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current error:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/logging/handlers.py:1130:1: error: invalid conversion in gimple call
+/Users/mrs/net/Python-3.14.6/Lib/logging/config.py:901:1: error: non-trivial conversion in 'integer_cst'  (x2)
+```
+
+The first is shared with `bugs/COMPILE_FAIL_logging_handlers.md`
+(`config.py` imports `handlers.py`) — see that doc. `config.py`'s own
+line 901 is a blank line, not executable code — same line-number
+misattribution pattern seen elsewhere this session. Neither
+root-caused further; not fixed.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/logging/config.py: In function '_alloc_ConvertingDict':

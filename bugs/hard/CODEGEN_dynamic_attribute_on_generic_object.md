@@ -77,6 +77,14 @@ class Slot:
   idiom of stashing arbitrary custom state on `app.env` via `hasattr`/
   dynamic-attribute assignment. "request for member 'glossary_terms' in
   something not a structure or union".
+- `Lib/pathlib/_os.py` (confirmed 2026-08-06, via
+  `bugs/COMPILE_FAIL_pathlib___init__.md`): `except OSError as err: ...
+  err.filename = source_f.name; err.filename2 = target_f.name` —
+  writing NEW attributes onto a caught EXCEPTION object. Same opaque-
+  object shape as sub-cases A/B (the exception's real runtime type
+  isn't one this compiler models with a known struct layout).
+  "request for member 'filename'/'filename2' in something not a
+  structure or union".
 - `Tools/build/umarshal.py` / `Tools/build/deepfreeze.py`: `retval.__dict__`
   / `pprint.pprint(retval.__dict__)` where `retval`/the target is a KNOWN
   user struct (`Code`) — "'Code' has no member named '__dict__'". This is

@@ -4,6 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; errors span two files (this one imports `pathlib/_os.py`):
+
+```
+error: request for member 'filename' in something not a structure or union    (_os.py:158)
+error: request for member 'filename2' in something not a structure or union   (_os.py:159)
+error: non-trivial conversion in 'integer_cst'                                (__init__.py:72)
+error: type mismatch in binary expression                                     (__init__.py:72)
+error: cannot convert to a pointer type                                       (__init__.py:404)
+```
+
+1. `pathlib/_os.py`'s `except OSError as err: err.filename =
+   source_f.name; err.filename2 = target_f.name` — writing NEW
+   attributes onto a caught exception object. Confirmed a new
+   real-world instance of the already-documented
+   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` (added
+   there). Not fixed here.
+
+2. `__init__.py:72`'s `self._tail[:-idx - 1]` (a slice with a computed
+   negative-index expression) and `:404`'s `return tail[-1]` (negative
+   single-element index) were not investigated further this session —
+   plausibly related to this codegen's slice/negative-index handling
+   for a `MojoList *`, but not confirmed.
+
+None fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py: In function '_alloc__PathParents':

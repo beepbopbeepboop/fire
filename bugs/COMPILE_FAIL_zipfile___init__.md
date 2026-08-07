@@ -4,6 +4,32 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current errors:
+
+```
+error: non-trivial conversion in 'integer_cst'   (x2, near line 567)
+error: mismatching comparison operand types       (near line 625)
+error: non-trivial conversion in 'var_decl'        (x2, near line 1290)
+error: passing argument 3 of 'ZipFile_mojo_open' makes integer from pointer without a cast [-Wint-conversion]  (line 1690)
+```
+
+Most of the reported source line numbers (567, 625, 1290) point at
+blank lines or docstrings, not executable code — the same line-number
+misattribution pattern seen in several other files this session
+(`bugs/COMPILE_FAIL_importlib_util.md`'s LazyModule case,
+`bugs/COMPILE_FAIL_Tools_unicode_gencodec.md`) where generated code
+continues past the last real `#line` directive without resetting it,
+so GCC blames the wrong physical line. Not root-caused further given
+time constraints.
+
+The one cleanly-attributed error, line 1690's `with self.open(name,
+"r", pwd) as fp:` (`ZipFile.read`/similar — `pwd` is an optional
+`bytes | None = None` parameter), suggests a `None`-default optional
+parameter not getting the right boxed type at a call site expecting a
+real `char *`/bytes value — not confirmed further. None fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py: In function '_alloc_LZMACompressor':

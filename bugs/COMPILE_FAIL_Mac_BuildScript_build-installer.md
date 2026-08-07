@@ -4,6 +4,39 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current errors, two distinct root causes:
+
+```
+error: invalid operands to binary + (have 'char *' and 'MojoList *')
+error: invalid operands to binary % (have 'int64_t' and 'MojoDict *')  (x2)
+```
+
+1. `FW_VERSION_PREFIX = "--undefined--"` at module scope (a STRING
+   placeholder, "initialized in parseOptions" per its own comment),
+   later reassigned inside a function to a real LIST value:
+   `FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions", getVersion()]`.
+   `gen_module`'s Phase 1.7 global prescan types a global from
+   whichever assignment it encounters (here: the module-level
+   `StringLiteral` → `char *`), with no reconciliation for a LATER
+   reassignment to a structurally different type inside a function —
+   a placeholder-then-real-type-reassignment idiom, related to (but a
+   distinct trigger shape from) `bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_annotation.md`
+   and `bugs/hard/CODEGEN_reset_func_wipes_global_container_type_inference.md`
+   (both already document other Phase-1.7-adjacent global-typing gaps
+   found this session).
+
+2. `readme = readme % textvars` / `srcdir = srcdir % textvars` — old-
+   style `"..." % {dict}` string formatting where the LHS `readme`/
+   `srcdir` (both function parameters, presumably `str`) resolve to
+   `int64_t` instead of `char *`, and `%` against a `MojoDict *` RHS
+   isn't specially handled at all (the `%` operator lowering likely
+   only recognizes tuple-style `%` formatting, not dict-style). Not
+   investigated further.
+
+Neither fixed here.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py: In function '_mojo_dispatch_getattr':
