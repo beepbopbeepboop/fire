@@ -2,61 +2,68 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
-(Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
+## Status (updated 2026-08-06)
+
+Investigated 2026-08-06. Root-caused; not fixed — traces back to an
+already-tracked, broader cross-module resolution gap. Low priority: the
+failing code is dead test-only code, never reached by any real import.
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:49:11: warning: unused variable '_tag' [-Wunused-variable]
-   49 |         # If python was built with in debug mode
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:54:11: warning: unused variable '_tag' [-Wunused-variable]
-   54 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:59:11: warning: unused variable '_tag' [-Wunused-variable]
-   59 |         for directory in os.environ['PATH'].split(os.pathsep):
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:74:11: warning: unused variable '_tag' [-Wunused-variable]
-   74 |     from ctypes import wintypes
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:83:13: warning: unused variable '_tag' [-Wunused-variable]
-   83 |         wintypes.HMODULE,
-      |             ^~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py: In function 'test':
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:227:8: error: variable or field '_t20' declared void
-  227 | 
-      |        ^   
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:500:10: warning: dereferencing 'void *' pointer
-  500 |         print(cdll.load("msvcrt"))
-      |          ^~~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:500:8: error: invalid use of void expression
-  500 |         print(cdll.load("msvcrt"))
-      |        ^
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:417:11: warning: variable '_t210' set but not used [-Wunused-but-set-variable]
-  417 |             if libpath:
-      |           ^ ~~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:416:10: warning: unused variable '_t209' [-Wunused-variable]
-  416 |             libpath = os.environ.get('LD_LIBRARY_PATH')
-      |          ^  ~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:399:10: warning: variable '_t192' set but not used [-Wunused-but-set-variable]
-  399 |             regex = os.fsencode(regex % (re.escape(name), abi_type))
-      |          ^  ~~
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:393:10: warning: variable '_t186' set but not used [-Wunused-but-set-variable]
-  393 |                 'ia64-64': 'libc6,IA-64',
-      |          ^    
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:387:10: warning: variable '_t180' set but not used [-Wunused-but-set-variable]
-  387 |                 machine = os.uname().machine + '-64'
-      |          ^    
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:374:10: warning: variable '_t167' set but not used [-Wunused-but-set-variable]
-  374 | 
-      |          ^    
-/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py:361:10: warning: variable '_t154' set but not used [-Wunused-but-set-variable]
-... (72 more lines)
+error: variable or field '_t21' declared void
+error: invalid use of void expression
 ```
 
-Exit code: 1
-Elapsed: 9.51s
+at:
+```python
+################################################################
+# test code
+
+def test():
+    from ctypes import cdll
+    if os.name == "nt":
+        print(cdll.msvcrt)
+        print(cdll.load("msvcrt"))   # <- here
+        print(find_library("msvcrt"))
+    ...
+```
+
+## Root cause
+
+`from ctypes import cdll` pulls in `cdll`, which in the real
+`ctypes/__init__.py` is a MODULE-LEVEL VALUE (a struct instance, not a
+function or class): `cdll = LibraryLoader(CDLL)`. Cross-module import
+resolution here can't determine `cdll`'s real type, so it falls back to
+emitting a generic weak stub for the unresolved symbol:
+
+```c
+#ifndef cdll
+__attribute__((weak)) int64_t cdll (...) { mojo_print ((char *)"cdll: unavailable in compiled mode"); return (int64_t)0; }  /* stub from ctypes */
+```
+
+i.e. `cdll` gets treated as an unresolved CALLABLE returning `int64_t`,
+not as a struct instance with a `.load(name)` method. `cdll.load("msvcrt")`
+then lowers to a dynamic-dispatch call on that broken stub value, whose
+return type resolves to `void` — and `print(<void-typed-expr>)` is
+invalid C, producing the two errors above.
+
+This is a variant of the SAME underlying gap already tracked for
+`ctypes/__init__.py` itself (bugs/COMPILE_FAIL_ctypes___init__.md, task
+#39) — that file's own compile has multiple unresolved issues
+(`__ctype_le__`/`__ctype_be__` dynamic attributes, the CFUNCTYPE varargs-
+packing bug), any of which could be why `ctypes/__init__.py`'s own
+`LibraryLoader`/`cdll` never gets far enough to be visible to
+`util.py`'s cross-module import resolution as a real, typed value. Not
+independently root-caused further than that — `cdll`'s resolution
+failure is downstream of `ctypes/__init__.py`'s own compile health, not
+a bug specific to `util.py`.
+
+## Priority note
+
+The failing code is `def test():`, explicitly dead test/demo code at the
+bottom of the file (guarded `if os.name == "nt":`, and this `test()`
+function itself is never called by anything outside itself — no
+`__main__` guard even invokes it in this file). Low priority relative to
+real, reachable code paths. Worth revisiting once `ctypes/__init__.py`
+(task #39) has a real, resolvable `cdll`/`LibraryLoader` — this file may
+simply compile clean once that upstream dependency does, without any
+change needed here at all.
