@@ -1,6 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_deque.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+`bugs/hard/CODEGEN_comprehension_return_type_defaults_int64.md` (task
+#145, referenced below re: the lines-332/438/834 "non-trivial
+conversion"/"type mismatch" pattern) is now fixed. This file's own
+mention was only ever a speculative "sibling family" match, not
+independently traced to a confirmed bare-`return`-comprehension shape
+in this file's source, and this file was already classified as "NOT a
+generator-codegen-cluster failure" dominated by unrelated errors — not
+re-investigated further here.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
 2026-07-30 `'SyntaxError' was not declared` .cpp error no longer

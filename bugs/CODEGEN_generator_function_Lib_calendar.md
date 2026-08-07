@@ -1,6 +1,26 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+**Classification bug FIXED** (`bugs/hard/CODEGEN_comprehension_return_
+type_defaults_int64.md`, task #145) — `_quick_type` now has a
+`Comprehension` case. Confirmed via a direct, isolated compile
+(`compile_to_gimple(..., do_imports=False)` on `calendar.py`'s own
+source, then `gcc -fgimple -fsyntax-only` on the result): **0 errors**
+— both the "non-trivial conversion"/"type mismatch" errors this doc
+originally reported AND the trailing `_CLIDemoCalendar___init__` arity
+error are gone. `calendar.py`'s OWN code now compiles cleanly in
+isolation.
+
+`python3 mojo.py build .../Lib/calendar.py` (the full whole-program,
+`do_imports=True` build) still fails — but now entirely due to
+UNRELATED, pre-existing issues in OTHER, transitively-imported files
+(`os.py`'s `relpath`-ambiguity refusal, several distinct pre-existing
+`operator.py` errors) that have nothing to do with calendar.py's own
+code or this bug. Not investigated further (out of scope for this
+comprehension-return-type fix).
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, but the failure has moved and is NOT actually inside
 the coroutine-codegen path anymore. Re-diagnosed from scratch against
