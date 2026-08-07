@@ -1,6 +1,18 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+`bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`
+(cross-referenced below) is now FIXED. Not independently re-verifiable
+for THIS specific file, though: as this doc's own 2026-08-06 note
+already found, `tokenize.py`'s build is blocked by unrelated `any`/
+`perror` name collisions before compilation ever reaches the generator-
+eligibility pass, so whether the module-qualification fix actually
+changes this file's outcome remains unconfirmed either way — not
+investigated further (the `any`/`perror` collision fix is out of scope
+here, same as before).
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, but the failure has moved well before the generator
 codegen stage. Re-diagnosed against current master (`2b0c4c5`); the

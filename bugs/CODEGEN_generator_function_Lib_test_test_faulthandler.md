@@ -1,6 +1,18 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`
+is now PARTIALLY fixed (task #150) — but only the tuple/list-pattern-
+unpack target shape. This file's own occurrence (`sys.stderr = None`,
+a non-`self` MODULE-attribute assignment target) is the specific shape
+that fix deliberately did NOT cover — assigning into an arbitrary
+object's attribute has no representation in this narrow scalar-only
+generator-body model, correctly identified as a meaningfully bigger,
+separate step in the hard-bug doc's own "What a fix needs" analysis.
+`check_stderr_none` is still refused, unchanged.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, confirmed reproducing against current master
 (`2b0c4c5`), now precisely classified.

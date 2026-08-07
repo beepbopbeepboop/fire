@@ -22600,8 +22600,23 @@ class GimpleGen:
                 "unsupported expression statement in generator body "
                 f"({type(s.value).__name__})")
         if isinstance(s, AssignStmt):
-            if isinstance(s.target, TupleExpr):
+            if isinstance(s.target, (TupleExpr, ListExpr)):
                 # Tuple unpacking: a, b = expr  →  a = expr[0]; b = expr[1]
+                # A LIST-PATTERN target (`[tup] = [...]`, `[a, b] = [...]`)
+                # is Python's other, less common but real, unpacking-target
+                # spelling — semantically identical to the tuple-target
+                # case (both just bind N names from N elements; the target
+                # brackets vs. parens are a syntax choice, not a semantic
+                # one), and `ListExpr`/`TupleExpr` share the exact same
+                # `.elements` field shape (see mojo_compiler.py), so no
+                # separate branch is needed — just widen the isinstance
+                # check to accept both. Before this, `[tup] = [...]` (real:
+                # Lib/test/crashers/gc_inspection.py's own generator `g`)
+                # fell all the way through to the generic "only a plain
+                # identifier assignment target is supported" refusal below,
+                # even though the exact same decomposition this TupleExpr
+                # branch already does applies unchanged. See
+                # CODEGEN_generator_non_plain_assignment_target_refused.md.
                 # When `expr` is a call to a module function returning a
                 # MojoList* (tokenize.py's `encoding, consumed =
                 # detect_encoding(readline)` — detect_encoding returns a
@@ -23246,6 +23261,43 @@ class GimpleGen:
                 msg_cpp = self._cpp_expr(val)
                 return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
                         f"(void *){msg_cpp} }};"]
+            # `raise <MemberExpr>(...)` / bare `raise <MemberExpr>` — a
+            # DYNAMICALLY resolved exception class (real, recurring idiom:
+            # `raise self._imap.error(...)` in imaplib.py's Idler.burst,
+            # plus test.support's run_with_locale/subst_drive — see
+            # CODEGEN_generator_raise_non_static_exception_class.md's three
+            # confirmed occurrences) has no statically-known class NAME to
+            # look up in _exc_type_id, so it can't get a real per-class tag
+            # the way `raise ExcName(...)` does. Rather than refuse the
+            # whole generator outright, fall back to the SAME untyped(0)/
+            # lenient-match representation `raise e` (a handler-bound
+            # IdentExpr, just above) already uses for the identical "don't
+            # statically know the exact class" situation — tag 0 is an
+            # existing, documented convention (see _cpp_try_stmt's own
+            # docstring: "untagged(0) lenient match on the first typed
+            # handler", and the ordinary GIMPLE path's identical handling
+            # around _gen_stmt_TryStmt), not a new one invented here. This
+            # necessarily loses precise except-type matching for a
+            # dynamically-resolved raise (an `except SpecificError:` may
+            # over-eagerly catch it) — an accepted, pre-existing tradeoff
+            # of this narrow scalar-only generator-body model, identical in
+            # kind to the one `raise e` already makes.
+            if isinstance(val, MemberExpr) or (
+                    isinstance(val, CallExpr) and isinstance(val.func, MemberExpr)):
+                msg_arg = val.args[0] if isinstance(val, CallExpr) and val.args else None
+                if msg_arg is not None:
+                    if isinstance(msg_arg, StringLiteral):
+                        text, is_fstr = self._decode_str_literal_text(msg_arg.value)
+                        if is_fstr:
+                            msg_cpp = self._cpp_expr(msg_arg)
+                        else:
+                            msg_cpp = f'const_cast<char *>("{_c_escape(text)}")'
+                    else:
+                        msg_cpp = self._cpp_expr(msg_arg)
+                else:
+                    msg_cpp = 'const_cast<char *>("")'
+                return [f"{indent}throw _MojoCppExc{{ (int64_t)0, {msg_cpp}, "
+                        f"(void *){msg_cpp} }};"]
             raise _UnsupportedGeneratorShape(
                 "unsupported `raise` value expression in generator body "
                 "(only `raise ExcName(...)`/`raise ExcName` with a "
@@ -23817,8 +23869,54 @@ class GimpleGen:
                     "MojoList*/MojoDict*/MojoSet* parameters are supported "
                     "for compiled generators)")
             param_ctypes.append((pn, ctype))
-        base = (f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
-                if struct_name is not None else f"_mojogen_{_safe_name(fn.name)}")
+        if struct_name is not None:
+            base = f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
+        else:
+            # Module-qualify a free-function generator's C symbol exactly
+            # like an ordinary free function's (`_func_csym`/SB-1's
+            # `bf96f55`/`13e6a5c`) — before this, TWO UNRELATED generator
+            # functions in different modules sharing a bare name (`walk`
+            # is common: os.py's own 4-param `walk` vs. an unrelated
+            # 1-param `walk` reachable via threading.py) both mangled to
+            # the identical bare `_mojogen_walk_start`, producing a hard
+            # "conflicting types" GCC error across the whole-program
+            # compile the moment both were transitively reachable (real:
+            # `python3 mojo.py build .../Lib/os.py`) — see
+            # CODEGEN_generator_function_symbol_not_module_qualified.md.
+            # `_func_qualifier` is called here EXACTLY as `_func_csym` calls
+            # it for an ordinary function's definition: `fn.name` is always
+            # one of THIS gen_module() call's own top-level FunctionDefs at
+            # this call site (both callers below iterate `stmts`/
+            # `_generator_fns`, itself built from `_walk_ast(stmts)` scoped
+            # to the currently-compiling module), so tier 1
+            # (`_local_top_level_func_names`, this module's OWN top-level
+            # names) always fires here — the same purely-per-instance,
+            # never-shared-dict-dependent info `_func_qualifier`'s
+            # docstring documents as "always authoritative for itself, full
+            # stop". Every reader of the registered `base` (self.
+            # _generator_api[name]['base']) does a single dict read reused
+            # for both the extern "C" forward-declaration/param-types
+            # registration and the actual call, so whatever this returns is
+            # automatically self-consistent at every call site — no
+            # separate cross-module CALL-resolution fix is needed to close
+            # THIS bug (unlike SB-1's ordinary-function fix, which also had
+            # to fix call-site resolution): the confirmed real-world
+            # collision is between two functions that never call each
+            # other, purely a shared-symbol-name definition clash. A
+            # from-scratch `self._generator_api` cross-module CALL
+            # collision (module A calling module B's same-bare-name
+            # generator while a DIFFERENT module C's own same-name
+            # generator is also in scope) remains the same class of
+            # documented, accepted "first-registered-module-wins" residual
+            # limitation `_imported_func_home`'s own docstring already
+            # carries for ordinary functions (tier 3) -- not fixed here,
+            # not exercised by any confirmed repro, and not attempted per
+            # this bug's own documented preference for a narrowly-verified
+            # fix over a speculative, higher-risk rework of the
+            # shared-dict call-resolution machinery.
+            _gen_qualifier = self._func_qualifier(fn.name)
+            base = (f"_mojogen_{_gen_qualifier}_{_safe_name(fn.name)}"
+                    if _gen_qualifier else f"_mojogen_{_safe_name(fn.name)}")
         # Params are already "declared" locals as far as the body emitter is
         # concerned — a param can be read (`i = start`) or directly
         # reassigned/augmented (`start = start + 1`) without a fresh `Type

@@ -1,6 +1,26 @@
 # CODEGEN_generator_function: Lib/os.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
+
+**Classification bug FIXED** (`bugs/hard/CODEGEN_generator_function_
+symbol_not_module_qualified.md`, task #146) — `_gen_cpp_generator_unit`'s
+free-function base-name computation now module-qualifies via
+`_func_qualifier` (the same SB-1 machinery ordinary free functions use).
+Confirmed: `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+no longer produces ANY `conflicting types for '_mojogen_walk_start'`
+error — the specific collision this doc documents is gone.
+
+**File STILL FAILS to build overall**, for a completely different,
+unrelated reason: `RuntimeError: cannot compile module: 'relpath' is
+ambiguous — this program transitively imports two different sibling
+modules that both define a free function named 'relpath' ...` — an
+ORDINARY (non-generator) function ambiguity, hit via `_func_qualifier`'s
+own pre-existing `_AMBIGUOUS_FUNC_HOME` honest-refusal path (unrelated
+machinery, not touched by the generator-symbol fix). Not investigated
+further here — out of scope for the generator/coroutine codegen cluster
+this file was originally classified under.
+
+## Status (updated 2026-08-06, superseded above)
 
 **STILL FAILING**, but re-diagnosed from scratch against current master
 (`2b0c4c5`) — the 2026-07-31 `_DeprecatedGenericAlias`/`_CallableType`/
