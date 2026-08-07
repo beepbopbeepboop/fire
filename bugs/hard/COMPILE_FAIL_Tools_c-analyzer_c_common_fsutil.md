@@ -1,5 +1,31 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (updated 2026-08-07)
+
+**NOT resolved** (task #140), despite the root-cause bug this doc
+points to (`CODEGEN_generator_recursive_yield_from_no_arg_forwarding.
+md`, task #138) now being FIXED. Confirmed via `MOJO_DEBUG=1`: `iter_
+files` is no longer blocked by the arg-forwarding/self-recursion gap —
+but this file STILL fails to compile, now hitting a DIFFERENT, genuinely
+separate, previously-MASKED blocker in the same function:
+```
+[gimple_codegen] generator 'iter_files' not eligible for C++ coroutine
+path, falling back to honest refusal: unsupported expression in
+generator body: LambdaExpr
+```
+`iter_files`'s own body (line 285 of the real file) has:
+```python
+get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))
+```
+a lambda expression (with its own `*args`/`**kwargs` forwarding)
+assigned to a local — entirely unrelated to yield-from/self-recursion,
+and out of this narrow generator-body codegen's scope on its own
+merits. This was always there; the arg-forwarding bug just refused
+`iter_files` earlier (via the blanket whole-module pre-check) before
+ever reaching this line. Not investigated/fixed further — a distinct,
+new potential hard-bug candidate (LambdaExpr support inside a compiled
+generator body) for a future session, not in scope for task #138's fix.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/fsutil.py`
 
 Root cause (current): see

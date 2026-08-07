@@ -2634,6 +2634,28 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                 else:
                     return None
         elif isinstance(n, YieldFromExpr):
+            # Self-recursive `yield from <this-same-function>(...)` (real:
+            # Tools/c-analyzer/c_common/fsutil.py's/test_exception_group.
+            # py's own generators recursing into themselves for the
+            # non-leaf case) — `fn` (this call's own first argument) hasn't
+            # registered itself into `generator_api` yet (registration only
+            # happens once the WHOLE function has finished compiling, in
+            # gen_module's calling loop), so _yield_from_delegate_ctype can
+            # never resolve it as a known compiled generator and would
+            # otherwise fall to its "anything else -> char *" default —
+            # silently corrupting the WHOLE function's inferred value type
+            # even when a DIRECT `yield <value>` site elsewhere in the same
+            # body (the base-case leaf, e.g. `yield root`) unambiguously
+            # wants int64_t/double/_Bool. A self-recursive site contributes
+            # NO independent type opinion of its own — by definition, a
+            # self-recursive generator's value type is whatever its OTHER
+            # (non-recursive) yield site(s) agree on — so skip it entirely
+            # here rather than let it default to char* and clobber the
+            # real answer. See
+            # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md.
+            if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
+                    and n.value.func.name == fn.name):
+                continue
             t = _yield_from_delegate_ctype(n, generator_api)
             if t is None:
                 return None
@@ -23606,8 +23628,27 @@ class GimpleGen:
         # non-generator-call expression — a method chain, a bare name, etc.):
         # iterate the MojoList* result with an indexed loop, co_yield-ing
         # each element as char*.
-        is_gen_call = (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
-                       and call.func.name in self._generator_api)
+        # Self-recursion: `yield from <this-same-function>(...)` — see the
+        # self-tracking context _gen_cpp_generator_unit sets up (`self.
+        # _cpp_gen_self_name`/`_base`/`_params`) right before compiling this
+        # function's own body, precisely because this function can never
+        # find ITSELF in `self._generator_api` yet (registration only
+        # happens after the whole compile succeeds) — matches the identical
+        # reasoning in `_generator_yield_ctype`'s own YieldFromExpr case,
+        # just on the body-EMISSION side instead of the type-INFERENCE
+        # side. Without this, a self-recursive `yield from` silently fell
+        # through to the "plain collection" fallback below (WRONG: drops
+        # keyword arguments entirely — no `_emit_call`-style padding exists
+        # on that path — and doesn't even attempt the real delegation
+        # loop), which is exactly what produced this hard bug's two
+        # observed C++ errors (too-few-arguments, and a yield-type
+        # mismatch from the type-inference side's matching char* default).
+        _self_name = getattr(self, '_cpp_gen_self_name', None)
+        is_self_recursive = (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+                              and _self_name is not None and call.func.name == _self_name)
+        is_gen_call = is_self_recursive or (
+            isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+            and call.func.name in self._generator_api)
         if not is_gen_call:
             result_var = self._cpp_fresh_name("_yf_result")
             coll_expr = self._cpp_expr(call)
@@ -23623,14 +23664,27 @@ class GimpleGen:
                 call.args.append(kexpr)
             call.kwargs = []
         sub_name = call.func.name
-        api = self._generator_api.get(sub_name)
-        if api is None or sub_name not in self._supported_generators:
-            raise _UnsupportedGeneratorShape(
-                f"`yield from {sub_name}(...)` does not delegate to a "
-                "generator this compile has itself already translated via "
-                "the C++20-coroutine path (either it's not a generator this "
-                "codegen supports, or it's defined LATER in this module — "
-                "the delegated-to generator must be defined earlier)")
+        if is_self_recursive:
+            # Build the SAME {'base', 'params', ...} shape self.
+            # _generator_api's entry would eventually hold, straight from
+            # the locally-tracked self-context — no premature/partial
+            # registration into the real (still-being-built) dict needed.
+            api = {'base': self._cpp_gen_self_base,
+                   'params': self._cpp_gen_self_params}
+            # Tell _gen_cpp_generator_unit (after this body-emission pass
+            # completes) that `{base}_start`/`_resume`/`_value`/`_destroy`
+            # need forward declarations ahead of `{impl}`'s own definition
+            # — see that flag's own declaration comment for why.
+            self._cpp_gen_self_recursed = True
+        else:
+            api = self._generator_api.get(sub_name)
+            if api is None or sub_name not in self._supported_generators:
+                raise _UnsupportedGeneratorShape(
+                    f"`yield from {sub_name}(...)` does not delegate to a "
+                    "generator this compile has itself already translated via "
+                    "the C++20-coroutine path (either it's not a generator this "
+                    "codegen supports, or it's defined LATER in this module — "
+                    "the delegated-to generator must be defined earlier)")
         sub_params: list = api.get('params') or []
         if len(call.args) != len(sub_params):
             raise _UnsupportedGeneratorShape(
@@ -23909,6 +23963,35 @@ class GimpleGen:
         self._cpp_gen_self_struct = struct_name
         self._cpp_gen_self_fields = self_fields
         self._cpp_declared = declared
+        # Self-recursion context for `yield from <this-same-function>(...)`
+        # (_cpp_yield_from) and this function's own value-type inference
+        # (_generator_yield_ctype/_yield_from_delegate_ctype, called just
+        # below): a generator's registration into self._generator_api only
+        # happens AFTER this whole method returns successfully (gen_module's
+        # calling loop), so a genuinely self-recursive `yield from
+        # <fn.name>(...)` inside fn's OWN body can never find itself there
+        # — a chicken-and-egg gap that silently mis-lowered the call as
+        # "yield from over a plain (non-generator) collection" instead
+        # (WRONG on two counts at once: the kwarg-forwarding skip that
+        # fallback shares with nothing, and defaulting the WHOLE function's
+        # yield-value type to char* — see
+        # CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md).
+        # Set here (this function's own `base`/`param_ctypes` are already
+        # fully computed above) and cleared in `finally`, mirroring
+        # `_cpp_gen_self_struct`'s exact same scoped-context convention.
+        self._cpp_gen_self_name = fn.name
+        self._cpp_gen_self_base = base
+        self._cpp_gen_self_params = param_ctypes
+        # Set True by _cpp_yield_from the moment it actually emits a
+        # self-recursive delegation call — read back (into a local,
+        # BEFORE `finally` below) to decide whether `{base}_start`/
+        # `_resume`/`_value`/`_destroy` need FORWARD declarations ahead of
+        # `{impl}`'s own definition: `impl`'s body (built in the try block
+        # just below) can reference its own not-yet-defined extern "C"
+        # wrapper functions, which are only emitted textually AFTER
+        # `impl` further down in this same method's returned `lines` —
+        # `_cpp_gen_self_recursed` is that signal.
+        self._cpp_gen_self_recursed = False
         func_decls: list[str] = []
         self._cpp_func_scope_decls = []
         try:
@@ -23917,11 +24000,16 @@ class GimpleGen:
                 body_lines.extend(self._cpp_stmt(s, declared, '    '))
             value_ctype = _generator_yield_ctype(fn, declared, self._generator_api, self_fields)
             func_decls = list(self._cpp_func_scope_decls)
+            self_recursed = self._cpp_gen_self_recursed
         finally:
             self._cpp_gen_self_struct = None
             self._cpp_gen_self_fields = None
             self._cpp_declared = None
             self._cpp_func_scope_decls = None
+            self._cpp_gen_self_name = None
+            self._cpp_gen_self_base = None
+            self._cpp_gen_self_params = None
+            self._cpp_gen_self_recursed = None
         if value_ctype is None:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
@@ -24005,6 +24093,24 @@ class GimpleGen:
             f"    std::suspend_always yield_value({cpp_value_ctype} v) {{ current_value = v; return {{}}; }}",
             f"    void return_void() {{}}",
             f"}};",
+            # Self-recursion (see `self_recursed`/_cpp_yield_from's own
+            # `is_self_recursive` branch): `{impl}`'s OWN body, built just
+            # below, can call `{base}_start`/`_resume`/`_value`/`_destroy`
+            # on itself (a delegating `yield from <this-same-function>
+            # (...)`) — those extern "C" wrapper functions are only
+            # DEFINED further down, after `{impl}`, so without a forward
+            # declaration here first, g++ sees an undeclared-identifier
+            # error at the self-call site (confirmed: this exact "was not
+            # declared in this scope" error, for all four wrapper names,
+            # reproduced before this forward-declaration block was added).
+            # Harmless/unused when `self_recursed` is False (the ordinary,
+            # non-recursive case) — nothing else in this file's own
+            # generated .cpp text depends on absence of a forward decl.
+            *([f"extern \"C\" MojoGenerator *{base}_start ({cpp_sig});",
+               f"extern \"C\" {cpp_bool} {base}_resume (MojoGenerator *g);",
+               f"extern \"C\" {cpp_value_ctype} {base}_value (MojoGenerator *g);",
+               f"extern \"C\" void {base}_destroy (MojoGenerator *g);"]
+              if self_recursed else []),
             f"static {task} {impl} ({cpp_sig}) {{",
             *(f"    {d}" for d in func_decls),
             *body_lines,
