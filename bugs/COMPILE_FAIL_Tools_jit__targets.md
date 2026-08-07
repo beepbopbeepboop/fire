@@ -4,6 +4,25 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-06)
+
+Re-ran; current failure is an honest up-front refusal, not a GCC error:
+
+```
+Error building: cannot compile module: function(s) _build_stencils,
+_compile, _parse (async function(s), declared `async def`) — this
+codegen compiles every function into a single straight-line C function
+and has no suspend/resume state-machine transform for generators, nor
+an event loop / suspend-resume codegen for async functions, yet, so
+these cannot be represented as compiled C without emitting silently
+wrong or broken code; falling back to interpreting this module from
+source instead
+```
+
+Async-function codegen refusal, part of the separate, already-tracked
+compiled-generator/async-codegen project (tasks #95-135) — not
+investigated further here per that project's scope.
+
 ```
 # ERROR: compiling imported module '_stencils' from /Users/mrs/net/Python-3.14.6/Tools/jit/_stencils.py: 11:1: Expected NAME got KW('enum')
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
