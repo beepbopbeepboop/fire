@@ -2,7 +2,24 @@
 
 ## Status
 
-Unfixed. Root-caused 2026-08-06 while investigating
+**Partially fixed 2026-08-07** ("option 3" below — the defensive net
+against an empty resolved `self` type — is implemented in
+`DispatchSolver`'s callee-to-struct resolution). Found and landed as
+part of the `weakref.py` investigation in
+`bugs/hard/CODEGEN_module_globals_cross_contamination_via_imported_stmts.md`
+(see that doc's "Also fixed in the same session" section for the fix
+detail and combined gate results) — filed there rather than duplicated
+here since it's a different subsystem (`DispatchTable`/
+`_plan_dispatch_tables`) from that doc's own `gen_module` globals-struct
+fixes, but option 3 is specifically this doc's own proposal.
+
+The underlying heuristic mis-fire itself (this doc's root cause below)
+is NOT fixed — option 3 only prevents it from emitting invalid C when it
+mis-fires on a case whose `self` type can't be resolved; a case where the
+heuristic mis-fires AND the self type happens to resolve to something
+plausible-but-wrong is still possible in principle and not addressed.
+
+Originally: unfixed, root-caused 2026-08-06 while investigating
 `bugs/COMPILE_FAIL_importlib_util.md`. Fully traced to a specific
 function and branch (see below) — this is NOT one of the previously
 documented hard bugs, a genuinely new mechanism.
