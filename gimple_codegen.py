@@ -6028,9 +6028,33 @@ class GimpleGen:
     def _ensure_local(self, ctype: str, val: str) -> str:
         """If val is a global variable (not a local temp or constant), load it into
         a local temp first.  GIMPLE requires all cast/unary operands to be registers."""
+        is_numeric_literal = bool(val.lstrip('-').replace('.', '', 1).isdigit())
         is_local = (val.startswith('_t') or val.startswith('"') or val.startswith("'")
-                    or val.lstrip('-').replace('.', '', 1).isdigit())
+                    or is_numeric_literal)
         if is_local:
+            # A bare integer/float literal's own GIMPLE type defaults to
+            # 'int' (no '.') or 'double' (has a '.'), regardless of what
+            # ctype the CALLER actually needs it typed as — a caller that
+            # assigns this return value directly into a temp DECLARED as a
+            # different scalar type (e.g. `int64_t _t = <this>;`) hits a
+            # real GIMPLE "non-trivial conversion in 'integer_cst'" error,
+            # since (unlike ordinary C) GIMPLE requires the RHS of a plain
+            # assignment to already have the exact declared type, no
+            # implicit int-widening. Confirmed via `Lib/importlib/
+            # _bootstrap.py`'s with-statement `__exit__` dummy-None-arg
+            # plumbing (_gen_stmt_WithStmt's `_extra_args = [('int64_t',
+            # '0')] * n`, reaching `_emit_call`'s `_ensure_local('int64_t',
+            # '0')`, then a caller emitting `{temp} = {this_return};`
+            # verbatim with no cast of its own — see bugs/CODEGEN_
+            # with_stmt_exit_dummy_arg_literal_int64_cast.md). Only cast
+            # when the literal's own default type doesn't already match
+            # ctype — a plain 'int' literal assigned into an 'int'-typed
+            # temp needs no cast (and GIMPLE rejects a cast whose source
+            # and destination types are identical as a redundant no-op).
+            if is_numeric_literal:
+                _native = 'double' if '.' in val else 'int'
+                if ctype != _native:
+                    return f'({ctype}){val}'
             return val
         # Copying a wider-declared scalar into a narrower integer temp is an
         # implicit conversion GIMPLE rejects (e.g. an int64_t ABI parameter
