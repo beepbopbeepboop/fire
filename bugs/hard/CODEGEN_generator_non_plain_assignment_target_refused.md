@@ -1,5 +1,89 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (updated 2026-08-07, SliceExpr sub-case: `iter_builtin_types`'s `subs[:] = []` FIXED; `patch_list`'s `orig[:] = saved` correctly STILL refused, for a good reason)
+
+**Fixed the FULL-slice-assignment case** (`x[:] = value`, i.e.
+`start`/`stop`/`step` all `None`) in `_cpp_stmt`'s `AssignStmt`
+handling: it now lowers to genuine, pre-existing runtime helpers
+(`mojo_list_clear` + `mojo_list_extend`), which is real correct
+in-place-mutation behavior (matching Python's own slice-assignment
+semantics — other references/aliases to the same list must observe
+the change), not a no-op elision like the `sys.stderr` fix above.
+Bounded/stepped slice-assign (`x[a:b] = y`, `x[::2] = y`) still needs
+real element-shifting splice support and remains unattempted/refused —
+no real occurrence found requiring it.
+
+**Of this doc's two confirmed real occurrences, one is now genuinely
+fixed end-to-end at the eligibility gate, the other is correctly still
+refused** — found to differ during hand-verification, not assumed:
+
+- `iter_builtin_types`'s `subs[:] = []` — **FIXED**, passes the
+  eligibility gate. The RHS is a literal empty list, which needs no
+  type information about `subs` at all (an empty-list RHS is always
+  just "clear the target", handled as its own branch ahead of the
+  general identifier-RHS case) — this occurrence has no way to hit the
+  hazard described below. (The function as a whole still doesn't fully
+  compile end-to-end for OTHER, unrelated reasons — same established
+  "eligibility gate passes, other separate gaps remain" pattern as
+  every other partial fix in this cluster — not investigated further
+  here since not required for this fix.)
+- `patch_list`'s `orig[:] = saved` — **investigated and deliberately
+  left refused**, for real-correctness reasons discovered by hand-
+  verifying the actual function body end-to-end (not just checking the
+  eligibility gate in isolation, which this occurrence WOULD have
+  passed under a naiver version of the fix). `saved = orig[:]` two
+  lines above types `saved` as `char *`
+  (`_infer_simple_expr_ctype`'s `if isinstance(e, SliceExpr): return
+  'char *'` — this narrow coroutine-body model reads EVERY slice as a
+  string; a separate, pre-existing, unfixed gap — see the "Verification"
+  section of the earlier `sys.stderr` status update above, which
+  independently confirmed the identical gap: `stderr = sys.stderr`
+  lowering to an undeclared identifier). A first version of this fix
+  blindly reinterpret-cast any non-`MojoList*`-typed RHS identifier to
+  `MojoList*` (mirroring an existing, accepted ambiguous-boxing
+  convention used elsewhere in this codegen, e.g. the plain GIMPLE
+  path's `DelStmt` `SliceExpr` branch) — for `saved` specifically, this
+  SYNTAX-compiled (`g++ -fsyntax-only` accepted it: an explicit
+  C-style pointer cast is always legal) but would have been a genuine
+  runtime memory-corruption bug: `mojo_list_clear`/`mojo_list_extend`
+  called on a real `char *` string reinterpreted as `MojoList *` — the
+  exact "silently wrong or broken code" this whole codegen otherwise
+  refuses to emit. Worse, this specific hazard is HIDDEN at the point
+  the fix is applied: `_cpp_try_stmt` translates a `finally:` block's
+  statements BEFORE the preceding `try:` block's (see its own
+  docstring/body — `finally_lines` is computed first), so at the point
+  `orig[:] = saved` (inside `patch_list`'s `finally:`) is translated,
+  `saved` is NOT YET in `declared` at all (it's only assigned inside
+  the `try:` block, not yet processed) — it reads back as untracked
+  (`None`), not as its eventual real type. Treating "untracked" as
+  "assume it's a list" (the permissive rule this fix DOES still use for
+  the ASSIGNMENT TARGET side, where it's safe and mirrors existing
+  precedent) would have silently done the wrong thing here specifically
+  because of this ordering quirk. Fixed by holding the RHS identifier
+  to a STRICTER bar than the target: only lower via `mojo_list_extend`
+  when `declared[name] == 'MojoList *'` exactly (positive proof,
+  no ambiguous-default fallback) — `saved` fails this check (it's
+  `None`, not `'MojoList *'`, at translation time), so `patch_list`
+  correctly falls through to the pre-existing generic refusal, exactly
+  as it should given the RHS really is a string here. Fixing the
+  underlying `finally`-before-`try` ordering (so `saved`'s real,
+  eventual type WOULD be visible) or the separate SliceExpr-reads-as-
+  string gap are both real, larger, un-narrow steps — not attempted.
+
+**Verification:** isolated repros for both the safe-cast path (a
+`MojoList*`-typed parameter assigned via cross-function call-site
+inference) and the empty-list path compile to valid C++ (`g++
+-std=c++20 -fsyntax-only`, 0 errors). The real `iter_builtin_types`
+occurrence (isolated to just its own `subs[:] = []` shape) also passes
+the eligibility gate and compiles to valid C++. The real `patch_list`
+occurrence was hand-verified (via `MOJO_DEBUG=1`) to still be refused,
+confirming the type-guard did its job rather than emitting the earlier
+draft's unsafe cast. Full 5-part CLAUDE.md gate run and passed:
+`test_gimple.py` (247/247), `test_module_cache.py` (76/76), `make
+check-selfhost` clean, from-scratch `libmojostdlib.dylib` rebuild (0
+`skip <module>:` lines), `compile_stdlib.py -j8` (664/664, 0
+unexpected — unchanged count).
+
 ## Status (updated 2026-08-07, non-self-MemberExpr FIXED for the `sys.stderr`/`stdout`/`stdin` shape)
 
 **The specific confirmed non-`self`-`MemberExpr` occurrence (`sys.
