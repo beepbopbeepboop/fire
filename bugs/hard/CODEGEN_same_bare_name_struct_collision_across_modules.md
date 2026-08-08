@@ -39,6 +39,20 @@ forward-declaration emission" (far broader blast radius than a
 preamble-only change), deferred to a dedicated pass with a larger time
 budget rather than attempting a partial version under time pressure.
 
+**2026-08-07 (Track B session)**: a second, independent real-world
+instance found (not investigated/fixed, purely logged per this
+project's "elaborate the bugs database" convention) — `python3 mojo.py
+build /Users/mrs/net/Python-3.14.6/Lib/typing.py`: `Lib/_collections_
+abc.py` defines `class _CallableGenericAlias(GenericAlias):` and `Lib/
+typing.py` INDEPENDENTLY defines its OWN, unrelated `class
+_CallableGenericAlias(_NotIterable, _GenericAlias, _root=True):` (line
+1615) — same bare name, same shape of bug: `redefinition of
+'_collections_abc__CallableGenericAlias___repr__'`/`___reduce__`,
+`conflicting types for '..___getitem__'`, `'_CallableGenericAlias' has
+no member named '__parameters__'/'__module__'`. Same root cause, same
+"deferred to a dedicated pass" status — not attempted here either,
+explicitly out of scope per this session's own assignment (task #141).
+
 ## Symptom
 
 ```
