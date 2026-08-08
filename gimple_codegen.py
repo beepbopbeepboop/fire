@@ -14429,10 +14429,31 @@ class GimpleGen:
         ret_type = self._infer_return_type(syn_body)
         self.func_return_types[lifted_name] = ret_type
         param_ctypes = []
+        seen_lambda_varargs = False
         for pname, ptype in node.params:
+            # A lambda's own *args/**kwargs (e.g. `lambda *args, **kwargs:
+            # cls(loader(*args, **kwargs))`, importlib/util.py's LazyLoader.
+            # factory) must resolve to the SAME concrete MojoList*/MojoDict*
+            # convention _gen_lifted_closure's real param-building loop
+            # below uses for the actual definition (see its `pname.
+            # startswith('**')`/`startswith('*')` branches) — this list
+            # feeds the forward declaration / static fn-pointer cast type,
+            # which must match the definition exactly or GCC rejects it as
+            # "conflicting types". Previously this loop had no `*`/`**`-
+            # prefix handling at all: a literal `'*args'`/`'**kwargs'` name (the
+            # star baked into the string) never matched anything in
+            # var_types below, so both fell through to the plain `int64_t`
+            # default — a forward decl silently mismatched against the
+            # real MojoList*/MojoDict* body it was declaring.
+            if pname.startswith('**'):
+                param_ctypes.append('MojoDict *')
+            elif pname.startswith('*'):
+                if not seen_lambda_varargs:
+                    param_ctypes.append('MojoList *')
+                    seen_lambda_varargs = True
             # Lambda params: second element is default value (AST node), not a type annotation.
             # Resolve from var_types context; default to int64_t.
-            if pname in self.var_types:
+            elif pname in self.var_types:
                 param_ctypes.append(self.var_types[pname])
             else:
                 param_ctypes.append('int64_t')
@@ -14489,9 +14510,34 @@ class GimpleGen:
 
         # Forward declaration so the preamble's static pointer initialiser can
         # reference the function before its definition appears in the output.
+        # Param names must have their `*`/`**` prefix stripped here too (bare
+        # `args`/`kwargs`, matching _gen_lifted_closure's real definition) —
+        # left raw, `MojoList * *args` parses in C as `args: MojoList **`
+        # (an extra, unintended level of pointer-ness from the literal `*`
+        # character surviving into the declared NAME), a second, subtler
+        # "conflicting types" mismatch beyond the ctype-only bug fixed above.
         params_str = ', '.join(
-            f'{ct} {pn}' for ct, (pn, _) in zip(param_ctypes, node.params)
+            f'{ct} {pn.lstrip("*")}' for ct, (pn, _) in zip(param_ctypes, node.params)
         ) or 'void'
+        # Re-read the return type from func_return_types instead of the
+        # `ret_type` local computed above (BEFORE the body was generated):
+        # `_gen_lifted_closure` (just above) independently re-infers the
+        # real return type from the SAME body and overwrites `func_return_
+        # types[lifted_name]` with its own answer (gimple_codegen.py's
+        # `self.func_return_types[ci.lifted_name] = ret_type` inside
+        # `_gen_lifted_closure`) — and the two inference calls can DISAGREE
+        # (different `self` context/state at each call site: this one runs
+        # before any capture/var_types seeding for the lifted function,
+        # `_gen_lifted_closure`'s runs after). Using the stale early value
+        # here produced a forward declaration with the WRONG return type,
+        # invisible until the struct-method `_lambda_parts`-flush fix above
+        # started actually emitting the (correct) definition next to it —
+        # confirmed via Lib/zipfile/__init__.py's `ZipFile.open`'s `lambda:
+        # self._writing`: forward-declared `_Bool ZipFile_open_lambda_1
+        # (void)` (this function's own early, pre-body-gen guess) but
+        # DEFINED `int64_t ZipFile_open_lambda_1 (void)` (the real,
+        # post-body-gen answer) — a hard "conflicting types" error.
+        ret_type = self.func_return_types.get(lifted_name, ret_type)
         fwd_decl = f'{ret_type} {lifted_name} ({params_str});'
         if fwd_decl not in self._elaborated_externs:
             self._elaborated_externs.append(fwd_decl)
@@ -30715,9 +30761,29 @@ class GimpleGen:
                     self._collect_body_import_bindings(m.body, _method_outer_scope)
                     for ci in self._all_closures.get(method_outer_name, {}).values():
                         _emit_closure_recursive(ci, method_outer_name)
+                    self._lambda_parts = []
                     func_parts.append(self._gen_struct_method(stmt.name, m, overload_id))
                     func_parts.append('')
                     self._pop_import_scope()
+                    # Flush any lambdas lifted during this method's body (see
+                    # the identical flush for top-level FunctionDefs above,
+                    # whose comment explains why body ORDER doesn't matter —
+                    # the forward decl already lives in the preamble). Without
+                    # this, a lambda inside a struct method (e.g. a
+                    # `@classmethod`'s `return lambda *a, **k: ...`) got its
+                    # forward declaration AND static function-pointer
+                    # initializer emitted (both registered unconditionally by
+                    # `_lower_LambdaExpr`), but the actual lifted C function
+                    # DEFINITION accumulated in `self._lambda_parts` was never
+                    # flushed anywhere for the struct-method code path — a
+                    # silent "declared but never defined" link failure.
+                    # Confirmed via importlib/util.py's `LazyLoader.factory`
+                    # classmethod: `return lambda *args, **kwargs: cls(loader(
+                    # *args, **kwargs))` linked as an undefined symbol
+                    # (`_LazyLoader_factory_lambda_1`) despite compiling clean.
+                    if self._lambda_parts:
+                        func_parts.extend(self._lambda_parts)
+                        self._lambda_parts = []
             elif isinstance(stmt, TraitDef):
                 lines = [f"typedef struct {stmt.name}_vtable {{"]
                 _seen_vtable_members: set = set()
