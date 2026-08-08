@@ -37,6 +37,17 @@ independently fixed earlier this session
 (`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`'s
 follow-up fix).
 
+`Lib/operator.py`'s `__matmul__` item above IS now fixed separately
+(`_lower_matmul`'s blind non-struct-operand call, see
+`bugs/COMPILE_FAIL_Lib_socket_request_for_member_module_in_something_not_a_structure_or_union.md`
+for the full writeup) — confirmed it no longer appears anywhere in a
+fresh `mojo.py build Lib/runpy.py` run. Doesn't change this file's
+overall status: it's currently blocked earlier, by the (reverted,
+still-open) `read_code`/`get_importer` link failure above, before ever
+reaching operator.py's compile at all in the link-mode attempt; the
+`build_executable` fallback (which DOES reach operator.py) still hits
+the SAME `Lib/stat.py`/`Lib/posixpath.py` bugs regardless.
+
 ## Original status (2026-08-06, superseded above for the read_code/get_importer mechanism)
 
 Re-ran (150s timeout, one retry with a longer background run that DID
