@@ -1,14 +1,43 @@
 # HARD BUG: module-level global prescan (Phase 1.7) is blind to `try/except`-only assignment and to bare (unassigned) annotations, and falls back to a garbage literal
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-07) — ALL THREE PARTS FIXED
 
-**Part 1 of 3 FIXED** (this session, incremental/one-at-a-time per this
-doc's own earlier caution). **Part 2 found to be ALREADY IMPLEMENTED**
-(pre-dates this doc — see below). **Part 3 precisely located** (this
-session tracked down the "untracked third fallback" flagged as
-unresolved below) but **NOT YET FIXED** — see "Part 3" section at the
-bottom; that is the actual blocker for `bugs/COMPILE_FAIL__pyrepl_main.md`
-and is being picked up as an independent next step, gated separately.
+**Fully fixed**, landed as two commits (part 1 alone, then parts 2+3
+together — see below for why 2 and 3 turned out to be inseparable).
+Both the minimal repro and the real motivating file now build AND RUN
+correctly end-to-end: `bugs/COMPILE_FAIL__pyrepl_main.md`'s
+`Lib/_pyrepl/main.py` now compiles clean via `python3 mojo.py build`
+(previously 3 `-Wint-conversion` errors) and produces a working binary.
+That bug's own file has been updated to reflect this.
+
+**Revised understanding of parts 2 and 3, found while landing part 3**:
+this doc's earlier "Part 2 already implemented, no work needed" note
+(written right after Part 1 landed) was only half right — Phase 1.7's
+existing `VarDecl`/`type_ann` handling (predates this doc) DOES resolve
+the annotation, but its own boxing decision (which C storage
+representation to advertise via `_global_c_decl_types`) had a real,
+independent, latent bug: it boxed EVERY pointer-typed annotation
+(including `char *`) to `int64_t`, when the actual rest-of-file
+convention (`_lower_IdentExpr`'s read side, `_gscan_declare_global`'s
+own sibling `AssignStmt` branches) only ever boxes `MojoDict
+*`/`MojoList *`/`MojoSet *` — a `char *` or other struct-pointer global
+is stored and read DIRECTLY, unboxed. This mismatch was invisible
+before because, for the common case (a `VarDecl` WITH a value, or any
+`AssignStmt`), a LATER pass always re-derives and overwrites both
+`_global_var_types`/`_global_c_decl_types` from the real value shape,
+silently correcting Phase 1.7's over-eager boxing. Only the bare-
+annotation-only case (Part 3's territory — nothing ever overwrites
+Phase 1.7's decision except the also-broken-until-now Part 3 code)
+actually depended on Phase 1.7 getting the boxing right, which is what
+finally exposed it. Fixing Part 3 alone (declaring the struct field
+correctly, unboxed) without ALSO fixing Phase 1.7's over-eager boxing
+just moved the type mismatch from the read site to the WRITE sites
+inside the `try`/`except`/`else` bodies (`_gen_stmt_AssignStmt`, which
+runs during Phase 2a — BEFORE Part 3's struct-declaration pass even
+executes — consults `_global_c_decl_types` as Phase 1.7 left it). The
+two fixes are not actually separable pieces of work; they had to land
+together as one coherent, gate-verified change. See "Part 2" and "Part
+3" sections below for the exact code changes.
 
 ### Part 1: TryStmt-descent in Phase 1.7 — FIXED
 
@@ -56,75 +85,111 @@ that is only ever assigned inside try/except — not exercised by the
 `_pyrepl/main.py` repro itself, but a distinct, independently-real gap
 this pass had.
 
-### Part 2: bare-annotation VarDecl → type_ann fallback — ALREADY IMPLEMENTED, not new work
+### Part 2: bare-annotation VarDecl → type_ann fallback — FIXED (had a latent boxing bug)
 
-Re-investigating this from scratch (per this session's "read the doc in
-full first" instruction) found that Phase 1.7's `VarDecl` branch
-(`gimple_codegen.py`, the `elif isinstance(_scan_stmt, VarDecl) and
-_scan_stmt.name not in _pre_declared_globals:` case) has, since commit
-`8c00e57` (predates this doc entirely), always checked `_scan_stmt.
-type_ann` first and mapped it through `self._resolve_type(...)` before
-ever falling back to inferring from `_scan_stmt.value` — i.e. exactly
-what this doc's "What a real fix needs" item 2 asked for. This doc's
-original root-cause writeup did not notice this pre-existing branch
-(likely because it focused on the `AssignStmt`-only blindness of the
-loop's FIRST branch and didn't re-check the separate `VarDecl` `elif`
-a few dozen lines down). No code change was needed or made for this
-part. Confirmed via `git log -S` that the `type_ann` handling predates
-this doc's 2026-08-06 root-cause date.
+Phase 1.7's `VarDecl` branch (`gimple_codegen.py`, the `elif
+isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in
+_pre_declared_globals:` case) has, since commit `8c00e57` (predates
+this doc entirely), always checked `_scan_stmt.type_ann` first and
+mapped it through `self._resolve_type(...)` — so the ANNOTATION itself
+was already being resolved to a real C type; this doc's original
+"what a real fix needs" item 2 was already substantially done. BUT its
+decision for `self._global_c_decl_types` (which C type to actually
+declare/read/write the global's STORAGE as) was wrong for any
+pointer-typed annotation other than dict/list/set: `if _resolved.
+endswith(' *'): self._global_c_decl_types[name] = 'int64_t'` boxed
+`char *` (and any custom struct pointer) to `int64_t` too. The rest of
+this file's actual, load-bearing convention (`_lower_IdentExpr`'s read
+side: `if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'): ctype =
+'int64_t' else: ctype = gtype`; `_gscan_declare_global`'s own sibling
+`AssignStmt`/`StringLiteral` branch: `global_decls.append(f"char *
+{gname};")`, NOT boxed) only boxes those three container types —
+everything else (`char *`, any struct pointer) is stored and read
+DIRECTLY, unboxed. Narrowed the condition to `if _resolved in
+('MojoDict *', 'MojoList *', 'MojoSet *'):` to match. This bug was
+invisible before because, for a `VarDecl` WITH a value or any ordinary
+`AssignStmt`, `_gscan_declare_global`'s own struct-declaration pass
+(Part 3, below) always re-derives and overwrites both `_global_var_
+types`/`_global_c_decl_types` from the real RHS value shape, silently
+correcting whatever Phase 1.7 guessed. Only a bare-annotation-only
+global (no `AssignStmt`/`VarDecl`-with-value ever reaches
+`_gscan_declare_global`'s existing branches for it) actually depended
+on Phase 1.7's `_global_c_decl_types` decision surviving unmodified —
+which is also exactly Part 3's territory, which is why these two had
+to be fixed together (see Part 3).
 
-### Part 3: the untracked "third fallback" — LOCATED, not yet fixed
+### Part 3: the untracked "third fallback" — FOUND AND FIXED (two separate bugs)
 
 Tracked down the "third, more permissive fallback ... producing a
 type-incoherent placeholder value" this doc originally flagged as
-unlocated. It is NOT in Phase 1.7 at all — it's a completely separate,
-independently-maintained pass a few hundred lines further down
-`gen_module` that actually emits the module's `_<mod>_toplev` struct
-FIELD DECLARATIONS and the struct-literal initializer: the loop `for
-stmt in _collect_global_stmts(all_global_scan): ... elif isinstance(
-stmt, VarDecl): ...` (search `_gscan_declare_global`). This second
-pass's `VarDecl` branch reads `stmt.value` directly and NEVER consults
-`stmt.type_ann` at all — for a bare annotation (`FAIL_REASON: str`,
-`stmt.value is None`), every `isinstance(_gv, ...)` check in that
-branch fails and it falls through to the final `else`:
-`global_decls.append(f"int {gname};")` / `self._global_var_types[gname]
-= 'int'` — silently OVERWRITING the correct `'char *'` that Phase 1.7
-(the OTHER pass, confirmed already correct per Part 2 above) had
-already recorded, with `'int'`. This is exactly what produces the
-observed `int FAIL_REASON;` struct field and the garbage
-`.FAIL_REASON = "f\"warning: {e}\""` initializer (a completely
-separate, unrelated fallback elsewhere handles stringifying an
-unresolved initializer expression's source text when asked to
-initialize a field whose recorded type doesn't match its value's
-shape — not investigated further, since fixing the type resolution
-here should mean that fallback stops being reached for this case at
-all).
+unlocated. Two independent bugs, both in the SAME pass (a few hundred
+lines further down `gen_module`, past Phase 1.7 — the loop that
+actually emits the module's `_<mod>_toplev` struct FIELD DECLARATIONS
+and the struct-literal initializer, `_gscan_declare_global`/its `for
+stmt in _collect_global_stmts(all_global_scan):` consumer loop):
 
-Confirmed via direct testing: Part 1 (already landed) does not change
-this struct's field type at all (`int FAIL_REASON;` unchanged before/
-after) — proving Part 3 is a genuinely separate bug in a separate pass,
-not a downstream consequence of Phase 1.7. This pass's `_collect_
-global_stmts` helper ALREADY recurses into `TryStmt`/`IfStmt` bodies
-(added independently, predates this doc) — so unlike Phase 1.7, this
-pass's gap is ONLY the missing `type_ann` consultation for bare
-annotations, not TryStmt-blindness.
+1. **Bug A — the `VarDecl` branch never consulted `stmt.type_ann`.**
+   It read `stmt.value` directly; for a bare annotation (`FAIL_REASON:
+   str`, `stmt.value is None`), every `isinstance(_gv, ...)` check
+   failed and it fell through to the final `else`: `global_decls.
+   append(f"int {gname};")` — silently OVERWRITING the correct type
+   Phase 1.7 had already recorded, with plain `'int'`. This is what
+   produced the observed `int FAIL_REASON;` struct field. **Fixed**:
+   added an `if stmt.type_ann and stmt.value is None:` branch ahead of
+   the existing value-inference chain, resolving the annotation via
+   `self._resolve_type(...)` exactly like Phase 1.7's own (now-
+   corrected, see Part 2) `VarDecl` branch, using the SAME dict/list/
+   set-only boxing convention.
 
-**Proposed fix** (not yet implemented — picking this up as the next
-incremental step, gated and spot-checked separately per this doc's own
-"don't land all three in one shot" caution, now generalized to "don't
-land Part 3 in the same step as anything else either"): in that
-`VarDecl` branch, check `stmt.type_ann` first (mirroring Phase 1.7's
-already-correct handling) and only fall back to inferring from `stmt.
-value` when there is no annotation — and, symmetrically, still allow a
-LATER real assignment (if `_gscan_declare_global` ever needs to
-reconcile with a value-inferred type) to be joined/preferred over a
-too-generic annotation the same way Part 1 above joins across try/
-except branches. Must keep `self._global_c_decl_types` in sync with
-Phase 1.7's existing pointer-boxing convention (`'int64_t'` storage for
-any pointer-typed global) — see the `_resolved.endswith(' *')` handling
-in Phase 1.7's own `VarDecl` branch — since this pass's `_gscan_declare_
-global`-style branches already do this consistently for the AssignStmt/
-MultiAssignStmt cases just below it in the same loop.
+2. **Bug B — the struct-literal initializer's own value-extraction
+   pass (a separate loop further down, `for gname in sorted(
+   _declared_globals): ... init_code = _extract_init_expr(stmt.value)`)
+   treated an f-string's raw, UNDECODED `StringLiteral.value` (which
+   keeps its `f`/`t` prefix and quotes — real interpolation only
+   happens later, at actual codegen time, in `_lower_StringLiteral`)
+   as an ordinary compile-time string constant.** This is what produced
+   the garbage `.FAIL_REASON = "f\"warning: {e}\""` initializer — the
+   literal, uninterpolated SOURCE TEXT of the f-string, quoted as a C
+   string. `_extract_init_expr`'s `elif isinstance(stmt_value,
+   StringLiteral): return f'"{_c_escape(stmt_value.value)}"'` had no
+   f-string special case at all. **Fixed**: added a new free-function
+   helper `_str_literal_value_is_fstring(val)` (module-level, next to
+   `_extract_init_expr`) that mirrors `GimpleGen._decode_str_literal_
+   text`'s own prefix-detection (deliberately NOT refactored to share
+   code with that hot, 4-call-site instance method — out of scope,
+   unrelated risk); `_extract_init_expr`'s `StringLiteral` branch now
+   returns `'0'` (the same "can't static-initialize, defer to runtime"
+   sentinel already used for `CallExpr`/`IdentExpr`) for an f/t-string
+   instead of treating its raw text as a real constant.
+
+Confirmed via direct testing that these are genuinely two independent,
+additive bugs: fixing Bug A alone got the struct field type right
+(`int64_t FAIL_REASON;` — correctly boxed at the time, before Part 2's
+fix; see below) but with the SAME garbage initializer (`.FAIL_REASON =
+"f\"warning: {e}\""`) until Bug B was also fixed. And fixing Part 3
+(Bugs A+B) alone, without ALSO narrowing Phase 1.7's own boxing
+decision (Part 2), produced a struct field boxed as `int64_t` (Part 3
+mirrored Phase 1.7's — at that point still-wrong — "any pointer type"
+boxing convention) while `_lower_IdentExpr`'s read side (which only
+boxes dict/list/set) read it straight into an unboxed `char *` temp
+with no cast: `assignment to 'char *' from 'int64_t'` at the READ site
+(`print(FAIL_REASON)`). Narrowing Part 3's own boxing condition to
+match `_lower_IdentExpr`/`_gscan_declare_global`'s real dict/list/set-
+only convention fixed the read site, but then EXPOSED that Phase 1.7's
+own boxing decision (which the WRITE-side codegen inside the try/
+except bodies — `_gen_stmt_AssignStmt`, running during Phase 2a,
+BEFORE Part 3's struct-declaration pass even executes — actually reads
+via `_global_c_decl_types`) was itself still wrong, producing
+`assignment to 'char *' from 'int64_t'` at the WRITE sites instead.
+Only after fixing BOTH Phase 1.7's boxing decision (Part 2) AND Part
+3's struct-declaration boxing decision, consistently, did every site
+(read, write, struct declaration, struct initializer) agree. This is
+why Parts 2 and 3 landed together as one commit rather than separately
+— they are not actually independent pieces of work once you trace the
+full data flow; the doc's original "don't land all three in one shot"
+caution was right in spirit (verify incrementally, don't rush), but
+the natural unit of "one part" turned out to be {Part 1} and {Parts 2
++ 3 together}, not three separate units.
 
 ## Original root-cause writeup (2026-08-06, kept for history)
 
@@ -257,7 +322,7 @@ fallback stops firing / degrades gracefully once real values are found).
    codebase's own "never emit silently-wrong C" convention) instead of
    compiling to a type-incoherent placeholder.
 
-## Risk
+## Risk (historical — kept for context; see "Status" at top for the outcome)
 
 Same class of risk as the already-fixed `IfStmt` gap in this same pass
 (that fix WAS made safely, gate-verified — see `fd29316`), but this one
@@ -268,3 +333,25 @@ untracked third fallback — needs real spelunking before it can even be
 described precisely). Do the `TryStmt`-descent piece first and re-run
 the full quality gate before attempting the annotation-fallback or
 placeholder-fallback pieces; don't land all three in one shot.
+
+## Final verification (2026-08-07)
+
+Full 5-part mandated gate clean on the combined Part 2+3 commit:
+`test_gimple.py` 247/247, `test_module_cache.py` 76/76, `make
+check-selfhost` clean, from-scratch stdlib dylib rebuild 0 skips,
+`compile_stdlib.py -j8` 664/664 0 unexpected. Before/after spot-check
+of 12 diverse corpus files (`importlib/_bootstrap_external.py`,
+`typing.py`, `tokenize.py`, `json/__init__.py`, `difflib.py`,
+`configparser.py`, `textwrap.py`, `shutil.py`, `argparse.py`,
+`dataclasses.py`, `enum.py`, `_pyrepl/main.py`) via isolated
+(`do_imports=False`) compile + `gcc -fgimple -fsyntax-only`: byte-
+identical output before and after, 0 regressions (4 of the 12 hit the
+pre-existing, unrelated "generator function, honest fallback"
+exception both before and after — not this bug's territory).
+
+End-to-end (`python3 mojo.py build`, the real CLI path, not the
+isolated proxy above): the minimal repro compiles clean and RUNS,
+printing the correct `warning: x`. `Lib/_pyrepl/main.py`
+(`bugs/COMPILE_FAIL__pyrepl_main.md`'s file) now builds to a working
+executable with exit code 0 (previously 3 `-Wint-conversion` errors).
+`bugs/COMPILE_FAIL__pyrepl_main.md` has been updated to reflect this.

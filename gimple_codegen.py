@@ -3139,6 +3139,30 @@ def _c_escape(s: str) -> str:
         i += 1
     return ''.join(out)
 
+def _str_literal_value_is_fstring(val: str) -> bool:
+    """Does a raw StringLiteral.value (as the parser leaves it -- an
+    f/t-string keeps its prefix+quotes, unlike a plain string, whose
+    quotes the parser already strips at tokenize time -- see
+    GimpleGen._decode_str_literal_text's own comment) look like an f- or
+    t-string? Pure prefix-sniffing, factored out as its own free
+    function (rather than inlined at its one call site) so any FUTURE
+    caller that only needs the yes/no answer (not the fully decoded
+    text GimpleGen._decode_str_literal_text also strips out) has
+    somewhere to reuse it instead of re-deriving the same prefix-walk.
+    Deliberately mirrors (but, for now, does not share code with)
+    _decode_str_literal_text's identical prefix-walk -- that method is
+    a hot, widely-used (4 call sites) instance method deep in the
+    f-string/`%`-formatting lowering path; refactoring it to delegate
+    here is out of scope for this fix (unrelated risk, see this
+    codebase's "one careful step at a time" convention for exactly this
+    kind of prescan/global-inference change)."""
+    prefix = ''
+    rest = val
+    while rest and rest[0] in 'fFrRbBuUtT':
+        prefix += rest[0]
+        rest = rest[1:]
+    return bool(rest) and rest[0] in ('"', "'") and any(c in 'fFtT' for c in prefix)
+
 def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
     if stmt_value is None:
@@ -3160,6 +3184,23 @@ def _extract_init_expr(stmt_value) -> str:
     elif isinstance(stmt_value, BoolLiteral):
         return '1' if stmt_value.value else '0'
     elif isinstance(stmt_value, StringLiteral):
+        # An f/t-string's raw `.value` is the UNDECODED source text,
+        # INCLUDING its f/t prefix and quotes (real decoding + runtime
+        # interpolation only happens at actual codegen time, in
+        # _lower_StringLiteral) -- treating it as an ordinary compile-
+        # time string constant here stuffed the literal, uninterpolated
+        # source text (e.g. the raw characters `f"warning: {e}"`, quotes
+        # and all) into a struct's static initializer: a type-incoherent
+        # placeholder, not the real runtime value, and not even valid
+        # source text for what the string SHOULD contain. Real
+        # interpolation needs a runtime call (mojo_str_cat/etc, emitted
+        # elsewhere for the real assignment), which can't appear in a C
+        # static initializer, so defer to the same '0'-then-runtime-
+        # assignment path already used for CallExpr/IdentExpr below. See
+        # bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_
+        # annotation.md, "Part 3".
+        if _str_literal_value_is_fstring(stmt_value.value):
+            return '0'
         return f'"{_c_escape(stmt_value.value)}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):
         return '0'  # Can't static-initialize; needs runtime init
@@ -30682,19 +30723,39 @@ class GimpleGen:
                 if _scan_stmt.type_ann:
                     _resolved = self._resolve_type(_scan_stmt.type_ann)
                     self._global_var_types[_scan_stmt.name] = _resolved
-                    # Every pointer-typed global is boxed as int64_t at the C
-                    # storage level (see _lower_IdentExpr's unconditional
-                    # "Globals are stored at C level as int64_t" convention,
-                    # which every READ of a global goes through regardless
-                    # of what this dict says) — without this, an annotated
-                    # global (`X: dict = {...}`, now a VarDecl since the
-                    # parser fix that also fixed StructDef's dataclass-field
-                    # visibility — see mojo_compiler.py's annotated-
-                    # assignment parsing) got its struct field declared as
-                    # the real pointer type directly, mismatching every read
-                    # site's int64_t assumption: "assignment to 'int64_t'
-                    # from 'MojoDict *' without a cast".
-                    if _resolved.endswith(' *'):
+                    # MojoDict*/MojoList*/MojoSet* globals are boxed as
+                    # int64_t at the C storage level (see _lower_IdentExpr's
+                    # `if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    # ctype = 'int64_t'` — the actual, load-bearing read-side
+                    # convention) — without this, an annotated global (`X:
+                    # dict = {...}`, now a VarDecl since the parser fix that
+                    # also fixed StructDef's dataclass-field visibility — see
+                    # mojo_compiler.py's annotated-assignment parsing) got
+                    # its struct field declared as the real pointer type
+                    # directly, mismatching every read site's int64_t
+                    # assumption: "assignment to 'int64_t' from 'MojoDict *'
+                    # without a cast".
+                    #
+                    # Deliberately NARROWER than "any pointer type" (an
+                    # earlier version of this comment/condition claimed
+                    # _lower_IdentExpr boxes EVERY pointer-typed global
+                    # unconditionally — that's not what the code there
+                    # actually does: char*/struct-pointer globals are read
+                    # AND declared directly, unboxed, everywhere else in
+                    # this file — see _gscan_declare_global's identical
+                    # MojoDict*/MojoList*/MojoSet*-only boxing a few hundred
+                    # lines down in gen_module). Boxing char* here too made
+                    # a bare `X: str` annotation's struct field 'int64_t'
+                    # while every WRITE to X during Phase 2a (which reads
+                    # THIS dict, populated here, before the struct-
+                    # declaration pass further down even runs) correctly
+                    # boxed a char* value into it — consistent with itself,
+                    # but not with the eventual UNBOXED 'char *' struct
+                    # field the struct-declaration pass declares to match
+                    # _lower_IdentExpr's read side. See bugs/hard/CODEGEN_
+                    # global_prescan_blind_to_trystmt_and_bare_annotation.md,
+                    # "Part 2".
+                    if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                 else:
                     # Infer type from value if present
@@ -31972,6 +32033,52 @@ class GimpleGen:
                 if gname in _declared_globals:
                     continue
                 _declared_globals.add(gname)
+                if stmt.type_ann and stmt.value is None:
+                    # A BARE (unassigned) annotation — `FAIL_REASON: str`,
+                    # no `= ...` — e.g. a feature-detection global only
+                    # ever assigned inside try/except/else (real instance:
+                    # Lib/_pyrepl/main.py's CAN_USE_PYREPL/FAIL_REASON).
+                    # `stmt.value` is None for this shape, so every
+                    # isinstance(_gv, ...) check below used to fail and
+                    # fall through to the final catch-all ("int gname;"),
+                    # silently OVERWRITING whatever real pointer type the
+                    # separate, EARLIER-running Phase 1.7 pre-scan (which
+                    # has always consulted type_ann for exactly this case
+                    # — see gen_module's "Phase 1.7" VarDecl branch) had
+                    # already correctly recorded in these same
+                    # self._global_var_types/_global_c_decl_types dicts —
+                    # this loop runs LATER and unconditionally clobbers
+                    # them.
+                    #
+                    # Resolve the annotation and declare the struct field
+                    # using the SAME boxing convention this pass's own
+                    # sibling branches already use (NOT Phase 1.7's: that
+                    # pass's comment claims "every pointer-typed global is
+                    # boxed as int64_t", but the actual, load-bearing
+                    # convention -- both in _gscan_declare_global just
+                    # above, for AssignStmt-declared globals, AND in the
+                    # READ side, _lower_IdentExpr's `if gtype in
+                    # ('MojoDict *', 'MojoList *', 'MojoSet *'): ctype =
+                    # 'int64_t' else: ctype = gtype` -- only boxes
+                    # MojoDict*/MojoList*/MojoSet*; a char*/struct-pointer
+                    # global is declared and read as its real pointer type
+                    # directly, unboxed. Boxing char* here too (an earlier
+                    # version of this fix did, copying Phase 1.7's
+                    # convention literally) declared the struct field
+                    # int64_t while _lower_IdentExpr's read path still
+                    # assigned it straight into a char* temp with no cast
+                    # -- "assignment to 'char *' from 'int64_t'" at every
+                    # read site. See bugs/hard/CODEGEN_global_prescan_
+                    # blind_to_trystmt_and_bare_annotation.md, "Part 3".
+                    _resolved = self._resolve_type(stmt.type_ann)
+                    self._global_var_types[gname] = _resolved
+                    if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                        global_decls.append(f"int64_t {gname};  /* {_resolved} */")
+                        self._global_c_decl_types[gname] = 'int64_t'
+                    else:
+                        global_decls.append(f"{_resolved} {gname};")
+                        self._global_c_decl_types[gname] = _resolved
+                    continue
                 _gv = stmt.value
                 if isinstance(_gv, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")

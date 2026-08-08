@@ -2,7 +2,20 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/_pyrepl/main.py`
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07) — FIXED
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/_pyrepl/main.py`
+now compiles clean and links to a working executable (exit code 0, no
+`-Wint-conversion` errors). Fixed as part of
+`bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_annotation.md`
+(that doc's "Part 2"/"Part 3" — Phase 1.7's own pointer-boxing decision
+for a bare annotation, plus the separate struct-field-declaration pass's
+missing `type_ann` consultation and its f-string-source-text-as-a-
+compile-time-constant bug). See that doc for the full mechanism and the
+exact code changes; kept here only as the original real-world repro
+record.
+
+## Status (superseded — kept for history, 2026-08-06)
 
 Re-ran against current HEAD; the specific error text has changed since
 the original scan (which used a homebrew-installed `.../lib/python3.14/
