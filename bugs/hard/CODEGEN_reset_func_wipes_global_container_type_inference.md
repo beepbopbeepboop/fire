@@ -1,6 +1,108 @@
 # HARD BUG: `_reset_func()` wipes global-scope container element/value-type inference before ANY function body can read it — including the already-shipped fix it silently undermines
 
-## Status
+## Status (FIXED 2026-08-08)
+
+Fixed directly (not delegated to a background agent, per this task's own
+"dedicated session" guidance) as part of a broader pass through this
+session's previously-held-back architectural bugs. Implemented the exact
+design this doc's own "What a real fix needs" section proposed (a
+persistent, never-`_reset_func`-cleared home for Phase 1.7's global
+inferences), but discovered — via direct testing, not assumed safe — a
+real, additional shadowing hazard the original design didn't anticipate,
+described in full below.
+
+### The fix
+
+1. Two new instance attributes, initialized once in `__init__`
+   (mirroring the existing `_field_elem_types`/`_field_dict_val_types`
+   pattern, which is explicitly "intentionally NOT reset" for the
+   identical reason): `self._global_elem_types: dict[str, str] = {}`
+   and `self._global_dict_val_types: dict[str, str] = {}`.
+2. `_phase17_infer_global_type` (Phase 1.7) now also writes into these
+   persistent tables. Also added the previously entirely-missing
+   dict-VALUE-type case (only list/tuple element-type capture existed
+   before — a global dict literal's value type had no Phase 1.7
+   tracking at all).
+3. `_reset_func` seeds the per-function `_elem_types`/`_dict_val_types`
+   from these persistent tables instead of starting empty. This means
+   **zero of the ~80 existing consumer call sites needed to change** —
+   they still just do `self._elem_types.get(name)` exactly as before;
+   only what the table starts as changed.
+
+### The shadowing hazard (found via testing, not in the original plan)
+
+The straightforward version of step 3 above — seed `_elem_types`
+unconditionally from `_global_elem_types` — causes a **real, confirmed
+segfault**: a local variable or parameter that happens to share a
+global container's bare name (e.g. a function-local `path_separators =
+[42, 43]` shadowing the module-level `path_separators: list[str]`)
+inherited the GLOBAL's seeded element type for its own static
+return-type inference. That inference is a syntactic pre-pass that runs
+BEFORE the function's own body is generated statement-by-statement, so
+it has no notion of "this name gets locally reassigned partway
+through" — only "is there currently an entry in the table for this
+bare name." The actual body-generation write sites (e.g.
+`_gen_stmt_AssignStmt`) DO correctly overwrite `_elem_types` once
+reached, but the early pre-pass reads the (wrong, global-seeded) value
+first, producing a function whose C return type disagrees with what
+its body actually computes — confirmed via direct `.ci` inspection: a
+function declared to return `char *` while its body actually returns
+an `int64_t` cast through a pointer, a hard type-confusion bug that
+segfaults at runtime.
+
+**Fixed** by adding `_locally_bound_names(body, params)` — a helper
+that mirrors real Python's own scoping rule (any assignment target, or
+parameter, anywhere in a function makes that name local for the WHOLE
+function, unless `global NAME` is declared) — walking `AssignStmt`,
+`MultiAssignStmt`, `AugAssignStmt`, `VarDecl`, `ForStmt` targets,
+`WithStmt` `as` targets, and every parameter name (recursing through
+`IfStmt`/`WhileStmt`/`ForStmt`/`TryStmt`/`WithStmt` bodies, but NOT
+into nested `FunctionDef`/`LambdaExpr` — their own separate scope).
+`_reset_func` now excludes any name in this set from the global-table
+seed entirely, so a shadowing local/parameter starts with NO entry
+(exactly like today's pre-fix behavior for that one name), while every
+genuinely-global name still gets seeded correctly. All 5 `_reset_func`
+call sites (`gen_func`, `_gen_lifted_closure`, `_gen_struct_method`,
+`_gen_toplevel`, and the harmless `__init__`-time first call before
+Phase 1.7 has even run) were updated to pass their own body/params.
+
+### Verification
+
+- The two original minimal repros (global list `path_separators =
+  ["/", "\\"]` read via `path_separators[0]` inside a non-toplevel
+  function; global dict `TEST_SLICES` read via subscript inside a
+  non-toplevel function) — both now compile AND **run**, printing the
+  real value (`"/"`, `"ios-arm64_x86_64-simulator"`), not a raw pointer
+  bit pattern as a decimal integer.
+- Three shadowing repros (local reassignment, function parameter, and a
+  normal same-function global read, all sharing one bare name) — all
+  three now produce correct values (`42`, `99`, `"/"`) with zero
+  crashes. The parameter-shadowing and local-shadowing cases both
+  SEGFAULTED before the `_locally_bound_names` guard was added (real
+  regressions caught by testing, not theoretical).
+- `Lib/importlib/_bootstrap_external.py` (the original `fd29316` fix's
+  motivating file): unaffected, its one remaining error is the
+  already-documented, unrelated `_write_atomic` implicit-declaration
+  gap.
+- `Apple/testbed/__main__.py` (this doc's own real-world instance): all
+  three originally-documented `TEST_SLICES[platform]`/
+  `TEST_SLICES[context.platform]` errors (lines 135, 176, 400) are
+  gone. One unrelated, separate error remains at line 225 (`source /
+  ... / test_framework_path.readlink()`, a `char* / int` path-join
+  issue with nothing to do with global container inference) — out of
+  scope for this fix.
+- Corpus spot-check: `json/__init__.py`, `enum.py`, `argparse.py`,
+  `os.py`, `Lib/collections/__init__.py` all build with 0 errors;
+  `typing.py`'s large pre-existing error cluster (675) is unaffected.
+- `test_gimple_runner.py` (compiled-AND-RUN suite): 17/18 passing,
+  1 pre-existing failure confirmed identical on unmodified master via
+  `git stash` (not a regression).
+- Full 5-part mandated gate: `test_gimple.py` 247/247,
+  `test_module_cache.py` 76/76, `make check-selfhost` clean,
+  from-scratch stdlib dylib rebuild 0 skips, `compile_stdlib.py -j8`
+  664/664 0 unexpected (unchanged from baseline).
+
+## Original status (2026-08-06, historical)
 
 Unfixed. Root-caused 2026-08-06 while investigating
 bugs/COMPILE_FAIL_Apple_testbed___main__.md's `invalid operands to

@@ -3686,6 +3686,18 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # Module-level GLOBAL container element/value types: global_name ->
+        # elem/value C type. Populated once by gen_module's Phase 1.7
+        # pre-scan (_phase17_infer_global_type), consulted by _reset_func
+        # to re-seed the per-function _elem_types/_dict_val_types tables at
+        # the start of EVERY function (see _reset_func's own comment) --
+        # NOT reset per function itself, for the same reason
+        # _field_elem_types isn't: a global's element type means the same
+        # thing in every function that reads it, unlike a recycled temp
+        # name. See bugs/hard/CODEGEN_reset_func_wipes_global_container_
+        # type_inference.md.
+        self._global_elem_types: dict[str, str] = {}
+        self._global_dict_val_types: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
         # dict.items()/values() result temp -> the dict's VALUE type. The
@@ -4294,7 +4306,88 @@ class GimpleGen:
         struct_field_types has no notion of inheritance) or a known builtin."""
         return name in self._KNOWN_EXCEPTION_NAMES or name in self.struct_field_types
 
-    def _reset_func(self):
+    def _locally_bound_names(self, body: list, params: list = None) -> set:
+        """Names bound as a LOCAL variable anywhere in this statement list,
+        PLUS every parameter name — mirrors real Python's own scoping rule
+        that any assignment target (or parameter) anywhere in a function
+        makes that name local for the WHOLE function (even before its
+        first lexical assignment), unless `global NAME` is declared. Used
+        by _reset_func's global-container seeding (_global_elem_types/
+        _global_dict_val_types) to avoid treating a LOCAL variable or
+        PARAMETER that happens to share a global container's bare name as
+        if it were still that global — see bugs/hard/CODEGEN_reset_func_
+        wipes_global_container_type_inference.md's shadowing edge case
+        (two real, confirmed segfaults without this guard: a local
+        `path_separators = [42, 43]` and a parameter `def f(path_
+        separators):`, both inheriting the global `path_separators`'s
+        seeded char* element type instead of their own real types).
+
+        Does NOT recurse into nested FunctionDef/LambdaExpr bodies (their
+        own separate scope) or comprehension targets (scoped to the
+        comprehension itself in real Python 3, never leaking to the
+        enclosing function — this compiler's own comprehension lowering
+        doesn't leak the loop variable into the enclosing scope either)."""
+        bound: set = set()
+        global_declared: set = set()
+        for pname, _ in (params or []):
+            bound.add(pname.lstrip('*'))
+
+        def _target_names(t):
+            if isinstance(t, IdentExpr):
+                return [t.name]
+            if isinstance(t, (TupleExpr, ListExpr)):
+                names = []
+                for e in t.elements:
+                    names.extend(_target_names(e))
+                return names
+            return []
+
+        def walk(nodes):
+            for node in nodes or []:
+                if isinstance(node, GlobalStmt):
+                    global_declared.update(node.names)
+                elif isinstance(node, AssignStmt):
+                    bound.update(_target_names(node.target))
+                elif isinstance(node, MultiAssignStmt):
+                    for t in node.targets:
+                        bound.update(_target_names(t))
+                elif isinstance(node, AugAssignStmt):
+                    bound.update(_target_names(node.target))
+                elif isinstance(node, VarDecl):
+                    bound.add(node.name)
+                elif isinstance(node, ForStmt):
+                    bound.update(_target_names(node.target))
+                    walk(node.body)
+                    if node.else_body:
+                        walk(node.else_body)
+                elif isinstance(node, WhileStmt):
+                    walk(node.body)
+                    if node.else_body:
+                        walk(node.else_body)
+                elif isinstance(node, IfStmt):
+                    walk(node.then_body)
+                    if node.else_body:
+                        walk(node.else_body)
+                    for _, elif_body in (node.elifs or []):
+                        walk(elif_body)
+                elif isinstance(node, TryStmt):
+                    walk(node.body)
+                    for h in (node.handlers or []):
+                        walk(h.body)
+                    if node.else_body:
+                        walk(node.else_body)
+                    if node.finally_body:
+                        walk(node.finally_body)
+                elif isinstance(node, WithStmt):
+                    for item in (node.items or []):
+                        if item.alias is not None:
+                            bound.add(item.alias if isinstance(item.alias, str) else item.alias.name)
+                    walk(node.body)
+
+        walk(body)
+        return bound - global_declared
+
+    def _reset_func(self, body: list = None, params: list = None):
         self.bb_counter   = 2
         self.temp_counter = 0
         self.decls:       list[str]         = []
@@ -4328,8 +4421,43 @@ class GimpleGen:
         self.exc_depth    = 0
         self.func_ret_type: str             = ''
         self._last_was_terminal: bool       = False
+        # Computed once, reused for both the _elem_types and _dict_val_types
+        # seeds just below -- see _locally_bound_names' own docstring.
+        _reset_locally_bound = self._locally_bound_names(body, params)
         # Container / layout state.
-        self._elem_types:      dict[str, str]   = {}  # container var → element C type
+        # Seeded from self._global_elem_types (populated once by gen_module's
+        # Phase 1.7 pre-scan, never reset) rather than starting empty -- a
+        # module-level global container's element type means the same thing
+        # in every function, so it must survive this per-function reset the
+        # same way _field_elem_types already does for struct fields. Without
+        # this seed, EVERY read of a global list/dict inside any function
+        # (not just _toplevel) silently defaulted to int64_t, even though
+        # Phase 1.7 had already correctly inferred the real type moments
+        # earlier — a genuine, silent wrong-value bug, not a compile
+        # failure. See bugs/hard/CODEGEN_reset_func_wipes_global_container_
+        # type_inference.md.
+        #
+        # Names LOCALLY bound anywhere in this function's own body (per
+        # _locally_bound_names, real Python scoping: any assignment target
+        # anywhere in the function makes that name local for the WHOLE
+        # function) are excluded from the seed entirely -- confirmed via a
+        # real segfault otherwise: a local `path_separators = [42, 43]`
+        # shadowing the global `path_separators: list[str]` inherited the
+        # seeded char* element type for its OWN static return-type
+        # inference (which runs as an early syntactic pre-pass, before any
+        # of the function's own assignments are actually processed, so it
+        # has no notion of "this name gets reassigned partway through" —
+        # only "is there currently an entry for this bare name"). The
+        # existing per-assignment write sites (e.g. _gen_stmt_AssignStmt)
+        # DO correctly overwrite _elem_types once the body is actually
+        # generated statement-by-statement, but a static pre-pass reading
+        # the table before that point would otherwise see the wrong,
+        # global-seeded entry for a name Python itself treats as local
+        # for this entire function.
+        self._elem_types:      dict[str, str]   = {
+            k: v for k, v in self._global_elem_types.items()
+            if k not in _reset_locally_bound
+        }  # container var → element C type
         self._nested_elem_types: dict[str, str] = {}
         self._span_mut_params: dict[str, bool]  = {}  # param/var name → literal Span/StringSlice mut=True/False
         # NOTE: _field_elem_types is intentionally NOT reset here — it stores
@@ -4357,8 +4485,13 @@ class GimpleGen:
         # names (_tN) recycle across functions. See _lower_bound_method_value.
         self._bound_method_ret_types: dict[str, str] = {}
         # Pre-seed known global dicts with their value types so .get() uses the right function.
+        # Also seeded from self._global_dict_val_types (Phase 1.7, never
+        # reset) for the same reason _elem_types is seeded from
+        # _global_elem_types just above — same shadowing exclusion too.
         self._dict_val_types:  dict[str, str]   = {
             '_BIN_OPS': 'char *', '_GD_BIN_OPS': 'char *',
+            **{k: v for k, v in self._global_dict_val_types.items()
+               if k not in _reset_locally_bound},
         }  # dict var → value C type
         self._struct_layout:   dict[str, str]   = {}  # var_name → STACK|HEAP
         self._layout_hint:  str             = LayoutSolver.HEAP  # for struct constructors
@@ -20801,7 +20934,7 @@ class GimpleGen:
 
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str = None) -> str:
         """Generate a top-level C function for a nested (closure) function."""
-        self._reset_func()
+        self._reset_func(ci.inner_def.body, ci.inner_def.params)
         # Per-lexical-scope import tracking: a lifted closure body is its own
         # lexical scope (its own local `from X import ...` statements shadow
         # the enclosing function's / module's same-named bindings).
@@ -21593,7 +21726,7 @@ class GimpleGen:
         return mangled
 
     def gen_func(self, node: FunctionDef) -> str:
-        self._reset_func()
+        self._reset_func(node.body, node.params)
         # Per-lexical-scope import tracking: this function body is its own
         # scope — push a fresh frame and pre-record every `from X import ...`
         # directly in the body so a bare-name call site resolves to the module
@@ -21862,7 +21995,7 @@ class GimpleGen:
 
     def _gen_toplevel(self, toplevel_stmts: list) -> str:
         """Generate _toplevel() or _{module}_toplevel() function for top-level statements."""
-        self._reset_func()
+        self._reset_func(toplevel_stmts)
         # Set module context for global field access
         self._current_module_ctx = self.module_name or "root"
         # Choose function name based on whether this is the root module or a library module
@@ -22378,7 +22511,7 @@ class GimpleGen:
         return f"{qualifier}_{bare}" if qualifier else bare
 
     def _gen_struct_method(self, struct_name: str, node: FunctionDef, overload_id: str = '') -> str:
-        self._reset_func()
+        self._reset_func(node.body, node.params)
         # Per-lexical-scope import tracking: a method body is its own lexical
         # scope (its own local `from X import ...` statements shadow the
         # module-level same-named bindings).
@@ -30744,6 +30877,20 @@ class GimpleGen:
                 for _e in _value.elements[1:]:
                     _elt = TypeLattice.join(_elt, self._quick_type(_e))
                 self._elem_types[_gname] = _elt
+                self._global_elem_types[_gname] = _elt
+            elif isinstance(_value, DictExpr) and _value.pairs:
+                # Dict-VALUE-type sibling of the list/tuple element-type
+                # inference just above -- was never implemented at all
+                # before (a global dict literal's value type had no
+                # Phase 1.7 tracking whatsoever, list/tuple-only). Only
+                # _global_dict_val_types (persistent) is written here, not
+                # the per-function _dict_val_types directly, since that
+                # one is now seeded FROM _global_dict_val_types in
+                # _reset_func -- see that seed's own comment.
+                _vt = self._quick_type(_value.pairs[0][1])
+                for _k, _v in _value.pairs[1:]:
+                    _vt = TypeLattice.join(_vt, self._quick_type(_v))
+                self._global_dict_val_types[_gname] = _vt
 
         def _phase17_scan_try_branches(_try_stmt):
             """Collect {name: C type} for every AssignStmt/MultiAssignStmt
