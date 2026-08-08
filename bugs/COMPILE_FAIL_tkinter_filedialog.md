@@ -2,7 +2,39 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/tkinter/filedialog.py`
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07): builds clean, but NOT because #141 is fixed
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/tkinter/filedialog.py`
+now builds cleanly in this environment (`Built: .../filedialog`, exit
+0). **This is not a fix of the `Dialog`/`Dialog` bare-name collision
+described below** (`bugs/hard/
+CODEGEN_same_bare_name_struct_collision_across_modules.md`, task #141 —
+explicitly out of scope this session, still genuinely unfixed) — it's
+an artifact of this build's import resolution:
+
+```
+$ MOJO_DEBUG=1 python3 mojo.py build .../filedialog.py
+[gimple_codegen] load_module('tkinter.dialog') failed; treating module as empty: Only stdlib and test imports supported: tkinter.dialog
+[gimple_codegen] load_module('tkinter.simpledialog') failed; treating module as empty: Only stdlib and test imports supported: tkinter.simpledialog
+```
+
+`filedialog.py` does `from tkinter.dialog import Dialog` and `from
+tkinter.simpledialog import _setup_dialog` — both submodule imports
+fail to resolve at all in this build path (a separate, pre-existing
+"only stdlib and test imports supported" module-search restriction,
+not investigated further here), so `tkinter/dialog.py`'s own `Dialog`
+class-with-`widgetName`/`num` fields never enters this compile's
+transitive closure in the first place. Only `tkinter/commondialog.py`'s
+`Dialog` (imported via `from tkinter import commondialog`, which DOES
+resolve) is ever seen under the bare name `Dialog`, so there's no
+collision to trigger in THIS specific build — not because the
+underlying "two real classes share a bare name" architecture gap was
+addressed. A build path where `tkinter.dialog` successfully resolves
+(e.g. a different module search configuration) could still hit the
+originally-documented collision. Left as-is; re-verify if #141 is ever
+picked up.
+
+## Status (updated 2026-08-06, historical)
 
 The ORIGINAL symptom (`_Open_show` undefined at link time — a dotted base
 class `_Dialog(commondialog.Dialog)` losing its base-class name during

@@ -2,6 +2,22 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/check-c-globals.py`
 
+## Status (re-verified 2026-08-07): NOW PASSES
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/c-analyzer/check-c-globals.py`
+now builds cleanly (`Built: .../check-c-globals`, exit 0, no `error:`
+lines). All three issues the 2026-08-06 note below left open (function-
+as-module-scope-value, `MojoBoundMethod *` assignment mismatch, and the
+overload-mangling call/definition-suffix mismatch on
+`logging_configure_logger`) appear to have been resolved as side
+effects of other fixes landed earlier in this session (this doc's own
+transitively-imported `Tools/c-analyzer/c_common/logging.py` — a
+different module from this project's own `logging.py` stdlib fixes,
+worth noting for anyone confused by the name collision). Not re-fixed
+here, just re-verified and closed out.
+
+## Status (historical, 2026-08-05/06)
+
 Note (2026-08-05): the "conflicting types for '_gimple_main'" error shown
 below is now FIXED (commit 12ff719, see `bugs/hard/
 CODEGEN_aliased_external_import_no_backing_symbol.md`). Re-testing today,

@@ -1,5 +1,22 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
+## Status (2026-08-07): still fully unfixed, including the comprehension sibling gap
+
+This session's assignment explicitly held this whole task (#143) back
+as "DO NOT TOUCH ... due to prior regressions". While investigating
+`bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (independently, for
+an unrelated `_compr_range_loop` bug — see that doc), a fix for this
+doc's own "Sibling gap: comprehension RHS" section below was drafted
+(adding a `Comprehension` case to `_collect_self_assigns`) and DID pass
+the full 5-part quality gate cleanly with zero regressions — but was
+deliberately reverted without landing, once it was recognized as inside
+this doc's excluded scope, rather than unilaterally deciding it was
+"safe enough" to ship despite the explicit hold. Recorded here so a
+future session doesn't have to rediscover that a working draft exists
+(look for the corresponding revert in this session's commit history) —
+still genuinely unfixed, including this sibling gap, pending the
+"separate, directly-supervised work" this task is reserved for.
+
 ## Status
 
 Unfixed. Root-caused 2026-08-06 while investigating
