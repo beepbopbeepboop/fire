@@ -3139,6 +3139,30 @@ def _c_escape(s: str) -> str:
         i += 1
     return ''.join(out)
 
+def _str_literal_value_is_fstring(val: str) -> bool:
+    """Does a raw StringLiteral.value (as the parser leaves it -- an
+    f/t-string keeps its prefix+quotes, unlike a plain string, whose
+    quotes the parser already strips at tokenize time -- see
+    GimpleGen._decode_str_literal_text's own comment) look like an f- or
+    t-string? Pure prefix-sniffing, factored out as its own free
+    function (rather than inlined at its one call site) so any FUTURE
+    caller that only needs the yes/no answer (not the fully decoded
+    text GimpleGen._decode_str_literal_text also strips out) has
+    somewhere to reuse it instead of re-deriving the same prefix-walk.
+    Deliberately mirrors (but, for now, does not share code with)
+    _decode_str_literal_text's identical prefix-walk -- that method is
+    a hot, widely-used (4 call sites) instance method deep in the
+    f-string/`%`-formatting lowering path; refactoring it to delegate
+    here is out of scope for this fix (unrelated risk, see this
+    codebase's "one careful step at a time" convention for exactly this
+    kind of prescan/global-inference change)."""
+    prefix = ''
+    rest = val
+    while rest and rest[0] in 'fFrRbBuUtT':
+        prefix += rest[0]
+        rest = rest[1:]
+    return bool(rest) and rest[0] in ('"', "'") and any(c in 'fFtT' for c in prefix)
+
 def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
     if stmt_value is None:
@@ -3160,6 +3184,23 @@ def _extract_init_expr(stmt_value) -> str:
     elif isinstance(stmt_value, BoolLiteral):
         return '1' if stmt_value.value else '0'
     elif isinstance(stmt_value, StringLiteral):
+        # An f/t-string's raw `.value` is the UNDECODED source text,
+        # INCLUDING its f/t prefix and quotes (real decoding + runtime
+        # interpolation only happens at actual codegen time, in
+        # _lower_StringLiteral) -- treating it as an ordinary compile-
+        # time string constant here stuffed the literal, uninterpolated
+        # source text (e.g. the raw characters `f"warning: {e}"`, quotes
+        # and all) into a struct's static initializer: a type-incoherent
+        # placeholder, not the real runtime value, and not even valid
+        # source text for what the string SHOULD contain. Real
+        # interpolation needs a runtime call (mojo_str_cat/etc, emitted
+        # elsewhere for the real assignment), which can't appear in a C
+        # static initializer, so defer to the same '0'-then-runtime-
+        # assignment path already used for CallExpr/IdentExpr below. See
+        # bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_
+        # annotation.md, "Part 3".
+        if _str_literal_value_is_fstring(stmt_value.value):
+            return '0'
         return f'"{_c_escape(stmt_value.value)}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):
         return '0'  # Can't static-initialize; needs runtime init
@@ -7029,7 +7070,37 @@ class GimpleGen:
             ot = self._quick_type(node.obj)
             sn: str
             sn = _struct_name_of(ot)
-            return self.struct_field_types.get(sn, {}).get(node.member, 'int64_t')
+            _fields = self.struct_field_types.get(sn, {})
+            if node.member in _fields:
+                return _fields[node.member]
+            # `node.member` isn't a real FIELD on this struct — it may be a
+            # bound METHOD/`@property` read without call syntax (`self.
+            # filename.parent`, `filename` a 0-arg method/property). Real
+            # codegen (_lower_MemberExpr's object-lowering path) auto-
+            # invokes such a value before doing the outer member lookup —
+            # this static type-guessing pre-pass (used by _infer_return_
+            # type/_collect_return_types to pick a function's own C return
+            # type from its `return` statements) must mirror that or a
+            # `return self.prop.attr`-shaped return silently defaulted to
+            # int64_t against a body that actually returns a real pointer:
+            # the compiled function's OWN declared C return type disagreed
+            # with what its body computed (the `.attr` field read itself
+            # was already correct — only the enclosing function's
+            # signature was wrong). Same struct-method detection
+            # `_lower_MemberExpr` itself already uses to recognize "this
+            # member is a bound-method value, not a field" (see that
+            # method's `_lower_bound_method_value` call site). See bugs/
+            # COMPILE_FAIL_zipfile__path___init__.md.
+            if sn and (f"{sn}_{node.member}" in self.func_return_types
+                       or (sn, node.member) in self._struct_method_signatures):
+                candidates = self._struct_method_signatures.get((sn, node.member))
+                overload_id = ''
+                if candidates and len(candidates) == 1:
+                    overload_id = candidates[0].get('overload_id', '') or ''
+                mangled = self._struct_method_csym(sn, node.member, overload_id)
+                return self.func_return_types.get(
+                    mangled, self.func_return_types.get(f"{sn}_{node.member}", 'int64_t'))
+            return 'int64_t'
         if isinstance(node, ListExpr):  return 'MojoList *'
         if isinstance(node, DictExpr):  return 'MojoDict *'
         if isinstance(node, SetExpr):   return 'MojoSet *'
@@ -8692,6 +8763,46 @@ class GimpleGen:
             ov = self._new_val(_ret, f'{_c_fn} ()')
         else:
             ot, ov = self.lower_expr(node.obj)
+            # `self.prop.attr` where `prop` is a 0-arg property/method
+            # accessed without call syntax (`self.prop`, no `()`) lowers to
+            # a deferred, uncalled `MojoBoundMethod *` value (see
+            # _lower_bound_method_value) — correct when `self.prop` is
+            # itself being called (`self.prop()`) or passed around as a
+            # first-class callable, but chaining a MEMBER ACCESS directly
+            # off it is never that: real Python (and, for a `@property`
+            # specifically, the entire point of the decorator) auto-
+            # invokes the getter/method FIRST and only then looks up
+            # `.attr` on the RESULT. This codegen has no notion of
+            # `@property` vs. an ordinary bound method at this
+            # representation level (both lower identically via
+            # _lower_bound_method_value) — but a real, intentional
+            # "read a member off the bound-method OBJECT itself" (e.g.
+            # `self.method.__name__`) isn't supported by this codegen
+            # either way (the dynamic-dispatch fallback further below has
+            # no such fields registered for MojoBoundMethod), so auto-
+            # invoking here is a strict improvement with no realistic
+            # regression case. Mirrors _lower_subscript's identical fix
+            # for `self.prop[key]` (see that method's own comment for the
+            # original bug/fix history). Confirmed via Lib/zipfile/_path/
+            # __init__.py's `filename` @property: `self.filename.parent`
+            # previously ran `_mojo_dispatch_getattr` on the bound-method
+            # object itself, which has no `.parent` — silent wrong
+            # runtime behavior (AttributeError) rather than a compile
+            # error, since the struct-name fallback further below (Step
+            # 4, bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
+            # already routes unknown MojoBoundMethod fields through
+            # runtime dispatch instead of a hard GCC error. See bugs/
+            # COMPILE_FAIL_zipfile__path___init__.md.
+            if ot == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(ov, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', ov)])
+                if ret_type in ('int64_t', 'int'):
+                    ot, ov = ret_type, raw_t
+                elif ret_type == 'void':
+                    ot, ov = 'int', self._new_val('int', '0')
+                else:
+                    ot, ov = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
             # Resolve an int64_t-boxed pointer to its real struct type (e.g.
             # `t = self._peek()` boxes a `Token *` as int64_t) — without this,
             # `t.line` never found a real struct field and fell through to the
@@ -30508,6 +30619,56 @@ class GimpleGen:
         # See bugs/CODEGEN_generator_function_Lib_weakref.md.
         _phase17_own_ids = set(id(s) for s in _phase17_own_stmts)
 
+        def _phase17_value_type(_value):
+            """Pure mapping from an RHS AST value to the C type
+            _phase17_infer_global_type would assign it — no dict writes,
+            no side effects. Factored out of _phase17_infer_global_type
+            (below) so the TryStmt-branch join logic (_phase17_scan_try_
+            branches, further below) can compute each branch's candidate
+            type using the IDENTICAL rules without duplicating this table
+            under a second name that would inevitably drift out of sync.
+            (List/tuple element-type tracking (_elem_types) is NOT done
+            here — that's a side effect specific to the direct-assignment
+            caller, not part of "what C type does this value have.")"""
+            if isinstance(_value, DictExpr):
+                return 'MojoDict *'
+            elif isinstance(_value, (ListExpr, TupleExpr)):
+                return 'MojoList *'
+            elif isinstance(_value, SetExpr):
+                return 'MojoSet *'
+            elif isinstance(_value, (IntLiteral, BoolLiteral)):
+                return 'int'
+            elif isinstance(_value, StringLiteral):
+                return 'char *'
+            elif isinstance(_value, CallExpr):
+                if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
+                    return f"{_value.func.name} *"
+                elif isinstance(_value.func, IdentExpr):
+                    ret = self.func_return_types.get(_value.func.name, '')
+                    if ret.endswith(' *'):
+                        return ret
+                    elif ret == 'char *':
+                        return 'char *'
+                    else:
+                        return 'int64_t'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member in ('read', 'readline')
+                        and not _value.args):
+                    return 'char *'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member == 'readlines'):
+                    return 'MojoList *'
+                else:
+                    return 'int64_t'
+            else:
+                qt = self._quick_type(_value) or 'int64_t'
+                if qt.endswith(' *'):
+                    return qt
+                elif qt == '_Bool':
+                    return 'int'
+                else:
+                    return 'int64_t'
+
         def _phase17_infer_global_type(_gname, _value):
             """Infer & record a global's C type (self._global_var_types,
             plus element type for list/tuple literals) from its assigned
@@ -30524,50 +30685,61 @@ class GimpleGen:
             bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
             (that doc covers the LOCAL-variable analogue of this same
             gap; this is the GLOBAL/module-scope sibling)."""
-            if isinstance(_value, DictExpr):
-                self._global_var_types[_gname] = 'MojoDict *'
-            elif isinstance(_value, (ListExpr, TupleExpr)):
-                self._global_var_types[_gname] = 'MojoList *'
-                if _value.elements:
-                    _elt = self._quick_type(_value.elements[0])
-                    for _e in _value.elements[1:]:
-                        _elt = TypeLattice.join(_elt, self._quick_type(_e))
-                    self._elem_types[_gname] = _elt
-            elif isinstance(_value, SetExpr):
-                self._global_var_types[_gname] = 'MojoSet *'
-            elif isinstance(_value, (IntLiteral, BoolLiteral)):
-                self._global_var_types[_gname] = 'int'
-            elif isinstance(_value, StringLiteral):
-                self._global_var_types[_gname] = 'char *'
-            elif isinstance(_value, CallExpr):
-                if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
-                    struct_name = _value.func.name
-                    self._global_var_types[_gname] = f"{struct_name} *"
-                elif isinstance(_value.func, IdentExpr):
-                    ret = self.func_return_types.get(_value.func.name, '')
-                    if ret.endswith(' *'):
-                        self._global_var_types[_gname] = ret
-                    elif ret == 'char *':
-                        self._global_var_types[_gname] = 'char *'
-                    else:
-                        self._global_var_types[_gname] = 'int64_t'
-                elif (isinstance(_value.func, MemberExpr)
-                        and _value.func.member in ('read', 'readline')
-                        and not _value.args):
-                    self._global_var_types[_gname] = 'char *'
-                elif (isinstance(_value.func, MemberExpr)
-                        and _value.func.member == 'readlines'):
-                    self._global_var_types[_gname] = 'MojoList *'
-                else:
-                    self._global_var_types[_gname] = 'int64_t'
-            else:
-                qt = self._quick_type(_value) or 'int64_t'
-                if qt.endswith(' *'):
-                    self._global_var_types[_gname] = qt
-                elif qt == '_Bool':
-                    self._global_var_types[_gname] = 'int'
-                else:
-                    self._global_var_types[_gname] = 'int64_t'
+            self._global_var_types[_gname] = _phase17_value_type(_value)
+            if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
+                _elt = self._quick_type(_value.elements[0])
+                for _e in _value.elements[1:]:
+                    _elt = TypeLattice.join(_elt, self._quick_type(_e))
+                self._elem_types[_gname] = _elt
+
+        def _phase17_scan_try_branches(_try_stmt):
+            """Collect {name: C type} for every AssignStmt/MultiAssignStmt
+            target living inside a top-level TryStmt's try/except/else/
+            finally bodies, TypeLattice.join-ing the type across every
+            branch that assigns the same name.
+
+            Unlike an IfStmt (where _flatten_resolved_conditionals already
+            picks the ONE platform-correct branch, mirroring how real
+            CPython only ever executes one side of an `if sys.platform ==
+            ...`), every branch of a try/except genuinely CAN execute at
+            runtime -- the `try` body if nothing raises, one `except`
+            handler if a matching exception is raised, or the `else` body
+            if the try body succeeds -- so a correct global type must be
+            the LUB across every branch that assigns the name, not just
+            the first one found textually the way the flat top-level scan
+            (which only ever sees a linear sequence of unconditionally-
+            executed statements) is content to do.
+
+            Deliberately NOT self-recursive (does not call itself for a
+            nested TryStmt) -- mirrors _flatten_resolved_conditionals's
+            own documented reason: a nested function calling itself here
+            doesn't survive this file's own self-host build. A TryStmt
+            nested inside another TryStmt's branch is left unscanned by
+            this pass (out of scope for this fix -- no observed real-world
+            instance needs it; see bugs/hard/CODEGEN_global_prescan_
+            blind_to_trystmt_and_bare_annotation.md)."""
+            _branch_lists = [_try_stmt.body or []]
+            for _h in (_try_stmt.handlers or []):
+                _branch_lists.append(getattr(_h, 'body', None) or [])
+            if isinstance(_try_stmt.else_body, list):
+                _branch_lists.append(_try_stmt.else_body)
+            if isinstance(getattr(_try_stmt, 'finally_body', None), list):
+                _branch_lists.append(_try_stmt.finally_body)
+            _joined = {}
+            for _blist in _branch_lists:
+                for _bstmt in _flatten_resolved_conditionals(_blist):
+                    _pairs = []
+                    if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
+                        _pairs.append((_bstmt.target.name, _bstmt.value))
+                    elif isinstance(_bstmt, MultiAssignStmt):
+                        for _tgt in _bstmt.targets:
+                            if isinstance(_tgt, IdentExpr):
+                                _pairs.append((_tgt.name, _bstmt.value))
+                    for _gname, _gvalue in _pairs:
+                        _t = _phase17_value_type(_gvalue)
+                        _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
+                                           if _gname in _joined else _t)
+            return _joined
 
         for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
@@ -30621,19 +30793,39 @@ class GimpleGen:
                 if _scan_stmt.type_ann:
                     _resolved = self._resolve_type(_scan_stmt.type_ann)
                     self._global_var_types[_scan_stmt.name] = _resolved
-                    # Every pointer-typed global is boxed as int64_t at the C
-                    # storage level (see _lower_IdentExpr's unconditional
-                    # "Globals are stored at C level as int64_t" convention,
-                    # which every READ of a global goes through regardless
-                    # of what this dict says) — without this, an annotated
-                    # global (`X: dict = {...}`, now a VarDecl since the
-                    # parser fix that also fixed StructDef's dataclass-field
-                    # visibility — see mojo_compiler.py's annotated-
-                    # assignment parsing) got its struct field declared as
-                    # the real pointer type directly, mismatching every read
-                    # site's int64_t assumption: "assignment to 'int64_t'
-                    # from 'MojoDict *' without a cast".
-                    if _resolved.endswith(' *'):
+                    # MojoDict*/MojoList*/MojoSet* globals are boxed as
+                    # int64_t at the C storage level (see _lower_IdentExpr's
+                    # `if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    # ctype = 'int64_t'` — the actual, load-bearing read-side
+                    # convention) — without this, an annotated global (`X:
+                    # dict = {...}`, now a VarDecl since the parser fix that
+                    # also fixed StructDef's dataclass-field visibility — see
+                    # mojo_compiler.py's annotated-assignment parsing) got
+                    # its struct field declared as the real pointer type
+                    # directly, mismatching every read site's int64_t
+                    # assumption: "assignment to 'int64_t' from 'MojoDict *'
+                    # without a cast".
+                    #
+                    # Deliberately NARROWER than "any pointer type" (an
+                    # earlier version of this comment/condition claimed
+                    # _lower_IdentExpr boxes EVERY pointer-typed global
+                    # unconditionally — that's not what the code there
+                    # actually does: char*/struct-pointer globals are read
+                    # AND declared directly, unboxed, everywhere else in
+                    # this file — see _gscan_declare_global's identical
+                    # MojoDict*/MojoList*/MojoSet*-only boxing a few hundred
+                    # lines down in gen_module). Boxing char* here too made
+                    # a bare `X: str` annotation's struct field 'int64_t'
+                    # while every WRITE to X during Phase 2a (which reads
+                    # THIS dict, populated here, before the struct-
+                    # declaration pass further down even runs) correctly
+                    # boxed a char* value into it — consistent with itself,
+                    # but not with the eventual UNBOXED 'char *' struct
+                    # field the struct-declaration pass declares to match
+                    # _lower_IdentExpr's read side. See bugs/hard/CODEGEN_
+                    # global_prescan_blind_to_trystmt_and_bare_annotation.md,
+                    # "Part 2".
+                    if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                 else:
                     # Infer type from value if present
@@ -30672,6 +30864,34 @@ class GimpleGen:
                             self._global_var_types[_scan_stmt.name] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
                     else:
                         self._global_var_types[_scan_stmt.name] = 'int64_t'
+            elif isinstance(_scan_stmt, TryStmt):
+                # A top-level `X: T` / feature-detection global that is
+                # ONLY ever assigned inside a try/except/else (e.g. Lib/
+                # _pyrepl/main.py's CAN_USE_PYREPL/FAIL_REASON pattern) was
+                # completely invisible to this pre-scan before: the loop
+                # only ever matched AssignStmt/MultiAssignStmt/VarDecl at
+                # this SAME nesting level, so every AssignStmt living
+                # inside a TryStmt's branches fell straight through,
+                # leaving the global's type unresolved and (per
+                # _lower_IdentExpr's unconditional "globals are int64_t at
+                # the C storage level" fallback used whenever this pass
+                # never recorded anything) eventually causing a type-
+                # incoherent placeholder initializer downstream. See
+                # bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_
+                # bare_annotation.md.
+                for _gname, _gtype in _phase17_scan_try_branches(_scan_stmt).items():
+                    if _gname in _pre_declared_globals:
+                        # A preceding bare `X: T` VarDecl (handled above,
+                        # in source order before this TryStmt in the real-
+                        # world idiom) or an earlier plain assignment
+                        # already resolved this name -- an explicit
+                        # annotation/assignment always takes priority over
+                        # a type merely inferred from try/except branches.
+                        continue
+                    _pre_declared_globals.add(_gname)
+                    if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                        self._global_to_module[_gname] = _phase17_mod
+                    self._global_var_types[_gname] = _gtype
 
         # Also scan ImportStmts inside TryStmt/IfStmt blocks (e.g., try: import mojo_compiler)
         # These are missed by the flat scan above.
@@ -31883,6 +32103,52 @@ class GimpleGen:
                 if gname in _declared_globals:
                     continue
                 _declared_globals.add(gname)
+                if stmt.type_ann and stmt.value is None:
+                    # A BARE (unassigned) annotation — `FAIL_REASON: str`,
+                    # no `= ...` — e.g. a feature-detection global only
+                    # ever assigned inside try/except/else (real instance:
+                    # Lib/_pyrepl/main.py's CAN_USE_PYREPL/FAIL_REASON).
+                    # `stmt.value` is None for this shape, so every
+                    # isinstance(_gv, ...) check below used to fail and
+                    # fall through to the final catch-all ("int gname;"),
+                    # silently OVERWRITING whatever real pointer type the
+                    # separate, EARLIER-running Phase 1.7 pre-scan (which
+                    # has always consulted type_ann for exactly this case
+                    # — see gen_module's "Phase 1.7" VarDecl branch) had
+                    # already correctly recorded in these same
+                    # self._global_var_types/_global_c_decl_types dicts —
+                    # this loop runs LATER and unconditionally clobbers
+                    # them.
+                    #
+                    # Resolve the annotation and declare the struct field
+                    # using the SAME boxing convention this pass's own
+                    # sibling branches already use (NOT Phase 1.7's: that
+                    # pass's comment claims "every pointer-typed global is
+                    # boxed as int64_t", but the actual, load-bearing
+                    # convention -- both in _gscan_declare_global just
+                    # above, for AssignStmt-declared globals, AND in the
+                    # READ side, _lower_IdentExpr's `if gtype in
+                    # ('MojoDict *', 'MojoList *', 'MojoSet *'): ctype =
+                    # 'int64_t' else: ctype = gtype` -- only boxes
+                    # MojoDict*/MojoList*/MojoSet*; a char*/struct-pointer
+                    # global is declared and read as its real pointer type
+                    # directly, unboxed. Boxing char* here too (an earlier
+                    # version of this fix did, copying Phase 1.7's
+                    # convention literally) declared the struct field
+                    # int64_t while _lower_IdentExpr's read path still
+                    # assigned it straight into a char* temp with no cast
+                    # -- "assignment to 'char *' from 'int64_t'" at every
+                    # read site. See bugs/hard/CODEGEN_global_prescan_
+                    # blind_to_trystmt_and_bare_annotation.md, "Part 3".
+                    _resolved = self._resolve_type(stmt.type_ann)
+                    self._global_var_types[gname] = _resolved
+                    if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                        global_decls.append(f"int64_t {gname};  /* {_resolved} */")
+                        self._global_c_decl_types[gname] = 'int64_t'
+                    else:
+                        global_decls.append(f"{_resolved} {gname};")
+                        self._global_c_decl_types[gname] = _resolved
+                    continue
                 _gv = stmt.value
                 if isinstance(_gv, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")
