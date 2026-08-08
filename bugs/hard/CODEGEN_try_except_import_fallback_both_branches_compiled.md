@@ -1,6 +1,82 @@
 # HARD BUG: `try: from X import Y / except ImportError: from Z import Y` compiles BOTH branches, causing a redefinition conflict
 
-## Status
+## Status (FIXED 2026-08-08)
+
+Fixed in `gen_module` (`gimple_codegen.py`, immediately before the
+pre-existing `IfStmt` def-promotion block): a new pass walks each
+top-level `TryStmt` and, when the `try` body and at least one `except`
+handler body both bind the SAME name via `FromImportStmt`,
+`ImportStmt`, or `FunctionDef`, replaces the whole `TryStmt` with just
+the `try` body's statements (dropping the `except`/`else`/`finally`
+bodies for codegen purposes) — mirroring the existing `IfStmt`
+platform-branch resolution's "pick one branch, replace the container in
+`stmts`" shape, with `try` always winning (this compiler doesn't model
+real exception control flow, so there's no way to know at compile time
+whether the `try` branch's import would actually fail on a given
+platform; `try` winning matches the common-case expectation for the
+"prefer the modern/preferred name" idiom below).
+
+Deliberately conservative in two ways, both required by the plan and
+confirmed necessary by testing (see Verification):
+1. **The trigger only looks at `FromImportStmt`/`ImportStmt`/
+   `FunctionDef` bindings** — NOT plain `AssignStmt`/`MultiAssignStmt`/
+   `VarDecl`. An early draft also treated a shared plain-assignment
+   target (e.g. `result = ...` appearing in both the `try` and `except`
+   bodies) as a trigger, which is WRONG: that's the ordinary, extremely
+   common defensive-error-handling idiom (`try: result = f() / except:
+   result = fallback`), not the redefinition bug this fix targets.
+   Only imports and function defs actually emit a competing C-level
+   symbol DEFINITION that can collide; a plain assignment doesn't, so
+   it's not evidence of the fallback-idiom shape and must not gate the
+   branch-drop.
+2. Even when triggered, an ordinary `try`/`except` doing genuinely
+   different, non-overlapping things in each branch (no shared
+   `FromImportStmt`/`ImportStmt`/`FunctionDef` name) is left completely
+   untouched — both branches still get scanned/compiled exactly as
+   before this fix (which may still hit the original redefinition error
+   if they generate a genuine name collision by some other mechanism,
+   but that's a materially different, non-fallback shape out of scope
+   here).
+
+### Verification
+
+- Minimal repro (`/tmp/hardbug_repros/tryexcept2/main.py`: both `try`
+  and `except` define `def helper():` with different bodies) —
+  compiles without a redefinition error and the built binary runs the
+  `try` branch's `helper()`, printing `"a"` as expected.
+- `/tmp/hardbug_repros/tryexcept3.py` (the `from json import loads as
+  parse` / `from simplejson import loads as parse` shape from this
+  doc's own repro) — compiles with no redefinition error.
+- `Tools/ssl/multissltests.py` / `Tools/wasm/wasi/__main__.py` (this
+  doc's original real-world instances) — re-checked; both now fail on
+  unrelated, separate downstream bugs (not this one), unchanged from
+  before this fix — confirms no regression, matching the plan's own
+  note that these two files' exact failure mode had already shifted by
+  the time this was implemented.
+- **Precision check** (`/tmp/hardbug_repros/tryexcept_notfallback.py`):
+  ```python
+  try:
+      from os import getcwd
+      result = getcwd()
+  except ImportError:
+      error_flag = True
+      result = "unknown"
+  print(result)
+  ```
+  `result` is assigned in BOTH branches (ordinary defensive-error-
+  handling, not the fallback-import idiom), while `getcwd`/`error_flag`
+  are not shared. Confirmed the fix does NOT collapse this TryStmt —
+  both branches are still scanned/compiled independently, producing the
+  exact same (pre-existing, unrelated) `int64_t`/`char *` type-conflict
+  compile error as on unmodified master (`git stash` A/B compared
+  byte-for-byte identical). This is what caught and fixed the
+  over-broad first draft described in point 1 above.
+- Full 5-part gate: `test_gimple.py` 247/247, `test_module_cache.py`
+  76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+  0 skips, `compile_stdlib.py -j8` 664/664 (0 unexpected, unchanged
+  from baseline).
+
+## Original status (2026-08-06, historical)
 
 Unfixed. Root-caused 2026-08-06 while triaging
 `bugs/COMPILE_FAIL_Tools_ssl_multissltests.md` and

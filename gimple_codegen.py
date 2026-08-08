@@ -26997,6 +26997,80 @@ class GimpleGen:
             stmts = [s for s in stmts
                      if not (isinstance(s, FunctionDef) and s.name in _overloaded)]
 
+        # `try: from X import Y / except ImportError: from Z import Y`
+        # (or a bare `def NAME(): ...` fallback shape) — the standard
+        # CPython compatibility idiom for "try the modern/preferred name,
+        # fall back to an older/alternate one on ImportError", both
+        # branches binding the SAME local name. Unlike the IfStmt
+        # platform-conditional case just below (which already flattens
+        # to one branch), NOTHING resolves a top-level TryStmt's
+        # try/except branches down to one — both get scanned/compiled,
+        # producing two conflicting C definitions for the same symbol
+        # ("redefinition of X"), or — when one branch's def/import never
+        # gets its own real definition emitted — a silently-wrong
+        # "unavailable in compiled mode" stub instead. This compiler
+        # doesn't implement real exception-based control flow at the
+        # type-checking/codegen level (whether the try branch's import
+        # actually succeeds depends on the target platform's real
+        # availability, unlike an `if sys.platform == ...:` check this
+        # compiler CAN resolve), so — mirroring how the `if` case below
+        # picks one branch with a fixed heuristic when the condition
+        # isn't staticaly resolvable — the correct behavior for THIS
+        # specific idiom is "prefer the try branch, drop the except
+        # branch(es)" for the purpose of choosing which definition of a
+        # shared name to emit. Deliberately conservative in TWO ways:
+        # (a) the trigger only looks at FromImportStmt/ImportStmt/
+        # FunctionDef bindings — the shapes that actually emit a real
+        # C-level symbol DEFINITION that can collide — NOT plain
+        # AssignStmt/MultiAssignStmt/VarDecl. An ordinary
+        # `try: result = f() \n except: result = fallback` shares the
+        # variable name `result` across both branches, but that's
+        # everyday defensive error-handling, not the redefinition bug
+        # this fix targets; treating a shared assignment target as
+        # grounds to silently drop the except branch's actual fallback
+        # logic would be a real behavior regression for that (far more
+        # common) idiom. (b) even when triggered, an ordinary try/except
+        # doing genuinely different, non-overlapping things in each
+        # branch is left completely untouched. See
+        # bugs/hard/CODEGEN_try_except_import_fallback_both_branches_
+        # compiled.md.
+        def _toplev_bound_names(_tb_body):
+            _names = set()
+            for _tb_s in (_tb_body or []):
+                if isinstance(_tb_s, FromImportStmt):
+                    for _tb_nm, _tb_alias in (_tb_s.names or []):
+                        _names.add(_tb_alias if _tb_alias else _tb_nm)
+                elif isinstance(_tb_s, ImportStmt):
+                    for _tb_mod, _tb_alias in _import_targets(_tb_s):
+                        _names.add(_tb_alias if _tb_alias else _tb_mod.split('.')[0])
+                elif isinstance(_tb_s, FunctionDef):
+                    _names.add(_tb_s.name)
+            return _names
+
+        _try_replaced: list = []
+        for _s in stmts:
+            if isinstance(_s, TryStmt):
+                _try_names = _toplev_bound_names(_s.body)
+                _handler_names: set = set()
+                for _h in (_s.handlers or []):
+                    _handler_names |= _toplev_bound_names(_h.body)
+                if _try_names and (_try_names & _handler_names):
+                    # Same-name-rebinding fallback idiom confirmed: keep
+                    # only the try branch's own statements (dropping the
+                    # except handler(s), else_body, and finally_body
+                    # entirely for codegen purposes — matches the
+                    # IfStmt case's "drop the branch container" comment
+                    # just below), so every later pass (Phase 1.7, the
+                    # closure/def scan, actual statement emission) sees
+                    # ordinary top-level statements instead of a TryStmt
+                    # it has no special handling for.
+                    _try_replaced.extend(_s.body or [])
+                else:
+                    _try_replaced.append(_s)
+            else:
+                _try_replaced.append(_s)
+        stmts = _try_replaced
+
         # Two (or more) top-level `def NAME(...):` statements with the SAME
         # name, nested in mutually-exclusive `if`/`elif`/`else` branches at
         # module scope (a common platform-conditional idiom — e.g.
