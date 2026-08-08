@@ -1,5 +1,69 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-07, Track B re-diagnosis, own-root build)
+
+Re-diagnosed with `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/enum.py`
+directly (this file as the ROOT of the build, not pulled in
+transitively via `subprocess.py`/`typing.py`). Current result: a hard,
+unhandled Python `RuntimeError` traceback (not a GCC compile error at
+all):
+
+```
+Error building: cannot compile module: function(s) _iter_member_by_def_,
+_iter_member_by_value_ (generator function(s), contain a `yield`/`yield
+from`) — this codegen compiles every function into a single
+straight-line C function and has no suspend/resume state-machine
+transform for generators, nor an event loop / suspend-resume codegen
+for async functions, yet, so these cannot be represented as compiled C
+without emitting silently wrong or broken code; falling back to
+interpreting this module from source instead
+```
+
+**This genuinely IS a generator-codegen-cluster failure** (contradicts
+the 2026-08-06 re-diagnosis below, which was against a DIFFERENT
+transitive graph — `subprocess.py`'s — where this exact refusal never
+surfaced because something else failed first). Root cause, confirmed
+via `MOJO_DEBUG=1`:
+
+```
+[gimple_codegen] generator method Flag.'_iter_member_by_value_' not eligible for C++ coroutine path, falling back to honest refusal: _iter_member_by_value_: a @classmethod generator that references `cls` in its body is not supported (no class-level attribute/method access exists yet for compiled generators)
+[gimple_codegen] generator method Flag.'_iter_member_by_def_' not eligible for C++ coroutine path, falling back to honest refusal: _iter_member_by_def_: a @classmethod generator that references `cls` in its body is not supported (no class-level attribute/method access exists yet for compiled generators)
+```
+
+`enum.py`'s `Flag._iter_member_by_value_`/`_iter_member_by_def_` (lines
+1428/1438) are BOTH `@classmethod` generators whose bodies reference
+`cls` (`cls._flag_mask_`, `cls._iter_member_by_value_(value)`,
+`cls._value2member_map_.get(val)`) — a documented, deliberate scope
+limit of the C++20-coroutine generator codegen ("no class-level
+attribute/method access exists yet for compiled generators"), not a
+bug in the eligibility check itself. This is the SAME class of gap as
+the explicitly-excluded `bugs/hard/CODEGEN_generator_struct_typed_
+param_refused.md` (task #147) and `bugs/hard/CODEGEN_generator_lambda_
+expr_unsupported.md` (also relevant here — `_iter_member_by_def_`'s
+`yield from sorted(cls._iter_member_by_value_(value), key=lambda m:
+m._sort_order_)` ALSO contains a lambda inside a generator, a second,
+independent reason this exact generator would be refused even if
+`cls`-access were supported) — both already flagged as feature-sized/
+high-risk and NOT to be re-attempted per this session's scope. NOT
+fixed; this file's OWN root build genuinely cannot succeed without a
+real "class-level access from a compiled generator coroutine" feature,
+which is out of scope here. The 4 OTHER `yield` sites the 2026-08-06
+entry below found eligible (lines 123, 1433 [`_iter_member_by_value_`
+itself, not this one — re-check needed], 1442, 1554) are unaffected;
+only these two `@classmethod` ones are refused.
+
+Separately, the `Signature`/`Parameter`-as-bare-C-identifier issue
+mentioned in the 2026-08-07 entry just below is now root-caused (a
+`typedef`-vs-callable-identifier collision in `_lower_MemberExpr`'s
+handling of `Parameter.ATTR`-shaped member access before `Parameter`'s
+own struct registration has happened) and PARTIALLY fixed — see
+`bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md`'s "Mechanism 4" section for the full writeup. This
+file's own `EnumType.__signature__` (the exact site quoted in that
+section) is the fix's motivating example, but this file's own ROOT
+build never reaches that code path at all — it fails earlier, on the
+`@classmethod`-generator refusal above, before GCC ever runs.
+
 ## Status (updated 2026-08-07)
 
 One more non-generator, unrelated error found and fixed in a
