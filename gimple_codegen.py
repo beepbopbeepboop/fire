@@ -7361,6 +7361,22 @@ class GimpleGen:
                             if vname not in inferred:
                                 inferred[vname] = []
                             inferred[vname].append(vtype)
+                elif isinstance(node, MultiAssignStmt):
+                    # `a = b = ... = expr` (chained assignment): every target
+                    # receives the SAME value/type (real Python chained-
+                    # assignment semantics), unlike AssignStmt's TupleExpr
+                    # unpack case above. Was entirely unhandled here — every
+                    # target of a chained assignment fell through to this
+                    # scan's int64_t default regardless of the RHS's real
+                    # type. See bugs/hard/CODEGEN_multi_assign_local_var_
+                    # type_not_inferred.md.
+                    vtype = self._quick_type(node.value)
+                    for target in node.targets:
+                        if isinstance(target, IdentExpr):
+                            vname = target.name
+                            if vname not in inferred:
+                                inferred[vname] = []
+                            inferred[vname].append(vtype)
                 elif isinstance(node, IfStmt):
                     collect_assigned_types(node.then_body)
                     if node.else_body:
@@ -18105,6 +18121,63 @@ class GimpleGen:
         for target in node.targets:
             if isinstance(target, IdentExpr):
                 tname = target.name
+                # A chained assignment's IdentExpr target(s) can be a real
+                # GLOBAL exactly like _gen_stmt_AssignStmt's single-target
+                # case (either via an explicit `global x` inside a real
+                # function, or as a genuine module-level/script statement
+                # during _gen_toplevel) — this loop used to treat EVERY
+                # IdentExpr target as a plain local unconditionally,
+                # regardless of whether Phase 1.7/the global-declaration
+                # scan already knows it's a real module global. That was
+                # silently "safe" only by accident, back when a chained-
+                # assignment-only global was invisible to those scans too
+                # (so nothing else expected it to be a global either) —
+                # now that both scans recognize such globals (see
+                # bugs/hard/CODEGEN_multi_assign_local_var_type_not_
+                # inferred.md), skipping this check meant a global boxed
+                # as int64_t at the C level (e.g. a MojoDict*/MojoList*
+                # global not in _dispatch_names) got its real pointer
+                # value written into a plain LOCAL variable declared
+                # straight as the semantic pointer type instead of the
+                # struct field's actual boxed-int64_t C type — "assignment
+                # to 'int64_t' from 'MojoDict *' makes integer from
+                # pointer without a cast" at the field's OTHER (correctly-
+                # routed) write/read sites, or a value invisible to any
+                # other function reading the same name as a global.
+                # Mirrors _gen_stmt_AssignStmt's own two global-write
+                # branches exactly (same field-ref construction, same
+                # _global_c_decl_types coercion, same dict/list/actual-type
+                # propagation), falling back to the ordinary local-variable
+                # path below only when neither applies.
+                if tname in self._func_declared_globals and tname in self._global_var_types:
+                    global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
+                    safe_module = _c_field_name(global_module) if global_module else "root"
+                    field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
+                    gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
+                    self._safe_coerce_emit(vtype, gtype, v, field_ref)
+                    if vtype == 'MojoDict *':
+                        if v in self._dict_val_types:
+                            self._dict_val_types[tname] = self._dict_val_types[v]
+                    elif vtype == 'MojoList *':
+                        if v in self._elem_types:
+                            self._elem_types[tname] = self._elem_types[v]
+                    continue
+                if self._in_toplevel_gen and tname in self._global_var_types:
+                    safe_module = _c_field_name(self._current_module_ctx or "root")
+                    field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
+                    gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
+                    self._safe_coerce_emit(vtype, gtype, v, field_ref)
+                    if vtype == 'MojoDict *':
+                        if v in self._dict_val_types:
+                            self._dict_val_types[tname] = self._dict_val_types[v]
+                    elif vtype == 'MojoList *':
+                        if v in self._elem_types:
+                            self._elem_types[tname] = self._elem_types[v]
+                    if vtype.endswith(' *') and v in self._actual_types:
+                        self._actual_types[tname] = self._actual_types[v]
+                    elif v in self._actual_types:
+                        self._actual_types[tname] = self._actual_types[v]
+                    continue
                 if tname not in self.var_types:
                     self._declare_var(tname, vtype)
                 dst = self.var_types[tname]
@@ -30400,6 +30473,68 @@ class GimpleGen:
         # `_merge_struct_inheritance`) keeps working exactly as before.
         # See bugs/CODEGEN_generator_function_Lib_weakref.md.
         _phase17_own_ids = set(id(s) for s in _phase17_own_stmts)
+
+        def _phase17_infer_global_type(_gname, _value):
+            """Infer & record a global's C type (self._global_var_types,
+            plus element type for list/tuple literals) from its assigned
+            RHS value. Factored out of the AssignStmt branch below so
+            MultiAssignStmt (`a = b = expr`) can share the identical
+            inference logic for every one of its targets — real Python
+            chained-assignment semantics: all targets receive the SAME
+            value, so they must all receive the SAME inferred type. Before
+            this, MultiAssignStmt was entirely invisible to this pre-scan,
+            so every chained-assignment global target fell through to
+            whatever default 'not seen at all' implies (int64_t, via the
+            unconditional "Globals are stored at C level as int64_t"
+            fallback), even for an obviously-pointer-typed RHS. See
+            bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
+            (that doc covers the LOCAL-variable analogue of this same
+            gap; this is the GLOBAL/module-scope sibling)."""
+            if isinstance(_value, DictExpr):
+                self._global_var_types[_gname] = 'MojoDict *'
+            elif isinstance(_value, (ListExpr, TupleExpr)):
+                self._global_var_types[_gname] = 'MojoList *'
+                if _value.elements:
+                    _elt = self._quick_type(_value.elements[0])
+                    for _e in _value.elements[1:]:
+                        _elt = TypeLattice.join(_elt, self._quick_type(_e))
+                    self._elem_types[_gname] = _elt
+            elif isinstance(_value, SetExpr):
+                self._global_var_types[_gname] = 'MojoSet *'
+            elif isinstance(_value, (IntLiteral, BoolLiteral)):
+                self._global_var_types[_gname] = 'int'
+            elif isinstance(_value, StringLiteral):
+                self._global_var_types[_gname] = 'char *'
+            elif isinstance(_value, CallExpr):
+                if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
+                    struct_name = _value.func.name
+                    self._global_var_types[_gname] = f"{struct_name} *"
+                elif isinstance(_value.func, IdentExpr):
+                    ret = self.func_return_types.get(_value.func.name, '')
+                    if ret.endswith(' *'):
+                        self._global_var_types[_gname] = ret
+                    elif ret == 'char *':
+                        self._global_var_types[_gname] = 'char *'
+                    else:
+                        self._global_var_types[_gname] = 'int64_t'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member in ('read', 'readline')
+                        and not _value.args):
+                    self._global_var_types[_gname] = 'char *'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member == 'readlines'):
+                    self._global_var_types[_gname] = 'MojoList *'
+                else:
+                    self._global_var_types[_gname] = 'int64_t'
+            else:
+                qt = self._quick_type(_value) or 'int64_t'
+                if qt.endswith(' *'):
+                    self._global_var_types[_gname] = qt
+                elif qt == '_Bool':
+                    self._global_var_types[_gname] = 'int'
+                else:
+                    self._global_var_types[_gname] = 'int64_t'
+
         for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
@@ -30423,92 +30558,28 @@ class GimpleGen:
                 _pre_declared_globals.add(_gname)
                 if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
                     self._global_to_module[_gname] = _phase17_mod
-                if isinstance(_scan_stmt.value, DictExpr):
-                    self._global_var_types[_gname] = 'MojoDict *'
-                elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
-                    self._global_var_types[_gname] = 'MojoList *'
-                    # Record the element type too (_quick_type's own
-                    # SubscriptExpr case reads it from here) -- without
-                    # this, a LATER global initialized by indexing THIS
-                    # one (`path_separators = ['/']` then `path_sep =
-                    # path_separators[0]`) always fell through to
-                    # _quick_type's int64_t default, since only the
-                    # list's OWN type was ever recorded here, never what
-                    # it contains. `path_sep` then got declared int64_t
-                    # while every value ever stored in it was a real
-                    # char*, and `path_sep.join(...)` inside any function
-                    # compiled against that global's declared type
-                    # produced a hard "assignment to int64_t from char*"
-                    # mismatch (found via Lib/importlib/_bootstrap_
-                    # external.py's identical real-world shape).
-                    if _scan_stmt.value.elements:
-                        _elt = self._quick_type(_scan_stmt.value.elements[0])
-                        for _e in _scan_stmt.value.elements[1:]:
-                            _elt = TypeLattice.join(_elt, self._quick_type(_e))
-                        self._elem_types[_gname] = _elt
-                elif isinstance(_scan_stmt.value, SetExpr):
-                    self._global_var_types[_gname] = 'MojoSet *'
-                elif isinstance(_scan_stmt.value, (IntLiteral, BoolLiteral)):
-                    self._global_var_types[_gname] = 'int'
-                elif isinstance(_scan_stmt.value, StringLiteral):
-                    self._global_var_types[_gname] = 'char *'
-                elif isinstance(_scan_stmt.value, CallExpr):
-                    if isinstance(_scan_stmt.value.func, IdentExpr) and _scan_stmt.value.func.name in self.struct_field_types:
-                        struct_name = _scan_stmt.value.func.name
-                        self._global_var_types[_gname] = f"{struct_name} *"
-                    elif isinstance(_scan_stmt.value.func, IdentExpr):
-                        ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
-                        if ret.endswith(' *'):
-                            self._global_var_types[_gname] = ret
-                        elif ret == 'char *':
-                            self._global_var_types[_gname] = 'char *'
-                        else:
-                            self._global_var_types[_gname] = 'int64_t'
-                    elif (isinstance(_scan_stmt.value.func, MemberExpr)
-                            and _scan_stmt.value.func.member in ('read', 'readline')
-                            and not _scan_stmt.value.args):
-                        # Same gap as _quick_type's: a MemberExpr call func
-                        # (anything but the IdentExpr case above) always fell
-                        # to the int64_t default, so `x = f.read()` promoted
-                        # to a global (see the surrounding pre-scan's
-                        # docstring) got the wrong C type — a real char*
-                        # pointer stored in a declared-int64_t global. Real
-                        # bug found via mojo.py's own
-                        # `with open(input_file) as f: src = f.read()`.
-                        self._global_var_types[_gname] = 'char *'
-                    elif (isinstance(_scan_stmt.value.func, MemberExpr)
-                            and _scan_stmt.value.func.member == 'readlines'):
-                        self._global_var_types[_gname] = 'MojoList *'
-                    else:
-                        self._global_var_types[_gname] = 'int64_t'
-                else:
-                    qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                    # A boolean-valued global (e.g. `_IS_DARWIN = platform.
-                    # system() == 'Darwin'`) must be recorded the SAME way
-                    # Phase 2b's struct-field emission (below, "elif qt ==
-                    # '_Bool': ... declare as `int`") declares it — as `int`,
-                    # not `_Bool` — or every READ of it inside a function
-                    # body compiled during Phase 2a (which happens BEFORE
-                    # Phase 2b runs and downgrades `_global_var_types` a
-                    # second time, too late to matter for already-compiled
-                    # bodies) declares its own local temp as `_Bool` while
-                    # loading from a field GCC sees declared `int`, tripping
-                    # `-fgimple`'s "non-trivial conversion in 'component_ref'"
-                    # (GIMPLE requires the temp's declared type to exactly
-                    # match the source lvalue's type, no implicit int/_Bool
-                    # coercion). Previously undetected: this only manifests
-                    # for a bool global that's genuinely READ from within ITS
-                    # OWN module's function bodies, and no such module ever
-                    # reached this compiler's do_imports=True closure before
-                    # BUG-2026-049's dotted-import fix (jit/arm64.py's own
-                    # `_IS_DARWIN`, reached via mojo.py's `import jit.arm64`
-                    # once dotted imports actually resolve).
-                    if qt.endswith(' *'):
-                        self._global_var_types[_gname] = qt
-                    elif qt == '_Bool':
-                        self._global_var_types[_gname] = 'int'
-                    else:
-                        self._global_var_types[_gname] = 'int64_t'
+                _phase17_infer_global_type(_gname, _scan_stmt.value)
+            elif isinstance(_scan_stmt, MultiAssignStmt):
+                # `a = b = ... = expr` at module scope (e.g. `Modules/
+                # getpath.py`'s `executable_dir = real_executable_dir =
+                # value.strip()` and `prefix = exec_prefix = ''`) was
+                # entirely invisible to this pre-scan — only plain
+                # single-target AssignStmt was ever matched above — so
+                # every target of a module-level chained assignment fell
+                # through to the int64_t default regardless of the RHS's
+                # real type. Mirrors the AssignStmt branch: every target
+                # gets the SAME inferred type, since real Python chained
+                # assignment binds every target to the identical value.
+                for _tgt in _scan_stmt.targets:
+                    if not isinstance(_tgt, IdentExpr):
+                        continue
+                    _gname = _tgt.name
+                    if _gname in _pre_declared_globals:
+                        continue
+                    _pre_declared_globals.add(_gname)
+                    if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                        self._global_to_module[_gname] = _phase17_mod
+                    _phase17_infer_global_type(_gname, _scan_stmt.value)
             elif isinstance(_scan_stmt, VarDecl) and _scan_stmt.name not in _pre_declared_globals:
                 _pre_declared_globals.add(_scan_stmt.name)
                 if _scan_stmt.name not in self._global_to_module:
@@ -31662,6 +31733,110 @@ class GimpleGen:
         # Same reasoning as `all_scan` just above: only this module's own
         # top-level `stmts`, not the whole-tree `imported_stmts` superset.
         all_global_scan = stmts
+
+        def _gscan_declare_global(gname, value):
+            """Infer a global's C type from its assigned RHS `value` and
+            append the literal struct-field declaration text to
+            `global_decls` (this is the pass that actually determines
+            which fields exist on the module's `_<mod>_toplev` struct —
+            see `_module_globals` below, built from `_declared_globals`).
+            Factored out of the AssignStmt branch so MultiAssignStmt
+            (`a = b = expr`) can share the identical logic for every one
+            of its targets — mirrors the identical refactor done for the
+            separate Phase 1.7 pre-scan above (`_phase17_infer_global_type`)
+            for the exact same reason: a chained assignment was invisible
+            to THIS scan too, so a global only ever assigned via `a = b =
+            expr` (e.g. `Lib/codecs.py`'s `BOM_LE = BOM_UTF16_LE = ...`)
+            never got a struct field here at all, even after Phase 1.7
+            (elsewhere) learned about it — the two scans must agree on
+            which names are real struct fields, or code that resolves a
+            name via Phase 1.7's `_global_var_types`/`_global_to_module`
+            emits `_<mod>_toplev.NAME` for a field this scan never
+            declared, i.e. 'struct _X_toplev has no member named NAME'."""
+            if isinstance(value, DictExpr):
+                if gname in _dispatch_names:
+                    global_decls.append(f"MojoDict * {gname};")
+                    self._global_c_decl_types[gname] = 'MojoDict *'
+                else:
+                    global_decls.append(f"int64_t {gname};  /* MojoDict * */")
+                    self._global_c_decl_types[gname] = 'int64_t'
+                self._global_var_types[gname] = 'MojoDict *'
+            elif isinstance(value, (ListExpr, TupleExpr)):
+                if gname in _dispatch_names:
+                    global_decls.append(f"MojoList * {gname};")
+                    self._global_c_decl_types[gname] = 'MojoList *'
+                else:
+                    global_decls.append(f"int64_t {gname};  /* MojoList * */")
+                    self._global_c_decl_types[gname] = 'int64_t'
+                self._global_var_types[gname] = 'MojoList *'
+            elif isinstance(value, SetExpr):
+                if gname in _dispatch_names:
+                    global_decls.append(f"MojoSet * {gname};")
+                    self._global_c_decl_types[gname] = 'MojoSet *'
+                else:
+                    global_decls.append(f"int64_t {gname};  /* MojoSet * */")
+                    self._global_c_decl_types[gname] = 'int64_t'
+                self._global_var_types[gname] = 'MojoSet *'
+            elif isinstance(value, (IntLiteral, BoolLiteral)):
+                global_decls.append(f"int {gname};")
+                self._global_var_types[gname] = 'int'
+                self._global_c_decl_types[gname] = 'int'
+            elif isinstance(value, StringLiteral):
+                global_decls.append(f"char * {gname};")
+                self._global_var_types[gname] = 'char *'
+                self._global_c_decl_types[gname] = 'char *'
+            elif isinstance(value, CallExpr):
+                if isinstance(value.func, IdentExpr) and value.func.name in self.struct_field_types:
+                    struct_name = value.func.name
+                    global_decls.append(f"{struct_name} * {gname};")
+                    self._global_var_types[gname] = f"{struct_name} *"
+                    self._global_c_decl_types[gname] = f"{struct_name} *"
+                elif isinstance(value.func, IdentExpr):
+                    ret = self.func_return_types.get(value.func.name, '')
+                    if ret.endswith(' *'):
+                        global_decls.append(f"{ret} {gname};")
+                        self._global_var_types[gname] = ret
+                        self._global_c_decl_types[gname] = ret
+                    elif ret == 'char *':
+                        global_decls.append(f"char * {gname};")
+                        self._global_var_types[gname] = 'char *'
+                        self._global_c_decl_types[gname] = 'char *'
+                    else:
+                        global_decls.append(f"int64_t {gname};")
+                        self._global_var_types[gname] = 'int64_t'
+                        self._global_c_decl_types[gname] = 'int64_t'
+                elif (isinstance(value.func, MemberExpr)
+                        and value.func.member in ('read', 'readline')
+                        and not value.args):
+                    global_decls.append(f"char * {gname};")
+                    self._global_var_types[gname] = 'char *'
+                    self._global_c_decl_types[gname] = 'char *'
+                elif (isinstance(value.func, MemberExpr)
+                        and value.func.member == 'readlines'):
+                    global_decls.append(f"int64_t {gname};  /* MojoList * */")
+                    self._global_var_types[gname] = 'MojoList *'
+                    self._global_c_decl_types[gname] = 'int64_t'
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
+            else:
+                qt = self._quick_type(value) or 'int64_t'
+                if qt.endswith(' *') or qt == 'char *':
+                    global_decls.append(f"{qt} {gname};")
+                    self._global_var_types[gname] = qt
+                    self._global_c_decl_types[gname] = (
+                        'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                        else qt)
+                elif qt == '_Bool':
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
+
         for stmt in _collect_global_stmts(all_global_scan):
             if isinstance(stmt, VarDecl):
                 # Module-level `var NAME: T = value` — a real global, not just
@@ -31707,121 +31882,25 @@ class GimpleGen:
                 if gname in _declared_globals:
                     continue
                 _declared_globals.add(gname)
-                if isinstance(stmt.value, DictExpr):
-                    if gname in _dispatch_names:
-                        global_decls.append(f"MojoDict * {gname};")
-                        self._global_c_decl_types[gname] = 'MojoDict *'
-                    else:
-                        global_decls.append(f"int64_t {gname};  /* MojoDict * */")
-                        self._global_c_decl_types[gname] = 'int64_t'
-                    self._global_var_types[gname] = 'MojoDict *'
-                elif isinstance(stmt.value, (ListExpr, TupleExpr)):
-                    if gname in _dispatch_names:
-                        global_decls.append(f"MojoList * {gname};")
-                        self._global_c_decl_types[gname] = 'MojoList *'
-                    else:
-                        global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                        self._global_c_decl_types[gname] = 'int64_t'
-                    self._global_var_types[gname] = 'MojoList *'
-                elif isinstance(stmt.value, SetExpr):
-                    if gname in _dispatch_names:
-                        global_decls.append(f"MojoSet * {gname};")
-                        self._global_c_decl_types[gname] = 'MojoSet *'
-                    else:
-                        global_decls.append(f"int64_t {gname};  /* MojoSet * */")
-                        self._global_c_decl_types[gname] = 'int64_t'
-                    self._global_var_types[gname] = 'MojoSet *'
-                elif isinstance(stmt.value, (IntLiteral, BoolLiteral)):
-                    global_decls.append(f"int {gname};")
-                    self._global_var_types[gname] = 'int'
-                    self._global_c_decl_types[gname] = 'int'
-                elif isinstance(stmt.value, StringLiteral):
-                    global_decls.append(f"char * {gname};")
-                    self._global_var_types[gname] = 'char *'
-                    self._global_c_decl_types[gname] = 'char *'
-                elif isinstance(stmt.value, CallExpr):
-                    if isinstance(stmt.value.func, IdentExpr) and stmt.value.func.name in self.struct_field_types:
-                        struct_name = stmt.value.func.name
-                        global_decls.append(f"{struct_name} * {gname};")
-                        self._global_var_types[gname] = f"{struct_name} *"
-                        self._global_c_decl_types[gname] = f"{struct_name} *"
-                    elif isinstance(stmt.value.func, IdentExpr):
-                        ret = self.func_return_types.get(stmt.value.func.name, '')
-                        if ret.endswith(' *'):
-                            global_decls.append(f"{ret} {gname};")
-                            self._global_var_types[gname] = ret
-                            self._global_c_decl_types[gname] = ret
-                        elif ret == 'char *':
-                            global_decls.append(f"char * {gname};")
-                            self._global_var_types[gname] = 'char *'
-                            self._global_c_decl_types[gname] = 'char *'
-                        else:
-                            global_decls.append(f"int64_t {gname};")
-                            self._global_var_types[gname] = 'int64_t'
-                            self._global_c_decl_types[gname] = 'int64_t'
-                    elif (isinstance(stmt.value.func, MemberExpr)
-                            and stmt.value.func.member in ('read', 'readline')
-                            and not stmt.value.args):
-                        # Same MemberExpr-call blind spot as the Phase 1.7
-                        # pre-scan above (and _quick_type): `x = f.read()`
-                        # always fell to the int64_t default here too — this
-                        # is the pass that actually emits the C declaration
-                        # text, so this one drove the real (wrong)
-                        # `int64_t src;` field. Real bug found via mojo.py's
-                        # own `with open(input_file) as f: src = f.read()`.
-                        global_decls.append(f"char * {gname};")
-                        self._global_var_types[gname] = 'char *'
-                        self._global_c_decl_types[gname] = 'char *'
-                    elif (isinstance(stmt.value.func, MemberExpr)
-                            and stmt.value.func.member == 'readlines'):
-                        global_decls.append(f"int64_t {gname};  /* MojoList * */")
-                        self._global_var_types[gname] = 'MojoList *'
-                        self._global_c_decl_types[gname] = 'int64_t'
-                    else:
-                        global_decls.append(f"int64_t {gname};")
-                        self._global_var_types[gname] = 'int64_t'
-                        self._global_c_decl_types[gname] = 'int64_t'
-                else:
-                    qt = self._quick_type(stmt.value) or 'int64_t'
-                    if qt.endswith(' *') or qt == 'char *':
-                        global_decls.append(f"{qt} {gname};")
-                        self._global_var_types[gname] = qt
-                        # MojoDict*/MojoList*/MojoSet* globals are stored at
-                        # C level as BOXED int64_t everywhere else in this
-                        # codegen (see the "Pre-populate _global_c_decl_
-                        # types" pass a few hundred lines up, and every
-                        # global read/write site's own `gtype = self.
-                        # _global_c_decl_types.get(...)` lookup) -- char*
-                        # and other real-pointer globals are the only ones
-                        # that keep their raw pointer C type. This branch
-                        # used to set `_global_c_decl_types[gname] = qt`
-                        # (the RAW guessed pointer type) unconditionally,
-                        # clobbering the correct boxed 'int64_t' the
-                        # earlier pass had already set for exactly this
-                        # container-type case -- the struct field then got
-                        # declared e.g. `MojoList * __all__;` while every
-                        # assignment to it (via _gen_stmt_AssignStmt's own
-                        # _global_c_decl_types lookup) coerced the RHS DOWN
-                        # to int64_t first, an explicit int64_t-to-pointer
-                        # assignment with no cast — "assignment to
-                        # 'MojoList *' from 'int64_t' makes pointer from
-                        # integer without a cast". Found via Lib/__future__.py's
-                        # `__all__ = ["all_feature_names"] + all_feature_names`
-                        # (a list-concat BinaryOp `_quick_type` correctly
-                        # guesses as MojoList*, unlike a bare list/dict/set
-                        # LITERAL, which the OTHER branches above already
-                        # handled with the right boxing).
-                        self._global_c_decl_types[gname] = (
-                            'int64_t' if qt in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                            else qt)
-                    elif qt == '_Bool':
-                        global_decls.append(f"int {gname};")
-                        self._global_var_types[gname] = 'int'
-                        self._global_c_decl_types[gname] = 'int'
-                    else:
-                        global_decls.append(f"int64_t {gname};")
-                        self._global_var_types[gname] = 'int64_t'
-                        self._global_c_decl_types[gname] = 'int64_t'
+                _gscan_declare_global(gname, stmt.value)
+            elif isinstance(stmt, MultiAssignStmt):
+                # `a = b = ... = expr` at module scope (e.g. `Lib/codecs.py`'s
+                # `BOM_LE = BOM_UTF16_LE = b'\xff\xfe'`) was invisible to
+                # this scan — only plain single-target AssignStmt was ever
+                # matched above — so a global ONLY ever assigned via a
+                # chained assignment never got a struct field declared for
+                # it at all. See `_gscan_declare_global`'s own docstring
+                # for why this must stay in sync with the separate Phase
+                # 1.7 pre-scan's identical fix. Every target gets the same
+                # inferred type (real Python chained-assignment semantics).
+                for _tgt in stmt.targets:
+                    if not isinstance(_tgt, IdentExpr):
+                        continue
+                    gname = _tgt.name
+                    if gname in _declared_globals:
+                        continue
+                    _declared_globals.add(gname)
+                    _gscan_declare_global(gname, stmt.value)
             elif isinstance(stmt, VarDecl) and stmt.name not in _declared_globals:
                 _declared_globals.add(stmt.name)
                 ctype = self._resolve_type(stmt.type_ann) if stmt.type_ann else 'int64_t'
@@ -31897,6 +31976,18 @@ class GimpleGen:
                 init_code = '0'
                 for stmt in _collect_global_stmts(all_global_scan):
                     if isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr) and stmt.target.name == gname:
+                        init_code = _extract_init_expr(stmt.value)
+                        break
+                    elif (isinstance(stmt, MultiAssignStmt)
+                            and any(isinstance(_t, IdentExpr) and _t.name == gname for _t in stmt.targets)):
+                        # Same chained-assignment blind spot as the two
+                        # scans above (`_gscan_declare_global`/Phase 1.7) —
+                        # without this, a global ONLY ever assigned via
+                        # `a = b = expr` always got a '0' initializer
+                        # (harmless for most types since _gen_toplevel's
+                        # own runtime assignment sets the real value right
+                        # after, but inconsistent with the plain-AssignStmt
+                        # case just above, which extracts the real literal).
                         init_code = _extract_init_expr(stmt.value)
                         break
                     elif isinstance(stmt, ImportStmt) and gname in (
