@@ -16166,12 +16166,36 @@ class GimpleGen:
         args = gen0.iterable.args
         dynamic_step = False
         if len(args) == 1:
-            start_v, step_v, cond_op = '0', '1', '<'
+            # Explicitly-typed int64_t TEMPS, not bare '0'/'1' string
+            # literals -- see the increment-temp comment further down for
+            # the exact failure mode this class of bug produces. A bare
+            # '0'/'1' defaults to C `int` under strict -fgimple (which has
+            # no implicit int->int64_t widening across statements), so
+            # `{target} = 0;` (target declared int64_t two lines above)
+            # and the increment `{target} + 1` both produced "non-trivial
+            # conversion in 'integer_cst'"/"type mismatch in binary
+            # expression" for EVERY 1-arg/2-arg range()-based comprehension
+            # (`[i * 4 for i in range(n)]`) -- not just the increment-temp
+            # DECLARATION shape the prior fix (see below) addressed. Using
+            # `self._new_val(...)` (a real pre-materialized temp, matching
+            # this same function's own `one64 = self._new_val('int64_t',
+            # "(int64_t)1")` pattern a few lines down) rather than simply
+            # inlining the `(int64_t)` cast as a string is required too --
+            # strict GIMPLE rejects a cast expression appearing directly as
+            # an operand of a binary op ("expected expression before '('
+            # token"); the cast must be its own prior assignment, with only
+            # the resulting bare temp name used in the binary expression.
+            # Found via Tools/cases_generator/cwriter.py's `CWriter.
+            # __init__`: `self.indents = [i * 4 for i in range(indent + 1)]`.
+            start_v = self._new_val('int64_t', '(int64_t)0')
+            step_v = self._new_val('int64_t', '(int64_t)1')
+            cond_op = '<'
             _, stop_v = self.lower_expr(args[0])
         elif len(args) == 2:
             _, start_v = self.lower_expr(args[0])
             _, stop_v  = self.lower_expr(args[1])
-            step_v, cond_op = '1', '<'
+            step_v = self._new_val('int64_t', '(int64_t)1')
+            cond_op = '<'
         elif len(args) == 3:
             _, start_v = self.lower_expr(args[0])
             _, stop_v  = self.lower_expr(args[1])

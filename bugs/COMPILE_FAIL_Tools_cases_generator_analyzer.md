@@ -4,7 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (2026-08-07)
+
+Re-ran after this session's `_compr_range_loop` fix (see `bugs/
+COMPILE_FAIL_Tools_cases_generator_cwriter.md` for the fix itself) — the
+2026-08-06 error below is GONE, but this file (via the same
+transitively-imported `cwriter.py`) now hits a different, deeper,
+unfixed bug in that same sibling file: `cwriter.py:35:3: internal
+compiler error: in build2, at tree.cc:5204`. Still failing overall; see
+`cwriter.py`'s own doc for the full remaining-issue breakdown (a real
+GCC ICE plus the still-excluded task #143 field-typing gap). Not
+independently investigated further here.
+
+## Status (updated 2026-08-06, historical)
 
 Re-ran; current error is entirely in a transitively-imported sibling,
 not this file's own code:

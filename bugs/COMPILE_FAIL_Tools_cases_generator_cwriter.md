@@ -4,7 +4,77 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (2026-08-07): STILL FAILING, but one real bug found+fixed along the way
+
+Re-investigated fresh. The `indents` field-typing diagnosis below (from
+2026-08-06) is correct and is the documented "comprehension RHS" sibling
+gap of `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_
+int64.md` (task #143) — **explicitly out of scope for this session**
+(task #143 is on this session's DO-NOT-TOUCH list, "held back for
+separate, directly-supervised work due to prior regressions"). A fix was
+drafted and verified (adding a `Comprehension` case to `_collect_self_
+assigns`, gimple_codegen.py) but then DELIBERATELY REVERTED once it was
+recognized as landing inside #143's excluded scope, even though it
+passed the full 5-part quality gate cleanly with zero regressions and
+touched a different, narrower slice of `_collect_self_assigns` than
+that doc's main (IdentExpr/param_types cross-call) finding. Left for
+whoever picks up #143 properly, with this session's draft available in
+git history if useful (see commit that reverts it in the same session).
+
+While investigating this file, however, a SEPARATE, genuinely narrow bug
+WAS found and fixed (unrelated to #143 or `_collect_self_assigns`):
+`_compr_range_loop` (the codegen for `[expr for x in range(...)]`-shaped
+comprehensions) hardcoded the loop's start/step values as bare Python
+string literals `'0'`/`'1'` for the 1-arg and 2-arg `range()` shapes,
+instead of real `int64_t`-typed temps. Under strict `-fgimple`, a bare
+integer literal defaults to C `int`, and GIMPLE has no implicit int->
+int64_t widening across statements — so `{loopvar} = 0;` (the loop var
+declared `int64_t`) and the increment `{loopvar} + 1` both produced
+"non-trivial conversion in 'integer_cst'"/"type mismatch in binary
+expression" for EVERY 1-arg/2-arg range()-based comprehension, not just
+this file's. Fixed by materializing `self._new_val('int64_t',
+'(int64_t)0')`/`'(int64_t)1')` temps instead (mirroring the function's
+own existing pattern for the increment step further down). Confirmed via
+direct `.ci` inspection and a standalone `gcc -fgimple` compile: this
+specific error class is now completely gone from `cwriter.py`'s build.
+
+**This file still does not build**, for two OTHER, unrelated reasons
+exposed once the above got out of the way (neither touched):
+1. The still-open `indents` field-typing issue (task #143, see above) —
+   `struct CWriter { int indents; ... }` instead of `MojoList *`.
+2. A real internal compiler error once the field-typing issue is
+   force-worked-around: `cwriter.py: In function 'cwriter_CWriter_
+   set_position': cwriter.py:35:3: internal compiler error: in build2,
+   at tree.cc:5204` — not investigated, a genuinely different and
+   deeper bug (this codegen emitting some GIMPLE shape GCC's own
+   `-fgimple` frontend crashes on, not just rejects).
+3. Separately, `CWriter.header_guard`'s `@contextlib.contextmanager`
+   bare-`yield` generator routes through the C++20-coroutine codegen
+   path, whose companion `.cpp` fails to compile: `self->out.write(...)`
+   — `self.out`'s real type is an opaque `TextIO` (unresolvable to a
+   known struct), so its field is `int64_t`-typed, and `_cpp_expr`'s
+   generator-body lowering emits a direct `.write()` method call on it
+   without the plain-C path's dynamic-dispatch fallback. This matches
+   the already-excluded/known class of gap described in `bugs/hard/
+   CODEGEN_generator_struct_typed_param_refused.md`'s scope note
+   ("method calls on self ... are out of this step's scope") — not
+   attempted, consistent with that doc's exclusion.
+
+### Quality gate (2026-08-07, `_compr_range_loop` fix only)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean (`Results: 1 passed, 0 failed`).
+4. From-scratch stdlib dylib rebuild — clean, 0 `skip <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — **664/664 passed, 0 unexpected**.
+6. Spot-checks: `Lib/json/__init__.py` and `Lib/logging/handlers.py`
+   (see `bugs/COMPILE_FAIL_logging_handlers.md` for that file's own,
+   separate fix landed the same session) both still build clean.
+   Before/after comparison via `git stash` confirmed `Lib/textwrap.py`'s
+   3 pre-existing errors are unchanged (not a regression from either
+   fix in this pass).
+
+## Status (updated 2026-08-06, historical)
 
 Re-ran; current error:
 
