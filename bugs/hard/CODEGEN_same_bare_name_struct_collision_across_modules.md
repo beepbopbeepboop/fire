@@ -1,6 +1,76 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
-## Status
+## Status (reassessed 2026-08-08 — deprioritized, not fixed)
+
+Re-verified both originally-confirmed real-world triggers against current
+master using the actual, default, user-facing command
+(`python3 mojo.py build <file>.py`):
+
+- `Lib/tkinter/filedialog.py` — **builds clean**, no struct-collision
+  errors (runs, hits an unrelated separate bug at runtime —
+  `AttributeError: curdir` from an unresolved-import stub, out of scope).
+- `Lib/tkinter/simpledialog.py` — **builds clean** as well.
+
+Neither reproduces via `mojo.py build` anymore. Root cause: `mojo.py
+build` now goes through `driver.py`'s module-cache "link mode" FIRST
+(`driver.compile_program`, see its own docstring: "compiles the client
+in link mode (extern decls)... content-addresses the whole program...
+If the link path can't produce a binary we return None so the caller
+can fall back to the inline builder"), only falling back to the
+`do_imports=True` whole-program inline builder
+(`gimple_codegen.compile_to_gimple_cached`, `mojo.py build_executable`)
+on failure. Link mode compiles EACH imported module as its OWN separate
+translation unit/dylib — `tkinter/dialog.py`'s `Dialog` and
+`tkinter/commondialog.py`'s unrelated `Dialog` are never in the same
+`struct_field_types`/`_struct_name_owner` dict at once, so the
+collision this doc describes is structurally impossible on that path.
+`compile_stdlib.py` (the quality-gate corpus tool) uses the same
+per-module compile primitive (`build_stdlib_dylib.compile_module_to_c_
+cached`), which is why its 664/664 clean-compile corpus has never
+caught this bug either — same reason, independently confirmed.
+
+**The underlying gap is still real and confirmed live** — a fresh
+minimal 2-file repro
+(`class Dialog: def __init__(self, widgetName): self.widgetName = ...`
+in one file, an unrelated `class Dialog: def __init__(self, result):
+self.result = ...` in a sibling file, both constructed from a third
+file) invoked directly against the vulnerable entry point
+(`gimple_codegen.compile_to_gimple_cached(src, do_imports=True, ...)`,
+bypassing `driver.py` entirely) reproduces the exact documented
+mechanism: the generated C has ONE `struct Dialog { int64_t
+widgetName; }` typedef, and BOTH classes' `__init__` methods get
+emitted under the SAME qualified C symbol name
+(`mod_a_Dialog___init__`, even for the class that's really from
+`mod_b` — confirming `_struct_method_qualifier`/`_imported_struct_home`
+resolve to the WRONG home module for the "loser" struct, not just a
+missing-qualification gap), with the second one writing to `self->
+result` — a field that doesn't exist on the struct that won the
+bare-name race. This would fail with both a C redefinition error
+(same symbol name emitted twice) AND a "no member named 'result'"
+error, exactly matching this doc's originally-documented symptoms.
+
+Today, in practice, this inline `do_imports=True` entry point is only
+reached as `mojo.py build`'s degraded fallback (triggered when link
+mode itself fails for unrelated reasons — driver.py's own docstring:
+"we accept things break, but a program that can build still does") and
+by `--dump-full`. Since link mode is tried first and both originally-
+confirmed real-world instances succeed on it, this bug currently has
+**no known live, reachable instance** through any of this project's
+primary, supported entry points (`mojo.py build`, `compile_stdlib.py`,
+the stdlib dylib build). Given the fix this doc's own plan calls for
+touches genuinely foundational, shared struct-identity machinery
+(referenced by field access, method dispatch, reflection, construction,
+and forward-declaration emission — the doc's own "Risk" section already
+rates this moderate-to-high, and it has been deliberately deferred
+twice before under the same reasoning), attempting the general fix now
+— for a bug with zero live reachable instances on any primary path —
+is not the right risk/reward trade. Deprioritized, not attempted.
+Revisit if: (a) a real-world file is found where link mode itself
+falls back to the inline builder AND that file also hits a genuine
+same-bare-name collision, or (b) `do_imports=True` becomes a primary
+(not fallback-only) path again for some other reason.
+
+## Original status (2026-08-06/07, historical)
 
 Unfixed. Concrete diagnosis + phased plan below (2026-08-06). Found while
 fixing bugs/COMPILE_FAIL_tkinter_filedialog.md's original symptom (now
