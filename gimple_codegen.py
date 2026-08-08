@@ -15156,6 +15156,45 @@ class GimpleGen:
         kwargs    = getattr(node, 'kwargs', []) or []
         kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
 
+        # Disambiguate a call to a `(*args, **kwargs)`-declared callee by
+        # the CALL SITE's own shape, not the callee's signature alone (see
+        # bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.
+        # md). _signature_ctypes types such a callee's `*args` as a plain
+        # concrete `MojoList *` (no packing) — correct for the spread-
+        # forwarding idiom (`f(*a, **k)`: the parser wraps each spread in
+        # UnaryOp(op='*'/'**', operand=...), and _lower_UnaryOp passes an
+        # already-packed MojoList*/MojoDict* through UNCHANGED, so
+        # `arg_pairs` already has the right shape and must be left alone)
+        # — but WRONG for an ordinary literal-argument call to the same
+        # shape (`CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)`, no
+        # spreads at all): the extra positional args would otherwise be
+        # coerced 1:1 against `*args`'s/`**kwargs`'s concrete param types
+        # instead of being packed, producing an arity mismatch or a silent
+        # type-confusion bug. Detect a real spread from the ORIGINAL AST
+        # args — a UnaryOp(op='*'/'**', ...) survives lowering as a
+        # same-shaped pass-through, so it can't be told apart from a real
+        # packed value after the fact. `_func_kwargs_slot` is only
+        # populated for genuine user free functions (gen_module's own
+        # FunctionDef registration pass), so this never fires for struct
+        # methods (a separate call-lowering path, out of scope here) or
+        # unresolved/imported names with no recorded signature.
+        _call_has_spread = any(isinstance(_a, UnaryOp) and _a.op in ('*', '**')
+                               for _a in node.args)
+        _kwslot_for_pack = self._func_kwargs_slot.get(fname)
+        if _kwslot_for_pack is None:
+            _kwslot_for_pack = self._func_kwargs_slot.get(fname_raw, -1)
+        if _kwslot_for_pack >= 0 and not _call_has_spread:
+            _n_fixed = max(0, _kwslot_for_pack - 1)
+            _fixed_pairs = arg_pairs[:_n_fixed]
+            _vararg_pairs = arg_pairs[_n_fixed:]
+            _lst = self._new_val('MojoList *', "mojo_list_new ()")
+            for _at, _av in _vararg_pairs:
+                _av = self._coerce_to_type(_at, 'int64_t', _av)
+                self._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+            arg_pairs = _fixed_pairs + [('MojoList *', _lst),
+                                        ('MojoDict *', self._pack_kwargs_dict(kwarg_dict))]
+            kwarg_dict = {}
+
         # Keyword argument padding for known functions
         if fname_raw == 'compile_to_gimple':
             if 'do_imports' in kwarg_dict: arg_pairs.append(kwarg_dict['do_imports'])

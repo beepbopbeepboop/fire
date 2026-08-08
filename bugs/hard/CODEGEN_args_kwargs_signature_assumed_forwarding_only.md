@@ -1,6 +1,51 @@
 # HARD BUG: a function declared `(*args, **kwargs)` assumes every call site uses spread syntax, breaking ordinary positional calls
 
-## Status
+## Status (FIXED 2026-08-08)
+
+Fixed at the CALL SITE, exactly as the "What a real fix needs" section
+below anticipated — `_signature_ctypes`'s callee-side typing was left
+untouched. In `_lower_call` (`gimple_codegen.py`, right after `arg_pairs`/
+`kwarg_dict` are built from `node.args`/`node.kwargs`, before the
+existing "too few args" padding block): detect whether the call's own
+`node.args` contains a real spread (`isinstance(a, UnaryOp) and a.op in
+('*', '**')` — the parser wraps `f(*a, **k)`'s arguments in exactly this
+shape, and `_lower_UnaryOp` already passes an already-packed
+`MojoList */MojoDict *` straight through unchanged for that case, so
+`arg_pairs` is already correctly shaped and must be left alone). If the
+callee is `(*args, **kwargs)`-shaped (`self._func_kwargs_slot.get(fname)`
+— an existing table, populated only for genuine free functions, so this
+never touches struct methods) AND the call site has no spread, pack
+every argument at/after the fixed named-parameter count into a real
+`MojoList *` (mirroring `_emit_call`'s existing sentinel-packing logic
+almost verbatim) and pack any literal keyword arguments into a
+`MojoDict *` via the already-existing `_pack_kwargs_dict` (reused, not
+reinvented — it already builds a correct empty dict when there are no
+literal kwargs).
+
+### Verification
+
+- Minimal repro (`make_thing(1, 2, 3, 4)` from this doc's own example)
+  compiles and runs, printing `3` (`len(argtypes)`), not an arity error.
+- Spread-forwarding idiom (`def wrapper(*args, **kwargs): return
+  inner(*args, **kwargs)`, called `wrapper(1, 2, 3, x=4, y=5)`) —
+  UNCHANGED/still correct, printing `5` (`len(a) + len(k)`), confirming
+  the existing, presumably well-exercised case wasn't regressed.
+- Boundary cases: `make_thing(1)` (zero varargs) → `0`; `make_thing(1, 2,
+  3)` (no literal kwargs) → `200`; `make_thing(1, 2, 3, x=9, y=10)`
+  (varargs AND literal kwargs together) → `202` — all correct.
+- `Lib/ctypes/__init__.py` (this doc's real-world trigger — `CFUNCTYPE`
+  called with 4 ordinary positional arguments) compiles clean.
+- Full 5-part gate, run in the doc's own recommended fail-fast order
+  (`compile_stdlib.py -j8` FIRST, given this exact call-lowering
+  machinery's documented history of two broad, reverted regressions —
+  `_tuplegetter` — from confident-looking changes earlier this session):
+  `compile_stdlib.py -j8` 664/664 (0 unexpected, unchanged from
+  baseline) — no regression, unlike the two prior reverted attempts in
+  this exact area. `test_gimple.py` 247/247, `test_module_cache.py`
+  76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+  0 skips.
+
+## Original status (2026-08-06, historical)
 
 Unfixed. Root-caused 2026-08-06 while investigating
 bugs/COMPILE_FAIL_ctypes___init__.md. This is a DELIBERATE, DOCUMENTED
