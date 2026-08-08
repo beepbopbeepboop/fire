@@ -9683,6 +9683,39 @@ class GimpleGen:
             ip = self._new_val('int64_t', f'(int64_t){rv}')
             rt = 'int64_t'; rv = ip
 
+        # A `char *` operand reaching a genuinely BITWISE operator (&, |, ^,
+        # <<, >>) is never a real Python string use — Python's str has no
+        # bitwise operators, so this can only be a mis-declared boxed scalar,
+        # not an actual string. This arises from the boxed dict/list runtime-
+        # dispatch tuple-unpack fallback (`_gen_for_iter`'s "boxed int64_t
+        # iterable, unknown container" branch): its dict-shaped sibling
+        # (`for k, v in <boxed>.items():`) and list-shaped sibling (`for a, b
+        # in <boxed list of (int, str) tuples>:`) unpack into the SAME
+        # source-level loop-variable names, and `_declare_var`'s documented
+        # first-decl-wins convention means whichever branch is emitted FIRST
+        # (always the dict branch, which types its key slot `char *`)
+        # permanently fixes the C-level declaration for BOTH branches — even
+        # when the list branch's real per-slot type is a genuine int64_t
+        # (`_safe_coerce_emit` then value-preservingly reinterpret-casts the
+        # int64_t into the shared `char *` variable, so the VALUE survives
+        # but the C TYPE is wrong at this use site). Coercing the char*
+        # operand back to int64_t here recovers a correctly-typed bitwise
+        # expression instead of gcc's hard "invalid operands to binary &
+        # (have int64_t and char *)". Real, in Lib/stat.py's filemode():
+        # `if mode & bit == bit:` where `bit`'s declaration is shared with a
+        # `for k, v in <boxed>.items()`-shaped sibling for-loop pattern
+        # earlier in the same runtime-dispatch fallback. Scoped strictly to
+        # bitwise operators (not '+'/'%'/'/' etc.) so every existing
+        # char*-string special case elsewhere in this method (concatenation,
+        # path-join, %-formatting) is completely unaffected.
+        if op in ('&', '|', '^', '<<', '>>'):
+            if lt == 'char *' and rt != 'char *':
+                lv = self._new_val('int64_t', f'(int64_t){lv}')
+                lt = 'int64_t'
+            if rt == 'char *' and lt != 'char *':
+                rv = self._new_val('int64_t', f'(int64_t){rv}')
+                rt = 'int64_t'
+
         c_op      = _BIN_OPS.get(op, op)
         res_type  = '_Bool' if op in _CMP_OPS else TypeLattice.join(lt, rt)
 
