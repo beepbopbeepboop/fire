@@ -2,6 +2,19 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
+## Status (updated 2026-08-07, Track B continuation session)
+
+Re-ran fresh: `error: cannot convert to a pointer type` (issue #2 below,
+`self.metadata['Name']`/`self.metadata['Version']`) is now FIXED — see
+"2. FIXED" below. Still blocked on the OTHER, unrelated class of error
+(issue #1/#3, "invalid conversion in return statement" — bare `return`
+vs. a real value in the same function, a known, separately-tracked
+type-inference gap): now 3 remaining sites (`_read_files_egginfo_
+installed` returning `text and text.splitlines()` / `map(...)`, and
+`PathDistribution._name_from_stem`'s tuple-unpack-from-call case). Not
+attempted here — same architectural area flagged as high-regression-risk
+in issue #1's own writeup below (unchanged from the prior session).
+
 ## Status (updated 2026-08-06)
 
 Three issues found. One (str.partition()) has a real runtime fix landed;
@@ -71,7 +84,7 @@ the real compilation site, e.g. via `self._elem_types`/`_return_elem_
 types` if that pre-pass can see them yet) rather than just widening
 `_assign_target`'s priority.
 
-### 2. Not investigated: `self.metadata['Name']` — subscript on a property-returned struct
+### 2. FIXED (2026-08-07): `self.metadata['Name']` — subscript on an un-invoked bound-method/property value
 
 ```
 error: cannot convert to a pointer type
@@ -80,14 +93,60 @@ at:
 ```python
 @property
 def name(self) -> str:
+    """Return the 'Name' metadata for the distribution package."""
     return self.metadata['Name']
 ```
-`self.metadata` is itself a `@property` returning `_adapters.Message(
-email.message_from_string(text))` — a user-defined struct instance, not
-a built-in dict. `self.metadata['Name']` is thus a SUBSCRIPT (`__getitem__`)
-call on an arbitrary struct instance — likely no generic `__getitem__`
-dispatch exists for user structs in the compiled path (not confirmed;
-not investigated further this session).
+where `metadata` (line 448-449) is a `@property` defined on the BASE
+class `Distribution`, inherited (not overridden) by `PathDistribution`.
+
+**Root cause (confirmed via the generated `.ci`)**: `self.metadata`
+(accessed WITHOUT call syntax) lowers via `_lower_MemberExpr` /
+`_lower_bound_method_value` (gimple_codegen.py) to a deferred, un-called
+`MojoBoundMethod *` value — correct when the consuming context is itself
+a call (`self.metadata()`), and this codegen has no `@property`-specific
+handling anywhere (confirmed: zero hits for `'property'` in
+`gimple_codegen.py`/`mojo_compiler.py` — bare 0-arg attribute access is
+generically deferred to a `MojoBoundMethod`, with auto-invocation only
+happening at whatever consumes it). `_lower_subscript` (gimple_codegen.py,
+`_lower_subscript`) had no case at all for a `MojoBoundMethod *` base:
+the generated `.ci` showed `self.metadata` boxed into a
+`MojoBoundMethod *` via `mojo_bound_method_new`, and the subscript then
+fell through to the generic "opaque/unknown pointer type" fallback,
+which:
+1. treated the un-called `MojoBoundMethod *` itself as an array base
+   pointer via the generic `_mojo_at_<Type>` GIMPLE pointer-arithmetic
+   helper (`_mojo_at_MojoBoundMethod`, a struct with no such element
+   shape) — the actual "cannot convert to a pointer type" GCC error, and
+2. even set up to reinterpret the subscript's STRING key (`'Name'`) as a
+   raw INTEGER byte offset (`_t6 = (int64_t) _t5;` where `_t5` was the
+   string literal's pointer) — a silent miscompile, not just a compile
+   error, had the arity happened to align instead.
+
+**Fix**: `_lower_subscript` (gimple_codegen.py) now checks for
+`ot == 'MojoBoundMethod *'` immediately after lowering the subscript's
+object expression, and if so, calls the bound method with 0 args first
+(via `mojo_bound_method_call_0`, using `_bound_method_ret_types` — keyed
+by the bound-method value's own C temp name, already populated by
+`_lower_bound_method_value` — to recover its real return type), THEN
+proceeds with the existing subscript dispatch logic on the ACTUAL
+returned value/type. This generically fixes `self.prop[key]` for any
+0-arg property/method (inherited or not) followed by a subscript,
+without touching `_signature_ctypes`/call-argument-packing machinery at
+all (a deliberately different, narrower code path from the held-back
+`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
+task #142 — NOT the same fix, NOT touching the same function).
+
+Verification: both `Distribution.name`/`Distribution.version`'s
+`self.metadata['Name']`/`self.metadata['Version']` sites now compile
+(the "cannot convert to a pointer type" errors are gone; this file's
+build now fails only on the separate, pre-existing issue #1/#3 "invalid
+conversion in return statement" cluster below). Full quality gate run
+clean: `test_gimple.py` (247/247), `test_module_cache.py` (76/76),
+`make check-selfhost`, from-scratch stdlib dylib rebuild (0 `skip`
+lines), `compile_stdlib.py -j8` (664/664, 0 unexpected). Corpus spot-
+check (collections/__init__.py, weakref.py, zipfile/__init__.py) showed
+no change in error signature/count vs. before the fix — all still fail
+on their own separate, already-documented issues.
 
 ### 3. Not investigated: other "invalid conversion in return statement" (line 575)
 
