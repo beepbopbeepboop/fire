@@ -4,7 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/logging/config.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (2026-08-07): FIXED
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/logging/config.py`
+now builds cleanly (`Built: .../config`, exit 0, no `error:` lines).
+This file's own 2026-08-06 `non-trivial conversion in 'integer_cst'`
+error no longer reproduces (superseded by other fixes earlier this
+session), and the shared blocker (`Lib/logging/handlers.py`'s
+transitively-unresolved-base link failure, since `config.py` imports
+`handlers.py`) is fixed — see `bugs/COMPILE_FAIL_logging_handlers.md`
+for the root cause and fix (a transitive-closure fix to
+`gimple_codegen.py`'s `_structs_with_unresolved_base` computation) and
+its quality-gate results, which cover this file too. Not independently
+re-fixed here; just re-verified and closed out.
+
+## Status (updated 2026-08-06, historical — superseded)
 
 Re-ran; current error:
 

@@ -27899,11 +27899,40 @@ class GimpleGen:
         # of these, is inherited from a base with no native definition
         # anywhere — not a same-struct forward reference — so the auto-stub
         # must be a real (weak) definition, not a bare declaration.
+        #
+        # This must be a TRANSITIVE closure, not just a direct-base check:
+        # e.g. Lib/logging/handlers.py's `class BaseRotatingHandler
+        # (logging.FileHandler)` has an unresolved base (bare `import
+        # logging` never pulls logging/__init__.py's StructDefs into this
+        # compile's known-struct set, unlike `from logging import X`), so
+        # BaseRotatingHandler correctly lands in this set — but its OWN
+        # subclass `TimedRotatingFileHandler(BaseRotatingHandler)` has a
+        # base name that IS a known StructDef (BaseRotatingHandler, defined
+        # right there in the same file), so a direct-base-only check never
+        # flagged the SUBCLASS, even though it inherits (and calls, e.g.
+        # `self.handleError(...)`, `self._open()`) the exact same
+        # never-defined-anywhere methods through that chain. Those calls
+        # fell into the bare-forward-declaration branch below instead of
+        # the weak-definition one, leaving a real undefined symbol at link
+        # time (confirmed via `mojo.py build .../logging/handlers.py`).
         _all_struct_names = {s.name for s in all_struct_defs if isinstance(s, StructDef)}
+        _struct_bases_map = {s.name: (getattr(s, 'bases', None) or [])
+                              for s in all_struct_defs if isinstance(s, StructDef)}
+        _unresolved_base_memo: dict = {}
+        def _has_unresolved_base(_name, _stack=frozenset()):
+            if _name in _unresolved_base_memo:
+                return _unresolved_base_memo[_name]
+            if _name in _stack:
+                return False  # inheritance-cycle guard; shouldn't normally happen
+            result = False
+            for _b in _struct_bases_map.get(_name, ()):
+                if _b not in _all_struct_names or _has_unresolved_base(_b, _stack | {_name}):
+                    result = True
+                    break
+            _unresolved_base_memo[_name] = result
+            return result
         self._structs_with_unresolved_base = {
-            s.name for s in all_struct_defs
-            if isinstance(s, StructDef)
-            and any(b not in _all_struct_names for b in (getattr(s, 'bases', None) or []))
+            _name for _name in _struct_bases_map if _has_unresolved_base(_name)
         }
         _merge_struct_inheritance(all_struct_defs)
         self._exc_descendants = _compute_exc_descendants(all_struct_defs)

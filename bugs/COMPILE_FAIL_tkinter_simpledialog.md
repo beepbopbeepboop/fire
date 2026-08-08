@@ -4,7 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/tkinter/simpledialog.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07): builds clean, but NOT because #141 is fixed
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/tkinter/simpledialog.py`
+now builds cleanly in this environment. Same caveat as `bugs/
+COMPILE_FAIL_tkinter_filedialog.md`'s 2026-08-07 note: this file's own
+`class Dialog(Toplevel):` no longer collides with `tkinter/
+commondialog.py`'s unrelated `Dialog` in THIS build because of how this
+particular file gets compiled standalone (`commondialog` is never
+reached from `simpledialog.py`'s own import list — `from tkinter import
+*`/`_get_temp_root`/`_destroy_temp_root`/`messagebox`, none of which
+pull in `commondialog`). The underlying architecture gap (`bugs/hard/
+CODEGEN_same_bare_name_struct_collision_across_modules.md`, task #141)
+remains genuinely unfixed; this file's clean build doesn't exercise it
+now that both `filedialog.py`'s AND `simpledialog.py`'s builds are
+independently re-verified. Not fixed here.
+
+## Status (updated 2026-08-06, historical)
 
 Re-ran; the stale `_place_window`/label-warning dump below is
 superseded. Current error is a confirmed instance of the already-
