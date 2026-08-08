@@ -1,6 +1,6 @@
-# HARD BUG (3 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls
+# HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
-## Status (fixed 2026-08-07, Track B cross-cutting COMPILE_FAIL sweep)
+## Status (Mechanism 4 added 2026-08-07, Track B session — partial fix; Mechanisms 1-3 fixed 2026-08-07, Track B cross-cutting COMPILE_FAIL sweep)
 
 Follow-up to `bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
 defined.md`'s "Follow-up fix" section: once that doc's `os.py`
@@ -9,11 +9,18 @@ defined.md`'s "Follow-up fix" section: once that doc's `os.py`
 issue and exposed a different, much larger cluster of real GIMPLE type
 errors dominated by `Lib/argparse.py`, `Lib/typing.py`, `Lib/enum.py`,
 and `Lib/gettext.py`. This doc covers the investigation of that cluster
-and the three genuinely tractable, independent root causes found and
-fixed in it (a fourth, `Lib/weakref.py`'s cluster, was investigated but
-NOT fixed — see "Investigated, not fixed" below).
+and the four genuinely tractable, independent root causes found and
+fixed in it (a fifth, `Lib/weakref.py`'s line-attribution mystery, was
+investigated but NOT fixed — see "Investigated, not fixed" below).
 
-All three fixes are in `gimple_codegen.py` only. Verified via the full
+Mechanism 4 (this update) is exactly the "Not fixed" item from this
+doc's own previous revision — the `Signature`/`Parameter`-as-bare-C-
+identifier bug found via `enum.py`'s `EnumType.__signature__`, which
+that revision explicitly left "not located precisely enough to propose
+a fix." It's now root-caused and PARTIALLY fixed — see its own section
+below for what's covered and what still isn't.
+
+All four fixes are in `gimple_codegen.py` only. Verified via the full
 5-part quality gate (below) — 0 regressions.
 
 ## Symptom (baseline, before this session's fixes)
@@ -251,6 +258,135 @@ remain — see "Not fixed" below). Full `Lib/subprocess.py` build: 755 ->
 two fixes were verified together in the full-build count and
 individually in the isolated `typing.py`-only count above).
 
+## Mechanism 4 (root-caused and PARTIALLY fixed, 2026-08-07): an imported class name used as a bare `X.ATTR` member-access base gets mistaken for a zero-arg accessor function, colliding with the class's own later-registered `typedef`
+
+### Symptom
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/typing.py`
+(pulls in `enum.py` transitively) — repeated, identical-looking errors:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/enum.py:1095:10: error: expected expression before 'Parameter'
+ 1095 |             return Signature([Parameter('new_class_name', Parameter.POSITIONAL_ONLY),
+```
+(14 occurrences before this fix, all reported at the exact same
+source line/column — GCC's `#line`-directive diagnostics collapse
+multiple DIFFERENT generated call sites down to one reported location
+whenever they all trace back to the same Python source statement, so
+"14 identical-looking errors" was actually several distinct generated
+C call sites, not one error printed 14 times — confirmed by stripping
+every `#line` directive from the `.ci` before recompiling, which
+recovers the real, distinct physical line numbers GCC's own diagnostic
+was masking.)
+
+This is `enum.py`'s `EnumType.__signature__` property:
+```python
+    @property
+    def __signature__(cls):
+        from inspect import Parameter, Signature
+        if cls._member_names_:
+            return Signature([Parameter('values', Parameter.VAR_POSITIONAL)])
+        else:
+            return Signature([Parameter('new_class_name', Parameter.POSITIONAL_ONLY), ...])
+```
+— a FUNCTION-SCOPED `from inspect import Parameter, Signature`, then
+`Parameter.VAR_POSITIONAL`-style class-attribute reads on the imported
+name.
+
+### Root cause
+
+Confirmed directly in the `.ci` (with `#line` directives stripped so
+GCC's reported line numbers are the real physical ones): `Parameter` is
+BOTH a real `typedef struct Parameter {...} Parameter;` (the genuine
+`inspect.Parameter` class, correctly discovered and inlined SOMEWHERE
+else in this same transitive-closure translation unit — its
+`_alloc_Parameter`/`_mojo_repr_Parameter`/`_mojo_getattr_Parameter`/
+`_mojo_setattr_Parameter` all exist) AND the target of a colliding
+`__attribute__((weak)) int64_t Parameter (...) { ...; }  /* stub from
+inspect */` — a bare-name "unresolved import" stub function. In C, a
+typedef name and a function/value identifier can't share one namespace
+scope this way — any expression trying to CALL `Parameter` (`Parameter
+()`, `Parameter (_t7, _t10)`) hits `error: expected expression before
+'Parameter'`, because the parser sees `Parameter` as a type name where
+an expression was expected.
+
+The half of this that's now fixed: `_lower_MemberExpr`'s handling of
+`X.ATTR` bare-name attribute access (`gimple_codegen.py`, ~line 8598)
+already has a correct path for `X` being a KNOWN struct
+(`module_name in self.struct_field_types`) — it stubs the unresolved
+class-attribute read as `t = 0; /* class attr X.ATTR — UNRESOLVED */`.
+But when `X` (here `Parameter`) is not YET in `self.struct_field_types`
+at the moment THIS particular member-access is lowered (an ordering
+race: `enum.py`'s `__signature__` body can be lowered before
+`inspect.py`'s `Parameter` class definition has been processed
+elsewhere in the transitive closure — `self.struct_field_types` is a
+single dict shared by reference across every module's `temp_gen`, so
+WHETHER a name is in it depends purely on processing order, not on
+whether the class exists at all), the code falls through to a
+DIFFERENT, older fallback a few lines down: "if the object is a
+zero-arg function used in member-access context (e.g. `block_idx.x`),
+call it first so we get the struct return value, not a void* funcptr."
+That fallback's guard (`node.obj.name in self.func_return_types and
+... not in self.struct_field_types`) is satisfied for `Parameter` too
+(the generic "unresolved import" registration path treats every
+imported name as a potential callable, adding it to
+`func_return_types` regardless of whether it's actually a class) — so
+it emits `Parameter ()` (an actual call) instead of the safe `0` stub,
+producing the `typedef`-vs-function-identifier collision above.
+
+### Fix (partial — see "Not fixed" below for what this doesn't cover)
+
+`gimple_codegen.py`, `_lower_MemberExpr` (~line 8598): added a new
+branch, checked BEFORE the `block_idx.x`-style zero-arg-function
+fallback, that catches this exact shape — `module_name` is registered
+as an import (`in self.imported_symbols`), not a known var or struct,
+not a `BUILTIN_VALUE_MAP` entry, AND starts with an uppercase letter
+(a PascalCase identifier, per Python's own class-naming convention —
+deliberately narrow so it can't affect the `block_idx`/`thread_idx`/
+`grid_dim` real accessor-function cases the zero-arg fallback exists
+for, which are always lowercase). When it matches, emit the SAME
+"class attr ... UNRESOLVED" `0`-stub the already-known-struct case
+uses, instead of falling into the zero-arg-call fallback.
+
+This is a narrow, MemberExpr-only fix — it does **not** address calls
+to the constructor itself (`Parameter('values', Parameter.VAR_POSITIONAL)`
+— the `Parameter(...)` CALL, as opposed to the `Parameter.ATTR` member
+read) hitting the exact same `typedef`-vs-identifier collision through
+a completely different code path (`_lower_named_call`'s own
+"unresolved import" stub-emission, unrelated to `_lower_MemberExpr`).
+Root-causing that side traced as far as confirming it's the SAME kind
+of ordering race (the STRUCT eventually gets registered, just not
+before the call in question is lowered) but fixing it safely would
+require either reordering when class definitions get registered across
+the whole transitive closure (high blast radius — this project's OWN
+`bugs/hard/CODEGEN_function_scoped_import_call_unresolved_at_link.md`
+documents a full session where an analogous cross-module resolution-
+ordering fix passed the ENTIRE 5-part quality gate clean and STILL had
+to be reverted after a corpus-wide regression only visible via manual
+re-triage of the `COMPILE_FAIL_*.md` corpus) or deferring the "is this
+name secretly a class" decision to the very end of the whole-program
+compile (a genuine architectural change, not a bug-fix-sized one).
+Left alone given that documented risk and this session's time budget.
+
+### Verification
+
+`typing.py` isolated build (pulls in `enum.py` transitively):
+`enum.py:1095:10: error: expected expression before 'Parameter'`
+occurrences: **14 -> 7** (the 7 remaining are all the unfixed
+`Parameter(...)`-constructor-call shape described above, confirmed via
+the same `#line`-stripped-recompile technique). Total `error:` count
+for this same build: 687 before and after (other clusters unaffected,
+consistent with 7 of the original 14 lines simply being replaced by 7
+DIFFERENT still-real errors from the constructor-call shape, not a net
+new error). `Lib/csv.py` (a different, independently-chosen transitive
+closure that also reaches `enum.py`): baseline 703 `error:` lines ->
+**695** with this fix (-8, consistent with the same partial win).
+
+Spot-checked 3 unrelated files for regressions (`Lib/json/__init__.py`,
+`Lib/csv.py`, `Lib/heapq.py`): all build with the same or fewer errors
+as baseline (`json/__init__.py` and `heapq.py` both build clean, 0
+errors, both before and after).
+
 ## Not fixed / investigated only
 
 - **`Lib/weakref.py`'s 35-error cluster** (`expected declaration
@@ -276,8 +412,16 @@ individually in the isolated `typing.py`-only count above).
      `Mapping.__eq__`.
   2. The literal `Parameter`/`Signature` identifiers appearing directly
      in what looks like a C declaration/parameter list (`expected
-     declaration specifiers or '...' before 'Parameter'`) is a
-     SEPARATE, NOT-yet-located bug — traced as far as ruling out
+     declaration specifiers or '...' before 'Parameter'`) — **UPDATE
+     2026-08-07: root-caused and partially fixed, see "Mechanism 4"
+     below.** This weakref.py instance specifically was not re-verified
+     against the Mechanism 4 fix (weakref.py's OWN build still has its
+     own separate `#line`-attribution issue from finding 1 above, and
+     the `deepcopy`/`unexpected RHS` errors are unrelated), but the
+     underlying `Parameter`/`Signature`-as-bare-C-identifier mechanism
+     is the same one Mechanism 4 fixes at its `enum.py` occurrence — see
+     that section for what's covered and what still isn't.
+     Originally: traced as far as ruling out
      `module_loader.py`'s `.mojo`-source text-scan path (`_mojo_type_to_
      c` there delegates to `gimple_codegen._mojo_type`, whose documented
      unknown-type fallback is `int64_t`, not the bare literal name; also
@@ -337,3 +481,20 @@ individually in the isolated `typing.py`-only count above).
 5. `python3 compile_stdlib.py -j8` — **664/664 passed, 0 unexpected
    failures** (unchanged from baseline — no regression from any of the
    three fixes).
+
+## Quality gate (2026-08-07, Mechanism 4 fix, separate session)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean (`Results: 1 passed, 0 failed`, "✓
+   self-host compiles + links clean").
+4. From-scratch stdlib dylib rebuild (`rm -f build/libmojostdlib.dylib`
+   + `build_stdlib_dylib.build_stdlib(jobs=8)`) — clean, 0 `skip
+   <module>:` lines.
+5. `python3 compile_stdlib.py -j8` — **664/664 passed, 0 unexpected
+   failures**.
+6. Cross-cutting spot-check (this fix touches `_lower_MemberExpr`, a
+   shared/broad lowering path): `Lib/json/__init__.py` and
+   `Lib/heapq.py` both build 0-error clean, unchanged. `Lib/csv.py`
+   went from 703 to 695 `error:` lines (improvement, not a regression —
+   it transitively reaches the same `enum.py` code path).

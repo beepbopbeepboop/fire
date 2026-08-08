@@ -8635,6 +8635,40 @@ class GimpleGen:
                 self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} — UNRESOLVED, not a comptime alias */")
                 return 'int', t
 
+            # Class name accessed as an attribute base before its real
+            # struct layout is known yet (e.g. `Parameter.VAR_POSITIONAL`
+            # inside enum.py's `__signature__`, where `from inspect import
+            # Parameter` is a FUNCTION-SCOPED import lowered generically by
+            # `_gen_stmt_FromImportStmt` — it registers `Parameter` into
+            # `self.imported_symbols`/`self.func_return_types` as if it
+            # were an ordinary callable, since that generic path has no way
+            # to know the imported name is actually a class). Without this
+            # check, the "zero-arg function used in member-access context"
+            # fallback just below (meant for real accessor functions like
+            # `block_idx.x`) fires instead: it emits `Parameter ()` — a
+            # bare call to `Parameter`, colliding with the SAME identifier
+            # already `typedef`'d as `struct Parameter` elsewhere in this
+            # translation unit once the real class genuinely does get
+            # inlined (e.g. via some OTHER file's top-level `from inspect
+            # import Parameter`) — a hard "expected expression before
+            # 'Parameter'" GCC syntax error (a typedef name can't be reused
+            # as a function/call identifier in C). Route the same way as
+            # the already-known-struct case just above: emit the same
+            # "class attr ... UNRESOLVED" stub. Guarded narrowly (a
+            # PascalCase identifier that came from an import, per Python's
+            # own class-naming convention — real accessor functions this
+            # fallback exists for, like `block_idx`/`thread_idx`/`grid_dim`,
+            # are always lowercase) so it can't affect any function this
+            # fallback already legitimately handles.
+            if (module_name in self.imported_symbols
+                    and module_name not in self.var_types
+                    and module_name not in self.struct_field_types
+                    and module_name not in self.BUILTIN_VALUE_MAP
+                    and module_name[:1].isupper()):
+                t = self._new_temp('int')
+                self._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} — UNRESOLVED import, not yet inlined as a struct */")
+                return 'int', t
+
         # If the object is a zero-arg function used in member-access context (e.g. block_idx.x),
         # call it first so we get the struct return value, not a void* funcptr.
         if (isinstance(node.obj, IdentExpr)
