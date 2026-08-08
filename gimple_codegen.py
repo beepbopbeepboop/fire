@@ -30508,6 +30508,56 @@ class GimpleGen:
         # See bugs/CODEGEN_generator_function_Lib_weakref.md.
         _phase17_own_ids = set(id(s) for s in _phase17_own_stmts)
 
+        def _phase17_value_type(_value):
+            """Pure mapping from an RHS AST value to the C type
+            _phase17_infer_global_type would assign it — no dict writes,
+            no side effects. Factored out of _phase17_infer_global_type
+            (below) so the TryStmt-branch join logic (_phase17_scan_try_
+            branches, further below) can compute each branch's candidate
+            type using the IDENTICAL rules without duplicating this table
+            under a second name that would inevitably drift out of sync.
+            (List/tuple element-type tracking (_elem_types) is NOT done
+            here — that's a side effect specific to the direct-assignment
+            caller, not part of "what C type does this value have.")"""
+            if isinstance(_value, DictExpr):
+                return 'MojoDict *'
+            elif isinstance(_value, (ListExpr, TupleExpr)):
+                return 'MojoList *'
+            elif isinstance(_value, SetExpr):
+                return 'MojoSet *'
+            elif isinstance(_value, (IntLiteral, BoolLiteral)):
+                return 'int'
+            elif isinstance(_value, StringLiteral):
+                return 'char *'
+            elif isinstance(_value, CallExpr):
+                if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
+                    return f"{_value.func.name} *"
+                elif isinstance(_value.func, IdentExpr):
+                    ret = self.func_return_types.get(_value.func.name, '')
+                    if ret.endswith(' *'):
+                        return ret
+                    elif ret == 'char *':
+                        return 'char *'
+                    else:
+                        return 'int64_t'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member in ('read', 'readline')
+                        and not _value.args):
+                    return 'char *'
+                elif (isinstance(_value.func, MemberExpr)
+                        and _value.func.member == 'readlines'):
+                    return 'MojoList *'
+                else:
+                    return 'int64_t'
+            else:
+                qt = self._quick_type(_value) or 'int64_t'
+                if qt.endswith(' *'):
+                    return qt
+                elif qt == '_Bool':
+                    return 'int'
+                else:
+                    return 'int64_t'
+
         def _phase17_infer_global_type(_gname, _value):
             """Infer & record a global's C type (self._global_var_types,
             plus element type for list/tuple literals) from its assigned
@@ -30524,50 +30574,61 @@ class GimpleGen:
             bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
             (that doc covers the LOCAL-variable analogue of this same
             gap; this is the GLOBAL/module-scope sibling)."""
-            if isinstance(_value, DictExpr):
-                self._global_var_types[_gname] = 'MojoDict *'
-            elif isinstance(_value, (ListExpr, TupleExpr)):
-                self._global_var_types[_gname] = 'MojoList *'
-                if _value.elements:
-                    _elt = self._quick_type(_value.elements[0])
-                    for _e in _value.elements[1:]:
-                        _elt = TypeLattice.join(_elt, self._quick_type(_e))
-                    self._elem_types[_gname] = _elt
-            elif isinstance(_value, SetExpr):
-                self._global_var_types[_gname] = 'MojoSet *'
-            elif isinstance(_value, (IntLiteral, BoolLiteral)):
-                self._global_var_types[_gname] = 'int'
-            elif isinstance(_value, StringLiteral):
-                self._global_var_types[_gname] = 'char *'
-            elif isinstance(_value, CallExpr):
-                if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
-                    struct_name = _value.func.name
-                    self._global_var_types[_gname] = f"{struct_name} *"
-                elif isinstance(_value.func, IdentExpr):
-                    ret = self.func_return_types.get(_value.func.name, '')
-                    if ret.endswith(' *'):
-                        self._global_var_types[_gname] = ret
-                    elif ret == 'char *':
-                        self._global_var_types[_gname] = 'char *'
-                    else:
-                        self._global_var_types[_gname] = 'int64_t'
-                elif (isinstance(_value.func, MemberExpr)
-                        and _value.func.member in ('read', 'readline')
-                        and not _value.args):
-                    self._global_var_types[_gname] = 'char *'
-                elif (isinstance(_value.func, MemberExpr)
-                        and _value.func.member == 'readlines'):
-                    self._global_var_types[_gname] = 'MojoList *'
-                else:
-                    self._global_var_types[_gname] = 'int64_t'
-            else:
-                qt = self._quick_type(_value) or 'int64_t'
-                if qt.endswith(' *'):
-                    self._global_var_types[_gname] = qt
-                elif qt == '_Bool':
-                    self._global_var_types[_gname] = 'int'
-                else:
-                    self._global_var_types[_gname] = 'int64_t'
+            self._global_var_types[_gname] = _phase17_value_type(_value)
+            if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
+                _elt = self._quick_type(_value.elements[0])
+                for _e in _value.elements[1:]:
+                    _elt = TypeLattice.join(_elt, self._quick_type(_e))
+                self._elem_types[_gname] = _elt
+
+        def _phase17_scan_try_branches(_try_stmt):
+            """Collect {name: C type} for every AssignStmt/MultiAssignStmt
+            target living inside a top-level TryStmt's try/except/else/
+            finally bodies, TypeLattice.join-ing the type across every
+            branch that assigns the same name.
+
+            Unlike an IfStmt (where _flatten_resolved_conditionals already
+            picks the ONE platform-correct branch, mirroring how real
+            CPython only ever executes one side of an `if sys.platform ==
+            ...`), every branch of a try/except genuinely CAN execute at
+            runtime -- the `try` body if nothing raises, one `except`
+            handler if a matching exception is raised, or the `else` body
+            if the try body succeeds -- so a correct global type must be
+            the LUB across every branch that assigns the name, not just
+            the first one found textually the way the flat top-level scan
+            (which only ever sees a linear sequence of unconditionally-
+            executed statements) is content to do.
+
+            Deliberately NOT self-recursive (does not call itself for a
+            nested TryStmt) -- mirrors _flatten_resolved_conditionals's
+            own documented reason: a nested function calling itself here
+            doesn't survive this file's own self-host build. A TryStmt
+            nested inside another TryStmt's branch is left unscanned by
+            this pass (out of scope for this fix -- no observed real-world
+            instance needs it; see bugs/hard/CODEGEN_global_prescan_
+            blind_to_trystmt_and_bare_annotation.md)."""
+            _branch_lists = [_try_stmt.body or []]
+            for _h in (_try_stmt.handlers or []):
+                _branch_lists.append(getattr(_h, 'body', None) or [])
+            if isinstance(_try_stmt.else_body, list):
+                _branch_lists.append(_try_stmt.else_body)
+            if isinstance(getattr(_try_stmt, 'finally_body', None), list):
+                _branch_lists.append(_try_stmt.finally_body)
+            _joined = {}
+            for _blist in _branch_lists:
+                for _bstmt in _flatten_resolved_conditionals(_blist):
+                    _pairs = []
+                    if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
+                        _pairs.append((_bstmt.target.name, _bstmt.value))
+                    elif isinstance(_bstmt, MultiAssignStmt):
+                        for _tgt in _bstmt.targets:
+                            if isinstance(_tgt, IdentExpr):
+                                _pairs.append((_tgt.name, _bstmt.value))
+                    for _gname, _gvalue in _pairs:
+                        _t = _phase17_value_type(_gvalue)
+                        _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
+                                           if _gname in _joined else _t)
+            return _joined
 
         for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
@@ -30672,6 +30733,34 @@ class GimpleGen:
                             self._global_var_types[_scan_stmt.name] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
                     else:
                         self._global_var_types[_scan_stmt.name] = 'int64_t'
+            elif isinstance(_scan_stmt, TryStmt):
+                # A top-level `X: T` / feature-detection global that is
+                # ONLY ever assigned inside a try/except/else (e.g. Lib/
+                # _pyrepl/main.py's CAN_USE_PYREPL/FAIL_REASON pattern) was
+                # completely invisible to this pre-scan before: the loop
+                # only ever matched AssignStmt/MultiAssignStmt/VarDecl at
+                # this SAME nesting level, so every AssignStmt living
+                # inside a TryStmt's branches fell straight through,
+                # leaving the global's type unresolved and (per
+                # _lower_IdentExpr's unconditional "globals are int64_t at
+                # the C storage level" fallback used whenever this pass
+                # never recorded anything) eventually causing a type-
+                # incoherent placeholder initializer downstream. See
+                # bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_
+                # bare_annotation.md.
+                for _gname, _gtype in _phase17_scan_try_branches(_scan_stmt).items():
+                    if _gname in _pre_declared_globals:
+                        # A preceding bare `X: T` VarDecl (handled above,
+                        # in source order before this TryStmt in the real-
+                        # world idiom) or an earlier plain assignment
+                        # already resolved this name -- an explicit
+                        # annotation/assignment always takes priority over
+                        # a type merely inferred from try/except branches.
+                        continue
+                    _pre_declared_globals.add(_gname)
+                    if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                        self._global_to_module[_gname] = _phase17_mod
+                    self._global_var_types[_gname] = _gtype
 
         # Also scan ImportStmts inside TryStmt/IfStmt blocks (e.g., try: import mojo_compiler)
         # These are missed by the flat scan above.

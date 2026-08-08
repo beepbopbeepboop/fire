@@ -1,8 +1,134 @@
 # HARD BUG: module-level global prescan (Phase 1.7) is blind to `try/except`-only assignment and to bare (unassigned) annotations, and falls back to a garbage literal
 
-## Status
+## Status (updated 2026-08-07)
 
-Unfixed. Root-caused 2026-08-06 while investigating
+**Part 1 of 3 FIXED** (this session, incremental/one-at-a-time per this
+doc's own earlier caution). **Part 2 found to be ALREADY IMPLEMENTED**
+(pre-dates this doc — see below). **Part 3 precisely located** (this
+session tracked down the "untracked third fallback" flagged as
+unresolved below) but **NOT YET FIXED** — see "Part 3" section at the
+bottom; that is the actual blocker for `bugs/COMPILE_FAIL__pyrepl_main.md`
+and is being picked up as an independent next step, gated separately.
+
+### Part 1: TryStmt-descent in Phase 1.7 — FIXED
+
+`gen_module`'s Phase 1.7 pre-scan (`gimple_codegen.py`) now descends
+into a top-level `TryStmt`'s `body`, every handler's `body`, `else_body`,
+and `finally_body`, collecting `AssignStmt`/`MultiAssignStmt` targets
+from ALL of them and `TypeLattice.join`-ing the type across every
+branch that assigns the same name (added `_phase17_scan_try_branches`,
+which reuses a new pure `_phase17_value_type` helper factored out of
+the pre-existing `_phase17_infer_global_type` so both stay in sync by
+construction rather than by convention). Hooked in as a new
+`elif isinstance(_scan_stmt, TryStmt):` branch in the main Phase 1.7
+loop, deferring to any name already resolved by a preceding VarDecl/
+AssignStmt (explicit annotation or plain assignment always wins over a
+type merely inferred from try/except branches).
+
+Deliberately NOT self-recursive for nested `TryStmt`s (a `TryStmt`
+nested inside another `TryStmt`'s branch is left unscanned) — mirrors
+`_flatten_resolved_conditionals`'s own documented constraint: a nested
+function calling itself doesn't survive this file's own self-host
+build. No real-world instance found that needs the nested case; flagged
+as an explicit non-goal in the new helper's docstring rather than
+silently omitted.
+
+Verified: the minimal repro's `_root_globals.FAIL_REASON` type is now
+correctly joined from the try/except/else branches (previously entirely
+invisible — TryStmt wasn't even checked). Full 5-part mandated gate
+clean (test_gimple.py 247/247, test_module_cache.py 76/76,
+check-selfhost clean, from-scratch stdlib dylib rebuild 0 skips,
+compile_stdlib.py -j8 664/664 0 unexpected). Spot-checked, before vs.
+after this change, isolated (`do_imports=False`) compile + `gcc
+-fgimple -fsyntax-only` of 6 diverse non-generator corpus files
+(`importlib/_bootstrap_external.py`, `typing.py`, `tokenize.py`,
+`json/__init__.py`, `configparser.py`, `textwrap.py`) plus confirming
+`difflib.py`'s pre-existing (unrelated, generator-support) fallback
+exception is unchanged: **byte-identical output before and after**, 0
+regressions.
+
+Note: this fix alone does NOT unblock the `_pyrepl/main.py` motivating
+case — that file's globals ARE preceded by a bare `X: T` VarDecl (see
+Part 2), so Part 1's TryStmt-join branch never even fires for them (it
+defers to the VarDecl-resolved type, by design). Part 1 matters for the
+different, ALSO-real shape of a global with NO preceding annotation
+that is only ever assigned inside try/except — not exercised by the
+`_pyrepl/main.py` repro itself, but a distinct, independently-real gap
+this pass had.
+
+### Part 2: bare-annotation VarDecl → type_ann fallback — ALREADY IMPLEMENTED, not new work
+
+Re-investigating this from scratch (per this session's "read the doc in
+full first" instruction) found that Phase 1.7's `VarDecl` branch
+(`gimple_codegen.py`, the `elif isinstance(_scan_stmt, VarDecl) and
+_scan_stmt.name not in _pre_declared_globals:` case) has, since commit
+`8c00e57` (predates this doc entirely), always checked `_scan_stmt.
+type_ann` first and mapped it through `self._resolve_type(...)` before
+ever falling back to inferring from `_scan_stmt.value` — i.e. exactly
+what this doc's "What a real fix needs" item 2 asked for. This doc's
+original root-cause writeup did not notice this pre-existing branch
+(likely because it focused on the `AssignStmt`-only blindness of the
+loop's FIRST branch and didn't re-check the separate `VarDecl` `elif`
+a few dozen lines down). No code change was needed or made for this
+part. Confirmed via `git log -S` that the `type_ann` handling predates
+this doc's 2026-08-06 root-cause date.
+
+### Part 3: the untracked "third fallback" — LOCATED, not yet fixed
+
+Tracked down the "third, more permissive fallback ... producing a
+type-incoherent placeholder value" this doc originally flagged as
+unlocated. It is NOT in Phase 1.7 at all — it's a completely separate,
+independently-maintained pass a few hundred lines further down
+`gen_module` that actually emits the module's `_<mod>_toplev` struct
+FIELD DECLARATIONS and the struct-literal initializer: the loop `for
+stmt in _collect_global_stmts(all_global_scan): ... elif isinstance(
+stmt, VarDecl): ...` (search `_gscan_declare_global`). This second
+pass's `VarDecl` branch reads `stmt.value` directly and NEVER consults
+`stmt.type_ann` at all — for a bare annotation (`FAIL_REASON: str`,
+`stmt.value is None`), every `isinstance(_gv, ...)` check in that
+branch fails and it falls through to the final `else`:
+`global_decls.append(f"int {gname};")` / `self._global_var_types[gname]
+= 'int'` — silently OVERWRITING the correct `'char *'` that Phase 1.7
+(the OTHER pass, confirmed already correct per Part 2 above) had
+already recorded, with `'int'`. This is exactly what produces the
+observed `int FAIL_REASON;` struct field and the garbage
+`.FAIL_REASON = "f\"warning: {e}\""` initializer (a completely
+separate, unrelated fallback elsewhere handles stringifying an
+unresolved initializer expression's source text when asked to
+initialize a field whose recorded type doesn't match its value's
+shape — not investigated further, since fixing the type resolution
+here should mean that fallback stops being reached for this case at
+all).
+
+Confirmed via direct testing: Part 1 (already landed) does not change
+this struct's field type at all (`int FAIL_REASON;` unchanged before/
+after) — proving Part 3 is a genuinely separate bug in a separate pass,
+not a downstream consequence of Phase 1.7. This pass's `_collect_
+global_stmts` helper ALREADY recurses into `TryStmt`/`IfStmt` bodies
+(added independently, predates this doc) — so unlike Phase 1.7, this
+pass's gap is ONLY the missing `type_ann` consultation for bare
+annotations, not TryStmt-blindness.
+
+**Proposed fix** (not yet implemented — picking this up as the next
+incremental step, gated and spot-checked separately per this doc's own
+"don't land all three in one shot" caution, now generalized to "don't
+land Part 3 in the same step as anything else either"): in that
+`VarDecl` branch, check `stmt.type_ann` first (mirroring Phase 1.7's
+already-correct handling) and only fall back to inferring from `stmt.
+value` when there is no annotation — and, symmetrically, still allow a
+LATER real assignment (if `_gscan_declare_global` ever needs to
+reconcile with a value-inferred type) to be joined/preferred over a
+too-generic annotation the same way Part 1 above joins across try/
+except branches. Must keep `self._global_c_decl_types` in sync with
+Phase 1.7's existing pointer-boxing convention (`'int64_t'` storage for
+any pointer-typed global) — see the `_resolved.endswith(' *')` handling
+in Phase 1.7's own `VarDecl` branch — since this pass's `_gscan_declare_
+global`-style branches already do this consistently for the AssignStmt/
+MultiAssignStmt cases just below it in the same loop.
+
+## Original root-cause writeup (2026-08-06, kept for history)
+
+Root-caused 2026-08-06 while investigating
 bugs/COMPILE_FAIL__pyrepl_main.md. This is the same `gen_module` "Phase
 1.7: pre-scan global variable declarations" pass whose `IfStmt`-blindness
 was already found and fixed once (see
