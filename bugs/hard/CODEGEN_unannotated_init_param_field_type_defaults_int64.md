@@ -1,6 +1,106 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
-## Status (2026-08-07): still fully unfixed, including the comprehension sibling gap
+## Status (PARTIALLY FIXED 2026-08-08)
+
+Both the comprehension sibling gap AND a scoped version of the main
+`IdentExpr`/param fix are now fixed. The main fix's scope is narrower
+than the full plan below — see "What was actually implemented" and
+"Known limitation" before relying on this for a case beyond a literal
+constructor argument.
+
+### Comprehension sibling gap: fixed
+
+Added a `Comprehension` case to `_collect_self_assigns`'s value-type
+dispatch (`gimple_codegen.py`, alongside the existing `ListExpr`/
+`DictExpr`/`SetExpr` cases), mapping `kind='list'/'set'/'dict'` to
+`MojoList */MojoSet */MojoDict *` respectively. Verified against this
+doc's own `Tools/cases_generator/cwriter.py`-derived repro (`self.
+indents = [i * 4 for i in range(indent + 1)]`) — the compiled binary
+now reads back the real list values (`0, 4, 8`), not a truncated
+pointer.
+
+### Main fix: constructor call-site scalar inference — fixed for LITERAL arguments only
+
+**What was actually implemented**: extended `gen_module` with a new,
+EARLY, standalone pass (placed immediately before the struct-field-
+collection loop that calls `_collect_self_assigns`) that scans every
+`ClassName(...)` call site across the module (and its transitive
+imports) for a `StringLiteral`/`FloatLiteral` argument at a position
+corresponding to one of `__init__`'s own unannotated parameters. When
+every observed call site agrees, the parameter's real type (`char */
+double`) is recorded in a new `self._ctor_lit_param_types` dict and fed
+into `_collect_self_assigns`'s `pm` (param-type) lookup for `__init__`
+specifically, ahead of the `int64_t` fallback — mirroring the doc's own
+described plan (steps 1-3), but as a small, self-contained pass rather
+than literally extending Pass 1.3d.
+
+**Why NOT a literal extension of Pass 1.3d** (this doc's own "What a
+real fix needs" section 1 suggested reusing/extending the existing
+free-function cross-call scalar-contract mechanism): confirmed by
+direct testing that Pass 1.3d runs too LATE — it depends on
+`self._inferred_var_types`, itself populated even later in `gen_module`,
+and by the time it runs, the struct-field-collection loop (several
+thousand lines earlier in the same method) has already locked in every
+field's C type. A first attempt that extended Pass 1.3d's own
+`_scalar_obs`/Apply machinery (under a `<ctor>`-prefixed key to avoid
+namespace collision with free-function entries) compiled and ran the
+minimal repro correctly in isolation but was CONFIRMED, by direct
+testing, to never actually take effect end-to-end (`Widget("hello")`
+still printed a raw pointer integer) — exactly the pass-ordering bug
+this paragraph describes. Reverted in favor of the standalone early
+pass actually landed.
+
+**Known limitation**: because the early pass runs before `self.
+_inferred_var_types` exists, it can only see DIRECT LITERAL constructor
+arguments (`Widget("hello")`), not the fuller "argument is an `IdentExpr`
+referencing an already-inferred variable" evidence the free-function
+version of this mechanism uses. This means `Lib/importlib/resources/
+readers.py`'s `NamespaceReader.__init__` (this doc's own real-world
+instance — the call site passes a variable, not a literal) is NOT
+fixed by this change, and that file also independently fails to compile
+for an entirely unrelated reason (`_candidate_paths` is a generator
+function; this codegen has no compiled-path support for generators
+containing `yield` in this call chain, an already-documented, separate
+gap) — so it could not be used as an end-to-end verification instance
+either way. Extending this to the fuller `IdentExpr`-based case would
+require either reordering `gen_module`'s passes (broad, high-risk — the
+plan's own reasoning for treating this whole area cautiously) or a
+second, later reconciliation pass patching already-emitted struct field
+types after Pass 1.3d runs (not attempted, left as a documented
+follow-up). The `int64_t` fallback is unchanged for every case this
+narrower pass can't resolve — strictly additive, per the doc's own
+point 3, just with a smaller resolved set than originally scoped.
+
+### Verification
+
+- Minimal repro (`class Widget: def __init__(self, label): self.label
+  = label` / `w = Widget("hello")`) — compiled binary now prints
+  `hello`/`5` (`len(w.label)`), not a raw pointer integer.
+- Conflicting-call-site repro (`Thing("str")` and `Thing(3.5)` for the
+  same unannotated param in different call sites) — correctly falls
+  back to the `int64_t` default (no unanimous type), compiles and runs
+  without error, confirming the "not unanimous → leave unresolved" rule
+  holds.
+- Comprehension-sibling repro: see above.
+- A self-hosted-build regression was caught and fixed during
+  verification: the first draft used `next(generator, default)` in two
+  places to find a struct's own `__init__` method — this is the EXACT,
+  already-documented gotcha the neighboring Pass 1.3d code comments
+  warn about (a self-hosted build of this file failed to link with an
+  undefined `_next` symbol). Rewritten as explicit loops / a
+  precomputed `_ctor_init_methods` dict; `make check-selfhost` confirmed
+  clean afterward.
+- Full 5-part gate, run in this doc's own recommended fail-fast order
+  (`compile_stdlib.py -j8` FIRST, given this doc's own "Risk" section
+  explicitly calls this the same class of risk as the `_tuplegetter`
+  regressions): `compile_stdlib.py -j8` 664/664 (0 unexpected,
+  unchanged from baseline) both before AND after the self-host-regression
+  fix — no stdlib compile-breadth regression at any point.
+  `test_gimple.py` 247/247, `test_module_cache.py` 76/76, `make
+  check-selfhost` clean (after the `next()` fix), from-scratch stdlib
+  dylib rebuild 0 skips.
+
+## Original status (2026-08-07): still fully unfixed, including the comprehension sibling gap
 
 This session's assignment explicitly held this whole task (#143) back
 as "DO NOT TOUCH ... due to prior regressions". While investigating

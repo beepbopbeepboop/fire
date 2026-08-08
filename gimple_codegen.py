@@ -28344,6 +28344,92 @@ class GimpleGen:
         # legitimate re-scan of the *same* node (e.g. the transitive closure
         # reaching one file via two import paths) is still a harmless no-op,
         # not itself treated as a collision.
+        # Constructor call-site scalar inference (bugs/hard/CODEGEN_
+        # unannotated_init_param_field_type_defaults_int64.md): the
+        # struct-field-collection loop just below (`_collect_self_assigns`)
+        # types `self.field = unannotated_param` purely from __init__'s own
+        # declared params, with zero cross-reference to how the class is
+        # actually constructed — `Widget("hello")` right there in the same
+        # file never informs `Widget.__init__`'s own `label` parameter,
+        # which silently defaults to int64_t (the raw pointer's bit pattern
+        # printed as a decimal integer instead of the real string). This
+        # codebase already has a general mechanism for exactly this class of
+        # problem for FREE functions (Pass 1.3d's cross-call scalar
+        # contract, a few thousand lines down in this same method) — but
+        # that pass runs too LATE to help here: it depends on
+        # self._inferred_var_types, itself only populated even later, and
+        # by the time it runs, `_collect_self_assigns` below has already
+        # locked in every field's type. Rather than reordering Pass 1.3d
+        # (broad, high-risk — this exact call-argument/parameter type-
+        # inference machinery has already produced two real regressions
+        # elsewhere this session), this is a standalone, narrower, EARLY
+        # pass: only DIRECT LITERAL constructor arguments (StringLiteral/
+        # FloatLiteral) are observed, not the fuller "IdentExpr referencing
+        # an already-inferred variable" evidence Pass 1.3d's free-function
+        # version uses (that needs machinery not built yet at this point in
+        # gen_module). Still resolves the common, directly-reproducible
+        # shape (a literal argument passed straight to a constructor)
+        # additively — every unresolvable case (no literal evidence, or
+        # disagreeing call sites) is left at today's int64_t default,
+        # unchanged. Kept in its OWN attribute (not self._inferred_param_
+        # types) since that dict is unconditionally reset to {} later, at
+        # Pass 1.3c (~line 29351) — harmless for THIS pass's own consumer
+        # (which reads it before that reset), but a distinct name avoids
+        # any ambiguity about which pass owns which entries.
+        self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
+        _ctor_init_params = {}
+        _ctor_init_methods = {}
+        for _s in all_struct_defs:
+            if isinstance(_s, StructDef):
+                _init = None
+                for _m in _s.methods:
+                    if _m.name == '__init__':
+                        _init = _m
+                        break
+                if _init:
+                    _ctor_init_params[_s.name] = [pn for pn, _ in (_init.params or [])
+                                                  if pn != 'self' and not pn.startswith('*')]
+                    # Avoid `next(gen, default)` here — a self-hosted build
+                    # of this very file failed to link with an undefined
+                    # `_next` symbol the last time this pattern was used
+                    # over a freshly-built generator (see the identical,
+                    # already-documented gotcha a few thousand lines down
+                    # at Pass 1.3d's own scalar-type resolution).
+                    _ctor_init_methods[_s.name] = _init
+        if _ctor_init_params:
+            _ctor_lit_obs: dict[str, dict[str, set]] = {}
+            _ctor_calls: list = []
+            self._calls_in_stmts(stmts, _ctor_calls)
+            if self.do_imports or self.link_imports:
+                self._calls_in_stmts(imported_stmts, _ctor_calls)
+            for _call in _ctor_calls:
+                if not isinstance(_call.func, IdentExpr):
+                    continue
+                _pnames = _ctor_init_params.get(_call.func.name)
+                if not _pnames:
+                    continue
+                for _i, _a in enumerate(_call.args):
+                    if _i >= len(_pnames):
+                        break
+                    if isinstance(_a, StringLiteral):
+                        _ctor_lit_obs.setdefault(_call.func.name, {}).setdefault(
+                            _pnames[_i], set()).add('char *')
+                    elif isinstance(_a, FloatLiteral):
+                        _ctor_lit_obs.setdefault(_call.func.name, {}).setdefault(
+                            _pnames[_i], set()).add('double')
+            for _struct_name, _pmap in _ctor_lit_obs.items():
+                _init = _ctor_init_methods.get(_struct_name)
+                if not _init:
+                    continue
+                _ann = {pn: pt for pn, pt in (_init.params or [])}
+                for _pname, _types in _pmap.items():
+                    if _types not in ({'double'}, {'char *'}):
+                        continue                    # not unanimous double / char *
+                    if _ann.get(_pname) is not None:
+                        continue                    # respect explicit annotation
+                    self._ctor_lit_param_types.setdefault(_struct_name, {})[_pname] = (
+                        'double' if _types == {'double'} else 'char *')
+
         for s in all_struct_defs:
             if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
                 self._struct_name_owner[s.name] = id(s)
@@ -28490,6 +28576,21 @@ class GimpleGen:
                                     ft = 'MojoList *'
                                 elif isinstance(v, SetExpr):
                                     ft = 'MojoSet *'
+                                elif isinstance(v, Comprehension):
+                                    # A comprehension is a DIFFERENT AST node
+                                    # than a literal ListExpr/DictExpr/SetExpr
+                                    # (see bugs/hard/CODEGEN_unannotated_
+                                    # init_param_field_type_defaults_int64.md's
+                                    # "Sibling gap" section) and matched none
+                                    # of the cases above, falling to the
+                                    # generic 'int' default -- found via
+                                    # Tools/cases_generator/cwriter.py's
+                                    # `self.indents = [i * 4 for i in
+                                    # range(indent + 1)]` (declared `int
+                                    # indents;`, the real value a truncated
+                                    # MojoList* pointer).
+                                    ft = {'list': 'MojoList *', 'set': 'MojoSet *',
+                                          'dict': 'MojoDict *'}.get(v.kind, 'MojoList *')
                                 elif isinstance(v, CallExpr):
                                     cfn = v.func
                                     cn = cfn.name if isinstance(cfn, IdentExpr) else ''
@@ -28592,6 +28693,16 @@ class GimpleGen:
                                     pm[pname] = '_Bool'
                                 else:
                                     pm[pname] = 'int64_t'
+                            elif (method.name == '__init__'
+                                  and pname in self._ctor_lit_param_types.get(s.name, {})):
+                                # Real constructor call-site evidence (a
+                                # literal argument observed above) beats the
+                                # generic int64_t default — see bugs/hard/
+                                # CODEGEN_unannotated_init_param_field_type_
+                                # defaults_int64.md. Scoped to __init__ only:
+                                # a same-named param on a DIFFERENT method has
+                                # no relation to how the class was constructed.
+                                pm[pname] = self._ctor_lit_param_types[s.name][pname]
                             else:
                                 pm[pname] = 'int64_t'
                     new_fields = {}
