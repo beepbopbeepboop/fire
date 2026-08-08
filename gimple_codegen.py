@@ -7070,7 +7070,37 @@ class GimpleGen:
             ot = self._quick_type(node.obj)
             sn: str
             sn = _struct_name_of(ot)
-            return self.struct_field_types.get(sn, {}).get(node.member, 'int64_t')
+            _fields = self.struct_field_types.get(sn, {})
+            if node.member in _fields:
+                return _fields[node.member]
+            # `node.member` isn't a real FIELD on this struct — it may be a
+            # bound METHOD/`@property` read without call syntax (`self.
+            # filename.parent`, `filename` a 0-arg method/property). Real
+            # codegen (_lower_MemberExpr's object-lowering path) auto-
+            # invokes such a value before doing the outer member lookup —
+            # this static type-guessing pre-pass (used by _infer_return_
+            # type/_collect_return_types to pick a function's own C return
+            # type from its `return` statements) must mirror that or a
+            # `return self.prop.attr`-shaped return silently defaulted to
+            # int64_t against a body that actually returns a real pointer:
+            # the compiled function's OWN declared C return type disagreed
+            # with what its body computed (the `.attr` field read itself
+            # was already correct — only the enclosing function's
+            # signature was wrong). Same struct-method detection
+            # `_lower_MemberExpr` itself already uses to recognize "this
+            # member is a bound-method value, not a field" (see that
+            # method's `_lower_bound_method_value` call site). See bugs/
+            # COMPILE_FAIL_zipfile__path___init__.md.
+            if sn and (f"{sn}_{node.member}" in self.func_return_types
+                       or (sn, node.member) in self._struct_method_signatures):
+                candidates = self._struct_method_signatures.get((sn, node.member))
+                overload_id = ''
+                if candidates and len(candidates) == 1:
+                    overload_id = candidates[0].get('overload_id', '') or ''
+                mangled = self._struct_method_csym(sn, node.member, overload_id)
+                return self.func_return_types.get(
+                    mangled, self.func_return_types.get(f"{sn}_{node.member}", 'int64_t'))
+            return 'int64_t'
         if isinstance(node, ListExpr):  return 'MojoList *'
         if isinstance(node, DictExpr):  return 'MojoDict *'
         if isinstance(node, SetExpr):   return 'MojoSet *'
@@ -8733,6 +8763,46 @@ class GimpleGen:
             ov = self._new_val(_ret, f'{_c_fn} ()')
         else:
             ot, ov = self.lower_expr(node.obj)
+            # `self.prop.attr` where `prop` is a 0-arg property/method
+            # accessed without call syntax (`self.prop`, no `()`) lowers to
+            # a deferred, uncalled `MojoBoundMethod *` value (see
+            # _lower_bound_method_value) — correct when `self.prop` is
+            # itself being called (`self.prop()`) or passed around as a
+            # first-class callable, but chaining a MEMBER ACCESS directly
+            # off it is never that: real Python (and, for a `@property`
+            # specifically, the entire point of the decorator) auto-
+            # invokes the getter/method FIRST and only then looks up
+            # `.attr` on the RESULT. This codegen has no notion of
+            # `@property` vs. an ordinary bound method at this
+            # representation level (both lower identically via
+            # _lower_bound_method_value) — but a real, intentional
+            # "read a member off the bound-method OBJECT itself" (e.g.
+            # `self.method.__name__`) isn't supported by this codegen
+            # either way (the dynamic-dispatch fallback further below has
+            # no such fields registered for MojoBoundMethod), so auto-
+            # invoking here is a strict improvement with no realistic
+            # regression case. Mirrors _lower_subscript's identical fix
+            # for `self.prop[key]` (see that method's own comment for the
+            # original bug/fix history). Confirmed via Lib/zipfile/_path/
+            # __init__.py's `filename` @property: `self.filename.parent`
+            # previously ran `_mojo_dispatch_getattr` on the bound-method
+            # object itself, which has no `.parent` — silent wrong
+            # runtime behavior (AttributeError) rather than a compile
+            # error, since the struct-name fallback further below (Step
+            # 4, bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
+            # already routes unknown MojoBoundMethod fields through
+            # runtime dispatch instead of a hard GCC error. See bugs/
+            # COMPILE_FAIL_zipfile__path___init__.md.
+            if ot == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(ov, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', ov)])
+                if ret_type in ('int64_t', 'int'):
+                    ot, ov = ret_type, raw_t
+                elif ret_type == 'void':
+                    ot, ov = 'int', self._new_val('int', '0')
+                else:
+                    ot, ov = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
             # Resolve an int64_t-boxed pointer to its real struct type (e.g.
             # `t = self._peek()` boxes a `Token *` as int64_t) — without this,
             # `t.line` never found a real struct field and fell through to the
