@@ -4,7 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/util.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-07): NOW PASSES
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/util.py`
+now builds cleanly (`Built: .../util`, exit 0, no `error:` lines) — a
+side effect of the "option 3" defensive-net fix landed today in
+`bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md`
+(the root cause this doc's 2026-08-06 note pointed at). No further
+action needed here; not re-fixed by this session, just re-verified and
+closed out.
+
+## Status (updated 2026-08-06, historical)
 
 Re-ran; current error (line numbers now point at the generated `.ci`,
 not the real `.py`, since the malformed code is emitted after the last

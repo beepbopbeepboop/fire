@@ -4,30 +4,35 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-07)
 
-Re-ran; errors span two files (this one imports `pathlib/_os.py`):
+Re-ran fresh against current master. The 2026-08-06 error set (the
+`_os.py` exception-attribute errors and the `__init__.py:72`/`:404`
+negative-index-slice errors) no longer reproduces at all — compilation
+now gets further and fails at a completely different point:
 
 ```
-error: request for member 'filename' in something not a structure or union    (_os.py:158)
-error: request for member 'filename2' in something not a structure or union   (_os.py:159)
-error: non-trivial conversion in 'integer_cst'                                (__init__.py:72)
-error: type mismatch in binary expression                                     (__init__.py:72)
-error: cannot convert to a pointer type                                       (__init__.py:404)
+$ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py
+[gimple_codegen] generator method Path.'walk' not eligible for C++ coroutine path, falling back to honest refusal: walk: every `yield` must carry a value, and all values must agree on one scalar type (int64_t/double/_Bool)
+Error building: cannot compile module: function(s) walk (generator function(s), contain a `yield`/`yield from`) — ... falling back to interpreting this module from source instead
 ```
 
-1. `pathlib/_os.py`'s `except OSError as err: err.filename =
-   source_f.name; err.filename2 = target_f.name` — writing NEW
-   attributes onto a caught exception object. Confirmed a new
-   real-world instance of the already-documented
-   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` (added
-   there). Not fixed here.
+**Classification:** same family as `bugs/hard/
+CODEGEN_generator_struct_typed_param_refused.md` (see that doc's
+scope note and `CODEGEN_generator_function_Lib_ftplib.md`'s matching
+`mlsd` case) — `Path.walk()` does `yield path, dirnames, filenames` (a
+3-tuple), which the coroutine codegen's scalar-only yield-value
+allow-list refuses outright, escalating to a fatal whole-module
+`RuntimeError` for the CLI's `mojo.py build` path since `walk` is a
+real `Path`/`PosixPath`/`WindowsPath` method reachable from the module
+root.
 
-2. `__init__.py:72`'s `self._tail[:-idx - 1]` (a slice with a computed
-   negative-index expression) and `:404`'s `return tail[-1]` (negative
-   single-element index) were not investigated further this session —
-   plausibly related to this codegen's slice/negative-index handling
-   for a `MojoList *`, but not confirmed.
+Not fixed here — genuine feature-sized coroutine-codegen scope
+boundary already covered by task #147's exclusion for this session (see
+that doc). The two previously-reported issues (exception dynamic-attr
+write, negative-index slice) may or may not still be latent further
+into the file; both are now moot since `walk`'s refusal is hit first
+and hard-fails the whole module before either is reached.
 
 None fixed here.
 

@@ -1,5 +1,36 @@
 # HARD BUG: a generator with a struct/class-typed parameter is refused outright, hard-failing the WHOLE top-level module (not a graceful per-function fallback)
 
+## Scope note (2026-08-07): this is a whole FAMILY of refusals, not just struct-typed parameters
+
+This doc's title names the parameter-type case specifically (the
+original finding), but the SAME underlying architecture — a fixed
+scalar/container allow-list in `_gen_cpp_generator_unit`/
+`_gen_cpp_async_unit`/`_gen_cpp_async_generator_unit`, refusal
+escalating to a fatal whole-module `RuntimeError` for the CLI's
+`mojo.py build` root file — has now been independently confirmed
+hitting THREE more real stdlib files via two OTHER trigger shapes, not
+just struct-typed parameters:
+
+- **Non-scalar YIELDED VALUE** (a tuple, where "every `yield` must
+  carry a value, and all values must agree on one scalar type" is
+  violated): `Lib/pathlib/__init__.py`'s `Path.walk()` (`yield path,
+  dirnames, filenames`) and `Lib/ftplib.py`'s `FTP.mlsd()` (`yield
+  (name, entry)`). See `bugs/COMPILE_FAIL_pathlib___init__.md` and
+  `bugs/CODEGEN_generator_function_Lib_ftplib.md`.
+- **`*args`/`**kwargs` parameters refused unconditionally**:
+  `Lib/test/_code_definitions.py`'s `asyncgen_spam(*args)`. See
+  `bugs/CODEGEN_generator_function_Lib_test__code_definitions.md`.
+
+All three are the same class of finding as this doc's original
+struct-typed-parameter case: a real, documented, INTENTIONAL scope
+limit in the C++20-coroutine codegen subsystem, not an accidental
+bug — and per this session's assignment, this whole family is held
+back from further attempts (feature-sized: widening the coroutine
+promise type to carry non-scalar yielded values, or to accept
+`*args`/`**kwargs`, are both real features, not narrow fixes). Left
+here as a consolidated pointer so a future session doesn't have to
+re-discover the connection between these docs from scratch.
+
 ## Status (re-verified 2026-08-07, still unfixed)
 
 Re-confirmed still reproducing identically against current master
