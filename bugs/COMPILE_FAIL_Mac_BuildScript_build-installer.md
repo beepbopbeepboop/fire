@@ -4,7 +4,152 @@ Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09): still broken, both root causes now confirmed structural — not fixed
+
+Re-ran fresh against current master (after merging in the recent
+`logging/handlers.py` transitive-closure and other same-day fixes — no
+change to this file's outcome). The exact same two errors from the
+2026-08-06 note below still reproduce byte-for-byte:
+
+```
+$ python3 mojo.py build /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py
+.../build-installer.py:704:17: error: invalid operands to binary + (have 'char *' and 'MojoList *')
+.../build-installer.py:1447:17: error: invalid operands to binary % (have 'int64_t' {aka 'long long int'} and 'MojoDict *')
+.../build-installer.py:1456:17: error: invalid operands to binary % (have 'int64_t' {aka 'long long int'} and 'MojoDict *')
+```
+
+Root-caused both precisely this session (previous note below had only
+sketched them). Both are genuinely structural/systemic — not attempted,
+per this project's documented history of narrow-looking fixes to shared
+global/local type-inference machinery causing broad silent regressions
+across the 664-file stdlib corpus (see CLAUDE.md's quality-gate section
+and `bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_
+annotation.md`'s own "Risk" section, which flags this exact `gen_module`
+Phase 1.7 pass as having "already produced one real regression-shaped
+scare earlier this session").
+
+### Root cause 1 (line 704): global reassigned to a structurally
+different type inside a function, module-scope initial value never
+reconciled
+
+`Mac/BuildScript/build-installer.py:112`:
+```python
+FW_VERSION_PREFIX = "--undefined--" # initialized in parseOptions
+```
+is a module-level `StringLiteral` — `gen_module`'s Phase 1.7 global
+pre-scan (`gimple_codegen.py`, `_phase17_infer_global_type` /
+`_gscan_declare_global`) types `FW_VERSION_PREFIX` as `char *` purely
+from this one assignment. Inside `parseOptions()` (line 637), after a
+`global FW_VERSION_PREFIX` declaration, line 703 reassigns it to a real
+LIST value: `FW_VERSION_PREFIX = FW_PREFIX[:] + ["Versions",
+getVersion()]`. Neither Phase 1.7 nor the struct-field-declaration pass
+(`_gscan_declare_global`) scans function bodies for `global`-declared
+reassignments at all — both only ever walk top-level module statements
+(by design; see `_gscan_declare_global`'s own doc comment on why
+`imported_stmts` is deliberately excluded from that scan). So
+`_global_var_types['FW_VERSION_PREFIX']` stays `char *` forever, and the
+VERY NEXT LINE (704), `FW_SSL_DIRECTORY = FW_VERSION_PREFIX[:] +
+["etc", "openssl"]`, reads `FW_VERSION_PREFIX` back with the stale
+`char *` type: `[:]` lowers as a STRING slice (producing another `char
+*`), then `+` between that and a list literal (`MojoList *`) is invalid
+C — exactly the reported error, one line downstream of the actual
+mistyped write.
+
+A real fix would need to extend the SAME Phase 1.7 pre-scan machinery
+that already required two previous incident-driven fixes this session
+(the `IfStmt`-flattening fix, commit `fd29316`, and the `TryStmt`-join
+fix, part of the "all three parts fixed" work in
+`bugs/hard/CODEGEN_global_prescan_blind_to_trystmt_and_bare_annotation.md`)
+to ALSO descend into every function body, find `global X` declarations,
+locate every reassignment to `X` within that function, and
+`TypeLattice.join` those types against whatever the module-level scan
+found — mirroring the TryStmt-branch-join logic already added, but for
+a structurally different scope (cross-function, not cross-branch) and
+needing new bookkeeping for `global`-statement discovery that doesn't
+exist anywhere in Phase 1.7 today. Doable in principle, but it directly
+widens the exact pass CLAUDE.md's quality gate section and the sibling
+hard-bug doc both call out as high-risk, evidenced by requiring the
+full 5-part gate (`test_gimple.py`, `test_module_cache.py`,
+`check-selfhost`, from-scratch stdlib dylib rebuild, `compile_stdlib.py
+-j8` 664/664) to be genuinely trustworthy — not attempted in this
+session given the file has a SECOND, independent structural gap (below)
+that would still leave it broken even with this one fixed.
+
+### Root cause 2 (lines 1447/1456): dict-keyed (`%(name)s`) runtime
+`%`-string-formatting is an unimplemented feature, not a type-inference
+bug
+
+`packageFromRecipe()` (line 1427):
+```python
+readme = textwrap.dedent(recipe['readme'])   # line 1437
+...
+textvars = dict(VER=getVersion(), FULLVER=getFullVersion())  # line 1443
+readme = readme % textvars                    # line 1447
+...
+srcdir = os.path.join(WORKDIR, '_root', srcdir[1:])  # line 1455
+srcdir = srcdir % textvars                     # line 1456
+```
+Several `recipe['readme']` values earlier in the file (e.g. lines
+424/434/449/462/473/491) are literal triple-quoted strings containing
+`%(VER)s`/`%(FULLVER)s`-style DICT-keyed format specifiers (Python's
+`"...%(name)s..." % {...}` idiom), not the positional `%s`/tuple form.
+
+Two compounding problems, confirmed by reading `gimple_codegen.py`'s
+`_lower_percent`/`_lower_percent_format` (~line 10239) and the generic
+`_quick_type` fallback (~line 7023):
+
+1. **`_lower_percent` only special-cases a LITERAL format string
+   (`isinstance(node.left, StringLiteral)`)** — by the time execution
+   reaches `readme % textvars`, `readme` is a plain `IdentExpr` (a
+   variable whose value happens to have originated, several statements
+   earlier, from a string literal via `recipe['readme']` →
+   `textwrap.dedent(...)`), not a `StringLiteral` AST node. There is no
+   data-flow/constant-propagation in this codegen that could recover
+   "this variable's value is known at compile time to be this literal
+   template" across an intervening dict-index + function call. So the
+   dict-keyed-format special case never fires for this shape at all —
+   it can only ever work for `"literal %(x)s" % some_dict` written
+   in-line as one expression, a narrower case than real Python supports
+   and than this file actually uses.
+2. **Even granting a genuinely dynamic (non-compile-time-known) format
+   string, this codebase has NO runtime `%`-format implementation at
+   all** — `_lower_percent_format`'s existing machinery parses the
+   format text at COMPILE TIME (splitting literal/`%spec` parts,
+   emitting per-part `sprintf`/`mojo_str_cat` calls) and only supports
+   POSITIONAL args (a tuple or single RHS value), never named/dict
+   lookups. Supporting `fmt % {dict}` in general — where `fmt` is only
+   known at runtime — needs a genuinely new C runtime primitive (e.g. a
+   `mojo_str_format_dict(char *fmt, MojoDict *vals)` that parses
+   `%(key)conv` specs and `%conv` specs against a `MojoDict *` AT
+   RUNTIME) that doesn't exist anywhere in `runtime/*.c` today. That's
+   a new feature, not a missing branch in an existing dispatcher.
+
+Separately (visible in the error text but not the blocking issue): `lt`
+for `readme`/`srcdir` reports as `int64_t`, not even `char *` — both are
+function-LOCAL variables whose declared type comes from
+`textwrap.dedent(...)`'s and `os.path.join(...)`'s return values, and
+neither is in the small hardcoded stdlib-function return-type tables
+`_quick_type`'s `CallExpr`/`MemberExpr` branches consult, so both fall
+through to the universal "unknown call return type" `int64_t` default —
+the SAME pervasive, foundational fallback used for every unresolved
+call across the whole compiler (not specific to this file). Adding
+table entries for `textwrap.dedent`/`os.path.join` would fix the
+reported type in isolation, but does nothing for root cause 2 above
+(the actual blocker) since even a correctly-typed `char *` LHS still
+has no code path to reach a dynamic, dict-keyed `%`-format at runtime.
+
+### Why not fixed here
+
+Both gaps are structural: (1) widens the Phase 1.7 global-type-inference
+pass that has already caused two real regressions this session and is
+explicitly flagged as high-risk by both CLAUDE.md and a sibling
+`bugs/hard/` doc; (2) requires designing and implementing a new runtime
+string-formatting primitive (dict-keyed `%`-format against a dynamic
+template) that doesn't exist in this codebase in any form yet — a real
+feature addition, not a stub/branch fix. Per this session's guidance,
+leaving both documented here rather than forcing either through.
+
+## Status (updated 2026-08-06, historical — superseded by the more precise write-up above)
 
 Re-ran; current errors, two distinct root causes:
 
