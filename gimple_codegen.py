@@ -8913,11 +8913,36 @@ class GimpleGen:
 
         # If the object is a zero-arg function used in member-access context (e.g. block_idx.x),
         # call it first so we get the struct return value, not a void* funcptr.
+        #
+        # Excludes dunder members (`__code__`, `__name__`, `__doc__`, ...):
+        # those are real Python attributes of the FUNCTION OBJECT ITSELF
+        # (`f.__code__` always means "introspect f", never "call f() and
+        # read .__code__ off its result", regardless of f's own arity or
+        # return type) — but this heuristic can't tell that apart from the
+        # block_idx.x/thread_idx.x/grid_dim.x GPU-intrinsic shape it exists
+        # for by construction alone, since both are "bare function name
+        # immediately followed by a MemberExpr". Without the exclusion,
+        # `_write_atomic.__code__` (Lib/importlib/_bootstrap_external.py,
+        # `_code_type = type(_write_atomic.__code__)`) emitted a bare
+        # `_write_atomic ()` zero-arg call to a real 3-parameter function —
+        # "implicit declaration of function '_write_atomic'" (GCC can't
+        # find a zero-arg overload, only the real mangled one). Dunder
+        # member names are never legitimate GPU-intrinsic accessor fields
+        # (always lowercase x/y/z), so excluding them can't affect that
+        # case. Falling through to the `else` branch instead lowers
+        # node.obj as an ordinary identifier — `_lower_IdentExpr`'s own
+        # "C function name used as a value" branch already produces a
+        # valid `_funcptr_*` void* value for a bare, uncalled function
+        # name, which the generic dynamic-dispatch fallback further below
+        # (the `ot in ('int', 'int64_t', 'void *', ...)` case) then handles
+        # like any other opaque-pointer member read.
+        _dunder_member = node.member.startswith('__') and node.member.endswith('__')
         if (isinstance(node.obj, IdentExpr)
                 and node.obj.name in self.func_return_types
                 and node.obj.name not in self.var_types
                 and node.obj.name not in self.struct_field_types
-                and node.obj.name not in self.BUILTIN_VALUE_MAP):
+                and node.obj.name not in self.BUILTIN_VALUE_MAP
+                and not _dunder_member):
             _fn_name = node.obj.name
             _c_fn = self._c_names.get(_fn_name, _safe_name(_fn_name))
             # Resolve through _resolve_type: some imports register a bare
