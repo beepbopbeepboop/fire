@@ -18414,8 +18414,25 @@ class GimpleGen:
                 self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
+                # Mirrors _gen_stmt_AssignStmt's identical MemberExpr
+                # struct-field branch: look up the field's REAL declared C
+                # type and coerce the computed value to it instead of a raw
+                # `->member = v` emit. Without this, `self.is_docstring |=
+                # is_docstring` (a bool dataclass field, declared plain
+                # `int` per this codegen's bool representation) — where the
+                # RHS is computed via the BinaryOp `|` path a few lines up
+                # and widened to `int64_t` (an unannotated `is_docstring=
+                # False` keyword param defaults to int64_t) — assigned that
+                # int64_t straight into the `int` field with no cast, a
+                # hard GIMPLE verifier rejection ("non-trivial conversion
+                # in 'var_decl'"), since -fgimple requires an explicit
+                # narrowing cast, unlike ordinary C. Real repro: Tools/
+                # i18n/pygettext.py's `Message.add_location`. See
+                # bugs/COMPILE_FAIL_Tools_i18n_pygettext.md.
                 op = '->' if '*' in ot else '.'
-                self._emit(f"  {ov}{op}{_safe_field(node.target.member)} = {v};")
+                struct_name = _struct_name_of(ot)
+                field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
+                self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
