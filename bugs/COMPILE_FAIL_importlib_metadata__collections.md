@@ -2,6 +2,17 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py`
 
+## Status (re-verified 2026-08-09)
+
+Re-ran `python3 mojo.py build .../_collections.py` fresh against current
+master. Still fails, byte-identical to the 2026-08-06 finding below:
+`_collections.py:31:1: error: non-trivial conversion in 'mem_ref'`
+(`_t14 = *_t10;`), i.e. `Pair.parse`'s `return cls(*map(str.strip,
+text.split("=", 1)))`. Root cause below still holds — genuinely
+structural (would need real modeling of `collections.namedtuple(...)`'s
+dynamically-constructed return value as a subclassable struct type,
+which is out of scope as a narrow fix). Not attempted.
+
 ## Status (updated 2026-08-06)
 
 Not fixed. Root cause identified but not resolved — a genuinely exotic,
