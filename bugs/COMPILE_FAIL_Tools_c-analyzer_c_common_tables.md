@@ -4,89 +4,58 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-09)
 
-Re-ran; current error (multiple identical occurrences):
+Re-ran against current master (`python3 mojo.py build .../c_common/
+tables.py`). The previously-documented `ColumnSpec._parse`
+`cls(*values)` spread-call-against-opaque-callee GCC error ("type
+mismatch in binary expression" at line 289) no longer surfaces — but
+NOT because that bug was fixed. `gen_module`'s generator-eligibility
+pre-pass (which now honestly refuses `parse_table`, see below) runs,
+and raises, entirely in Python BEFORE any C is ever handed to GCC —
+that raise necessarily happens earlier in the pipeline than a GCC-
+level type-mismatch ever could. The only way the old doc's GCC error
+could have been reached at all is if, at capture time, the generator-
+eligibility check didn't yet reject `parse_table`'s tuple-valued yield
+(i.e. an earlier, more permissive version of the coroutine-lowering
+pre-pass let it through, presumably emitting silently-wrong C, which
+then went on to hit the unrelated `cls(*values)` bug during GCC
+compilation). The eligibility check has since been hardened to
+honestly refuse tuple-valued yields up front instead of silently
+mis-lowering them. So: the `cls(*values)` opaque-callee spread-call
+bug is UNVERIFIED here, not confirmed fixed — it's simply unreachable
+now, masked by an earlier (and more correct) refusal. Left as a
+separate, latent finding; not re-investigated since it can't be
+reached from this file's current top-level compile.
+
+Current failure is the same already-tracked "coroutine codegen has
+much weaker yield/type coverage than the ordinary function path" gap
+independently confirmed this session for `c_analyzer/__init__.py`,
+`c_analyzer/__main__.py`, `c_analyzer/info.py`, and
+`c_common/scriptutil.py`:
 
 ```
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:289:1: error: type mismatch in binary expression
+Error building: cannot compile module: function(s) parse_table
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
 ```
 
-at `ColumnSpec._parse`'s classmethod: `*values, _ = raw` (starred-target
-unpack) then `return cls(*values)` — calling the classmethod's own
-`cls` (an opaque, dynamically-typed class reference, boxed `int64_t`)
-with a SPREAD `*values` argument. Root-caused via the generated `.ci`:
-this lowers to `mojo_fnptr_call_1(cls_as_voidptr, (int64_t)values)` —
-the `MojoList *` holding the real per-element values gets cast whole
-to `int64_t` and passed as a SINGLE argument, rather than actually
-spreading its elements into separate call arguments. `cls(*values)`
-against a dynamic/opaque callable reference doesn't perform real
-argument spreading at all.
-
-Not fixed here — this is call-argument handling for a spread call
-against a DYNAMIC callable (as opposed to a statically-known
-constructor/function, which this codegen handles correctly elsewhere),
-one of the explicitly flagged high-risk categories (call-argument
-coercion) this session treats with extra caution. Plausibly related to
-(but a distinct shape from) `bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
-— that doc covers a *declared* `*args`/`**kwargs` function being
-called with literal positional args; this is the mirror case, a
-spread *call site* against an opaque *callee*. Worth checking whether
-the two share a fix location before attempting either.
+With `MOJO_DEBUG=1`:
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:61:11: warning: unused variable '_tag' [-Wunused-variable]
-   61 |             values = _fix_read_default(row)
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:66:11: warning: unused variable '_tag' [-Wunused-variable]
-   66 |     return fix_row
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:71:11: warning: unused variable '_tag' [-Wunused-variable]
-   71 |         fix = empty
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:86:11: warning: unused variable '_tag' [-Wunused-variable]
-   86 |                fix=None,
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:95:13: warning: unused variable '_tag' [-Wunused-variable]
-   95 |                 header,
-      |             ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: At top level:
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:216:59: warning: trigraph '??-' ignored, use '-trigraphs' to enable [-Wtrigraphs]
-  216 |             sep = None
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:219:67: warning: trigraph '??-' ignored, use '-trigraphs' to enable [-Wtrigraphs]
-  219 | 
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function 'fix_row_a64463':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:56:11: warning: variable 'val' set but not used [-Wunused-but-set-variable]
-   56 |         def fix_row(row):
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_alloc__normalize_fix_read_fix_row_env':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:57:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   57 |             values = fix(row)
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py: In function '_normalize_fix_read_fix_row':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:72:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   72 |     if callable(fix):
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:70:11: warning: variable '_t5' set but not used [-Wunused-but-set-variable]
-   70 |     if fix is None:
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:69:10: warning: variable '_t4' set but not used [-Wunused-but-set-variable]
-   69 | def _normalize_fix_write(fix, empty=''):
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:68:11: warning: variable '_t3' set but not used [-Wunused-but-set-variable]
-   68 | 
-      |           ^  
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py:67:14: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
-   67 | 
-      |              ^  
-... (964 more lines)
+generator 'parse_table' not eligible for C++ coroutine path, falling
+back to honest refusal: parse_table: every `yield` must carry a value,
+and all values must agree on one scalar type (int64_t/double/_Bool)
 ```
 
-Exit code: 1
-Elapsed: 14.26s
+`parse_table` (line 153) does `yield row, filename` (line 183) — a
+2-tuple-valued yield. The coroutine promise machinery only supports a
+single scalar (`int64_t`/`double`/`_Bool`) yield-value type, exactly
+the documented "tuple-valued yields aren't representable at all" gap.
+Not attempted here — deliberately deferred, already-tracked compiled-
+generator/async-codegen project scope, not a narrow fix.
+
+(The old GCC-warning-log excerpt previously shown here was from the
+stale pre-hardening repro described above and has been removed —
+current repro fails before GCC is ever invoked.)
