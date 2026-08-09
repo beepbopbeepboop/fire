@@ -4,6 +4,41 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-09): still fails, same generator/coroutine gap, confirmed precisely
+
+Re-ran on current `master` (`python3 mojo.py build .../c_parser/parser/__init__.py`,
+exit 1). Error set in the generated `__init___gen.cpp` is unchanged from
+2026-08-06 (`invalid conversion from 'MojoBoundMethod*' to 'int64_t'`,
+`'ParsedItem' was not declared in this scope`, `request for member
+'filename' in 'fileinfo', which is of non-class type 'int64_t'`, etc.).
+
+Confirmed precisely which generators/yields trigger it: this module has
+three coroutine-lowered generator functions —
+- `parse()` (line 128-129): `for result in _parse(...): yield
+  ParsedItem.from_raw(result)` — yields a cross-module struct type
+  (`ParsedItem`, imported via `from ..info import ParsedItem`), not a
+  scalar the coroutine promise machinery can represent.
+- `_parse()` (around line 161): `yield result` — the loop var's real
+  type is inferred from an untyped upstream param/return and defaults
+  to `int64_t`.
+- `_iter_source()` (around lines 191/201/204): `yield srcinfo`, where
+  `srcinfo` is a `SourceInfo` instance (`from ._info import
+  SourceInfo`, also cross-module) built up via mutation of unannotated
+  fields (`fileinfo`, `filestack`, `_start`, `_used`, etc.), all of
+  which fall back to `int64_t`/`char*` instead of their real
+  struct/list types in this codegen path.
+
+This is the exact already-tracked gap: unannotated generator
+params/locals/fields default to `int64_t` in the coroutine-promise
+lowering (unlike the ordinary-function path's real type inference),
+and non-scalar (here cross-module-struct-typed) yield values aren't
+representable at all — so downstream member accesses on the wrongly
+`int64_t`/`char*`-typed locals fail to compile. Same class as
+`bugs/CODEGEN_generator_function_Lib_*.md` /
+`bugs/hard/CODEGEN_generator_*.md`. No code change made — out of scope
+for this pass per the project's explicit deferral of the
+generator/coroutine codegen project.
+
 ## Status (updated 2026-08-06)
 
 Re-ran; current errors are all in a generated C++ file

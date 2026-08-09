@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-09): unchanged, still blocked on sibling cwriter.py ICE
+
+Re-ran on current `master` (`python3 mojo.py build .../cases_generator/analyzer.py`,
+exit 1). Single error, identical to 2026-08-07:
+`Tools/cases_generator/cwriter.py:35:3: internal compiler error: in
+build2, at tree.cc:5204`. This file (`analyzer.py`) itself is not
+directly implicated — the failure is entirely in the transitively-
+imported `cwriter.py` (`import lexer`/`from cwriter import CWriter`
+chain). `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (checked
+the same session) confirms this GCC ICE is still open there too, and
+is a genuinely different/deeper bug than the field-typing gap (task
+#143) that used to mask it — not a generator/coroutine yield-type
+issue at all, an actual `-fgimple` frontend crash on some emitted
+GIMPLE shape. Not investigated further here (this is `cwriter.py`'s
+bug to root-cause, not `analyzer.py`'s); this file's own doc kept only
+to record that it's still blocked, with no code change made.
+
 ## Status (2026-08-07)
 
 Re-ran after this session's `_compr_range_loop` fix (see `bugs/
