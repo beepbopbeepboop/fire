@@ -2,6 +2,38 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/_bootstrap.py`
 
+## Status (updated 2026-08-08)
+
+Issue #1's real root cause was misdiagnosed in the note below (it is
+NOT an instance of #143's unannotated-param bug — `_verbose_message`'s
+`message` param has no annotation, but that's not what's wrong here).
+Actual cause: `_verbose_message(message, *args, verbosity=1)` — a
+vararg followed by a real trailing (keyword-only) parameter, with no
+`**kwargs`. `_emit_call`'s packing-sentinel check only fires when
+`'...'` is the LAST entry of a callee's param-type list; here it isn't
+(`verbosity` follows it), so packing silently never happens and the
+call's extra positional arguments get coerced 1:1 against the wrong
+concrete param types. Root-caused, fixed at the call-lowering level
+(`_lower_named_call`, `gimple_codegen.py`) — a new `_vararg_trailing_
+param_types` persistent table plus packing logic generalized to find
+the sentinel anywhere in the signature, not just the last position.
+Confirmed correct via 3 hand-written repros (basic case, an explicit
+keyword override of the trailing param, and no regression on the
+sibling `#142` args/kwargs fix) and the full 5-part gate.
+
+**This specific file still does not compile end-to-end** — the exact
+call site at line 951 continues to fail with the same symptom even
+after the fix, for a reason not yet isolated (confirmed NOT a caching
+artifact — reproduced with a fully isolated `GMOJO_HOME`). Direct
+inspection shows `self._vararg_trailing_param_types['_verbose_message']`
+holds the CORRECT signature by the time `gen_module` finishes for this
+file, so the gap is somewhere between that correct registration and
+this one call site's actual lowering — possibly a further code path
+in `_lower_call`/`_lower_named_call` not yet identified for a file this
+large and structurally complex. The underlying mechanism fix is real,
+tested, and gate-verified (worth keeping), but does not yet close this
+doc. Left as a genuine open item rather than force-closing it.
+
 ## Status (updated 2026-08-07, Track B continuation session)
 
 Issue #3 (below) is now FIXED — see its own updated section. Down to a

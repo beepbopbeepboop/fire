@@ -4038,6 +4038,21 @@ class GimpleGen:
         # `_t32 = (MojoDict *)_t31;` for `h(1, x=7, y=8)`, i.e. the integer 7
         # reinterpreted as a dict pointer, which segfaults on first use.
         self._func_kwargs_slot: dict[str, int] = {}
+        # A free function's own sentinel-preserving param C-type list, for
+        # the `(fixed, *args, trailing_kwonly=default, ...)` shape (no
+        # `**kwargs`) — populated ONCE at registration time so a call site
+        # compiled LATER still sees the packing sentinel, mirroring why
+        # `_mangled_signature_ctypes` exists for struct methods (see that
+        # dict's own docstring: `func_param_types[name]`'s sentinel gets
+        # overwritten with the concrete real signature once the function's
+        # forward declaration is finalized, so any call site compiled
+        # afterwards sees a signature with no `'...'` at all). Unlike
+        # `_mangled_signature_ctypes`, which is only ever populated for
+        # struct methods, this covers plain free functions — see
+        # `_lower_call`'s own trailing-keyword-only-param packing fix and
+        # bugs/COMPILE_FAIL_importlib__bootstrap.md's `_verbose_message`
+        # instance.
+        self._vararg_trailing_param_types: dict[str, list] = {}
         # (struct_name, method_name) -> list of candidate overloads, each a dict:
         #   {'overload_id', 'param_names', 'param_ctypes' (excl self), 'min_arity', 'max_arity'}.
         # Populated from the CURRENT file's own AST only (same-file resolution);
@@ -15229,6 +15244,80 @@ class GimpleGen:
                                         ('MojoDict *', self._pack_kwargs_dict(kwarg_dict))]
             kwarg_dict = {}
 
+        # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
+        # followed by more (keyword-only, per Python syntax) params, but NO
+        # `**kwargs`. `_emit_call`'s own packing check only fires when the
+        # `'...'` sentinel is the LAST entry of param_types; here it isn't
+        # (the trailing params come after it), so that check silently never
+        # fires — the call's extra positional args get coerced 1:1 against
+        # the trailing params' concrete C types instead of packed, and the
+        # trailing params themselves never receive a value at all. Real
+        # instance: importlib/_bootstrap.py's `_verbose_message(message,
+        # *args, verbosity=1)` called as `_verbose_message(fmt, a, b)`
+        # (verbosity left at its default) — `"too many arguments"` / a
+        # pointer-from-integer cast error at the call site. Python syntax
+        # guarantees anything textually after `*args` in a `def` is
+        # keyword-only, so it can NEVER be filled positionally by a call
+        # site — every entry of `arg_pairs` at/after the vararg's own
+        # position is unambiguously a vararg-pack candidate; the trailing
+        # param(s) must come from an explicit keyword argument (already in
+        # `kwarg_dict`, keyed by the call site's own real argument names) or
+        # their own default (`_func_param_defaults`, keyed by declared name
+        # — the trailing keyword-only slots are always exactly its LAST
+        # `len(_trailing_ptypes)` entries, since a param before `*args` is
+        # never keyword-only and so never appears in that tail).
+        #
+        # `func_param_types[name]`'s sentinel gets overwritten with the
+        # concrete real signature once the function's forward declaration
+        # is finalized (see _emit_call's own "starts life ending in the
+        # packing sentinel... gets overwritten... Every OTHER call site
+        # compiled afterwards then sees the concrete signature and
+        # silently skips packing" comment a few hundred lines up) — a call
+        # site compiled AFTER that point (the overwhelmingly common case
+        # for any function called more than once, or called from code
+        # textually after its own definition) sees a signature with no
+        # `'...'` at all, not even in the middle. `_mangled_signature_
+        # ctypes` preserves the original sentinel form untouched, so it's
+        # consulted FIRST here — `_emit_call`'s own existing fallback to it
+        # only checks `mangled_sig[-1] == '...'`, which is exactly as blind
+        # to a NON-final sentinel as the primary check it's guarding, so
+        # this reimplements that preference for the non-final case too
+        # rather than assuming `_emit_call`'s narrower version covers it.
+        if not _call_has_spread:
+            _vararg_ptypes = (self._vararg_trailing_param_types.get(fname)
+                              or self._vararg_trailing_param_types.get(fname_raw)
+                              or self._mangled_signature_ctypes.get(fname)
+                              or self._mangled_signature_ctypes.get(fname_raw)
+                              or self.func_param_types.get(fname)
+                              or self.func_param_types.get(fname_raw))
+            if _vararg_ptypes and '...' in _vararg_ptypes and _vararg_ptypes[-1] != '...':
+                _sentinel_idx = _vararg_ptypes.index('...')
+                _n_fixed2 = _sentinel_idx
+                _trailing_ptypes = _vararg_ptypes[_sentinel_idx + 1:]
+                _trailing_dflts = (self._func_param_defaults.get(fname)
+                                   or self._func_param_defaults.get(fname_raw) or [])
+                _trailing_names_defaults = (_trailing_dflts[-len(_trailing_ptypes):]
+                                            if _trailing_ptypes else [])
+                _fixed2 = arg_pairs[:_n_fixed2]
+                _vararg2 = arg_pairs[_n_fixed2:]
+                _lst2 = self._new_val('MojoList *', "mojo_list_new ()")
+                for _at2, _av2 in _vararg2:
+                    _av2 = self._coerce_to_type(_at2, 'int64_t', _av2)
+                    self._emit(f"  mojo_list_append_int ({_lst2}, {_av2});")
+                _trailing_pairs = []
+                for _i2, _tpt in enumerate(_trailing_ptypes):
+                    _tname = (_trailing_names_defaults[_i2][0]
+                             if _i2 < len(_trailing_names_defaults) else None)
+                    if _tname is not None and _tname in kwarg_dict:
+                        _trailing_pairs.append(kwarg_dict.pop(_tname))
+                    elif (_i2 < len(_trailing_names_defaults)
+                          and _trailing_names_defaults[_i2][1] is not None):
+                        _trailing_pairs.append(
+                            self._default_expr_to_pair(_trailing_names_defaults[_i2][1]))
+                    else:
+                        _trailing_pairs.append((_tpt, '0'))
+                arg_pairs = _fixed2 + [('MojoList *', _lst2)] + _trailing_pairs
+
         # Keyword argument padding for known functions
         if fname_raw == 'compile_to_gimple':
             if 'do_imports' in kwarg_dict: arg_pairs.append(kwarg_dict['do_imports'])
@@ -21346,6 +21435,38 @@ class GimpleGen:
                 out.append(self._param_ctype(pn, pt, node))
         return out
 
+    def _note_vararg_trailing_param_types(self, s) -> None:
+        """Called immediately after `self.func_param_types[s.name] =
+        self._signature_ctypes(...)` sets a free function's CORRECT,
+        fully-inferred signature — copies it into `self._vararg_
+        trailing_param_types` when the packing sentinel isn't in the
+        LAST position (a `(fixed, *args, trailing_kwonly=default, ...)`
+        shape with no `**kwargs`). `func_param_types[name]` itself later
+        gets its sentinel overwritten with the concrete signature once
+        the function's forward declaration is finalized (see
+        `_vararg_trailing_param_types`'s own docstring) — this side
+        table is where `_lower_named_call`'s trailing-keyword-only-param
+        packing fix reads from instead, so it stays correct regardless
+        of how much LATER a given call site is compiled. Deliberately
+        NOT computed once at registration time (a first, reverted
+        attempt did that — `_param_ctype`'s own type inference for an
+        unannotated param isn't fully settled that early, confirmed via
+        a real repro where it wrongly produced `int64_t` for a `char *`
+        message param). Piggybacking on the SAME already-correct value
+        this line just computed avoids re-deriving anything."""
+        if not isinstance(s, FunctionDef) or not s.params:
+            return
+        if not any(pn.startswith('**') for pn, _ in s.params):
+            _last_pn = s.params[-1][0]
+            if not _last_pn.startswith('*'):
+                _sig = self.func_param_types.get(s.name)
+                if _sig and '...' in _sig and _sig[-1] != '...':
+                    self._vararg_trailing_param_types[s.name] = _sig
+                    try:
+                        self._vararg_trailing_param_types[self._func_csym(s.name)] = _sig
+                    except Exception:
+                        pass
+
     def _fixed_param_ctypes(self, params, node, self_struct=None) -> list:
         """C types of the parameters that precede the first *-param, for a
         function with *args. The varargs are packed into a single trailing
@@ -21948,6 +22069,7 @@ class GimpleGen:
         # Record that this function takes varargs so call sites can pack args
         if has_varargs:
             self.func_param_types[node.name] = self._signature_ctypes(node.params, node)
+            self._note_vararg_trailing_param_types(node)
         safe = self._func_csym(node.name)
 
         # For main (in main module only), call class-attr initializer first
@@ -29126,6 +29248,7 @@ class GimpleGen:
             if isinstance(s, FunctionDef) and s.params:
                 if any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                    self._note_vararg_trailing_param_types(s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params]
             # Record free-function param DEFAULTS keyed by the mangled name, so
@@ -29588,6 +29711,7 @@ class GimpleGen:
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                    self._note_vararg_trailing_param_types(s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
         for s in all_structs_for_methods:
@@ -29748,6 +29872,7 @@ class GimpleGen:
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                    self._note_vararg_trailing_param_types(s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
@@ -30683,6 +30808,7 @@ class GimpleGen:
             if isinstance(s, FunctionDef):
                 if s.params and any(pn.startswith('*') for pn, _ in s.params):
                     self.func_param_types[s.name] = self._signature_ctypes(s.params, s)
+                    self._note_vararg_trailing_param_types(s)
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
@@ -31756,6 +31882,7 @@ class GimpleGen:
                 continue
             if fn.params and any(pn.startswith('*') for pn, _ in fn.params):
                 self.func_param_types[fn.name] = self._signature_ctypes(fn.params, fn)
+                self._note_vararg_trailing_param_types(fn)
             else:
                 inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
                 param_ctypes = []
@@ -33872,6 +33999,7 @@ class GimpleGen:
             if has_varargs:
                 param_ctypes = self._signature_ctypes(fn.params, fn, sentinel='MojoList *')
                 self.func_param_types[fn.name] = self._signature_ctypes(fn.params, fn)
+                self._note_vararg_trailing_param_types(fn)
             else:
                 param_ctypes = []
                 inferred_params = self._inferred_param_types.get(fn.name, {}) if hasattr(self, '_inferred_param_types') else {}
