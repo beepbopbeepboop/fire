@@ -9713,6 +9713,63 @@ class GimpleGen:
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
+
+        # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
+        # property/method accessed without call syntax lowers to a
+        # deferred, uncalled `MojoBoundMethod *` value (see
+        # _lower_bound_method_value) — correct when the consuming context
+        # is itself a call (`self.prop()`) or the value is being passed
+        # around as a first-class callable, but a BINARY OPERATOR is
+        # never that: real Python (and, for a `@property` specifically,
+        # the entire point of the decorator) auto-invokes the getter
+        # FIRST and only then applies the operator to its return value.
+        # Left unhandled, arithmetic ops (`+`/`-`) fell into the generic
+        # raw-pointer-arithmetic fallback further below (treating the
+        # bound-method pointer as an array base pointer via the
+        # `_mojo_at_<T>` scaled-offset helper — a genuine GCC `-fgimple`
+        # frontend internal compiler error, "internal compiler error: in
+        # build2", since a `MojoBoundMethod *` has no such element shape)
+        # and comparison ops just cast the raw bound-method POINTER to
+        # int64_t and compared THAT — silently wrong runtime values, no
+        # compile error. `is`/`is not` are deliberately excluded: those
+        # are the one case where comparing the callable's IDENTITY (not
+        # its invoked value) is the plausible intended semantics (e.g.
+        # `self.callback is None`), mirroring how this representation
+        # already has no notion of `@property` vs. an ordinary bound
+        # method to disambiguate the two intents. Mirrors the identical
+        # fix already applied to _lower_subscript's `self.prop[key]` and
+        # the MemberExpr chain's `self.prop.attr` (see those comments /
+        # bugs/COMPILE_FAIL_zipfile__path___init__.md) — this is the
+        # third and, with `is`/`is not` excluded, final direct-consumer
+        # context that had no such handling. Found via Tools/
+        # cases_generator/cwriter.py's CWriter.set_position: `gap =
+        # tkn.column - self.last_token.end_column` (both `Token`
+        # `@property`s, `tkn`'s static type only resolvable once the
+        # full `lexer.py` import closure is compiled alongside it — the
+        # standalone single-file build never hit this since `tkn` fell
+        # back to an opaque type there instead).
+        if node.op not in ('is', 'is not'):
+            if lt == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(lv, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', lv)])
+                if ret_type in ('int64_t', 'int'):
+                    lt, lv = ret_type, raw_t
+                elif ret_type == 'void':
+                    lt, lv = 'int', self._new_val('int', '0')
+                else:
+                    lt, lv = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
+            if rt == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(rv, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', rv)])
+                if ret_type in ('int64_t', 'int'):
+                    rt, rv = ret_type, raw_t
+                elif ret_type == 'void':
+                    rt, rv = 'int', self._new_val('int', '0')
+                else:
+                    rt, rv = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
+
         return self._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
     def _lower_binary_tail(self, op: str, left_node, lt: str, lv: str,
@@ -28843,7 +28900,55 @@ class GimpleGen:
                     if isinstance(field, VarDecl) and field.name and field.name != 'self':
                         # For untyped fields, assume they're pointers to the containing struct
                         if not field.type_ann and field.name not in self.struct_field_types[s.name]:
-                            self.struct_field_types[s.name][field.name] = s.name + ' *'
+                            # An untyped (`type_ann is None`) VarDecl here isn't
+                            # always a genuinely-unresolvable field: it's ALSO
+                            # the exact placeholder shape `_merge_struct_
+                            # inheritance` copies in from a BASE class's
+                            # `.fields` once that base's own fields were
+                            # already fully resolved by an earlier compile
+                            # pass (module caching — the base struct's real
+                            # per-field types live in `self.struct_field_
+                            # types[base_name]`, never in the placeholder
+                            # VarDecl's own `type_ann`, by design: see the
+                            # `_collect_self_assigns`/`_collect_self_reads`
+                            # completion loop just below, which appends
+                            # `VarDecl(name=fn, type_ann=None, value=None)`
+                            # for exactly this reason). Blindly guessing
+                            # "pointer to self" for such an inherited field
+                            # clobbers its real, already-known type — e.g. a
+                            # subclass with no `__init__` of its own
+                            # (`class Parser(PLexer): ...`, only ever using
+                            # the base's inherited constructor) got EVERY
+                            # inherited field (`pos`, `src`, `filename`,
+                            # `tokens`, all correctly `int64_t`/`char *`/
+                            # `MojoList *` on the base struct `PLexer`)
+                            # redeclared `struct Parser *` on `Parser`
+                            # itself — a self-referential pointer type that
+                            # is never actually assigned a `Parser *` value
+                            # anywhere, so every real (scalar/string/list)
+                            # value written through it hit GCC's `-fgimple`
+                            # frontend as a hard type mismatch, or — for a
+                            # `-` used on such a field's boxed-as-a-property
+                            # value further downstream — a frontend internal
+                            # compiler error. Look the field up on each base
+                            # (in MRO order, matching `_merge_struct_
+                            # inheritance`'s own `s.bases` walk) BEFORE
+                            # falling back to the same-struct-pointer guess,
+                            # so a genuinely inherited, already-resolved
+                            # field keeps its real type and only a truly
+                            # unknown field (not found on any base either —
+                            # the original `Scope.parent`-style case this
+                            # heuristic was written for) still gets the
+                            # same-struct-pointer fallback. Found via Tools/
+                            # cases_generator/parsing.py's `Parser(PLexer)`.
+                            _inherited_ft = None
+                            for _base_name in (getattr(s, 'bases', None) or []):
+                                _base_ft = self.struct_field_types.get(_base_name, {})
+                                if field.name in _base_ft:
+                                    _inherited_ft = _base_ft[field.name]
+                                    break
+                            self.struct_field_types[s.name][field.name] = (
+                                _inherited_ft if _inherited_ft is not None else s.name + ' *')
                 # Collect class-level attributes (non-self, non-method assignments at class body)
                 self._class_attrs[s.name] = {}
                 for field in s.fields:
