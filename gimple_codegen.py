@@ -5674,7 +5674,26 @@ class GimpleGen:
         'mojo_dict_items_sorted': ('MojoList *', ['MojoDict *']),
         'mojo_reversed':         ('void *',     ['void *']),
         # POSIX / C stdlib functions with non-int64_t returns (util stubs table)
-        'isdir':                 ('int',         ['char *']),
+        # NOTE: bare `isdir` (as opposed to `int_isdir`, the real os.path.isdir
+        # runtime helper just below) is intentionally NOT listed here — see
+        # bugs/COMPILE_FAIL_Modules_getpath.md. Being "known" here forced
+        # `_lower_named_call`'s `_is_unknown` check permanently False for the
+        # literal name `isdir`, which skipped the safe, lazy, per-file weak-
+        # stub fallback every other CPython-getpath.c-injected-and-never-
+        # defined name (abspath/isfile/joinpath/...) already gets, so a file
+        # that references bare `isdir` without ever locally defining or
+        # importing it (getpath.py's own shape) compiled clean but then hit
+        # "Undefined symbols ... _isdir" at link time — nothing anywhere in
+        # this compiler's runtime supplies a body for the literal C symbol
+        # `isdir`. Real Mojo code (std/os/path/path.mojo's own `def isdir`,
+        # or any file importing it) is entirely unaffected by this removal:
+        # `func_return_types`/`func_param_types` (populated by Pass 1/2's
+        # own registration of that real definition/import) already supply
+        # the correct return/param types directly, independent of this
+        # table — this entry's `ret_type`/`expected_params` overrides in
+        # `_lower_named_call` only ever mattered as a fallback for names
+        # NOT already resolved that way, i.e. only for the broken case this
+        # removal fixes.
         'int_isdir':             ('int',         ['int64_t', 'int64_t']),  # os.path.isdir(path)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
@@ -32226,7 +32245,33 @@ class GimpleGen:
             ('align_up',               'int64_t align_up(...);'),
             ('align_down',             'int64_t align_down(...);'),
             ('clamp',                  'int64_t clamp(...);'),
-            ('isdir',                  'int isdir (char * path);'),
+            # NOTE: `isdir` intentionally has NO entry here (removed — see
+            # bugs/COMPILE_FAIL_Modules_getpath.md and the paired removal of
+            # `'isdir'` from `_KNOWN_SIGS` below, in `_lower_named_call`'s
+            # docstring-adjacent comment, for the full root-cause writeup).
+            # Short version: unlike every other name in this table (real C
+            # stdlib/POSIX functions, or genuine Mojo runtime helpers that
+            # always have a backing definition somewhere in the link), a bare
+            # `isdir` reference with no local def/import (e.g. CPython's own
+            # Modules/getpath.py, where the C embedder injects `isdir` into
+            # the exec() namespace at runtime — a mechanism this compiler
+            # doesn't have) has NO possible backing definition at all, ever.
+            # This table is emitted UNCONDITIONALLY into every compiled
+            # file's preamble regardless of whether the name is even
+            # referenced (see `_skip_util`/`_util_stubs` above) — fine for a
+            # one-line prototype, but wrong for anything needing a real weak
+            # body (bloats every single compiled unit, confirmed via
+            # test_module_cache.py's "reflect: client object is tiny" size
+            # assertion regressing from a first attempt that put a weak
+            # `{ mojo_print(...); return 0; }` body directly in this table).
+            # The right mechanism for "only synthesize a stub in files that
+            # actually call this unresolved name" already exists and is
+            # exercised by every sibling CPython-injected name (`abspath`/
+            # `isfile`/`joinpath`/`hassuffix`/`warn`/...): `_lower_named_
+            # call`'s `_is_unknown`/`self._elaborated_externs` fallback,
+            # which lazily emits a `__attribute__((weak))` stub with that
+            # same safe body, ONE PER FILE THAT ACTUALLY CALLS IT. `isdir`
+            # just needs to be routed through that path instead of this one.
             ('serialize',              'void serialize(...);'),
             ('slice',                  'int64_t slice(...);'),
             ('_getpw_linux',           'int64_t _getpw_linux(...);'),
