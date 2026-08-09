@@ -4,7 +4,27 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (fast-forwarded to `bf1ead2`, after
+several sibling `Tools/c-analyzer/` bugs and the related
+`_write_atomic.__code__` bug (see
+`bugs/COMPILE_FAIL_importlib__bootstrap_external.md`) got fixed this
+session). `python3 mojo.py build` on this file still fails with the
+EXACT SAME four errors as the 2026-08-07 note below, character for
+character (`'fmt_brief_0c85c9' undeclared here (not in a function)`,
+etc.) — none of the intervening fixes touched this "generator function
+referenced as a bare value" gap. That `importlib/_bootstrap_external.py`
+doc's own 2026-08-09 update independently confirms the same conclusion:
+its superficially-similar `_write_atomic.__code__` case had an
+unrelated root cause (a `_lower_MemberExpr` heuristic misfiring on a
+dunder attribute) and has now been fixed there, while explicitly
+reaffirming this file's case is the separate, still out-of-scope
+generator-as-value gap. Confirmed still structural (part of the
+already-tracked compiled-generator/async-codegen project, tasks
+#95-135); not attempted. No code change — doc re-verified only.
+
+## Original status (updated 2026-08-07)
 
 Investigated further: `fmt_raw`/`fmt_brief`/`fmt_summary`/`fmt_full`
 (referenced below as VALUES in the `FORMATS` dict) are all GENERATOR
