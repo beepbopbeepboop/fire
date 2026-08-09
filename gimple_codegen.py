@@ -28900,7 +28900,55 @@ class GimpleGen:
                     if isinstance(field, VarDecl) and field.name and field.name != 'self':
                         # For untyped fields, assume they're pointers to the containing struct
                         if not field.type_ann and field.name not in self.struct_field_types[s.name]:
-                            self.struct_field_types[s.name][field.name] = s.name + ' *'
+                            # An untyped (`type_ann is None`) VarDecl here isn't
+                            # always a genuinely-unresolvable field: it's ALSO
+                            # the exact placeholder shape `_merge_struct_
+                            # inheritance` copies in from a BASE class's
+                            # `.fields` once that base's own fields were
+                            # already fully resolved by an earlier compile
+                            # pass (module caching — the base struct's real
+                            # per-field types live in `self.struct_field_
+                            # types[base_name]`, never in the placeholder
+                            # VarDecl's own `type_ann`, by design: see the
+                            # `_collect_self_assigns`/`_collect_self_reads`
+                            # completion loop just below, which appends
+                            # `VarDecl(name=fn, type_ann=None, value=None)`
+                            # for exactly this reason). Blindly guessing
+                            # "pointer to self" for such an inherited field
+                            # clobbers its real, already-known type — e.g. a
+                            # subclass with no `__init__` of its own
+                            # (`class Parser(PLexer): ...`, only ever using
+                            # the base's inherited constructor) got EVERY
+                            # inherited field (`pos`, `src`, `filename`,
+                            # `tokens`, all correctly `int64_t`/`char *`/
+                            # `MojoList *` on the base struct `PLexer`)
+                            # redeclared `struct Parser *` on `Parser`
+                            # itself — a self-referential pointer type that
+                            # is never actually assigned a `Parser *` value
+                            # anywhere, so every real (scalar/string/list)
+                            # value written through it hit GCC's `-fgimple`
+                            # frontend as a hard type mismatch, or — for a
+                            # `-` used on such a field's boxed-as-a-property
+                            # value further downstream — a frontend internal
+                            # compiler error. Look the field up on each base
+                            # (in MRO order, matching `_merge_struct_
+                            # inheritance`'s own `s.bases` walk) BEFORE
+                            # falling back to the same-struct-pointer guess,
+                            # so a genuinely inherited, already-resolved
+                            # field keeps its real type and only a truly
+                            # unknown field (not found on any base either —
+                            # the original `Scope.parent`-style case this
+                            # heuristic was written for) still gets the
+                            # same-struct-pointer fallback. Found via Tools/
+                            # cases_generator/parsing.py's `Parser(PLexer)`.
+                            _inherited_ft = None
+                            for _base_name in (getattr(s, 'bases', None) or []):
+                                _base_ft = self.struct_field_types.get(_base_name, {})
+                                if field.name in _base_ft:
+                                    _inherited_ft = _base_ft[field.name]
+                                    break
+                            self.struct_field_types[s.name][field.name] = (
+                                _inherited_ft if _inherited_ft is not None else s.name + ' *')
                 # Collect class-level attributes (non-self, non-method assignments at class body)
                 self._class_attrs[s.name] = {}
                 for field in s.fields:
