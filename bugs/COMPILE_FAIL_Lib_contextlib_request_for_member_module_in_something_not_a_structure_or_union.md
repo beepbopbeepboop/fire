@@ -1,5 +1,27 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-09, fresh against current master post-merge)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
+against current master (this worktree's branch was rebuilt on top of
+local master at fdd5e66, which includes all fixes from the intervening
+sessions referenced elsewhere in `bugs/` — dict-subscript augmented
+assignment, `del` statement, class-body enum attributes, for-loop
+tuple-unpacking, etc.). None of those touched the async/generator
+codegen path. Output is byte-for-byte the same failure class as the
+2026-08-07 status below: the identical `RuntimeError` naming the same
+11 async functions (`__aenter__` x3, `__aexit__` x4, `_exit_wrapper`,
+`aclose`, `enter_async_context`, `inner`), same "no suspend/resume
+state-machine transform" message. Still structural, still correctly
+out of scope for a narrow fix — see the unchanged root-cause analysis
+below. Checked whether the sibling fix that resolved
+`bugs/COMPILE_FAIL_Lib_runpy_...md` (deleted 2026-08-09, function-
+scoped-import link stub) or the socket.py `_lower_matmul` fix would
+have any bearing here: neither is reachable, since this file fails
+during `gen_module`'s async-function eligibility check, before any
+link-time or matmul codegen is ever attempted. Not a shared root cause
+with the other two docs in this cluster.
+
 ## Status (re-verified 2026-08-07, Track B continuation session)
 
 The PERF hard bug this doc previously matched
