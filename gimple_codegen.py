@@ -17998,6 +17998,24 @@ class GimpleGen:
                 # Also propagate nested element types (for lists of lists)
                 if v in self._nested_elem_types:
                     self._nested_elem_types[tname] = self._nested_elem_types[v]
+                # And per-slot tuple element types (for lists of heterogeneous
+                # tuples, e.g. `to_check = [(all_missing, "missing", msg), ...]`
+                # — _lower_list_literal already computes and records this on
+                # the RHS temp `v` (see its own `_tuple_slot_types[t] =
+                # _tuple_slot_types[ev]` propagation from each tuple element
+                # into the list literal temp), but that record was never
+                # carried from the temp onto the assigned variable name here,
+                # so a later `for name_list, what, message in to_check:`
+                # (_gen_for_list) found no entry for `to_check` and fell back
+                # to the joined `_nested_elem_types` pair type (int64_t),
+                # declaring the list[str] slot `name_list` as a plain
+                # int64_t. The inner `for name in name_list:` then dispatched
+                # on that stale int64_t type as a STRING iteration
+                # (mojo_strlen/_mojo_at_char on an int64_t list pointer) —
+                # "makes pointer from integer without a cast". See
+                # bugs/COMPILE_FAIL_Tools_check-c-api-docs_main.md.
+                if v in self._tuple_slot_types:
+                    self._tuple_slot_types[tname] = self._tuple_slot_types[v]
             if dst == 'MojoDict *':
                 if v in self._elem_types:
                     self._elem_types[tname] = self._elem_types[v]
