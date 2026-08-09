@@ -3594,6 +3594,29 @@ class GimpleGen:
         # for globals; bare function names for functions.
         self._cpp_module_global_refs: set[tuple[str, str]] = set()
         self._cpp_module_func_refs: set[str] = set()
+        # Struct methods called from a compiled generator/async body on
+        # EITHER `self` or a non-self struct-pointer-typed local/parameter
+        # (see bugs/hard/CODEGEN_generator_struct_typed_param_refused.md).
+        # This codegen's structs are plain C structs (no real C++ member
+        # functions) — a method call must go through the method's own
+        # mangled C symbol (`obj_ptr, args...`), exactly like an ordinary
+        # (non-generator) compiled method call already does on the GIMPLE
+        # side, NOT `obj->method(args)`/`obj.method(args)` C++ member-call
+        # syntax (which doesn't compile against a plain struct at all).
+        # Keys: (struct_name, method_name). Declared extern "C" in the
+        # .cpp preamble alongside _cpp_module_func_refs, using the same
+        # func_return_types/func_param_types lookup _struct_method_csym's
+        # mangled key already populates.
+        self._cpp_struct_method_refs: set[tuple[str, str]] = set()
+        # Struct names accepted as a compiled generator/async function's OWN
+        # struct-typed PARAMETER (not via `self` on a generator method —
+        # that case already has _supported_generator_methods for the same
+        # purpose). The .cpp preamble needs this struct's layout typedef
+        # visible for the parameter's own pointer type and any `param.field`
+        # access, exactly like _supported_generator_methods already provides
+        # for `self`. See bugs/hard/CODEGEN_generator_struct_typed_param_
+        # refused.md.
+        self._cpp_param_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
@@ -22859,6 +22882,22 @@ class GimpleGen:
             res = f"(!({res}))"
         return f"({res})"
 
+    def _cpp_struct_ptr_local(self, name: str) -> str | None:
+        """If `name` is a declared local/param in the coroutine body
+        currently being emitted whose C++ type is a known struct pointer
+        (e.g. 'ArgResolver *'), return the bare struct name; else None.
+        Used to pick `->` vs `.` for a non-self member access/method call,
+        and to find the struct a method call on `name` belongs to — see
+        bugs/hard/CODEGEN_generator_struct_typed_param_refused.md."""
+        if self._cpp_declared is None:
+            return None
+        ct = self._cpp_declared.get(name)
+        if ct and ct.endswith(' *'):
+            sn = ct[:-2]
+            if sn in self.struct_field_types:
+                return sn
+        return None
+
     def _cpp_expr(self, e) -> str:
         if isinstance(e, IntLiteral):
             return str(e.value)
@@ -22942,8 +22981,16 @@ class GimpleGen:
                     return f"self->{e.member}"
                 # Unknown field: emit as self->member (C++ struct pointer access)
                 return f"self->{e.member}"
-            # Non-self member access: entry.name, os.path, etc.
+            # Non-self member access: entry.name, os.path, etc. A struct-
+            # POINTER-typed local/parameter (see bugs/hard/CODEGEN_
+            # generator_struct_typed_param_refused.md — e.g. dis.py's
+            # `arg_resolver: ArgResolver` generator parameter) needs `->`,
+            # not `.`, same as `self` above; every other non-self case
+            # (a module-object field like os.path, a scalar local with no
+            # real struct type) keeps the existing `.` form unchanged.
             obj_expr = self._cpp_expr(e.obj) if not isinstance(e.obj, IdentExpr) else e.obj.name
+            if isinstance(e.obj, IdentExpr) and self._cpp_struct_ptr_local(e.obj.name):
+                return f"{obj_expr}->{e.member}"
             return f"{obj_expr}.{e.member}"
         if isinstance(e, UnaryOp):
             op = {'not': '!'}.get(e.op, e.op)
@@ -23094,11 +23141,36 @@ class GimpleGen:
                     if e.func.member == 'isclose' and len(a) >= 2:
                         return (f"std::abs((double)({a[0]}) - (double)({a[1]})) "
                                 f"< 1e-9")
-                # self.method(...) → self->method(...)  (struct pointer receiver)
+                # self.method(...) / <struct-ptr local>.method(...) — this
+                # codegen's structs are plain C structs with no real C++
+                # member functions (only field layout is re-emitted into
+                # the .cpp preamble — see gen_module's own "Struct layout(s)
+                # needed by this module's compiled generator method(s)"
+                # comment), so a call must go through the method's own
+                # mangled C symbol (obj_ptr, args...) — `obj->method(args)`/
+                # `obj.method(args)` C++ member-call syntax doesn't compile
+                # against a plain struct at all (confirmed via a direct
+                # repro: `struct Counter has no member named 'bump'`).
+                # `_cpp_struct_method_refs` records which (struct, method)
+                # pairs actually get called so gen_module's final .cpp
+                # assembly can declare each one's real signature `extern
+                # "C"`, mirroring the existing _cpp_module_func_refs
+                # pattern for free functions. See bugs/hard/CODEGEN_
+                # generator_struct_typed_param_refused.md.
+                _cpp_self_struct = getattr(self, '_cpp_gen_self_struct', None)
                 if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'self' \
-                        and getattr(self, '_cpp_gen_self_struct', None):
+                        and _cpp_self_struct:
                     args = ', '.join(self._cpp_expr(a) for a in e.args)
-                    return f"self->{e.func.member}({args})"
+                    _sym = self._struct_method_csym(_cpp_self_struct, e.func.member, '')
+                    self._cpp_struct_method_refs.add((_cpp_self_struct, e.func.member))
+                    return f"{_sym}(self{', ' + args if args else ''})"
+                if isinstance(e.func.obj, IdentExpr):
+                    _obj_struct = self._cpp_struct_ptr_local(e.func.obj.name)
+                    if _obj_struct:
+                        args = ', '.join(self._cpp_expr(a) for a in e.args)
+                        _sym = self._struct_method_csym(_obj_struct, e.func.member, '')
+                        self._cpp_struct_method_refs.add((_obj_struct, e.func.member))
+                        return f"{_sym}({e.func.obj.name}{', ' + args if args else ''})"
                 # A member call on a MODULE-GLOBAL object whose member isn't a
                 # statically-known function (os.py's `sys.audit(...)`,
                 # compileall.py's `os.fspath(...)`, mimetypes.py's
@@ -25152,13 +25224,26 @@ class GimpleGen:
                 param_ctypes.append((pn[1:], 'MojoList *'))
                 continue
             ctype = self._param_ctype(pn, pt, fn)
+            # A struct pointer is an ordinary trivially-copyable C type —
+            # the compiler-generated coroutine frame copies it into itself
+            # by value exactly like any scalar/container parameter, zero
+            # additional plumbing needed for ACCEPTANCE. What used to be
+            # missing was BODY-side support for calling a method on such a
+            # parameter (`->` vs `.`, and the mangled-symbol-call
+            # machinery) — now handled by _cpp_struct_ptr_local/
+            # _cpp_struct_method_refs. See bugs/hard/CODEGEN_generator_
+            # struct_typed_param_refused.md.
+            _is_struct_ptr = (ctype.endswith(' *')
+                              and ctype[:-2] in self.struct_field_types)
+            if _is_struct_ptr:
+                self._cpp_param_struct_names.add(ctype[:-2])
             if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
-                             'MojoDict *', 'MojoSet *'):
+                             'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
                 raise _UnsupportedGeneratorShape(
                     f"{fn.name}: generator parameter '{pn}' has unsupported "
                     f"type {ctype!r} (only int64_t/double/_Bool/char*/"
-                    "MojoList*/MojoDict*/MojoSet* parameters are supported "
-                    "for compiled generators)")
+                    "MojoList*/MojoDict*/MojoSet*/<known struct>* parameters "
+                    "are supported for compiled generators)")
             param_ctypes.append((pn, ctype))
         if struct_name is not None:
             base = f"_mojogen_{_safe_name(struct_name)}_{_safe_name(fn.name)}"
@@ -25659,13 +25744,20 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled async functions")
             ctype = self._param_ctype(pn, pt, fn)
+            # See the identical struct-pointer-acceptance note in
+            # _gen_cpp_generator_unit — same allow-list, same reasoning,
+            # same shared _cpp_expr body-side machinery.
+            _is_struct_ptr = (ctype.endswith(' *')
+                              and ctype[:-2] in self.struct_field_types)
+            if _is_struct_ptr:
+                self._cpp_param_struct_names.add(ctype[:-2])
             if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
-                             'MojoDict *', 'MojoSet *'):
+                             'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
                 raise _UnsupportedAsyncShape(
                     f"{fn.name}: async function parameter '{pn}' has "
                     f"unsupported type {ctype!r} (only int64_t/"
-                    "double/_Bool/char* parameters are supported for "
-                    "compiled async functions)")
+                    "double/_Bool/char*/<known struct>* parameters are "
+                    "supported for compiled async functions)")
             param_ctypes.append((pn, ctype))
         # A NESTED async closure's captured free variable(s) (device_
         # context.mojo's `async def wrapper(...) capturing -> None:`,
@@ -26793,12 +26885,20 @@ class GimpleGen:
                     f"{fn.name}: *args/**kwargs parameters not supported "
                     "for compiled async generators")
             ctype = self._param_ctype(pn, pt, fn)
+            # See the identical struct-pointer-acceptance note in
+            # _gen_cpp_generator_unit — same allow-list, same reasoning,
+            # same shared _cpp_expr body-side machinery.
+            _is_struct_ptr = (ctype.endswith(' *')
+                              and ctype[:-2] in self.struct_field_types)
+            if _is_struct_ptr:
+                self._cpp_param_struct_names.add(ctype[:-2])
             if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
-                             'MojoDict *', 'MojoSet *'):
+                             'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
                 raise _UnsupportedAsyncShape(
                     f"{fn.name}: async generator parameter '{pn}' has "
                     f"unsupported type {ctype!r} (only int64_t/"
-                    "double/_Bool/char* parameters are supported)")
+                    "double/_Bool/char*/<known struct>* parameters are "
+                    "supported)")
             param_ctypes.append((pn, ctype))
         base = f"_mojoasyncgen_{_safe_name(fn.name)}"
         declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes}
@@ -34207,7 +34307,7 @@ class GimpleGen:
                 cpp_parts.append('    }')
                 cpp_parts.append('};')
                 cpp_parts.append('')
-            if self._supported_generator_methods:
+            if self._supported_generator_methods or self._cpp_param_struct_names:
                 # Milestone C step 3: every struct a compiled generator
                 # METHOD in this module binds `self` to needs its C layout
                 # visible here too (for `self->field` access and for the
@@ -34215,7 +34315,12 @@ class GimpleGen:
                 # typedef text the .c/.ci output got (see
                 # self._struct_typedef_texts' docstring), not a
                 # independently-derived copy, so gcc and g++ agree on the
-                # struct's layout byte-for-byte.
+                # struct's layout byte-for-byte. `_cpp_param_struct_names`
+                # (bugs/hard/CODEGEN_generator_struct_typed_param_refused.md)
+                # is the identical need for a struct accepted as a
+                # generator/async function's own PARAMETER type, not just
+                # via `self` — merged into the same typedef-emission loop
+                # below rather than a separate one.
                 cpp_parts.append('/* Struct layout(s) needed by this module\'s')
                 cpp_parts.append('   compiled generator method(s) -- verbatim copy of')
                 cpp_parts.append('   the same typedef(s) emitted into the .c/.ci output. */')
@@ -34242,6 +34347,9 @@ class GimpleGen:
                     _gm_sname2 = _gm_struct_method_key[0]
                     if _gm_sname2 not in _gm_struct_names_seen:
                         _gm_struct_names_seen.append(_gm_sname2)
+                for _gm_sname3 in self._cpp_param_struct_names:
+                    if _gm_sname3 not in _gm_struct_names_seen:
+                        _gm_struct_names_seen.append(_gm_sname3)
                 for _gm_method_struct_name in sorted(_gm_struct_names_seen):
                     _td = self._struct_typedef_texts.get(_gm_method_struct_name)
                     if _td:
@@ -34331,6 +34439,34 @@ class GimpleGen:
                 # symbol, ABI-identical to the .ci side's own extern).
                 for _vfn in sorted(self._cpp_module_variadic_func_refs):
                     cpp_parts.append(f'extern "C" int64_t {_vfn} (...);')
+                cpp_parts.append('')
+            if self._cpp_struct_method_refs:
+                # Struct methods called from a compiled generator/async body
+                # on `self` or a non-self struct-pointer-typed local (see
+                # _cpp_struct_method_refs' own declaration comment and
+                # bugs/hard/CODEGEN_generator_struct_typed_param_refused.md)
+                # — declared extern "C" here exactly like a free function's
+                # own declaration just above, using the SAME mangled-symbol/
+                # signature lookup _struct_method_csym already populates for
+                # the ordinary (non-generator) GIMPLE-compiled method.
+                cpp_parts.append('/* Extern declarations for struct methods')
+                cpp_parts.append('   called from this module\'s compiled generator')
+                cpp_parts.append('   bodies (compiled standalone, linked with the .ci). */')
+                for _sm_struct, _sm_method in sorted(self._cpp_struct_method_refs):
+                    try:
+                        _smsym = self._struct_method_csym(_sm_struct, _sm_method, '')
+                        _smkey = f"{_sm_struct}_{_safe_name(_sm_method)}"
+                        _smret = self.func_return_types.get(
+                            _smsym, self.func_return_types.get(_smkey, 'int64_t'))
+                        _smparams = self.func_param_types.get(
+                            _smsym, self.func_param_types.get(_smkey, [f"{_sm_struct} *"]))
+                        _smret_cpp = _smret.replace('_Bool', 'bool')
+                        _smparam_str = ', '.join(
+                            p if p != '_Bool' else 'bool' for p in _smparams)
+                        cpp_parts.append(
+                            f'extern "C" {_smret_cpp} {_smsym} ({_smparam_str});')
+                    except Exception:
+                        continue
                 cpp_parts.append('')
             for unit in self._generator_cpp_units:
                 cpp_parts.append(unit)

@@ -1,5 +1,117 @@
 # HARD BUG: a generator with a struct/class-typed parameter is refused outright, hard-failing the WHOLE top-level module (not a graceful per-function fallback)
 
+## Status (FIXED 2026-08-08, this doc's own title case only)
+
+Fixed the exact case this doc's title and root-cause section describe —
+a struct-typed generator PARAMETER — for all three coroutine-codegen
+units (`_gen_cpp_generator_unit`, `_gen_cpp_async_unit`,
+`_gen_cpp_async_generator_unit`, which the doc's own "Scope note"
+already established share one byte-for-byte-identical allow-list). The
+OTHER two families that scope note also names (non-scalar yielded
+values; `*args`/`**kwargs` parameters) are NOT addressed by this
+change — separate, still-open docs.
+
+### What was fixed
+
+1. **Parameter acceptance**: widened all 3 allow-list checks to also
+   accept a pointer to any struct this compile already knows about
+   (`ctype.endswith(' *') and ctype[:-2] in self.struct_field_types`) —
+   exactly the "mechanically straightforward, zero additional plumbing"
+   acceptance step this doc's own "What a fix would need" section
+   predicted.
+2. **Body-side struct-pointer access** (the doc's own predicted hard
+   part): a struct-typed generator parameter needs `->` for field
+   reads, not `.` — `_cpp_expr`'s non-self `MemberExpr` case now checks
+   a new `_cpp_struct_ptr_local(name)` helper (looks up the name's
+   declared C++ type in `self._cpp_declared`, resolves to the bare
+   struct name if it's a known struct pointer) and picks the correct
+   operator.
+3. **Method calls on a struct-typed value** (the doc's own flagged
+   "real work" — and, discovered while implementing this, NOT limited
+   to non-self parameters): this codegen's structs are plain C structs
+   with no real C++ member functions — confirmed via a direct repro
+   that even the PRE-EXISTING `self.method()` call path
+   (`gimple_codegen.py`'s `self->{member}(args)` emission, already
+   present in the code before this fix) was actually BROKEN, not just
+   narrow-scoped as its own docstring claimed ("method calls on self
+   ... refuse naturally") — a real repro hit `'Counter' has no member
+   named 'bump'` at the g++ compile step, since no member function
+   named `bump` exists on the plain C struct typedef. Fixed BOTH the
+   self case and the new non-self case together: a method call now
+   goes through the method's own mangled C symbol
+   (`_struct_method_csym`) as an ordinary free-function-style call
+   (`mangled_sym(obj_ptr, args...)`), not C++ member-call syntax. Which
+   `(struct, method)` pairs actually get called is tracked in a new
+   `self._cpp_struct_method_refs` set and declared `extern "C"` in the
+   .cpp preamble (mirroring the existing `_cpp_module_func_refs`
+   pattern for free functions called from a generator body).
+4. **Struct-typedef visibility for parameter types**: the .cpp
+   preamble only re-emitted a struct's C layout for the `self` struct
+   of a generator METHOD (`_supported_generator_methods`). A struct
+   accepted only via a generator/async function's own PARAMETER type
+   (not `self`) had no typedef in the .cpp TU at all, producing
+   `'Resolver' was not declared in this scope`. Fixed by tracking every
+   struct name accepted this way in a new `self._cpp_param_struct_names`
+   set and merging it into the same typedef-emission loop
+   `_supported_generator_methods` already drives.
+
+### Verification
+
+- The doc's own minimal-repro sketch (`Resolver.__init__(self, base)` /
+  `resolve(self, x): return x + self.base`, `def gen_vals(r: Resolver,
+  n): ... yield r.resolve(i) ...`) — needed an explicit `r: Resolver`
+  annotation to actually exercise struct-typed PARAMETER inference (an
+  unannotated free-function generator parameter has no equivalent of
+  #143's constructor-call-site scalar inference; noted as a real,
+  separate, narrower gap, not fixed here). Compiles and runs correctly:
+  `Resolver(10)`'s generator prints `10, 11, 12`.
+- A companion self-method repro (`Counter.gen_vals(self, n): yield
+  self.bump(i)`) — confirmed BROKEN before this fix (direct repro:
+  `'Counter' has no member named 'bump'`), fixed and verified: prints
+  `10, 11, 12`.
+- Real-world trigger re-tested: `MOJO_DEBUG=1 python3 mojo.py build
+  .../Lib/dis.py` — this doc's own exact documented symptom
+  (`_get_instructions_bytes: generator parameter 'arg_resolver' has
+  unsupported type 'ArgResolver *'`) no longer appears ANYWHERE in the
+  build output; `_get_instructions_bytes` is no longer refused. The
+  file as a WHOLE still can't build — `_find_imports`/`_unpack_opargs`/
+  `findlinestarts` still refuse, but for the entirely separate,
+  explicitly-out-of-scope "non-scalar yielded value" reason this doc's
+  own Scope note already names (`bugs/COMPILE_FAIL_pathlib___init__.md`
+  /`bugs/CODEGEN_generator_function_Lib_ftplib.md`'s family) — not a
+  new/different symptom, and not something this change touches or
+  regresses.
+- Full 5-part gate: `compile_stdlib.py -j8` run FIRST (fail-fast,
+  matching every other high-risk item's verification order this
+  session) — 664/664, 0 unexpected, unchanged from baseline, both
+  times this was run during development. `test_gimple.py` 247/247,
+  `test_module_cache.py` 76/76, `make check-selfhost` clean,
+  from-scratch stdlib dylib rebuild 0 skips. `test_gimple_runner.py`
+  (compiled-AND-RUN suite) 17/18 — the 1 failure is the
+  already-documented, confirmed pre-existing (unmodified-master)
+  failure from earlier this session, unrelated to this change.
+
+### Known, honest limitations (not attempted)
+
+- The non-scalar-yielded-value and `*args`/`**kwargs`-parameter
+  families this doc's own "Scope note" section already named are
+  UNTOUCHED — separate docs, separate root causes.
+- An UNANNOTATED struct-typed generator/async parameter still defaults
+  to `int64_t` (no equivalent of #143's constructor-call-site scalar
+  inference exists for generator/async free-function parameters) —
+  only an EXPLICITLY annotated struct-typed parameter is accepted.
+- A struct-typed LOCAL VARIABLE (not a parameter) inside a generator
+  body was not specifically exercised — `_cpp_struct_ptr_local` reads
+  from `self._cpp_declared`, which the existing body-compile loop
+  already updates for locals assigned a known type, so this should work
+  by the same mechanism, but wasn't separately repro'd.
+- A NESTED struct method call whose OWN parameters include ANOTHER
+  struct pointer, deep `self.x.y.method()` chains, and generic/
+  parametrized structs were not exercised — this fix targets exactly
+  the shape the doc's own repro and the real `dis.py` trigger use (a
+  direct `local_or_param.method(args)` call), not the fully general
+  case.
+
 ## Scope note (2026-08-07): this is a whole FAMILY of refusals, not just struct-typed parameters
 
 This doc's title names the parameter-type case specifically (the
