@@ -4,92 +4,105 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09)
 
-Re-ran; two DISTINCT issues, one already documented, one new:
+Re-ran against current `master`. Of the two issues this doc previously
+tracked, one is now confirmed FIXED by unrelated prior work this session;
+the other is real-rooted and STRUCTURAL — not fixed.
 
+### 1. `'MojoBoundMethod' has no member named '__name__'` — FIXED
+
+This was already tracked as a confirmed real-world instance in
+`bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` ("More
+real-world instances confirmed 2026-08-06": `inner.__name__ =
+'read_nonlocal'` plus a separate `f.__name__` read, both on
+`MojoBoundMethod` values). That doc's Steps 1-4 (real per-object dynamic-
+attribute storage + routing `MojoBoundMethod`/`MojoGenerator`/`MojoAsync`
+through it) landed and were verified 2026-08-07, and this file was one of
+its own confirmed-instance verification rows (0 "structure or union"/"has no
+member named" errors afterward). Re-confirmed here: current `mojo.py build`
+output no longer contains this error at all.
+
+### 2. `'_t5' undeclared` / `'a' undeclared` — STRUCTURAL, root-caused, NOT fixed
+
+Current error:
 ```
-error: 'MojoBoundMethod' has no member named '__name__'
-error: '_t5' undeclared (first use in this function); did you mean '_t4'?
-error: 'a' undeclared (first use in this function)
+var_access_benchmark.py:91:7: error: '_t5' undeclared (first use in this function); did you mean '_t4'?
+var_access_benchmark.py:92:7: error: 'a' undeclared (first use in this function)
 ```
+in `read_classvar_from_instance_d4d5c5` (the C name for
+`read_classvar_from_instance`).
 
-1. `'MojoBoundMethod' has no member named '__name__'` — this file is
-   ALREADY a confirmed real-world instance in
-   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s "More
-   real-world instances confirmed 2026-08-06" section (`inner.__name__
-   = 'read_nonlocal'` — a write — plus a separate read of `f.__name__`
-   elsewhere in this same file, both on `MojoBoundMethod` values). Not
-   re-investigated; see that doc for the fix plan.
+Root cause, fully identified via direct `.ci` inspection (previously marked
+"not root-caused further" — now is): the source is
 
-2. `'_t5' undeclared` / `'a' undeclared` — a SEPARATE, NOT previously
-   documented issue. `def read_instancevar(trials=trials, a=C(1)):`
-   has a struct-typed DEFAULT-valued parameter (`a=C(1)`), used only as
-   repeated bare discarded-value expression statements in the body
-   (`a.x;    a.x;    a.x; ...` — a micro-benchmark idiom for measuring
-   attribute-access speed). The generated C never declares `a` (or the
-   temp `_t5` presumably meant to hold the read `.x` value) in this
-   function at all, so both are "undeclared" at first use. Not
-   root-caused further within this session's time budget — plausibly a
-   dead-code/unused-value elimination pass over bare expression-
-   statement attribute reads interacting badly with a default-valued
-   struct parameter's own declaration emission. Worth a focused
-   follow-up: minimal repro would be `def f(a=SomeStruct()): a.x` with
-   no other use of `a` in the body.
-
-```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function '_alloc_A':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:56:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   56 |         v_global; v_global; v_global; v_global; v_global
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'A_m':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:361:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'B___init__':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:21:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   21 | 
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:19:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   19 |     def __init__(self, x):
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'C___init__':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:27:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   27 |     v_local = 1
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:25:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   25 | 
-      |           ^  
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'read_local_0c85c9':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:29:11: warning: variable 'v_local' set but not used [-Wunused-but-set-variable]
-   29 |         v_local;    v_local;    v_local;    v_local;    v_local
-      |           ^~~~~~~
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function '_alloc_make_nonlocal_reader_inner_env':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:37:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   37 |     def inner(trials=trials):
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'make_nonlocal_reader_inner':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:47:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   47 | read_nonlocal = make_nonlocal_reader()
-      | ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:45:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   45 |     return inner
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'read_classvar_from_instance_1ce6ce':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:78:7: error: '_t5' undeclared (first use in this function); did you mean '_t4'?
-   78 |     for t in trials:
-      |       ^~~
-      |       _t4
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:78:7: note: each undeclared identifier is reported only once for each function it appears in
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:79:7: error: 'a' undeclared (first use in this function)
-   79 |         a.x;    a.x;    a.x;    a.x;    a.x
-      |       ^
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'read_namedtuple_1ce6ce':
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py:101:11: warning: variable 'a' set but not used [-Wunused-but-set-variable]
-  101 | def read_namedtuple(trials=trials, D=namedtuple('D', ['x'])):
-      |           ^
-/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py: In function 'write_local_0c85c9':
-... (87 more lines)
+```python
+class A(object):
+    def m(self):
+        pass
+...
+def read_classvar_from_instance(trials=trials, A=A):
+    A.x = 1
+    a = A()
+    for t in trials:
+        a.x; a.x; a.x; ...
 ```
 
-Exit code: 1
-Elapsed: 13.83s
+**The function parameter is named `A` — identical to the global class `A`
+it defaults to.** This is a real, if unusual, Python idiom (deliberately
+shadowing a global name with a same-named parameter/default, presumably here
+so the benchmark measures "read a global vs. read a local" access patterns
+uniformly across sibling functions). It's fatal to this codegen for two
+compounding reasons:
+
+1. **C namespace collision.** The struct type `A` is emitted as a C
+   `typedef struct A A;`. The function is generated as
+   `void read_classvar_from_instance_d4d5c5 (MojoList * trials, int64_t A)`
+   — the PARAMETER also named `A`, typed `int64_t` (this codegen's opaque
+   representation for "a class object value" — see sub-cases A/B in
+   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`). In C,
+   typedef names and ordinary identifiers share one namespace; a parameter
+   named `A` SHADOWS the typedef `A` for the rest of that function's scope.
+   Every subsequent attempt to declare a variable of type `A *` in this
+   function (`A * _t5;`, `A * a;` — for the `a = A()` local) is instead
+   parsed by GCC as an ordinary expression `A * _t5;` (multiply undeclared
+   variable `_t5` by the parameter `A`) rather than a declaration, since `A`
+   no longer names a type in this scope. This cascades: `_t5`/`a` are never
+   actually declared as C variables at all, hence "undeclared" at every
+   later use.
+2. **Deeper, pre-existing semantic gap (same root, worse than the syntax
+   error alone reveals):** even setting the C-namespace collision aside,
+   this codegen's constructor/attribute lowering resolves a bare identifier
+   like `A` in `A.x = 1` / `A()` by a **pure name-based lookup** against
+   global tables (`self.struct_field_types`, etc.) — confirmed via a search
+   turning up roughly 40 call sites of the shape
+   `raw_name in self.struct_field_types` used to decide "is this a struct
+   constructor / class object access". None of them check whether that bare
+   name is actually SHADOWED by a local variable or parameter in the
+   current function scope (i.e., no Python-scoping-aware name resolution
+   anywhere in this dispatch class). So even independent of the C-typedef
+   collision, `A.x = 1` inside this function is being lowered as "set a
+   field on the GLOBAL class A" rather than "call `.x = 1`-style dynamic
+   attribute set on the VALUE currently bound to local parameter `A`" —
+   already a real semantic (miscompile) gap, not just a syntax one.
+
+**Classified STRUCTURAL, not attempted.** A correct fix requires genuine
+scope-aware name resolution (checking local/parameter bindings before
+falling back to global struct/class name lookup) threaded through roughly
+40 independently-written call sites across this codegen's call- and
+attribute-lowering machinery — exactly the shape of change this project's
+own history warns is high-risk when done as a "narrow-looking" patch (see
+CLAUDE.md's quality-gate section and the `_tuplegetter` incidents it
+references). A parameter/local variable shadowing a same-named global class
+is also a rare enough real-world pattern (this benchmark script does it
+deliberately, for benchmarking purposes) that the risk/benefit of a broad,
+scope-resolution-adding change doesn't currently justify it within a single
+narrow-bug fix pass. Left open for a dedicated follow-up.
+
+## Quality gate
+
+No code change was made for this file's remaining issue (structural, not
+attempted). Issue 1 required no code change here either — it was already
+fixed by prior, unrelated work; this doc's re-verification is the only
+change (the "structure or union" style errors are gone, confirmed via a
+fresh `python3 mojo.py build` run).

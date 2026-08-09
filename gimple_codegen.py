@@ -19079,6 +19079,22 @@ class GimpleGen:
             if raw_name in ('strided_load', 'strided_store') and node.value.args:
                 self._lower_strided(node.value, store=(raw_name == 'strided_store'))
                 return
+            # A bare, value-discarding `len(x)` statement (e.g. the
+            # `try: len(t) except TypeError: ...` type-probe idiom —
+            # see Tools/unicode/gencodec.py's hexrepr()). Without this,
+            # `len` fell all the way to the generic call-building path
+            # below, which has no type-aware dispatch at all and just
+            # calls the runtime `mojo_len` directly with the argument's
+            # raw (possibly non-pointer, e.g. int64_t) type/value — "passing
+            # argument 1 of 'mojo_len' makes integer from pointer without a
+            # cast". `_lower_builtin_len` (the value-CONSUMING twin every
+            # other `len()` call site already routes through, in
+            # `_lower_call`) has the real per-type dispatch
+            # (MojoStr*/MojoList*/MojoDict*/MojoSet*/char*/int64_t-widened);
+            # reuse it here and simply discard its result.
+            if raw_name == 'len' and len(node.value.args) == 1:
+                self._lower_builtin_len(node.value)
+                return
             # Recursive call from inner function to itself
             if raw_name == self._inner_func_name and self._env_param:
                 lifted   = self.current_func_name
