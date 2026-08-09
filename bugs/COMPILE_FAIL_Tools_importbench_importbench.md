@@ -4,9 +4,10 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09, root-caused per-function via `MOJO_DEBUG=1`; still structural, not attempted)
 
-Re-ran; current failure is an honest up-front refusal, not a GCC error:
+Re-ran against current master (`c4340d2`); still an honest up-front
+refusal, not a GCC error:
 
 ```
 Error building: cannot compile module: function(s) benchmark_wo_bytecode,
@@ -20,63 +21,61 @@ without emitting silently wrong or broken code; falling back to
 interpreting this module from source instead
 ```
 
-Generator codegen refusal, part of the separate, already-tracked
-compiled-generator/async-codegen project (tasks #95-135) — not
-investigated further here per that project's scope.
+`MOJO_DEBUG=1 python3 mojo.py build importbench.py` pins down each of
+the 6 refused functions to one of two ALREADY-TRACKED, deliberately-
+deferred structural gaps in the coroutine (`.cpp`) generator-body
+codegen — no new root cause found, and this file doesn't reveal any
+narrow, safe-to-land fix (see below):
 
-```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:89:11: warning: unused variable '_tag' [-Wunused-variable]
-   89 |             yield from bench(name, lambda: sys.modules.pop(name),
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:94:11: warning: unused variable '_tag' [-Wunused-variable]
-   94 |     benchmark_wo_bytecode.__doc__ = benchmark_wo_bytecode.__doc__.format(name)
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:99:11: warning: unused variable '_tag' [-Wunused-variable]
-   99 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:114:11: warning: unused variable '_tag' [-Wunused-variable]
-  114 |             assert not os.path.exists(cache_from_source(mapping[name]))
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:123:13: warning: unused variable '_tag' [-Wunused-variable]
-  123 |         def cleanup():
-      |             ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function 'bench_7a6366':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:33:1: warning: label 'bb_13' defined but not used [-Wunused-label]
-   33 |                 cleanup()
-      | ^    
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:311:11: warning: variable '_t26' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:310:11: warning: variable '_t25' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:305:11: warning: variable '_t20' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:303:10: warning: unused variable '_t18' [-Wunused-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:286:11: warning: variable '_t5' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:281:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function 'from_cache_1ce6ce':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:91:11: warning: variable '_t37' set but not used [-Wunused-but-set-variable]
-   91 |         finally:
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:83:11: warning: variable '_t29' set but not used [-Wunused-but-set-variable]
-   83 |         """Source w/o bytecode: {}"""
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:78:11: warning: variable '_t24' set but not used [-Wunused-but-set-variable]
-   78 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:57:11: warning: variable '_t4' set but not used [-Wunused-but-set-variable]
-   57 |     # Relying on built-in importer being implicit.
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:53:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   53 |     """Built-in module"""
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py: In function 'builtin_mod_1ce6ce':
-/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py:75:11: warning: variable '_t20' set but not used [-Wunused-but-set-variable]
-   75 |                              seconds=seconds)
-... (478 more lines)
-```
+1. **`unsupported expression in generator body: LambdaExpr`** —
+   `builtin_mod`, `source_using_bytecode`, and the closure-nested
+   `using_bytecode_benchmark` (defined inside `_using_bytecode`) all do
+   `yield from bench(name, lambda: sys.modules.pop(name), repeat=...,
+   seconds=...)` — a `lambda` literal passed as a plain call argument.
+   This is exactly `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
+   md`'s tracked gap (`_cpp_expr` has no `LambdaExpr` case at all);
+   that doc already investigated and confirmed this is feature-sized
+   (needs a new "callable value" declared-type category), not a narrow
+   fix — nothing new to add here.
+2. **`only a plain identifier assignment target is supported`** —
+   `from_cache` does `module.__file__ = '<test>'` /
+   `module.__package__ = ''` where `module` is a real
+   `types.ModuleType(name)` local (later read via `sys.modules[name] =
+   module`) — a non-`self`, non-`sys.{stderr,stdout,stdin}` `MemberExpr`
+   assignment target. This is `bugs/hard/CODEGEN_generator_non_plain_
+   assignment_target_refused.md`'s remaining unfixed case: writing into
+   a REAL object's attribute has no representation in this model, and
+   silently eliding it (the way `sys.stderr = val` is elided) would be
+   actually wrong here since `module` is a real, later-read object —
+   correctly still refused.
+3. **New narrow sub-detail found in this pass**: `source_wo_bytecode`
+   and the closure-nested `benchmark_wo_bytecode` (defined inside
+   `_wo_bytecode`) both do `sys.dont_write_bytecode = True` /
+   `= False` — a `sys.<member>` target, but `dont_write_bytecode` isn't
+   in the `('stderr', 'stdout', 'stdin')` tuple the existing elision
+   fix (`gimple_codegen.py` ~line 24284) checks. Confirmed via `grep`
+   that `dont_write_bytecode` has NO backing value anywhere else in
+   `gimple_codegen.py` either (same "sys has no real backing value
+   ANYWHERE in this model" rationale the stderr/stdout/stdin fix relies
+   on) — widening that tuple to include it would be safe by the exact
+   same reasoning already established and gated. **Not applied**,
+   because it wouldn't change this file's outcome either way: both
+   `source_wo_bytecode` and `benchmark_wo_bytecode` ALSO independently
+   contain the SAME `yield from bench(name, lambda: ..., ...)` shape as
+   gap 1 above, so they'd remain refused on the LambdaExpr gap even
+   with the assignment-target check widened. Noted here for whoever
+   next touches the `sys.stderr` elision list, not implemented.
 
-Exit code: 1
-Elapsed: 13.88s
+**Net: all 6 refused functions are blocked by one of the two
+already-documented structural/feature-sized gaps (3 by gap 1, 1 by gap
+2, 2 by BOTH gap 1 and the new gap-3 sub-detail which doesn't matter on
+its own).** No combination of narrow fixes gets this file compiling —
+it needs real progress on the feature-sized LambdaExpr-in-generator-body
+work first. Part of the separate, already-tracked compiled-generator/
+async-codegen project scope; not attempted here. No code change made
+for this bug.
+
+(An older status further down used to show a large raw GCC warning
+dump from a stale, pre-refusal-gate run — removed as no longer
+reflecting current behavior; the module now fails at the up-front
+Python-level refusal above, before any C/C++ is ever handed to GCC.)
