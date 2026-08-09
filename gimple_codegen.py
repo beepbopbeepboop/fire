@@ -17998,6 +17998,24 @@ class GimpleGen:
                 # Also propagate nested element types (for lists of lists)
                 if v in self._nested_elem_types:
                     self._nested_elem_types[tname] = self._nested_elem_types[v]
+                # And per-slot tuple element types (for lists of heterogeneous
+                # tuples, e.g. `to_check = [(all_missing, "missing", msg), ...]`
+                # — _lower_list_literal already computes and records this on
+                # the RHS temp `v` (see its own `_tuple_slot_types[t] =
+                # _tuple_slot_types[ev]` propagation from each tuple element
+                # into the list literal temp), but that record was never
+                # carried from the temp onto the assigned variable name here,
+                # so a later `for name_list, what, message in to_check:`
+                # (_gen_for_list) found no entry for `to_check` and fell back
+                # to the joined `_nested_elem_types` pair type (int64_t),
+                # declaring the list[str] slot `name_list` as a plain
+                # int64_t. The inner `for name in name_list:` then dispatched
+                # on that stale int64_t type as a STRING iteration
+                # (mojo_strlen/_mojo_at_char on an int64_t list pointer) —
+                # "makes pointer from integer without a cast". See
+                # bugs/COMPILE_FAIL_Tools_check-c-api-docs_main.md.
+                if v in self._tuple_slot_types:
+                    self._tuple_slot_types[tname] = self._tuple_slot_types[v]
             if dst == 'MojoDict *':
                 if v in self._elem_types:
                     self._elem_types[tname] = self._elem_types[v]
@@ -18396,8 +18414,25 @@ class GimpleGen:
                 self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
             else:
+                # Mirrors _gen_stmt_AssignStmt's identical MemberExpr
+                # struct-field branch: look up the field's REAL declared C
+                # type and coerce the computed value to it instead of a raw
+                # `->member = v` emit. Without this, `self.is_docstring |=
+                # is_docstring` (a bool dataclass field, declared plain
+                # `int` per this codegen's bool representation) — where the
+                # RHS is computed via the BinaryOp `|` path a few lines up
+                # and widened to `int64_t` (an unannotated `is_docstring=
+                # False` keyword param defaults to int64_t) — assigned that
+                # int64_t straight into the `int` field with no cast, a
+                # hard GIMPLE verifier rejection ("non-trivial conversion
+                # in 'var_decl'"), since -fgimple requires an explicit
+                # narrowing cast, unlike ordinary C. Real repro: Tools/
+                # i18n/pygettext.py's `Message.add_location`. See
+                # bugs/COMPILE_FAIL_Tools_i18n_pygettext.md.
                 op = '->' if '*' in ot else '.'
-                self._emit(f"  {ov}{op}{_safe_field(node.target.member)} = {v};")
+                struct_name = _struct_name_of(ot)
+                field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
+                self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
         elif isinstance(node.target, SubscriptExpr):
             ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
