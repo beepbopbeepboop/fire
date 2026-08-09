@@ -12402,7 +12402,18 @@ class GimpleGen:
             t = self._new_temp('int')
             self._emit_call('int', t, _STR_PREDICATES[method], [('char *', cstr_ov)])
             return '_Bool', self._new_val('_Bool', f'{t} != 0')
-        if method in ('encode', 'decode', 'format'):
+        # pathlib.Path.readlink() — this codegen has no real symlink-target
+        # resolution (no runtime helper exists), so honestly stub to an
+        # identity passthrough of the receiver rather than falling to the
+        # generic 'int' stub below — same simplification precedent as the
+        # GIMPLE path's own isfile/normpath/relpath stubs elsewhere in this
+        # file ("normpath/relpath -> identity"). Without this, ANY chained
+        # `path / other_path.readlink()` (a real Path.readlink() call site
+        # feeding straight into `/`, e.g. Apple/testbed/__main__.py's
+        # symlink-rewriting helper) hit the generic 'int' stub, producing a
+        # hard "invalid operands to binary / (have 'char *' and 'int')"
+        # compile error instead of just an honestly-approximate stub value.
+        if method in ('encode', 'decode', 'format', 'readlink'):
             return self._stub_result('char *', cstr_ov, f'TODO: {method}')
         # Unknown method on char* — stub
         return self._stub_result('int', '0', f'TODO: char*.{method}')
