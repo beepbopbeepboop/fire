@@ -60,7 +60,87 @@ fn main():
 ```
 Reproduces the identical `invalid operands to binary -` error.
 
-## Not fixed
+## Re-verified 2026-08-09 (still NOT fixed, plus a deeper finding)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/re/_compiler.py`
+fresh against current master (commit `0101a08`, after merging in the several
+other agents' work from this session). Identical failure, byte-for-byte same
+site: `_compiler.py:187:17: error: invalid operands to binary - (have
+'int64_t' ... and 'MojoList *')`. Confirmed via the same minimal standalone
+repro from the previous session (`for tail in tail: code[tail] = code[tail]
+- tail`) — still reproduces identically.
+
+**This session's addition**: inspected the actual generated GIMPLE (`.ci`)
+for the minimal repro, not just the compile error. This exposes that the
+bug is worse than a stale-type/missing-cast cosmetic issue — it's a genuine
+**C-variable aliasing bug** that would silently corrupt data (not just fail
+to compile) if the types happened to line up:
+
+```c
+MojoList * tail;      /* the ONE C variable for the Python name `tail`      */
+...
+tail = _t1;            /* tail = [1, 2, 3]  (the original list)             */
+...
+_t10 = mojo_list_len (tail);   /* fine: list length read before the loop    */
+...
+bb_4:
+  _t14 = mojo_list_get_int (tail, _t12);   /* list_ptr arg IS `tail` itself */
+  _t15 = (int64_t)_t14;
+  tail = (MojoList *)_t15;      /* !!! overwrites `tail` with the ELEMENT
+                                    value, reinterpret-cast to a pointer !!! */
+```
+
+`_gen_for_list`'s `list_ptr = it_val` (gimple_codegen.py ~line 20837) is
+literally the SAME C identifier as the loop target whenever the iterable is
+a bare self-shadowing name, because `_lower_IdentExpr`'s plain-read case
+returns the bare C variable name itself (no copy). Every one of
+`mojo_list_len`/`mojo_list_get_int`'s call sites inside `_gen_for_list` then
+re-reads that SAME C variable on each loop iteration — but the loop body
+just overwrote it with the previous iteration's element value (cast to
+`MojoList *` to satisfy the stale declaration). On a 2nd iteration this
+would dereference a bogus pointer (an `int64_t` value reinterpreted as a
+`MojoList *`) inside `mojo_list_get_int`, i.e. a wrong-pointer read/crash —
+this specific repro's error is only visible earlier, at the `- tail`
+subtraction in the loop body (because `_lower_BinaryOp` never inserts the
+`(int64_t)` cast that `_lower_IdentExpr`'s subscript-index caller already
+does for the same stale-typed variable — see e.g. the working `code[tail]`
+index reads a few lines earlier in the same generated function, which DO
+get the cast). Had the subtraction not been present, this specific case
+would have compiled "successfully" into a use-after-corruption bug instead
+of a hard compile error.
+
+This confirms (and raises the stakes on) the "capture the iterable's value
+into a stable temp BEFORE the loop, decoupled from the loop target's C
+identity" fix shape from the original analysis below — a value-level
+snapshot is not just nice-to-have for type correctness, it's required for
+the LOOP TO EVEN READ THE RIGHT LIST on iterations after the first, in the
+self-shadow case. Still not attempted, for the same reason as before: the
+lowest-risk way to make this snapshot-and-rebind happen generically for all
+iterable kinds is to do it once, centrally, in `_gen_for_iter`'s dispatch
+(gimple_codegen.py ~line 20537, right after `it_type, it_val =
+self.lower_expr(node.iterable)` — this point already sees every iterable
+kind uniformly, before it branches into `_gen_for_list`/`_gen_for_dict`/etc,
+so the snapshot itself doesn't need touching in all ~7 branches). But
+making the loop target's SUBSEQUENT re-declaration (inside whichever
+sub-function `_declare_var(var, elem)` eventually runs) mint a genuinely
+fresh, non-colliding C name — instead of tripping `_declare_var`'s
+deliberate first-decl-wins no-op guard, or crashing with a duplicate C
+declaration if the guard is bypassed naively — needs either a new opt-in
+parameter threaded through `_declare_var` and all ~7 call sites, or a
+pre-registered `self._c_names[var]` override that `_declare_var` is taught
+to consult before defaulting `c_name = name` (current code never consults
+`_c_names` when minting a NEW declaration, only when renaming for
+keyword/shadow collisions it detects itself). Either shape touches
+`_declare_var`, which has 40+ call sites across the whole file and is
+exactly the kind of shared, load-bearing type-registration machinery this
+project's history (see `bugs/hard/`) has repeatedly found causes broad,
+silent regressions across the 664-file stdlib corpus when touched via a
+narrow-looking local fix, caught only by the full stdlib-build gate, not
+the fast test suites. Given this is still the only confirmed real-world
+occurrence in the whole corpus, the risk/reward still doesn't clear the bar
+for a from-scratch attempt this pass. Left open.
+
+## Not fixed (original analysis)
 
 A real fix needs to distinguish THIS shape (the loop target's name
 collides with its OWN iterable, within the SAME `for` statement) from
