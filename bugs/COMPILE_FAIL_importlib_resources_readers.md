@@ -4,7 +4,49 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-09): blocker changed, now a confirmed structural gap
+
+Re-ran `python3 mojo.py build .../readers.py` fresh against current
+master. The 2026-08-06 blocker below (the `NamespaceReader.__init__`
+unannotated-param `int64_t` mistype) no longer surfaces — presumably
+fixed as a side effect of other recent type-inference work on sibling
+importlib files this session — but the module still fails to build,
+now on an earlier, module-wide pre-pass:
+
+```
+Error building: cannot compile module: function(s) _candidate_paths
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ... falling
+back to interpreting this module from source instead
+```
+
+Confirmed real: `MultiplexedPath._candidate_paths` (line 160) is a
+genuine generator —
+```python
+@classmethod
+def _candidate_paths(cls, path_str: str) -> Iterator[abc.Traversable]:
+    yield pathlib.Path(path_str)
+    yield from cls._resolve_zip_path(path_str)
+```
+`gimple_codegen.py`'s `gen_module` (`gimple_codegen.py` around line
+30564) does an upfront, whole-module scan for any function containing
+`yield`/`yield from` or declared `async def`, and — when not running
+under `relaxed_imports` (stdlib-build fallback mode; `mojo.py build`
+on a direct entry file always runs strict) — raises immediately,
+before any per-function codegen (including whatever
+`NamespaceReader.__init__` now does) is even attempted. This is the
+same well-known, deliberate limitation noted in this project's
+generator/coroutine codegen history: only specific, narrow generator
+shapes have a real suspend/resume state-machine lowering implemented
+(see `test_generators.py`/the compiled-generator-codegen project in
+git log); arbitrary generator shapes like this one (plain `yield` +
+`yield from` delegating to another generator method) are not among
+them. This is a genuinely structural gap, not a narrow bug — no fix
+attempted here, per the task's explicit scope (generator support is
+feature-sized, not a narrow fix).
+
+## Status (updated 2026-08-06, historical — superseded above)
 
 Re-ran; current error:
 
