@@ -2,18 +2,25 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
-## Status (updated 2026-08-07, Track B continuation session)
+## Status (updated 2026-08-09)
 
-Re-ran fresh: `error: cannot convert to a pointer type` (issue #2 below,
-`self.metadata['Name']`/`self.metadata['Version']`) is now FIXED — see
-"2. FIXED" below. Still blocked on the OTHER, unrelated class of error
-(issue #1/#3, "invalid conversion in return statement" — bare `return`
-vs. a real value in the same function, a known, separately-tracked
-type-inference gap): now 3 remaining sites (`_read_files_egginfo_
-installed` returning `text and text.splitlines()` / `map(...)`, and
-`PathDistribution._name_from_stem`'s tuple-unpack-from-call case). Not
-attempted here — same architectural area flagged as high-regression-risk
-in issue #1's own writeup below (unchanged from the prior session).
+Re-verified fresh against current master. A NEW issue (not present in
+the 2026-08-07 write-up, so presumably introduced or exposed by
+unrelated codegen work in between) was found and fixed this session:
+`distributions(**kwargs)` called with no arguments (`distributions()`,
+lines 1009/1044) failed to LINK with "too many arguments to function
+'distributions_08efcc'; expected 1, have 2" — see "4. FIXED" below.
+
+Still blocked on the same, unchanged, already-documented structural
+type-inference gap from the prior session (issue #1/#3, "invalid
+conversion in return statement" — bare `return` vs. a real value in
+the same function): now 2 remaining sites (`_read_files_egginfo_
+installed`'s `text and text.splitlines()`/`map(...)`, and
+`PathDistribution._name_from_stem`'s tuple-unpack-from-call case; the
+2026-08-07 write-up's "3 remaining sites" count included a third that
+no longer reproduces). Not attempted here either — same architectural
+area flagged as high-regression-risk in issue #1's own writeup below
+(unchanged from the prior session).
 
 ## Status (updated 2026-08-06)
 
@@ -152,3 +159,67 @@ on their own separate, already-documented issues.
 
 Not yet looked at — a third, separate site with the same class of error
 as issue #1's symptom but not confirmed to share the same root cause.
+(2026-08-09: re-verified — line 575 is `_read_files_egginfo_installed`'s
+`return map('"{}"'.format, paths)`, which mixes a bare `return` (line
+563, `if not text or not subdir: return`) with this real-value return in
+the same function — the exact same "single inferred return type across
+a bare-`return`-mixed-with-real-`return`" shape issue #1 already
+describes, just a different function. Not a separate root cause.)
+
+### 4. FIXED (2026-08-09): `def f(**kwargs): ...` called with no `*args` slot passed 2 C args against a 1-param C signature
+
+```
+error: too many arguments to function 'distributions_08efcc'; expected 1, have 2
+```
+at both call sites of:
+```python
+def distributions(**kwargs) -> Iterable[Distribution]:
+    ...
+```
+called as plain `distributions()` (lines 1009, 1044 — inside
+`entry_points()`'s `_unique(distributions())` and
+`packages_distributions()`'s `for dist in distributions():`).
+
+**Root cause (confirmed via the generated `.ci`)**: `distributions`'s C
+signature is correctly declared with exactly ONE parameter
+(`int64_t distributions_08efcc (MojoDict *);` — `_signature_ctypes`, the
+DEF-side signature builder, only emits a `MojoList *` slot for `*args`
+when the function ALSO has a real `*args` parameter before `**kwargs`;
+`distributions` has none). But `_lower_named_call`'s `**kwargs`-packing
+logic (gimple_codegen.py, the block keyed off `_func_kwargs_slot`)
+unconditionally assumed the `f(self, *args, **kwargs)` forwarding
+pattern — i.e. that a `*args` slot ALWAYS immediately precedes
+`**kwargs` — and built BOTH a fresh empty `MojoList *` (meant to
+represent the nonexistent `*args`) AND a `MojoDict *`, passing both to
+every `**kwargs`-taking callee regardless of whether it actually
+declared `*args` too. For a genuinely kwargs-ONLY function like
+`distributions(**kwargs)`, that's 2 arguments against the correctly
+1-parameter real C declaration — "too many arguments."
+
+This is a general bug, not specific to this file: ANY plain
+`def f(**kwargs): ...` (no `*args`) called with zero positional
+arguments and reached through this packing path would hit it.
+
+**Fix**: added `GimpleGen._func_kwargs_has_vararg: dict[str, bool]`
+(gimple_codegen.py, declared next to `_func_kwargs_slot`), populated at
+the same registration site (`gen_module`'s FunctionDef pre-scan) from
+the SAME `_seen_star` flag that loop already computes internally but
+previously discarded. The call-site packing logic
+(`_lower_named_call`) now checks this flag: when the callee genuinely
+has a preceding `*args`, behavior is unchanged (build both a
+`MojoList *` and `MojoDict *`, exactly as before); when it doesn't, only
+the single `MojoDict *` is built and appended, matching the real 1-slot
+C signature. Any stray positional arguments passed to a kwargs-only
+call site (a real Python-level `TypeError` this codegen has no
+type-checker to catch earlier) are passed through unchanged rather than
+silently dropped, ahead of the dict — an honest degrade for a call that
+was already invalid Mojo/Python, not a new failure mode.
+
+Verification: both `distributions()` call sites in this file now
+compile+link past this point (the "too many arguments" errors are
+gone; the file's build now fails only on the separate, pre-existing
+issue #1/#3 "invalid conversion in return statement" cluster). Full
+quality gate run clean: `test_gimple.py` (247/247), `test_module_
+cache.py` (76/76), `make check-selfhost` clean, from-scratch stdlib
+dylib rebuild (0 `skip <module>:` lines), `compile_stdlib.py -j8`
+(664/664 passed, 0 unexpected).

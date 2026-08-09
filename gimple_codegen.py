@@ -4038,6 +4038,22 @@ class GimpleGen:
         # `_t32 = (MojoDict *)_t31;` for `h(1, x=7, y=8)`, i.e. the integer 7
         # reinterpreted as a dict pointer, which segfaults on first use.
         self._func_kwargs_slot: dict[str, int] = {}
+        # free-fn name (both mangled and plain) -> whether a real `*args`
+        # parameter precedes its `**kwargs` (as opposed to `**kwargs` being
+        # the function's ONLY vararg-style parameter, e.g. `def f(**kwargs)`
+        # with no `*args` at all). `_signature_ctypes` (the DEF side) only
+        # ever emits a `MojoList *` C param for `*args` when `**kwargs` is
+        # ALSO present ("the forwarding pattern f(self, *args, **kwargs)") —
+        # a kwargs-ONLY function gets exactly ONE C param (`MojoDict *`), not
+        # two. The call-site packing keyed off `_func_kwargs_slot` (see
+        # `_lower_named_call`) used to assume the forwarding pattern
+        # unconditionally, always building BOTH a `MojoList *` (for a
+        # nonexistent `*args`) and a `MojoDict *` and passing both — for a
+        # kwargs-only callee that's 2 arguments against a 1-parameter C
+        # declaration ("too many arguments to function"). Found via
+        # Lib/importlib/metadata/__init__.py's `def distributions(**kwargs):`
+        # called as plain `distributions()`.
+        self._func_kwargs_has_vararg: dict[str, bool] = {}
         # A free function's own sentinel-preserving param C-type list, for
         # the `(fixed, *args, trailing_kwonly=default, ...)` shape (no
         # `**kwargs`) — populated ONCE at registration time so a call site
@@ -15258,15 +15274,40 @@ class GimpleGen:
         if _kwslot_for_pack is None:
             _kwslot_for_pack = self._func_kwargs_slot.get(fname_raw, -1)
         if _kwslot_for_pack >= 0 and not _call_has_spread:
-            _n_fixed = max(0, _kwslot_for_pack - 1)
+            # Whether the callee ALSO declares a real `*args` before its
+            # `**kwargs` (the `f(self, *args, **kwargs)` forwarding pattern,
+            # which gets a concrete `MojoList *` C param) — as opposed to
+            # `**kwargs` being its only vararg-style parameter (`def
+            # f(**kwargs)`, exactly one `MojoDict *` C param; see
+            # `_func_kwargs_has_vararg`'s own docstring). Defaults to True
+            # (the old, always-pack-a-list-too behavior) when unknown, since
+            # every call site that reaches this branch at all necessarily
+            # has a `_func_kwargs_slot` entry, and both dicts are populated
+            # together at the exact same registration site — this fallback
+            # only matters for some other, not-yet-audited path that might
+            # populate `_func_kwargs_slot` without its sibling.
+            _has_vararg = self._func_kwargs_has_vararg.get(
+                fname, self._func_kwargs_has_vararg.get(fname_raw, True))
+            _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
             _fixed_pairs = arg_pairs[:_n_fixed]
             _vararg_pairs = arg_pairs[_n_fixed:]
-            _lst = self._new_val('MojoList *', "mojo_list_new ()")
-            for _at, _av in _vararg_pairs:
-                _av = self._coerce_to_type(_at, 'int64_t', _av)
-                self._emit(f"  mojo_list_append_int ({_lst}, {_av});")
-            arg_pairs = _fixed_pairs + [('MojoList *', _lst),
-                                        ('MojoDict *', self._pack_kwargs_dict(kwarg_dict))]
+            _packed_dict_pair = ('MojoDict *', self._pack_kwargs_dict(kwarg_dict))
+            if _has_vararg:
+                _lst = self._new_val('MojoList *', "mojo_list_new ()")
+                for _at, _av in _vararg_pairs:
+                    _av = self._coerce_to_type(_at, 'int64_t', _av)
+                    self._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+                arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
+            else:
+                # No `*args` slot at all: any leftover positional args (a
+                # real Python-level TypeError against a kwargs-only
+                # signature, but this codegen has no type-checker to catch
+                # it earlier) have nowhere valid to go — pass them through
+                # unchanged ahead of the single `MojoDict *` param rather
+                # than silently discarding them, mirroring `_fixed_pairs`'
+                # existing "leave it to the generic arity/coercion handling
+                # further down" convention for a genuinely malformed call.
+                arg_pairs = _fixed_pairs + _vararg_pairs + [_packed_dict_pair]
             kwarg_dict = {}
 
         # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
@@ -29335,8 +29376,11 @@ class GimpleGen:
                     _ci += 1
                 if _kw_i >= 0:
                     self._func_kwargs_slot[s.name] = _kw_i
+                    self._func_kwargs_has_vararg[s.name] = _seen_star
                     try:
-                        self._func_kwargs_slot[self._func_csym(s.name)] = _kw_i
+                        _mangled_kw_name = self._func_csym(s.name)
+                        self._func_kwargs_slot[_mangled_kw_name] = _kw_i
+                        self._func_kwargs_has_vararg[_mangled_kw_name] = _seen_star
                     except Exception:
                         pass
             # A genuine user free function (FunctionDef node, not a libc extern):
