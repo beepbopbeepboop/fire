@@ -4,75 +4,74 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09)
 
-Re-ran; current errors are all in a generated C++ file
-(`__init___gen.cpp`), e.g. `'filenames' was not declared in this
-scope`, `no match for 'operator*' (operand type is 'MojoDict')`,
-`too few arguments to function 'analyze_decls_bb5aa0'`. This module
-defines generator functions (`analyze_decls` does `yield from
-analyze_decls(decls, known)`, `yield resolve_parsed(item)`, etc.),
-which this codegen compiles via a SEPARATE C++20-coroutine lowering
-path (hence the `.cpp`, not `.ci`/`.c`) rather than the ordinary
-straight-line C path. This is part of the separate, already-tracked
-compiled-generator/async-codegen project (tasks #95-135) — specifically
-the "C++ coroutine codegen gap" category (generator-body name
-resolution / sibling-call resolution) that project's own scope
-description covers. Not investigated further here.
+Re-verified against current master (fast-forwarded to `bf1ead2`,
+after several other sibling `Tools/c-analyzer/` bugs got fixed this
+session): still fails, but the failure mode has changed shape since
+the 2026-08-06 note — the codegen no longer even reaches
+`__init___gen.cpp`/gcc. `gen_module` now detects the unsupported
+generator shape up front and refuses cleanly:
 
 ```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:28:11: warning: unused variable '_tag' [-Wunused-variable]
-   28 |                           ):
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:33:11: warning: unused variable '_tag' [-Wunused-variable]
-   33 | def iter_decls(filenames, *,
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:38:11: warning: unused variable '_tag' [-Wunused-variable]
-   38 |     kinds = KIND.DECLS if kinds is None else (KIND.DECLS & set(kinds))
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:53:11: warning: unused variable '_tag' [-Wunused-variable]
-   53 |         known,
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:62:13: warning: unused variable '_tag' [-Wunused-variable]
-   62 |     types = {decl: None for decl in collated['type']}
-      |             ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function 'analyze_a64463':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:145:8: error: variable or field 'results' declared void
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:148:8: error: variable or field '_t10' declared void
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:21:11: error: invalid use of void expression
-   21 |     results = iter_analysis_results(filenames, **kwargs)
-      |           ^
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:147:11: warning: variable '_t9' set but not used [-Wunused-but-set-variable]
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function 'iter_analysis_results_dad6ee':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:35:8: error: variable or field 'decls' declared void
-   35 |                parse_files=_parse_files,
-      |        ^    
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:29:9: error: invalid use of void expression
-   29 |     decls = iter_decls(filenames, **kwargs)
-      |         ^
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:36:11: warning: variable '_t9' set but not used [-Wunused-but-set-variable]
-   36 |                **kwargs
-      |           ^  
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:35:8: warning: variable 'decls' set but not used [-Wunused-but-set-variable]
-   35 |                parse_files=_parse_files,
-      |        ^    
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function '_alloc_analyze_decls_analyze_decl_env':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:52:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   52 |     knowntypes, knowntypespecs = _datafiles.get_known(
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py: In function 'analyze_decls_analyze_decl':
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:68:1: warning: label 'bb_2' defined but not used [-Wunused-label]
-   68 |             typespecs,
-      | ^   
-/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.py:66:11: warning: variable '_t7' set but not used [-Wunused-but-set-variable]
-... (88 more lines)
+Error building: cannot compile module: function(s) analyze_decls, check_all
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has no
+suspend/resume state-machine transform for generators, nor an event loop /
+suspend-resume codegen for async functions, yet, so these cannot be
+represented as compiled C without emitting silently wrong or broken code;
+falling back to interpreting this module from source instead
+```
+
+With `MOJO_DEBUG=1` the precise reason surfaces:
+
+```
+[gimple_codegen] generator 'analyze_decls' not eligible for C++ coroutine
+path, falling back to honest refusal: analyze_decls: every `yield` must
+carry a value, and all values must agree on one scalar type
+(int64_t/double/_Bool)
+[gimple_codegen] generator 'check_all' not eligible for C++ coroutine
+path, falling back to honest refusal: check_all: every `yield` must carry
+a value, and all values must agree on one scalar type
+(int64_t/double/_Bool)
+```
+
+Root-caused precisely this time: `gimple_codegen.py`'s C++20-coroutine
+generator lowering (`_gen_cpp_generator_unit`, around line 25667)
+computes one shared C scalar type (`int64_t`/`double`/`_Bool`) for
+every `yield` in a generator's body via `_generator_yield_ctype`; if
+that returns `None` (no single scalar type covers every yielded
+value), it raises `_UnsupportedGeneratorShape` and the function is
+left uncompilable rather than emitting broken/mismatched C++. Both
+`analyze_decls` (`yield decl, resolved` — a 2-tuple) and `check_all`
+(`yield data, failure` and `yield None, None` — also 2-tuples) yield
+TUPLES, not scalars, so neither is eligible.
+
+This is still the same structural gap the 2026-08-06 note pointed at
+(part of the separate, already-tracked compiled-generator/async-codegen
+project, tasks #95-135), just now caught earlier and more precisely:
+the coroutine promise/value machinery has no representation for a
+non-scalar (tuple/object/pointer-pair) yielded value at all — genuinely
+needs a whole new value-representation category in the coroutine
+codegen, not a local stub or missing-case fill-in. Not attempted here,
+per CLAUDE.md's guidance against forcing narrow fixes onto structural
+gaps. No code change; doc corrected to match current (more precise,
+earlier-failing) behavior only.
+
+```
+Error building: cannot compile module: function(s) analyze_decls, check_all
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has no
+suspend/resume state-machine transform for generators, nor an event loop /
+suspend-resume codegen for async functions, yet, so these cannot be
+represented as compiled C without emitting silently wrong or broken code;
+falling back to interpreting this module from source instead
+Traceback (most recent call last):
+  File ".../mojo.py", line 314, in build_executable
+    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(...)
+  File ".../gimple_codegen.py", line 30700, in gen_module
+    raise RuntimeError(...)
+RuntimeError: cannot compile module: function(s) analyze_decls, check_all ...
 ```
 
 Exit code: 1
-Elapsed: 14.14s
