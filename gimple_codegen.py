@@ -15582,6 +15582,49 @@ class GimpleGen:
                 acc = self._new_val('int64_t', f'{cond} ? {acc} : {bv}')
             return 'int64_t', acc
 
+        # min/max over string-ish (char* and/or single-char) args → same
+        # ternary-fold approach as the numeric case above, but lexicographic
+        # comparison needs a real strcmp-style call (`<`/`>` directly on two
+        # char* pointers compares ADDRESSES, not string content) —
+        # mojo_cstr_cmp mirrors the string-equality lowering above (`==`/
+        # `!=`) doing the identical strcmp-based comparison for the same
+        # char* representation. A bare 'char' operand (e.g. a value read via
+        # `_mojo_at_char`/string indexing, as opposed to a char*-boxed
+        # single-character string) is normalized to a real 1-char string via
+        # mojo_char_to_str first, mirroring the equality lowering's own
+        # `_to_char_star` helper immediately above. Without this, a 2-arg
+        # call mixing these representations, like Tools/build/deepfreeze.py's
+        # `maxchar = max(maxchar, c)` (maxchar: char*, c: char, from
+        # iterating a str), fell through to the generic call-expr path
+        # below, calling the real runtime's `mojo_max(void *args)`
+        # (single-iterable-of-ints signature) with 2 scalar args — a hard
+        # "too many arguments to function 'mojo_max'" -fgimple compile
+        # error, not a subtler runtime bug.
+        _STRINGY = ('char *', 'char')
+        if (fname_raw in ('min', 'max') and len(arg_pairs) >= 2
+                and all(t in _STRINGY for t, _ in arg_pairs)
+                and any(t == 'char *' for t, _ in arg_pairs)):
+            def _as_cstr(t, v):
+                if t == 'char *':
+                    return v
+                return self._call_expr('char *', 'mojo_char_to_str', [('char', v)])
+            acc = _as_cstr(*arg_pairs[0])
+            for t, v in arg_pairs[1:]:
+                cv = _as_cstr(t, v)
+                cmp_i = self._call_expr('int', 'mojo_cstr_cmp', [('char *', acc), ('char *', cv)])
+                cmp64 = self._new_val('int64_t', f'(int64_t){cmp_i}')
+                zero = self._new_val('int64_t', '(int64_t)0')
+                # cmp64 < 0 means acc sorts strictly before cv (acc is the
+                # lexicographically smaller string); max wants the larger of
+                # the two, so max replaces acc with cv exactly when
+                # cmp64 < 0, min replaces when cmp64 > 0 — equal strings
+                # keep acc either way, matching the numeric fold's identical
+                # "keep acc on tie" behavior above.
+                replace_op = '<' if fname_raw == 'max' else '>'
+                cond = self._new_val('_Bool', f'{cmp64} {replace_op} {zero}')
+                acc = self._new_val('char *', f'{cond} ? {cv} : {acc}')
+            return 'char *', acc
+
         # round(x, ndigits) → round(x*10^n)/10^n (libm round() takes 1 arg only)
         if fname_raw == 'round' and len(arg_pairs) == 2:
             (xt, xv), (nt, nv) = arg_pairs

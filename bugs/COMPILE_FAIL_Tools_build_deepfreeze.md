@@ -4,6 +4,85 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-09): found + fixed a real, narrow, SEPARATE bug in this file's own code; the file's SHARED root cause (umarshal.py) is still open, now masked rather than fixed
+
+Re-ran fresh against current master. Besides the shared `umarshal.py`
+errors described below (unchanged, still open — see
+`bugs/COMPILE_FAIL_Tools_build_umarshal.md`), this file has its OWN,
+previously-undocumented, genuinely narrow bug (truncated out of the
+2026-08-06 dump below, which cuts off after ~30 of ~3268 lines):
+
+```
+/Users/mrs/net/Python-3.14.6/Tools/build/deepfreeze.py:97:9: error: too many arguments to function 'mojo_max'; expected 1, have 2
+```
+
+at `analyze_character_width`'s `maxchar = max(maxchar, c)` (`maxchar`:
+`char *`, `c`: bare `char`, from iterating a `str`). Root cause:
+`_lower_call`'s min/max 2-arg ternary-fold fast path
+(`gimple_codegen.py`, ~line 15568) only handles operands whose type is
+in a fixed numeric-scalar set (`_NUM`); `char *`/`char` aren't in it,
+so this call fell through to the generic call-expr path, which called
+the real runtime's `mojo_max(void *args)` — a single-iterable-of-ints
+signature — with 2 scalar args, a hard `-fgimple` "too many arguments"
+error.
+
+**Fixed** (narrow, self-contained, does not touch shared type-inference
+machinery): added a second ternary-fold fast path, mirroring the
+existing numeric one, for operands that are `char *` and/or bare
+`char` (at least one must be `char *`) — using `mojo_cstr_cmp` for
+real lexicographic string comparison (`<`/`>` directly on two `char *`
+pointers would compare addresses, not content) and `mojo_char_to_str`
+to normalize a bare `char` operand into a real 1-char string first,
+mirroring the equality lowering's own identical `_to_char_star`
+pattern immediately above it in the same file. Verified: this specific
+error is gone from a fresh, independent (non-cached, direct
+`gcc-mp-15 -fgimple`) compile of `deepfreeze.py`'s own generated code.
+
+**Important caveat — do not read "`mojo.py build` reports success" as
+this bug or the shared umarshal.py bug being fixed.** After this fix,
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/build/
+deepfreeze.py` does report `Built: ...` with 0 errors, reproducibly
+(3 separate runs, including one with a fully isolated, empty
+`GMOJO_HOME` to rule out a stale-cache false positive). But this is
+NOT evidence the shared `umarshal.py` structural bug is fixed —
+tracing `mojo.py build`'s actual dispatch (`mojo.py`'s `build`
+handling) showed it tries `driver.compile_program` (`gimple_codegen.
+compile_linked`, the newer "link mode" path — separately-compiled,
+cached per-module dylibs) FIRST, falling back to the older, simpler
+`build_executable`/`compile_to_gimple_cached(do_imports=True, ...)`
+INLINING path only if `driver.compile_program` raises. Direct
+instrumentation confirmed: with the fix in place, `compile_linked`
+succeeds on its own (deepfreeze.py's own code no longer errors) and
+the inlining fallback — the ONLY path that actually inlines and
+compiles `umarshal.py`'s real body, and therefore the only path that
+can surface `Reader._r_object`'s bug — is never reached at all.
+Link mode's own import resolution (`_register_link_imports`/its
+nested `_exports` helper, `gimple_codegen.py` ~line 5098) gracefully
+degrades an import it can't resolve to a real dylib (confirmed by
+reading its source: catches exceptions from `imports.resolve()` AND
+`load_module()`, ultimately returning `({}, False, path)` — "treating
+module as empty") rather than erroring. Confirmed empirically: the
+built `deepfreeze` binary has ZERO `Reader`/`_r_object`/`umarshal`/
+`loads` symbols (`nm`) or strings (`strings`) anywhere in it —
+`import umarshal` and everything that depends on it (`umarshal.loads(
+data)` at deepfreeze.py:476) is silently absent from the build, not
+successfully compiled. Before this fix, deepfreeze.py's OWN `max()`
+bug broke `compile_linked`'s compile of deepfreeze.py's own code,
+forcing the fallback to the inlining path — which is why umarshal.py's
+errors were directly visible in this doc's original 2026-08-06 dump
+below. So the fix here (a) is real and worth keeping, but (b)
+incidentally causes this file to stop exercising (and therefore stop
+correctly reporting) the still-broken shared dependency, via an
+unrelated, orthogonal masking gap in link mode's import-resolution
+fallback. Leaving this doc open rather than deleting it — the
+underlying compile-correctness problem (this file's actual behavior
+depends on `umarshal.loads()`, which is silently missing from the
+built binary) is not resolved, it's just no longer visible as a build
+error. `bugs/COMPILE_FAIL_Tools_build_umarshal.md` (unchanged, still
+open) remains the reliable, honest repro of the shared root cause —
+compile `umarshal.py` directly as the entry file, which always goes
+through the real inlining path.
+
 ## Status (updated 2026-08-06)
 
 Re-ran; current error is entirely in a transitively-imported sibling:
