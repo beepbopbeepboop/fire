@@ -4026,6 +4026,16 @@ class GimpleGen:
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
+        self._classmethod_names: set[str] = set()     # mangled `Struct_method` names of REAL classmethods
+        # (explicit @classmethod, plus the two dunders Python treats as
+        # implicit classmethods without requiring the decorator:
+        # __init_subclass__/__class_getitem__) — see _lower_method_call's
+        # `ov == 'cls'` heuristic, which consults this to avoid misattributing
+        # an ordinary parameter/local that merely happens to be NAMED `cls`
+        # (e.g. the descriptor-protocol `__get__(self, instance, cls=None)`
+        # third parameter, whose real type is whatever class object touched
+        # the descriptor at the call site, not the struct __get__ happens to
+        # be defined on) to the struct enclosing the CURRENT method.
         self._struct_init_params: dict[str, list[str]] = {}  # struct -> __init__ param names (excl self)
         self._struct_init_defaults: dict[str, dict] = {}  # struct -> __init__ param name -> default expr AST node (excl self)
         self._func_param_defaults: dict[str, list] = {}  # mangled free-fn name -> [(param_name, default_ast), ...]
@@ -11531,7 +11541,33 @@ class GimpleGen:
         # — in the compiled binary, reading `.name` on a boxed IdentExpr
         # handle falls back to mojo_obj_getattr -> NULL, so an isinstance+name
         # check never fires; `ov` is the reliable `'cls'` value from lower_expr.
-        if (ov == 'cls' and self.current_func_name):
+        #
+        # Gate on `self.current_func_name in self._classmethod_names` too —
+        # a bare `ov == 'cls'` match alone fires for ANY parameter/local
+        # merely NAMED `cls`, not just a real classmethod's implicit first
+        # argument. The descriptor protocol's `__get__(self, instance,
+        # cls=None)` has exactly such a parameter: real Mojo/Python code
+        # (`Lib/string/__init__.py`'s `_TemplatePattern.__get__` calling
+        # `cls._compile_pattern()`, where `cls` is whatever class touched the
+        # descriptor at the call site -- `Template` here, but in general
+        # unknowable statically) would otherwise get `_cns` resolved from
+        # `current_func_name`'s OWN enclosing struct (`_TemplatePattern`,
+        # since it's a real struct-field-types member and the longest-prefix
+        # loop below has no way to tell "the enclosing struct" apart from
+        # "the struct this dynamically-typed value actually holds") and emit
+        # a call to `_TemplatePattern__compile_pattern`, a symbol nothing
+        # defines (`_compile_pattern` is only ever a method of `Template`) —
+        # an undefined-symbol link failure, not a compile error, so it
+        # slipped past every gcc-level check for a long time. `_classmethod_
+        # names` (populated in gen_module's Pass 1b, exact-mangled-name match
+        # like `_static_methods` — a known, accepted limitation for
+        # overloaded methods, see `_static_methods`'s own callers) is only
+        # populated for real `@classmethod`s plus the two dunders Python
+        # treats as implicit classmethods (`__init_subclass__`/
+        # `__class_getitem__`), so ordinary methods with a same-named
+        # parameter no longer match.
+        if (ov == 'cls' and self.current_func_name
+                and self.current_func_name in self._classmethod_names):
             # Derive the enclosing struct name from current_func_name (the
             # mangled `<Struct>_<method>` form). A single rsplit('_', 1) is
             # WRONG when the METHOD name itself contains an underscore —
@@ -29482,6 +29518,15 @@ class GimpleGen:
                     # Track @staticmethod methods so call sites don't pass cls arg
                     if hasattr(m, 'decorators') and 'staticmethod' in (m.decorators or []):
                         self._static_methods.add(mangled)
+                    # Track REAL classmethods (explicit @classmethod, or the
+                    # two dunders Python makes implicit classmethods without
+                    # the decorator) — see _classmethod_names' own docstring
+                    # at its declaration for why _lower_method_call needs
+                    # this instead of trusting any parameter literally named
+                    # `cls`.
+                    if ((hasattr(m, 'decorators') and 'classmethod' in (m.decorators or []))
+                            or m.name in ('__init_subclass__', '__class_getitem__')):
+                        self._classmethod_names.add(mangled)
                     # Also store method param types using the mangled name (for call-site arg padding)
                     if m.params:
                         ctypes = []
