@@ -4,6 +4,81 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-08-09): the ICE from 2026-08-07 is FIXED. File still doesn't
+## fully build, for the separate, already-documented, structural reason
+## (item 3 below) — that part is unchanged and left open.
+
+Re-verified the 2026-08-07 ICE fresh (`internal compiler error: in build2,
+at tree.cc:5204` in `CWriter_set_position`, line 35, `self.out.write(" " *
+gap)`). Confirmed it still reproduced on current master. Root-caused via
+the transitive-closure `.ci` (`mojo.py --dump-full`, not the standalone
+`--dump`, which never hit this — see below for why): `gap = tkn.column -
+self.last_token.end_column` (`cwriter.py` line 34), where `Token.column`/
+`Token.end_column` are `@property`s (`lexer.py`).
+
+Once `Token` becomes a real, statically-known struct (only true when
+`lexer.py` is compiled into the same translation unit as `cwriter.py` —
+the standalone single-file `--dump` of `cwriter.py` alone never resolves
+`Token` and falls back to fully-dynamic `_mojo_dispatch_getattr`, which
+happens to work), `tkn.column` (no call syntax) lowers via
+`_lower_bound_method_value` to a deferred, uncalled `MojoBoundMethod *`
+value — correct when the value is itself being called or passed around as
+a callable, but here it's an *operand of a binary operator*
+(`BinaryOp.left` in `-`). `gimple_codegen.py`'s `_lower_binary`
+(generic/fallback path, after all the special-cased operators) had no
+handling for a `MojoBoundMethod *` operand at all, so `_is_raw_ptr()`
+treated the bound-method pointer as a genuine raw C buffer pointer and
+routed the subtraction through the generic scaled-pointer-arithmetic
+helper (`_mojo_at_MojoBoundMethod(ptr, -offset)`, i.e. `ptr + n` — real
+pointer arithmetic on a struct with no such element shape). That's a
+GIMPLE shape GCC's own `-fgimple` frontend crashes building internally
+(ICE) rather than gracefully rejecting — hence "internal compiler error
+in build2", not an ordinary type-mismatch diagnostic. Comparison
+operators hit the exact same uncalled-bound-method value but took a
+*different*, non-crashing wrong path: they just cast the raw
+`MojoBoundMethod *` pointer to `int64_t` and compared THAT — silently
+wrong runtime values, not a compile failure (e.g. `self.last_token.
+end_line < tkn.line` a few lines above the crash site).
+
+This is the exact same class of gap as two already-fixed, already-
+documented precedents in the same file (`_lower_MemberExpr`'s `self.prop.
+attr` chain and `_lower_subscript`'s `self.prop[key]`, both citing
+`bugs/COMPILE_FAIL_zipfile__path___init__.md`) — an uncalled 0-arg
+property/method value reaching a THIRD consuming context (a binary
+operator) that had no auto-invoke handling. **Narrow, not structural**:
+fixed by adding the identical auto-invoke-via-`mojo_bound_method_call_0`
+step to `_lower_binary`'s generic fallback (right before the final
+`return self._lower_binary_tail(...)`, gimple_codegen.py), for both
+operands, deliberately excluding `is`/`is not` (the one operator where
+comparing the callable's *identity* rather than its *invoked value* is
+the plausible intent — e.g. `self.callback is None`).
+
+Confirmed fixed: `cwriter.py`'s `CWriter_set_position` now compiles past
+line 35 with no ICE and no error there. The file still does not fully
+build, for the SEPARATE, pre-existing, structural reason already
+documented as item 3 below (`CWriter.header_guard`'s `@contextlib.
+contextmanager` bare-`yield` generator's companion `.cpp` calling `.write
+()` on `self.out`, whose real type is an unresolvable `TextIO` boxed to
+`int64_t` — explicitly out of scope per `bugs/hard/
+CODEGEN_generator_struct_typed_param_refused.md`, not touched here).
+Items 1 (`indents` field typing) and 2 (the ICE) below are now both
+resolved — item 1 turned out to already be fixed by unrelated work
+between 2026-08-07 and now (`indents` is `MojoList *` in the current
+struct, not the plain `int` the 2026-08-06 note describes).
+
+### Quality gate (2026-08-09, `_lower_binary` bound-method auto-invoke fix)
+
+1. `python3 test_gimple.py` — 247 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean (`Results: 1 passed, 0 failed`).
+4. From-scratch stdlib dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+   `build_stdlib_dylib.build_stdlib(jobs=8)`) — clean, 0 `skip <module>:`
+   lines.
+5. `python3 compile_stdlib.py -j8` — 664/664 passed, 0 unexpected (same
+   baseline count as before the change).
+6. `cwriter.py` itself: the ICE is gone; build now fails only at the
+   already-documented, separate, structural item 3 below.
+
 ## Status (2026-08-07): STILL FAILING, but one real bug found+fixed along the way
 
 Re-investigated fresh. The `indents` field-typing diagnosis below (from

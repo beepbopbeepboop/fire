@@ -9713,6 +9713,63 @@ class GimpleGen:
 
         lt, lv = self.lower_expr(node.left)
         rt, rv = self.lower_expr(node.right)
+
+        # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
+        # property/method accessed without call syntax lowers to a
+        # deferred, uncalled `MojoBoundMethod *` value (see
+        # _lower_bound_method_value) — correct when the consuming context
+        # is itself a call (`self.prop()`) or the value is being passed
+        # around as a first-class callable, but a BINARY OPERATOR is
+        # never that: real Python (and, for a `@property` specifically,
+        # the entire point of the decorator) auto-invokes the getter
+        # FIRST and only then applies the operator to its return value.
+        # Left unhandled, arithmetic ops (`+`/`-`) fell into the generic
+        # raw-pointer-arithmetic fallback further below (treating the
+        # bound-method pointer as an array base pointer via the
+        # `_mojo_at_<T>` scaled-offset helper — a genuine GCC `-fgimple`
+        # frontend internal compiler error, "internal compiler error: in
+        # build2", since a `MojoBoundMethod *` has no such element shape)
+        # and comparison ops just cast the raw bound-method POINTER to
+        # int64_t and compared THAT — silently wrong runtime values, no
+        # compile error. `is`/`is not` are deliberately excluded: those
+        # are the one case where comparing the callable's IDENTITY (not
+        # its invoked value) is the plausible intended semantics (e.g.
+        # `self.callback is None`), mirroring how this representation
+        # already has no notion of `@property` vs. an ordinary bound
+        # method to disambiguate the two intents. Mirrors the identical
+        # fix already applied to _lower_subscript's `self.prop[key]` and
+        # the MemberExpr chain's `self.prop.attr` (see those comments /
+        # bugs/COMPILE_FAIL_zipfile__path___init__.md) — this is the
+        # third and, with `is`/`is not` excluded, final direct-consumer
+        # context that had no such handling. Found via Tools/
+        # cases_generator/cwriter.py's CWriter.set_position: `gap =
+        # tkn.column - self.last_token.end_column` (both `Token`
+        # `@property`s, `tkn`'s static type only resolvable once the
+        # full `lexer.py` import closure is compiled alongside it — the
+        # standalone single-file build never hit this since `tkn` fell
+        # back to an opaque type there instead).
+        if node.op not in ('is', 'is not'):
+            if lt == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(lv, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', lv)])
+                if ret_type in ('int64_t', 'int'):
+                    lt, lv = ret_type, raw_t
+                elif ret_type == 'void':
+                    lt, lv = 'int', self._new_val('int', '0')
+                else:
+                    lt, lv = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
+            if rt == 'MojoBoundMethod *':
+                ret_type = self._bound_method_ret_types.get(rv, 'int64_t')
+                raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
+                                         [('MojoBoundMethod *', rv)])
+                if ret_type in ('int64_t', 'int'):
+                    rt, rv = ret_type, raw_t
+                elif ret_type == 'void':
+                    rt, rv = 'int', self._new_val('int', '0')
+                else:
+                    rt, rv = ret_type, self._new_val(ret_type, f'({ret_type}){raw_t}')
+
         return self._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 
     def _lower_binary_tail(self, op: str, left_node, lt: str, lv: str,
