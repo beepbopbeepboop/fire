@@ -2,20 +2,30 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-09, still open)
 
 Root-caused; NOT fixed — requires implementing two substantial missing
 runtime features (`io.BytesIO`, `pickle.Pickler`/`Unpickler`), not a
 narrow bug. Low priority: this is a Doc/includes/ EXAMPLE script (doc
 illustration code), not real library/stdlib code.
 
+Re-verified against current master (`python3 mojo.py build
+Doc/includes/dbpickle.py`): `gimple_codegen.py` still has zero
+references to `BytesIO`/`Pickler`/`Unpickler` anywhere in the file, so
+the underlying gap is unchanged. The GCC error site has shifted slightly
+(now surfaces one statement later than previously recorded, at the
+`DBUnpickler(...).load()` call rather than the `io.BytesIO()` assignment
+itself — an artifact of unrelated codegen changes upstream, not of any
+fix to this gap):
+
 ```
-error: cannot convert to a pointer type
+dbpickle.py:80:3: error: cannot convert to a pointer type
+   80 |     memos = DBUnpickler(file, conn).load()
 ```
-at:
-```python
-file = io.BytesIO()
-```
+
+which still traces back to the same root cause below: `file = io.BytesIO()`
+(line 68) lowers to an unresolved stub returning `int64_t`, and that
+`int64_t`-typed `file` conflicts with later pointer-typed uses.
 
 ## Root cause
 
