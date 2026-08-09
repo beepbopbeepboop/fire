@@ -4,7 +4,62 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09, re-verified — supersedes the 2026-08-06 note below)
+
+Re-ran against current master (`d0e4874`). The isinstance-tuple /
+subscript C-syntax errors described in the 2026-08-06 note below no
+longer reproduce at all — that code is never reached anymore. The
+build now fails much earlier, before any C text is emitted, with a
+hard, honest `RuntimeError` refusal out of `GimpleGen.gen_module`:
+
+```
+cannot compile module: function(s) items_from_keys_and_values,
+iter_locals, iteritems, parse_location_table (generator function(s),
+contain a `yield`/`yield from`) — this codegen compiles every function
+into a single straight-line C function and has no suspend/resume
+state-machine transform for generators, nor an event loop /
+suspend-resume codegen for async functions, yet, so these cannot be
+represented as compiled C without emitting silently wrong or broken
+code; falling back to interpreting this module from source instead
+```
+
+`MOJO_DEBUG=1` shows the specific cause for all four:
+
+```
+generator 'parse_location_table' not eligible for C++ coroutine path:
+  every `yield` must carry a value, and all values must agree on one
+  scalar type (int64_t/double/_Bool)
+generator 'items_from_keys_and_values' not eligible: same reason
+generator method PyDictObjectPtr.'iteritems' not eligible: same reason
+generator method PyFramePtr.'iter_locals' not eligible: same reason
+```
+
+Confirmed by reading the source: every one of these four generators
+`yield`s a tuple, not a scalar —
+`items_from_keys_and_values`/`PyDictObjectPtr.iteritems`/
+`PyFramePtr.iter_locals` all `yield (pyop_key, pyop_value)` (or
+`yield (pyop_name, pyop_value)`), and `parse_location_table` does
+`yield addr, end_addr, None` (a 3-tuple). This is the SAME well-known,
+already-documented, deliberately-out-of-scope limitation as
+`bugs/CODEGEN_generator_function_Lib_weakref.md` (`WeakValueDictionary
+.items`/`WeakKeyDictionary.items` both `yield key, value`) and several
+other `bugs/CODEGEN_generator_function_Lib_*.md` docs: the C++20
+coroutine codegen this compiler uses for generator functions only
+supports a scalar (int64_t/double/_Bool) yield-value type — a
+`yield`ed tuple/object needs a whole new pointer-typed promise/value
+representation in that coroutine machinery (`_gen_cpp_generator_unit`
+and friends), which is a structural, feature-sized extension to shared
+generator-codegen machinery, not a narrow one-spot fix. Per this
+project's history of "narrow-looking" fixes to this exact class of
+shared machinery causing broad silent regressions, this is
+deliberately NOT attempted here — left as an accurate, honest
+structural-limitation record instead. `relaxed_imports` (which would
+turn this into a per-function stub-and-continue instead of a hard
+raise) is never set `True` for a root module by `mojo.py`'s own build
+entry points, so this is a hard, whole-module refusal for this file as
+things stand today, independent of the two now-stale findings below.
+
+## Status (updated 2026-08-06, historical — superseded, kept for context)
 
 Re-ran; current errors include real C syntax errors (not just type
 mismatches):
