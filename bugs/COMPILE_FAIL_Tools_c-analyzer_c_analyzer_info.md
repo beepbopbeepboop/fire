@@ -4,18 +4,51 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09)
 
-Re-ran; current errors are all in a generated C++ file (`info_gen.cpp`),
-e.g. `ISO C++ forbids comparison between pointer and integer`, `request
-for member 'render' in 'self->Analyzed::item', which is of non-class
-type 'int64_t'`, `'Analyzed' has no member named '_render_extra'`.
-`info.py` itself defines generator methods (`render`: `yield repr(self)`
-/ `yield from rendered`, etc.), compiled via this codegen's separate
-C++20-coroutine lowering path. Part of the separate, already-tracked
-compiled-generator/async-codegen project (tasks #95-135) — the
-untyped/misresolved generator-body member-access category that
-project's scope already covers. Not investigated further here.
+Re-verified against current master (fast-forwarded to `bf1ead2`, after
+several sibling `Tools/c-analyzer/` bugs got fixed this session): still
+fails, same shape and (for the errors quoted in the 2026-08-06 note)
+byte-identical text — errors are all in the generated C++ file
+(`info_gen.cpp`), confirming this module still routes through the
+separate C++20-coroutine generator lowering path (`info.py`'s `render`
+method does `yield repr(self)` / `yield from rendered`, etc.).
+
+Root-caused precisely this time (the 2026-08-06 note hadn't traced past
+the gcc error text): `Analyzed.__init__`'s `item`/`typedecl` parameters
+and the `render(self, fmt='line', ...)` method's `fmt` parameter are
+both unannotated. The ORDINARY (non-coroutine) function-lowering path
+infers such parameters' real C types from call-site/body usage; the
+C++20-coroutine generator-body lowering (`_gen_cpp_generator_unit` and
+its statement-emission helpers) is a separate, independently-maintained
+type-inference pass that does not do this — it falls back to the naive
+`int64_t` default for both `self.item` (a struct-typed field, assigned
+from the `item` constructor param) and `fmt` (a string, compared against
+string literals `'raw'`/`'summary'`/`'full'` in `render`'s body). This
+produces exactly the observed errors:
+- `self->item.render(fmt)` — `.render` looked up on `int64_t` because
+  `item`'s field type was never resolved to the real `Analyzed`/
+  `TypeDeclaration`-shaped struct pointer.
+- `(fmt == "raw")` / `(fmt == "summary")` / `(fmt == "full")` — `fmt`
+  compared against a C string literal while typed `int64_t`: "ISO C++
+  forbids comparison between pointer and integer".
+- `throw _MojoCppExc{ (int64_t)108472663, fmt, (void *)fmt }` — the
+  exception-message slot expects `char*` but receives `fmt` typed as
+  `int64_t`.
+- `Analyzed__render_extra(self, fmt)` used in a value context while its
+  inferred return type is `void` — likely the same self/param
+  mistyping cascading into `_render_extra`'s own inferred signature.
+
+This is the same "untyped/misresolved generator-body member-access"
+category the 2026-08-06 note already pointed at, now traced to its
+actual mechanism: the coroutine-body lowering pass needs its own
+parameter/field type-inference pass brought up to parity with the
+ordinary function-lowering path's (a real, nontrivial feature — not a
+missing single case), and touches the same separately-maintained
+generator/async codegen subsystem the tracked project (tasks #95-135)
+already covers. Structural; not attempted here, per CLAUDE.md's
+guidance against forcing narrow fixes onto shared/incomplete inference
+machinery. No code change — doc corrected with the precise mechanism.
 
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
