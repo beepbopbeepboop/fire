@@ -1,5 +1,50 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-09, root cause now FULLY CONFIRMED)
+
+Re-verified against current master (fast-forwarded to `e5daa1d`) —
+reproduces identically (`Error building: cannot compile module:
+function(s) parse ...`, still no per-function "not eligible" debug note
+naming `parse`).
+
+Traced `gen_module` directly this pass (rather than just re-running the
+build) to settle the "probable, not fully confirmed" root cause from
+2026-08-06/07 with certainty:
+
+- `gimple_codegen.py:28928`: `all_struct_defs = stmts + (imported_stmts
+  ...)` — `stmts` is the flat list of MODULE-level statements passed
+  into `gen_module`; it is never recursed into `FunctionDef` bodies.
+- `gimple_codegen.py:30766` and `:30797` (the two generator-method
+  compile passes, "Milestone C step 3" and its yield-from second pass):
+  `for _sd in stmts: if not isinstance(_sd, StructDef): continue` — same
+  flat top-level-only iteration.
+- `_walk_ast` (`gimple_codegen.py:2091`), the one helper in this file
+  that *does* recurse into arbitrary nesting depth (`if`/`while`/`try`/
+  `with`/nested-`def` bodies), is used throughout this file only to hunt
+  for specific node kinds inside an already-known function's body
+  (`yield`, `await`, etc.) — never to discover additional `StructDef`s
+  to feed into the struct-registration or generator-method-compile
+  loops.
+
+This confirms with certainty: `BarFormatter`, defined locally inside
+`test_override_parse`'s body (`Lib/test/test_string/test_string.py`
+~line 33-40), is never added to `stmts`'s top-level `StructDef` set at
+all, so its `parse` generator method is never even visited by either
+generator-method compile pass — not considered, not refused, hence no
+per-function debug note. The whole-module fallback still fires because
+a separate, correctly-thorough deep-scan (unrelated to struct
+registration) finds the unhandled `yield` reachable somewhere in the
+module regardless.
+
+Confirmed genuinely structural, not attempted as a fix: `all_struct_defs`
+and the two generator-method loops are load-bearing, module-wide
+assumptions (struct field-layout emission, forward declarations, generic
+elaboration, etc. all key off this same top-level-only `stmts` scan) —
+teaching this codegen to discover and compile function-body-local
+classes at all is a real, feature-sized change to the struct-
+registration story generally, not scoped to generators specifically.
+Out of scope for a narrow-bug pass.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild (both the full

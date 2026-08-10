@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_finalization.py
 
+## Status (re-verified 2026-08-09)
+
+Re-verified against current master (fast-forwarded to `e5daa1d`, no
+intervening commits touch generator classmethod/`cls` handling) via a
+real `MOJO_DEBUG=1 python3 mojo.py build` run — reproduces identically
+to 2026-08-07: every inherited `test` classmethod generator method is
+refused with the exact same message (`"a @classmethod generator that
+references `cls` in its body is not supported (no class-level attribute/
+method access exists yet for compiled generators)"`), and the module
+still hits the same whole-module `"cannot compile module: function(s)
+test ..."` fallback. Confirmed structural, unchanged, no action taken.
+
 ## Status (updated 2026-08-07)
 
 **Classification bug FIXED, this file STILL FAILS to compile (expected
