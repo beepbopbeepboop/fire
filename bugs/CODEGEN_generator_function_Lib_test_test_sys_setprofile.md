@@ -1,6 +1,68 @@
 # CODEGEN_generator_function: Lib/test/test_sys_setprofile.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (98e5aa3) with a real rebuild (real
+gcc-mp-15/g++-mp-15 via `mojo.py build`). Unchanged: still exactly 1
+error in the whole transitive closure, still this file's own, still NOT
+a generator-codegen-cluster issue (all 3 of this file's own `yield i`
+generator sites remain refusal-free).
+```
+/Users/mrs/net/Python-3.14.6/Lib/test/test_sys_setprofile.py:415:31: error: assignment to 'MojoList *' from 'int64_t' {aka 'long long int'} makes pointer from integer without a cast [-Wint-conversion]
+```
+
+Traced further than the prior pass (root-caused, not just spotted):
+source is `protect_ident = ident(protect)` (line 415), where `ident`
+(line 403) returns a 2-tuple `(int, str)` — correctly inferred as
+`MojoList *` everywhere else (`ident_0c85c9`'s C signature is genuinely
+`MojoList * ident_0c85c9 (int64_t);`, and the `.ci`'s struct-field
+declaration is genuinely `MojoList * protect_ident;`). The generated
+call site is:
+```c
+_t2 = ident_0c85c9 (_t3);        /* correctly MojoList * */
+_t4 = (void *)_t2;
+_t5 = (int64_t)_t4;              /* boxed down to int64_t here */
+_root_globals.protect_ident = _t5;   /* stored into a MojoList * field -> GIMPLE error */
+```
+The box-then-store shape (`(void *)` then `(int64_t)`) is exactly
+`_safe_coerce_emit`'s `s.endswith(' *') and d in ('int','int64_t')`
+branch (gimple_codegen.py ~line 6422) — meaning at the point
+`_gen_stmt_AssignStmt`'s toplevel-global branch (~line 18024-18030)
+calls it, `gtype = self._global_c_decl_types.get('protect_ident', ...)`
+resolved to `int64_t`, NOT the `MojoList *` the struct field is actually
+declared as. Two independent global-type-inference passes exist for
+this exact RHS shape (`_gscan_declare_global`, ~line 33221, and the
+separate "Phase 1.7" `_phase17_infer_global_type`/`_phase17_value_type`,
+~line 31760-31810) — both correctly return `MojoList *` for a
+`CallExpr` whose callee's `func_return_types` entry ends in `' *'`, but
+ONLY IF `self.func_return_types.get('ident')` is already populated with
+`MojoList *` at the time each pass runs. Since the struct field itself
+ends up correctly declared, at least the pass that emits `global_decls`
+sees the right type; the disagreement must be a pass-ordering artifact
+between whichever populates `_global_c_decl_types` (read at use-time by
+the toplevel body-gen pass) and whichever runs Phase 1.7 (which writes
+only `_global_var_types`, not `_global_c_decl_types` — so if Phase 1.7
+runs AFTER `_gscan_declare_global` with a stale/empty `func_return_types
+['ident']` read, `_global_var_types['protect_ident']` could get
+silently downgraded to `int64_t` while `_global_c_decl_types` stays
+correct, or vice versa) — not fully pinned down to the exact statement
+that clobbers it without instrumenting the actual pass order, which
+would require non-trivial print-tracing across gen_module's multi-pass
+pipeline.
+
+**Classification: real bug, confirmed and root-caused further than
+before, but genuinely NOT the generator-codegen path** (`_gen_stmt_
+AssignStmt`'s ordinary toplevel-global-store branch, `_safe_coerce_emit`,
+and two independently-maintained global-type-inference pre-scans —
+none of it coroutine/`.cpp`-path code). Also not "narrow" in the safe
+sense: a confident fix needs to determine and fix an actual pass-
+ordering disagreement between 2+ separately-maintained whole-transitive-
+closure type-inference scans, which is exactly the kind of shared-
+machinery change with broad regression risk CLAUDE.md flags. Not
+attempted here — consistent with the prior pass's identical judgment
+call to defer this to "a dedicated non-generator pass."
+
+## Status (updated 2026-08-07, superseded above)
 
 Re-verified against current master with a real rebuild. The `:50:23:
 error: expected identifier before '__func__'` error is GONE (fixed

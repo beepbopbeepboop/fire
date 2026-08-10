@@ -1,6 +1,54 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (98e5aa3) with a real rebuild (real
+gcc-mp-15/g++-mp-15 via `mojo.py build`, top-level target). **Still NOT
+diagnosable as a generator-codegen-cluster issue** — same conclusion as
+the 2026-08-06/07 passes, confirmed unchanged. `tokenize.py`'s own
+`any`/`perror` name collisions (this codegen's builtin `any()` and libc
+`perror` handling) still block compilation well before the generator-
+eligibility pass is ever reached for `tokenize()`'s own `yield from
+_generate_tokens_from_c_tokenizer(...)`:
+```
+/Users/mrs/net/Python-3.14.6/Lib/tokenize.py:63:8: error: conflicting types for 'any'; have 'char *(MojoList *)'
+/Users/mrs/net/Python-3.14.6/Lib/tokenize.py:3265:31: error: conflicting types for 'perror'; have 'int64_t()' {aka 'long long int()'}
+/Users/mrs/net/Python-3.14.6/Lib/tokenize.py:124:9: error: invalid use of void expression
+```
+One additional, previously-unseen error in this file itself (line
+numbers shifted slightly vs. the 2026-08-06 pass due to unrelated
+upstream changes, but the `any`/`perror` collisions are the same named
+symbols as before):
+```
+/Users/mrs/net/Python-3.14.6/Lib/tokenize.py:23:28: error: assignment to 'char *' from 'int64_t' {aka 'long long int'} makes pointer from integer without a cast [-Wint-conversion]
+```
+— `__author__ = 'Ka-Ping Yee <ping@lfw.org>'`, a plain top-level string
+literal assignment to a dunder name; not investigated further (ordinary
+codegen, unrelated to generators, and this file's build is already
+blocked by the other 2 errors regardless).
+
+The overall build (500 errors total across the whole transitive closure)
+is now completely dominated by unrelated cascading failures in
+transitively-imported stdlib files reached from `tokenize.py`'s own
+`import re`/`from codecs import lookup, BOM_UTF8` etc. chain — chiefly
+`Lib/codecs.py` (346 errors alone), plus `Lib/argparse.py` (40),
+`Lib/typing.py` (20), `Lib/inspect.py` (12), `Lib/enum.py` (12),
+`Lib/posixpath.py` (9), `Lib/os.py` (8), `Lib/contextlib.py` (7),
+`Lib/gettext.py` (5), `Lib/functools.py` (5) — none of which implicate
+`tokenize.py`'s own generators or code.
+
+**Classification unchanged: NOT actually diagnosable as a generator-
+codegen-cluster issue from the current build output.** The `any`/
+`perror` builtin/libc name-collision fix remains out of scope for this
+doc (a separate, already-known, ordinary free-function-naming gap); not
+attempted here. Whether `tokenize()`'s own `yield from
+_generate_tokens_from_c_tokenizer(...)` refusal (previously observed
+only when reached transitively via `enum.py`, cross-referenced in
+`bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`,
+now FIXED per that doc) still reproduces once the name-collision
+blockers are fixed remains unconfirmed either way.
+
+## Status (updated 2026-08-07, superseded above)
 
 `bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`
 (cross-referenced below) is now FIXED. Not independently re-verifiable
