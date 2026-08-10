@@ -7205,6 +7205,7 @@ class GimpleGen:
                 if mod == 're' and meth == 'match':  return 'int'
                 if mod == 're' and meth == 'search': return 'int'
                 if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
+                if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
                 if mod == 'sys': return 'int'
                 # dict.keys()/.values()/.items(): _lower_dict_method (below)
                 # lowers all three to a real `MojoList *` (mojo_dict_keys/
@@ -11405,6 +11406,30 @@ class GimpleGen:
                 t = self._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
                 return 'char *', t
 
+            # sysconfig.get_config_var(name) — real Python signature returns
+            # `str | None` (the build-config value for `name`, e.g.
+            # "BUILD_GNU_TYPE"/"BUILD_DIR"), never int. Not previously
+            # modeled anywhere in this codegen at all (no _KNOWN_SIGS/
+            # module-dispatch entry) — the whole `module_name == 'sysconfig'`
+            # shape simply fell through every case in this if/elif chain to
+            # the generic unresolved-module-call default (int64_t), so a
+            # value that's genuinely a pointer at runtime got typed as a
+            # scalar. That's silently wrong on its own, and a hard
+            # `-fgimple` "invalid operands to binary /" error the moment the
+            # result feeds a pathlib `/` join (real repro: Tools/wasm/wasi/
+            # __main__.py's module-level `BUILD_DIR = CROSS_BUILD_DIR /
+            # sysconfig.get_config_var("BUILD_GNU_TYPE")`). This codegen has
+            # no real sysconfig data (that's a whole separate, much bigger
+            # "model libpython's build config" project) — stub to an empty
+            # string via the same `_stub_result` convention every other
+            # not-really-implemented-but-correctly-typed call in this file
+            # uses, rather than pretending to implement it.
+            if module_name == 'sysconfig' and method_name == 'get_config_var':
+                for _a in node.args:
+                    self.lower_expr(_a)
+                return self._stub_result('char *', self._intern_string(''),
+                                          'sysconfig.get_config_var() stubbed')
+
             if (module_name == 'gimple_codegen' and method_name in (
                     'compile_to_gimple', 'compile_to_gimple_cached')):
                 # gimple_codegen.compile_to_gimple(src, do_imports=False, filename="") → returns char*
@@ -14982,16 +15007,38 @@ class GimpleGen:
             body=syn_body,
         )
 
-        # Infer param types from captures + existing var_types context
+        # Infer param types from captures + existing var_types context.
+        # `node.params` elements are (pname, default_value_AST_or_None) —
+        # NOT (pname, type_ann) — so the `pname` branch below only ever
+        # fires for a default-less param; a defaulted param's second
+        # element is an expression node (never `None`), so it always
+        # skipped this loop entirely. That silently missed the standard
+        # tkinter-callback idiom `lambda e, self=self: ...` (bind an
+        # outer-scope value into the lambda without a real closure) —
+        # including the common `lambda e, w=window: ...` shape where the
+        # default's identifier differs from the param name — so a
+        # captured struct-pointer param like `self` never got its real
+        # ctype recorded here and fell back to a generic `int64_t` default
+        # a few lines down in `_gen_lifted_closure`, while the forward
+        # declaration built from THIS list (a few lines below) kept
+        # whatever `pname` itself resolved to. Two lambdas differing only
+        # in whether their default-bound param happened to coincide with
+        # `pname` could each end up with a mismatched decl-vs-definition
+        # ctype for the same lifted name, a "conflicting types" hard
+        # error (real repro: Tools/unittestgui/unittestgui.py's
+        # `errorListbox.bind("<Double-1>", lambda e, self=self: self.
+        # showSelectedError())`).
         captures = []
-        for pname, ptype in node.params:
-            if ptype is None and pname in self.var_types:
+        for pname, default in node.params:
+            if isinstance(default, IdentExpr) and default.name in self.var_types:
+                captures.append((pname, self.var_types[default.name]))
+            elif default is None and pname in self.var_types:
                 captures.append((pname, self.var_types[pname]))
 
         ci = ClosureInfo(
             lifted_name=lifted_name,
             env_struct='',
-            captures=[],
+            captures=captures,
             inner_def=syn_def,
         )
         # Register return type and param types now so call sites resolve correctly
@@ -15691,6 +15738,33 @@ class GimpleGen:
             scaled = self._new_val('double', f'{xd} * {p}')
             r = self._new_val('double', f'round ({scaled})')
             return 'double', self._new_val('double', f'{r} / {p}')
+
+        # int(x) — direct cast for already-numeric types. Only a STRING
+        # argument (`int("42")`) should route through the mojo_make_int
+        # runtime helper (parses digits, _KNOWN_SIGS declares it as
+        # `int64_t mojo_make_int(char *)`); a numeric argument
+        # (`int(self.fraction * float(totalWidth))`, `int(True)`, an
+        # already-int64_t value) previously fell through to that same
+        # generic BUILTIN_VALUE_MAP['int'] = 'mojo_make_int' call
+        # unconditionally, and generic arg coercion then blindly cast the
+        # numeric value to the callee's declared `char *` param type
+        # (`_t8 = (char *)_t6;` reinterpreting a double's bit pattern as a
+        # pointer) instead of converting it — a `-fgimple` "invalid types
+        # in conversion to integer" hard error at the following
+        # `mojo_make_int(_t8)` call (real repro: Tools/unittestgui/
+        # unittestgui.py's `ProgressBar.paint`: `width = int(self.fraction
+        # * float(totalWidth))`). C's double->int64_t cast truncates
+        # toward zero, matching Python's `int(float)` semantics, so a
+        # straight cast is correct here — mirrors the analogous `float(x)`
+        # direct-cast special case immediately below.
+        if fname_raw == 'int' and len(arg_pairs) == 1:
+            at, av = arg_pairs[0]
+            if at == 'double':
+                return 'int64_t', self._new_val('int64_t', f'(int64_t){av}')
+            if at == 'int64_t':
+                return 'int64_t', av
+            if at in ('int', '_Bool'):
+                return 'int64_t', self._new_val('int64_t', f'(int64_t){av}')
 
         # float(x) — direct cast for numeric types
         if fname_raw == 'float' and arg_pairs:
@@ -21399,8 +21473,36 @@ class GimpleGen:
         node = ci.inner_def
         # Infer parameter types from usage before seeding var_types
         inferred_params = self._infer_param_types(node)
+        # A lambda's own default-value params (`lambda e, self=self: ...`,
+        # the standard tkinter-callback idiom for binding an outer-scope
+        # value without relying on closures) are lifted as ordinary formal
+        # params of a *synthetic* FunctionDef with no type annotations
+        # (_lower_LambdaExpr strips defaults before calling here) — so for
+        # a lambda specifically (env_struct=='': _lower_LambdaExpr never
+        # sets one) `ci.captures` holds the REAL ctype _lower_LambdaExpr
+        # already resolved for each such param from the ENCLOSING
+        # function's live var_types (e.g. `self` -> `TkTestRunner *`),
+        # which is far more reliable than usage-based inference on the
+        # synthetic, out-of-context body below. Prefer it over
+        # `inferred_params`/`_resolve_type(None)` so the forward
+        # declaration _lower_LambdaExpr emits (built from that SAME
+        # ci.captures-sourced param_ctypes list) matches this function's
+        # real definition -- previously it didn't (ci.captures was
+        # unconditionally passed as `[]`, discarding the correctly-typed
+        # list _lower_LambdaExpr had just computed), a forward-decl-vs-
+        # definition ctype mismatch ("conflicting types") once two such
+        # lambdas existed in the same translation unit (real repro: Tools/
+        # unittestgui/unittestgui.py's `errorListbox.bind("<Double-1>",
+        # lambda e, self=self: self.showSelectedError())`). Scoped to
+        # `not ci.env_struct` so a real (env-struct-based) nested closure's
+        # OWN declared params, which can legitimately share a name with an
+        # outer captured variable via shadowing, are unaffected -- those
+        # still resolve their param type the normal way below.
+        _lambda_capture_types = dict(ci.captures) if not ci.env_struct else {}
         for pname, ptype in node.params:
-            if ptype is None and pname in inferred_params:
+            if pname in _lambda_capture_types:
+                self.var_types[pname] = _lambda_capture_types[pname]
+            elif ptype is None and pname in inferred_params:
                 self.var_types[pname] = inferred_params[pname]
             else:
                 self.var_types[pname] = self._resolve_type(ptype)
@@ -21456,6 +21558,16 @@ class GimpleGen:
             if ci.is_re_sub_callback and i == 0:
                 # First (match) param is always char * for re.sub callbacks
                 ctype = 'char *'
+            elif pname in _lambda_capture_types:
+                # Same ci.captures-sourced type used to seed var_types
+                # above (and to build the forward declaration in
+                # _lower_LambdaExpr) — this second, independent ctype
+                # computation for the REAL definition's param_strs must
+                # agree with it too, or the forward decl and definition
+                # mismatch exactly like the bug this whole capture-priority
+                # mechanism exists to fix (see the comment above the
+                # `_lambda_capture_types` assignment).
+                ctype = _lambda_capture_types[pname]
             elif ptype is None and pname in inferred_params:
                 ctype = inferred_params[pname]
             else:
