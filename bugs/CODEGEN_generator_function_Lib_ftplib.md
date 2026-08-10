@@ -1,13 +1,9 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09, re-verified — reproduces identically)
 
-**STILL FAILING**, re-diagnosed again against current master — the
-2026-08-06 note's claim that `mlsd` "now appears to compile cleanly
-through the coroutine path" was WRONG (most likely an artifact of that
-prior check looking at the wrong error stream/module during a
-transitive-closure build, since the `MOJO_DEBUG=1` refusal line is
-unambiguous once you isolate `ftplib.py`'s own build). Fresh repro:
+**STILL FAILING**, re-confirmed against current master (fast-forwarded
+to `dd7c7c6`). Identical repro to the 2026-08-07 entry below:
 
 ```
 $ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py
@@ -15,22 +11,27 @@ $ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py
 Error building: cannot compile module: function(s) mlsd (generator function(s), contain a `yield`/`yield from`) — ... falling back to interpreting this module from source instead
 ```
 
-**Classification: `bugs/hard/CODEGEN_generator_struct_typed_param_
-refused.md`'s family** (the general "coroutine codegen's scalar/
-container-only allow-list" scope boundary — that doc's title says
-"struct-typed PARAMETER" but the same family also covers the yielded
-VALUE's type, as documented in that doc and in
-`CODEGEN_generator_function_Lib_test__code_definitions.md`'s note about
-a third instance). `FTP.mlsd`'s body does `yield (name, entry)` — a
-2-tuple `(str, dict)` — and `_gen_cpp_generator_unit`'s value-type
-check only accepts a single scalar type (`int64_t`/`double`/`_Bool`)
-across every `yield` in the function, so a tuple-yielding generator is
-refused outright. Because this is ftplib.py's only generator and it's
-module-level-reachable (an `FTP` instance method), the refusal
-escalates to a fatal whole-module `RuntimeError` for the CLI's `mojo.py
-build` path (same "message claims graceful fallback, doesn't actually
-take it for the root file" gap documented in the struct-typed-param
-doc's Symptom section).
+**Classification: tuple-valued `yield`** — the well-known,
+already-catalogued C++20-coroutine-promise scope boundary (the promise
+only carries a single scalar `int64_t`/`double`/`_Bool`; there is no
+representation for a tuple/struct value crossing a suspend point), same
+family as `bugs/CODEGEN_generator_function_Lib_dis.md`'s
+`_unpack_opargs`/`findlinestarts`/`_find_imports` case. `FTP.mlsd`'s
+body does `yield (name, entry)` — a 2-tuple `(str, dict)` — and
+`_gen_cpp_generator_unit`'s value-type check only accepts a single
+scalar type across every `yield` in the function, so a tuple-yielding
+generator is refused outright. Because this is ftplib.py's only
+generator and it's module-level-reachable (an `FTP` instance method),
+the refusal escalates to a fatal whole-module `RuntimeError` for the
+CLI's `mojo.py build` path (the error text's claimed graceful fallback
+isn't actually taken for the root file being built).
+
+(Note: the sibling struct-typed-*parameter* refusal this doc's older
+entries below cross-reference — `bugs/hard/CODEGEN_generator_struct_
+typed_param_refused.md`, task #147 — is now fixed, commit `5d22b29`,
+and that doc has since been removed per project convention. That fix
+is unrelated to `mlsd`'s failure here, which is about the yielded
+VALUE's type, not a parameter's.)
 
 The previously-reported `test.__doc__` "invalid use of void expression"
 error (line 926) was real at the time but is no longer what blocks this
