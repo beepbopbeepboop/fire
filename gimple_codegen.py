@@ -6973,8 +6973,29 @@ class GimpleGen:
             # globals struct, mirroring the AssignStmt write path's routing
             # (otherwise AugAssign `x += 1` on a global emitted a LOCAL
             # write, leaving the global unchanged: "counter undeclared").
-            global_module = getattr(self, '_global_to_module', {}).get(name, self._current_module_ctx or "root")
-            safe_module = _c_field_name(global_module) if global_module else "root"
+            #
+            # Always target THIS module's own struct (self._current_module_
+            # ctx), never `_global_to_module.get(name)` — that map is a
+            # SHARED, whole-transitive-tree, name-keyed "first module to
+            # claim this bare name wins" map (see gen_module's Phase 1.7 /
+            # "Module-level globals" passes and bugs/hard/CODEGEN_module_
+            # globals_cross_contamination_via_imported_stmts.md), so when
+            # two genuinely DIFFERENT modules each declare their own
+            # same-named top-level global (e.g. every file's own `HERE =
+            # ...`), it can point at whichever module happened to be
+            # scanned FIRST — not necessarily this one. But a `global name`
+            # statement (or a bare top-level statement) unambiguously means
+            # "THIS function's/THIS statement's own enclosing module's
+            # global" under real Python scoping, regardless of what any
+            # OTHER module also happens to call itself — and Mechanism 1's
+            # fix (that same doc) already guarantees this module's own
+            # struct genuinely has a field for `name` whenever this branch
+            # fires, since its globals-struct scan is scoped to this
+            # module's own statements only. Mirrors _gen_stmt_AssignStmt's
+            # and _gen_stmt_MultiAssignStmt's own `_in_toplevel_gen`
+            # branches, which already use this exact same direct-current-
+            # module routing for the identical reason.
+            safe_module = _c_field_name(self._current_module_ctx or "root")
             return f"_{safe_module}_globals.{_c_field_name(name)}"
         return self._cname(name)
 
@@ -18004,10 +18025,19 @@ class GimpleGen:
             folded = self._try_const_fold_str(node.value)
             if folded is not None:
                 self._const_str_locals[(self.current_func_name, tname)] = folded
-            # Write to module struct when `global x` was declared in this function
+            # Write to module struct when `global x` was declared in this function.
+            # Always target THIS module's own struct (self._current_module_ctx),
+            # never `_global_to_module.get(tname)` — that map is a SHARED,
+            # whole-tree, "first module to claim this bare name wins" map, so
+            # it can misdirect the write to a DIFFERENT module that happens to
+            # declare its own same-named global (see the `_in_toplevel_gen`
+            # branch right below, already fixed this exact way, and
+            # _write_dest's identical fix — bugs/hard/CODEGEN_module_globals_
+            # cross_contamination_via_imported_stmts.md's write-side addendum).
+            # A `global tname` statement unambiguously means THIS function's
+            # own enclosing module's global under real Python scoping.
             if tname in self._func_declared_globals and tname in self._global_var_types:
-                global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
-                safe_module = _c_field_name(global_module) if global_module else "root"
+                safe_module = _c_field_name(self._current_module_ctx or "root")
                 field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
                 # The struct field's REAL declared C type can differ from the
                 # semantic _global_var_types entry (e.g. a MojoDict* global not
@@ -19006,10 +19036,12 @@ class GimpleGen:
                 # branches exactly (same field-ref construction, same
                 # _global_c_decl_types coercion, same dict/list/actual-type
                 # propagation), falling back to the ordinary local-variable
-                # path below only when neither applies.
+                # path below only when neither applies. Always targets THIS
+                # module's own struct directly (self._current_module_ctx),
+                # not `_global_to_module.get(tname)` — see
+                # _gen_stmt_AssignStmt's identical branch for why.
                 if tname in self._func_declared_globals and tname in self._global_var_types:
-                    global_module = getattr(self, '_global_to_module', {}).get(tname, self._current_module_ctx or "root")
-                    safe_module = _c_field_name(global_module) if global_module else "root"
+                    safe_module = _c_field_name(self._current_module_ctx or "root")
                     field_ref = f"_{safe_module}_globals.{_c_field_name(tname)}"
                     gtype = self._global_c_decl_types.get(tname, self._global_var_types[tname])
                     self._safe_coerce_emit(vtype, gtype, v, field_ref)
