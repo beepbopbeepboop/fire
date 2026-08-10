@@ -1,5 +1,34 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+## Re-verified 2026-08-09 (fresh pass, no code change)
+
+Confirmed all four fixes below are present and committed on `master`
+(`ret = sig[0] if sig else 'int64_t'` at gimple_codegen.py:20264,
+`ctype in ('int64_t', '_Bool')` at :5426, `fake_obj_type = f"{base_name}
+*"` derived-to-base cast at :11086, and the PascalCase-import
+`_lower_MemberExpr` guard at :8994-9001 — `git blame` shows these landed
+in the commits this doc already describes; nothing since has touched
+them). Re-ran `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/subprocess.py`: 0 occurrences of
+`non-trivial conversion in 'integer_cst'` (Mechanism 2/3's target,
+still fully gone) and only 2 residual `invalid conversion in gimple
+call` (both now `Lib/enum.py:918`/`:1918`-attributed, unrelated to the
+original `can_colorize`/`Signature`/`Parameter`/`unpack` cluster
+Mechanism 1 fixed — not a regression of this doc's territory). The
+still-not-fixed Mechanism 4 residual (`Parameter(...)` constructor-call
+shape) is still present (8 `expected expression before 'Parameter'`
+occurrences now vs. 7 previously — same unfixed shape, magnitude
+consistent with corpus drift from unrelated fixes elsewhere, not a
+regression). Total error count for the full `subprocess.py` build has
+moved (720 → 486) purely from OTHER, unrelated fixes landing in the
+intervening two days (execv/execve arg-type errors, `mojo_list_contains_str`
+pointer-type errors, argparse `_parse_known_args` errors — none in this
+doc's scope). No new work done; this doc's remaining "Not fixed" items
+(weakref.py line-attribution, argparse `**kwargs`, dynamic `%`-format,
+Mechanism 4's constructor-call gap) are unchanged and still genuinely
+structural/deferred for the reasons already documented below — left
+as-is per this session's "hard bugs" conservatism guidance.
+
 ## Status (Mechanism 4 added 2026-08-07, Track B session — partial fix; Mechanisms 1-3 fixed 2026-08-07, Track B cross-cutting COMPILE_FAIL sweep)
 
 Follow-up to `bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
