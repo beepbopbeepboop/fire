@@ -1,5 +1,58 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-09)
+
+Re-verified against current master (`42faf64`). Confirmed:
+`check_stderr_none` no longer appears in the "not eligible"/refused
+list at all in a full `MOJO_DEBUG=1 python3 mojo.py build` of the real
+file — the `sys.stderr = None` assignment-target fix described below
+still holds. The full-file build still fails overall, but now purely on
+OTHER, unrelated, non-generator errors transitively reached in
+`Lib/test/support/__init__.py`, `os_helper.py`, and `script_helper.py`
+(int64_t/pointer-cast mismatches, an undeclared `print_warning`, etc.) —
+none of those are generator-codegen issues and none are in this doc's
+scope; they never even reach the `.cpp` coroutine-compile stage since
+the plain `.ci` compile fails first.
+
+To see what `check_stderr_none` itself now compiles to, in isolation
+(a standalone 20-line repro of just this method, since the full-file
+build no longer surfaces it), inspecting the generated `_gen.cpp`
+confirms the doc's next paragraph is still accurate, with concrete
+evidence:
+```cpp
+static _mojogen_FaultHandlerTests_check_stderr_none_Task
+_mojogen_FaultHandlerTests_check_stderr_none_impl (FaultHandlerTests * self) {
+    int64_t stderr;
+    stderr = sys.stderr;              // sys.stderr READ: 'sys' is simply
+                                       // undeclared in this TU -> hard g++ error
+    ...
+    int64_t cm;                       // untyped `with ... as cm:` binding
+                                       // defaults to int64_t (known gap)
+    co_yield (int64_t)0;
+    FaultHandlerTests_assertEqual(self, mojo_str((void *)(cm.exception)), ...);
+                                       // -> invalid member access on int64_t
+```
+The `with self.assertRaises(RuntimeError) as cm:` call itself is elided
+to `(void)(0);` (the known "real side-effecting `with` inside a
+generator body" gap) rather than actually invoking `assertRaises` and
+populating `cm`, so `cm` is left as an uninitialized `int64_t` before
+the invalid `.exception` member access on it.
+
+All three remaining gaps are already-known, already-documented
+structural gaps from this task family (not narrow, not attempted here):
+- `sys.stderr` read — arbitrary outer-scope module-attribute resolution
+  inside a generator's separately-compiled translation unit (the
+  "genuinely structural" outer-scope-resolution gap).
+- untyped `with ... as cm:` binding defaulting to `int64_t`.
+- the `with self.assertRaises(...) as cm:` call being a real
+  side-effecting `with` inside a generator body.
+
+Also reconfirmed unchanged: `start_threads` (transitively reached via
+`test.support`) is still refused with the `print()` non-scalar-argument
+gap.
+
+No code change made for this bug.
+
 ## Status (updated 2026-08-07, `sys.stderr = None` case now fixed)
 
 This file's specific occurrence (`sys.stderr = None` in
