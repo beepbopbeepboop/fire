@@ -129,3 +129,44 @@ core yield/coroutine machinery itself works (per the already-completed
 across the generator codegen path, not a narrow fix, and deserves either
 its own dedicated hard-bug investigation or grouping with the existing
 #95-135 generator-function task cluster once one is picked up in depth.
+
+### Re-verified 2026-08-09 against master `d3d4c68` — reproduces identically, no regressions/fixes in this cluster since 2026-08-06
+
+Full rebuild (`python3 mojo.py build .../ctypes/macholib/dyld.py`)
+still stops at exactly the same `dyld_gen.cpp` compile stage, and every
+one of the five bullets above still reproduces line-for-line against
+the current generated `dyld_gen.cpp`:
+
+- `framework = framework_info(name);` — still `'framework_info' was not
+  declared in this scope'` (both in `dyld_override_search` and
+  `dyld_default_search`).
+- `for (auto path : dyld_framework_path_...(env))` /
+  `dyld_library_path_...(env)` / `_root_globals.DEFAULT_FRAMEWORK_
+  FALLBACK` / `_root_globals.DEFAULT_LIBRARY_FALLBACK` — still `'begin'/
+  'end' was not declared in this scope'` at every generator-body
+  `for`-loop over a `MojoList*`-returning call or a module-level list
+  global.
+- `os.path.basename(name)` — still `'os' was not declared in this
+  scope; did you mean 'cos'`, at all three call sites.
+- `name.startswith(...)` / `path.endswith(...)` — still `request for
+  member 'startswith'/'endswith' in ..., which is of non-class type
+  'int64_t'`, confirming untyped generator params (`name`, `path`,
+  `suffix`) still default to `int64_t` instead of their real inferred
+  `char *`/string type.
+- Every `co_yield <string expr>` involving one of those mistyped params
+  still fails with `invalid conversion from 'int64_t' to 'char*'` (or
+  the reverse, `'const char*' to 'int64_t'` for `mojo_cstr_slice`'s
+  start/stop args, which received a string where an offset int was
+  expected — a downstream consequence of the same param-typing gap).
+
+No part of this cluster overlaps with any fix landed since the
+2026-08-06 update (checked `git log --oneline -85`: the intervening
+generator-codegen fixes were the module-qualified free-function-symbol
+collision fix (task #146, `bugs/hard/CODEGEN_generator_function_
+symbol_not_module_qualified.md`) and the `len()`/`ord()` scalar-type-
+estimator fix — neither touches generator-body param type inference,
+sibling ordinary-function-call declarations, module-attribute-access
+threading, or `MojoList*` range-iteration inside a coroutine body).
+Confirmed still structural; not attempted here for the same reason as
+before — this is five separate maturity gaps in one shared, large
+codegen path (generator/coroutine lowering), not a single narrow spot.
