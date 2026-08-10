@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (re-verified 2026-08-09, unchanged)
+
+Re-ran `python3 mojo.py build .../Lib/test/libregrtest/save_env.py` against
+current master (140 commits past the 2026-08-07 fix below, none of which
+touch tuple-yield handling). Reproduces identically: clean, honest refusal —
+
+```
+Error building: cannot compile module: function(s) resource_info
+(generator function(s), contain a `yield`/`yield from`) — ... falling back
+to interpreting this module from source instead
+```
+
+No new regression, no new fix landed for actual tuple-value ABI support.
+Still the same structural gap (tuple-valued `yield` has no real codegen
+support — see the family-wide note in this cluster's task doc). Nothing
+further to do here.
+
 ## Status (updated 2026-08-07 — malformed-C++ tuple-yield now an honest refusal, not a fix for the file itself)
 
 Re-verified the 2026-08-06 root-cause trace below by dumping the actual
