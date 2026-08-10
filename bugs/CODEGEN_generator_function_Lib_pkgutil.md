@@ -1,5 +1,50 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-09, re-verified — TWO MORE generators now also refused, both tuple-valued yield)
+
+Re-verified against current master (`c79a013`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pkgutil.py`.
+`walk_packages`'s refusal reason is unchanged from the 2026-08-07 note
+below (still exactly the `onerror(info.name)` "argument must be a
+scalar ... expression" message) — that analysis stands.
+
+**New since 2026-08-07: two more of this file's own generators now
+also refuse**, both for the well-known tuple-valued-yield structural
+gap (`_infer_generator_yield_ctype`'s `TupleExpr` handling,
+`gimple_codegen.py:2699-2724`, which deliberately refuses rather than
+emit broken C++ — see e.g. `CODEGEN_generator_function_Lib_ipaddress.md`
+for the same pattern elsewhere in this cluster):
+
+```
+[gimple_codegen] generator '_iter_file_finder_modules' not eligible for
+  C++ coroutine path, falling back to honest refusal:
+  _iter_file_finder_modules: every `yield` must carry a value, and all
+  values must agree on one scalar type (int64_t/double/_Bool)
+[gimple_codegen] generator 'iter_zipimport_modules' not eligible for
+  C++ coroutine path, falling back to honest refusal:
+  iter_zipimport_modules: every `yield` must carry a value, and all
+  values must agree on one scalar type (int64_t/double/_Bool)
+```
+
+Confirmed by reading the source: `_iter_file_finder_modules`
+(pkgutil.py:128) does `yield prefix + modname, ispkg` (line 166) — a
+real 2-element tuple yield (`str, bool`). `iter_zipimport_modules`
+(pkgutil.py:176) does `yield prefix + fn[0], True` (line 191) and
+`yield prefix + modname, False` (line 202) — same 2-element
+tuple-yield shape at two call sites in the same generator. Both are
+new, independent instances of the tuple-yield structural gap, distinct
+from `walk_packages`'s captured-callback-argument gap analyzed below.
+The overall `mojo.py build` failure now reports all three generator
+names together (`_iter_file_finder_modules, iter_zipimport_modules,
+walk_packages`) since `gen_module` collects every refused generator
+in the module before raising once.
+
+Net effect: even if `walk_packages`'s narrower callback-argument gap
+were fixed, this file would still fail to build — two more of its own
+top-level generators are independently blocked by the tuple-yield
+structural gap. Not attempted here (matches this task's "structural,
+do not force a fix" guidance). Doc kept, not deleted.
+
 ## Status (updated 2026-08-07, investigated further, correctly NOT fixed)
 
 Re-verified against current master: `walk_packages`'s refusal reason
