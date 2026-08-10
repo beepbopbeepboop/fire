@@ -1,5 +1,55 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
+
+Re-verified against current master (`5ba7d4b`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ipaddress.py`.
+The build now fails immediately, BEFORE reaching any GCC-stage error, on
+a hard Python-level `RuntimeError` from `gen_module`
+(`gimple_codegen.py:30968`):
+
+```
+Error building: cannot compile module: function(s) _find_address_range
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
+```
+
+Root cause, confirmed by reading the source: `_find_address_range`
+(ipaddress.py:164) does `yield first, last` (lines 178 and 181) — a real
+**tuple-valued yield**. This is the well-known, already-tracked
+structural gap for this generator-codegen family (coroutine promises
+only support a single scalar `int64_t`/`double`/`_Bool`/`char *`, no
+tuple representation) — see `_infer_generator_yield_ctype`'s explicit
+`TupleExpr` handling at `gimple_codegen.py:2699-2724`, which
+deliberately returns `None` (refuse) rather than let a tuple yield sail
+through to broken C++ emission, citing this exact family of real-world
+cases (e.g. `Lib/test/libregrtest/save_env.py`'s `resource_info`).
+
+This is a genuine change from the 2026-08-07 status below: back then,
+`ipaddress.py`'s 14 generator sites reportedly compiled through the
+coroutine path with no refusal at all, and the file failed later at
+GCC-stage on unrelated `@property`/`format`/stray-backslash errors.
+Since then, another session's work (visible in the current
+`gimple_codegen.py`, citing `save_env.py`'s bug doc) tightened the
+tuple-yield eligibility check to honestly refuse rather than silently
+mis-emit, so `_find_address_range` (which was apparently NOT one of the
+14 sites previously scanned/reported, or was previously eligible under
+weaker checking) now correctly aborts the whole-module compile before
+any of the other, unrelated GCC-stage errors are even reached. Grepping
+the file confirms exactly one tuple-yield site — `_find_address_range`
+(lines 178, 181); the file's other 12 `yield` sites (lines 249, 300,
+690, 696, 846, 849, 857, 859, 951, 975, 2351) are all single-value.
+
+**Classification: matches the tracked "tuple-valued yield" structural
+generator-codegen gap** (no coroutine-promise representation for
+tuples) — out of scope for a narrow fix per this task's guidance. Not
+attempted here. The previously-noted unrelated GCC-stage errors
+(`@property`-as-bound-method, `format` implicit-declaration, stray
+backslash) are no longer reachable/relevant until tuple-yield support
+(or a source-level workaround) unblocks the whole module, so they are
+left undisturbed below for reference but are moot for now.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild. `MOJO_DEBUG=1`

@@ -1,5 +1,46 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
+
+Re-verified against current master (`5ba7d4b`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
+The build now fails immediately, before reaching any GCC-stage error, on
+a hard Python-level `RuntimeError` from `gen_module`
+(`gimple_codegen.py:30968`):
+
+```
+Error building: cannot compile module: function(s) iteritems
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
+```
+
+Root cause, confirmed by reading the source: `Mailbox.iteritems`
+(mailbox.py:122) does `yield (key, value)` at line 129 — a real
+**tuple-valued yield** (parenthesized 2-tuple). This is the same
+well-known, already-tracked structural gap as `ipaddress.py`'s
+`_find_address_range` (see that bug doc's 2026-08-09 update for the
+mechanism: coroutine promises only support a single scalar, and
+`_infer_generator_yield_ctype`'s `TupleExpr` branch at
+`gimple_codegen.py:2699-2724` now honestly refuses rather than
+mis-emitting a broken `co_yield {a, b, c};`). This supersedes the
+2026-08-06/07 statuses below — at that time `iteritems` apparently
+compiled through the coroutine path without refusal (or wasn't yet
+subject to this tightened check); a later session's work (visible in
+current `gimple_codegen.py`) made the tuple-yield eligibility check
+stricter, so `iteritems` now correctly aborts the whole-module compile
+before any of the previously-reported `mojo_open_file`-arity/pointer-
+conversion GCC-stage errors are even reached. mailbox.py's other 4
+`yield`/`yield from` sites (lines 113, 456, 680, 2035) are all
+single-value/delegating, not tuple-valued.
+
+**Classification: matches the tracked "tuple-valued yield" structural
+generator-codegen gap** — out of scope for a narrow fix per this task's
+guidance. Not attempted here. The previously-noted `mojo_open_file`
+arity mismatch and other non-generator GCC-stage errors are no longer
+reachable until tuple-yield support (or a source-level workaround)
+unblocks the whole module; left undisturbed below for reference.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild. The
