@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (re-verified 2026-08-09, unchanged from 2026-08-07)
+
+Fresh from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/weakref.py` on current master reproduces the exact same immediate,
+pre-C-emission refusal as 2026-08-07, verbatim:
+
+```
+Error building: cannot compile module: function(s) items, items
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ... falling
+back to interpreting this module from source instead
+```
+
+Root cause confirmed unchanged: `WeakValueDictionary.items`/
+`WeakKeyDictionary.items` both `yield key, value` — a 2-tuple.
+`gimple_codegen.py`'s `_infer_generator_yield_ctype` (~line 2699-2724)
+correctly and deliberately refuses any `TupleExpr`-valued `yield`: the
+coroutine-body emitter's C++20 promise type only supports a single
+scalar (`int64_t`/`double`/`_Bool`/`char *`) value crossing the
+suspend/resume boundary, and there is no tuple/struct-valued promise
+codegen at all. This is the SAME "tuple-valued yield" gap that is by
+far the single most common finding across this entire
+`CODEGEN_generator_function_Lib_*` doc family (dozens of other files
+hit the identical `TupleExpr` refusal) — genuinely structural/
+feature-sized (would require a real multi-field/boxed promise-type
+codegen, not a narrow stub fix), not attempted here per this session's
+explicit guidance to leave known structural gaps alone rather than
+force a fix. No code change made for this file.
+
 ## Status (re-verified 2026-08-07, Track B continuation session — supersedes the "2140 -> 700 errors" investigation below)
 
 A fresh, from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/

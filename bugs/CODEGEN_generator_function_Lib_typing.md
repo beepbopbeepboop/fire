@@ -1,5 +1,40 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (re-verified 2026-08-09)
+
+Fresh from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/typing.py` on current master. Classification unchanged: **NOT a
+generator-codegen-cluster failure** — typing.py's own 4 generator sites
+(lines 1533, 3129, 3132, 3135, all bare `yield <name>` inside
+`__iter__`-style methods) produce zero errors and no "not eligible"
+refusal.
+
+Two more previously-open patterns from this doc are now confirmed GONE:
+- The `module_toplev_struct_never_fully_defined` cluster (`struct
+  _tokenize_toplev`/`struct _inspect_toplev`, 9th occurrence as of
+  2026-08-06): 0 occurrences in the current build output.
+- The `stray '\' in program` textwrap.py tokenizer bug (7th occurrence
+  as of 2026-08-06): 0 occurrences in the current build output.
+
+The dominant pattern in the current build (412 of 650 total `error:`
+lines) is now `Lib/contextlib.py` — a large cascade, not investigated
+here, consistent with the already-tracked, separate
+`bugs/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_
+something_not_a_structure_or_union.md` non-scalar-`__aenter__`-return
+structural gap. typing.py's own remaining errors (20 lines, all
+non-generator) are: `non-register as LHS of unary operation` (171),
+`redefinition of 'traceback__Sentinel___repr__'` (424), `assignment to
+'_Sentinel *' from 'int64_t'` (430), `passing argument 1 of
+'_is_dunder_79c856' makes integer from pointer without a cast` (1300),
+`'_CallableGenericAlias' has no member named '__parameters__'`/
+`'__module__'` (1348/1353), `conflicting types for
+'_collections_abc__CallableGenericAlias___getitem__'` (1371),
+`redefinition of '_collections_abc__CallableGenericAlias___repr__'`/
+`___reduce__` (1536/1624), and `'_TypedDictMeta' has no member named
+'__orig_bases__'` (3357, unchanged from 2026-08-07). None of these
+implicate typing.py's own generators — still out of scope for this
+generator-codegen cluster; no code change made here.
+
 ## Status (updated 2026-08-07)
 
 Two of this doc's previously-open patterns are now FIXED — see

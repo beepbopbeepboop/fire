@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/turtle.py
 
+## Status (re-verified 2026-08-09, unchanged from 2026-08-07)
+
+Fresh from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/turtle.py` on current master. Classification unchanged: **NOT a
+generator-codegen-cluster failure**. turtle.py's 3 bare-`yield` sites
+(lines 1312, 3442, 3586) still show zero signal of a problem — no
+"not eligible" refusal under `MOJO_DEBUG=1`, and none of the current
+build's `error:` lines land on those lines. The transitive build now
+pulls in `Lib/tkinter/simpledialog.py` (315 of the run's errors, an
+unrelated file/bug not investigated here) which pushes the raw total
+error count much higher than the ~21 seen 2026-08-07, but turtle.py's
+own distinct error set is essentially the same 14 lines as before:
+`mojo_open_file` 2-arg (171, 4001), the `genericpath_isfile`/
+`ntpath_split`/`ntpath_join` module-qualified-symbol gap (213/218/219),
+`invalid conversion in return statement` (1618/2331/2372), `cannot
+convert to a pointer type` (189/3078), `invalid types in conversion to
+integer` (3314/3379), `non-trivial conversion`/`type mismatch in binary
+expression` (750), plus one new one: implicit declaration of `write`
+(4170, likely a builtin/method-dispatch gap unrelated to generators).
+None of this implicates turtle.py's own generators. Still out of scope
+for this generator-codegen cluster; no code change made here.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild. Still correctly
