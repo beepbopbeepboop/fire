@@ -15345,6 +15345,93 @@ class GimpleGen:
             return ('int', '0')
         return ('int', '0')
 
+    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict,
+                                      call_has_spread=False):
+        """Shared by `_lower_named_call` (value-consuming call sites) and
+        `_gen_stmt_ExprStmt` (bare, value-discarding statement call sites —
+        see that function's own duplicated general-call-building path for
+        why it needs this too, not just _lower_named_call).
+
+        `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
+        followed by more (keyword-only, per Python syntax) params, but NO
+        `**kwargs`. `_emit_call`'s own packing check only fires when the
+        `'...'` sentinel is the LAST entry of param_types; here it isn't
+        (the trailing params come after it), so that check silently never
+        fires — the call's extra positional args get coerced 1:1 against
+        the trailing params' concrete C types instead of packed, and the
+        trailing params themselves never receive a value at all. Real
+        instance: importlib/_bootstrap.py's `_verbose_message(message,
+        *args, verbosity=1)` called as `_verbose_message(fmt, a, b)`
+        (verbosity left at its default) — `"too many arguments"` / a
+        pointer-from-integer cast error at the call site. Python syntax
+        guarantees anything textually after `*args` in a `def` is
+        keyword-only, so it can NEVER be filled positionally by a call
+        site — every entry of `arg_pairs` at/after the vararg's own
+        position is unambiguously a vararg-pack candidate; the trailing
+        param(s) must come from an explicit keyword argument (already in
+        `kwarg_dict`, keyed by the call site's own real argument names) or
+        their own default (`_func_param_defaults`, keyed by declared name
+        — the trailing keyword-only slots are always exactly its LAST
+        `len(_trailing_ptypes)` entries, since a param before `*args` is
+        never keyword-only and so never appears in that tail).
+
+        `func_param_types[name]`'s sentinel gets overwritten with the
+        concrete real signature once the function's forward declaration
+        is finalized (see _emit_call's own "starts life ending in the
+        packing sentinel... gets overwritten... Every OTHER call site
+        compiled afterwards then sees the concrete signature and
+        silently skips packing" comment a few hundred lines up) — a call
+        site compiled AFTER that point (the overwhelmingly common case
+        for any function called more than once, or called from code
+        textually after its own definition) sees a signature with no
+        `'...'` at all, not even in the middle. `_mangled_signature_
+        ctypes` preserves the original sentinel form untouched, so it's
+        consulted FIRST here — `_emit_call`'s own existing fallback to it
+        only checks `mangled_sig[-1] == '...'`, which is exactly as blind
+        to a NON-final sentinel as the primary check it's guarding, so
+        this reimplements that preference for the non-final case too
+        rather than assuming `_emit_call`'s narrower version covers it.
+
+        Returns the (possibly repacked) `(arg_pairs, kwarg_dict)`.
+        """
+        if call_has_spread:
+            return arg_pairs, kwarg_dict
+        _vararg_ptypes = (self._vararg_trailing_param_types.get(fname)
+                          or self._vararg_trailing_param_types.get(fname_raw)
+                          or self._mangled_signature_ctypes.get(fname)
+                          or self._mangled_signature_ctypes.get(fname_raw)
+                          or self.func_param_types.get(fname)
+                          or self.func_param_types.get(fname_raw))
+        if not (_vararg_ptypes and '...' in _vararg_ptypes and _vararg_ptypes[-1] != '...'):
+            return arg_pairs, kwarg_dict
+        _sentinel_idx = _vararg_ptypes.index('...')
+        _n_fixed2 = _sentinel_idx
+        _trailing_ptypes = _vararg_ptypes[_sentinel_idx + 1:]
+        _trailing_dflts = (self._func_param_defaults.get(fname)
+                           or self._func_param_defaults.get(fname_raw) or [])
+        _trailing_names_defaults = (_trailing_dflts[-len(_trailing_ptypes):]
+                                    if _trailing_ptypes else [])
+        _fixed2 = arg_pairs[:_n_fixed2]
+        _vararg2 = arg_pairs[_n_fixed2:]
+        _lst2 = self._new_val('MojoList *', "mojo_list_new ()")
+        for _at2, _av2 in _vararg2:
+            _av2 = self._coerce_to_type(_at2, 'int64_t', _av2)
+            self._emit(f"  mojo_list_append_int ({_lst2}, {_av2});")
+        _trailing_pairs = []
+        for _i2, _tpt in enumerate(_trailing_ptypes):
+            _tname = (_trailing_names_defaults[_i2][0]
+                     if _i2 < len(_trailing_names_defaults) else None)
+            if _tname is not None and _tname in kwarg_dict:
+                _trailing_pairs.append(kwarg_dict.pop(_tname))
+            elif (_i2 < len(_trailing_names_defaults)
+                  and _trailing_names_defaults[_i2][1] is not None):
+                _trailing_pairs.append(
+                    self._default_expr_to_pair(_trailing_names_defaults[_i2][1]))
+            else:
+                _trailing_pairs.append((_tpt, '0'))
+        arg_pairs = _fixed2 + [('MojoList *', _lst2)] + _trailing_pairs
+        return arg_pairs, kwarg_dict
+
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         """Final dispatch for user-defined and C stdlib functions."""
         # C reserved function renaming
@@ -15513,78 +15600,12 @@ class GimpleGen:
             kwarg_dict = {}
 
         # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
-        # followed by more (keyword-only, per Python syntax) params, but NO
-        # `**kwargs`. `_emit_call`'s own packing check only fires when the
-        # `'...'` sentinel is the LAST entry of param_types; here it isn't
-        # (the trailing params come after it), so that check silently never
-        # fires — the call's extra positional args get coerced 1:1 against
-        # the trailing params' concrete C types instead of packed, and the
-        # trailing params themselves never receive a value at all. Real
-        # instance: importlib/_bootstrap.py's `_verbose_message(message,
-        # *args, verbosity=1)` called as `_verbose_message(fmt, a, b)`
-        # (verbosity left at its default) — `"too many arguments"` / a
-        # pointer-from-integer cast error at the call site. Python syntax
-        # guarantees anything textually after `*args` in a `def` is
-        # keyword-only, so it can NEVER be filled positionally by a call
-        # site — every entry of `arg_pairs` at/after the vararg's own
-        # position is unambiguously a vararg-pack candidate; the trailing
-        # param(s) must come from an explicit keyword argument (already in
-        # `kwarg_dict`, keyed by the call site's own real argument names) or
-        # their own default (`_func_param_defaults`, keyed by declared name
-        # — the trailing keyword-only slots are always exactly its LAST
-        # `len(_trailing_ptypes)` entries, since a param before `*args` is
-        # never keyword-only and so never appears in that tail).
-        #
-        # `func_param_types[name]`'s sentinel gets overwritten with the
-        # concrete real signature once the function's forward declaration
-        # is finalized (see _emit_call's own "starts life ending in the
-        # packing sentinel... gets overwritten... Every OTHER call site
-        # compiled afterwards then sees the concrete signature and
-        # silently skips packing" comment a few hundred lines up) — a call
-        # site compiled AFTER that point (the overwhelmingly common case
-        # for any function called more than once, or called from code
-        # textually after its own definition) sees a signature with no
-        # `'...'` at all, not even in the middle. `_mangled_signature_
-        # ctypes` preserves the original sentinel form untouched, so it's
-        # consulted FIRST here — `_emit_call`'s own existing fallback to it
-        # only checks `mangled_sig[-1] == '...'`, which is exactly as blind
-        # to a NON-final sentinel as the primary check it's guarding, so
-        # this reimplements that preference for the non-final case too
-        # rather than assuming `_emit_call`'s narrower version covers it.
-        if not _call_has_spread:
-            _vararg_ptypes = (self._vararg_trailing_param_types.get(fname)
-                              or self._vararg_trailing_param_types.get(fname_raw)
-                              or self._mangled_signature_ctypes.get(fname)
-                              or self._mangled_signature_ctypes.get(fname_raw)
-                              or self.func_param_types.get(fname)
-                              or self.func_param_types.get(fname_raw))
-            if _vararg_ptypes and '...' in _vararg_ptypes and _vararg_ptypes[-1] != '...':
-                _sentinel_idx = _vararg_ptypes.index('...')
-                _n_fixed2 = _sentinel_idx
-                _trailing_ptypes = _vararg_ptypes[_sentinel_idx + 1:]
-                _trailing_dflts = (self._func_param_defaults.get(fname)
-                                   or self._func_param_defaults.get(fname_raw) or [])
-                _trailing_names_defaults = (_trailing_dflts[-len(_trailing_ptypes):]
-                                            if _trailing_ptypes else [])
-                _fixed2 = arg_pairs[:_n_fixed2]
-                _vararg2 = arg_pairs[_n_fixed2:]
-                _lst2 = self._new_val('MojoList *', "mojo_list_new ()")
-                for _at2, _av2 in _vararg2:
-                    _av2 = self._coerce_to_type(_at2, 'int64_t', _av2)
-                    self._emit(f"  mojo_list_append_int ({_lst2}, {_av2});")
-                _trailing_pairs = []
-                for _i2, _tpt in enumerate(_trailing_ptypes):
-                    _tname = (_trailing_names_defaults[_i2][0]
-                             if _i2 < len(_trailing_names_defaults) else None)
-                    if _tname is not None and _tname in kwarg_dict:
-                        _trailing_pairs.append(kwarg_dict.pop(_tname))
-                    elif (_i2 < len(_trailing_names_defaults)
-                          and _trailing_names_defaults[_i2][1] is not None):
-                        _trailing_pairs.append(
-                            self._default_expr_to_pair(_trailing_names_defaults[_i2][1]))
-                    else:
-                        _trailing_pairs.append((_tpt, '0'))
-                arg_pairs = _fixed2 + [('MojoList *', _lst2)] + _trailing_pairs
+        # followed by more (keyword-only) params but no `**kwargs`; see
+        # `_pack_vararg_trailing_params`'s own docstring for the full
+        # rationale (shared with `_gen_stmt_ExprStmt`'s statement-level
+        # twin call path below).
+        arg_pairs, kwarg_dict = self._pack_vararg_trailing_params(
+            fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
         # Keyword argument padding for known functions
         if fname_raw == 'compile_to_gimple':
@@ -19376,6 +19397,22 @@ class GimpleGen:
             # Handle keyword arguments for regular function calls
             kwargs = getattr(node.value, 'kwargs', []) or []
             kwarg_dict = {kname: self.lower_expr(kexpr) for kname, kexpr in kwargs}
+
+            # `def f(fixed, *args, trailing_kwonly=default, ...)` called as
+            # a bare, value-discarding statement (e.g. importlib/_bootstrap.
+            # py's `_verbose_message('import {!r} # {!r}', spec.name,
+            # spec.loader)`, whose None return is discarded) — this is the
+            # statement-level twin of `_lower_named_call`'s identical
+            # packing; see `_pack_vararg_trailing_params`'s docstring for
+            # the full rationale. Without this, this function's own
+            # general-call-building path below coerces the extra positional
+            # args 1:1 against the trailing params' concrete C types
+            # instead of packing them, e.g. "passing argument 2 of
+            # '_verbose_message' makes pointer from integer without a cast".
+            _call_has_spread = any(isinstance(_a, UnaryOp) and _a.op in ('*', '**')
+                                   for _a in node.value.args)
+            arg_pairs, kwarg_dict = self._pack_vararg_trailing_params(
+                fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 
             # For compile_to_gimple: pad with do_imports and filename kwargs
             if raw_name == 'compile_to_gimple':
