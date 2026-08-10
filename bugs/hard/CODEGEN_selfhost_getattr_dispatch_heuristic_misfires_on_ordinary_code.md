@@ -5,19 +5,50 @@
 **Partially fixed 2026-08-07** ("option 3" below — the defensive net
 against an empty resolved `self` type — is implemented in
 `DispatchSolver`'s callee-to-struct resolution). Found and landed as
-part of the `weakref.py` investigation in
-`bugs/hard/CODEGEN_module_globals_cross_contamination_via_imported_stmts.md`
-(see that doc's "Also fixed in the same session" section for the fix
-detail and combined gate results) — filed there rather than duplicated
-here since it's a different subsystem (`DispatchTable`/
-`_plan_dispatch_tables`) from that doc's own `gen_module` globals-struct
-fixes, but option 3 is specifically this doc's own proposal.
+part of the `weakref.py` investigation that was tracked in the now-
+deleted `bugs/hard/CODEGEN_module_globals_cross_contamination_via_
+imported_stmts.md` (fully fixed and removed 2026-08-10 — see commit
+636718b and its predecessor for the fix detail and combined gate
+results) — filed there rather than duplicated here since it's a
+different subsystem (`DispatchTable`/`_plan_dispatch_tables`) from that
+doc's own `gen_module` globals-struct fixes, but option 3 is
+specifically this doc's own proposal.
 
 The underlying heuristic mis-fire itself (this doc's root cause below)
 is NOT fixed — option 3 only prevents it from emitting invalid C when it
 mis-fires on a case whose `self` type can't be resolved; a case where the
 heuristic mis-fires AND the self type happens to resolve to something
 plausible-but-wrong is still possible in principle and not addressed.
+
+**Re-verified 2026-08-10**: re-ran this doc's own real-world repro
+(`Lib/importlib/util.py`'s `_LazyModule`) two ways — (a) `python3
+mojo.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/util.py`
+(the default entry point, which for this file happens to succeed via
+`driver.py`'s per-module link mode) and (b) directly via
+`gimple_codegen.compile_linked(src, filename=...)` (the same call
+`mojo.py build` makes), inspecting the generated `.ci` and compiling it
+standalone with the project's real `-fgimple` GCC
+(`/opt/local/bin/gcc-mp-15 -fgimple ...`). Both succeed cleanly (exit
+0, 0 `error:` lines). The generated dispatch table for `_LazyModule`
+now has a correctly-resolved `self` type on both function-pointer
+fields (`void (*LazyModule___delattr__)(_LazyModule *self, int attr)`,
+previously the malformed `( *self, int attr)` this doc's symptom
+describes) — confirms option 3's defensive net (or some other change
+since 2026-08-07) is holding for this doc's own concrete repro. The
+dispatch table still contains both of `_LazyModule`'s dunder methods
+(`__delattr__`/`__getattribute__`) as callees, consistent with the
+heuristic's "assume all methods" fallback still firing (not narrowed) —
+this file's `_LazyModule` just happens to have no OTHER, non-dunder
+methods for the fallback to over-broadly rope in, so it can't currently
+demonstrate the theoretical "self type resolves to something
+plausible-but-wrong" residual risk described above. That residual risk
+remains unconfirmed (no live repro) and unaddressed — same status as
+2026-08-07, not attempted here either, for the same reasons (see
+"Risk" below). Keeping this doc open for that reason: the doc's TITLE
+symptom (emitting invalid C) has no known live repro anymore, but the
+doc's own root cause (the over-eager heuristic itself) is still
+genuinely unfixed, just currently non-crashing on every repro found so
+far.
 
 Originally: unfixed, root-caused 2026-08-06 while investigating
 `bugs/COMPILE_FAIL_importlib_util.md`. Fully traced to a specific
