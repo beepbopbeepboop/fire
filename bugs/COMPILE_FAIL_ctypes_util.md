@@ -2,6 +2,26 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (updated 2026-08-09)
+
+Re-verified fresh via `python3 mojo.py build`. Symptom is byte-for-byte
+identical to the 2026-08-06 finding below: same two errors at the same
+lines (`util.py:500`/`502`, `variable or field '_t21' declared void` /
+`invalid use of void expression`), and the generated `.ci` still shows
+`cdll` lowered as the same generic weak int64_t-returning stub
+(`__attribute__((weak)) int64_t cdll (...) { mojo_print (...); return
+(int64_t)0; }`). Notably, `ctypes/__init__.py` itself now compiles
+clean end-to-end (`python3 mojo.py build .../ctypes/__init__.py` exits
+0) — a real improvement since this doc's last update — but that alone
+wasn't enough to fix `util.py`'s cross-module view of `cdll`: nothing
+in this session's fixes touched cross-module resolution of a MODULE-
+LEVEL VALUE (as opposed to a function/class), so `cdll = LibraryLoader
+(CDLL)`'s real struct-instance type still isn't visible to `util.py`'s
+own compile. Root cause and priority assessment unchanged from below —
+still the same structural, already-tracked gap, still dead test-only
+code. No fix attempted (matches the "known structural gap" category:
+cross-module resolution of a module-level value, not a function).
+
 ## Status (updated 2026-08-06)
 
 Investigated 2026-08-06. Root-caused; not fixed — traces back to an

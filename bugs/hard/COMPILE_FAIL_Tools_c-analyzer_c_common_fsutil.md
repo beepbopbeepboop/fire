@@ -1,5 +1,40 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (updated 2026-08-09, re-verified: TWO blockers now, both known structural gaps)
+
+Re-verified fresh via `MOJO_DEBUG=1 python3 mojo.py build`. `iter_files`
+still hits the exact same `LambdaExpr`-in-generator-body blocker as the
+2026-08-07 finding below (`unsupported expression in generator body:
+LambdaExpr`) — unchanged, still tracked at
+`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`, still not a
+narrow fix (see that doc's "feature-sized" writeup).
+
+Additionally, the module-level generator pre-check now also flags a
+SECOND generator in this same file, `process_filenames` (line 151):
+
+```
+[gimple_codegen] generator 'process_filenames' not eligible for C++
+coroutine path, falling back to honest refusal: process_filenames:
+every `yield` must carry a value, and all values must agree on one
+scalar type (int64_t/double/_Bool)
+```
+
+Its body is `yield filename, relfile, check, solo` — a 4-tuple-valued
+`yield`. This is a confirmed instance of the OTHER already-known,
+already-catalogued structural gap for this session ("Tuple-valued
+`yield` in a generator (structural, no fix)" — the compiled generator
+coroutine path only supports a single scalar-typed value per `yield`,
+not a tuple). Not attempted, per that gap's established structural
+classification.
+
+Net effect: this file is blocked by TWO independent, already-
+catalogued structural gaps (tuple-valued yield + LambdaExpr-in-
+generator-body), neither narrow, neither attempted here. The file will
+not compile until BOTH are addressed (a real generator-coroutine
+tuple-value-carrying mechanism, and real LambdaExpr support inside a
+compiled generator body) — both feature-sized efforts, not one-spot
+fixes.
+
 ## Status (updated 2026-08-07, LambdaExpr blocker root-caused, feature-sized, doc written)
 
 The `LambdaExpr` blocker noted just below (`get_files = (lambda *a,
