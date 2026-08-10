@@ -1,6 +1,91 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (`3d36ccd`). `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/codecs.py` still fails, but the failure
+is NOT the collection of unrelated errors listed in the 2026-08-06
+status below — those turned out to be a red herring from testing with
+the wrong `gcc`/`g++` binary in this session's own investigation
+(`gcc-15`/`g++-15` aren't actually on `PATH` in this environment; the
+project's real compiler is `/opt/local/bin/gcc-mp-15` /
+`/opt/local/bin/g++-mp-15`, per `build_config.find_gcc()`/`find_gxx()`
+— a plain `gcc-15 ...` silently no-ops as "command not found" and a
+naive `grep -c error` on its empty output reads as "0 errors", a false
+negative). Once re-tested with the correct binaries,
+`codecs.py`'s own generated `.ci` (plain-C part) compiles 100% clean —
+confirming the "not a generator-codegen-cluster failure" conclusion
+below WAS right about the `.ci` side.
+
+**However, `codecs.py` DOES still fail, for a real, still-open,
+generator-codegen reason** that the 2026-08-06 pass never actually
+reached (it was looking at the wrong error output). Root-caused via
+`driver.compile_program` directly (`mojo.py build`'s primary,
+module-cache/link-mode path — a DIFFERENT codegen invocation from the
+plain `compile_to_gimple_with_cpp(do_imports=True)` path
+`build_executable`, its fallback, uses): the companion `.cpp`
+(coroutine-translation unit for `codecs.py`'s own 2 generators,
+`iterencode`/`iterdecode`) fails to compile with g++:
+
+```
+client_async.cpp: In function '_mojogen_iterencode_Task _mojogen_iterencode_impl(MojoList*, int64_t, int64_t, MojoDict*)':
+client_async.cpp:113:65: error: no match for 'operator*' (operand type is 'MojoDict')
+  113 |     encoder = (getincrementalencoder_0c85c9(encoding))(errors, (**kwargs));
+      |                                                                 ^~~~~~~~
+client_async.cpp:113:74: error: expression cannot be used as a function
+client_async.cpp:117:26: error: request for member 'encode' in 'encoder', which is of non-class type 'int64_t'
+```
+(identical pair for `iterdecode`/`decoder` at :185/:189).
+
+**Root cause, precisely identified:** `codecs.py`'s real source, line
+1052 (`iterencode`, a generator — contains `yield output`):
+```python
+encoder = getincrementalencoder(encoding)(errors, **kwargs)
+```
+a `**kwargs`-unpack used as a CALL ARGUMENT (`iterdecode`'s sibling
+line 185/`getincrementaldecoder` is identical). `gimple_codegen.py`'s
+coroutine `.cpp` expression emitter (`_cpp_expr`, ~line 23418) lowers
+every call argument via a flat `', '.join(self._cpp_expr(a) for a in
+e.args)` (repeated at every `CallExpr` call site in that function, e.g.
+~23712/23716) with NO special case for a `**kwargs`/`*args`-unpack
+argument (a `UnaryOp` node per this project's `*`/`**` call-argument AST
+convention — see this repo's own `CLAUDE.md`). Such a `UnaryOp` instead
+falls through to `_cpp_expr`'s generic `UnaryOp` case (~line 23512):
+```python
+if isinstance(e, UnaryOp):
+    op = {'not': '!'}.get(e.op, e.op)
+    return f"({op}{self._cpp_expr(e.operand)})"
+```
+which for `op == '**'` literally emits `(**kwargs)` — C++ parses that as
+a double pointer-dereference of the `MojoDict *` local, not an argument-
+unpack — hence "no match for operator*". This is a silent MISCOMPILE
+class bug (produces syntactically-plausible-looking but wrong C++,
+rather than an honest refusal), not a graceful "unsupported shape"
+refusal — worse than most of this family's other gaps in that respect,
+though the end effect (this module can't compile through the coroutine
+path) is the same.
+
+**Classification: same structural bucket as the already-documented,
+explicitly-not-attempted `bugs/hard/CODEGEN_generator_lambda_expr_
+unsupported.md`** (a sibling gap in the exact same `_cpp_expr`
+call-argument-lowering machinery — that doc covers a `LambdaExpr`
+argument falling through to a dispatcher with no case for it; this is a
+`*`/`**`-unpack argument falling through to the wrong generic case
+instead). Both are instances of "the coroutine-body expression emitter's
+call-argument handling is narrower than the ordinary (non-generator)
+function path's," which is this session's stated out-of-scope
+generator/coroutine structural gap. Not attempted here, per this
+session's explicit mandate to confirm-and-document rather than extend
+this family's codegen. A minimal, purely-defensive narrower fix (making
+this ONE shape raise `_UnsupportedGeneratorShape` instead of emitting
+invalid C++, so it fails soft — falls back to interpreting the module —
+instead of hard) was considered but also not attempted, to keep this
+pass's footprint on shared `_cpp_expr` machinery at zero, matching the
+lambda doc's own precedent.
+
+## Status (updated 2026-08-06, superseded above — see note on wrong
+compiler binary; the specific errors below were never actually
+codecs.py's real blocker)
 
 **STILL FAILING**, but re-diagnosed against current master (`2b0c4c5`) —
 the 2026-07-30 `getincrementalencoder` .cpp error no longer reproduces.

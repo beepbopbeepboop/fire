@@ -4,7 +4,71 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (`3d36ccd`) via `python3 mojo.py
+build /Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`. The
+2026-08-07 property-chaining fix (below) is confirmed still in effect.
+The file still does NOT compile, for the SAME remaining symptom the
+2026-08-07 pass flagged but explicitly left un-investigated
+("`request for member 'rstrip' in 'path'`") — now actually root-caused:
+
+```
+Generator (.cpp) compilation failed: ...
+__init___gen.cpp: In function '_mojogen__ancestry_Task _mojogen__ancestry_impl(int64_t)':
+__init___gen.cpp:105:17: error: request for member 'rstrip' in 'path', which is of non-class type 'int64_t' {aka 'long long int'}
+  105 |     path = path.rstrip(posixpath.sep);
+      |                 ^~~~~~
+```
+
+This is inside `_ancestry` — a module-level GENERATOR function (`def
+_ancestry(path): ... yield path ...`, source lines 44-68) with an
+unannotated `path` parameter, called elsewhere only as `_ancestry(path)`
+(another unannotated parameter, in `_parents`) — never with a literal
+string argument anywhere in the file, so this codegen's cross-call
+scalar-contract inference (`_inferred_param_types`, the same mechanism
+described in `bugs/hard/CODEGEN_unannotated_init_param_field_type_
+defaults_int64.md` for constructor params) never gets any evidence to
+resolve `path`'s real type, and `_param_ctype` falls back to its
+`int64_t` default — this part is a general (non-generator-specific)
+limitation of that inference pass, shared by the ordinary compiled path
+too.
+
+**However, confirmed via a minimal isolated repro that fixing JUST the
+param-type inference would not be enough** — this codegen's generator/
+coroutine body expression emitter (`_cpp_expr`, `gimple_codegen.py`
+~line 23418) has **no string-method-call support at all** (no `.rstrip`/
+`.split`/etc. dispatch), unlike the ordinary (non-generator) compiled
+path's `_lower_call`/string-method lowering, which handles these
+correctly. Repro: a free (non-generator) function with an unannotated
+`path` param called `path.rstrip('/')` in a loop, invoked with a
+string-literal argument elsewhere (`strip_sep("hello///")`) — the
+ordinary path infers `path` as `char *` (literal call-site evidence
+exists here, unlike `_ancestry`) AND compiles/links successfully. The
+SAME body, turned into a generator (`yield path` added), still gets
+`path` correctly inferred as `char *` by `_gen_cpp_generator_unit`
+(same `_param_ctype` call, same literal-call-site evidence) — but then
+fails to compile with the near-identical error `request for member
+'rstrip' in 'path', which is of non-class type 'char*'`. This isolates
+the two issues cleanly: `_ancestry`'s specific instance additionally
+suffers the param-type-inference gap (no literal call site anywhere),
+but even a correctly-`char *`-typed parameter's `.rstrip()` call fails
+in a generator body — the coroutine `_cpp_expr` emitter simply has no
+member-call dispatch for string methods, full stop.
+
+**Classification: generator/coroutine-codegen structural gap** (this
+session's `_cpp_expr`-is-narrower-than-the-ordinary-path theme,
+already established for `LambdaExpr`-as-call-argument and `**kwargs`-
+unpack-as-call-argument — see
+`bugs/CODEGEN_generator_function_Lib_codecs.md`'s 2026-08-09 update for
+a sibling instance in the exact same function). Not attempted here —
+adding real string-method dispatch to the coroutine body emitter is
+feature-sized work in this same out-of-scope area, per this session's
+explicit mandate. Doc kept, root cause section updated with the precise
+confirming construct (the exact generator/param/method combination)
+rather than re-deriving from scratch in a future session.
+
+## Status (updated 2026-08-07, superseded above)
 
 **The property-chaining bug (`self.filename.parent` resolving to the
 bound-method value instead of the getter's result) is FIXED.** The
