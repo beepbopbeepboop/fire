@@ -1,5 +1,44 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-09, re-verified with a direct minimal repro)
+
+Re-verified against current master (post-merge `7df52a0`). The full
+`mojo.py build` on the real `imaplib.py` is currently uninformative on
+its own for this specific bug: the whole-transitive-graph build now
+fails much earlier, in unrelated code (a severe `ssl.py`/`argparse`
+symbol clash causing GCC to bail out early with "confused by earlier
+errors") before the log gives a clean read on `Idler.burst`'s own
+generated `.cpp`. So this pass isolated the method with a minimal
+standalone repro (`Idler`/`IMAP4` classes reduced to just the shapes
+`burst()` touches: `self._imap.sock`, `next(self)`, `self._pop(...)`)
+and ran `MOJO_DEBUG=1 python3 mojo.py build` on that directly.
+
+Result: no "not eligible" refusal (confirms the `raise self._imap.error
+(...)` fix from `bugs/hard/CODEGEN_generator_raise_non_static_
+exception_class.md` still holds — the generator reaches real coroutine
+`.cpp` generation), and the generated `.cpp` reproduces all three
+previously-documented blockers verbatim, unchanged:
+```
+imaplib_burst_repro_gen.cpp:120:23: error: request for member 'sock' in 'self->Idler::_imap', which is of non-class type 'int64_t' {aka 'long long int'}
+imaplib_burst_repro_gen.cpp:126:18: error: 'next' was not declared in this scope
+imaplib_burst_repro_gen.cpp:140:13: error: 'response' was not declared in this scope
+imaplib_burst_repro_gen.cpp:140:34: error: too many arguments to function 'int64_t Idler__pop(Idler*)'
+```
+The 4th (`response`/arity) is one symptom, not two: `self._pop(interval,
+None)` — a call to a `self`-method from inside a generator body — gets
+silently codegen'd as a call to `Idler__pop(self)` (dropping both real
+args, per the doc's original "self.<field> reads only, no method calls"
+observation), so the `while response := ...` walrus assignment target
+is left undeclared when the call shape mismatch cascades.
+
+No change in classification or scope: these are the SAME structural
+"coroutine-body expression emitter doesn't model nested struct-field
+attribute chains, the `next()` builtin, or `self`-method calls" gaps as
+before, not narrow, not attempted here — still worth a dedicated hard-
+bug doc for `_cpp_expr`/`_cpp_stmt`'s silent-fallthrough-instead-of-
+refusing behavior on unhandled generator-body constructs (a future
+session's task, not this one).
+
 ## Status (updated 2026-08-07)
 
 **Classification bug FIXED** (`bugs/hard/CODEGEN_generator_raise_
