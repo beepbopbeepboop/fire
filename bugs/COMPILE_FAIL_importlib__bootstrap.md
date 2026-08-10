@@ -2,6 +2,119 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/_bootstrap.py`
 
+## Status (updated 2026-08-09)
+
+Re-verified fresh. Substantial progress since the 2026-08-08 note below:
+
+- **Issue #1 (`_verbose_message`'s line-951 call) is now FIXED.** Root
+  cause: the vararg-trailing-param packing mechanism (the
+  `_vararg_trailing_param_types` fix from 2026-08-08) had only ever been
+  wired into `_lower_named_call`, the value-CONSUMING call-lowering path.
+  `_verbose_message('import {!r} # {!r}', spec.name, spec.loader)` at
+  line 951 is a bare, value-DISCARDING statement (its `None` return is
+  never used) — that goes through `_gen_stmt_ExprStmt`, a completely
+  separate, independently-duplicated general-call-building code path
+  (the same "statement-level twin" duplication pattern already
+  documented at half a dozen other sites in this file:
+  len/list/tuple/exit/quit/main-redirect), which never had the
+  equivalent trailing-param-packing logic at all. Fixed by extracting
+  the packing logic into a new shared `_pack_vararg_trailing_params()`
+  helper (gimple_codegen.py) and calling it from both
+  `_lower_named_call` and `_gen_stmt_ExprStmt`. Confirmed: the
+  "passing argument 2 of '_verbose_message' makes pointer from integer
+  without a cast" error at line 951 no longer reproduces. Full 5-part
+  quality gate run clean (247/0 test_gimple, 76/0 test_module_cache,
+  check-selfhost clean, 0 skips on stdlib dylib rebuild, 664/664 0
+  unexpected on compile_stdlib.py).
+- **Issue #2 (`cls._SEP` dynamic class attribute) is now also resolved**
+  — no longer produces any error, as a side effect of the separate,
+  broader `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`
+  fix (Steps 1-4, landed 2026-08-07): `cls._SEP`/`cls._SEP = ...` now
+  goes through real per-object dynamic-attribute storage instead of a
+  hard "request for member in something not a structure or union"
+  compile error.
+- **Issue #3** (the `with`-statement `__exit__` dummy-arg / `_ensure_
+  local` literal-cast bug) — already fixed 2026-08-07, unaffected.
+
+**This file still does NOT compile end-to-end — a NEW, different,
+previously-masked blocker is now the sole remaining issue**, surfaced
+only once issues #1/#2 stopped blocking the compile earlier:
+
+```
+Undefined symbols for architecture arm64:
+  "__WeakValueDictionary__KeyedRef", referenced from:
+      __WeakValueDictionary_setdefault in _bootstrap.o
+  "__WeakValueDictionary_data", referenced from:
+      __WeakValueDictionary_setdefault in _bootstrap.o
+ld: symbol(s) not found for architecture arm64
+```
+
+This is a LINK-time error, not a compile-time one — the whole file now
+compiles to GIMPLE/C cleanly (0 `error:` from GCC), and only fails at
+the final link step. Root cause: `_WeakValueDictionary` (lines 62-134,
+a hand-rolled minimal weakref-values dict used by `_ModuleLock`) has:
+
+```python
+def __init__(self):
+    class KeyedRef(_weakref.ref):     # locally-defined nested class
+        ...
+    self._KeyedRef = KeyedRef         # stashed as a callable-class attribute
+    self.clear()
+
+def clear(self):
+    self.data = {}                    # a MojoDict*-typed field
+
+def setdefault(self, key, default=None):
+    try:
+        o = self.data[key]()          # <-- subscript-then-call on an attribute
+    except KeyError:
+        o = None
+    ...
+        self.data[key] = self._KeyedRef(default, key)   # <-- call an attribute-held class
+```
+
+`self.data[key]()` and `self._KeyedRef(default, key)` are both call
+expressions whose callee is `SubscriptExpr`/plain access on a
+`MemberExpr` (`self.<attr>`). `_lower_call` (gimple_codegen.py, ~line
+13901) has an existing special case: `if isinstance(node.func,
+SubscriptExpr) and isinstance(node.func.obj, MemberExpr):` — designed
+for Mojo's comptime-bracket-parametrized generic METHOD call pattern
+(`self.some_method[T](args)`). That branch fires UNCONDITIONALLY for
+ANY `<member>[<subscript>](<args>)` call shape, with no check that
+`method_name` (`node.func.obj.member`, here `'data'`) is actually a
+real declared method on the receiver's struct — it just discards the
+subscript (`[key]`) entirely, treats the outer member name as a
+method name, and lowers `self.data[key]()` as if it were the 0-arg
+call `self.data()`. Since `data`/`_KeyedRef` are ordinary struct FIELDS
+(not methods), this produces a call to a synthesized, never-actually-
+defined weak-stub-style symbol (`_WeakValueDictionary_data`/
+`_WeakValueDictionary__KeyedRef`) that only gets a *declaration*, not a
+definition — hence the link-time (not compile-time) "symbol(s) not
+found" failure.
+
+This is a genuinely different bug from the file's originally-tracked
+issues: two syntactically-identical call shapes (`obj.name[X](Y)`)
+have different real Python semantics — a bracket-generic method call
+vs. an ordinary "subscript a dict/list-valued attribute, then call the
+retrieved value" — and the codegen's existing bracket-generic-method
+special case has no disambiguation between them. **Classified as
+structural/high-risk, not attempted**: this exact call-lowering branch
+(comptime bracket-param generic method dispatch) is independently
+flagged elsewhere in this session's history as an already-known-buggy,
+high-value/high-risk area (`f[N](...)` silently compiling to 0), and
+`_lower_call`/`_lower_named_call` are both extremely large, heavily
+cross-cutting shared functions with documented history of narrow-
+looking fixes causing broad silent regressions elsewhere in this
+codebase (the "_tuplegetter incidents"). A safe fix would need to
+verify `method_name` is a genuine registered method of `_struct_name`
+before taking this branch, and provide a real fallback lowering for
+"call the value produced by subscripting a struct member" (which does
+not currently exist anywhere in `_lower_call` — the nearest neighbor,
+the `not isinstance(node.func, IdentExpr)` block a few dozen lines
+below, only handles `CallExpr`/`LambdaExpr` callees, not
+`SubscriptExpr(MemberExpr)` ones) — real, but nontrivial, scoped work
+for a future session, not a one-line guard.
+
 ## Status (updated 2026-08-08)
 
 Issue #1's real root cause was misdiagnosed in the note below (it is
