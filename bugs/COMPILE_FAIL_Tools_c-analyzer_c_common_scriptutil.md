@@ -4,6 +4,35 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-10 — `main_for_filenames`'s tuple-valued yield now FIXED; `_iter_filenames` remains refused for an unrelated, non-tuple reason)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified: `main_for_filenames` is no longer in the
+refusal list — it now compiles past the eligibility gate. Only
+`_iter_filenames` remains refused, and NOT for a tuple-arity/shape
+reason:
+
+```python
+def _iter_filenames(filenames, process, relroot):
+    ...
+    check = (lambda: True)
+    for filename, ismany in iterutil.iter_many(items, onempty):
+        relfile = fsutil.format_filename(filename, relroot, fixroot=False)
+        yield filename, relfile, check, ismany
+```
+
+The 4-tuple yield's THIRD element, `check`, is bound to a `lambda: True`
+closure. `_cpp_expr` (the coroutine-body expression lowering) has no
+case for `LambdaExpr` at all — attempting to box it would need a real
+value representation for a closure, which this narrow scalar/pointer
+coroutine-body model doesn't have. Confirmed via `MOJO_DEBUG=1`: the
+refusal is now the honest, precise `unsupported expression in generator
+body: LambdaExpr` (raised by `_cpp_expr`'s own existing exhaustive
+fallback, not anything new added this session) — not a tuple-arity/type
+mismatch. Unrelated to and unaffected by this fix. Doc kept open (not
+deleted) — 1 of 2 generators fixed, but the file still doesn't build.
+
 ## Status (re-verified 2026-08-09)
 
 Re-ran against current master (`python3 mojo.py build .../c_common/

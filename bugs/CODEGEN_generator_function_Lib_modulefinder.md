@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-10 — general tuple-valued yield now FIXED; `scan_opcodes`'s specific NESTED-tuple shape remains a distinct, still-refused sub-case)
+
+Implemented real tuple-valued-`yield` support this session (`yield a,
+b, ...` boxes into a real `MojoList *` at the yield site — see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). `scan_opcodes` is STILL refused, correctly — its shape is a
+DISTINCT, deeper sub-case this fix deliberately does not cover:
+
+```python
+yield "store", (name,)
+yield "absolute_import", (fromlist, name)
+yield "relative_import", (level, fromlist, name)
+```
+
+Each of these is a tuple whose SECOND element is ITSELF a nested tuple
+literal (varying inner arity: 1, 2, then 2 elements). `_cpp_expr`
+lowers a bare tuple/list/dict/set literal to a raw C++ braced-init-list
+(`{name}`), which is not a valid argument to `mojo_list_append_int/
+_double/_str` (nor castable to any of those types) — attempting to box
+it anyway would reproduce this family's ORIGINAL malformed-C++ failure
+mode one level deeper. This session's fix added an explicit guard for
+exactly this (`_generator_yield_ctype`'s `TupleExpr` branch now refuses,
+via `return None`, whenever any element of the tuple is itself a
+`TupleExpr`/`ListExpr`/`DictExpr`/`SetExpr`) — confirmed via a direct
+repro (`yield "store", ("name",)`) that this now produces the same
+clean, honest Python-level refusal `scan_opcodes` already got, not a
+GCC-stage syntax error.
+
+Recursive/nested tuple-element boxing (and, separately, the outer
+tuple's own arity varying if it did) is out of this fix's scope — see
+the task's "yield tuples with a FIXED, small element count" scope
+boundary. Doc kept open (not deleted) — `scan_opcodes` remains
+refused, now for a more precisely diagnosed reason.
+
 ## Status (updated 2026-08-09 — RECLASSIFIED: `scan_opcodes`'s tuple-valued yield is now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real

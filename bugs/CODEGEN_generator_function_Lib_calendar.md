@@ -1,5 +1,48 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; file still blocked by other, unrelated gaps)
+
+Implemented real tuple-valued-`yield` support this session (`yield a,
+b, ...` boxes the tuple's elements into a real runtime `MojoList *`
+at the yield site — `_cpp_yield_tuple`, `gimple_codegen.py` — and
+unboxes it on the consumer side via `_gen_for_generator_iter`'s/
+`_compr_generator_loop`'s new tuple-target handling, keyed off
+`_generator_tuple_yield_slot_ctypes`). Confirmed via an isolated
+compile (`compile_to_gimple_with_cpp(..., do_imports=False)` +
+`g++ -fsyntax-only`) that `itermonthdays2`/`itermonthdays3`/
+`itermonthdays4` (the three generators this doc's 2026-08-09 status
+identified as tuple-yield-refused) now compile past the eligibility
+gate, and their own `co_yield`/tuple-boxing lines are syntactically
+valid C++ with no errors.
+
+**calendar.py still does not build clean**, for reasons independent of
+tuple-yield:
+
+1. `itermonthdates`'s and `itermonthdays4`'s own bodies do
+   `for y, m, d in self.itermonthdays3(...):` — a PLAIN (non-`yield
+   from`) `for` loop, inside a coroutine body, over another compiled
+   generator, with a non-`enumerate()` tuple target. `_cpp_for_stmt`
+   only special-cases a tuple target for `enumerate(...)`; any other
+   tuple-target iterable (including a sibling generator call) falls
+   through to treating the WHOLE comma-joined target string as one bogus
+   C++ identifier, e.g. `for (auto y, m, d : Calendar_itermonthdays3(...))`
+   — real, malformed C++. This is a separate, pre-existing gap in the
+   coroutine-body `for`-loop lowering (not the yield/promise machinery
+   this session's fix touches) — also confirmed independently in
+   `weakref.py`'s and `Tools/c-analyzer/c_parser/datafiles.py`'s own
+   generators (see those docs). Not attempted here.
+2. `itermonthdays`'s own body calls `itertools.repeat(...)` inside a
+   `yield from` — `repeat` has no lowering in the coroutine-body
+   expression emitter (`'repeat' was not declared in this scope`),
+   unrelated to tuple-yield.
+3. The whole-program (`do_imports=True`) build still hits hundreds of
+   unrelated, pre-existing errors in transitively-imported files
+   (`operator.py`, `posixpath.py`, `enum.py`, ...) — same situation the
+   2026-08-07 status below already documented for this exact file.
+
+Doc kept open (not deleted) — tuple-yield is no longer this file's
+blocker, but the file genuinely still doesn't build.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (`3d36ccd`) via `python3 mojo.py build

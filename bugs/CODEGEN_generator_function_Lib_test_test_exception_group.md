@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/test/test_exception_group.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; other, pre-existing gaps now block)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`; the self-recursive `yield from leaf_generator(e, tbs)` case
+from task #138 is untouched and still correctly skipped from the
+type-unification walk). Confirmed via an isolated compile:
+`leaf_generator`'s `yield exc, tbs` (line 564) is no longer refused,
+and its own `co_yield`/tuple-boxing text is syntactically valid C++
+(no g++ errors on those lines).
+
+**This file still does not build**, blocked by unrelated, pre-existing
+gaps EARLIER in the same function body: `tbs.append(exc.__traceback__)`
+(line 556) and `tbs.pop()` (line 565) — `tbs`'s real type (a list,
+default-valued `tbs=None` then reassigned `tbs = []`) isn't tracked as
+`MojoList *` in this narrow coroutine-body model, so it defaults to
+`int64_t`, and `exc.__traceback__`/`exc.exceptions` are non-`self`
+struct-typed MemberExpr reads — a documented, general limitation of
+this coroutine-body model (only `self.<field>` MemberExpr reads are
+supported; see `_gen_cpp_generator_unit`'s own docstring). None of
+these are the promise/ABI gap this session's fix targets. Not attempted
+here. Doc kept open (not deleted).
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (`42faf64`) with a real

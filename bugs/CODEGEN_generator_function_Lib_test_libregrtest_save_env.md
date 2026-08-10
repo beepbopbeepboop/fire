@@ -1,5 +1,45 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; other, pre-existing gaps now block)
+
+Implemented real tuple-valued-`yield` support this session: `yield a,
+b, ...` boxes the tuple's elements into a real runtime `MojoList *` at
+the yield site (`_cpp_yield_tuple`, `gimple_codegen.py`) — each
+element's own natural type is inferred independently (so `resource_
+info`'s `getattr(self, get_name)` elements, which this codegen can't
+type further, get the same int64_t-default-for-unknown convention the
+scalar-yield case already used) — unboxed on the consumer side via
+`_gen_for_generator_iter`'s new tuple-target handling. Confirmed via an
+isolated compile: `resource_info`'s `yield name, getattr(self,
+get_name), getattr(self, restore_name)` (line 326) is no longer
+refused at the Python-level eligibility gate, and the `_mg_tup_1`
+boxing text itself (3 `mojo_list_append_int` calls + `co_yield`) is
+syntactically valid C++.
+
+**save_env.py still does not build**, blocked by THREE separate,
+pre-existing gaps earlier/later in the SAME function body (confirmed via
+direct g++ syntax-check of the isolated compile), all unrelated to
+tuple-yield:
+1. `for name in self.resources:` — a plain `for` loop over a struct
+   FIELD (`self.<field>`) typed `MojoList *`, inside a coroutine body.
+   `_cpp_for_stmt`'s range-for fallback (`for (auto name : ...)`)
+   doesn't work for a raw `MojoList *` (no ADL `begin`/`end`) — g++:
+   `'begin'/'end' was not declared in this scope`. (The already-existing
+   fix for this exact shape, `_gen_for_iter`'s handling of a bare
+   IdentExpr local, doesn't cover a `self.field` MemberExpr iterable.)
+2. `get_name = 'get_' + method_suffix` — string concatenation lowers to
+   a `const char *`-returning helper, assigned into a `char *`-declared
+   local — g++: "invalid conversion from 'const char*' to 'char*'".
+3. `getattr(self, get_name)` — the coroutine-body expression lowering
+   (`_cpp_expr`) has no case for `getattr(...)` at all; it falls through
+   to a generic "emit the call verbatim" path that references a
+   nonexistent C++ function named `getattr` — g++: "'getattr' was not
+   declared in this scope".
+
+None of these are the promise/ABI-representation gap this session's fix
+targets — they're independent, narrower `_cpp_stmt`/`_cpp_expr` gaps.
+Not attempted here. Doc kept open (not deleted).
+
 ## Status (re-verified 2026-08-09, unchanged)
 
 Re-ran `python3 mojo.py build .../Lib/test/libregrtest/save_env.py` against

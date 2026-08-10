@@ -2,6 +2,25 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/asyncio/futures.py`
 
+## Status (updated 2026-08-10 — NOT actually blocked by tuple-valued yield; unaffected by this session's tuple-yield fix)
+
+This session implemented real tuple-valued-`yield` support
+(`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`/`_generator_yield_ctype`). Re-checked this file against it:
+**`Future.__await__` was never actually blocked by tuple-yield** — its
+own most recent (2026-08-09) analysis below already correctly
+identifies the real blocker as a value-carrying `return` inside a
+generator (`return self.result()`), a distinct gap this session's fix
+does not touch (`_cpp_stmt`'s `ReturnStmt` case inside a generator body,
+not the `YieldExpr`/promise-value-type machinery the tuple-yield fix
+changed). Confirmed via a fresh re-run: `MOJO_DEBUG=1` reports the
+IDENTICAL refusal message, character-for-character, as the 2026-08-09
+status below — completely unchanged. This file was evidently included
+in this session's initial file list by a broad keyword match ("tuple"-
+adjacent language in its own doc, drawing an analogy between the two
+gaps), not because tuple-yield is its actual blocker. No change to this
+doc's classification; left open, unaffected.
+
 ## Status (updated 2026-08-06)
 
 Re-ran; the original doc's snippet was stale/uninformative (a truncated

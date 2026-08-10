@@ -2,6 +2,59 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED for fixed-arity tuples; 10 of the 14 refused generators now compile; 4 remain refused for well-understood, in-scope reasons)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`/`_generator_yield_ctype`'s widened `TupleExpr` handling — a
+tuple's elements are boxed into a real `MojoList *` at the yield site,
+unboxed on the consumer side). Deliberately scoped to a FIXED element
+count per generator (every `yield`/`yield from` site in one generator
+must agree on both arity and — with a char*-preference merge rule —
+each slot's type; see this fix's own commit for the full design), not a
+general variadic/heterogeneous-shape promise.
+
+Re-verified this file's whole-program refusal list (`python3 mojo.py
+build .../randdec.py`, do_imports=True, Python-level eligibility check
+only): it now names only 4 of the original 14 refused generators —
+**`all_binary`, `all_ternary`, `all_unary`, `bin_close_numbers`,
+`bin_close_to_pow10`, `bin_incr_digits`, `bin_random_mixed_op`,
+`logical_bin_incr_digits`, `tern_close_numbers`, `tern_incr_digits`,
+and `tern_random_mixed_op` (10 of the 14) now compile past the
+eligibility gate** — each `yield a, b`/`yield a, b, c` in those turned
+out to be a real, FIXED-arity tuple, exactly this fix's target shape.
+
+**4 generators remain refused, correctly, for reasons this fix's own
+documented scope boundary explicitly excludes:**
+- `unary_optarg`: `yield randdec(...), None` (2-tuple) AND `yield
+  randdec(...), None, None` (3-tuple) — genuinely VARYING arity across
+  yield sites in the same function (a deliberate test-code idiom:
+  exercising an optional-trailing-arg call shape). This fix requires one
+  fixed arity per generator; refused via `_generator_tuple_yield_slot_
+  ctypes`'s explicit arity-mismatch check.
+- `binary_optarg` (3-tuple then 4-tuple) / `ternary_optarg` (4-tuple
+  then 5-tuple): the same varying-arity pattern, one slot wider.
+- `un_incr_digits_tuple`: mixes SCALAR yields (`yield from_triple(1,
+  ndigits(m), 0)`, a plain function-call result) with literal TUPLE
+  yields (`yield (0, tuple(map(int, str(ndigits(m)))), 0)`) at
+  DIFFERENT sites in the SAME function — these can never share one
+  promise value type regardless of arity support (`_generator_yield_
+  ctype`'s outer unification correctly disagrees: int64_t vs.
+  MojoList*). Also note: this specific tuple's own middle element
+  (`tuple(map(...))`) is itself a runtime-constructed nested tuple, a
+  second, independent reason this exact yield site couldn't be boxed
+  even in isolation.
+
+Since the file still has 4 refused generators, `gen_module` still
+raises and the whole-program build still fails as a unit — but this is
+now a MUCH smaller, precisely-scoped, and correctly-diagnosed remainder
+(4 of 14, both documented reasons squarely inside this fix's own stated
+scope boundary — see the task guidance's "yield tuples with a FIXED,
+small element count" allowance) rather than the general structural gap
+this doc previously described. Doc kept open (not deleted) — updated
+rather than superseded, since 10/14 is real, verified progress but the
+file as a whole still doesn't build.
+
 ## Status (updated 2026-08-09 — re-verified, root cause corrected: this is now
 ## purely the known tuple-valued-yield structural gap, not the `nan`/
 ## `randfloat.py` issues the previous status section described)

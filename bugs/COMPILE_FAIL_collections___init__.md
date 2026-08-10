@@ -2,6 +2,28 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Confirmed via an isolated compile: `_OrderedDictItemsView.
+__reversed__`'s `yield (key, self._mapping[key])` is no longer refused
+— its own tuple-boxing text is syntactically valid C++, correctly
+boxing `key` as int64_t and the dict-subscript value as `char *`
+(inferred via `_infer_simple_expr_ctype`'s `SubscriptExpr` case).
+
+**This file still does not build**, blocked by an INDEPENDENT,
+pre-existing gap one statement earlier in the SAME method:
+`for key in reversed(self._mapping):` — `reversed(...)` has no lowering
+in the coroutine-body expression emitter — g++: "'reversed' was not
+declared in this scope". Unrelated to tuple-yield. Since this blocker
+occurs before the file reaches C compilation of its non-generator code
+at all, the three issues documented in the 2026-08-06 section below
+(`_tuplegetter` redefinition, dynamic-attribute gaps, `Counter`
+incompatible-types) remain unconfirmed either way — not re-checked here
+(same caveat the 2026-08-07/09 statuses already carried). Not attempted
+here. Doc kept open (not deleted).
+
 ## Status (re-verified 2026-08-09 against master `d3d4c68`)
 
 Still reproduces, still stops at the same earlier blocker as the

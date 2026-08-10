@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-10 — general tuple-valued yield now FIXED; `walk`/`_fwalk` remain refused for a distinct, in-scope reason: they mix SCALAR and TUPLE yields in one function)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified: `walk`/`_fwalk` are STILL refused, unchanged,
+with the exact same message as before
+(`walk`/`_fwalk`: "every yield must carry a value, and all values must
+agree on one scalar type") — this fix does not help them, correctly.
+
+Root cause, unchanged from the analysis below: `walk()` has `yield top`
+(a bare scalar, the `topdown=False` branch) AND `yield top, dirs,
+nondirs` (a 3-tuple, the `topdown=True` branch) — TWO yield sites in
+the SAME function that don't even agree on arity, let alone type.
+`_fwalk()` similarly mixes a bare-identifier `yield value` with a direct
+`yield toppath, dirs, nondirs, topfd` 4-tuple. `_generator_yield_ctype`
+unifies a scalar contribution (`int64_t`, `top`'s inferred default) and
+a tuple contribution (`MojoList *`, from the tuple sites) exactly the
+same way it unifies any two disagreeing scalar types — since neither
+is `char *` (the one type the merge rule tolerates), it correctly
+refuses the whole function. This is NOT a case a fixed-arity tuple
+design could ever unify, regardless of how much tuple-yield support is
+added — `walk`/`_fwalk` fundamentally yield DIFFERENT SHAPES on
+different code paths, which no single C++20 coroutine promise value
+type can represent. Not attempted here (would need a tagged-union/
+variant promise, a much larger redesign). Doc kept open (not deleted).
+
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`c79a013`) via a real

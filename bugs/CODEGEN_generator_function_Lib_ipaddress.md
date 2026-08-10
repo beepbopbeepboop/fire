@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`/`_generator_yield_ctype`'s widened `TupleExpr` handling — boxes
+`yield a, b, ...` into a real `MojoList *` at the yield site, unboxed on
+the consumer side). Confirmed via an isolated compile +
+`g++ -fsyntax-only`: `_find_address_range`'s `yield first, last` (lines
+178/181) is no longer refused, and its own tuple-boxing/`co_yield` text
+is syntactically valid C++ (verified: no g++ error anywhere in its
+`_mojogen__find_address_range_impl` co_yield lines).
+
+**ipaddress.py still does not build**, blocked by an INDEPENDENT,
+pre-existing gap in the SAME function, one statement earlier:
+`it = iter(addresses); first = last = next(it)` — a `MultiAssignStmt`
+(`a = b = expr`) inside a coroutine body. `_cpp_stmt`'s `MultiAssignStmt`
+case emits a bare assignment (`first = val; last = val;`) but never
+actually DECLARES `first`/`last` as real C++ locals (unlike the ordinary
+`AssignStmt` case, which hoists a declaration into `_cpp_func_scope_
+decls` on first use) — g++: `'first' was not declared in this scope`.
+Confirmed as a genuinely separate, tuple-yield-unrelated bug via a
+minimal repro (`a = b = 5; yield a; yield b` — no tuples at all) that
+reproduces the identical error. Not attempted here (a distinct,
+well-scoped `_cpp_stmt` gap, out of this session's scope).
+
+Doc kept open (not deleted) — tuple-yield is no longer this file's
+blocker, but the file genuinely still doesn't build; the previously-
+documented `@property`-bound-method/`format`/stray-backslash issues from
+the 2026-08-06/07 statuses below appear to be already fixed (not
+reproduced in the current whole-program error set, which now shows
+zero errors attributable to ipaddress.py's own code — only errors in
+transitively-imported files, same pattern as calendar.py's doc).
+
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real
