@@ -33519,7 +33519,7 @@ class GimpleGen:
                                 _set_elts = v.elements if isinstance(v, SetExpr) else []
                                 for elt in _set_elts:
                                     if isinstance(elt, StringLiteral):
-                                        inits.append(f'  mojo_set_add_str ({mangled}, "{elt.value}");')
+                                        inits.append(f'  mojo_set_add_str ({mangled}, "{_c_escape(elt.value)}");')
                                     elif isinstance(elt, IntLiteral):
                                         inits.append(f'  mojo_set_add_int ({mangled}, {elt.value});')
                                 class_attr_inits.extend(inits)
@@ -33529,7 +33529,7 @@ class GimpleGen:
                                 class_attr_inits.append(f"  {mangled} = mojo_list_new();")
                             elif isinstance(v, StringLiteral):
                                 ctype = 'char *'
-                                class_attr_inits.append(f'  {mangled} = "{v.value}";')
+                                class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')
                             elif isinstance(v, IntLiteral):
                                 ctype = 'int64_t'
                                 class_attr_inits.append(f'  {mangled} = {v.value};')
