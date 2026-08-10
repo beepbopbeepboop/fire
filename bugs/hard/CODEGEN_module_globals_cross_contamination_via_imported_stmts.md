@@ -310,3 +310,29 @@ renames it — task #141, explicitly out of scope for this session).
 Neither was attempted here — see `bugs/CODEGEN_generator_function_Lib_
 weakref.md`'s own updated "Not fixed" section for the full writeup and
 why the second one specifically was left alone.
+
+## Addendum (2026-08-09): this fix also resolved a sibling doc, discovered while re-verifying it
+
+`bugs/hard/CODEGEN_cross_module_bare_import_name_collision.md` (found
+independently the same day as this doc, "Track A") described the same
+`_global_to_module` map misdirecting a bare imported-module name's read
+(`glob.py`'s own `contextlib.closing(...)` resolving to `_subprocess_
+globals.contextlib` instead of falling through correctly) — and was
+left unfixed/deferred at the time, apparently because the two docs'
+authors weren't aware of each other's work in the same session. Mechanism
+3's `_lower_IdentExpr` owner-guard above (`_global_to_module.get(name)`
+either unset or equal to `self.module_name`) turns out to cover that
+exact read path too. Re-verified 2026-08-09: `glob.py`'s `_listdir`
+function no longer reads `_subprocess_globals.contextlib` at all (falls
+through to the safe placeholder, since it isn't the owner) — confirmed
+directly in the generated `.ci`. That sibling doc has been removed
+(`git rm`) as fixed; see its removal commit for the full evidence
+write-up. Note this fix only closes the READ-side case that doc
+described — the WRITE-side call sites still using the older
+`self._global_to_module.get(name, self._current_module_ctx or "root")`
+pattern without an equivalent owner-guard (e.g. the `global x; x = ...`
+reassignment-target routing around gimple_codegen.py's AssignStmt/
+AugAssign target-lowering) were NOT audited or touched here — a
+narrower, still-open, currently-hypothetical gap for a same-bare-name
+module-level-variable (not import-marker) collision reassigned via
+`global`, not confirmed to have any live repro.

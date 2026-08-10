@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Correction (2026-08-09, later same day): the line-175 error's root cause was misattributed
+
+The "updated 2026-08-09" note directly below (from an earlier commit
+the same day) claimed `bugs/hard/CODEGEN_cross_module_bare_import_name_
+collision.md`'s `_global_to_module` collision was "the real root cause
+of the line-175 error" and "still present and unfixed." A careful
+re-derivation (not just re-matching the same misleading `glob.py:175`
+GCC line number, which this doc's own earlier methodology note already
+warns is unreliable for this function) found this was wrong: the
+`_global_to_module` read-side misattribution for `contextlib`
+(glob.py's own `_listdir`, reading `_subprocess_globals.contextlib`)
+was ALREADY fixed as a side effect of `bugs/hard/CODEGEN_module_globals_
+cross_contamination_via_imported_stmts.md`'s "Mechanism 3" fix (commit
+`21f5f49`, landed before this doc's own "updated 2026-08-09" note was
+written — the note re-matched the symptom without re-verifying the
+mechanism still applied). Confirmed directly: stripping all `#line`
+directives from the generated `.ci` and recompiling shows GCC's real
+physical-line error is inside `_glob0_737363` (`_t8 =
+_join_abb124(_t5, _t7)` — assigning `_join_abb124`'s `char *` return
+into an `int64_t`-declared temp), NOT any `contextlib`/`_global_to_
+module` misattribution — a distinct, unrelated return-type-inference
+gap in codegen for a path-join-style helper call. Separately confirmed
+`_listdir_132aaf`'s own generated code no longer reads `_subprocess_
+globals.contextlib` at all (falls through to the safe "unknown
+identifier" placeholder, since it correctly recognizes it does not own
+that name). `bugs/hard/CODEGEN_cross_module_bare_import_name_collision.
+md` has been removed as fixed (see its own former content / this
+commit's message for the full evidence). glob.py itself still does not
+build — same practical bottom line — but for the `_join_abb124`
+return-type bug above (not yet investigated further) and the line-354
+`translate()` keyword-arg-arity gap already described below, not this
+one.
+
 ## Status (updated 2026-08-09, re-verified — unchanged)
 
 Re-verified against current master (post-merge `7df52a0`). Still fails
@@ -10,11 +43,8 @@ same lines:
 /Users/mrs/net/Python-3.14.6/Lib/glob.py:354:9: error: too few arguments to function 'translate_584a43'; expected 4, have 1
 ```
 Confirmed again: `MOJO_DEBUG=1` shows no "not eligible" refusal for any
-of glob.py's own generators, and `bugs/hard/CODEGEN_cross_module_bare_
-import_name_collision.md` (the real root cause of the line-175 error)
-is still present and unfixed (`gimple_codegen.py`'s `_global_to_module`
-first-registration-wins map, still shared/unqualified as of this
-commit). No change needed to the classification below.
+of glob.py's own generators. (See the correction above — the line-175
+root-cause claim in this section is superseded/wrong.)
 
 One addition: pinned down the second error (line 354,
 `translate_584a43` arity mismatch) precisely — it is NOT generator-
