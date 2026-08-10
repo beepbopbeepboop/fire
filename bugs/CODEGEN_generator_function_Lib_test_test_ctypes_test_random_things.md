@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (re-verified 2026-08-09, unchanged)
+
+Re-ran `python3 mojo.py build .../Lib/test/test_ctypes/test_random_things.py`
+against current master (140 commits past the 2026-08-07 note below). Fails
+identically:
+
+```
+test_random_things_gen.cpp:124:56: error: request for member 'unraisable'
+in 'cm', which is of non-class type 'int64_t' {aka 'long long int'}
+```
+
+(4 occurrences, same `cm.unraisable.*` member accesses.) Same root cause as
+before: `with support.catch_unraisable_exception() as cm:` inside a
+generator body — an untyped `with ... as` binding defaults to `int64_t`
+instead of its real context-manager struct type. Confirmed still the same
+`with`-binding variant of the broad, deliberately-untouched #147
+struct-typed-param-in-generator-body gap. No fix attempted, per this
+cluster's guidance to leave #147-shaped gaps alone.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild — reproduces

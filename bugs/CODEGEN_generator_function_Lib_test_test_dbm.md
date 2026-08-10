@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (re-verified 2026-08-09, unchanged classification, error count down further)
+
+Re-ran `python3 mojo.py build .../Lib/test/test_dbm.py` against current
+master (140 commits past the 2026-08-07 note below). Error count has
+dropped again, from 31 to **29**. `test_dbm.py`'s own generator (`yield
+mod`, line 34) still contributes zero errors and shows no "not eligible"
+refusal — its own translation unit only produces `-Wunused-*` warnings.
+All 29 remaining errors are still in transitively-imported dependency files
+(`Lib/test/support/__init__.py`, `import_helper.py`, `os_helper.py`),
+dominated by `assignment to 'int64_t' ... from 'char *' makes integer from
+pointer without a cast` (the same untyped-var-defaults-to-int64_t family
+noted elsewhere in this cluster, but on the ordinary/non-generator codegen
+path here). **Classification unchanged: NOT a generator-codegen-cluster
+failure.** Still out of scope for this cluster; not investigated further.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild. Still correctly
