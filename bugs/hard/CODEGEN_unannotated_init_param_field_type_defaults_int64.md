@@ -1,6 +1,26 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
-## Status (PARTIALLY FIXED 2026-08-08)
+## Status (re-verified 2026-08-09 — unchanged, still PARTIALLY FIXED)
+
+Re-ran both minimal repros against current master via `python3 mojo.py
+build <file>.py` + running the resulting binary:
+
+- Covered case (direct literal constructor argument — `class Widget:
+  def __init__(self, label): self.label = label` / `w =
+  Widget("hello")`): builds clean, runs, prints `hello` / `5` — correct.
+- Known-limitation case (same class, but constructed via an
+  already-inferred local variable instead of a literal — `s = "hello";
+  w = Widget(s)`): builds clean (no compile error) but the RUNNING
+  binary prints a raw pointer decimal (e.g. `4337521104`) and a nonsense
+  length (e.g. `6581285`) instead of `hello`/`5` — exactly the silent
+  wrong-value symptom the "Known limitation" section below describes,
+  unchanged.
+
+Both claims in this doc still hold exactly as documented. No code
+change made — extending the fix to the `IdentExpr`-argument case would
+require the pass-ordering rework the "Known limitation" section already
+flags as out of scope for a lightweight re-check, and this session's
+assignment was explicitly to re-verify only, not extend the fix.
 
 Both the comprehension sibling gap AND a scoped version of the main
 `IdentExpr`/param fix are now fixed. The main fix's scope is narrower
