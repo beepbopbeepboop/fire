@@ -1,5 +1,52 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-09 — RECLASSIFIED: `scan_opcodes`'s tuple-valued yield is now the blocking error)
+
+Re-verified against current master (`5ba7d4b`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/modulefinder.py`.
+The build now fails immediately, before reaching any GCC-stage error
+(i.e. before the `_quick_type` fix documented just below even gets a
+chance to matter), on a hard Python-level `RuntimeError` from
+`gen_module` (`gimple_codegen.py:30968`):
+
+```
+Error building: cannot compile module: function(s) scan_opcodes
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
+```
+
+This is exactly the tuple-of-heterogeneous-arity-yield shape the
+2026-08-06 section below already identified in `scan_opcodes` (lines
+393-403: `yield "store", (name,)` / `yield "absolute_import", (fromlist,
+name)` / `yield "relative_import", (level, fromlist, name)`) — confirmed
+again by re-reading the source. This is the same well-known,
+already-tracked structural gap as `ipaddress.py`'s `_find_address_range`
+and `mailbox.py`'s `iteritems` (see those bug docs' 2026-08-09 updates):
+coroutine promises only support a single scalar, and
+`_infer_generator_yield_ctype`'s `TupleExpr` branch at
+`gimple_codegen.py:2699-2724` now honestly refuses rather than
+mis-emitting broken C++.
+
+This supersedes the "ONE error remained" claim in the 2026-08-07 section
+below: that section's testing was done when `scan_opcodes` was
+apparently still eligible under a weaker tuple-yield check (or wasn't
+yet reached before other passes ran), so the module compiled far enough
+to hit the `find_all_submodules` `_quick_type` bug and the `self.msg`
+`*args` bug at GCC stage. A later session's work (visible in current
+`gimple_codegen.py`) tightened the tuple-yield eligibility check, so
+`scan_opcodes` now correctly aborts the whole-module compile before
+either of those two are reached.
+
+**The `_quick_type` `.keys()`/`.values()`/`.items()` fix described below
+is still landed and still correct** (verified present in current
+`gimple_codegen.py`'s `_quick_type`, around the `CallExpr`-on-`MemberExpr`
+branch) — it's just no longer the *blocking* error for a full-module
+build of this file, since `scan_opcodes`'s tuple-yield refusal now fires
+first. **Classification: matches the tracked "tuple-valued yield"
+structural generator-codegen gap** — out of scope for a narrow fix per
+this task's guidance. Not attempted here.
+
 ## Status (updated 2026-08-07 — `_quick_type` `.keys()`/`.values()`/`.items()` case FIXED)
 
 Re-verified against current master: the `struct _subprocess_toplev`/
