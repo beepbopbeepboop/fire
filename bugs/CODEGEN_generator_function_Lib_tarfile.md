@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-09)
+
+Re-verified again against current master with a fresh real rebuild
+(`MOJO_DEBUG=1 python3 mojo.py build .../Lib/tarfile.py`, real
+`gcc-mp-15`/`g++-mp-15` via `mojo.py`'s own resolution — not a hand
+invocation). Classification UNCHANGED: **NOT a generator-codegen-cluster
+failure**. Confirmed via `MOJO_DEBUG=1`: all 3 of tarfile.py's own
+generator sites (`TarFile.__iter__`'s `yield from self.members` /
+`yield tarinfo` x2, lines 2999/3011/3024) — no "not eligible" refusal
+logged for any of them; every "not eligible" line in this build's debug
+output names a generator/async function in a DIFFERENT, transitively-
+imported module (e.g. `ItemsView.__iter__`, `_unpack_opargs`,
+`findlinestarts`, `Flag._iter_member_by_value_`, `WeakValueDictionary.
+items`, `iter_fields`), never `TarFile.__iter__` or anything else from
+tarfile.py itself.
+
+The error set has shifted again since the last note: the previous
+`:1863:1`/`:2403:1` "non-trivial conversion in 'var_decl'" pair is GONE
+(both those source lines now only produce ordinary unused-variable/
+unused-label warnings), replaced by one new error:
+```
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2418:27: error: unexpected RHS for assignment before ';' token
+```
+at `return _NAMED_FILTERS[filter]` inside a `try:`/`except KeyError:`
+(`TarFile._get_extraction_filter`) — a dict-subscript **read** inside a
+`return` inside a `try` body. (Note: this is a different shape from the
+dict-subscript *augmented-assignment* mis-codegen fixed by commit
+`0b6394a`/"Fix bug31" just before this session started — that fix was
+for `dict[k] += v`; this is a plain `return dict[k]` inside try/except.
+Not investigated further — out of scope for this generator-codegen
+pass.) The rest of the previously-documented error set is unchanged:
+```
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:149:26: error: assignment to 'char *' from 'int' makes pointer from integer without a cast [-Wint-conversion]
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:151:26: error: assignment to 'char *' from 'int' makes pointer from integer without a cast [-Wint-conversion]
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:754:7: error: 'SpecialFileError' has no member named 'tarinfo'
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2035:3: error: implicit declaration of function 'bz2_BZ2File___init__'
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2040:3: error: implicit declaration of function 'bz2_BZ2File_mojo_close'
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2063:3: error: implicit declaration of function 'lzma_LZMAFile___init__'
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2068:3: error: implicit declaration of function 'lzma_LZMAFile_mojo_close'
+```
+Still none of these are inside tarfile.py's own generator bodies. Not
+investigated further here — same out-of-scope non-generator issues
+(exception-subclass attribute, conditional `import bz2`/`import lzma`
+symbol resolution, dict-subscript-in-try codegen) as previously noted.
+No code change made in this pass.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild. Still correctly
