@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/runtests.py
 
+## Status (updated 2026-08-09, re-verified against current master `b48a941`)
+
+Re-ran `python3 mojo.py build .../runtests.py` fresh. Bullet 2 (below)
+remains fixed — confirmed no `MojoList*`-conversion errors. **Bullet 1
+is still open, unchanged, exact same 2 errors**:
+```
+runtests_gen.cpp:142:11: error: 'sys' was not declared in this scope
+runtests_gen.cpp:142:59: error: 'JsonFileType' was not declared in this
+scope; did you mean 'JsonFile'?
+```
+Both come from `JsonFile.inherit_subprocess` (a
+`@contextlib.contextmanager`-decorated generator method, line 44):
+`if sys.platform == 'win32' and self.file_type == JsonFileType.
+WINDOWS_HANDLE:` references the `sys` MODULE and the top-level
+`JsonFileType` class, neither of which this codegen threads into a
+generator body's C++ coroutine scope (only params/self/locals are —
+see `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s bullet 4, the same
+gap this doc already classified it under). Confirmed still structural,
+not a narrow single-spot fix: correctly resolving an arbitrary
+outer-scope name (any imported module, or any top-level class used for
+its own attributes/constants) inside a generator's separately-
+generated coroutine translation unit would need real symbol-table
+threading from the enclosing module scope into every `_gen_cpp_
+generator_unit`/`_gen_cpp_async_unit` call site, not a stub case. No
+fix attempted here, consistent with this doc's own prior guidance.
+
 ## Status (updated 2026-08-07 — bullet 2 (`yield from self.<MojoList* field>`) FIXED)
 
 Re-verified against current master, then fixed bullet 2 from the
