@@ -1,6 +1,60 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (`3d36ccd`) via `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/calendar.py`. The comprehension-return-
+type fix below is confirmed still in effect (no "non-trivial conversion"/
+"type mismatch" errors), but the whole-program build now fails earlier,
+with a clean, honest refusal instead of a GCC error:
+
+```
+Error building: cannot compile module: function(s) itermonthdays2,
+itermonthdays3, itermonthdays4 (generator function(s), contain a
+`yield`/`yield from`) — this codegen compiles every function into a
+single straight-line C function and has no suspend/resume state-machine
+transform for generators, nor an event loop / suspend-resume codegen for
+async functions, yet, so these cannot be represented as compiled C
+without emitting silently wrong or broken code; falling back to
+interpreting this module from source instead
+```
+
+**Root cause: this is the known, already-documented "tuple-valued
+`yield`" sub-gap** (`_generator_yield_ctype` in `gimple_codegen.py`,
+~line 2647): the C++20-coroutine promise type this codegen emits for a
+generator only supports a single scalar value (`int64_t`/`double`/
+`_Bool`/`char *`), and `_generator_yield_ctype`'s own `YieldExpr` case
+explicitly detects a `TupleExpr` yield value and returns `None` (by
+design — see the long comment at that call site, which cites this exact
+family of bug as its rationale) so the caller (`_gen_cpp_generator_unit`)
+raises `_UnsupportedGeneratorShape`, correctly falling the whole method
+back to "not eligible for the C++ coroutine path" rather than emitting
+invalid/miscompiled C++.
+
+Confirmed against `calendar.py`'s real source
+(`Calendar.itermonthdays2`/`itermonthdays3`/`itermonthdays4`, lines
+240-272):
+- `itermonthdays2`: `yield d, i % 7` — a 2-tuple.
+- `itermonthdays3`: `yield y, m, d` — a 3-tuple.
+- `itermonthdays4`: `yield y, m, d, (self.firstweekday + i) % 7` — a
+  4-tuple.
+
+`itermonthdates`/`itermonthdays` (lines 219-238), which yield a single
+scalar/struct value each (`yield datetime.date(y, m, d)` /
+`yield from repeat(...)` / `yield from range(...)`), are NOT affected —
+confirmed absent from the current refusal list, consistent with the
+"Calendar's OWN generator methods now compile cleanly" note from the
+2026-08-06 status below, which only ever covered the non-tuple-yield
+methods.
+
+Per this session's mandate for the generator/coroutine family: this is
+an already-known, out-of-scope structural gap (no tuple-yield
+representation in the coroutine promise), not attempted here. Not
+fixed — doc kept and updated with the precise confirming instance per
+the standing "check fresh, update accurately" instruction for this
+family.
+
+## Status (updated 2026-08-07, superseded above)
 
 **Classification bug FIXED** (`bugs/hard/CODEGEN_comprehension_return_
 type_defaults_int64.md`, task #145) — `_quick_type` now has a
