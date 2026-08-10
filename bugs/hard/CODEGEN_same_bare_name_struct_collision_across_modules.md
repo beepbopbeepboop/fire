@@ -1,5 +1,23 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+## Status (re-verified 2026-08-09 — unchanged, still deprioritized/not fixed)
+
+Re-ran both named repros again against current master via plain
+`python3 mojo.py build <file>.py`:
+
+- `Lib/tkinter/filedialog.py` — still builds clean (exit 0, no
+  struct-collision errors in the compile log).
+- `Lib/tkinter/simpledialog.py` — still builds clean (exit 0, same).
+
+No change from the 2026-08-08 assessment below — both real-world
+triggers still go through `driver.py`'s link-mode path (each imported
+module its own translation unit), so the collision this doc describes
+remains structurally unreachable on the primary `mojo.py build` entry
+point for these two files. The underlying `do_imports=True` inline-path
+gap itself was not re-derived or re-attempted here (lightweight
+re-check only, per this session's assignment) — the 2026-08-08 analysis
+below still stands.
+
 ## Status (reassessed 2026-08-08 — deprioritized, not fixed)
 
 Re-verified both originally-confirmed real-world triggers against current
