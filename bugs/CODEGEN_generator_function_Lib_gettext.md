@@ -1,5 +1,65 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-09)
+
+Re-verified against current master (post-merge `7df52a0`). Still fails,
+still NOT a generator-codegen-cluster failure — `gettext.py`'s one
+generator (`_expand_lang`, `yield value`/`yield ''`) again shows up ONLY
+in the warnings section of the build log (`_expand_lang_584a43`), no
+errors, no `MOJO_DEBUG=1` "not eligible" refusal. Confirms the
+2026-08-07 reclassification still holds.
+
+Current error list has shifted again (line numbers move release to
+release as unrelated fixes land elsewhere in the stack):
+```
+gettext.py:208:23 error: passing argument 1 of 'mojo_strlen' makes pointer from integer without a cast
+gettext.py:217:25 error: passing argument 1 of '_mojo_at_char' makes pointer from integer without a cast
+gettext.py:472:1  error: invalid types for 'trunc_mod_expr'   (npgettext's `self.CONTEXT % (context, msgid1)`)
+gettext.py:485:1  error: invalid types for 'trunc_mod_expr'   (npgettext's `self.CONTEXT % (context, msgid1)`, 2nd call site)
+gettext.py:554:10 error: too many arguments to function 'mojo_open_file'; expected 1, have 2
+gettext.py:114:10 error: too many arguments to function 'mojo_enumerate'; expected 1, have 2
+gettext.py:843:46 error: stray '\' in program / missing terminating ' character / expected ';' ...
+```
+The 208/217 pair is one root cause, not two: `c2py()`'s `result, nexttok
+= _parse(_tokenize(plural))` (line 203) then `for c in result:` (line
+208) — `result`'s inferred type collapses to a scalar (`int64_t`-ish)
+instead of the real string/sequence type `_parse` returns, so both the
+`mojo_strlen` call (line 208's `for` iteration) and `_mojo_at_char`
+(line 217's `elif c == ')'`-adjacent codegen) get fed an int where a
+`char *` is expected — matches the previously-documented "untouched"
+208 line, now confirmed to have a sibling symptom at 217 from the same
+cause. 472/485 are the SAME dynamic-`%`-format-string gap already
+called out as deliberately out-of-scope. 554 (`mojo_open_file` 1-vs-2
+arg — `open(mofile, 'rb')`, the mode string isn't modeled) is confirmed
+still real and, per the note below, IS the same recurring gap suspected
+in `turtle.py`'s re-diagnosis: `gimple_codegen.py`'s `mojo_open_file`
+runtime shim (declared at line ~32669: `int64_t mojo_open_file(char
+*path);`) only ever takes a path, never a mode — a systemic modeling
+gap (would need runtime.c changes + mode-string handling), not a narrow
+one-line fix. NEW this pass: `mojo_enumerate` has the identical 1-vs-2-
+arg gap for the `start` parameter (`enumerate(_binary_ops, 1)` at line
+114, a plain dict-comprehension, not generator-related) — same shape of
+bug, different builtin.
+
+`gettext.py:843` is a confirmed **red herring**, same #line-stamping
+artifact documented in `glob.py`'s doc: `gettext.py` is only 657 lines
+long, so line 843 cannot be real source. Checking the cached `.ci`
+confirms the last `#line` stamp for `gettext.py` is `#line 657
+"...gettext.py"`, immediately followed by unstamped code from a
+transitively-imported module (`textwrap.py`'s `TextWrapper` — the
+`_classattr_TextWrapper__letter` identifier in the error is textwrap's,
+not gettext's). Not gettext.py's bug at all; mis-attributed by GCC's
+line counter continuing past the last stamp.
+
+**Classification unchanged: NOT a generator-codegen-cluster failure.**
+Remaining errors are a small cluster of distinct, non-narrow, non-
+generator gaps (a `_parse()`-return-type inference bug, the known %-
+format gap, and TWO builtins — `open()`/`enumerate()` — missing their
+optional second argument in the runtime shim). None attempted here —
+out of scope for this generator-codegen pass; `mojo_open_file`'s gap in
+particular looks worth its own dedicated non-generator bug doc given it
+now has 2 confirmed sightings (gettext.py, turtle.py).
+
 ## Status (updated 2026-08-07)
 
 Of the 4 errors listed below, the `gettext.py:445:1: error: invalid
