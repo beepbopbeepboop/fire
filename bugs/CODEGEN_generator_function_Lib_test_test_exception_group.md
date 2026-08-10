@@ -1,5 +1,50 @@
 # CODEGEN_generator_function: Lib/test/test_exception_group.py
 
+## Status (updated 2026-08-09)
+
+Re-verified against current master (`42faf64`) with a real
+`MOJO_DEBUG=1 python3 mojo.py build`. The recursive-`yield-from`
+classification below (task #138, `bugs/hard/
+CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`) is
+confirmed to remain fixed — no cascade of malformed declarations.
+
+The refusal `leaf_generator` now hits has changed and is cleaner than
+what's described below: it's now refused up front, purely on the
+tuple-valued `yield exc, tbs` at the very end of its body:
+```
+[gimple_codegen] generator 'leaf_generator' not eligible for C++ coroutine
+path, falling back to honest refusal: leaf_generator: every `yield` must
+carry a value, and all values must agree on one scalar type
+(int64_t/double/_Bool)
+```
+This is a clean, honest, CORRECT refusal — not a miscompile or cascade —
+from `_infer_generator_yield_ctype`'s `TupleExpr` branch in
+`gimple_codegen.py` (currently ~line 2699-2724): a multi-element `yield
+a, b` has no representation in this generator-body model's single-scalar
+promise type, and the function deliberately returns `None` (triggering
+the same graceful "not eligible" fallback every other unsupported shape
+gets) rather than letting the tuple sail through to `_cpp_stmt` and emit
+invalid C++.
+
+This is the **single most common gap across the whole
+`CODEGEN_generator_function_Lib_*` doc family** (per this task's
+briefing) — also hit by, at least, `Lib/dis.py`, `Lib/ftplib.py`,
+`Lib/pkgutil.py`, and `Lib/test/libregrtest/save_env.py`. It is
+correctly classified as structural, not narrow: fixing it for real means
+threading a real N-scalar (or boxed-tuple) `co_yield` payload type
+through the whole coroutine promise/emission machinery
+(`_infer_generator_yield_ctype`, the promise-type declaration, every
+`_cpp_stmt` `YieldExpr` case, and the caller-side resume/value-extraction
+API) — not a one-spot stub or missing-case fix. Not attempted here, per
+this task's guidance to not force a fix on confirmed-structural gaps.
+
+`leaf_generator`'s other previously-noted sibling gaps (`tbs.append(...)`
+on an untyped param, `exc.__traceback__`/`exc.exceptions` attribute
+access) are moot for this file now — the tuple-yield refusal fires
+first, before those statements are ever reached by `_cpp_stmt`.
+
+No code change made for this bug.
+
 ## Status (updated 2026-08-07)
 
 **Classification bug FIXED for the reported symptom** (`bugs/hard/
