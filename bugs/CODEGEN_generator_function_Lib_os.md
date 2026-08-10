@@ -1,5 +1,64 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
+
+Re-verified against current master (`c79a013`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`. The
+build now fails IMMEDIATELY, on `os.py`'s OWN top-level module compile
+(`gen_module`, before any transitive-closure/GCC-stage work is even
+reached), with a hard Python-level `RuntimeError`:
+
+```
+Error building: cannot compile module: function(s) _fwalk, walk
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
+```
+
+`MOJO_DEBUG=1` confirms the precise refusal reason for both:
+
+```
+[gimple_codegen] generator 'walk' not eligible for C++ coroutine path,
+  falling back to honest refusal: walk: every `yield` must carry a
+  value, and all values must agree on one scalar type
+  (int64_t/double/_Bool)
+[gimple_codegen] generator '_fwalk' not eligible for C++ coroutine path,
+  falling back to honest refusal: _fwalk: every `yield` must carry a
+  value, and all values must agree on one scalar type
+  (int64_t/double/_Bool)
+```
+
+Root cause, confirmed by reading the source: `walk()` (os.py:364-418)
+has `yield top` (a scalar, line 364, the `topdown=False` post-order
+case) AND `yield top, dirs, nondirs` (a real 3-element **tuple-valued
+yield**, line 418, the `topdown=True` case) — two yield statements in
+the same generator that don't even agree on arity, let alone type.
+`_fwalk()` (os.py:465-551) similarly has `yield value` (line 501,
+where `value` is itself a 4-tuple assigned earlier via
+`stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))`) and
+`yield toppath, dirs, nondirs, topfd` directly (line 551, a real
+4-element tuple yield).
+
+This is the well-known, already-tracked structural gap for this
+generator-codegen family: the coroutine promise only supports a single
+scalar `int64_t`/`double`/`_Bool`/`char *` yield type — see
+`_infer_generator_yield_ctype`'s explicit `TupleExpr` handling at
+`gimple_codegen.py:2699-2724`, which deliberately returns `None`
+(refuse) rather than let a tuple yield sail through to broken C++
+emission. **Classification: matches the tracked "tuple-valued yield"
+structural generator-codegen gap** — out of scope for a narrow fix per
+this task's guidance. Not attempted here.
+
+This refusal happens strictly BEFORE the module-qualification fix
+(`_gen_cpp_generator_unit`'s `_func_qualifier`-based symbol naming) and
+the `relpath`-ambiguity issue documented below ever get exercised for
+this file — `os.py`'s own top-level compile now aborts on its own two
+generators before any transitive-closure linking is attempted, so
+those two previously-documented issues are currently unreachable/moot
+for `os.py` specifically (they may still be real for other files, not
+re-verified here). The below status entries are kept for history but
+no longer describe the current blocking error.
+
 ## Status (updated 2026-08-07)
 
 **Classification bug FIXED** (`bugs/hard/CODEGEN_generator_function_
