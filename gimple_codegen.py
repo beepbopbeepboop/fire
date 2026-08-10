@@ -19169,6 +19169,23 @@ class GimpleGen:
             if raw_name == 'len' and len(node.value.args) == 1:
                 self._lower_builtin_len(node.value)
                 return
+            # A bare, value-discarding `list(x)` / `tuple(x)` statement
+            # (e.g. `tuple(g())` used to force/drain a generator for its
+            # side effects — Lib/test/crashers/gc_inspection.py). Without
+            # this, `list`/`tuple` fell all the way to the generic
+            # call-building path below, which maps the builtin name straight
+            # to `mojo_make_list`/`mojo_make_tuple` (the 0-ARG empty-
+            # container constructors, per BUILTIN_VALUE_MAP) with no regard
+            # for the actual argument — "too many arguments to function
+            # 'mojo_make_tuple'; expected 0, have 1". `_lower_builtin_list`
+            # (the value-CONSUMING twin every other `list()`/`tuple(<=1 arg)`
+            # call site already routes through at `_lower_call`'s own
+            # `fname_raw in ('list', 'tuple')` check) has the real
+            # iterable-conversion lowering; reuse it here and simply discard
+            # its result, mirroring the identical `len` fix just above.
+            if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
+                self._lower_builtin_list(node.value)
+                return
             # Recursive call from inner function to itself
             if raw_name == self._inner_func_name and self._env_param:
                 lifted   = self.current_func_name
