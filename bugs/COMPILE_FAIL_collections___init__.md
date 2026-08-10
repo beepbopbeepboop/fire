@@ -2,6 +2,47 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (re-verified 2026-08-09 against master `d3d4c68`)
+
+Still reproduces, still stops at the same earlier blocker as the
+2026-08-07 update below, and `MOJO_DEBUG=1` now pins the exact cause
+down precisely (this wasn't captured before):
+
+```
+[gimple_codegen] generator method _OrderedDictItemsView.'__reversed__'
+  not eligible for C++ coroutine path, falling back to honest refusal:
+  __reversed__: every `yield` must carry a value, and all values must
+  agree on one scalar type (int64_t/double/_Bool)
+```
+
+The actual source (`_OrderedDictItemsView.__reversed__`,
+`collections/__init__.py:76-78`):
+
+```python
+def __reversed__(self):
+    for key in reversed(self._mapping):
+        yield (key, self._mapping[key])
+```
+
+This is a plain instance of the already-documented, already-structural
+**tuple-valued `yield` in a generator** gap (the current coroutine
+promise design only supports a single scalar `int64_t`/`double`/`_Bool`
+yield type; `_infer_generator_yield_ctype` deliberately returns `None`
+for a `TupleExpr` yield value). Not narrow, not attempted here — same
+class of gap as `bugs/COMPILE_FAIL_asyncio_futures.md`'s
+value-carrying-`return` refusal (both are "the coroutine promise type
+can't represent this value shape" gaps in the same shared machinery).
+`_OrderedDictKeysView.__reversed__` (`yield from reversed(...)`) and
+`_OrderedDictValuesView.__reversed__` (`yield self._mapping[key]`,
+single scalar-ish value) are NOT the blocker — only the tuple-yielding
+`_OrderedDictItemsView.__reversed__` is.
+
+Because this blocker occurs before all three issues in the
+2026-08-06 section below are reached, whether those are still live
+remains unconfirmed (same caveat as the 2026-08-07 update — not
+re-checked, would require fixing or patching around this generator
+limitation first, out of scope for a structural gap).
+
 ## Status (re-verified 2026-08-07, Track B continuation session)
 
 A fresh build now stops EARLIER than all three issues below, at an
