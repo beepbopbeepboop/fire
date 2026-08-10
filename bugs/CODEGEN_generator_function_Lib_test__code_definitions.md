@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-09)
+
+Re-verified against current master with a fresh real rebuild
+(`MOJO_DEBUG=1 python3 mojo.py build .../Lib/test/_code_definitions.py`,
+real `gcc-mp-15`/`g++-mp-15` via `mojo.py`'s own resolution). Reproduces
+byte-for-byte identically to the 2026-08-06 note below, same message,
+same `RuntimeError`:
+```
+[gimple_codegen] async generator 'asyncgen_spam' not eligible for C++ coroutine path, falling back to honest refusal: asyncgen_spam: *args/**kwargs parameters not supported for compiled async generators
+Error building: cannot compile module: function(s) asyncgen_spam (async generator function(s), ...) — falling back to interpreting this module from source instead
+```
+Confirmed by reading `_gen_cpp_async_generator_unit`
+(`gimple_codegen.py:27322`) directly: the `*args`/`**kwargs` refusal is
+unconditional and, per that method's own docstring, DELIBERATE — a
+documented scope boundary ("Scope is kept parameter-less anyway... not
+because the repro found trouble, but because there is no need to widen
+scope beyond this step's one target shape... to close out the project"),
+not an oversight. This is correctly classified as a known,
+intentionally-scoped structural gap (the same family as
+`bugs/hard/CODEGEN_generator_struct_typed_param_refused.md`), not a
+narrow bug — no code change made in this pass.
+
 ## Status (updated 2026-08-06)
 
 **STILL FAILING**, confirmed reproducing against current master
