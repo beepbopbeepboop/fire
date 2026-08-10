@@ -1,5 +1,15 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-09)
+
+Re-verified again against current master (`42faf64`) with a real
+`MOJO_DEBUG=1 python3 mojo.py build`: still reproduces byte-for-byte
+identically (same `unsupported statement in generator body: StructDef`
+refusal on `fake_pip`). No relevant `_cpp_stmt`/`StructDef` handling has
+been added since the prior verification. Classification and disposition
+unchanged from below — genuinely feature-sized, not a narrow fix, not
+attempted.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild — reproduces
