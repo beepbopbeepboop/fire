@@ -25,3 +25,47 @@ compiled-generator/async-codegen project (tasks #95-135) — not
 investigated further here per that project's scope.
 
 Exit code: 1
+
+### Re-verified 2026-08-09 against master `6feddbf` — reproduces, precise root cause confirmed
+
+`MOJO_DEBUG=1` pinpoints the exact refusal reason (previously not
+captured):
+
+```
+[gimple_codegen] generator method Future.'__await__' not eligible for
+  C++ coroutine path, falling back to honest refusal: `return <value>`
+  inside a generator is not supported (a generator's `return` ends
+  iteration with no value, unlike an ordinary function's `return`)
+```
+
+Reading the actual source (`futures.py:292-298`):
+
+```python
+def __await__(self):
+    if not self.done():
+        self._asyncio_future_blocking = True
+        yield self  # This tells Task to wait for completion.
+    if not self.done():
+        raise RuntimeError("await wasn't used with future")
+    return self.result()  # May raise too.
+```
+
+Root cause (`gimple_codegen.py`'s `_cpp_stmt`, `ReturnStmt` case,
+~line 24664): a generator's C++20 coroutine promise type in this
+codegen has no channel for a Python generator's `return <value>`
+(which in real Python semantics raises `StopIteration(value)` to the
+driving `next()`/`.send()` call — the exact mechanism `yield from`/
+`await` protocol implementations rely on to hand back a final result,
+as this file's `__await__` does with `self.result()`). The coroutine
+promise's `return_void()` only supports a bare `return`/fall-off-the-
+end; a value-carrying `return` is refused outright rather than risk
+emitting C++ that silently drops the value. This is the SAME class of
+gap as the already-tracked tuple-valued-yield refusal
+(`_infer_generator_yield_ctype`'s deliberate `None` return for
+`TupleExpr`) — a shape the current single-scalar-yield coroutine
+promise design genuinely cannot represent, not a missing case in an
+otherwise-adequate lowering. Threading a real "return value" channel
+through the promise type (plus every `yield from`/`await`-composition
+call site that would need to actually consume it) is a broad change to
+shared coroutine-promise machinery, not a narrow fix — matches this
+project's structural-gap classification. Not attempted here.

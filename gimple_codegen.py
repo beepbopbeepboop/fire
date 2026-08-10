@@ -2536,6 +2536,20 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if e.func.name in ('str', 'repr', 'os.path.join', 'os.path.basename',
                            'os.path.dirname', 'os.path.splitext'):
             return 'char *'
+        # `len()`/`ord()` always return a plain int regardless of their
+        # argument's type — unlike every other builtin call, their result
+        # type needs no argument-type inspection at all, so they're safe to
+        # recognize unconditionally here (narrow fix — see
+        # bugs/COMPILE_FAIL_Apple___main__.md: Apple/__main__.py's `group()`
+        # generator has `print(f"..." + "=" * (70 - len(text)))`; the
+        # nested `len(text)` fell through this whole function to the `None`
+        # "don't know" default, which poisoned the enclosing `-`/`*`/`+`
+        # BinaryOp chain to `None` too, and the print()-argument-type check
+        # in `_cpp_stmt` treats `None` as "not a scalar, refuse the whole
+        # generator" — even though the actual runtime value is an ordinary
+        # char* string).
+        if e.func.name in ('len', 'ord'):
+            return 'int64_t'
         if known is not None and e.func.name in known:
             return known[e.func.name]
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):

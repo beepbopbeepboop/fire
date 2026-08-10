@@ -27,6 +27,21 @@ This is an async/generator codegen refusal, part of the separate,
 already-tracked compiled-generator/async-codegen project (tasks
 #95-135) — not investigated further here per that project's scope.
 
+### Re-verified 2026-08-09 against master `6feddbf` — still accurate
+
+Reproduces byte-for-byte identical to the block above. `MOJO_DEBUG=1`
+confirms these functions never even reach the per-function "not
+eligible for C++ coroutine path" attempt (no debug line emitted for
+any of them) — `_async_quick_eligible`'s cheap pre-filter silently
+rejects them first, because their bodies `await` shapes outside its
+recognized whitelist (`asyncio.sleep(<seconds>)`, `sock_recv`, a call
+to another already-compiled `async def`, or `create_task(...)`):
+`android.py` awaits `asyncio.create_subprocess_exec(...)`,
+`process.communicate()`, `process.wait()`, `stream.readexactly(...)`,
+and a local `wait_for(...)` helper — none recognized. Confirmed
+structural (this codegen deliberately has no general subprocess/stream
+async-I/O composition yet), no narrow fix available. Doc kept as-is.
+
 ```
 Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
 /Users/mrs/net/Python-3.14.6/Android/android.py: In function '_alloc_LogPriority':
