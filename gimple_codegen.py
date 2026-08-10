@@ -7205,6 +7205,7 @@ class GimpleGen:
                 if mod == 're' and meth == 'match':  return 'int'
                 if mod == 're' and meth == 'search': return 'int'
                 if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
+                if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
                 if mod == 'sys': return 'int'
                 # dict.keys()/.values()/.items(): _lower_dict_method (below)
                 # lowers all three to a real `MojoList *` (mojo_dict_keys/
@@ -11404,6 +11405,30 @@ class GimpleGen:
                     arg_val = self._new_val('MojoList *', f'(MojoList *){arg_val}')
                 t = self._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
                 return 'char *', t
+
+            # sysconfig.get_config_var(name) — real Python signature returns
+            # `str | None` (the build-config value for `name`, e.g.
+            # "BUILD_GNU_TYPE"/"BUILD_DIR"), never int. Not previously
+            # modeled anywhere in this codegen at all (no _KNOWN_SIGS/
+            # module-dispatch entry) — the whole `module_name == 'sysconfig'`
+            # shape simply fell through every case in this if/elif chain to
+            # the generic unresolved-module-call default (int64_t), so a
+            # value that's genuinely a pointer at runtime got typed as a
+            # scalar. That's silently wrong on its own, and a hard
+            # `-fgimple` "invalid operands to binary /" error the moment the
+            # result feeds a pathlib `/` join (real repro: Tools/wasm/wasi/
+            # __main__.py's module-level `BUILD_DIR = CROSS_BUILD_DIR /
+            # sysconfig.get_config_var("BUILD_GNU_TYPE")`). This codegen has
+            # no real sysconfig data (that's a whole separate, much bigger
+            # "model libpython's build config" project) — stub to an empty
+            # string via the same `_stub_result` convention every other
+            # not-really-implemented-but-correctly-typed call in this file
+            # uses, rather than pretending to implement it.
+            if module_name == 'sysconfig' and method_name == 'get_config_var':
+                for _a in node.args:
+                    self.lower_expr(_a)
+                return self._stub_result('char *', self._intern_string(''),
+                                          'sysconfig.get_config_var() stubbed')
 
             if (module_name == 'gimple_codegen' and method_name in (
                     'compile_to_gimple', 'compile_to_gimple_cached')):

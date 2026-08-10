@@ -4,102 +4,80 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-06)
+## Status (updated 2026-08-09)
 
-Re-ran; THREE distinct issues:
+Re-verified fresh. Of the three originally-reported issues, 1 and 3 are
+now resolved (1 by an earlier session's `try`/`except ImportError`
+mechanism fix; 3 fixed in this session); issue 2 remains open and is
+the only thing still blocking this file.
 
-```
-error: redefinition of 'cpu_count'
-error: invalid call to non-function before ';' token
-error: invalid operands to binary / (have 'char *' and 'int64_t')
-```
+1. **FIXED** (earlier session): `redefinition of 'cpu_count'` from
+   `try: from os import process_cpu_count as cpu_count / except
+   ImportError: from os import cpu_count` no longer reproduces — the
+   `try`/`except ImportError` fallback mechanism fix
+   (`bugs/hard/CODEGEN_try_except_import_fallback_both_branches_
+   compiled.md`) landed and covers this file's instance too (confirmed
+   via a fresh `python3 mojo.py build`; sibling file `Tools/ssl/
+   multissltests.py` was independently re-verified clean earlier this
+   session as well).
 
-1. `redefinition of 'cpu_count'` — `try: from os import
-   process_cpu_count as cpu_count / except ImportError: from os import
-   cpu_count`. Root-caused as a new hard bug (confirmed via a SECOND
-   independent instance, `Tools/ssl/multissltests.py`'s `urlopen`):
-   `bugs/hard/CODEGEN_try_except_import_fallback_both_branches_compiled.md`.
+2. **STILL OPEN** — `invalid call to non-function before ';' token`,
+   two call sites:
+   - `def subdir(working_dir, *, clean_ok=False): ... def wrapper
+     (context): nonlocal working_dir; if callable(working_dir):
+     working_dir = working_dir(context)` (~line 104) — `working_dir` is
+     an unannotated parameter that is SOMETIMES a plain value
+     (a `pathlib.Path`, later used as `working_dir.exists()`) and
+     SOMETIMES a zero-arg callable returning one (`context ->
+     Path`); real Python discriminates at runtime via `callable(...)`.
+   - `def build_steps(*steps): def builder(context): for step in
+     steps: step(context)` (~line 408) — same root cause: `step` is an
+     element of an unannotated `*args` tuple, called as a function.
+   Both are the SAME gap: this codegen's cross-call type-inference
+   pass for unannotated free-function params ("Pass 1.3d", see
+   `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_
+   int64.md`'s "Why this doesn't affect free functions the same way"
+   section) only recognizes SCALAR contracts (`double`/`char *`); a
+   callable-typed parameter isn't one of those, so both `working_dir`
+   and `step` still default to `int64_t`, and calling that int64_t
+   value as a function fails ("invalid call to non-function").
+   Confirmed via a fresh re-run this session — not investigated
+   further given this session's continued caution around Pass 1.3d
+   (shared call-argument-lowering/type-inference machinery whose
+   narrow-looking edits have previously caused broad silent
+   regressions elsewhere in this codebase — the "_tuplegetter
+   incidents"). A real fix would need a genuinely new "always called as
+   a function value" contract kind recognized by that same shared pass,
+   not a local one-line change — classified as structural, not narrow.
 
-2. `invalid call to non-function` at `def subdir(working_dir, *,
-   clean_ok=False): ... working_dir = working_dir(context)` —
-   `working_dir` is an unannotated parameter whose real call-site
-   argument is a CALLABLE (a function value), not a scalar. This
-   codebase's existing cross-call type-inference pass for unannotated
-   free-function params ("Pass 1.3d", see `bugs/hard/
-   CODEGEN_unannotated_init_param_field_type_defaults_int64.md`'s "Why
-   this doesn't affect free functions the same way" section) only
-   recognizes SCALAR contracts (`double`/`char *`); a callable-typed
-   parameter isn't one of those, so it still defaults to `int64_t`, and
-   calling that int64_t value as a function fails. Not investigated
-   further — plausibly a narrow addition to that same pass (recognize
-   "always called with a function/closure value" as another contract
-   kind) but not attempted given this session's caution around that
-   exact machinery.
+3. **FIXED** (this session): `invalid operands to binary / (have
+   'char *' and 'int64_t')` at module-level `BUILD_DIR = CROSS_BUILD_DIR
+   / sysconfig.get_config_var("BUILD_GNU_TYPE")` — `sysconfig.
+   get_config_var(...)` wasn't modeled anywhere in `gimple_codegen.py`
+   (no `_KNOWN_SIGS`/module-dispatch entry at all), so the call fell
+   through to the generic default (`int64_t`), and the following `/`
+   (pathlib path-join) then saw `(char *, int64_t)` instead of
+   `(char *, char *)`. Fixed by adding a dedicated
+   `module_name == 'sysconfig' and method_name == 'get_config_var'`
+   case to the module-call dispatch in `_lower_call` (~line 11406) that
+   stubs the result to an empty string via the existing `_stub_result`
+   convention (this codegen has no real libpython build-config data to
+   answer with — implementing the real semantics is a separate, much
+   larger "model sysconfig's build config" project), typed correctly as
+   `char *`; also added the matching `_quick_type` pre-pass entry
+   (~line 7207) so a local/global variable holding the result infers
+   the right C type too. Confirmed fixed by re-running the build: this
+   specific error is gone; a DIFFERENT `char*`/`int64_t` `/` error
+   remains at a later line (`sysroot = wasi_sdk_path / "share" /
+   "wasi-sysroot"`, ~line 260) but that one is unrelated to sysconfig —
+   `wasi_sdk_path = context.wasi_sdk_path` is a dynamic attribute read
+   off an opaque object, the already-documented, separate
+   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` structural
+   gap, not attempted here.
 
-3. `invalid operands to binary / (have 'char *' and 'int64_t')` at
-   module-level `BUILD_DIR = CROSS_BUILD_DIR / sysconfig.get_config_var
-   ("BUILD_GNU_TYPE")` — `sysconfig.get_config_var(...)`'s return type
-   isn't modeled as `char *` (a real stdlib function whose signature
-   this compiler doesn't know), so it defaults `int64_t`, and the
-   subsequent `/` (path-join) sees `(char *, int64_t)` instead of
-   `(char *, char *)`. Not investigated further — a stdlib-signature
-   modeling gap, likely narrow but not chased down this session.
-
-None fixed here.
-
-```
-Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_dispatch_getattr':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:80:11: warning: unused variable '_tag' [-Wunused-variable]
-   80 |     environment = env_defaults | os.environ | updates
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_dispatch_setattr':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:85:11: warning: unused variable '_tag' [-Wunused-variable]
-   85 |             env_diff[key] = value
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_dispatch_fields':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:90:11: warning: unused variable '_tag' [-Wunused-variable]
-   90 |     log("🌎", f"Environment changes:{''.join(env_vars)}")
-      |           ^~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_dispatch_repr':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:105:11: warning: unused variable '_tag' [-Wunused-variable]
-  105 |             separator()
-      |           ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function '_mojo_generic_elem_repr':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:114:13: warning: unused variable '_tag' [-Wunused-variable]
-  114 | 
-      |             ^   
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function 'separator':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:410:11: warning: variable '_t12' set but not used [-Wunused-but-set-variable]
-  410 |     return builder
-      |           ^~~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:405:10: warning: unused variable '_t7' [-Wunused-variable]
-  405 | 
-      |          ^  
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:399:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-  399 |         if LOCAL_SETUP.read_bytes() == LOCAL_SETUP_MARKER:
-      |          ^~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function 'mojo_log_132aaf':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:55:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
-   55 | 
-      |          ^  
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py: In function 'updated_env_0c85c9':
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:127:11: warning: variable 'item' set but not used [-Wunused-but-set-variable]
-  127 | 
-      |           ^   
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:126:11: warning: variable 'key' set but not used [-Wunused-but-set-variable]
-  126 |     """Execute a command.
-      |           ^~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:120:7: warning: variable '_t50' set but not used [-Wunused-but-set-variable]
-  120 |         return wrapper
-      |       ^ ~~
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:119:13: warning: variable '_t49' set but not used [-Wunused-but-set-variable]
-  119 | 
-      |             ^   
-/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py:82:11: warning: variable '_t15' set but not used [-Wunused-but-set-variable]
-   82 |     env_diff = {}
-... (591 more lines)
-```
+Net: this file still does not compile clean (issue 2's two call sites
+are still hard errors, and the `context.wasi_sdk_path` dynamic-attribute
+gap noted under issue 3 is a further, separate blocker past that). Not
+fixed here beyond issues 1/3 above.
 
 Exit code: 1
-Elapsed: 11.28s
