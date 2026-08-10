@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (re-verified 2026-08-09)
+
+Re-verified against current master (fast-forwarded to `e5daa1d`) via a
+real `MOJO_DEBUG=1 python3 mojo.py build` run — reproduces byte-for-byte
+identically to 2026-08-07: `generator 'g' not eligible for C++ coroutine
+path ...: unsupported expression statement in generator body (BinaryOp)`,
+same whole-module fallback naming `g` (generator) and `t3` (async).
+Still a genuine feature gap (bare-statement `1/0` needs real runtime
+int-division-by-zero -> Mojo-exception trapping in the compiled
+coroutine path, which doesn't exist), not a narrow fix — confirmed
+unchanged, no action taken.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild — reproduces
