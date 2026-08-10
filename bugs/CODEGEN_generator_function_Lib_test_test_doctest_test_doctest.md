@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_doctest/test_doctest.py
 
+## Status (updated 2026-08-09)
+
+Re-verified against current master (post `_MOJO_STUB_<NAME>` guard-macro
+case-collision fix, commit `ee69066` — unrelated to this file, doesn't
+change anything here) with a real rebuild: reproduces byte-for-byte
+identically, same two errors, same lines (`test_hook`/`TestHook` at
+source lines 3156-3161). Classification unchanged and confirmed still
+accurate — this is the family-wide structural gap this session's parent
+task lists as "Unannotated params/fields (including an untyped `with
+... as cm:` binding) defaulting to `int64_t` inside generator bodies
+specifically" (here: an untyped plain local, `hook = TestHook(pathdir)`)
+combined with "Arbitrary outer-scope module/class name resolution inside
+a generator's separately-generated translation unit" (here: the
+`TestHook` class name itself). Both require broad/shared inference-
+machinery changes (generator bodies compile into a separately-generated
+C++ translation unit that doesn't get the same outer-scope name/type
+threading the ordinary function path gets) — not narrow, not attempted.
+
 ## Status (updated 2026-08-07)
 
 Re-verified against current master with a real rebuild — reproduces
