@@ -1,5 +1,47 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-09, re-verified against current master `b48a941`)
+
+Re-ran `MOJO_DEBUG=1 python3 mojo.py build .../_test_eintr.py` fresh.
+**Still fails, but the root cause is now `_test_eintr.py`'s OWN code, not
+just the transitive `test.support` gaps below** — the earlier
+2026-08-06/07 passes' claim that "the file's own 2 generators compile
+cleanly" does not hold up under direct re-verification:
+
+`OSEINTRTest._interrupted_reads` (line 153) does `yield rd, datum` — a
+real 2-element **tuple-valued yield**. `MOJO_DEBUG=1` output confirms:
+```
+generator method OSEINTRTest.'_interrupted_reads' not eligible for C++
+coroutine path, falling back to honest refusal: _interrupted_reads:
+every `yield` must carry a value, and all values must agree on one
+scalar type (int64_t/double/_Bool)
+```
+Traced to `gimple_codegen.py`'s `_generator_yield_ctype` (module-level
+helper, ~line 2647), the `TupleExpr` branch at lines 2699-2724: it
+deliberately returns `None` (refuse) rather than letting the generic
+"default to int64_t" fallback silently mis-lower `yield rd, datum` as
+an invalid raw `co_yield {rd, datum};` braced-init-list. This is the
+SAME widely-recurring "tuple-valued yield" structural gap this whole
+`bugs/CODEGEN_generator_function_Lib_*` family already knows about
+(the single most common sub-gap across the ~40-file cluster, e.g. also
+hit by `Lib/test/libregrtest/save_env.py`'s `resource_info`) — no
+dedicated fix attempted here per this cluster's standing guidance
+(genuinely representing a tuple across a C++20 coroutine's single
+scalar promise type is a real state-machine/ABI design problem, not a
+one-spot stub gap).
+
+Because this generator is refused (not merely one function skipped),
+`gen_module`'s non-`relaxed_imports` path raises a hard
+`RuntimeError('cannot compile module: function(s) _interrupted_reads
+...')` and the ENTIRE module build fails outright (falls back to pure
+interpretation) — this is expected behavior given the tuple-yield
+refusal, not a separate bug.
+
+`_test_eintr.py`'s other generator (`yield proc`, line 40) is a plain
+scalar `Popen`-object yield — not independently reproducible as broken
+on its own since the module never gets far enough to isolate it (the
+`_interrupted_reads` failure aborts the whole module first).
+
 ## Status (updated 2026-08-07, re-verified against tasks #146/#149/#150)
 
 Re-ran `MOJO_DEBUG=1 python3 mojo.py build .../_test_eintr.py` against
