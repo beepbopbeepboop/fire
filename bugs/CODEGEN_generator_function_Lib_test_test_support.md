@@ -1,6 +1,88 @@
 # CODEGEN_generator_function: Lib/test/test_support.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-verified against current master (98e5aa3) with a real `MOJO_DEBUG=1
+python3 mojo.py build` rebuild using the real gcc-mp-15/g++-mp-15
+toolchain. **Confirmed NOT a generator-codegen-cluster issue.**
+`test_support.py`'s own generator (`_caplog`, `@contextlib.contextmanager`
+def at line 43, `yield handler` at line 49) shows zero "not eligible"
+refusal anywhere in the debug log — it compiles cleanly through the C++
+coroutine path (used at 6 call sites, e.g. `with warnings_helper.
+check_warnings() as recorder, _caplog() as caplog:`). The previously
+documented `MojoGenerator` incomplete-type errors and `component_ref`
+non-trivial-conversion errors are BOTH gone (superseded, not
+reproducible).
+
+Item 1 (`save_restore_warnings_filters`, the non-plain-assignment-target
+hard bug) still reproduces exactly as before — confirmed again via
+`MOJO_DEBUG=1` output (`generator 'save_restore_warnings_filters' not
+eligible ... only a plain identifier assignment target is supported`).
+This function lives in the transitively-imported `Lib/test/support/
+warnings_helper.py`, not in `test_support.py` itself. No change to
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+status needed.
+
+**Current build failure (31 errors total) is dominated by the
+transitively-imported `test/support/` PACKAGE** (`test/support/
+__init__.py`: 7 errors, `os_helper.py`: 21 errors, `import_helper.py`: 1
+error) — reached via this file's own `from test import support` / `from
+test.support import os_helper` / `import_helper` / `script_helper` /
+`socket_helper` / `warnings_helper` lines. This is exactly the common
+cross-file blocker flagged elsewhere this session (cascading import-time
+errors in that DIFFERENT `Lib/test/support/__init__.py` package, distinct
+from this top-level `Lib/test/test_support.py` module) — none of those 29
+errors are generator-related and none are this file's own code; not
+investigated further here (out of scope for this doc's own file).
+
+**Exactly ONE error is in `test_support.py` itself, and it is real,
+root-caused, and NOT generator-related:**
+```
+/Users/mrs/net/Python-3.14.6/Lib/test/test_support.py:26:24: error: assignment to 'int64_t' {aka 'long long int'} from 'char *' makes pointer from integer without a cast [-Wint-conversion]
+```
+Source: `TESTFN = os_helper.TESTFN` (module-level global, initialized
+from a cross-module attribute read; `os_helper` is bound via `from
+test.support import os_helper`). Traced to the generated `.ci`
+(`_t1 = (int64_t)0; /* ct param or undeclared: os_helper */` followed by
+a `_mojo_dispatch_getattr` call on that NULL placeholder): `os_helper`
+itself never resolves as a recognized module marker at this use site.
+Root cause: `_gen_stmt_FromImportStmt` (gimple_codegen.py ~line 20170)
+treats every `from X import Y` identically as importing an ordinary
+function/class SYMBOL defined in module X (registering `Y` in
+`self.imported_symbols` with `{'module': X, 'return_type': ...}`), with
+NO disambiguation for the case where `Y` is itself a SUBMODULE of package
+X (`from test.support import os_helper`, where `os_helper` names
+`test/support/os_helper.py`, not a symbol inside `test/support/
+__init__.py`). Because `os_helper` is never registered as a genuine
+module marker (the way plain `import os_helper` would via
+`_gen_stmt_ImportStmt`'s `_declare_var(local_name, 'int64_t')` + marker
+assignment), `_lower_MemberExpr`'s module-attribute-access special cases
+(gimple_codegen.py ~8822-8987, all gated on recognizing `module_name` as
+a known module/import marker) never match `os_helper.TESTFN`, and
+`os_helper` falls through to `_lower_IdentExpr`'s terminal "unknown
+identifier" placeholder (`(int64_t)0`) — so `os_helper.TESTFN` becomes a
+runtime `_mojo_dispatch_getattr` call on a NULL pointer, force-cast to
+`char *` at the store despite the target global's `_quick_type`-inferred
+declared field being `int64_t`.
+
+**Classification: real bug, confirmed, but NOT narrow enough to safely
+fix in this pass.** `_gen_stmt_FromImportStmt` is shared machinery used
+for every `from X import Y` statement in the entire compiler; correctly
+distinguishing "Y is a symbol in X" from "Y is a submodule of package X"
+needs cross-referencing the whole-transitive-closure module registry
+(order-sensitive: has `test.support.os_helper` already been compiled/
+registered as its own module by the time this statement is scanned?),
+which is a materially bigger and riskier change than a single missing
+stub case — exactly the kind of shared-machinery change CLAUDE.md warns
+produced past regressions. Only 1 occurrence found in this whole file
+(every other `os_helper.foo(...)` / `import_helper.foo(...)` usage in
+this file is a CALL, which goes through the separate, already-working
+`_lower_call` member-call path, not this one). Not attempted here;
+flagged for a dedicated, carefully-scoped pass — genuinely out of scope
+for this generator-codegen-focused doc either way (no generator/coroutine
+involvement at all).
+
+## Status (updated 2026-08-07, superseded above)
 
 Item 1's hard-bug doc (`bugs/hard/CODEGEN_generator_non_plain_
 assignment_target_refused.md`, task #150) is now PARTIALLY fixed —
