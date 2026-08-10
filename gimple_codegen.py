@@ -3026,6 +3026,35 @@ def _safe_name(name: str) -> str:
     return name
 
 
+def _stub_guard_name(name: str) -> str:
+    """Canonical `_MOJO_STUB_<name>` C-preprocessor guard macro used
+    throughout this file's auto-stub/extern-suppression scheme (weak
+    function stubs, forward-decl externs, ctor stubs, struct typedefs all
+    share ONE guard namespace so that a real definition/typedef for a
+    symbol always wins over a later auto-generated stub of that SAME
+    symbol — see every call site's own comment for the specific collision
+    it guards against).
+
+    Case-PRESERVING by design: `name` here is already a real, exact C
+    identifier (a mangled function symbol or a struct name), and every
+    call site's matching half compares against that same exact string —
+    the shared-guard scheme has never relied on case-insensitive matching.
+    Previously every call site independently upper-cased `name` before
+    building the guard purely for SCREAMING_SNAKE_CASE macro style; that
+    incidentally made the guard namespace case-INSENSITIVE, so two
+    genuinely different symbols that only differ in case (e.g. the struct
+    `Deque` — a local subclass — and the unrelated function `deque` — an
+    unresolved `from collections import deque`) collided: the struct's
+    `#define _MOJO_STUB_DEQUE` (emitted first) silently suppressed the
+    `deque` function's own `#ifndef _MOJO_STUB_DEQUE` weak-stub block
+    later in the same translation unit, leaving `deque` completely
+    undeclared and producing `implicit declaration of function 'deque'`
+    at every call site. See bugs/CODEGEN_generator_function_Lib_test_test_
+    deque.md. Preserving case here removes the false collision while
+    leaving every genuine (exact-name) dedup case unaffected."""
+    return f'_MOJO_STUB_{name}'
+
+
 def _c_field_name(name: str) -> str:
     """Convert a Mojo variable/module name to a valid C struct field name.
     Dots in module paths (e.g. 'std.sys') become underscores ('std__sys').
@@ -5058,7 +5087,7 @@ class GimpleGen:
                 # the same guard macro _MOJO_STUB_<NAME>) don't produce a second
                 # conflicting declaration. If the extern is emitted here, the stub
                 # will see the macro already defined and skip itself.
-                guard = f'_MOJO_STUB_{sym.upper()}'
+                guard = _stub_guard_name(sym)
                 decl = f'#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif'
                 self._link_import_decl_list.append(decl)
                 seen.add(sym)
@@ -10557,7 +10586,7 @@ class GimpleGen:
             # file's other auto-stub generators for the same GIMPLE-mode
             # reason (a fixed-arity `()` is "zero params" under -fgimple,
             # not "unspecified", and rejects any real argument list).
-            _stub_guard = f'_MOJO_STUB_{_safe_name(mangled).upper()}'
+            _stub_guard = _stub_guard_name(_safe_name(mangled))
             _stub = (f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
                       f'__attribute__((weak)) int64_t {mangled} (...) '
                       f'{{ mojo_print ((char *)'
@@ -12736,7 +12765,7 @@ class GimpleGen:
                 and f'{struct_name}_{method}' not in self.func_return_types
                 and mangled not in self._auto_stubbed
                 and mangled not in _SELFHOST_HARDCODED_FUNCS):
-            _stub_guard = f'_MOJO_STUB_{struct_name.upper()}_{method.upper()}'
+            _stub_guard = _stub_guard_name(f'{struct_name}_{method}')
             # A struct with at least one base class we couldn't resolve to a
             # known StructDef (e.g. `class IDGatherer(html.parser.HTMLParser)`
             # — an external/unmodeled class) may call inherited methods
@@ -15337,7 +15366,7 @@ class GimpleGen:
                        and fname_raw not in _C_RESERVED_FUNCS
                        and fname not in _SELFHOST_HARDCODED_FUNCS)
         if _is_unknown:
-            _stub_key = f'_MOJO_STUB_{fname.upper()}'
+            _stub_key = _stub_guard_name(fname)
             if fname_raw in self._unresolved_import_aliases:
                 # See bugs/hard/CODEGEN_aliased_external_import_no_backing_
                 # symbol.md: a name imported from a module load_module()
@@ -19387,7 +19416,7 @@ class GimpleGen:
                                     and raw_name not in _C_RESERVED_FUNCS
                                     and fname not in _SELFHOST_HARDCODED_FUNCS)
                 if _is_unknown_stmt and fname not in self._auto_stubbed:
-                    _stub_guard = f'_MOJO_STUB_{fname.upper()}'
+                    _stub_guard = _stub_guard_name(fname)
                     if raw_name in self._unresolved_import_aliases:
                         # See _lower_named_call's identical branch (and
                         # bugs/hard/CODEGEN_aliased_external_import_no_
@@ -30114,7 +30143,7 @@ class GimpleGen:
                 else:
                     params_str = ', '.join(param_ctypes) or 'void'
                 sig = f"{ret_type} {mangled} ({params_str})"
-                guard = f"_MOJO_STUB_{mangled.upper()}"
+                guard = _stub_guard_name(mangled)
                 decl = f"#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif"
                 if decl not in self._elaborated_externs:
                     self._elaborated_externs.append(decl)
@@ -30132,7 +30161,7 @@ class GimpleGen:
                     # struct_name, method, '')`) — still module-qualified,
                     # for the same reason every other decl in this loop is.
                     no_oid = self._struct_method_csym(s.name, m.name, '')
-                    bare_guard = f"_MOJO_STUB_{no_oid.upper()}"
+                    bare_guard = _stub_guard_name(no_oid)
                     bare_decl = f"#ifndef {bare_guard}\n#define {bare_guard}\nextern {ret_type} {no_oid} (...);\n#endif"
                     if bare_decl not in self._elaborated_externs:
                         self._elaborated_externs.append(bare_decl)
@@ -30975,7 +31004,8 @@ class GimpleGen:
                 # a warning if actually called at runtime).
                 for _fn_name in _gen_only + _async_only + _async_gen:
                     _csym = self._func_csym(_fn_name)
-                    _stub = f'#ifndef _MOJO_STUB_{_csym.upper()}\n#define _MOJO_STUB_{_csym.upper()}\nint64_t {_csym} (...);\n#endif'
+                    _g = _stub_guard_name(_csym)
+                    _stub = f'#ifndef {_g}\n#define {_g}\nint64_t {_csym} (...);\n#endif'
                     if _stub not in self._elaborated_externs:
                         self._elaborated_externs.append(_stub)
                     # See _unsupported_generator_names's docstring: Phase 2a
@@ -32525,7 +32555,7 @@ class GimpleGen:
             # in the file, so this #ifndef sees it. Hit by `Error` (Mojo's
             # builtin error type) when a module in the closure registers it as
             # an opaque struct — e.g. any enum-importing file (types.py).
-            stub_guard = f'_MOJO_STUB_{name.upper()}'
+            stub_guard = _stub_guard_name(name)
             return (f'#ifndef {stub_guard}\n#ifndef {guard}\n#define {guard}\n'
                     + (decl + '\n#endif\n#endif'))
         _ctor_lines = [_guarded_ctor(name, decl) for name, decl in _builtin_ctors if name not in _skip_ctors]
@@ -32663,7 +32693,7 @@ class GimpleGen:
             ('_get_global_or_null',    'int64_t _get_global_or_null(...);'),
         ]
         def _guarded_stub(name, decl):
-            guard = f'_MOJO_STUB_{name.upper()}'
+            guard = _stub_guard_name(name)
             return f'#ifndef {guard}\n#define {guard}\n' + (decl + '\n#endif')
         _util_stubs = [_guarded_stub(name, decl) for name, decl in _util_pairs if name not in _skip_util]
         parts.extend([
@@ -32842,7 +32872,7 @@ class GimpleGen:
                     # parameter's own pointer type). See the generated_cpp
                     # assembly further below in gen_module.
                     self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
-                    parts.append(f"#define _MOJO_STUB_{struct_name.upper()}")  # suppress any later variadic stub
+                    parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                     emitted.add(struct_name)
                     self._emitted_structs.add(struct_name)  # track for dedup in Section 2
             parts.append('')
@@ -33637,7 +33667,7 @@ class GimpleGen:
                     # Suppress any builtin-ctor function stub of the same name in
                     # this or another module (a `typedef … Name;` type collides
                     # with an `int64_t Name(...)` function) — see _guarded_ctor.
-                    parts.append(f"#define _MOJO_STUB_{sd.name.upper()}")
+                    parts.append(f"#define {_stub_guard_name(sd.name)}")
                     parts.append('')
                     self._emitted_structs.add(sd.name)
 
@@ -34180,7 +34210,7 @@ class GimpleGen:
                 # signature" branch below was fixed to use a matching guard
                 # (see that fix's own comment / bugs/CODEGEN_generator_
                 # function_Lib_weakref.md).
-                _stub_only_guard = f'_MOJO_STUB_{cname.upper()}'
+                _stub_only_guard = _stub_guard_name(cname)
                 parts.append(f"#ifndef {_stub_only_guard}\n#define {_stub_only_guard}\n"
                               f"{ret_type} {cname} () {body}  /* stub from {module} */\n#endif")
                 continue
@@ -34321,7 +34351,7 @@ class GimpleGen:
                     # occurrence is textually first in the final .ci win,
                     # exactly like every other `_MOJO_STUB_*`-guarded stub
                     # in this file already relies on.
-                    _unresolved_guard = f'_MOJO_STUB_{safe.upper()}'
+                    _unresolved_guard = _stub_guard_name(safe)
                     parts.append(f"#ifndef {_unresolved_guard}\n#define {_unresolved_guard}\n"
                                   f"__attribute__((weak)) {ret_type} {safe} (...) {body}  /* stub from {module} */\n#endif")
                 else:
@@ -34503,7 +34533,7 @@ class GimpleGen:
             # definition and call sites.
             _c_fn_name = self._func_csym(fn.name)
             _guard_name = _c_fn_name if fn.name in _C_RESERVED_FUNCS else fn.name
-            stub_guard = f'_MOJO_STUB_{_guard_name.upper()}'
+            stub_guard = _stub_guard_name(_guard_name)
             parts.append(f'#ifndef {stub_guard}')
             parts.append(f"{ret} {_c_fn_name} ({ptypes});")
             parts.append('#endif')
