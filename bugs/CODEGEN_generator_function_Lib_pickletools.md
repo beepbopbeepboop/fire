@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-09, re-verified — unchanged)
+
+Re-verified against current master (`c79a013`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py`.
+Identical refusal reproduces exactly:
+
+```
+[gimple_codegen] generator '_genops' not eligible for C++ coroutine
+  path, falling back to honest refusal: unsupported expression in
+  generator body: LambdaExpr
+Error building: cannot compile module: function(s) _genops (generator
+  function(s), contain a `yield`/`yield from`) — ...
+```
+
+Still exactly `_genops`'s `getpos = lambda: None` (pickletools.py:34
+in this checkout — the `if hasattr(data, "tell"): ... else: getpos =
+lambda: None` fallback). No new information; the 2026-08-07
+classification below (`bugs/hard/CODEGEN_generator_lambda_expr_
+unsupported.md`, feature-sized, needs a lifted-closure-style value
+category for `LambdaExpr` in the coroutine body model) still stands.
+Not re-attempted here.
+
 ## Status (updated 2026-08-07, classified — doc reference now exists)
 
 **Classification: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`**
