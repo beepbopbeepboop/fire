@@ -1,5 +1,41 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-09, unchanged)
+
+Re-re-verified against current master (real `mojo.py build` rebuild,
+real `gcc-mp-15`/`g++-mp-15` per `build_config.py`). Exact same two
+errors as the 2026-08-07 pass, byte-for-byte, confirming this doc is
+still accurate and neither has been fixed nor regressed:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/symtable.py:449:10: error: too many arguments to function 'mojo_open_file'; expected 1, have 2
+/Users/mrs/net/Python-3.14.6/Lib/symtable.py:576:46: error: stray '\' in program
+/Users/mrs/net/Python-3.14.6/Lib/symtable.py:576:47: error: missing terminating ' character
+/Users/mrs/net/Python-3.14.6/Lib/symtable.py:576:46: error: expected ';' before '_classattr_TextWrapper__letter'
+```
+
+symtable.py's only generator (`yield flagname`, line 302) still shows
+zero signal of any problem (no "not eligible" refusal, does not appear
+in the error list): **still NOT a generator-codegen-cluster failure.**
+
+Both root causes remain unfixed and are confirmed non-generator,
+recurring elsewhere in this same bug-doc family (not narrow, not
+attempted here): the `mojo_open_file(char *path)` runtime helper
+(`gimple_codegen.py` line ~5590/6505/14846/32669) only models the
+1-argument `open(path)` call form — a 2-argument call (`open(path,
+mode)`, as used at symtable.py:449) is emitted as a call with an extra
+argument gcc then rejects; the same gap is independently hit by
+`Lib/mailbox.py`, `Lib/ftplib.py`, and `Lib/gettext.py`'s current
+re-diagnoses. The stray-backslash tokenizer issue is transitively from
+`textwrap.py` (pulled in via the same import chain) and is
+independently hit by `Lib/codecs.py`'s, `Lib/ipaddress.py`'s,
+`Lib/weakref.py`'s, `Lib/typing.py`'s, `Lib/tempfile.py`'s, and
+`Lib/gettext.py`'s current re-diagnoses — this is clearly a shared,
+systemic gap (in the tokenizer's handling of some string-literal shape
+in `textwrap.py`), not something to fix narrowly as part of a 3-bug
+pass. Not deleting the doc — `symtable.py`'s build still fails
+end-to-end.
+
 ## Status (updated 2026-08-07, failure point now pinned down)
 
 Re-verified against current master with a real, complete rebuild
