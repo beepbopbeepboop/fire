@@ -1,6 +1,33 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-re-verified against current master (real `mojo.py build` rebuild,
+real `gcc-mp-15`/`g++-mp-15` per `build_config.py`). Classification
+unchanged: **NOT a generator-codegen-cluster failure.** The
+`Popen.__enter__`-adjacent `yield to_close` generator still shows zero
+signal of any problem (no "not eligible" refusal, no error attributed
+to `subprocess.py` itself — 0 occurrences). Total build errors keep
+dropping: 495 now (down from 785, then 720, in the 2026-08-07 pass),
+still 100% in transitively-imported files. The dominant cluster has
+shifted again — it's now `Lib/threading.py` (297 errors, e.g.
+`request for member '__suppress_context__' in something not a
+structure or union`, `expected expression before
+'_DeleteDummyThreadOnDel'`, several `expected ';', ',' or ')' before
+'default'`), not the `argparse.py`/`typing.py`/`enum.py`/`gettext.py`
+cluster this doc previously pointed at (that cluster still contributes
+45/20/12/6 errors respectively, but is no longer dominant).
+`threading.py`'s errors look unrelated to generator codegen (parameter
+defaults, exception-attribute struct access, a straightforward
+undeclared-symbol parse error) and are not chased down further here —
+out of scope for this generator-codegen cluster; see
+`bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md` for the still-open part of the previously-identified
+cluster. Not deleting the doc since `subprocess.py`'s full build still
+fails end-to-end (only files that 100% compile clean get removed per
+this project's convention).
+
+## Status (updated 2026-08-07, superseded above)
 
 `bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`'s
 `os.py` `'relpath' is ambiguous` follow-up fix landed, clearing the

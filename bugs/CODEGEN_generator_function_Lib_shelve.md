@@ -1,6 +1,31 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
-## Status (updated 2026-08-07)
+## Status (updated 2026-08-09)
+
+Re-re-verified against current master (real `mojo.py build` rebuild, real
+`gcc-mp-15`/`g++-mp-15` per `build_config.py`). Classification unchanged:
+**NOT a generator-codegen-cluster failure.** `Shelf.__iter__`
+(`yield k.decode(self.keyencoding)`) still shows zero signal of any
+problem — no "not eligible" refusal, no error attributed to
+`shelve.py` itself (0 occurrences in the error list). Total build
+errors continue to drop: 552 now (down from 1038 in the 2026-08-07
+pass), still 100% in transitively-imported files, none in
+`shelve.py`'s own source. Dominant clusters this pass: `Lib/pickle.py`
+(350 errors — by far the largest single contributor now),
+`Lib/argparse.py` (45), `Lib/codecs.py` (36), `Lib/typing.py` (20),
+`Lib/inspect.py` (14), `Lib/enum.py` (12), plus smaller counts in
+`posixpath.py`/`contextlib.py`/`os.py`/`functools.py`/`gettext.py`/
+`weakref.py`/`tokenize.py`/`threading.py`. The `struct _*_toplev`
+pattern previously reported as fully gone is not entirely eliminated
+(59 remaining `toplev` occurrences in this log), but is a minor
+contributor next to `pickle.py`. None of this implicates `shelve.py`'s
+generator or its own code. Not investigated further — out of scope for
+this generator-codegen cluster; not deleting the doc since the file's
+full build (`mojo.py build`) still fails (`git rm` per this project's
+process is reserved for files whose target source 100% compiles clean
+end-to-end, not just "this file's own lines contribute 0 errors").
+
+## Status (updated 2026-08-07, superseded above)
 
 Re-verified against current master with a real rebuild. Still correctly
 classified as **NOT a generator-codegen-cluster failure** —
