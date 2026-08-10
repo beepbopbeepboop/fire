@@ -1,5 +1,32 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes` — boxes a tuple's elements into a real `MojoList *` at the
+yield site). Confirmed via an isolated compile: `Mailbox.iteritems`'s
+`yield (key, value)` (line 129) is no longer refused. Its OWN
+`co_yield`/boxing text is syntactically valid, correctly heterogeneous
+C++ — `key` boxed via `mojo_list_append_int`, `value` (correctly
+inferred `char *`, from an earlier `mojo_cstr_slice` assignment) via
+`mojo_list_append_str` — no g++ errors on those lines.
+
+**mailbox.py still does not build**, blocked by an INDEPENDENT,
+pre-existing gap one statement earlier in the SAME function:
+`value = mojo_cstr_slice((char *)(self), key, (key) + 1);` — g++:
+"forming reference to void" (a call-signature/return-type mismatch for
+`mojo_cstr_slice` in the coroutine-body expression lowering). Unrelated
+to tuple-yield. Matches this doc's own 2026-08-07 status, which already
+predicted the next blocker would be the previously-documented
+`mojo_open_file`-arity/type-mismatch cluster once tuple-yield unblocked
+`iteritems` — the underlying non-generator issues in that cluster are
+plausibly the same family as this `mojo_cstr_slice` finding, not
+independently re-verified in full here.
+
+Doc kept open (not deleted) — tuple-yield is no longer this file's
+blocker, but the file genuinely still doesn't build.
+
 ## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
 
 Re-verified against current master (`5ba7d4b`) via a real

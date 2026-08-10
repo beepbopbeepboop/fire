@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-10 — 3 of the 4 tuple-valued-yield refusals now FIXED; `PyDictObjectPtr.iteritems` remains refused for a distinct, deeper reason)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified via an isolated compile: `items_from_keys_and_
+values`'s `yield (pyop_key, pyop_value)` and `parse_location_table`'s
+tuple yield are NO LONGER refused (both now compile past the
+eligibility gate); the overall refusal list dropped from 4 names down
+to 1.
+
+**`PyDictObjectPtr.iteritems` remains refused**, for a DIFFERENT,
+deeper reason than plain tuple-yield, unaffected by this fix: its body
+has TWO yield sites of genuinely different shapes —
+```python
+for item in items_from_keys_and_values(keys, values):
+    yield item                       # a bare identifier
+...
+yield (pyop_key, pyop_value)         # a literal 2-tuple
+```
+`yield item` (a bare identifier, delegated from another function's
+already-tuple-shaped result) contributes the generic int64_t default
+(this fix only recognizes a LITERAL tuple expression at the yield site
+itself — it has no way to know `item` is already conceptually
+tuple-shaped), while `yield (pyop_key, pyop_value)` contributes
+`MojoList *` — these disagree, so `_generator_yield_ctype`'s
+unification correctly refuses the whole function, the same way it
+would for any two genuinely-disagreeing scalar types. Recognizing that
+a bare-identifier yield site is ALSO tuple-shaped (when it demonstrably
+is) is a separate, more general inference improvement, out of this
+fix's scope. Doc kept open (not deleted) — 3 of 4 generators fixed, but
+the file still doesn't build (both because of `iteritems` and because
+none of these files build clean end-to-end regardless, per this
+session's broader findings — see the other docs in this batch).
+
 ## Status (updated 2026-08-09, re-verified — supersedes the 2026-08-06 note below)
 
 Re-ran against current master (`d0e4874`). The isinstance-tuple /

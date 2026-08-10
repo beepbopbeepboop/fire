@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-10 — the 2 tuple-valued-yield refusals now FIXED; `walk_packages`'s own, unrelated gap remains)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified via an isolated compile: `_iter_file_finder_
+modules`'s `yield prefix + modname, ispkg` and `iter_zipimport_
+modules`'s two `yield prefix + fn[0], True` / `yield prefix + modname,
+False` sites are NO LONGER in the refusal list — both generators now
+compile past the eligibility gate (confirmed: the overall build's
+Python-level `RuntimeError` now names only `walk_packages`, not all
+three as the 2026-08-09 status below shows).
+
+**pkgutil.py still does not build**, blocked by `walk_packages`'s own,
+wholly unrelated, pre-existing gap (unchanged from the 2026-08-07
+analysis below): calling its own `onerror` callback parameter as
+`onerror(info.name)` — `info.name` is a `MemberExpr` field read on a
+non-`self` struct-typed local, which the coroutine-body's captured-
+callback-argument type check doesn't accept. Not the tuple-yield gap
+this session's fix targets. Doc kept open (not deleted) — 2 of 3
+generators fixed, but the file still doesn't build as a whole.
+
 ## Status (updated 2026-08-09, re-verified — TWO MORE generators now also refused, both tuple-valued yield)
 
 Re-verified against current master (`c79a013`) via a real

@@ -2,6 +2,23 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
+## Status (updated 2026-08-10 — NOT actually blocked by tuple-valued yield)
+
+This session implemented real tuple-valued-`yield` support in the
+compiled-generator coroutine codegen (`gimple_codegen.py`'s
+`_cpp_yield_tuple`/`_generator_tuple_yield_slot_ctypes`). Checked this
+file against it: **this file has no tuple-valued `yield` anywhere** —
+its only two `yield` sites (`yield Pair(name, value)` and `yield
+section.value + space + quoted_marker(section.name)`) are both plain
+scalar values. Issue #1's `name, sep, rest = filename.partition('-')`
+is a tuple-UNPACK assignment (a completely different mechanism,
+`_infer_local_var_types`/`_assign_target`, in the ORDINARY
+non-generator GIMPLE path), not a generator `yield`. This doc was
+evidently included in this session's initial file list by a keyword
+match on "tuple" in its own text, not because tuple-valued `yield` is
+its blocker. No change to this doc's classification or content below;
+unaffected by this session's fix.
+
 ## Status (updated 2026-08-09)
 
 Re-verified fresh against current master. A NEW issue (not present in

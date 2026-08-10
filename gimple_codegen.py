@@ -2658,6 +2658,103 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
     return 'char *'
 
 
+def _walk_own_body(node):
+    """Recursively return a list of every AST node reachable from `node`,
+    generically (same walk shape as `_walk_ast`) — EXCEPT it does NOT
+    descend into nested FunctionDef/LambdaExpr bodies (a nested def's own
+    `yield`/`return` belongs to ITS scope, not the enclosing generator's,
+    and would corrupt any caller's own-body-only scan). Factored out of
+    `_generator_yield_ctype`'s formerly-inline `_own_walk` (identical
+    logic) so `_generator_tuple_yield_slot_ctypes` (below) can reuse the
+    exact same own-body walk instead of maintaining a second copy — both
+    need to see precisely the same set of a generator's own top-level
+    YieldExpr sites."""
+    if isinstance(node, (FunctionDef, LambdaExpr)):
+        return []
+    if node is None:
+        return []
+    if isinstance(node, (list, tuple)):
+        result = []
+        for item in node:
+            result.extend(_walk_own_body(item))
+        return result
+    if hasattr(node, '__dataclass_fields__'):
+        result = [node]
+        for fname in node.__dataclass_fields__:
+            result.extend(_walk_own_body(getattr(node, fname)))
+        return result
+    return [node]
+
+
+def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None = None,
+                                        self_fields: dict | None = None,
+                                        async_api: dict | None = None,
+                                        closure_api: dict | None = None) -> tuple[bool, list | None]:
+    """Companion to `_generator_yield_ctype` for the tuple-valued-yield
+    case (`yield a, b` / `yield a, b, c`): computes the unified per-SLOT
+    C++ element type list every tuple-yield site in `fn`'s own body must
+    agree on, the way `_generator_yield_ctype` unifies one overall scalar
+    type across every (non-tuple) yield site. A tuple-valued yield is
+    boxed at its own site into a real runtime `MojoList *` (see
+    `_cpp_yield_tuple` — the SAME representation `_lower_tuple_literal`
+    already builds for an ordinary, non-generator tuple literal), so the
+    promise's own value type just needs to be the ALREADY-supported
+    `MojoList *` scalar (`_generator_yield_ctype`'s TupleExpr branch
+    contributes exactly that) — but a consumer unpacking that pointer back
+    into `for a, b in gen():`'s loop variables needs to know each slot's
+    REAL type (int64_t/double/char*) to pick the right accessor
+    (mojo_list_get_int/_double/_str), which this function supplies.
+
+    Returns `(has_tuple_yield, slot_ctypes)`:
+      - `(False, None)`: `fn` has no tuple-valued yield at all — the
+        ordinary, unrelated case for every scalar/list/string-yielding
+        generator this codegen already supports; callers must not treat
+        this as a refusal.
+      - `(True, None)`: `fn` DOES have at least one tuple-valued yield,
+        but the sites disagree in a way that can't be resolved (different
+        element COUNTS across sites — this generator's single promise
+        type can only ever carry one fixed shape — or two sites disagree
+        on one slot's type in a way the same char*-preference rule
+        `_generator_yield_ctype` itself uses doesn't resolve). Callers
+        must treat this exactly like `_generator_yield_ctype` returning
+        None for any other unsupported shape: refuse the whole generator.
+      - `(True, [ctype, ...])`: every tuple-yield site agreed (directly or
+        via the char*-preference rule) on both arity and each slot's type
+        — the list to hand to the consumer-side unpacking helper.
+
+    Per-element types are inferred the exact same way
+    `_generator_yield_ctype`'s own per-scalar-yield case does (via
+    `_infer_simple_expr_ctype`, defaulting an unresolvable element to
+    int64_t — e.g. save_env.py's `getattr(self, get_name)` slot, which
+    `_infer_simple_expr_ctype` has no case for): a slot this function
+    can't precisely type still gets a usable, consistent int64_t
+    convention rather than aborting the whole tuple-yield feature over
+    one unresolvable element."""
+    found = False
+    slots: list | None = None
+    for n in _walk_own_body(fn.body):
+        if not (isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr)):
+            continue
+        found = True
+        site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t'
+                for el in n.value.elements]
+        if slots is None:
+            slots = site
+        elif len(slots) != len(site):
+            return True, None
+        else:
+            merged = []
+            for a, b in zip(slots, site):
+                if a == b:
+                    merged.append(a)
+                elif 'char *' in (a, b):
+                    merged.append('char *')
+                else:
+                    return True, None
+            slots = merged
+    return found, slots
+
+
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             generator_api: dict | None = None,
                             self_fields: dict | None = None,
@@ -2688,57 +2785,61 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     # Walk only this function's own body — do NOT descend into nested
     # FunctionDef/LambdaExpr bodies (a nested def's `return <value>` is its
     # own, not this generator's, and would corrupt the yield-type check).
-    def _own_walk(node):
-        if isinstance(node, (FunctionDef, LambdaExpr)):
-            return []
-        if node is None:
-            return []
-        if isinstance(node, (list, tuple)):
-            result = []
-            for item in node:
-                result.extend(_own_walk(item))
-            return result
-        if hasattr(node, '__dataclass_fields__'):
-            result = [node]
-            for fname in node.__dataclass_fields__:
-                result.extend(_own_walk(getattr(node, fname)))
-            return result
-        return [node]
-    for n in _own_walk(fn.body):
+    for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
             if n.value is None:
                 if ctype is None:
                     ctype = 'int64_t'  # bare yield yields None → 0
                 continue
             if isinstance(n.value, TupleExpr):
-                # `yield a, b, c` — a real multi-element tuple yield. The
-                # separate emission path (_cpp_stmt's YieldExpr case) has no
-                # real tuple-yield support: it emits the tuple as a raw
-                # braced-init-list (`co_yield {a, b, c};`) with NO regard for
-                # whatever scalar type this function's promise ends up using
-                # — invalid/mismatched C++ that fails with a confusing GCC
-                # syntax error attributed to the WRONG line (the malformed
-                # statement shifts every subsequent #line-unstamped line
-                # count), not an honest refusal. `_infer_simple_expr_ctype`
-                # correctly has no TupleExpr case (returns None — "don't
-                # know, refuse" per its own docstring), but the generic
-                # "default to int64_t when type can't be inferred" fallback
-                # just below silently overrides that signal for THIS shape,
-                # letting an unsupported tuple-yield generator sail through
-                # eligibility and reach `_cpp_stmt` emission at all. Return
-                # None here (skipping that default) so the caller's existing
-                # `if value_ctype is None: raise _UnsupportedGeneratorShape`
-                # check (_gen_cpp_generator_unit) does its job — the SAME
-                # graceful "not eligible for C++ coroutine path" fallback
-                # every other unsupported shape in this file already gets.
+                # `yield a, b, c` — a real multi-element tuple yield.
+                # Boxed at its own site (see `_cpp_yield_tuple`, called
+                # from `_cpp_stmt`'s YieldExpr case) into a real runtime
+                # `MojoList *` — the exact representation
+                # `_lower_tuple_literal` already builds for an ordinary,
+                # non-generator tuple literal, marked via
+                # `mojo_mark_as_tuple` — and co_yield'd as that ONE
+                # pointer. A `MojoList *` is already a supported co_yield
+                # scalar payload (any generator that yields a plain
+                # list/string value already relies on this), so the
+                # overall promise/value-ctype machinery needs no change at
+                # all for this shape beyond contributing 'MojoList *' to
+                # the usual unify-across-every-yield-site check below —
+                # exactly like any other yield-site type does. The per-
+                # SLOT element types (int64_t vs double vs char* per tuple
+                # position) are a SEPARATE concern this function doesn't
+                # need to resolve — see `_generator_tuple_yield_slot_
+                # ctypes`, this function's dedicated companion, which
+                # `_gen_cpp_generator_unit`/`_gen_cpp_async_generator_unit`
+                # both call right alongside this one and use to drive the
+                # consumer-side (`for a, b in gen():`) unpacking.
                 # Real: Lib/test/libregrtest/save_env.py's
                 # `resource_info`: `yield name, getattr(self, get_name),
                 # getattr(self, restore_name)`. See
                 # CODEGEN_generator_function_Lib_test_libregrtest_save_env.md.
-                return None
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
-            if t is None:
-                t = 'int64_t'  # default when type can't be inferred
+                #
+                # A NESTED collection literal as one of the tuple's own
+                # elements (`yield "store", (name,)` — modulefinder.py's
+                # `scan_opcodes`, a tuple whose second slot is itself a
+                # 1-tuple) has no scalar representation `_cpp_yield_tuple`'s
+                # per-element boxing can build: `_cpp_expr` lowers a bare
+                # TupleExpr/ListExpr/DictExpr/SetExpr to a raw C++ braced-
+                # init-list (`{name}`), which is not a valid argument to
+                # `mojo_list_append_int/_double/_str` (nor castable to
+                # int64_t/double/char*) — attempting it anyway would
+                # reproduce this exact family's original malformed-C++
+                # failure mode ONE LEVEL DEEPER instead of fixing it.
+                # Refuse the whole shape honestly here, before it ever
+                # reaches emission, exactly like any other unsupported
+                # yield shape in this function already does.
+                if any(isinstance(el, (TupleExpr, ListExpr, DictExpr, SetExpr))
+                       for el in n.value.elements):
+                    return None
+                t = 'MojoList *'
+            else:
+                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
+                if t is None:
+                    t = 'int64_t'  # default when type can't be inferred
             if ctype is None:
                 ctype = t
             elif ctype != t:
@@ -3558,6 +3659,21 @@ class GimpleGen:
         # for every entry in _supported_generators — the exact extern "C" API
         # names/types the .c side forward-declares and calls into.
         self._generator_api: dict[str, dict] = {}
+        # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
+        # stash their just-computed _generator_tuple_yield_slot_ctypes
+        # result here (list[str] for a tuple-yielding generator, None for
+        # every other kind) right before their own `finally` clears
+        # per-compile state (declared/self_fields, needed to compute it,
+        # go out of scope there) — read immediately after by their own
+        # caller (gen_module's generator-registration loops) to populate
+        # the new 'tuple_slot_ctypes' key in _generator_api/_generator_
+        # method_api/_async_gen_api. Not a per-generator dict keyed by
+        # name (like _generator_api itself) because it only ever needs to
+        # survive the few lines between one unit's compile finishing and
+        # its caller reading it — reset to None at the top of each unit's
+        # own compile attempt so a stale prior generator's value can never
+        # leak into this one's registration on any early-exception path.
+        self._cpp_last_tuple_slot_ctypes: list | None = None
         # cpp_text fragments from _gen_cpp_generator_unit, one per supported
         # generator, concatenated into self.generated_cpp at the end of
         # gen_module once the common preamble is known.
@@ -17166,7 +17282,19 @@ class GimpleGen:
             self._emit(f"  /* TODO: comprehension over MojoGenerator* with no known API (unreachable in Milestone B scope) */")
             return
         base, vct = api['base'], api['value_ctype']
-        self._declare_var(gen0.target, vct)
+        # `[... for a, b in <tuple-yielding generator>():]` — mirrors
+        # _gen_for_generator_iter's identical tuple-target handling (see
+        # its own comment): gen0.target arrives as the literal string
+        # "(a, b)" only when this generator's registration proved it's a
+        # real tuple-yielder.
+        tuple_slot_ctypes = api.get('tuple_slot_ctypes')
+        is_tuple_target = (gen0.target.startswith('(') and gen0.target.endswith(')')
+                            and tuple_slot_ctypes is not None)
+        if is_tuple_target:
+            var_names = [v.strip() for v in gen0.target[1:-1].split(',')]
+        else:
+            var_names = None
+            self._declare_var(gen0.target, vct)
         bb_cond = self._new_bb(); bb_body = self._new_bb()
         bb_post = self._new_bb(); bb_after = self._new_bb()
         self._emit(f"  goto {bb_cond};")
@@ -17175,7 +17303,10 @@ class GimpleGen:
         self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
         self._emit_label(bb_body)
         val = self._new_val(vct, f"{base}_value ({it_val})")
-        self._emit(f"  {gen0.target} = {val};")
+        if is_tuple_target:
+            self._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
+        else:
+            self._emit(f"  {gen0.target} = {val};")
         self._gen_compr_append(node, gen0, res, res_type, bb_post)
         self._emit(f"  goto {bb_post};")
         self._emit_label(bb_post)
@@ -21770,6 +21901,58 @@ class GimpleGen:
 
     # ── Struct iterator protocol (for x in obj where obj has __iter__) ────
 
+    def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str) -> None:
+        """Unpacks a boxed-tuple `MojoList *` (produced by a tuple-yielding
+        compiled generator's `_cpp_yield_tuple` boxing — see that method's
+        docstring for the producer side) into `var_names`, one runtime
+        accessor call per slot, using the generator's own statically-
+        unified per-slot type list (`slot_types`, from
+        `_generator_api[...]['tuple_slot_ctypes']` —
+        see `_generator_tuple_yield_slot_ctypes`). Shared by every
+        compiled-generator tuple-target `for` consumer
+        (`_gen_for_generator_iter`/`_compr_generator_loop`) so the two
+        can't silently diverge on how a boxed tuple is read back apart.
+
+        Mirrors `_gen_for_list`'s existing `for (a, b) in <list-of-
+        tuples>:` per-slot accessor dispatch (int/double/str, chosen via
+        TypeLattice.list_suffix) — kept as its OWN narrow helper rather
+        than merged into that method's inline tuple-unpack block, since
+        `_gen_for_list`'s is_tuple branch carries additional
+        dict.items()-specific "slot 0 is always the string key" logic
+        that has no equivalent here: a compiled generator's tuple yield
+        has no such convention, every slot's type comes straight from
+        `slot_types`."""
+        for i, vn in enumerate(var_names):
+            slot_elem = slot_types[i] if i < len(slot_types) else 'int64_t'
+            self._declare_var(vn, slot_elem)
+            cvn = self._cname(vn)
+            suf = TypeLattice.list_suffix(slot_elem)
+            vt = self.var_types.get(vn, slot_elem)
+            if suf == 'str':
+                ts = self._new_val('char *', f"mojo_list_get_str ({list_ptr}, {i})")
+                if vt == 'char *':
+                    self._emit(f"  {cvn} = {ts};")
+                else:
+                    ip = self._new_val('int64_t', f"(int64_t){ts}")
+                    self._emit(f"  {cvn} = {ip};")
+                    # Recover the real string type on later reads (print(),
+                    # f-strings, method args) — mirrors _gen_for_list's
+                    # identical fixup for the same "boxed into an int64_t
+                    # var" situation.
+                    self._actual_types[vn] = 'char *'
+            elif suf == 'double':
+                dv = self._new_val('double', f"mojo_list_get_double ({list_ptr}, {i})")
+                if vt == 'double':
+                    self._emit(f"  {cvn} = {dv};")
+                else:
+                    self._safe_coerce_emit('double', vt, dv, cvn)
+            else:
+                raw = self._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
+                if vt == 'int64_t':
+                    self._emit(f"  {cvn} = {raw};")
+                else:
+                    self._safe_coerce_emit('int64_t', vt, raw, cvn)
+
     def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list,
                                 destroy_after: bool = True):
         """for x in <supported generator call>(): ... — <base>_resume()/
@@ -21792,7 +21975,23 @@ class GimpleGen:
         second time. See the call site in _gen_for_iter for the full
         rationale."""
         base, vct = api['base'], api['value_ctype']
-        self._declare_var(var, vct)
+        # `for a, b in <tuple-yielding generator>():` — `var` arrives as
+        # the literal string "(a, b)" (see _gen_for_list's identical
+        # tuple-target string convention; ForStmt.target is always a plain
+        # str). Only unpack per-slot when this generator's own
+        # registration proved it's REALLY a tuple-yielder (`tuple_slot_
+        # ctypes` non-None, from `_generator_tuple_yield_slot_ctypes`) —
+        # a plain (non-tuple) generator that happens to be consumed with a
+        # tuple-looking target is a pre-existing, unrelated mismatch this
+        # fix doesn't attempt to handle (falls through to the ordinary
+        # single-name declare below, unchanged prior behavior).
+        tuple_slot_ctypes = api.get('tuple_slot_ctypes')
+        is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
+        if is_tuple_target:
+            var_names = [v.strip() for v in var[1:-1].split(',')]
+        else:
+            var_names = None
+            self._declare_var(var, vct)
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
@@ -21806,7 +22005,10 @@ class GimpleGen:
         self._loop_depth += 1
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         val = self._new_val(vct, f"{base}_value ({gen_val})")
-        self._emit(f"  {self._cname(var)} = {val};")
+        if is_tuple_target:
+            self._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
+        else:
+            self._emit(f"  {self._cname(var)} = {val};")
         self.loop_stack.append((bb_post, bb_after))
         for s in body:
             self.gen_stmt(s)
@@ -24205,6 +24407,56 @@ class GimpleGen:
         self._cpp_fresh_name_counter += 1
         return f"{prefix}_{self._cpp_fresh_name_counter}"
 
+    def _cpp_yield_tuple(self, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
+        """`yield a, b, ...` — boxes the tuple's elements into a real
+        runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
+        representation `_lower_tuple_literal` builds for an ordinary,
+        non-generator `(a, b)` tuple literal in the main GIMPLE path — see
+        that method's docstring) and `co_yield`s THAT boxed pointer,
+        instead of the invalid raw C++ braced-init-list
+        (`co_yield {a, b, c};`) this shape used to emit — see
+        `_generator_yield_ctype`'s TupleExpr-handling docstring for why
+        that was invalid C++ against a promise typed for a single scalar.
+
+        The promise's `yield_value` parameter itself needs NO change for
+        this: `MojoList *` is already a supported co_yield scalar payload
+        (any generator that yields a plain list/string value already
+        relies on this) — boxing the tuple down to one pointer here is
+        sufficient on its own; only this boxing and the consumer-side
+        unboxing (`_gen_for_generator_iter`'s/`_compr_generator_loop`'s
+        tuple-target handling, keyed off `_generator_tuple_yield_slot_
+        ctypes`'s unified per-slot result) are new.
+
+        Each element's own natural type is inferred independently, right
+        here at its own yield site, via `_infer_simple_expr_ctype` (the
+        same declared-locals-aware inference `_cpp_stmt`'s AssignStmt case
+        already uses at emission time — `self._cpp_declared`/`declared`
+        is the SAME dict object `_generator_yield_ctype`'s later, whole-
+        body-final call reads from, so a `yield <local>, <local>` site
+        occurring textually before that local's own first assignment
+        still gets the same int64_t default fallback both call sites
+        agree on) — this method only needs a type good enough to choose
+        the right `mojo_list_append_<suffix>` runtime call for THIS one
+        site; the separate, function-wide UNIFIED per-slot type list
+        (computed once, after the whole body's been walked) is what the
+        consumer side actually trusts for its own accessor choice."""
+        tvar = self._cpp_fresh_name('_mg_tup')
+        self_fields = getattr(self, '_cpp_gen_self_fields', None)
+        lines = [f"{indent}MojoList *{tvar} = mojo_list_new();",
+                 f"{indent}mojo_mark_as_tuple({tvar});"]
+        for el in tup.elements:
+            ectype = _infer_simple_expr_ctype(el, declared, self_fields, self._async_api) or 'int64_t'
+            ev = self._cpp_expr(el)
+            suf = TypeLattice.list_suffix(ectype)
+            if suf == 'double':
+                lines.append(f"{indent}mojo_list_append_double({tvar}, (double)({ev}));")
+            elif suf == 'str':
+                lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_list_append_int({tvar}, (int64_t)({ev}));")
+        lines.append(f"{indent}co_yield {tvar};")
+        return lines
+
     def _cpp_stmt_with_break_flag(self, s, declared: dict, indent: str,
                                    brk_var: str) -> list[str]:
         """Like _cpp_stmt but intercepts BreakStmt to set brk_var = true before
@@ -24244,6 +24496,8 @@ class GimpleGen:
                         "combined-refusal category — see gen_module)")
                 if s.value.value is None:
                     return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
+                if isinstance(s.value.value, TupleExpr):
+                    return self._cpp_yield_tuple(s.value.value, declared, indent)
                 return [f"{indent}co_yield {self._cpp_expr(s.value.value)};"]
             if isinstance(s.value, YieldFromExpr):
                 if self._cpp_emit_kind in ('async', 'async_gen'):
@@ -25796,6 +26050,11 @@ class GimpleGen:
                                           same existing convention)
           <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
         """
+        # Reset the tuple-yield side channel up front (see its own
+        # docstring at __init__) so an early exception/refusal in THIS
+        # compile attempt can never leave a PRIOR generator's leftover
+        # slot-types list around for some later, unrelated read to pick up.
+        self._cpp_last_tuple_slot_ctypes = None
         # Parameters: only plain scalar (int64_t/double/_Bool) positional
         # params are supported this step. *args/**kwargs and any param whose
         # resolved C type isn't one of those three are refused — string/
@@ -26002,6 +26261,22 @@ class GimpleGen:
             for s in fn.body:
                 body_lines.extend(self._cpp_stmt(s, declared, '    '))
             value_ctype = _generator_yield_ctype(fn, declared, self._generator_api, self_fields)
+            # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
+            # (just above) only decided the OVERALL promise value type
+            # ('MojoList *' for a tuple yield, same as any plain list-
+            # valued yield) — this companion call resolves the per-SLOT
+            # element types a consumer for-loop needs to unbox that
+            # pointer correctly (see _generator_tuple_yield_slot_ctypes's
+            # own docstring). `has_tuple_yield=True, slots=None` means fn
+            # DOES tuple-yield but the sites disagree on arity/slot type —
+            # a real unsupported shape, so force the same graceful refusal
+            # every other unsupported shape gets here, even though
+            # _generator_yield_ctype itself came back non-None.
+            has_tuple_yield, tuple_slot_ctypes = _generator_tuple_yield_slot_ctypes(
+                fn, declared, self_fields, self._async_api)
+            if has_tuple_yield and tuple_slot_ctypes is None:
+                value_ctype = None
+            self._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
             func_decls = list(self._cpp_func_scope_decls)
             self_recursed = self._cpp_gen_self_recursed
         finally:
@@ -27524,6 +27799,9 @@ class GimpleGen:
 
         Returns (cpp_text, value_ctype, base, param_ctypes) mirroring both
         predecessors' return shape (param_ctypes always `[]` this step)."""
+        # See _gen_cpp_generator_unit's identical reset for why this must
+        # happen up front, before any early exception/refusal.
+        self._cpp_last_tuple_slot_ctypes = None
         param_ctypes: list[tuple[str, str]] = []
         for pn, pt in (fn.params or []):
             if pn.startswith('*'):
@@ -27558,6 +27836,14 @@ class GimpleGen:
             value_ctype = _generator_yield_ctype(
                 fn, declared, generator_api=self._generator_api,
                 self_fields=None, async_api=self._async_api)
+            # See _gen_cpp_generator_unit's identical companion call for
+            # the full rationale — same tuple-yield slot-type resolution,
+            # reused verbatim for the async-generator (`async for`) case.
+            has_tuple_yield, tuple_slot_ctypes = _generator_tuple_yield_slot_ctypes(
+                fn, declared, None, self._async_api)
+            if has_tuple_yield and tuple_slot_ctypes is None:
+                value_ctype = None
+            self._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
         finally:
             self._cpp_emit_kind = 'generator'
             self._cpp_gen_self_struct = None
@@ -30578,6 +30864,11 @@ class GimpleGen:
             self._supported_generators[s.name] = s
             self._generator_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                # None for every generator except a tuple-valued one
+                # (`yield a, b, ...`) — see _cpp_yield_tuple's producer-
+                # side boxing and _gen_for_generator_iter's/next()'s
+                # consumer-side unpacking, both keyed off this.
+                'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             }
             # <base>_start's real C parameter types, registered the exact
             # same way an ordinary function's signature is registered — this
@@ -30642,6 +30933,7 @@ class GimpleGen:
                 self._supported_generators[s.name] = s
                 self._generator_api[s.name] = {
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                    'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 _gen_dflts = getattr(s, 'param_defaults', None) or {}
@@ -30693,6 +30985,7 @@ class GimpleGen:
             self._supported_async_gen[s.name] = s
             self._async_gen_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
@@ -30718,6 +31011,7 @@ class GimpleGen:
                 self._supported_async_gen[s.name] = s
                 self._async_gen_api[s.name] = {
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                    'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 self._generator_cpp_units.append(cpp_text)
@@ -30867,6 +31161,7 @@ class GimpleGen:
                 self._supported_generator_methods[key] = m
                 self._generator_method_api[key] = {
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                    'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 _gen_dflts = getattr(m, 'param_defaults', None) or {}
@@ -30897,6 +31192,7 @@ class GimpleGen:
                 self._supported_generator_methods[key] = m
                 self._generator_method_api[key] = {
                     'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+                    'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
                 }
                 self.func_param_types[f"{base}_start"] = param_ctypes
                 _gen_dflts = getattr(m, 'param_defaults', None) or {}

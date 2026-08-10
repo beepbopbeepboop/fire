@@ -1,5 +1,29 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Confirmed via an isolated compile: `WeakValueDictionary.
+items`/`WeakKeyDictionary.items`'s `yield key, value` sites are no
+longer refused, and their own tuple-boxing/`co_yield` text is
+syntactically valid C++.
+
+**weakref.py still does not build**, blocked by an INDEPENDENT,
+pre-existing gap one statement earlier in the SAME methods:
+`for k, wr in self.data.copy().items():` — a plain `for` loop, inside a
+coroutine body, over a non-generator call (`dict.items()`), with a
+non-`enumerate()` tuple target. `_cpp_for_stmt` only special-cases a
+tuple target for `enumerate(...)`; any other tuple-target iterable
+(including a plain dict/generator `.items()`-shaped call) falls through
+to treating the whole comma-joined target as ONE bogus C++ identifier —
+g++: `for (auto k, wr : self->data.copy().items())`, "declaration of
+'auto k' has no initializer". Confirmed as the SAME gap independently
+found in `calendar.py`'s and `Tools/c-analyzer/c_parser/datafiles.py`'s
+own generators (see those docs) — a real, separate, pre-existing
+`_cpp_for_stmt` limitation, not the promise/ABI gap this session's fix
+targets. Not attempted here. Doc kept open (not deleted).
+
 ## Status (re-verified 2026-08-09, unchanged from 2026-08-07)
 
 Fresh from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/

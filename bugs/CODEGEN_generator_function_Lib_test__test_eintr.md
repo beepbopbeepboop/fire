@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; unrelated gaps earlier in the same body now block)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Confirmed via an isolated compile: `OSEINTRTest.
+_interrupted_reads`'s `yield rd, datum` (line 153) is no longer
+refused, and its own `co_yield`/tuple-boxing text
+(`mojo_list_append_int(rd)`/`mojo_list_append_int(datum)`) is
+syntactically valid C++ — no g++ errors on those lines.
+
+**This file still does not build**, blocked by unrelated, pre-existing
+gaps EARLIER in the same function body (confirmed via g++ syntax-check):
+`rd, wr = os.pipe()` (no lowering for `os.pipe()`), `data = [b"hello",
+b"world", b"spam"]` (a bare list-literal local assignment inside a
+coroutine body has no declared-type support — confirmed via a minimal,
+tuple-free repro: `dirs = ["a","b"]; yield dirs[0]` hits the identical
+"cannot convert brace-enclosed-initializer-list to int64_t" error), and
+`'\n'.join((...))` (`.join()` unsupported in the coroutine-body
+expression lowering). None of these are the promise/ABI gap this
+session's fix targets. Not attempted here. Doc kept open (not deleted).
+
 ## Status (updated 2026-08-09, re-verified against current master `b48a941`)
 
 Re-ran `MOJO_DEBUG=1 python3 mojo.py build .../_test_eintr.py` fresh.

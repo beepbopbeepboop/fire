@@ -2,6 +2,36 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes` — the design note in the 2026-08-09 section below, "making
+tuple-valued yields actually compile needs a new value-representation
+category," is exactly what landed: a tuple is boxed into the SAME
+`MojoList *` representation an ordinary compiled tuple literal already
+uses, and `MojoList *` was already a supported `co_yield` scalar
+payload, so the promise type itself needed no redesign). Confirmed via
+an isolated compile: `Path.walk()`'s `yield path, dirnames, filenames`
+is no longer refused, and its own tuple-boxing/`co_yield` text is
+syntactically valid C++ (`dirnames`/`filenames`, both lists, correctly
+box into the generic non-string-pointer bucket, the same convention
+this codegen already uses for any non-`char*` pointer stored in a list
+slot).
+
+**pathlib/__init__.py still does not build**, blocked by an
+INDEPENDENT, pre-existing gap earlier in the SAME method: an
+`os.<call>(...)` module-attribute call inside `walk`'s body has no
+lowering in the coroutine-body expression emitter — g++: "'os' was not
+declared in this scope". Unrelated to tuple-yield. This is the SAME
+tuple-yield structural gap independently confirmed in `save_env.py`/
+`test_exception_group.py`/`randdec.py` (cited below) — those 3 (plus
+this file) are now all past that specific gate; this doc's "why not
+fixed" section below (structural, feature-sized) no longer describes
+the current blocker, but a real fix WAS landed this session for the
+narrower tuple-yield mechanism it describes. Doc kept open (not
+deleted) — this file genuinely still doesn't build.
+
 ## Status (updated 2026-08-09 — re-verified against current master, same
 ## structural gap, reference doc corrected)
 

@@ -4,6 +4,39 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a NEW, precisely-diagnosed, unrelated blocker found)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Confirmed via an isolated compile: `parse_table`'s `yield
+row, filename` (line 183) is no longer refused.
+
+**This file still does not build**, blocked by a DIFFERENT, precisely-
+diagnosed, pre-existing gap — not in the tuple-yield boxing itself
+(confirmed clean), but in the coroutine's own C++ FUNCTION SIGNATURE:
+`parse_table(entries, sep='\t', header=None, rawsep=False,
+default=None, strict=True)` has a parameter literally named `default`
+— a C++ reserved keyword. The coroutine-body codegen's parameter-list
+emission (`cpp_sig`, `_gen_cpp_generator_unit`) doesn't escape C++-
+keyword parameter names the way struct FIELD names already are
+(`_CPP_KEYWORD_FIELDS`) — g++ then fails to parse the function
+signature at all ("expected ',' or '...' before 'default'"), which
+cascades into "not declared in this scope" errors for every OTHER name
+in the function body (including this session's own correctly-generated
+tuple-boxing code, which is innocent — it's simply unreachable once the
+enclosing function's signature itself fails to parse). Confirmed by line
+number: the very first error is at the `_mojogen_parse_table_impl`
+function-signature line itself, and every subsequent error in that
+function is a direct syntactic consequence of that one parse failure.
+
+A real fix would extend the SAME keyword-escaping mechanism
+`_CPP_KEYWORD_FIELDS`/`_cpp_expr`'s IdentExpr case already applies to
+struct field names, to coroutine PARAMETER names too — not attempted
+here (a distinct, well-scoped `_gen_cpp_generator_unit` gap, unrelated
+to the promise/ABI value-representation work this session's fix
+targets). Doc kept open (not deleted) — tuple-yield is no longer this
+file's blocker, but the file genuinely still doesn't build.
+
 ## Status (re-verified 2026-08-09)
 
 Re-ran against current master (`python3 mojo.py build .../c_common/
