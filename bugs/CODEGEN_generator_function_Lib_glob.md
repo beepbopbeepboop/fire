@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-09, re-verified — unchanged)
+
+Re-verified against current master (post-merge `7df52a0`). Still fails
+identically to the 2026-08-07 diagnosis below — exact same two errors,
+same lines:
+```
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:175:7: error: assignment to 'int64_t' {aka 'long long int'} from 'char *' makes integer from pointer without a cast [-Wint-conversion]
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:354:9: error: too few arguments to function 'translate_584a43'; expected 4, have 1
+```
+Confirmed again: `MOJO_DEBUG=1` shows no "not eligible" refusal for any
+of glob.py's own generators, and `bugs/hard/CODEGEN_cross_module_bare_
+import_name_collision.md` (the real root cause of the line-175 error)
+is still present and unfixed (`gimple_codegen.py`'s `_global_to_module`
+first-registration-wins map, still shared/unqualified as of this
+commit). No change needed to the classification below.
+
+One addition: pinned down the second error (line 354,
+`translate_584a43` arity mismatch) precisely — it is NOT generator-
+related either. `translate(pat, *, recursive=False, include_hidden=
+False, seps=None)` (glob.py:294) is an ordinary function with 3
+keyword-only parameters; its one call site, `_compile_pattern`
+(glob.py:354, `translate(pat, recursive=recursive, include_hidden=True,
+seps=seps)`), passes all 3 by keyword. `translate` itself contains no
+`yield` — this is a plain call-codegen gap in keyword-only-argument
+forwarding for an ORDINARY function call, unrelated to the coroutine
+generator path this cluster of bug docs is about. Left uninvestigated
+further here (out of scope for the generator-codegen cluster; would be
+better tracked as its own non-generator `CODEGEN_` doc if it recurs
+elsewhere — a quick grep of the other 2 bug docs in this batch,
+gettext.py/imaplib.py, found no matching symptom, so not folded into a
+shared doc yet).
+
 ## Status (updated 2026-08-07, re-diagnosed — previous root cause was WRONG)
 
 **STILL FAILING**, but the 2026-08-06 note's root-cause analysis below
