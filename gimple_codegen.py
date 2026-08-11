@@ -2064,7 +2064,17 @@ _C_PARAM_EXTRA_KEYWORDS = frozenset({'asm', '__asm__', 'typeof', '__typeof__'})
 
 # C standard-library macros that expand to numeric constants — using them as identifiers
 # causes the preprocessor to replace them before GCC sees the code (e.g. 'true' → '1').
-_C_MACRO_NAMES = frozenset({'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END'})
+_C_MACRO_NAMES = frozenset({
+    'true', 'false', 'NULL', 'EOF', 'SEEK_SET', 'SEEK_CUR', 'SEEK_END',
+    # <stdio.h> object-like macros: a Mojo global/field named identically
+    # (e.g. tempfile.py's own module-level `TMP_MAX = 10000` constant)
+    # gets silently text-substituted by the C preprocessor before GCC ever
+    # parses the struct, turning `int TMP_MAX;` into `int 308915776;`
+    # ("expected identifier ... before numeric constant") wherever it's
+    # declared/accessed — same failure mode SEEK_CUR/SEEK_SET/SEEK_END
+    # above already guard against, just from the rest of the same header.
+    'TMP_MAX', 'FILENAME_MAX', 'FOPEN_MAX', 'BUFSIZ', 'L_tmpnam', 'L_ctermid',
+})
 
 # Python pseudo-attributes provided by the runtime/type machinery, NOT real
 # instance fields — excluded from the "read-only field" struct inference so
