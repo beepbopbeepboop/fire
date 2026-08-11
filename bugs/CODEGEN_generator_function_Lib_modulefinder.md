@@ -1,5 +1,77 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-11 — re-verified still refused; deepened root-cause to 3 independent, stacked gaps, real fix attempt not made — genuinely out of narrow-fix scope)
+
+Re-verified against current master: `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/modulefinder.py` still fails with the
+identical `RuntimeError: cannot compile module: function(s)
+scan_opcodes ...` before any C is emitted — unchanged from 2026-08-10.
+
+Went deeper than the previous session's assessment to see whether a
+real, bounded fix was possible (not just re-confirming the refusal).
+Found this is actually **3 independent, stacked gaps**, not one — a
+real fix would need all three, and each is itself non-trivial:
+
+1. **Nested-tuple element boxing.** `scan_opcodes`'s 3 yield sites are
+   `yield "store", (name,)` / `yield "absolute_import", (fromlist,
+   name)` / `yield "relative_import", (level, fromlist, name)` — the
+   OUTER tuple is always 2 elements (agrees with
+   `_generator_tuple_yield_slot_ctypes`'s fixed-arity-per-slot model),
+   but slot 1 is itself a nested `TupleExpr` whose OWN arity varies
+   (1, 2, then 3 elements) depending on which site fired. The existing
+   `_cpp_yield_tuple`/`_generator_tuple_yield_slot_ctypes` model assigns
+   ONE C++ scalar type per top-level slot, unified across every yield
+   site in the function — there is no representation at all for "this
+   slot is itself a variable-arity nested tuple," which is a
+   structurally different (dynamically-shaped, not fixed-shape) case.
+   A real fix would need slot 1 to box recursively into its own
+   `MojoList *` (storing the boxed pointer as `int64_t` the same way
+   this codebase already boxes other pointer-typed values into int64_t
+   containers) and mark that slot's ctype as `'MojoList *'` instead of
+   a scalar — a genuinely new code path, not a parameter tweak.
+2. **The consumer never calls the generator directly.**
+   `scan_code`'s consuming loop is:
+   ```python
+   scanner = self.scan_opcodes
+   for what, args in scanner(co):
+   ```
+   `_cpp_for_generator_delegate` (the coroutine-body consumer for
+   `for <target> in <call>:`) only recognizes `self.<method>(...)`
+   (checked via `isinstance(call.func, MemberExpr)` +
+   `call.func.obj is IdentExpr('self')`) or a free-function
+   self-recursive call by name — a call through a local variable
+   (`scanner`) that was bound to a bound-method value earlier in the
+   same function is neither shape, so this loop would raise
+   `_UnsupportedGeneratorShape` regardless of whether gap #1 above is
+   fixed. This is the SAME "closure/bound-method-as-value" class of gap
+   as other already-fixed bugs this session, but applied specifically
+   to a GENERATOR consumption site, which `_cpp_for_generator_delegate`
+   has no alias-resolution for at all.
+3. **The consumer destructures with tag-dependent, non-fixed arity.**
+   Even with #1 and #2 solved, `scan_code`'s body does
+   `name, = args` / `fromlist, name = args` / `level, fromlist, name =
+   args` in different branches keyed on the `what` tag string — i.e.
+   the nested tuple's real shape is a discriminated union (arity/typing
+   varies by which string tag accompanies it), not a single fixed
+   N-tuple. No part of this codegen's tuple-yield/tuple-unpack model
+   represents tag-discriminated variable-shape data; each unpack site
+   would need to trust its own local arity assumption against a
+   runtime `MojoList *` of unknown-at-compile-time length, which is a
+   correctness question this codegen doesn't have an existing pattern
+   for (every other tuple-unpack consumer assumes a single, statically
+   agreed arity for the whole generator).
+
+**Not attempted**: this is 3 stacked, independently non-trivial
+extensions to already-complex, heavily-shared machinery
+(`_cpp_yield_tuple`/`_generator_tuple_yield_slot_ctypes`/
+`_cpp_for_generator_delegate`) that every other fixed tuple-yield bug
+this session depends on for correctness (mailbox.py, ipaddress.py,
+etc.) — a rushed combined fix risks regressing all of them. This is a
+genuine, deep structural gap, not a narrow one; consistent with the
+previous session's own "out of this fix's scope" conclusion, now with
+the full 3-part breakdown documented so a future dedicated pass
+doesn't have to re-derive it. Doc kept open.
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; unaffected, file still fails before GCC stage regardless)
 
 Investigated this session's cross-cutting task tracing a recurring
