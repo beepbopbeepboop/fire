@@ -3659,6 +3659,12 @@ class GimpleGen:
         # for every entry in _supported_generators — the exact extern "C" API
         # names/types the .c side forward-declares and calls into.
         self._generator_api: dict[str, dict] = {}
+        # Default empty; gen_module overwrites this with the module's real
+        # set once it's scanned (see that assignment's own docstring) —
+        # this fallback just keeps `_cpp_for_generator_delegate`'s caller
+        # safe for any code path that reaches `_cpp_for_stmt` without going
+        # through gen_module first.
+        self._all_generator_names: set = set()
         # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
         # stash their just-computed _generator_tuple_yield_slot_ctypes
         # result here (list[str] for a tuple-yielding generator, None for
@@ -23987,6 +23993,31 @@ class GimpleGen:
             val = self._cpp_expr(e.value)
             return f"({name} = {val})"
         if isinstance(e, CallExpr):
+            # A `*`/`**`-unpack call ARGUMENT (this project's parser wraps
+            # a spread argument in UnaryOp(op='*'/'**', operand=...) — see
+            # this repo's own CLAUDE.md) has no case anywhere in this
+            # coroutine-body expression emitter's call-argument lowering
+            # (every call shape below just does a flat `', '.join(self.
+            # _cpp_expr(a) for a in e.args)` or an equivalent). Left
+            # unchecked, such an argument falls through to the generic
+            # UnaryOp case further down (`op == '**'` -> literally `(**x)`),
+            # which g++ parses as a double pointer-dereference of a
+            # MojoDict*/MojoList* local, not an argument-unpack — a silent
+            # MISCOMPILE (invalid/nonsensical C++), not just a missed
+            # feature. Real: codecs.py's `iterencode`/`iterdecode` doing
+            # `getincrementalencoder(encoding)(errors, **kwargs)` — the
+            # callee is itself a dynamically-obtained class, so even a
+            # correct implementation would need to know that class's real
+            # parameter names at compile time, which this scalar body model
+            # has no way to discover. Refuse the whole generator honestly
+            # here (falls the module back to interpreting it from source)
+            # instead of ever reaching one of those broken emission sites —
+            # same family as bugs/hard/CODEGEN_generator_lambda_expr_
+            # unsupported.md's existing LambdaExpr-argument refusal.
+            if any(isinstance(a, UnaryOp) and a.op in ('*', '**') for a in e.args):
+                raise _UnsupportedGeneratorShape(
+                    "a `*`/`**`-unpack call argument is not supported in a "
+                    "compiled generator/coroutine body")
             # Simple function call in generator body (e.g. os.path.join(a, b))
             if isinstance(e.func, MemberExpr):
                 # `.format(...)` on a string literal — mirrors the GIMPLE
@@ -25256,6 +25287,203 @@ class GimpleGen:
             lines.extend(self._cpp_stmt(st, declared, indent))
         return lines
 
+    def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list,
+                                     declared: dict, indent: str) -> list[str]:
+        """`for <target> in <call to another already-compiled generator>():`
+        inside a coroutine body — an ordinary (non-`yield from`) consuming
+        loop over a sibling generator (e.g. dis.py's
+        `_get_instructions_bytes` doing `for offset, start_offset, op, arg
+        in _unpack_opargs(original_code):`). `target` is either a plain str
+        (single loop variable) or a list of names (a tuple target — see
+        `_cpp_for_stmt`'s own "(a, b, ...)" string convention, already
+        unwrapped by the caller).
+
+        Mirrors `_cpp_yield_from`'s existing sub-generator delegation drive
+        loop almost exactly: same `<base>_start/_resume/_value/_destroy`
+        calling convention over `self._generator_api`, same "callee must be
+        a generator this compile has ALREADY translated" ordering
+        constraint (this naturally means "defined earlier in the module",
+        exactly like `yield from` — gen_module's multi-pass retry loop for
+        generators that depend on a not-yet-compiled sibling applies here
+        unchanged, since raising `_UnsupportedGeneratorShape` when `call.
+        func.name` isn't in `self._generator_api` yet is exactly what makes
+        a caller like `_get_instructions_bytes` retried in a later pass) —
+        but DRIVES the sub-generator instead of re-`co_yield`ing: each
+        produced value is assigned into the loop target(s) and the loop
+        body runs, rather than delegating it onward. A tuple target is
+        unboxed via the same `MojoList *`-of-boxed-elements convention
+        `_cpp_yield_tuple` produces on the producer side and
+        `_emit_generator_tuple_unpack` reads back on the plain-GIMPLE
+        consumer side (`TypeLattice.list_suffix` picks the right
+        `mojo_list_get_*` accessor per slot, from the callee's own
+        registered `tuple_slot_ctypes`) — this is that same protocol's
+        coroutine-body counterpart, which had no consumer at all before
+        (only the GIMPLE side's `for`/comprehension consumers did).
+
+        Raises `_UnsupportedGeneratorShape` (never emits invalid C++) for:
+        the callee not being a genuinely-compiled generator yet (source-
+        order/never-eligible), an argument-count mismatch, or (implicitly,
+        via the caller's own pre-check) a tuple target paired with a
+        non-tuple-yielding callee — all handled exactly like every other
+        out-of-scope shape in this emitter, so an unsupported instance
+        falls back to interpreting the whole module from source instead of
+        miscompiling."""
+        if call.kwargs:
+            for kname, kexpr in call.kwargs:
+                call.args.append(kexpr)
+            call.kwargs = []
+        # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
+        # `Calendar.itermonthdates` doing `for y, m, d in self.
+        # itermonthdays3(year, month):`), resolved via
+        # `self._generator_method_api` (keyed by (struct_name, method_name)
+        # — see that dict's own population sites) instead of the
+        # free-function `self._generator_api`. `<base>_start`'s first
+        # parameter is the receiver itself (`_gen_cpp_generator_unit`
+        # prepends `('self', f"{struct_name} *")` to a method's own
+        # `param_ctypes`, mirroring `_gen_struct_method`'s identical
+        # convention for an ordinary compiled method) — passed here as the
+        # literal `self` (this delegating generator's OWN receiver; a
+        # generator method can only ever be consumed via `self.<method>()`
+        # in this scalar body model, never through an arbitrary struct-typed
+        # local — see the `isinstance(call.func.obj, IdentExpr) and ...
+        # 'self'` guard below), never a separately-evaluated expression.
+        if isinstance(call.func, MemberExpr):
+            _self_struct = getattr(self, '_cpp_gen_self_struct', None)
+            if not (isinstance(call.func.obj, IdentExpr)
+                    and call.func.obj.name == 'self' and _self_struct):
+                raise _UnsupportedGeneratorShape(
+                    "`for ... in <expr>.<method>(...)` is only supported "
+                    "when <expr> is literally `self` inside a generator "
+                    "method on the same struct")
+            sub_name = f"{_self_struct}.{call.func.member}"
+            api = self._generator_method_api.get((_self_struct, call.func.member))
+            if (api is None or (_self_struct, call.func.member)
+                    not in self._supported_generator_methods):
+                raise _UnsupportedGeneratorShape(
+                    f"`for ... in self.{call.func.member}(...)` does not "
+                    "consume a generator method this compile has itself "
+                    "already translated via the C++20-coroutine path "
+                    "(either it's not a generator this codegen supports, or "
+                    "it's defined LATER among this struct's methods — the "
+                    "consumed generator method must be defined earlier)")
+            receiver_exprs = ['self']
+        else:
+            sub_name = call.func.name
+            api = self._generator_api.get(sub_name)
+            if api is None or sub_name not in self._supported_generators:
+                raise _UnsupportedGeneratorShape(
+                    f"`for ... in {sub_name}(...)` does not consume a generator "
+                    "this compile has itself already translated via the "
+                    "C++20-coroutine path (either it's not a generator this "
+                    "codegen supports, or it's defined LATER in this module — "
+                    "the consumed generator must be defined earlier)")
+            receiver_exprs = []
+        sub_params = api.get('params') or []
+        if len(call.args) + len(receiver_exprs) != len(sub_params):
+            raise _UnsupportedGeneratorShape(
+                f"`for ... in {sub_name}(...)`: expected "
+                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                f"got {len(call.args)}")
+        arg_exprs = receiver_exprs + [self._cpp_expr(a) for a in call.args]
+        base = api['base']
+        vct = api['value_ctype']
+        tuple_slot_ctypes = api.get('tuple_slot_ctypes')
+        is_tuple = isinstance(target, list)
+        if is_tuple and tuple_slot_ctypes is None:
+            # A tuple loop target (`for a, b in ...:`) but the callee isn't
+            # actually a tuple-valued yielder (`_generator_tuple_yield_
+            # slot_ctypes` found nothing to unify) — e.g. it yields a plain
+            # scalar/string, or a real Python `for` over its results
+            # wouldn't even type-check. Refuse honestly rather than
+            # silently defaulting every slot to int64_t (which would read
+            # back garbage from a single-scalar `MojoList` value on the
+            # producer side, since `_cpp_yield_tuple`'s boxing convention
+            # was never applied there at all).
+            raise _UnsupportedGeneratorShape(
+                f"`for {', '.join(target)} in {sub_name}(...)`: tuple loop "
+                f"target but {sub_name!r} is not a tuple-valued generator")
+        self._yield_from_seq = getattr(self, '_yield_from_seq', 0) + 1
+        guard = f"__mojogen_forgen{self._yield_from_seq}"
+        args_text = ', '.join(arg_exprs)
+        lines = [
+            f"{indent}{{",
+            f"{indent}    _mojogen_sub_guard {guard}"
+            f"{{ {base}_start({args_text}), &{base}_destroy }};",
+            f"{indent}    while ({base}_resume({guard}.g)) {{",
+        ]
+        body_indent = indent + '        '
+        if is_tuple:
+            val_var = self._cpp_fresh_name("_mg_forgen_val")
+            lines.append(f"{body_indent}MojoList * {val_var} = {base}_value({guard}.g);")
+            for i, nm in enumerate(target):
+                slot_ct = tuple_slot_ctypes[i] if tuple_slot_ctypes and i < len(tuple_slot_ctypes) else 'int64_t'
+                if nm not in declared:
+                    declared[nm] = slot_ct
+                    lines.append(f"{body_indent}{_c_to_cpp_scalar_type(slot_ct)} {nm};")
+                suf = TypeLattice.list_suffix(slot_ct)
+                if suf == 'double':
+                    lines.append(f"{body_indent}{nm} = mojo_list_get_double({val_var}, {i});")
+                elif suf == 'str':
+                    lines.append(f"{body_indent}{nm} = mojo_list_get_str({val_var}, {i});")
+                elif slot_ct == '_Bool':
+                    lines.append(f"{body_indent}{nm} = (bool)mojo_list_get_int({val_var}, {i});")
+                else:
+                    lines.append(f"{body_indent}{nm} = mojo_list_get_int({val_var}, {i});")
+        else:
+            if target not in declared:
+                declared[target] = vct
+                lines.append(f"{body_indent}{_c_to_cpp_scalar_type(vct)} {target};")
+            lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+        for inner in body:
+            lines.extend(self._cpp_stmt(inner, declared, body_indent))
+        lines.append(f"{indent}    }}")
+        # Same Milestone-D pending-exception disambiguation _cpp_yield_from
+        # already does at its own `_resume`-driven while-loop boundary (see
+        # that method's docstring for the full reasoning) — `_resume`
+        # reporting "no more values" is ambiguous between genuine
+        # exhaustion and an uncaught exception that unwound the whole
+        # sub-generator body; re-throw a real C++ exception here (never
+        # mojo_raise()/longjmp from inside a coroutine frame) so `{guard}`'s
+        # destructor still runs correctly during the throw's normal stack
+        # unwind.
+        lines.append(f"{indent}    if (mojo_exc_pending_get()) {{")
+        lines.append(f"{indent}        mojo_exc_pending_set(0);")
+        lines.append(f"{indent}        throw _MojoCppExc{{ mojo_exc_type_get(), "
+                     f"mojo_exc_msg_get(), mojo_exc_obj_get() }};")
+        lines.append(f"{indent}    }}")
+        lines.append(f"{indent}}}")
+        return lines
+
+    def _cpp_iterable_is_delegatable_generator_call(self, iterable) -> bool:
+        """True when `iterable` is a call this compile can potentially
+        delegate to via `_cpp_for_generator_delegate` — either a bare
+        `name(...)` naming a free-function generator, or `self.method(...)`
+        naming a generator METHOD on the SAME struct this body belongs to
+        (`self._cpp_gen_self_struct`, set by `_gen_cpp_generator_unit`
+        while compiling a generator method's body — None for a free
+        function, so the method-call branch below naturally never matches
+        there). Uses `self._all_generator_names` (every generator name
+        anywhere in the module, computed once up front — see that
+        attribute's own docstring) rather than `self._generator_api`/
+        `self._generator_method_api` directly, so a callee that's a real
+        generator but hasn't been COMPILED yet in this pass still counts as
+        "delegatable" here — `_cpp_for_generator_delegate` itself raises
+        `_UnsupportedGeneratorShape` for that case, which is exactly what
+        gets the caller retried in gen_module's later passes instead of
+        silently falling through to the generic (non-generator-aware)
+        iterable lowering."""
+        if not isinstance(iterable, CallExpr):
+            return False
+        if isinstance(iterable.func, IdentExpr):
+            return iterable.func.name in self._all_generator_names
+        if isinstance(iterable.func, MemberExpr):
+            _self_struct = getattr(self, '_cpp_gen_self_struct', None)
+            return bool(_self_struct
+                        and isinstance(iterable.func.obj, IdentExpr)
+                        and iterable.func.obj.name == 'self'
+                        and iterable.func.member in self._all_generator_names)
+        return False
+
     def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         """Plain `for <var> in <iterable>:` inside a generator body.
         Lowers to a C++ range-for or indexed loop over the iterable.
@@ -25292,8 +25520,38 @@ class GimpleGen:
                     lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
                 return lines
+            # `for a, b, ... in <call to another already-compiled generator>
+            # ():` — a PLAIN (non-`yield from`) consuming loop, inside a
+            # coroutine body, over a sibling generator this same module has
+            # already translated via the C++20-coroutine path, with a
+            # non-`enumerate()` tuple target. Real: dis.py's
+            # `_get_instructions_bytes` doing `for offset, start_offset, op,
+            # arg in _unpack_opargs(original_code):`. Only intercepted when
+            # the callee is BOTH a known compiled generator AND (since the
+            # target is a tuple) itself a genuine tuple-valued yielder —
+            # anything else (a dict/list `.items()`-shaped call, a struct
+            # __iter__, ...) falls through to the pre-existing
+            # single-bogus-identifier path below unchanged (see
+            # bugs/CODEGEN_generator_function_Lib_weakref.md for that
+            # separate, still-open gap).
+            if not s.else_body and self._cpp_iterable_is_delegatable_generator_call(s.iterable):
+                return self._cpp_for_generator_delegate(_names, s.iterable, s.body,
+                                                          declared, indent)
             target = target[1:-1]
         if isinstance(target, str):
+            # `for x in <call to another already-compiled generator>():` —
+            # the single-loop-variable sibling of the tuple-target case just
+            # above (same delegation machinery, no per-slot unpack needed).
+            # Checked before the generic `_cpp_expr`/range-for fallback
+            # below: that fallback has no notion of `self._generator_api` at
+            # all, so it previously emitted a call through the WRONG
+            # (non-coroutine, arity/return-type-mismatched) extern "C"
+            # declaration gen_module's "module-level symbols referenced by
+            # generator bodies" preamble falls back to for any unrecognized
+            # callee — invalid C++, not just a missed optimization.
+            if not s.else_body and self._cpp_iterable_is_delegatable_generator_call(s.iterable):
+                return self._cpp_for_generator_delegate(target, s.iterable, s.body,
+                                                          declared, indent)
             target_was_declared = target in declared
             declared[target] = 'int64_t'
             # `for i in range(...)` → a plain indexed loop, mirroring the
@@ -28076,6 +28334,26 @@ class GimpleGen:
             if isinstance(n, FunctionDef):
                 if n.is_generator: _generator_fns[id(n)] = n
                 if n.is_async: _async_fns[id(n)] = n
+        # Every generator function NAME anywhere in this module, computed
+        # ONCE here before the compile-attempt passes below start `.pop()`-
+        # ing entries out of `_generator_fns` as they succeed — kept for
+        # this GimpleGen instance's whole lifetime (unlike `_generator_fns`,
+        # a purely-local dict) so `_cpp_for_generator_delegate`'s caller
+        # (`_cpp_for_stmt`) can tell "this callee IS a generator in this
+        # module, just not compiled yet (wrong source order for THIS pass)"
+        # apart from "this callee was never a generator at all" even AFTER
+        # the callee's own entry has already been popped/registered or is
+        # still pending in a later pass. Without this, a `for x in g():`
+        # loop whose callee `g` happens to be defined LATER in the module
+        # (dis.py's `_get_instructions_bytes` calling `_unpack_opargs`,
+        # defined ~180 lines below it) would see `g` missing from
+        # `self._generator_api` on pass 1, silently fall through to the
+        # generic (non-generator-aware) iterable lowering below, and emit
+        # invalid C++ instead of raising `_UnsupportedGeneratorShape` — the
+        # one signal that gets THIS caller retried once `g` has actually
+        # been compiled, in pass 2/3/4, exactly like `_cpp_yield_from`'s own
+        # identical source-order dependency already relies on.
+        self._all_generator_names: set = {n.name for n in _generator_fns.values()}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): every
         # async function NAME anywhere in this module (top-level or
         # nested), regardless of whether it ends up eligible/compiled —

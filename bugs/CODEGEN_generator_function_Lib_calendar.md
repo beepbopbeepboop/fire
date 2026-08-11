@@ -1,5 +1,65 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-10, later same session — item 1's `_cpp_for_stmt` gap FIXED for the plain-tuple-target case; file still blocked by other, separate gaps)
+
+Item 1 below (`_cpp_for_stmt` treating a non-`enumerate` tuple target as
+one bogus C++ identifier) is **fixed** for the shape that actually
+affects `itermonthdates`: `for y, m, d in self.itermonthdays3(year,
+month):` — a PLAIN tuple-target `for` loop delegating to a generator
+METHOD (`self.<method>(...)`, not a free function). This was fixed in
+two steps this session, both shared with `bugs/CODEGEN_generator_
+function_Lib_dis.md` (see that doc for the full mechanism writeup):
+first a new `_cpp_for_generator_delegate` added real support for a plain
+`for`-loop consuming ANOTHER COMPILED GENERATOR via its own
+`<base>_start/_resume/_value/_destroy` API (mirroring `_cpp_yield_from`'s
+existing delegation drive-loop) for a bare free-function callee
+(commit `5d8839d`); then a follow-up extended the SAME mechanism to also
+resolve a `self.<method>(...)` callee via `self._generator_method_api`
+(commit `05bcb91`), passing `self` as the receiver argument to
+`<base>_start` exactly like an ordinary compiled method already does.
+
+Verified via an isolated compile + `g++ -fsyntax-only`:
+`Calendar.itermonthdates`'s for-loop over `self.itermonthdays3(...)` now
+lowers through the correct `_mojogen_Calendar_itermonthdays3_*` API and
+is completely free of errors (previously: 5 errors — "declaration of
+'auto y' has no initializer" etc.). Confirmed with `grep`: zero remaining
+occurrences of `itermonthdates` in the isolated compile's error output.
+
+**Re-reading `itermonthdays4`'s REAL source** (this doc's item 1, below,
+mis-described its shape — it's not a second instance of the SAME plain
+tuple-target loop; it's a nested-tuple target INSIDE `enumerate()`):
+```python
+def itermonthdays4(self, year, month):
+    for i, (y, m, d) in enumerate(self.itermonthdays3(year, month)):
+        yield y, m, d, (self.firstweekday + i) % 7
+```
+`for i, (y, m, d) in enumerate(...)` is a NESTED tuple target (an outer
+2-tuple `(i, (y, m, d))` whose second element is itself a 3-tuple) —
+`_cpp_for_stmt`'s existing `enumerate` branch only ever supported a FLAT
+2-name unpack (`for a, b in enumerate(x):`), so this shape is still
+refused (`declaration of 'auto i' has no initializer` / `expected ')'
+before ',' token`), unrelated to the fix above. Similarly,
+`itermonthdays2` does `for i, d in enumerate(self.itermonthdays(...),
+self.firstweekday):` — here the GENERATOR CALL is `enumerate`'s OWN
+first argument, not the loop's iterable directly; the existing
+`enumerate` branch's `_src = self._cpp_expr(s.iterable.args[0])` calls
+`_cpp_expr` directly on that generator call, which routes through the
+ordinary (non-coroutine) `self.method(...)` call lowering and picks up
+the wrong extern "C" stub — a third, separate `_cpp_for_stmt`/`_cpp_expr`
+gap this fix doesn't reach either. Neither of these two was attempted
+this pass (both are distinct, additional shapes beyond the one item 1
+actually described and this fix targeted).
+
+Also unaffected: item 2 below (`itertools.repeat` unimplemented in the
+coroutine-body expression emitter) and item 3 (hundreds of unrelated
+pre-existing errors in transitively-imported files blocking the
+whole-program `do_imports=True` build regardless) — both still apply
+verbatim.
+
+**calendar.py as a whole still does not build.** Doc kept open — real,
+verified progress on item 1's actual (non-nested) case, but two
+further, distinct tuple/enumerate-interaction gaps plus items 2-3 remain.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; file still blocked by other, unrelated gaps)
 
 Implemented real tuple-valued-`yield` support this session (`yield a,
