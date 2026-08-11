@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs, this file included (the 2026-08-06 entry below —
+already noted fixed as of 2026-08-07, `bugs/hard/COMPILE_FAIL_module_
+toplev_struct_never_fully_defined.md`'s mechanism-1/mechanism-2
+fixes). Confirmed via fresh rebuild: zero occurrences now, unaffected
+either way. While tracing the mechanism, found+fixed a closely related
+residual bug (`_gen_struct_method`/`_gen_lifted_closure` never setting
+`self._current_module_ctx`, misrouting a `global`-statement write
+inside a class method to the wrong module's struct — see that hard-bug
+doc's history and this session's commit) plus a related `_safe_coerce_
+emit` `.`-access gap. Effect on this file: total build error count
+dropped 562 -> 560 via a fresh rebuild. All 3 of tarfile.py's own
+generator sites remain unaffected (still compile cleanly); the
+`SpecialFileError`/`bz2`/`lzma`/dict-subscript-in-try cluster below is
+unaffected and remains this file's real blocker.
+
 ## Status (updated 2026-08-09)
 
 Re-verified again against current master with a fresh real rebuild

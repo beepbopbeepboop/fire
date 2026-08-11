@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; unaffected, file still fails before GCC stage regardless)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs, this file included (the 2026-08-06 entry below —
+already noted GONE as of 2026-08-07, fixed by `bugs/hard/COMPILE_FAIL_
+module_toplev_struct_never_fully_defined.md`'s mechanism-1/mechanism-2
+fixes). Also found+fixed one closely related residual bug in the same
+struct-family area this session (`_gen_struct_method`/`_gen_lifted_
+closure` never setting `self._current_module_ctx`, a `global`-write
+misrouting bug — see that hard-bug doc's history). No effect on THIS
+file either way: `scan_opcodes`'s nested-tuple-yield refusal (below)
+raises a Python-level `RuntimeError` in `gen_module` before any C code
+is ever emitted, so the build never reaches GCC at all, with or
+without either fix. No reclassification.
+
 ## Status (updated 2026-08-10 — general tuple-valued yield now FIXED; `scan_opcodes`'s specific NESTED-tuple shape remains a distinct, still-refused sub-case)
 
 Implemented real tuple-valued-`yield` support this session (`yield a,

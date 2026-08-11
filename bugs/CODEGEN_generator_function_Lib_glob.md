@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-10 — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs. This file was named in the 2026-08-07 entry below as
+"likely another symptom of the same cross-module collision class" —
+confirmed via a fresh rebuild that's WRONG (or at least stale): zero
+occurrences of that exact error now (already fixed by the mechanism-1/
+mechanism-2 fixes referenced there, `bugs/hard/COMPILE_FAIL_module_
+toplev_struct_never_fully_defined.md`, deleted as resolved).
+
+Found and fixed one closely related, previously-undocumented bug while
+tracing the mechanism, and this file was the one that pinned it down
+precisely: `typing.py` (transitively imported) does
+```python
+class _LazyAnnotationLib:
+    def __getattr__(self, attr):
+        global _lazy_annotationlib
+        import annotationlib
+        _lazy_annotationlib = annotationlib
+        return getattr(annotationlib, attr)
+```
+`_gen_struct_method`/`_gen_lifted_closure` (gimple_codegen.py) never
+set `self._current_module_ctx` — so this class's methods, compiled
+FIRST in typing.py's own recursive do_imports=True compile (before any
+ordinary function/toplevel statement had set the context), inherited
+stale/default state and routed the `global` write to the wrong
+module's struct: `struct '_root_toplev' has no member named
+'_lazy_annotationlib'` (should have been `_typing_globals`). Fixed by
+setting the context explicitly in both methods, mirroring `gen_func`/
+`_gen_toplevel`'s existing identical line. Also fixed a related
+`_safe_coerce_emit` bug this exposed: its `is_field` check only
+recognized `->`-accessed struct-field LHS (needed to route a cast
+through a register temp first, an `-fgimple` requirement), not plain
+`.`-accessed ones (a non-pointer globals-struct instance's own field)
+— once the write correctly targeted `_typing_globals._lazy_
+annotationlib`, it produced an invalid combined cast+store statement,
+"non-register as LHS of unary operation". Fixed by recognizing `.` too.
+
+Effect on this file: total build error count dropped 504 -> 502 (both
+of the above, confirmed via a full category diff — zero new error
+categories introduced, only these 2 disappeared). This file's real
+remaining blockers (line 175 / `_join_abb124`'s return-type gap, line
+354 / `translate_584a43` keyword-arg-arity gap, described below) are
+unaffected. No reclassification — glob.py still does not build.
+
 ## Correction (2026-08-09, later same day): the line-175 error's root cause was misattributed
 
 The "updated 2026-08-09" note directly below (from an earlier commit

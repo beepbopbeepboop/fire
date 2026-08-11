@@ -1,5 +1,41 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs (this file included, per the 2026-08-06 entry below).
+Confirmed via a fresh `python3 mojo.py build` rebuild: this file has
+**zero** occurrences of that exact error — it was already fully fixed
+by the two already-landed mechanism-1/mechanism-2 fixes referenced
+below (`bugs/hard/COMPILE_FAIL_module_toplev_struct_never_fully_
+defined.md`, deleted as resolved), consistent with this doc's own
+2026-08-07 note. Not this file's live blocker; no re-classification
+needed.
+
+While tracing the pattern's mechanism, found and fixed one closely
+related, previously-undocumented residual bug in the same struct-
+family area: `_gen_struct_method`/`_gen_lifted_closure` (gimple_
+codegen.py) never set `self._current_module_ctx`, so a `global`-
+statement write inside a class method (or a closure nested in one)
+compiled as the FIRST thing in its module's own recursive compile
+inherited stale/default module context and routed the write to the
+wrong module's globals struct (typing.py's `_LazyAnnotationLib.
+__getattr__` was the confirmed repro: `struct '_root_toplev' has no
+member named '_lazy_annotationlib'`, since the write landed on the
+ENTRY module's struct instead of typing's own). Also fixed a related
+`_safe_coerce_emit` gap (`is_field` only recognized `->`-accessed
+struct fields, not plain `.`-accessed ones, causing an invalid
+combined cast+store GIMPLE statement once the write-target routing
+above was corrected). Full details/verification in `bugs/hard/COMPILE_
+FAIL_module_toplev_struct_never_fully_defined.md`'s history and this
+session's commit message.
+
+Effect on this file: total build error count dropped 651 -> 649 (2
+fewer — the fixed bug's own signature) via a fresh rebuild; the
+tuple-yield-then-`mojo_cstr_slice` blocker described below is
+unaffected and remains this file's real blocker. No reclassification.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
 
 Implemented real tuple-valued-`yield` support this session (see
