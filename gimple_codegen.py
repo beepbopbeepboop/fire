@@ -11024,6 +11024,28 @@ class GimpleGen:
         """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
         func = node.func  # MemberExpr
 
+        # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
+        # the existing `sys.platform` comptime-constant special case just
+        # below (obj.name == 'sys'), these are genuinely string-returning
+        # calls with no real filesystem/locale model in this codegen, so a
+        # fixed `"utf-8"` (this compiler's own real behavior on every
+        # supported host) is a faithful stand-in. Without this, the call
+        # fell through to the fully generic "unknown method on scalar
+        # receiver" stub (`_stub_result(ot, ...)`, several hundred lines
+        # below), which passes the RECEIVER's type through unchanged — the
+        # `sys` module reference itself resolves to a placeholder
+        # `int64_t`, so the stubbed call result was typed `int64_t` too.
+        # Assigning that result directly to a real `char *`-typed target
+        # (e.g. `tarfile.py`'s module-level `ENCODING = sys.
+        # getfilesystemencoding()`) is invalid C ("assignment to 'char *'
+        # from 'int' makes pointer from integer without a cast") — a hard
+        # compile failure, not just an imprecise stub. Found via
+        # bugs/CODEGEN_generator_function_Lib_tarfile.md.
+        if (isinstance(func.obj, IdentExpr) and func.obj.name == 'sys'
+                and func.member in ('getfilesystemencoding', 'getdefaultencoding')):
+            for a in node.args: self.lower_expr(a)
+            return 'char *', self._intern_string('utf-8')
+
         # Step I (create_task/Task/TaskGroup/RaisingTask project):
         # `task.wait()` or `task^.wait()` where `task` holds a
         # `MojoAsync *` handle produced by
@@ -14446,7 +14468,7 @@ class GimpleGen:
         if fname_raw in ('set', 'frozenset'):                        return self._lower_builtin_set(node)
         if fname_raw == 'dict':                                      return self._lower_builtin_dict(node)
         if fname_raw in ('list', 'tuple') and len(node.args) <= 1:  return self._lower_builtin_list(node)
-        if fname_raw == 'open'            and 'open' not in self.func_return_types:
+        if fname_raw == 'open'            and not self._locally_binds_name('open'):
             return self._lower_builtin_open(node)
         if fname_raw == 'Self':                                      return self._lower_self_ctor(node)
         # iter(x) — the container is already iterable (for-loops consume it directly),
@@ -22631,6 +22653,44 @@ class GimpleGen:
         if home and bare_name in home:
             return _sanitize_qualifier(home[bare_name])
         return ''
+
+    def _locally_binds_name(self, bare_name: str) -> bool:
+        """Whether the module CURRENTLY being compiled itself defines or
+        imports a free function named `bare_name` — i.e. tiers 1/2 of
+        `_func_qualifier`'s three-tier lookup (this exact gen_module call's
+        own top-level defs, its own lexical import-scope stack, and its own
+        FromImportStmt scan), deliberately EXCLUDING tier 3
+        (`_imported_func_home`, populated by scanning every sibling module
+        in the whole-program transitive closure and shared by object
+        identity across nested temp_gens).
+
+        Needed for builtins whose bare name collides with an unrelated
+        stdlib module's own same-named free function elsewhere in the
+        transitive closure (e.g. `tokenize.py`'s own `def open(filename):`,
+        `wave.py`'s `def open(f, mode=None):`) — a global `bare_name in
+        self.func_return_types` check (populated by scanning ALL modules,
+        not just this one) can't distinguish "some OTHER module defines
+        this name" from "THIS module shadows the builtin", so a bare
+        `open(path, mode)` call in a module that never touches `tokenize`
+        at all was routed through the wrong arm (BUILTIN_VALUE_MAP's
+        1-argument `mojo_open_file`, not `_lower_builtin_open`'s real
+        2-argument handling) purely because some unrelated module
+        elsewhere in the same whole-program build happens to define a
+        function with the same bare name. See
+        bugs/CODEGEN_generator_function_Lib_symtable.md's `with open(path,
+        'rb') as f:` repro (symtable.py imports tokenize transitively but
+        never binds its `open`)."""
+        if bare_name in getattr(self, '_local_top_level_func_names', ()):
+            return True
+        scopes = getattr(self, '_import_scope_stack', None)
+        if scopes:
+            for frame in reversed(scopes):
+                if bare_name in frame:
+                    return True
+        own_home = getattr(self, '_own_imported_func_home', None)
+        if own_home and bare_name in own_home:
+            return True
+        return False
 
     def _func_mangleable(self, name: str) -> bool:
         """Whether a free function's C symbol is overload-mangled. True for a local
@@ -32881,6 +32941,58 @@ class GimpleGen:
                                            if _gname in _joined else _t)
             return _joined
 
+        def _phase17_scan_if_branches(_if_stmt):
+            """The IfStmt sibling of `_phase17_scan_try_branches`, for a
+            top-level `if`/`elif`/`else` whose condition
+            `_flatten_resolved_conditionals` could NOT fold to a
+            compile-time constant (e.g. `if os.name == "nt": ENCODING =
+            "utf-8" else: ENCODING = sys.getfilesystemencoding()` —
+            `os.name` isn't one of the handful of comptime-foldable
+            expressions `_eval_const_bool` recognizes, unlike
+            `sys.platform`). An unresolved IfStmt is left as a single
+            nested node in `_phase17_stmts` (never flattened into its
+            branches the way a resolved one is), so the flat top-level
+            scan loop never saw any of its branches' assignments at all —
+            a global ONLY ever assigned inside such an if/else fell
+            through to the unconditional 'globals are int64_t' default,
+            same failure shape as the already-fixed TryStmt gap this
+            mirrors. Concretely: `ENCODING`'s struct field was correctly
+            inferred `char *` from OTHER evidence (the `"utf-8"` literal
+            branch happened to be visible via a different path), but
+            because THIS assignment-statement-type join never ran, this
+            branch's own `sys.getfilesystemencoding()` RHS kept
+            defaulting through the generic int64_t/`int` fallback,
+            producing an invalid `char *`-field-assigned-from-`int`
+            mismatch at both branches. See
+            bugs/CODEGEN_generator_function_Lib_tarfile.md.
+
+            Deliberately NOT self-recursive for the same reason
+            `_phase17_scan_try_branches` isn't (a nested function calling
+            itself here doesn't survive this file's own self-host build)
+            — a nested if/elif/else inside one of THIS if's own branches
+            is left unscanned (out of scope; no observed real-world
+            instance needs it)."""
+            _branch_lists = [_if_stmt.then_body or []]
+            for _cond2, _elif_body2 in (getattr(_if_stmt, 'elifs', None) or []):
+                _branch_lists.append(_elif_body2 or [])
+            if isinstance(_if_stmt.else_body, list):
+                _branch_lists.append(_if_stmt.else_body)
+            _joined = {}
+            for _blist in _branch_lists:
+                for _bstmt in _flatten_resolved_conditionals(_blist):
+                    _pairs = []
+                    if isinstance(_bstmt, AssignStmt) and isinstance(_bstmt.target, IdentExpr):
+                        _pairs.append((_bstmt.target.name, _bstmt.value))
+                    elif isinstance(_bstmt, MultiAssignStmt):
+                        for _tgt in _bstmt.targets:
+                            if isinstance(_tgt, IdentExpr):
+                                _pairs.append((_tgt.name, _bstmt.value))
+                    for _gname, _gvalue in _pairs:
+                        _t = _phase17_value_type(_gvalue)
+                        _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
+                                           if _gname in _joined else _t)
+            return _joined
+
         for _scan_stmt in _phase17_stmts:
             if isinstance(_scan_stmt, AssignStmt) and isinstance(_scan_stmt.target, IdentExpr):
                 _gname = _scan_stmt.target.name
@@ -33027,6 +33139,19 @@ class GimpleGen:
                         # already resolved this name -- an explicit
                         # annotation/assignment always takes priority over
                         # a type merely inferred from try/except branches.
+                        continue
+                    _pre_declared_globals.add(_gname)
+                    if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                        self._global_to_module[_gname] = _phase17_mod
+                    self._global_var_types[_gname] = _gtype
+            elif isinstance(_scan_stmt, IfStmt):
+                # See _phase17_scan_if_branches' own docstring: an IfStmt
+                # whose condition couldn't be comptime-folded away by
+                # _flatten_resolved_conditionals (so it still appears here
+                # as a single nested node, not inlined into its winning
+                # branch) was previously invisible to this pre-scan.
+                for _gname, _gtype in _phase17_scan_if_branches(_scan_stmt).items():
+                    if _gname in _pre_declared_globals:
                         continue
                     _pre_declared_globals.add(_gname)
                     if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
