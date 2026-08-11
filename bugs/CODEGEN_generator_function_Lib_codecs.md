@@ -1,5 +1,49 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-10, later same session — the `**kwargs`-unpack MISCOMPILE fixed into an honest refusal)
+
+The `**kwargs`-call-argument miscompile documented below (`_cpp_expr`
+emitting the literal, invalid `(**kwargs)` for a `getincrementalencoder
+(encoding)(errors, **kwargs)`-shaped call) is **fixed**, but not by
+implementing real dynamic-callee/kwargs-spread support — that remains a
+genuine, much larger feature (the callee here is a dynamically-obtained
+class; even a correct implementation would need to know ITS real
+parameter names at compile time, which this scalar coroutine-body model
+has no way to discover at all). Instead, `_cpp_expr`'s `CallExpr` case
+now detects ANY `*`/`**`-unpack call argument (a `UnaryOp(op='*'/'**',
+...)` node, this project's parser convention — see `CLAUDE.md`) up front
+and raises `_UnsupportedGeneratorShape` immediately, before reaching any
+of the several call-argument-lowering sites that previously fell through
+to the generic (wrong) `UnaryOp` case. This converts the bug from a
+silent MISCOMPILE (invalid C++ that happened to still look plausible
+enough to reach `g++`) into the same honest, graceful "generator not
+eligible, fall back to interpreting the module from source" refusal
+every other unsupported generator shape in this codegen already gets —
+the same family as `bugs/hard/CODEGEN_generator_lambda_expr_
+unsupported.md`'s existing `LambdaExpr`-argument refusal (which this doc
+previously classified this bug alongside as a "sibling gap", per the
+2026-08-09 status below).
+
+Verified: an isolated compile of `codecs.py` alone (`do_imports=False`)
+now raises the standard `RuntimeError: cannot compile module: function(s)
+iterdecode, iterencode ...` refusal — the exact same message shape
+`calendar.py`/`dis.py` produce for THEIR still-unsupported generators —
+instead of ever reaching the broken `(**kwargs)` emission site. A fresh
+`MOJO_DEBUG=1 python3 mojo.py build .../Lib/codecs.py` confirms the same:
+both generators are refused at "not eligible for C++ coroutine path"
+with the new, precise message, and the whole build fails with the
+standard fatal `Error building: cannot compile module: ...` (same
+"escalates to a fatal RuntimeError for the root build target" behavior
+this family's other docs already document — not a new inconsistency).
+Commit: `dbe97ee`.
+
+**`codecs.py` still does not compile natively** — it never could (the
+`**kwargs`-against-a-dynamic-callee shape is a real, unimplemented
+feature, not a narrow bug), but it now fails the SAME honest way every
+other out-of-scope generator shape does, instead of via a miscompile.
+Doc kept open (the underlying feature gap is real and unresolved), status
+updated to reflect the miscompile is gone.
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring
