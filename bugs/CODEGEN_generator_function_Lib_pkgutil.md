@@ -1,5 +1,60 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-11, real fix attempted on `walk_packages` — confirmed genuinely stacked, not narrow)
+
+Re-verified against current master via a real `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/pkgutil.py`. Confirms the 2026-08-10
+status below still holds exactly: the module's own two tuple-yield
+generators stay fixed, and `walk_packages` is the file's only remaining
+refused generator (`MOJO_DEBUG=1` shows only `walk_packages` refusals
+across all 4 codegen passes now — nothing else in this file's own
+source).
+
+Went further than the prior passes and actually attempted a real fix
+for `walk_packages`'s narrowest-looking refusal (`onerror(info.name)`:
+"argument must be a scalar ... expression", from `info.name` being a
+`MemberExpr` on a non-`self` local). Read `walk_packages`'s full body
+(`pkgutil.py:37-90`) end-to-end before touching any code, specifically
+to check whether fixing just that one check would actually unblock the
+function (this project's history flags "narrow-looking single-check
+fixes that don't move the needle" as wasted, regression-risking effort
+on shared machinery). It would not — the SAME function body has, all
+independently reachable regardless of that one fix:
+
+- `for info in iter_modules(path, prefix):` — the CURRENT pass-1
+  refusal reason (confirmed via `MOJO_DEBUG=1`, unchanged from below):
+  `iter_modules` isn't a generator this compile has itself already
+  translated via the coroutine path at the point `walk_packages` is
+  compiled, an entirely separate gap from the `onerror` argument-shape
+  one.
+- a nested closure `def seen(p, m={}):` with a MUTABLE DEFAULT
+  argument — no representation in this coroutine body model at all
+  (nested `FunctionDef`s inside a generator body are a distinct,
+  unhandled shape).
+- `__import__(info.name)` and `sys.modules[info.name]` — both call/
+  subscript a compile-time-unresolvable dynamic name; neither has a
+  case in this scalar body model.
+- `getattr(sys.modules[...], '__path__', None)` — compounds the
+  `sys.modules[...]` gap above with a 3-arg `getattr` on its result.
+- a self-recursive `yield from walk_packages(path, info.name + '.',
+  onerror)` where `path` (the enclosing generator's OWN parameter) has
+  been REASSIGNED earlier in the loop body — a different shape from
+  the untouched-parameter self-recursion this codegen's generator-
+  recursion support already handles (task #138's fix).
+
+That's five further independent unsupported constructs in the same
+function, on top of the argument-shape gap and the `iter_modules`
+consumption gap already found. Fixing the `onerror(info.name)` check
+alone would immediately hit the `for info in iter_modules(...)` gap
+(now the actual pass-1 blocker), then each of the five above in turn.
+This is not a case where one narrow check is the last thing standing
+between this function and a clean compile — it is a function built
+almost entirely out of shapes this generator-coroutine codegen doesn't
+support yet, each independently. Not implemented — matches the
+existing analysis below, now confirmed (not assumed) by tracing the
+whole function body rather than stopping at the first refusal message.
+Doc kept open, not deleted (module doesn't build).
+
 ## Status (updated 2026-08-10 — the 2 tuple-valued-yield refusals now FIXED; `walk_packages`'s own, unrelated gap remains)
 
 Implemented real tuple-valued-`yield` support this session (see

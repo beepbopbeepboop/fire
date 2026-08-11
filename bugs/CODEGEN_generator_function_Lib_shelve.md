@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-11, re-verified — still correctly out of scope for this cluster)
+
+Re-verified against current master via a real `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/shelve.py`. `Shelf.__iter__`
+(`shelve.py`'s only generator) still shows zero signal of any problem
+— `MOJO_DEBUG=1` has no "not eligible" refusal naming it, and grepping
+the error log for `Lib/shelve.py` finds 0 occurrences: shelve.py's own
+source still contributes ZERO of the build's errors.
+
+Counted the current error log precisely by originating file (543
+`error:` lines total this pass): 349 `Lib/pickle.py`, 40
+`Lib/argparse.py`, 36 `Lib/codecs.py`, 19 `Lib/typing.py`, 14
+`Lib/inspect.py`, 12 `Lib/enum.py`, 9 `Lib/posixpath.py`, 8 `Lib/os.py`,
+7 `Lib/contextlib.py`, 6 `Lib/gettext.py`, 5 `Lib/functools.py`, 3 each
+in `Lib/weakref.py`/`Lib/dis.py`, 2 `Lib/tokenize.py` — 100% in
+transitively-imported files (via `import dbm` → its backend modules →
+`pickle`/`argparse`/`codecs`/`typing`/...), same dominant-cluster shape
+as every prior pass, `pickle.py` now even more dominant (349/543, up
+from 350/552 → now a slightly larger share of a slightly smaller
+total). None of these implicate `shelve.py`'s own code or its
+generator either way.
+
+**Classification confirmed unchanged: NOT a generator-codegen-cluster
+failure.** No dedicated bug doc exists yet for `pickle.py`'s own 349
+errors (checked `bugs/` and `bugs/hard/`) — but fixing those is a
+separate, unrelated undertaking from this "generator function" cluster
+(pickle.py's errors are not shown to be generator-related at all, and
+diagnosing 349 errors in a file this task was not assigned is out of
+this task's scope). Not attempted here, consistent with every prior
+pass's identical conclusion. Doc kept, not deleted — `git rm` is
+reserved for a file whose target source 100% compiles clean end-to-
+end, and `shelve.py`'s full `mojo.py build` still fails (via its
+dependency closure).
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; the 2026-08-09 "59 remaining toplev occurrences" claim was a grep-methodology false positive; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring

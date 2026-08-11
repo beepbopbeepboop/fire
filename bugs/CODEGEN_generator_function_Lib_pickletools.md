@@ -1,5 +1,62 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-11, real fix attempted — found genuinely stacked, not narrow)
+
+Re-verified against current master via a real `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/pickletools.py`: identical `_genops`/
+`LambdaExpr` refusal reproduces exactly, unchanged from below.
+
+This time actually attempted a real fix rather than re-confirming the
+classification: traced what it would take to make `getpos = lambda:
+None` compile (lift the lambda to a real non-capturing C++ function,
+give `getpos` the existing "opaque callable pointer" `int64_t`
+convention `_cpp_stmt`'s bare-call branch already uses via
+`mojo_fnptr_call_N`, and add a matching VALUE-producing-call case to
+`_cpp_expr`'s `CallExpr`/`IdentExpr` branch — that call form only
+exists today in `_cpp_stmt`'s value-discarding bare-`ExprStmt` case,
+around `gimple_codegen.py:24846`, not in `_cpp_expr` itself, so `pos =
+getpos()` — a VALUE use — has no path to it either).
+
+That alone would not unblock this file — `_genops` has (at least) two
+further, independent stacked gaps in the exact same function body,
+confirmed by reading both `gimple_codegen.py` and the real source
+(`pickletools.py:2268-2298`):
+
+1. The `if hasattr(data, "tell"): getpos = data.tell` branch (the
+   sibling of the `lambda` branch, same `getpos` local) assigns a
+   BOUND METHOD reference (`data.tell`, no call parens) as a value.
+   `_cpp_expr`'s `MemberExpr` case (`gimple_codegen.py:23972-23982`)
+   has no bound-method-value case at all — a non-self `MemberExpr`
+   read falls through to the generic `f"{obj}.{member}"` fallback,
+   which is invalid/wrong C++ here (`data` is a raw `int64_t`/`char *`
+   in this scalar model, not a real object with a `.tell` member —
+   `g++`: "member reference base type ... is not a structure or
+   union"). Both `if`/`else` branches of the SAME statement are
+   compiled unconditionally (this is straight-line C++, not templated
+   per-branch), so fixing only the `lambda` side leaves this side
+   broken.
+2. `_genops` yields BOTH a 3-tuple (`yield opcode, arg, pos`) and a
+   4-tuple (`yield opcode, arg, pos, getpos()`, gated by the
+   `yield_end_pos` parameter) at two different call sites in the same
+   function body. Confirmed directly against
+   `_generator_tuple_yield_slot_ctypes` (`gimple_codegen.py:2689-2755`):
+   its own docstring and `elif len(slots) != len(site): return True,
+   None` make disagreeing ARITY across tuple-yield sites an
+   unconditional refusal — "this generator's single promise type can
+   only ever carry one fixed shape." This is a third, fully
+   independent blocker from the other two.
+
+Net: fixing the `LambdaExpr` gap alone provably would not unblock this
+file — `_genops` has three independent, stacked structural gaps (an
+opaque-callable-value type category for `_cpp_expr`, a bound-method-
+value representation, and varying-arity tuple yields), each on its own
+already the class of change this project's process reserves for a
+dedicated, carefully-verified pass rather than a drive-by fix bundled
+with two others at once. Not implemented — genuinely feature-sized,
+confirmed (not assumed) via direct code tracing this session, matching
+the existing `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
+classification. Doc kept open.
+
 ## Status (updated 2026-08-09, re-verified — unchanged)
 
 Re-verified against current master (`c79a013`) via a real
