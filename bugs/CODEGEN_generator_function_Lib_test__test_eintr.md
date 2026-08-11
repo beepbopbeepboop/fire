@@ -1,5 +1,71 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-11 — tuple-valued yield fix holds; file's OWN code now compiles clean; blocked purely by 4 distinct, unrelated Lib/test/support/__init__.py bugs)
+
+Re-verified against current master with a fresh real rebuild. The
+2026-08-10 note's claim (tuple-valued `yield rd, datum` fixed, but
+`os.pipe()`/bare-list-literal-local/`.join()` gaps earlier in
+`_interrupted_reads`'s own body still block) does **not** reproduce as
+described — direct inspection of the full error list shows **zero**
+errors attributed to `_test_eintr.py` itself. Confirmed via `grep
+"_test_eintr.py:" ... | grep "error:"` on a fresh build: no matches.
+Whatever combination of fixes landed since 2026-08-10 (the tuple-yield
+work, or unrelated ones) also resolved the `os.pipe()`/list-literal/
+`.join()` gaps previously blocking this same body — `_test_eintr.py`'s
+own 2 generators (`yield proc` and `yield rd, datum`) now compile
+cleanly end to end.
+
+**This file still does not build**, now blocked ENTIRELY by 4 distinct,
+pre-existing, non-generator bugs in the transitively-imported `Lib/test/
+support/__init__.py` (confirmed via direct source read at each site):
+
+1. `set_sanitizer_env_var`'s `env[name] += f':{option}'` (line 488,
+   `env` an untyped dict-shaped param) — `env` gets misinferred as a
+   `MojoList`, not a `MojoDict`: `passing argument 3 of
+   'mojo_list_set_int' makes integer from pointer without a cast`
+   (a `char *` f-string result passed where `mojo_list_set_int` expects
+   an `int64_t` index — the wrong runtime function entirely, list not
+   dict).
+2. `bigmemtest`'s docstring-adjacent lines (1184/1186) —
+   `assignment to 'int64_t *' from 'int64_t' makes pointer from integer
+   without a cast` — a closure/local type-inference mismatch, not yet
+   traced past the mismatch symptom itself.
+3. `print_warning`'s own body (`stream = print_warning.orig_stderr`,
+   line 1420) — the Python idiom of using a plain function as an
+   attribute-namespace (a later statement sets `print_warning.
+   orig_stderr = ...`) breaks this codegen's function-vs-variable
+   disambiguation: `implicit declaration of function 'print_warning'`.
+4. `patch()`'s `getattr(object_to_patch, attr_name)` (line ~1908) —
+   `passing argument 1 of 'mojo_getattr' makes integer from pointer
+   without a cast [-Wint-conversion]`, plus a genuine syntax-level
+   `expected ')' before ';'` / `expected expression before '('` pair
+   nearby — at least two distinct problems in this one call's lowering.
+
+None of (1)-(4) are IN `_test_eintr.py` itself, and none involve
+generators — all are `test.support`'s own pre-existing, independent
+codegen gaps (dict/list type-inference confusion, a function-as-
+namespace attribute pattern, and a `getattr()`-on-dynamically-typed-
+object lowering bug), first precisely enumerated at this level of
+detail in this pass (superseding the STALE 2026-08-07 list below, which
+named different symptoms — `force_color`'s plain-`int` param, `iter_
+builtin_types`/`patch_list`'s slice-target refusal, `async_yield`'s
+`return <value>` — none of which appear in the current error list,
+apparently fixed by unrelated work since). Also note: the reported
+line numbers for these 4 (1184/1186/1420/1906ish) are themselves
+suspect — each points at a docstring/comment line, not the actual
+offending statement a few lines below/above; this matches a separate,
+not-yet-root-caused `#line`-attribution inaccuracy in this codegen's
+whole-program C output also observed independently while investigating
+`bugs/CODEGEN_generator_function_Lib_tempfile.md` this session (its own
+`#line` pragmas for the shared globals-init struct run stale past a
+certain point in a large concatenated build) — a real but separate
+diagnostics-quality gap, not attempted here.
+
+Not attempted: each of the 4 is its own nontrivial, independent root
+cause (not narrow one-spot stubs) in a file that isn't one of this
+cluster's 41 named target files, and none touch generator codegen at
+all — out of scope for this pass. Doc kept open, not deleted.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; unrelated gaps earlier in the same body now block)
 
 Implemented real tuple-valued-`yield` support this session (see

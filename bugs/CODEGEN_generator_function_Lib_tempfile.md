@@ -1,5 +1,71 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (updated 2026-08-11)
+
+Re-verified against current master with a fresh real rebuild. Still
+correctly classified as **NOT a generator-codegen-cluster failure** —
+`_TemporaryFileWrapper.__iter__` still shows zero signal of a problem.
+
+The previously-documented `_c_escape()` gap (class-body string-attribute
+initializers not escaping embedded `"`) is GONE — verified both call
+sites (`gimple_codegen.py`'s class-attribute-globals section, now
+~line 34682/34692) already route through `_c_escape()`; fixed as a side
+effect of other work between the last note and now.
+
+**Found and fixed a real, different narrow bug** blocking this file:
+`gimple_codegen.py`'s `_c_field_name` (line ~3173) renames a Mojo
+global/struct-field name that collides with a handful of hardcoded C
+preprocessor macro names (`_C_MACRO_NAMES`, line ~2067 — `NULL`, `EOF`,
+`SEEK_SET`/`SEEK_CUR`/`SEEK_END`) so the raw name isn't emitted verbatim
+into the generated struct, where `<stdio.h>`'s own macro would text-
+substitute it into invalid C before GCC ever parses it. `tempfile.py`'s
+own module-level constant `TMP_MAX = 10000` (`Lib/tempfile.py:72`) isn't
+in that allow-list, and `<stdio.h>` defines `TMP_MAX` as an object-like
+macro (`308915776` on this system) — so the whole-program root-module
+globals struct got emitted as `int TMP_MAX;` / `.TMP_MAX = 20,` /
+`_root_globals.TMP_MAX`, all three silently macro-substituted to `int
+308915776;` etc., producing exactly the "expected identifier ... before
+numeric constant" family of errors this doc has tracked for 3+ prior
+sessions (confirmed via a from-scratch reproduction: stripping all
+`#line` directives from the generated `.ci` and recompiling showed the
+true physical location was `typedef struct _root_toplev { int TMP_MAX;
+...`, not literally "tempfile.py:4732" as GCC's misleading `#line`-
+derived diagnostic claimed — the `#line` attribution for this whole-
+program init struct is itself inaccurate/stale past a certain point in
+the file, a separate, not-yet-investigated diagnostics-quality gap that
+only mattered for tracking this bug down, not for the fix itself).
+
+**Fix**: added `TMP_MAX`, `FILENAME_MAX`, `FOPEN_MAX`, `BUFSIZ`,
+`L_tmpnam`, `L_ctermid` to `_C_MACRO_NAMES` (the rest of `<stdio.h>`'s
+own plain object-like macros, same header that already motivated
+`EOF`/`SEEK_*`'s presence in the set — bounded to this one header rather
+than sweeping every libc header's macro namespace, to keep the change
+narrow and reviewable). Confirmed via rebuild: the `TMP_MAX`-family
+errors (previously 3 of the file's ~13 errors, at lines 4732/4755/4756)
+are completely gone.
+
+**This file still does not build** — a real rebuild after the fix hits
+a NEW, different, non-generator, non-textwrap blocker:
+`Lib/operator.py`'s `attrgetter.__init__`/`itemgetter.__init__`
+(`getters = tuple(map(attrgetter, self._attrs))` closed over by a nested
+`def func(obj): return tuple(getter(obj) for getter in getters)`) hits
+`operator.py:270:1: error: non-trivial conversion in 'var_decl'`
+(a local inferred `int64_t` but assigned a `struct MojoList *`). This is
+the closure-capturing-a-tuple/list-of-CALLABLE-VALUES shape — matches
+this session's already-confirmed structural gap ("an opaque callable
+VALUE — a lambda or bound method stored in a variable, not called
+immediately — has no representation" in this codegen's type model), not
+a narrow bug. Not attempted here (a real fix would mean giving this
+codegen a first-class representation for a collection of bound-method/
+callable values, a design-level project, not a one-spot stub gap).
+`operator.py` is reached transitively (via `functools`/`shutil`-style
+imports), not one of tempfile.py's own generators or module-level code.
+
+Gate run for the `_C_MACRO_NAMES` fix: `test_gimple.py` 247/247,
+`test_module_cache.py` 76/76, `make check-selfhost` clean,
+`build_stdlib_dylib.build_stdlib()` 0 skips, `compile_stdlib.py` 664/664
+(no regression from the added macro-name reservations).
+
 ## Status (updated 2026-08-09)
 
 Re-verified again against current master with a fresh real rebuild
