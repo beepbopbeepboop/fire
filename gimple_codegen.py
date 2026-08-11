@@ -22664,11 +22664,47 @@ class GimpleGen:
         # Mirror the param/return types under the mangled key so _emit_call's
         # argument coercion and return typing (keyed by the emitted name) still
         # work — func_param_types/func_return_types are keyed by the bare name.
+        # Plain assignment, NOT setdefault: `_func_csym` is called repeatedly
+        # for the same function throughout compilation (every call site's
+        # symbol resolution, every forward declaration), and the bare-name
+        # entry it mirrors from is deliberately CORRECTED in place over time
+        # by later passes (e.g. Pass 1.3e's "refresh return types now that
+        # param inference is final", which re-infers an unannotated
+        # function's return type once its real parameter shape is known and
+        # overwrites func_return_types[bare_name] with the corrected value).
+        # `setdefault` here meant whichever call happened to run FIRST froze
+        # the mangled key at whatever the bare-name value was AT THAT MOMENT
+        # — if that first call landed before Pass 1.3e's correction (e.g.
+        # from a same-module caller compiled earlier in source order, which
+        # resolves its own call site's symbol via this same method before
+        # the callee itself has been fully return-type-inferred), the
+        # mangled key stayed wrong FOREVER even after the bare key was
+        # later fixed, since nothing ever re-mirrored it. `_emit_call`
+        # looks up func_return_types BY THE MANGLED KEY (see its "Also
+        # check func_return_types" mismatch-correction block) — a stale
+        # mangled entry there overrides an otherwise-correct `ret_type`
+        # with the wrong one, then emits the call's result straight into a
+        # temp declared with that wrong type, with NO cast (an invalid,
+        # uncaught type mismatch, since the whole point of that block is to
+        # apply a cast when the two types differ — but it never even
+        # considers that ITS OWN "authoritative" value might itself be
+        # stale). Real: glob.py's `_join` (return type correctly inferred
+        # 'char *' via Pass 1.3e) called from `_glob0` (compiled earlier in
+        # source order) — `_func_csym('_join')` ran during `_glob0`'s OWN
+        # compile before Pass 1.3e had corrected the bare key, freezing
+        # `func_return_types['_join_abb124'] = 'int64_t'` permanently;
+        # `_t8 = _join_abb124(_t5, _t7);` (a real char*-returning call
+        # assigned into an int64_t temp with no cast) then failed
+        # -Wint-conversion. Always re-mirroring the CURRENT bare-name value
+        # is strictly more correct than freezing at first use — the whole
+        # reason `func_return_types`/`func_param_types` get corrected after
+        # the fact is that later passes have STRICTLY MORE information than
+        # earlier ones, never less.
         if mangled != base:
             if bare_name in self.func_param_types:
-                self.func_param_types.setdefault(mangled, self.func_param_types[bare_name])
+                self.func_param_types[mangled] = self.func_param_types[bare_name]
             if bare_name in self.func_return_types:
-                self.func_return_types.setdefault(mangled, self.func_return_types[bare_name])
+                self.func_return_types[mangled] = self.func_return_types[bare_name]
         return mangled
 
     def gen_func(self, node: FunctionDef) -> str:
@@ -25332,6 +25368,14 @@ class GimpleGen:
             for kname, kexpr in call.kwargs:
                 call.args.append(kexpr)
             call.kwargs = []
+        # Set True only by the free-function self-recursion branch below —
+        # read further down (the non-tuple value-consumption branch) to
+        # decide between an explicit `vct` declaration and `auto` type
+        # deduction. A `self.<method>()` generator-METHOD self-recursion
+        # (the MemberExpr branch just below) is a separate, more complex
+        # case not attempted here — stays False for that branch, matching
+        # its existing (unchanged) refusal behavior.
+        is_self_recursive = False
         # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
         # `Calendar.itermonthdates` doing `for y, m, d in self.
         # itermonthdays3(year, month):`), resolved via
@@ -25369,14 +25413,53 @@ class GimpleGen:
             receiver_exprs = ['self']
         else:
             sub_name = call.func.name
-            api = self._generator_api.get(sub_name)
-            if api is None or sub_name not in self._supported_generators:
-                raise _UnsupportedGeneratorShape(
-                    f"`for ... in {sub_name}(...)` does not consume a generator "
-                    "this compile has itself already translated via the "
-                    "C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the consumed generator must be defined earlier)")
+            # Self-recursion: `for <target> in <this-same-function>(...):`
+            # (real: glob.py's `_rlistdir`, which recurses into itself via
+            # an ordinary consuming for-loop, not `yield from` — os.walk's
+            # well-known recursive-directory-listing shape). Mirrors
+            # `_cpp_yield_from`'s own `is_self_recursive` handling exactly,
+            # for the identical chicken-and-egg reason documented there:
+            # this function can never find ITSELF in `self._generator_api`
+            # yet, since registration only happens after the whole compile
+            # succeeds. Without this, every self-recursive generator that
+            # consumes itself via a plain `for` (as opposed to `yield
+            # from`) hard-refused on EVERY multi-pass retry (never just
+            # "defined later" — a self-reference can never resolve via
+            # reordering), taking the whole module down with it.
+            _self_name = getattr(self, '_cpp_gen_self_name', None)
+            is_self_recursive = (_self_name is not None and sub_name == _self_name)
+            if is_self_recursive:
+                # Same locally-tracked self-context `_cpp_yield_from` uses
+                # — no premature/partial registration into the real
+                # (still-being-built) `self._generator_api` dict needed.
+                # `value_ctype`/`tuple_slot_ctypes` are genuinely NOT known
+                # yet (computed only after this whole generator's body
+                # finishes, in `_gen_cpp_generator_unit`) — left as None;
+                # the non-tuple value-consumption branch below uses C++
+                # `auto` type deduction instead of a literal ctype for
+                # exactly this reason (see its own comment), and the
+                # tuple-target branch's existing `tuple_slot_ctypes is
+                # None` check (just below) already refuses a tuple loop
+                # target here honestly, rather than guessing.
+                api = {'base': self._cpp_gen_self_base,
+                       'params': self._cpp_gen_self_params,
+                       'value_ctype': None, 'tuple_slot_ctypes': None}
+                # Tell _gen_cpp_generator_unit (after this body-emission
+                # pass completes) that `{base}_start`/`_resume`/`_value`/
+                # `_destroy` need forward declarations ahead of `{impl}`'s
+                # own definition — same flag `_cpp_yield_from` sets for the
+                # identical reason (this body references its own
+                # not-yet-textually-defined extern "C" wrappers).
+                self._cpp_gen_self_recursed = True
+            else:
+                api = self._generator_api.get(sub_name)
+                if api is None or sub_name not in self._supported_generators:
+                    raise _UnsupportedGeneratorShape(
+                        f"`for ... in {sub_name}(...)` does not consume a generator "
+                        "this compile has itself already translated via the "
+                        "C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the consumed generator must be defined earlier)")
             receiver_exprs = []
         sub_params = api.get('params') or []
         if len(call.args) + len(receiver_exprs) != len(sub_params):
@@ -25429,6 +25512,39 @@ class GimpleGen:
                     lines.append(f"{body_indent}{nm} = (bool)mojo_list_get_int({val_var}, {i});")
                 else:
                     lines.append(f"{body_indent}{nm} = mojo_list_get_int({val_var}, {i});")
+        elif is_self_recursive:
+            # `vct` is None here (this generator's own value_ctype is only
+            # known AFTER its whole body finishes generating — see
+            # _gen_cpp_generator_unit) — declare via C++ `auto` type
+            # deduction instead of a literal ctype. This is provably
+            # correct, not a guess: `_gen_cpp_generator_unit` always emits
+            # a forward `extern "C"` declaration for `{base}_value`
+            # (returning the eventual real `cpp_value_ctype`) whenever
+            # `self._cpp_gen_self_recursed` was set (true here — set just
+            # above), and that declaration is textually emitted before
+            # `impl`'s own body (which is what `lines`, built here, becomes
+            # part of) — see that method's own "Self-recursion" comment.
+            # `target` is deliberately NOT added to `declared`: its real
+            # ctype genuinely isn't known yet at this point, and declaring
+            # it now with a wrong guess (e.g. always int64_t) would be
+            # worse than leaving it absent — an absent name already falls
+            # back to this codegen's existing "unknown identifier" handling
+            # everywhere else (_cpp_expr's IdentExpr case emits the bare
+            # C++ name, which is correct here since `target` genuinely IS
+            # a real, `auto`-typed local by this point in the emitted
+            # text). Residual known gap: a direct `yield <target>` later in
+            # THIS SAME function's body (a "flatten" pattern with no other
+            # concrete yield site to establish the real type from) would
+            # still default to int64_t in `_generator_yield_ctype`'s
+            # unify-across-every-yield-site walk — not the shape confirmed
+            # here (glob.py's `_rlistdir` yields `x`/`_join(x, y)`, both
+            # independently char*-typed, so the merge's "prefer char* if
+            # either is a string" rule already gives the right answer
+            # regardless).
+            if target not in declared:
+                lines.append(f"{body_indent}auto {target} = {base}_value({guard}.g);")
+            else:
+                lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
         else:
             if target not in declared:
                 declared[target] = vct
