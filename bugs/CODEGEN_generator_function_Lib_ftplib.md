@@ -1,5 +1,65 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-10, re-verified — this doc's OWN generator bug is FIXED, file still doesn't build for an unrelated reason)
+
+Re-ran `MOJO_DEBUG=1 python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/ftplib.py` against current master
+(fast-forwarded to `9d93746`, which includes this session's earlier
+real tuple-valued-`yield` support, commit `a7b71a0`/merge `09008e8`).
+
+**`FTP.mlsd`'s tuple-yield refusal is GONE.** Grepped the full
+`MOJO_DEBUG=1` log for every "not eligible for C++ coroutine path" line
+naming `mlsd` — zero hits. The tuple-boxing fix (`yield (name, entry)`
+now boxes into a real `MojoList *`, same mechanism this session used
+to fix `dis.py`/`calendar.py`/etc.) resolves exactly the gap this doc's
+2026-08-09 entry (below) diagnosed. This doc's own subject is fixed.
+
+**The file still fails to build overall, but for a completely
+different, non-generator reason in a transitively-imported module.**
+`ftplib.py` pulls in `ssl.py` (for `FTP_TLS`), which pulls in
+`subprocess.py`; the combined-module compile fails with dozens of
+`error: 'Popen__close_pipe_fds' undeclared here (not in a function);
+did you mean 'subprocess_Popen__close_pipe_fds'?` (and the same shape
+for several `calendar.Month`/`calendar.Day` dunder methods) — a real
+struct method exists under its MODULE-QUALIFIED C symbol
+(`subprocess_Popen__close_pipe_fds`), but a generated dispatch-table
+struct-literal initializer references it by its UNQUALIFIED name
+(`Popen__close_pipe_fds`), which was never declared.
+
+Root-caused this precisely: it's the SAME already-tracked mechanism as
+`bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_
+ordinary_code.md` (the `DispatchTable`/`_plan_dispatch_tables`
+"assume all methods" fallback for an unrecognized `getattr(self, x)`
+pattern), just a different symptom of it than that doc's own repro. The
+fallback registers callees via `self.struct_methods[stmt.name]
+[method.name]` (`gimple_codegen.py:758`), which is populated as the
+UNQUALIFIED `f"{stmt.name}_{method.name}"`
+(`gimple_codegen.py:756`) — this call-graph/dispatch-table analysis
+pass was built before/independently of the module-qualified-C-symbol
+scheme (see the "SB-1 mojo_abs symbol-collision fix" work) and was
+never updated to match, so any struct this heuristic mis-fires on (any
+class with an unrecognized `getattr(self, x)`-shaped method, per that
+doc's root-cause writeup) gets a dispatch table full of dangling
+unqualified symbol references whenever that struct's real methods
+live in a NON-root, imported module (root-module structs' unqualified
+and qualified names coincide, masking the bug there).
+
+Not fixed here: out of scope for this doc (it's not a generator bug,
+and not even in `ftplib.py` itself), and the existing hard-bug doc
+already classifies this whole mechanism as "Moderate risk... any
+change here must be verified against `make check-selfhost` FIRST and
+foremost" — deserves its own dedicated pass, not a piggyback fix. Left
+a matching note on that doc with this new symptom for whoever picks it
+up next (module-qualification gap, not the malformed-self-type gap
+that doc's `option 3` already fixed).
+
+**This doc could be deleted (its own subject, `mlsd`'s tuple-yield
+gap, is fixed) except that `python3 mojo.py build
+Lib/ftplib.py` still does not succeed** — keeping it open, re-pointed
+at the real current blocker, rather than deleting a doc for a file
+that still doesn't build (which would look like false progress to a
+future pass grepping `bugs/` for "does ftplib.py build yet").
+
 ## Status (updated 2026-08-09, re-verified — reproduces identically)
 
 **STILL FAILING**, re-confirmed against current master (fast-forwarded

@@ -1,5 +1,48 @@
 # HARD BUG: the self-hosting `getattr(self, x)`-dispatch-table heuristic mis-fires on ordinary stdlib code, emitting invalid C
 
+## New symptom found 2026-08-10 (same mechanism, different manifestation — not fixed)
+
+While re-verifying `bugs/CODEGEN_generator_function_Lib_ftplib.md`
+(unrelated generator-codegen pass), hit a SECOND, distinct symptom of
+this exact same "assume all methods" fallback:
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py`
+(which transitively imports `ssl.py` -> `subprocess.py`) fails with
+dozens of `error: 'Popen__close_pipe_fds' undeclared here (not in a
+function); did you mean 'subprocess_Popen__close_pipe_fds'?` (and the
+identical shape for several `calendar.Month`/`calendar.Day` dunder
+methods, via `gettext.py`'s own build pulling in `copy.py` ->
+`argparse.py`/`ast.py`). This is NOT the "self type resolves empty"
+symptom `option 3` already fixed (`_Bool_items`/malformed `( *self,
+...)`  declarations) — here the `self` type resolves FINE, but the
+callee is registered under its UNQUALIFIED name.
+
+Root cause: this fallback's callee registry,
+`self.struct_methods[stmt.name][method.name]`
+(`gimple_codegen.py:753-758`), is populated with the plain
+`f"{stmt.name}_{method.name}"` mangled name
+(`gimple_codegen.py:756`) — this call-graph/dispatch-table analysis
+pass predates (or was never updated to match) the module-qualified-C-
+symbol scheme used elsewhere in this codegen for cross-module method
+calls (see the "SB-1 mojo_abs symbol-collision fix" session). For a
+struct defined in the ROOT module being compiled, the unqualified and
+module-qualified names happen to coincide, so the bug is invisible
+there — it only shows up when this heuristic mis-fires on a struct
+defined in a NON-root, transitively-imported module (`subprocess.Popen`,
+`calendar.Month`/`Day` here), where the two names genuinely differ and
+`DispatchTable.emit_table_init` (`gimple_codegen.py:552-575`) emits a
+struct-literal function-pointer initializer referencing a symbol that
+was never declared under that exact spelling.
+
+Not investigated further / not fixed here — same "moderate risk,
+needs a dedicated `make check-selfhost`-first pass" caveat as the rest
+of this doc; flagging precisely so a future pass fixing this doesn't
+have to re-discover the module-qualification angle from scratch. A
+real fix likely needs `_plan_dispatch_tables`'s callee registration (or
+`DispatchTable.add_method`) to resolve/emit the module-qualified name
+for any callee whose owning struct isn't in the root module, mirroring
+whatever lookup the rest of the codegen already uses for ordinary
+cross-module method calls.
+
 ## Status
 
 **Partially fixed 2026-08-07** ("option 3" below — the defensive net
