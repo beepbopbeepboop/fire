@@ -25261,17 +25261,55 @@ class GimpleGen:
         if isinstance(s, AssertStmt):
             return []  # assert is a no-op in compiled generators
         if isinstance(s, MultiAssignStmt):
-            # a = b = expr → declare ALL targets, assign value to each
+            # a = b = expr → declare ALL targets, assign value to each.
+            # Unlike the ordinary AssignStmt case just above, this never
+            # actually DECLARED a first-seen target as a real C++ local —
+            # it recorded the (always-int64_t-guessed) type into `declared`
+            # (the PYTHON-side bookkeeping dict) and emitted the assignment
+            # line, but no `{ctype} {name};` ever reached the emitted text
+            # at all — g++: "use of undeclared identifier". Real:
+            # ipaddress.py's `_find_address_range`: `first = last =
+            # next(it)`. Fixed by mirroring AssignStmt's own two-part
+            # fix exactly: infer each NEW target's real ctype from the
+            # value (same `_infer_simple_expr_ctype` call, same self/
+            # struct-method-call special case `_cpp_hoist_walrus_decls`
+            # already added, for consistency — a `first = last = self.
+            # method()` shape would hit the identical gap otherwise), and
+            # hoist the declaration into `_cpp_func_scope_decls` (function
+            # scope, not this block) — needed for the exact same reason
+            # AssignStmt's own comment documents: a name first assigned
+            # inside a `try:`/`for:` body must stay visible to a sibling
+            # `else:`/post-loop block, and this project's C++ coroutine
+            # frames outlive every block, so function scope is sound and
+            # matches Python's own function-level (not block-level)
+            # scoping.
             if s.targets:
                 val = self._cpp_expr(s.value)
                 lines = []
                 for t in s.targets:
-                    if isinstance(t, str):
-                        declared[t] = 'int64_t'
-                        lines.append(f"{indent}{t} = {val};")
-                    elif isinstance(t, IdentExpr):
-                        declared[t.name] = 'int64_t'
-                        lines.append(f"{indent}{t.name} = {val};")
+                    tname = t if isinstance(t, str) else (t.name if isinstance(t, IdentExpr) else None)
+                    if tname is None:
+                        continue
+                    if tname not in declared:
+                        vt = None
+                        if isinstance(s.value, CallExpr) and isinstance(s.value.func, MemberExpr):
+                            _mf = s.value.func
+                            _mstruct = None
+                            if isinstance(_mf.obj, IdentExpr) and _mf.obj.name == 'self':
+                                _mstruct = getattr(self, '_cpp_gen_self_struct', None)
+                            elif isinstance(_mf.obj, IdentExpr):
+                                _mstruct = self._cpp_struct_ptr_local(_mf.obj.name)
+                            if _mstruct:
+                                vt = self.func_return_types.get(f"{_mstruct}_{_mf.member}")
+                        if vt is None:
+                            vt = _infer_simple_expr_ctype(
+                                s.value, declared, getattr(self, '_cpp_gen_self_fields', None))
+                        if vt is None:
+                            vt = 'int64_t'
+                        declared[tname] = vt
+                        if self._cpp_func_scope_decls is not None:
+                            self._cpp_func_scope_decls.append(f"{_c_to_cpp_scalar_type(vt)} {tname};")
+                    lines.append(f"{indent}{tname} = {val};")
                 return lines
             return []
         if isinstance(s, ComptimeVarStmt):
