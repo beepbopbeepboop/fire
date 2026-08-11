@@ -3804,6 +3804,22 @@ class GimpleGen:
         # for `self`. See bugs/hard/CODEGEN_generator_struct_typed_param_
         # refused.md.
         self._cpp_param_struct_names: set[str] = set()
+        # Struct names actually CONSTRUCTED (`StructName(args)`) inside a
+        # compiled generator/async body, first-assigned to a plain local
+        # (test_doctest.py's `hook = TestHook(pathdir)` inside
+        # `test_hook`'s `@contextlib.contextmanager` body — see
+        # bugs/CODEGEN_generator_function_Lib_test_test_doctest_test_
+        # doctest.md). Distinct from `_cpp_param_struct_names` (a struct
+        # arriving as a PARAMETER, never allocated in this TU) because the
+        # .cpp preamble also needs an `extern "C" {Struct} * _alloc_
+        # {Struct}(void);` declaration for these — the ordinary GIMPLE
+        # path's own `_alloc_{struct}` helper (see `_lower_struct_
+        # constructor`/`_struct_allocs_needed`), reused rather than
+        # reinvented so the .c/.ci-emitted allocator and this .cpp TU
+        # agree on the exact same allocation. Still needs the struct's
+        # layout typedef visible too, so gen_module's typedef-emission
+        # loop treats this set the same as `_cpp_param_struct_names`.
+        self._cpp_ctor_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
@@ -24505,6 +24521,64 @@ class GimpleGen:
                     # bare-name call below, an undeclared C++ identifier
                     # ("'object' was not declared in this scope").
                     return "(int64_t)(void *)malloc(1)"
+                # `StructName(args)` — a real struct CONSTRUCTOR call inside
+                # a generator/async body (test_doctest.py's `hook =
+                # TestHook(pathdir)` inside `test_hook`'s `@contextlib.
+                # contextmanager` body). Only the plain, single-`__init__`-
+                # overload shape is supported here — the same narrowing
+                # `_lower_struct_constructor`'s own single-signature
+                # fallback path uses, not the ordinary GIMPLE path's full
+                # same-file overload resolution (this scalar coroutine-body
+                # model has no call-site arg-type machinery to pick between
+                # candidates with) — a struct with no `__init__` at all, or
+                # with kwargs at the call site, refuses honestly below
+                # rather than guessing. Lowered as an immediately-invoked
+                # C++ lambda (`[&]() { ...; return t; }()`) so allocation +
+                # `__init__` call (two separate calls on the ordinary path
+                # — see `_lower_struct_constructor`) can still appear as a
+                # single VALUE expression here — this codegen already calls
+                # `_cpp_expr` expecting one expression string back, not a
+                # statement list, at every call site (assignment RHS, yield
+                # value, function argument, ...).
+                #
+                # Allocation is inlined here (calloc + stamp
+                # `__mojo_type_id` + seed any class-attribute instance
+                # fields), NOT a call to the ordinary GIMPLE path's own
+                # `_alloc_{struct}` helper — that helper is deliberately
+                # emitted `static` (see its own emission comment: "each
+                # module that needs it emits its own copy; the monolithic
+                # stdlib dylib compiles modules independently, so an
+                # externally-linked _alloc_<sn> would collide at link
+                # time"), i.e. internal C linkage, invisible to this
+                # generator body's SEPARATELY compiled/linked .cpp
+                # translation unit. Mirrors that function's own logic
+                # (`_struct_type_id`/class-attr seeding) verbatim rather
+                # than inventing different construction semantics for the
+                # generator-body path. `__init__` itself IS reused via the
+                # ordinary `{struct}_init` C symbol (`_struct_method_csym`)
+                # — unlike `_alloc_`, struct methods are never `static`
+                # (see `_cpp_struct_method_refs`, already proven to work
+                # for `self`/parameter struct pointers), so no analogous
+                # linkage problem exists there.
+                if fname in self.struct_field_types and fname in self._struct_has_init \
+                        and not e.kwargs:
+                    self._cpp_ctor_struct_names.add(fname)
+                    init_sym = self._struct_method_csym(fname, '__init__', '')
+                    self._cpp_struct_method_refs.add((fname, '__init__'))
+                    init_args = ', '.join(['_t'] + args)
+                    class_attrs = self._class_attrs.get(fname, {})
+                    field_map = self.struct_field_types.get(fname, {})
+                    attr_inits = ''.join(
+                        f" _t->{_safe_field(aname)} = {gname};"
+                        for aname, gname in sorted(class_attrs.items())
+                        if aname in field_map
+                        and field_map[aname] == self._global_var_types.get(gname, field_map[aname]))
+                    return (f"[&]() -> {fname} * {{ {fname} * _t = "
+                            f"({fname} *)calloc(1, sizeof({fname})); "
+                            f"_t->__mojo_type_id = {_struct_type_id(fname)};"
+                            f"{attr_inits} "
+                            f"{init_sym}({init_args}); "
+                            f"return _t; }}()")
                 # A call to a module-level function (tokenize.py's
                 # `detect_encoding(readline)`, codecs.py's
                 # `getincrementalencoder(encoding)`, os.py's `fspath(top)`)
@@ -25316,9 +25390,22 @@ class GimpleGen:
             name = s.target.name
             val = self._cpp_expr(s.value)
             if name not in declared:
-                ctype = _infer_simple_expr_ctype(
-                    s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
-                    self._async_api)
+                # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
+                # struct-constructor branch just above, which already
+                # lowered `val` to a real `[&]() -> {Struct} * {...}()`
+                # construction expression for exactly this shape; give the
+                # LOCAL the matching real pointer type here instead of
+                # letting it fall through `_infer_simple_expr_ctype` (which
+                # has no notion of struct constructors at all) to the
+                # int64_t default below — that mismatch is what produced
+                # "assignment to 'int64_t' from 'TestHook *'" originally.
+                if (isinstance(s.value, CallExpr) and isinstance(s.value.func, IdentExpr)
+                        and s.value.func.name in self._cpp_ctor_struct_names):
+                    ctype = f"{s.value.func.name} *"
+                else:
+                    ctype = _infer_simple_expr_ctype(
+                        s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
+                        self._async_api)
                 if ctype is None:
                     ctype = 'int64_t'  # default for unknown-type locals
                 declared[name] = ctype
@@ -36301,7 +36388,8 @@ class GimpleGen:
                 cpp_parts.append('    }')
                 cpp_parts.append('};')
                 cpp_parts.append('')
-            if self._supported_generator_methods or self._cpp_param_struct_names:
+            if (self._supported_generator_methods or self._cpp_param_struct_names
+                    or self._cpp_ctor_struct_names):
                 # Milestone C step 3: every struct a compiled generator
                 # METHOD in this module binds `self` to needs its C layout
                 # visible here too (for `self->field` access and for the
@@ -36313,8 +36401,10 @@ class GimpleGen:
                 # (bugs/hard/CODEGEN_generator_struct_typed_param_refused.md)
                 # is the identical need for a struct accepted as a
                 # generator/async function's own PARAMETER type, not just
-                # via `self` — merged into the same typedef-emission loop
-                # below rather than a separate one.
+                # via `self`; `_cpp_ctor_struct_names` is the same need for
+                # a struct CONSTRUCTED inside the body (test_doctest.py's
+                # `hook = TestHook(pathdir)`) — merged into the same
+                # typedef-emission loop below rather than a separate one.
                 cpp_parts.append('/* Struct layout(s) needed by this module\'s')
                 cpp_parts.append('   compiled generator method(s) -- verbatim copy of')
                 cpp_parts.append('   the same typedef(s) emitted into the .c/.ci output. */')
@@ -36344,6 +36434,47 @@ class GimpleGen:
                 for _gm_sname3 in self._cpp_param_struct_names:
                     if _gm_sname3 not in _gm_struct_names_seen:
                         _gm_struct_names_seen.append(_gm_sname3)
+                for _gm_sname4 in self._cpp_ctor_struct_names:
+                    if _gm_sname4 not in _gm_struct_names_seen:
+                        _gm_struct_names_seen.append(_gm_sname4)
+                # Transitive closure over struct-pointer-typed FIELDS: a
+                # struct pulled in above (test_doctest.py's `TestHook`) can
+                # itself have a field typed as ANOTHER struct pointer
+                # (`self.importer = TestImporter()` — a plain, no-`var`-
+                # annotation instance attribute, so struct_field_types
+                # infers its real constructed type, `TestImporter *`, same
+                # as any other field) — that struct's own typedef needs to
+                # be visible in this .cpp TU too, or the outer struct's
+                # field declaration itself fails to compile ("'TestImporter'
+                # does not name a type"). BFS rather than one flat pass:
+                # the pulled-in struct can itself reference a THIRD struct
+                # the same way, arbitrarily deep.
+                _gm_frontier = list(_gm_struct_names_seen)
+                while _gm_frontier:
+                    _gm_cur = _gm_frontier.pop()
+                    for _gm_fct in self.struct_field_types.get(_gm_cur, {}).values():
+                        if isinstance(_gm_fct, str) and _gm_fct.endswith(' *'):
+                            _gm_fld_sn = _gm_fct[:-2]
+                            if (_gm_fld_sn in self.struct_field_types
+                                    and _gm_fld_sn not in _gm_struct_names_seen):
+                                _gm_struct_names_seen.append(_gm_fld_sn)
+                                _gm_frontier.append(_gm_fld_sn)
+                # Forward-declare every struct tag in this closure BEFORE
+                # any of their full typedefs below — `sorted()` order
+                # (alphabetical, e.g. "TestHook" before "TestImporter")
+                # doesn't necessarily match the dependency order a pointer
+                # FIELD needs (TestHook's own typedef, emitted first
+                # alphabetically, has a `TestImporter *importer;` field —
+                # C++ requires `TestImporter` to at least name a type by
+                # that point). A plain forward `struct Name;` ahead of time
+                # (legal C++, later redefined by the real `typedef struct
+                # Name {...} Name;`) sidesteps needing real dependency-
+                # order sorting entirely.
+                for _gm_fwd_sn in sorted(_gm_struct_names_seen):
+                    if _gm_fwd_sn in self._struct_typedef_texts:
+                        cpp_parts.append(f'struct {_gm_fwd_sn};')
+                if any(_fwd in self._struct_typedef_texts for _fwd in _gm_struct_names_seen):
+                    cpp_parts.append('')
                 for _gm_method_struct_name in sorted(_gm_struct_names_seen):
                     _td = self._struct_typedef_texts.get(_gm_method_struct_name)
                     if _td:
