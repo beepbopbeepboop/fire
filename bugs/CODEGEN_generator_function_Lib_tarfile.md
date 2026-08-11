@@ -1,5 +1,107 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-11, one root cause fixed; real blocker root-caused, left open)
+
+Re-verified against current master. Classification unchanged: **NOT a
+generator-codegen-cluster failure** — all 3 of tarfile.py's own
+generator sites (`TarFile.__iter__`'s `yield from self.members`/`yield
+tarinfo` x2) still compile cleanly, unaffected by anything below.
+
+**One real root cause fixed**: `sys.getfilesystemencoding()` had no
+real lowering in `gimple_codegen.py` and fell through to the fully
+generic "unknown method on scalar receiver" stub, which passes the
+receiver's own placeholder C type through as the call's result type —
+a bare `sys` module reference resolves to a placeholder `int64_t`, so
+the call's result was typed `int64_t` too, even though the real
+function returns a string. Added a narrow special case (mirroring the
+existing `sys.platform` comptime-constant special case already in
+`_lower_method_call`) for `sys.getfilesystemencoding()`/`sys.
+getdefaultencoding()`, returning the fixed `"utf-8"` value both
+genuinely have on every host this compiler targets. Also fixed, in the
+same pass, a related but SEPARATE gap this file's own `if os.name ==
+"nt": ENCODING = "utf-8" else: ENCODING = sys.getfilesystemencoding()`
+exposed: the Phase 1.7 module-level-global type pre-scan
+(`gen_module`'s `_phase17_infer_global_type` family) only handled a
+`TryStmt`'s branches when a global is assigned inside one (an already-
+fixed, now-deleted hard bug, `CODEGEN_global_prescan_blind_to_trystmt_
+and_bare_annotation.md`) — the analogous `IfStmt` case, when the
+condition can't be folded to a compile-time constant (`os.name ==
+"nt"` isn't one of the handful of expressions this codegen's `_eval_
+const_bool` recognizes, unlike e.g. `sys.platform`), was never handled
+at all: the whole `IfStmt` node is left un-flattened in the pre-scan's
+input, so NEITHER branch's assignment was ever visible to the type
+inference, silently defaulting through the generic `int64_t` fallback.
+Added `_phase17_scan_if_branches`, a direct IfStmt sibling of the
+already-shipped `_phase17_scan_try_branches`, joining the inferred type
+across `then`/`elif`/`else` branches exactly the same way.
+
+Both fixes are real, independently defensible, and pass the full
+mandatory gate with zero regressions (`test_gimple.py` 247/247,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+dylib rebuild 0 skips, `compile_stdlib.py` 664/664 — see this session's
+commits). Verified directly: a real `mojo.py build` of a `sys.
+getfilesystemencoding()`-calling repro no longer types the call's
+result `int64_t`.
+
+**tarfile.py's `ENCODING` line (149/151) itself still fails**, though —
+root-caused one level deeper, and NOT fixed here: `_global_var_types`
+(the dict both `_phase17_infer_global_type` and the Phase 2a assignment
+lowering consult for a global's declared C type) is a single flat dict
+SHARED BY OBJECT IDENTITY across every module compiled together in one
+`do_imports=True` whole-program build (`temp_gen._global_var_types =
+self._global_var_types`), keyed by BARE global name alone — the exact
+same "shared, first/last-writer-wins flat namespace" root cause already
+diagnosed and deliberately deferred for FREE FUNCTIONS in `bugs/hard/
+CODEGEN_generator_function_symbol_not_module_qualified.md` and for
+STRUCTS in `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_
+modules.md`, but never previously confirmed for MODULE-LEVEL GLOBALS.
+Concretely: `Lib/token.py`'s own module-level `ENCODING` (a real token-
+type integer constant, unrelated in meaning) and `Lib/tarfile.py`'s own
+`ENCODING` (a string) share the same bare name; each module's own
+struct DECLARATION ends up correctly typed (`_token_toplev.ENCODING` is
+`int`, `_root_toplev.ENCODING` — tarfile's own — is `char *`, confirmed
+via direct `.ci` inspection) because each module's struct-declaration
+pass reads `_global_var_types['ENCODING']` at the moment ITS OWN
+Phase 1.7 scan just ran, before any later-processed module can
+overwrite the shared dict — but the ASSIGNMENT-STATEMENT codegen for
+tarfile's own `ENCODING = ...` (Phase 2a, run interleaved with other
+modules' own Phase 1.7/2a passes in a whole-program build) reads the
+SAME shared dict at a later point, by which time some other module's
+own scan has overwritten the shared entry, producing an `int`-typed
+RHS value assigned into a `char *`-typed field — exactly the observed
+`error: assignment to 'char *' from 'int'`. Confirmed via direct `.ci`
+inspection (both the `os.name == "nt"` AND the `sys.
+getfilesystemencoding()` branches emit an `(int)` cast on their RHS,
+even the branch that's a bare string-literal reference — ruling out a
+"the RHS value itself was wrong" explanation and confirming it's the
+GLOBAL's inferred TYPE that's cross-contaminated, not the individual
+call's result).
+
+**Deliberately not fixed here**: making `_global_var_types` (and its
+Phase 2a consumers) genuinely per-module-scoped — the same fix
+`_func_qualifier`'s three-tier lookup already provides for free
+functions — is a real, structural, non-trivial rework of shared,
+correctness-sensitive machinery touched by dozens of call sites (`grep
+-c '_global_var_types' gimple_codegen.py` is well over 40), squarely
+the same class of change this project's own documented history (the
+"_tuplegetter incidents", the free-function/struct SB-1 fixes' own
+two-regression histories) says needs a dedicated session with room for
+real multi-file `mojo.py build` CLI verification across many
+collision shapes, not a same-pass addition alongside two already-
+verified, independently-scoped fixes. Left open.
+
+The other tarfile.py-own errors are unaffected by any of the above and
+remain independently diagnosed, unfixed, non-generator issues (unchanged
+from the 2026-08-09 pass below): `SpecialFileError.__init__`'s `self.
+tarinfo = tarinfo` ("has no member named 'tarinfo'" — adjacent to, but
+NOT the same receiver shape as, `bugs/hard/CODEGEN_dynamic_attribute_
+on_generic_object.md`'s own documented residual gap; not investigated
+further here) and the `bz2opzen`/`xzopen` `from bz2 import BZ2File`/
+`from lzma import LZMAFile` FUNCTION-SCOPED imports inside a `try:` block
+(implicit-declaration errors — the already-tracked, already-diagnosed
+class of gap in `bugs/hard/CODEGEN_function_scoped_import_rettype_and_
+literal_cast_mismatches.md`).
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring
