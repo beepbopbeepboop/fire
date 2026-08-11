@@ -1,5 +1,72 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-11 — re-verified still refused; deepened root cause, confirms (not reverses) prior "needs tagged-union redesign" conclusion)
+
+Re-verified against current master: `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/os.py` still fails with the identical
+`RuntimeError: cannot compile module: function(s) _fwalk, walk ...`,
+unchanged from 2026-08-10.
+
+Looked for a possible narrower fix than the "tagged-union promise, much
+larger redesign" the previous session concluded was required, since the
+2026-08-10 framing ("mixes SCALAR and TUPLE yields") looked, on a closer
+read of `walk()`'s actual source, potentially too pessimistic:
+
+`walk()`'s `yield top` (os.py:364) is NOT really a scalar yield in the
+way `_generator_yield_ctype` treats it (an unresolvable identifier,
+defaulted to `int64_t`). It's reached only inside
+`if isinstance(top, tuple): yield top; continue` — and `top` really is
+a 3-tuple there at runtime: bottom-up traversal earlier pushes
+`stack.append((top, dirs, nondirs))` (os.py:429), and `top =
+stack.pop()` (os.py:359) pops it back off. So `yield top` and the
+other site's literal `yield top, dirs, nondirs` (os.py:418) are, in
+real Python semantics, THE SAME 3-tuple shape — not two genuinely
+different yield shapes. `_fwalk` follows the identical idiom (`stack.
+append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))` then later
+`yield value`). This looked promising: if the codegen could special-case
+"a bare-identifier yield inside an `isinstance(x, tuple)`-guarded branch
+should adopt the SAME tuple slot ctypes already established by this
+function's real tuple-literal yield site(s)," the type-unification
+refusal might go away without touching the yield-tuple machinery's core
+model.
+
+**But this doesn't actually solve the real problem, it only relocates
+it** — traced one level further: `stack` itself (`stack = [fspath(top)]`,
+then both `stack.append(new_path)` — a plain string — and `stack.append
+((top, dirs, nondirs))` — a 3-tuple — at different points in the same
+function) is a genuinely, dynamically HETEROGENEOUSLY-typed Python list
+(str elements AND tuple elements in the same list), and `isinstance(top,
+tuple)` is a real runtime type-discrimination check on a value popped
+from it. This codegen's container/value model has no runtime type tag
+for a `MojoList *` element at all — every list's element representation
+is a single static C type decided at compile time (`_elem_types`/
+`_nested_elem_types`), and every "boxed pointer stored as int64_t"
+convention this codebase uses elsewhere (see mailbox.py's/ipaddress.py's
+tuple-yield boxing) relies on the STATIC type already being known at
+each use site, not on a runtime discriminator recoverable via
+`isinstance()`. So even if the yield-type-unification layer were taught
+to special-case this idiom, `stack`'s own mixed-element-type list and
+the `isinstance(top, tuple)` runtime check one level below it would
+still need real tagged/dynamically-typed value representation to
+compile correctly — without that, "fixing" just the yield-type mismatch
+would most likely just move the failure to a different, less legible
+GCC-stage error (or, worse, silently miscompile `isinstance(top,
+tuple)` into something that's always true/false, corrupting `walk()`'s
+actual traversal order).
+
+**Conclusion: refines but does not reverse** the 2026-08-10 assessment
+— `walk`/`_fwalk` don't fail because two *independent, disjoint* yield
+shapes coexist by coincidence; they fail because `walk`/`_fwalk`
+legitimately need a dynamically/heterogeneously-typed value
+representation (the `stack` list's own elements) that this codegen does
+not have anywhere in its container or coroutine-promise model. A real
+fix is still the same larger tagged-union/variant redesign the prior
+session identified, now with the underlying reason nailed down more
+precisely (not just "yield shapes disagree" but "the whole function's
+control flow depends on runtime type discrimination this codegen's
+value model can't represent"). Not attempted — genuinely out of narrow-
+fix scope. Doc kept open.
+
 ## Status (updated 2026-08-10 — general tuple-valued yield now FIXED; `walk`/`_fwalk` remain refused for a distinct, in-scope reason: they mix SCALAR and TUPLE yields in one function)
 
 Implemented real tuple-valued-`yield` support this session (see
