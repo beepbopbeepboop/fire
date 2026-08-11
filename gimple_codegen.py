@@ -25332,21 +25332,59 @@ class GimpleGen:
             for kname, kexpr in call.kwargs:
                 call.args.append(kexpr)
             call.kwargs = []
-        sub_name = call.func.name
-        api = self._generator_api.get(sub_name)
-        if api is None or sub_name not in self._supported_generators:
-            raise _UnsupportedGeneratorShape(
-                f"`for ... in {sub_name}(...)` does not consume a generator "
-                "this compile has itself already translated via the "
-                "C++20-coroutine path (either it's not a generator this "
-                "codegen supports, or it's defined LATER in this module — "
-                "the consumed generator must be defined earlier)")
+        # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
+        # `Calendar.itermonthdates` doing `for y, m, d in self.
+        # itermonthdays3(year, month):`), resolved via
+        # `self._generator_method_api` (keyed by (struct_name, method_name)
+        # — see that dict's own population sites) instead of the
+        # free-function `self._generator_api`. `<base>_start`'s first
+        # parameter is the receiver itself (`_gen_cpp_generator_unit`
+        # prepends `('self', f"{struct_name} *")` to a method's own
+        # `param_ctypes`, mirroring `_gen_struct_method`'s identical
+        # convention for an ordinary compiled method) — passed here as the
+        # literal `self` (this delegating generator's OWN receiver; a
+        # generator method can only ever be consumed via `self.<method>()`
+        # in this scalar body model, never through an arbitrary struct-typed
+        # local — see the `isinstance(call.func.obj, IdentExpr) and ...
+        # 'self'` guard below), never a separately-evaluated expression.
+        if isinstance(call.func, MemberExpr):
+            _self_struct = getattr(self, '_cpp_gen_self_struct', None)
+            if not (isinstance(call.func.obj, IdentExpr)
+                    and call.func.obj.name == 'self' and _self_struct):
+                raise _UnsupportedGeneratorShape(
+                    "`for ... in <expr>.<method>(...)` is only supported "
+                    "when <expr> is literally `self` inside a generator "
+                    "method on the same struct")
+            sub_name = f"{_self_struct}.{call.func.member}"
+            api = self._generator_method_api.get((_self_struct, call.func.member))
+            if (api is None or (_self_struct, call.func.member)
+                    not in self._supported_generator_methods):
+                raise _UnsupportedGeneratorShape(
+                    f"`for ... in self.{call.func.member}(...)` does not "
+                    "consume a generator method this compile has itself "
+                    "already translated via the C++20-coroutine path "
+                    "(either it's not a generator this codegen supports, or "
+                    "it's defined LATER among this struct's methods — the "
+                    "consumed generator method must be defined earlier)")
+            receiver_exprs = ['self']
+        else:
+            sub_name = call.func.name
+            api = self._generator_api.get(sub_name)
+            if api is None or sub_name not in self._supported_generators:
+                raise _UnsupportedGeneratorShape(
+                    f"`for ... in {sub_name}(...)` does not consume a generator "
+                    "this compile has itself already translated via the "
+                    "C++20-coroutine path (either it's not a generator this "
+                    "codegen supports, or it's defined LATER in this module — "
+                    "the consumed generator must be defined earlier)")
+            receiver_exprs = []
         sub_params = api.get('params') or []
-        if len(call.args) != len(sub_params):
+        if len(call.args) + len(receiver_exprs) != len(sub_params):
             raise _UnsupportedGeneratorShape(
-                f"`for ... in {sub_name}(...)`: expected {len(sub_params)} "
-                f"argument(s), got {len(call.args)}")
-        arg_exprs = [self._cpp_expr(a) for a in call.args]
+                f"`for ... in {sub_name}(...)`: expected "
+                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                f"got {len(call.args)}")
+        arg_exprs = receiver_exprs + [self._cpp_expr(a) for a in call.args]
         base = api['base']
         vct = api['value_ctype']
         tuple_slot_ctypes = api.get('tuple_slot_ctypes')
@@ -25416,6 +25454,36 @@ class GimpleGen:
         lines.append(f"{indent}}}")
         return lines
 
+    def _cpp_iterable_is_delegatable_generator_call(self, iterable) -> bool:
+        """True when `iterable` is a call this compile can potentially
+        delegate to via `_cpp_for_generator_delegate` — either a bare
+        `name(...)` naming a free-function generator, or `self.method(...)`
+        naming a generator METHOD on the SAME struct this body belongs to
+        (`self._cpp_gen_self_struct`, set by `_gen_cpp_generator_unit`
+        while compiling a generator method's body — None for a free
+        function, so the method-call branch below naturally never matches
+        there). Uses `self._all_generator_names` (every generator name
+        anywhere in the module, computed once up front — see that
+        attribute's own docstring) rather than `self._generator_api`/
+        `self._generator_method_api` directly, so a callee that's a real
+        generator but hasn't been COMPILED yet in this pass still counts as
+        "delegatable" here — `_cpp_for_generator_delegate` itself raises
+        `_UnsupportedGeneratorShape` for that case, which is exactly what
+        gets the caller retried in gen_module's later passes instead of
+        silently falling through to the generic (non-generator-aware)
+        iterable lowering."""
+        if not isinstance(iterable, CallExpr):
+            return False
+        if isinstance(iterable.func, IdentExpr):
+            return iterable.func.name in self._all_generator_names
+        if isinstance(iterable.func, MemberExpr):
+            _self_struct = getattr(self, '_cpp_gen_self_struct', None)
+            return bool(_self_struct
+                        and isinstance(iterable.func.obj, IdentExpr)
+                        and iterable.func.obj.name == 'self'
+                        and iterable.func.member in self._all_generator_names)
+        return False
+
     def _cpp_for_stmt(self, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         """Plain `for <var> in <iterable>:` inside a generator body.
         Lowers to a C++ range-for or indexed loop over the iterable.
@@ -25466,9 +25534,7 @@ class GimpleGen:
             # single-bogus-identifier path below unchanged (see
             # bugs/CODEGEN_generator_function_Lib_weakref.md for that
             # separate, still-open gap).
-            if (not s.else_body and isinstance(s.iterable, CallExpr)
-                    and isinstance(s.iterable.func, IdentExpr)
-                    and s.iterable.func.name in self._all_generator_names):
+            if not s.else_body and self._cpp_iterable_is_delegatable_generator_call(s.iterable):
                 return self._cpp_for_generator_delegate(_names, s.iterable, s.body,
                                                           declared, indent)
             target = target[1:-1]
@@ -25483,9 +25549,7 @@ class GimpleGen:
             # declaration gen_module's "module-level symbols referenced by
             # generator bodies" preamble falls back to for any unrecognized
             # callee — invalid C++, not just a missed optimization.
-            if (not s.else_body and isinstance(s.iterable, CallExpr)
-                    and isinstance(s.iterable.func, IdentExpr)
-                    and s.iterable.func.name in self._all_generator_names):
+            if not s.else_body and self._cpp_iterable_is_delegatable_generator_call(s.iterable):
                 return self._cpp_for_generator_delegate(target, s.iterable, s.body,
                                                           declared, indent)
             target_was_declared = target in declared
