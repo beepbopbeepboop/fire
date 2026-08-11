@@ -1,5 +1,142 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-10, later same day — 2 of 3 remaining blockers FIXED; 1 precisely diagnosed, not fixed)
+
+Re-verified against current master. Two real, previously-undiagnosed
+bugs found and fixed this pass (both in `gimple_codegen.py`, both
+generic — not glob.py-specific):
+
+**Fix 1 — self-recursive generator consumed via plain `for`, not
+`yield from`, was refused on every pass.** `_glob2`'s `yield from
+_rlistdir(...)` compiles fine, but `_rlistdir` itself is recursive via
+an ORDINARY consuming loop (`for y in _rlistdir(path, ...): yield
+_join(x, y)`, glob.py:224 — the classic `os.walk`-style recursive-
+directory-listing shape), not `yield from`. `_cpp_for_generator_
+delegate` (the codegen for "plain `for` over an already-compiled
+sibling generator") had no self-recursion case at all — only `_cpp_
+yield_from` did (added for a previous, `yield from`-only bug). Since a
+generator only registers into `self._generator_api`/`self._supported_
+generators` AFTER its own body finishes compiling, a genuinely self-
+recursive `for` loop inside that SAME body can never find itself there
+on any retry pass (unlike an ordinary forward-reference to a sibling
+defined later, which the existing multi-pass retry loop already
+handles) — `MOJO_DEBUG=1` showed `_rlistdir` permanently refused:
+"`for ... in _rlistdir(...)` does not consume a generator this compile
+has itself already translated... — the consumed generator must be
+defined earlier", taking the whole module's compile down every time.
+Fixed by mirroring `_cpp_yield_from`'s existing self-recursion handling
+(`self._cpp_gen_self_name`/`_base`/`_params`, the same locally-tracked
+context) into `_cpp_for_generator_delegate`: detects `for x in
+<this-same-function>(...)`, builds the delegate call from the
+in-progress self-context instead of the not-yet-populated real
+registry, and declares the per-iteration loop-consumption local via
+C++ `auto` (its real type isn't known until AFTER this whole
+generator's own body finishes — but `_gen_cpp_generator_unit` already
+emits a forward `extern "C"` declaration for `{base}_value` whenever
+self-recursion is detected, so `auto` deduction against that forward
+declaration is provably correct, not a guess). A tuple-valued
+self-recursive loop target is refused honestly (falls through the
+existing `tuple_slot_ctypes is None` check) rather than guessed at —
+out of scope here.
+
+**Fix 2 — `_func_csym`'s mangled-key mirror used `setdefault`, freezing
+a function's return/param type at whatever it was on the FIRST call,
+even after later passes corrected it.** `_join`'s return type is
+correctly inferred `char *` by Pass 1.3e ("refresh return types now
+that param inference is final") — confirmed directly via debug
+instrumentation: `func_return_types['_join']` == `'char *'` throughout.
+But `_glob0` (which calls `_join`, and is compiled EARLIER in source
+order) resolves its OWN call site's C symbol via `_func_csym('_join')`,
+which mirrors the bare-name entry into the mangled-symbol key
+(`func_return_types['_join_abb124']`) via `setdefault` — so whichever
+call happened to run FIRST froze the mangled key's value forever,
+regardless of any later correction to the bare key. `_emit_call` (the
+GIMPLE call-emission helper) looks up the callee's return type BY THE
+MANGLED KEY specifically to decide whether a cast is needed — a stale,
+wrong mangled entry there overrides an otherwise-correct `ret_type`
+with the wrong one, and then emits the call's real (correct) result
+straight into a temp declared with the WRONG type, with no cast at all
+(since the whole point of that lookup is "insert a cast when the two
+disagree" — it never considered its own answer might itself be stale).
+Concretely: `_t8 = _join_abb124(_t5, _t7);` assigned a genuine `char *`
+return into an `_t8` declared `int64_t` — GCC's `-Wint-conversion`
+"assignment to 'int64_t' from 'char *'" — reported at `glob.py:175`
+only because of `-fgimple`'s unreliable un-`#line`-stamped physical-line
+counting (the 2026-08-09 entry below already established the real
+offending statement is inside `_glob0`, not `_glob2` — this pass
+confirms and fixes the actual root cause that entry left open).
+Fixed by changing both `func_param_types`/`func_return_types` mirrors in
+`_func_csym` from `setdefault` to a plain assignment — always
+re-mirroring the CURRENT bare-name value is strictly more correct than
+freezing at first use, since later passes only ever have MORE
+information than earlier ones, never less.
+
+Verified via a direct isolated compile (both `do_imports=False` and the
+full `do_imports=True` build): `_t3 = _join_abb124(_t5, _t7);` now (no
+more int64_t detour), `_join`'s own definition/forward-declaration were
+already correct (`char * _join_abb124 (char *, char *)`) and unchanged.
+Whole-build error count for the SAME full `mojo.py build`: 505 → 504
+(exactly the one fixed error; a full before/after error-message-set
+diff confirms zero new error categories introduced — the other 2
+pre-existing `-Wint-conversion` "int64_t from char*" instances
+elsewhere in the build, unrelated call sites, are untouched).
+
+Full mandatory gate (CLAUDE.md) re-run after BOTH fixes together:
+- `python3 test_gimple.py`: 247 passed, 0 failed
+- `python3 test_module_cache.py`: 76 passed, 0 failed
+- `make check-selfhost`: clean (mojo.py compiling its own source)
+- From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
+- `python3 compile_stdlib.py` (no `-j`): 664/664 passed, 0 unexpected
+
+**glob.py itself still does not build** — exactly ONE error remains,
+precisely diagnosed but NOT fixed this pass (same architectural class
+as the already-tracked, deliberately-deferred `bugs/hard/CODEGEN_same_
+bare_name_struct_collision_across_modules.md`, just for FREE-FUNCTION
+signatures instead of struct layouts):
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:354:9: error: too few arguments to function 'translate_584a43'; expected 4, have 1
+```
+
+Root cause, confirmed by direct inspection of the generated `.ci`:
+glob.py's own `translate(pat, *, recursive=False, include_hidden=False,
+seps=None)` (glob.py:294, 1 positional + 3 keyword-only params) is
+compiled correctly as a real 4-parameter C function
+(`char * translate_584a43 (char * pat, int64_t recursive, int64_t
+include_hidden, int64_t seps)`). But its ONE call site
+(`_compile_pattern`, glob.py:354: `translate(pat, recursive=recursive,
+include_hidden=True, seps=seps)`) emits `translate_584a43 (_t11)` — only
+`pat`, all 3 keyword arguments silently dropped. `Lib/fnmatch.py`
+(transitively imported) has its OWN, UNRELATED top-level `def
+translate(pat):` (fnmatch.py:95 — a single-positional-arg, no-kwonly-
+param function, mangled separately as `fnmatch_translate_584a43` since
+its own module-qualification differs). `_lower_named_call`'s keyword-
+argument-padding logic (`expected_params = self.func_param_types.get
+(fname_raw, [])`, keyed by the BARE name `'translate'`) reads from
+`self.func_param_types` — a dict SHARED across the entire `do_imports=
+True` transitive compile, not module-qualified, first/last-write-wins
+— so glob.py's own `translate` call site ends up reading fnmatch.py's
+`translate`'s signature (1 param) instead of its own (4 params),
+padding zero extra arguments instead of the 3 needed. This reproduces
+even though `mojo.py build`'s PRIMARY path (`driver.py`'s per-module
+link mode) would normally make this class of collision unreachable
+(each module its own translation unit there) — glob.py's build falls
+through to the vulnerable `do_imports=True` WHOLE-PROGRAM inline path
+(`build_executable`'s fallback) for unrelated reasons (its own
+coroutine-generator content), which is exactly the "structurally
+possible when the primary link-mode path is bypassed" caveat the
+same-bare-name-collision hard-bug doc already documents for the
+struct-layout version of this same architectural gap. Not attempted
+here: fixing it properly means module-qualifying `func_param_types`/
+`func_return_types`/`_func_kwargs_slot` (or an equivalent conflict-
+detection layer) across the whole `do_imports=True` compile — the same
+broad, high-blast-radius shared-registry rework the struct-collision
+doc already deliberately declined to attempt in a narrow pass, now
+confirmed to also affect free-function signature/kwarg-padding
+resolution, not just struct field layouts. Flagged here precisely so a
+future pass targeting that whole hard-bug family has a second, cleanly
+independent confirmed instance to fix alongside the struct one.
+
 ## Status (updated 2026-08-10 — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring

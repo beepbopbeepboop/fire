@@ -1,5 +1,89 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-11 — MultiAssignStmt declaration gap FIXED; 2 separate, deeper pre-existing gaps confirmed blocking, neither fixed)
+
+Re-verified the exact blocker the 2026-08-10 entry below left open:
+`_find_address_range`'s `it = iter(addresses); first = last = next(it)`
+— a `MultiAssignStmt` (`a = b = expr`) inside a coroutine body.
+Confirmed via direct inspection of the generated `.cpp`: `_cpp_stmt`'s
+`MultiAssignStmt` case emitted the assignment (`first = val; last =
+val;`) but NEVER actually declared `first`/`last` as real C++ locals at
+all (unlike the ordinary `AssignStmt` case, which hoists a `{ctype}
+{name};` into `_cpp_func_scope_decls` on first use) — g++: "use of
+undeclared identifier 'first'"/"'last'". Also always guessed
+`int64_t` for the target's type regardless of the value's real type.
+
+**Fixed** by mirroring `AssignStmt`'s own two-part handling exactly:
+for each NEW target, infer its real ctype from the value (same
+`_infer_simple_expr_ctype` call AssignStmt already uses, PLUS the same
+`self.<method>(...)`/`<struct-ptr-local>.<method>(...)` special case
+`_cpp_hoist_walrus_decls` (this session's earlier imaplib.py fix)
+already added, for consistency — `_infer_simple_expr_ctype` itself has
+no self/struct-method-call case), then hoist the declaration into
+`_cpp_func_scope_decls` (function scope, exactly like AssignStmt) so a
+target first assigned inside a `try:`/`for:` body stays visible to a
+sibling block, matching Python's own function- (not block-) scoping.
+
+Verified via an isolated repro (`first = last = a; yield first; yield
+last`) compiling and RUNNING correctly end-to-end (`x`/`x`, matching
+Python), and against the real `ipaddress.py`: the "'first'/'last'
+undeclared" errors are confirmed gone from `_find_address_range`'s own
+generated code.
+
+Full mandatory gate (CLAUDE.md): `test_gimple.py` 247/0,
+`test_module_cache.py` 76/0, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skips, `compile_stdlib.py` 664/664 (0
+unexpected).
+
+**ipaddress.py itself still does not build.** Re-verifying the whole
+file (both the real `mojo.py build` full transitive compile — zero
+errors attributable to ipaddress.py's own code anywhere in that log,
+same as the 2026-08-10 entry already found — and a direct isolated
+`do_imports=False` compile + g++, for a clean read unclouded by other
+files' unrelated errors) surfaces TWO separate, deeper, genuinely
+distinct gaps, neither attempted here:
+
+**(a) `next(it)` on a plain (non-`self`) stateful iterator is a
+different, much harder shape than `next(self)`.** This session's
+imaplib.py fix taught `next(x)` to dispatch to `x.__next__()` when `x`
+is `self` or a struct-pointer local with a real compiled `__next__`
+method — but `_find_address_range`'s `it = iter(addresses)` is a plain
+list, and `next(it)` here relies on real Python's stateful iterator
+protocol: `next(it)` must consume exactly the FIRST element, and the
+following `for ip in it:` must then continue from the SECOND element
+onward — genuine iterator-cursor state this narrow coroutine-body model
+has no representation for at all (a `for` loop here just does a full
+`for (auto x : list)`/indexed-loop over the WHOLE list, with no
+separate "already consumed N items" cursor). `next(it)` on it emits
+literally the C++ identifier `next` with nothing declared to back it —
+g++: "use of undeclared identifier 'next'". A real fix would need to
+invent a genuine resumable-list-iterator representation (e.g. an
+explicit index cursor threaded alongside the list) for this coroutine-
+body model — a materially bigger step than the `self.__next__()`
+dispatch fixed this session, not attempted.
+
+**(b) `summarize_address_range(first, last)` — a SEPARATE generator,
+own gap.** Confirmed via direct inspection that lines further down in
+the same `.cpp` reporting `member reference base type 'int64_t' is not
+a structure or union` are NOT from `_find_address_range` at all, but
+from this OTHER top-level generator (ipaddress.py:200), whose own
+`first`/`last` PARAMETERS are unannotated (`def
+summarize_address_range(first, last):`) and default to `int64_t`, then
+get used as real objects (`first.version`, `first._ip`, ...) —
+the same general "unannotated parameter/field defaults to int64_t"
+family as the already-tracked, already-repeatedly-re-verified-unchanged
+`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+hard bug (that doc's own title is about `__init__` params/fields
+specifically; this is the same root architecture applying to an
+ORDINARY function's own parameters instead — confirmed as the same
+class, not re-investigated as a separate hard-bug doc here, per this
+session's time budget). Not attempted.
+
+Both (a) and (b) are genuinely separate from the `MultiAssignStmt`
+gap this pass fixed, and from each other — `_find_address_range` and
+`summarize_address_range` are two different top-level generator
+functions, each blocked by its own distinct issue.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
 
 Implemented real tuple-valued-`yield` support this session (see

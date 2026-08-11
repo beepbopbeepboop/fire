@@ -22664,11 +22664,47 @@ class GimpleGen:
         # Mirror the param/return types under the mangled key so _emit_call's
         # argument coercion and return typing (keyed by the emitted name) still
         # work — func_param_types/func_return_types are keyed by the bare name.
+        # Plain assignment, NOT setdefault: `_func_csym` is called repeatedly
+        # for the same function throughout compilation (every call site's
+        # symbol resolution, every forward declaration), and the bare-name
+        # entry it mirrors from is deliberately CORRECTED in place over time
+        # by later passes (e.g. Pass 1.3e's "refresh return types now that
+        # param inference is final", which re-infers an unannotated
+        # function's return type once its real parameter shape is known and
+        # overwrites func_return_types[bare_name] with the corrected value).
+        # `setdefault` here meant whichever call happened to run FIRST froze
+        # the mangled key at whatever the bare-name value was AT THAT MOMENT
+        # — if that first call landed before Pass 1.3e's correction (e.g.
+        # from a same-module caller compiled earlier in source order, which
+        # resolves its own call site's symbol via this same method before
+        # the callee itself has been fully return-type-inferred), the
+        # mangled key stayed wrong FOREVER even after the bare key was
+        # later fixed, since nothing ever re-mirrored it. `_emit_call`
+        # looks up func_return_types BY THE MANGLED KEY (see its "Also
+        # check func_return_types" mismatch-correction block) — a stale
+        # mangled entry there overrides an otherwise-correct `ret_type`
+        # with the wrong one, then emits the call's result straight into a
+        # temp declared with that wrong type, with NO cast (an invalid,
+        # uncaught type mismatch, since the whole point of that block is to
+        # apply a cast when the two types differ — but it never even
+        # considers that ITS OWN "authoritative" value might itself be
+        # stale). Real: glob.py's `_join` (return type correctly inferred
+        # 'char *' via Pass 1.3e) called from `_glob0` (compiled earlier in
+        # source order) — `_func_csym('_join')` ran during `_glob0`'s OWN
+        # compile before Pass 1.3e had corrected the bare key, freezing
+        # `func_return_types['_join_abb124'] = 'int64_t'` permanently;
+        # `_t8 = _join_abb124(_t5, _t7);` (a real char*-returning call
+        # assigned into an int64_t temp with no cast) then failed
+        # -Wint-conversion. Always re-mirroring the CURRENT bare-name value
+        # is strictly more correct than freezing at first use — the whole
+        # reason `func_return_types`/`func_param_types` get corrected after
+        # the fact is that later passes have STRICTLY MORE information than
+        # earlier ones, never less.
         if mangled != base:
             if bare_name in self.func_param_types:
-                self.func_param_types.setdefault(mangled, self.func_param_types[bare_name])
+                self.func_param_types[mangled] = self.func_param_types[bare_name]
             if bare_name in self.func_return_types:
-                self.func_return_types.setdefault(mangled, self.func_return_types[bare_name])
+                self.func_return_types[mangled] = self.func_return_types[bare_name]
         return mangled
 
     def gen_func(self, node: FunctionDef) -> str:
@@ -23896,6 +23932,43 @@ class GimpleGen:
                     return f"self->{e.member}"
                 # Unknown field: emit as self->member (C++ struct pointer access)
                 return f"self->{e.member}"
+            # Two-level `self.<field1>.<field2>` chain (imaplib.py's
+            # `Idler.burst`: `self._imap.sock`, where `_imap` is itself a
+            # struct-pointer-typed field). This narrow model's own struct-
+            # field boxing convention (the same one module globals and
+            # `_safe_coerce_emit` already box through) stores ANY non-
+            # scalar field — including a struct pointer like `_imap:
+            # IMAP4` — as a raw `int64_t` in the emitted C++ typedef (see
+            # gen_module's struct-typedef emission), so a bare `self-
+            # >field1` is genuinely `int64_t` at the C++ level, not a real
+            # pointer: `self->field1.field2`/`self->field1->field2` are
+            # BOTH invalid C++ on that raw int64_t (g++: "member reference
+            # base type 'int64_t' is not a structure or union"). An
+            # explicit cast through `field1`'s own REGISTERED struct-
+            # pointer type (already known via struct_field_types, exactly
+            # like the single-level case just above already looks up)
+            # makes the chain valid: `((Inner *)(self->field1))->field2`.
+            # Only recurses one extra level (matches the one confirmed
+            # real-world shape) — a THIRD level (`self.a.b.c`) still falls
+            # through to the generic fallback below and is not attempted.
+            if (struct_name and isinstance(e.obj, MemberExpr)
+                    and isinstance(e.obj.obj, IdentExpr) and e.obj.obj.name == 'self'):
+                outer_ft = self.struct_field_types.get(struct_name, {}).get(e.obj.member)
+                if (outer_ft and outer_ft.endswith(' *')
+                        and outer_ft[:-2] in self.struct_field_types):
+                    # The inner struct's own C typedef must actually be
+                    # emitted into the .cpp preamble too — gen_module's
+                    # existing "struct layout(s) needed by this module's
+                    # compiled generator method(s)" collection only knew
+                    # about a generator METHOD's own `self`-struct and a
+                    # generator's declared PARAMETER structs, neither of
+                    # which covers a struct reached only indirectly through
+                    # a field's pointer type, like `IMAP4` here (reached
+                    # via `Idler`'s own `_imap` field). Reuses the SAME
+                    # `_cpp_param_struct_names` set that collection already
+                    # reads from, rather than inventing a second one.
+                    self._cpp_param_struct_names.add(outer_ft[:-2])
+                    return f"(({outer_ft})(self->{e.obj.member}))->{e.member}"
             # Non-self member access: entry.name, os.path, etc. A struct-
             # POINTER-typed local/parameter (see bugs/hard/CODEGEN_
             # generator_struct_typed_param_refused.md — e.g. dis.py's
@@ -24188,6 +24261,31 @@ class GimpleGen:
                     # call at the bottom of this block, an undeclared C++
                     # identifier ("'iter' was not declared in this scope").
                     return args[0]
+                if fname == 'next' and len(e.args) == 1:
+                    # next(x) -> x.__next__() (imaplib.py's `Idler.burst`:
+                    # `yield next(self)`, since `Idler` implements the
+                    # iterator protocol on itself — `__next__` is an
+                    # ordinary compiled struct method, callable the exact
+                    # same way `self.method(...)`/`<struct-ptr-local>.
+                    # method(...)` calls just below already are). Only the
+                    # common 1-arg form (letting StopIteration propagate
+                    # out, exactly like every other uncaught exception in
+                    # this coroutine-body model already does) — real
+                    # Python's 2-arg `next(x, default)` (suppressing
+                    # StopIteration) is not attempted here. Before this,
+                    # `next` fell through to the generic bare-name call at
+                    # the bottom of this block, an undeclared C++
+                    # identifier ("'next' was not declared in this scope").
+                    _next_arg = e.args[0]
+                    _next_struct = None
+                    if isinstance(_next_arg, IdentExpr) and _next_arg.name == 'self':
+                        _next_struct = getattr(self, '_cpp_gen_self_struct', None)
+                    elif isinstance(_next_arg, IdentExpr):
+                        _next_struct = self._cpp_struct_ptr_local(_next_arg.name)
+                    if _next_struct:
+                        _sym = self._struct_method_csym(_next_struct, '__next__', '')
+                        self._cpp_struct_method_refs.add((_next_struct, '__next__'))
+                        return f"{_sym}({args[0]})"
                 if fname == 'callable' and len(e.args) == 1:
                     # This scalar coroutine-body model has no runtime type
                     # tag to genuinely check "is this value callable" for
@@ -24556,6 +24654,58 @@ class GimpleGen:
         if isinstance(s, BreakStmt):
             return [f"{indent}{brk_var} = true;", f"{indent}break;"]
         return self._cpp_stmt(s, declared, indent)
+
+    def _cpp_hoist_walrus_decls(self, expr, declared: dict, indent: str) -> list[str]:
+        """Pre-declare every `name := value` (WalrusExpr) target appearing
+        inside an `if`/`while` CONDITION expression, before the condition
+        itself is lowered. `_cpp_expr`'s own WalrusExpr case only emits the
+        assignment (`(name = val)`), assuming `name` is already a declared
+        C++ local — true for a walrus used as an ordinary statement's RHS
+        (declared by that statement's own AssignStmt-style handling), but
+        NOT for one embedded directly in a condition, which has no separate
+        declaring statement at all. Without this, `while response :=
+        self._pop(...):` (imaplib.py's `Idler.burst`) left `response`
+        completely undeclared — g++: "use of undeclared identifier
+        'response'". Declares using the value's inferred ctype (same
+        inference `_cpp_stmt`'s own AssignStmt case already uses for a
+        first-assigned local), defaulting to int64_t when unknown, matching
+        every other local's own default. Uses `_walk_ast` (a generic,
+        node-shape-agnostic walk) rather than a hand-rolled expression
+        traversal, so a walrus nested inside a `BinaryOp`/`CompareChain`/
+        anywhere else inside the condition is still found."""
+        lines = []
+        for n in _walk_ast(expr):
+            if isinstance(n, WalrusExpr) and n.name not in declared:
+                vt = None
+                # `name := self.<method>(...)` / `<struct-ptr-local>.
+                # <method>(...)`: `_infer_simple_expr_ctype` (a module-
+                # level free function with no access to this compiler
+                # instance's own `func_return_types`) has no case for a
+                # self/struct-method CALL at all, so it would otherwise
+                # always default this to int64_t — wrong whenever the
+                # method returns something else (imaplib.py's own
+                # `self._pop(...)` returns `char *`). Resolve it directly
+                # here the same way `_quick_type`'s identical struct-
+                # method-call case does: `func_return_types` is keyed
+                # `f"{struct}_{method}"` for an ordinary compiled struct
+                # method (see `_struct_method_csym`'s own naming).
+                if isinstance(n.value, CallExpr) and isinstance(n.value.func, MemberExpr):
+                    _wf = n.value.func
+                    _wstruct = None
+                    if isinstance(_wf.obj, IdentExpr) and _wf.obj.name == 'self':
+                        _wstruct = getattr(self, '_cpp_gen_self_struct', None)
+                    elif isinstance(_wf.obj, IdentExpr):
+                        _wstruct = self._cpp_struct_ptr_local(_wf.obj.name)
+                    if _wstruct:
+                        vt = self.func_return_types.get(f"{_wstruct}_{_wf.member}")
+                if vt is None:
+                    vt = _infer_simple_expr_ctype(
+                        n.value, declared, getattr(self, '_cpp_gen_self_fields', None))
+                if vt is None:
+                    vt = 'int64_t'
+                declared[n.name] = vt
+                lines.append(f"{indent}{_c_to_cpp_scalar_type(vt)} {n.name};")
+        return lines
 
     def _cpp_stmt(self, s, declared: dict, indent: str) -> list[str]:
         if isinstance(s, PassStmt):
@@ -25036,10 +25186,11 @@ class GimpleGen:
                 return [f"{indent}*{name} = *{name} {op} {val};"]
             return [f"{indent}{name} = {name} {op} {val};"]
         if isinstance(s, WhileStmt):
+            lines = self._cpp_hoist_walrus_decls(s.condition, declared, indent)
             cond = self._cpp_expr(s.condition)
             if s.else_body:
                 brk_var = self._cpp_fresh_name("_mg_brk")
-                lines = [f"{indent}bool {brk_var} = false;"]
+                lines.append(f"{indent}bool {brk_var} = false;")
                 lines.append(f"{indent}while ({cond}) {{")
                 for inner in s.body:
                     lines.extend(self._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
@@ -25049,14 +25200,15 @@ class GimpleGen:
                     lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
             else:
-                lines = [f"{indent}while ({cond}) {{"]
+                lines.append(f"{indent}while ({cond}) {{")
                 for inner in s.body:
                     lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
             return lines
         if isinstance(s, IfStmt):
+            lines = self._cpp_hoist_walrus_decls(s.condition, declared, indent)
             cond = self._cpp_expr(s.condition)
-            lines = [f"{indent}if ({cond}) {{"]
+            lines.append(f"{indent}if ({cond}) {{")
             for inner in s.then_body:
                 lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -25109,17 +25261,55 @@ class GimpleGen:
         if isinstance(s, AssertStmt):
             return []  # assert is a no-op in compiled generators
         if isinstance(s, MultiAssignStmt):
-            # a = b = expr → declare ALL targets, assign value to each
+            # a = b = expr → declare ALL targets, assign value to each.
+            # Unlike the ordinary AssignStmt case just above, this never
+            # actually DECLARED a first-seen target as a real C++ local —
+            # it recorded the (always-int64_t-guessed) type into `declared`
+            # (the PYTHON-side bookkeeping dict) and emitted the assignment
+            # line, but no `{ctype} {name};` ever reached the emitted text
+            # at all — g++: "use of undeclared identifier". Real:
+            # ipaddress.py's `_find_address_range`: `first = last =
+            # next(it)`. Fixed by mirroring AssignStmt's own two-part
+            # fix exactly: infer each NEW target's real ctype from the
+            # value (same `_infer_simple_expr_ctype` call, same self/
+            # struct-method-call special case `_cpp_hoist_walrus_decls`
+            # already added, for consistency — a `first = last = self.
+            # method()` shape would hit the identical gap otherwise), and
+            # hoist the declaration into `_cpp_func_scope_decls` (function
+            # scope, not this block) — needed for the exact same reason
+            # AssignStmt's own comment documents: a name first assigned
+            # inside a `try:`/`for:` body must stay visible to a sibling
+            # `else:`/post-loop block, and this project's C++ coroutine
+            # frames outlive every block, so function scope is sound and
+            # matches Python's own function-level (not block-level)
+            # scoping.
             if s.targets:
                 val = self._cpp_expr(s.value)
                 lines = []
                 for t in s.targets:
-                    if isinstance(t, str):
-                        declared[t] = 'int64_t'
-                        lines.append(f"{indent}{t} = {val};")
-                    elif isinstance(t, IdentExpr):
-                        declared[t.name] = 'int64_t'
-                        lines.append(f"{indent}{t.name} = {val};")
+                    tname = t if isinstance(t, str) else (t.name if isinstance(t, IdentExpr) else None)
+                    if tname is None:
+                        continue
+                    if tname not in declared:
+                        vt = None
+                        if isinstance(s.value, CallExpr) and isinstance(s.value.func, MemberExpr):
+                            _mf = s.value.func
+                            _mstruct = None
+                            if isinstance(_mf.obj, IdentExpr) and _mf.obj.name == 'self':
+                                _mstruct = getattr(self, '_cpp_gen_self_struct', None)
+                            elif isinstance(_mf.obj, IdentExpr):
+                                _mstruct = self._cpp_struct_ptr_local(_mf.obj.name)
+                            if _mstruct:
+                                vt = self.func_return_types.get(f"{_mstruct}_{_mf.member}")
+                        if vt is None:
+                            vt = _infer_simple_expr_ctype(
+                                s.value, declared, getattr(self, '_cpp_gen_self_fields', None))
+                        if vt is None:
+                            vt = 'int64_t'
+                        declared[tname] = vt
+                        if self._cpp_func_scope_decls is not None:
+                            self._cpp_func_scope_decls.append(f"{_c_to_cpp_scalar_type(vt)} {tname};")
+                    lines.append(f"{indent}{tname} = {val};")
                 return lines
             return []
         if isinstance(s, ComptimeVarStmt):
@@ -25332,6 +25522,14 @@ class GimpleGen:
             for kname, kexpr in call.kwargs:
                 call.args.append(kexpr)
             call.kwargs = []
+        # Set True only by the free-function self-recursion branch below —
+        # read further down (the non-tuple value-consumption branch) to
+        # decide between an explicit `vct` declaration and `auto` type
+        # deduction. A `self.<method>()` generator-METHOD self-recursion
+        # (the MemberExpr branch just below) is a separate, more complex
+        # case not attempted here — stays False for that branch, matching
+        # its existing (unchanged) refusal behavior.
+        is_self_recursive = False
         # `self.method(...)` — a generator METHOD call (e.g. calendar.py's
         # `Calendar.itermonthdates` doing `for y, m, d in self.
         # itermonthdays3(year, month):`), resolved via
@@ -25369,14 +25567,53 @@ class GimpleGen:
             receiver_exprs = ['self']
         else:
             sub_name = call.func.name
-            api = self._generator_api.get(sub_name)
-            if api is None or sub_name not in self._supported_generators:
-                raise _UnsupportedGeneratorShape(
-                    f"`for ... in {sub_name}(...)` does not consume a generator "
-                    "this compile has itself already translated via the "
-                    "C++20-coroutine path (either it's not a generator this "
-                    "codegen supports, or it's defined LATER in this module — "
-                    "the consumed generator must be defined earlier)")
+            # Self-recursion: `for <target> in <this-same-function>(...):`
+            # (real: glob.py's `_rlistdir`, which recurses into itself via
+            # an ordinary consuming for-loop, not `yield from` — os.walk's
+            # well-known recursive-directory-listing shape). Mirrors
+            # `_cpp_yield_from`'s own `is_self_recursive` handling exactly,
+            # for the identical chicken-and-egg reason documented there:
+            # this function can never find ITSELF in `self._generator_api`
+            # yet, since registration only happens after the whole compile
+            # succeeds. Without this, every self-recursive generator that
+            # consumes itself via a plain `for` (as opposed to `yield
+            # from`) hard-refused on EVERY multi-pass retry (never just
+            # "defined later" — a self-reference can never resolve via
+            # reordering), taking the whole module down with it.
+            _self_name = getattr(self, '_cpp_gen_self_name', None)
+            is_self_recursive = (_self_name is not None and sub_name == _self_name)
+            if is_self_recursive:
+                # Same locally-tracked self-context `_cpp_yield_from` uses
+                # — no premature/partial registration into the real
+                # (still-being-built) `self._generator_api` dict needed.
+                # `value_ctype`/`tuple_slot_ctypes` are genuinely NOT known
+                # yet (computed only after this whole generator's body
+                # finishes, in `_gen_cpp_generator_unit`) — left as None;
+                # the non-tuple value-consumption branch below uses C++
+                # `auto` type deduction instead of a literal ctype for
+                # exactly this reason (see its own comment), and the
+                # tuple-target branch's existing `tuple_slot_ctypes is
+                # None` check (just below) already refuses a tuple loop
+                # target here honestly, rather than guessing.
+                api = {'base': self._cpp_gen_self_base,
+                       'params': self._cpp_gen_self_params,
+                       'value_ctype': None, 'tuple_slot_ctypes': None}
+                # Tell _gen_cpp_generator_unit (after this body-emission
+                # pass completes) that `{base}_start`/`_resume`/`_value`/
+                # `_destroy` need forward declarations ahead of `{impl}`'s
+                # own definition — same flag `_cpp_yield_from` sets for the
+                # identical reason (this body references its own
+                # not-yet-textually-defined extern "C" wrappers).
+                self._cpp_gen_self_recursed = True
+            else:
+                api = self._generator_api.get(sub_name)
+                if api is None or sub_name not in self._supported_generators:
+                    raise _UnsupportedGeneratorShape(
+                        f"`for ... in {sub_name}(...)` does not consume a generator "
+                        "this compile has itself already translated via the "
+                        "C++20-coroutine path (either it's not a generator this "
+                        "codegen supports, or it's defined LATER in this module — "
+                        "the consumed generator must be defined earlier)")
             receiver_exprs = []
         sub_params = api.get('params') or []
         if len(call.args) + len(receiver_exprs) != len(sub_params):
@@ -25429,6 +25666,39 @@ class GimpleGen:
                     lines.append(f"{body_indent}{nm} = (bool)mojo_list_get_int({val_var}, {i});")
                 else:
                     lines.append(f"{body_indent}{nm} = mojo_list_get_int({val_var}, {i});")
+        elif is_self_recursive:
+            # `vct` is None here (this generator's own value_ctype is only
+            # known AFTER its whole body finishes generating — see
+            # _gen_cpp_generator_unit) — declare via C++ `auto` type
+            # deduction instead of a literal ctype. This is provably
+            # correct, not a guess: `_gen_cpp_generator_unit` always emits
+            # a forward `extern "C"` declaration for `{base}_value`
+            # (returning the eventual real `cpp_value_ctype`) whenever
+            # `self._cpp_gen_self_recursed` was set (true here — set just
+            # above), and that declaration is textually emitted before
+            # `impl`'s own body (which is what `lines`, built here, becomes
+            # part of) — see that method's own "Self-recursion" comment.
+            # `target` is deliberately NOT added to `declared`: its real
+            # ctype genuinely isn't known yet at this point, and declaring
+            # it now with a wrong guess (e.g. always int64_t) would be
+            # worse than leaving it absent — an absent name already falls
+            # back to this codegen's existing "unknown identifier" handling
+            # everywhere else (_cpp_expr's IdentExpr case emits the bare
+            # C++ name, which is correct here since `target` genuinely IS
+            # a real, `auto`-typed local by this point in the emitted
+            # text). Residual known gap: a direct `yield <target>` later in
+            # THIS SAME function's body (a "flatten" pattern with no other
+            # concrete yield site to establish the real type from) would
+            # still default to int64_t in `_generator_yield_ctype`'s
+            # unify-across-every-yield-site walk — not the shape confirmed
+            # here (glob.py's `_rlistdir` yields `x`/`_join(x, y)`, both
+            # independently char*-typed, so the merge's "prefer char* if
+            # either is a string" rule already gives the right answer
+            # regardless).
+            if target not in declared:
+                lines.append(f"{body_indent}auto {target} = {base}_value({guard}.g);")
+            else:
+                lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
         else:
             if target not in declared:
                 declared[target] = vct
