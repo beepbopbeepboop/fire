@@ -2588,6 +2588,18 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # check above would refuse the whole generator.
         if e.func.member == 'format':
             return 'char *'
+        # `<str>.replace(old, new)` — mirrors `_cpp_expr`'s CallExpr/
+        # MemberExpr `.replace(...)` case (routes through the same
+        # `_char_replace_impl` runtime helper, always returns `char *`):
+        # without a matching entry here, a first-assigned local like
+        # `method_suffix = name.replace('.', '_')` (save_env.py's
+        # `resource_info`) defaulted to the int64_t fallback below, so a
+        # LATER string-concat use of `method_suffix` (`'get_' +
+        # method_suffix`) missed the `_is_str_operand` check in `_cpp_expr`'s
+        # BinaryOp case (which reads THIS same `known`/`declared` map) and
+        # emitted a raw, invalid C++ `+` instead of `mojo_str_cat`.
+        if e.func.member == 'replace' and len(e.args) == 2:
+            return 'char *'
     if isinstance(e, Comprehension):
         # A list/dict/set comprehension used as a plain local's RHS
         # (`items = [x for x in ... ]`, as opposed to the already-handled
@@ -17817,6 +17829,45 @@ class GimpleGen:
         return bool(result) if isinstance(result, (bool, int)) else None
         return None
 
+    def _cpp_short_circuit_bool(self, node) -> bool | None:
+        """Like `_eval_const_bool`, but implements REAL Python short-circuit
+        semantics for `and`/`or` at the top level, instead of requiring both
+        operands to be independently foldable.
+
+        Used only by `_cpp_stmt`'s `IfStmt` dead-branch elimination (the
+        generator/coroutine `.cpp` body path) to resolve guard idioms like
+        `if sys.platform == 'win32' and self.file_type ==
+        SomeEnum.WINDOWS_ONLY_MEMBER:` — `sys.platform` is a genuine
+        compile-time constant for this host (see `_eval_const`'s own
+        `sys.platform` case and its "conditional toplevel def" precedent),
+        and on a non-Windows host the left operand alone already proves the
+        whole `and` False. Python's `and`/`or` never evaluate their right
+        operand once the left side already decides the result, so the right
+        operand's own resolvability (here, a top-level enum class name this
+        codegen doesn't thread into a generator's coroutine scope — see
+        bugs/CODEGEN_generator_function_Lib_test_libregrtest_runtests.md)
+        is irrelevant to the branch's real, correct-for-this-host truth
+        value. Returns True/False only when the ENTIRE condition is decided
+        this way; None otherwise (ordinary runtime-dependent condition, or
+        an `and`/`or` whose outcome genuinely depends on an unresolvable
+        operand) — callers must fall back to normal codegen unchanged.
+        """
+        if isinstance(node, BinaryOp) and node.op == 'and':
+            l = self._cpp_short_circuit_bool(node.left)
+            if l is False:
+                return False  # short-circuit: right operand never evaluated
+            if l is True:
+                return self._cpp_short_circuit_bool(node.right)
+            return None
+        if isinstance(node, BinaryOp) and node.op == 'or':
+            l = self._cpp_short_circuit_bool(node.left)
+            if l is True:
+                return True  # short-circuit: right operand never evaluated
+            if l is False:
+                return self._cpp_short_circuit_bool(node.right)
+            return None
+        return self._eval_const_bool(node)
+
     # ── Statement generation ───────────────────────────────────────────────
 
     # Statement kinds whose handler recurses into gen_stmt for a nested body
@@ -24274,6 +24325,33 @@ class GimpleGen:
                                 f'generator-body module-member call '
                                 f'{e.func.obj.name}.{e.func.member}()')
                     return '0'
+                # `<char*-typed obj>.replace(old, new)` — a real string
+                # method call on a local/self-field this narrow body model
+                # already knows is `char *` (not a struct-pointer/module
+                # object), which the generic `{obj}.{member}(...)` fallback
+                # just below can't handle at all (C++ has no member
+                # functions on a raw `char *`). Routes through the SAME
+                # `_char_replace_impl` runtime helper the ordinary GIMPLE
+                # path's own `str.replace(...)` lowering already uses
+                # (already declared via the wholesale `#include
+                # <mojo_runtime.h>` every generated .cpp file has — no new
+                # extern declaration needed). Real: save_env.py's
+                # `resource_info`: `name.replace('.', '_')`.
+                _str_obj_ctype = None
+                if isinstance(e.func.obj, IdentExpr) and self._cpp_declared is not None:
+                    _str_obj_ctype = self._cpp_declared.get(e.func.obj.name)
+                elif (isinstance(e.func.obj, MemberExpr)
+                        and isinstance(e.func.obj.obj, IdentExpr)
+                        and e.func.obj.obj.name == 'self' and _cpp_self_struct):
+                    _str_obj_ctype = self.struct_field_types.get(
+                        _cpp_self_struct, {}).get(e.func.obj.member)
+                if (_str_obj_ctype == 'char *' and e.func.member == 'replace'
+                        and len(e.args) == 2):
+                    _obj_expr = self._cpp_expr(e.func.obj)
+                    _a0 = self._cpp_expr(e.args[0])
+                    _a1 = self._cpp_expr(e.args[1])
+                    return (f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
+                            f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))")
                 obj = self._cpp_expr(e.func.obj)
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{obj}.{e.func.member}({args})"
@@ -24299,6 +24377,34 @@ class GimpleGen:
                     return f"mojo_repr_str((char *)({args[0]}))"
                 if fname == 'hasattr' and len(e.args) == 2:
                     return f"mojo_hasattr((int)({args[0]}), {args[1]})"
+                if fname == 'getattr':
+                    # `getattr(obj, name_expr)` — dynamic, runtime-string-
+                    # keyed attribute lookup (save_env.py's `resource_info`:
+                    # `getattr(self, get_name)`, where `get_name` is a
+                    # RUNTIME-computed string, not a literal — could resolve
+                    # to any of several differently-typed/-signatured bound
+                    # methods depending on its value). This codegen's own
+                    # `mojo_getattr` runtime helper is an honest always-0
+                    # stub (no real name->member reflection table exists at
+                    # all — struct fields/methods are resolved to fixed
+                    # compile-time offsets/symbols, never dispatched by a
+                    # runtime string), and there is no other codegen
+                    # machinery here that could do this correctly either.
+                    # Previously fell through to the generic bare-name-call
+                    # fallback below, which emitted a literal, undeclared
+                    # C++ identifier `getattr(...)` — a real, un-diagnosed
+                    # g++ syntax error. Refuse honestly instead (same
+                    # graceful "fall back to interpreting this module from
+                    # source" path every other unsupported generator shape
+                    # in this file already gets), matching this cluster's
+                    # own established convention of converting a raw
+                    # miscompile into an honest refusal rather than
+                    # attempting unsupported reflection.
+                    raise _UnsupportedGeneratorShape(
+                        "getattr(obj, name) with a non-static attribute "
+                        "name is not supported in a compiled generator/"
+                        "coroutine body (no runtime attribute-reflection "
+                        "table exists in this codegen)")
                 if fname == 'range':
                     # range(stop) / range(start, stop) / range(start, stop,
                     # step) → the runtime's range object (iterated by the
@@ -25276,6 +25382,44 @@ class GimpleGen:
                 lines.append(f"{indent}}}")
             return lines
         if isinstance(s, IfStmt):
+            # Dead-branch elimination for a fully compile-time-decidable
+            # if/elif/.../else chain (see `_cpp_short_circuit_bool`'s
+            # docstring): if EVERY branch's condition, evaluated in order
+            # with real Python short-circuit `and`/`or` semantics, resolves
+            # to a definite True/False, pick the first True branch (or
+            # `else`) and emit ONLY its body, unconditionally — never
+            # emitting the untaken branches' condition/body text at all.
+            # This lets a host-platform guard like `if sys.platform ==
+            # 'win32' and self.file_type == SomeEnum.WINDOWS_ONLY:` compile
+            # even though `SomeEnum` (a top-level class) isn't threaded into
+            # this generator's coroutine scope — on a non-Windows host the
+            # left operand alone already proves the branch dead, so the
+            # right operand's own unresolvability is moot, exactly like
+            # CPython itself never evaluating it. Falls back to the
+            # original verbatim-condition emission the moment any branch in
+            # the chain isn't fully decidable this way (the overwhelmingly
+            # common case — an ordinary runtime-dependent `if`).
+            _branches = [(s.condition, s.then_body)] + list(s.elifs)
+            _resolved = []
+            _fully_determined = True
+            for _cond, _body in _branches:
+                _v = self._cpp_short_circuit_bool(_cond)
+                _resolved.append((_v, _body))
+                if _v is None:
+                    _fully_determined = False
+                    break
+            if _fully_determined:
+                for _v, _body in _resolved:
+                    if _v:
+                        lines = []
+                        for inner in _body:
+                            lines.extend(self._cpp_stmt(inner, declared, indent))
+                        return lines
+                lines = []
+                if s.else_body:
+                    for inner in s.else_body:
+                        lines.extend(self._cpp_stmt(inner, declared, indent))
+                return lines
             lines = self._cpp_hoist_walrus_decls(s.condition, declared, indent)
             cond = self._cpp_expr(s.condition)
             lines.append(f"{indent}if ({cond}) {{")
@@ -25960,20 +26104,70 @@ class GimpleGen:
                 # "'begin' was not declared in this scope" / "'end' was not
                 # declared in this scope". Found via Tools/c-analyzer/
                 # c_common/tables.py's `_fix_read_default`.
-                if (isinstance(s.iterable, IdentExpr)
+                # A third shape reaches the same "raw pointer, no ADL
+                # begin/end" failure: `for x in self.<field>:` where
+                # `<field>` is a struct FIELD (not a local/param) typed
+                # `MojoList *` in the generated C++ struct typedef --
+                # save_env.py's `resource_info`: `for name in self.
+                # resources:`. struct_field_types (the same lookup
+                # `_cpp_expr`'s MemberExpr case already uses for
+                # `self.<field>` reads) tells us the field's real C type;
+                # anything that ISN'T one of the four known scalars is,
+                # per this codegen's own struct-field-boxing convention,
+                # pointer-shaped (a real `MojoList *` in the emitted
+                # typedef, same as this branch already assumes for a bare
+                # identifier) -- so the identical indexed-loop lowering
+                # applies, reading through `self->field` instead of a bare
+                # local name.
+                _self_field_itname = None
+                _self_field_elem_ctype = None
+                if (isinstance(s.iterable, MemberExpr)
+                        and isinstance(s.iterable.obj, IdentExpr)
+                        and s.iterable.obj.name == 'self'
+                        and getattr(self, '_cpp_gen_self_struct', None)):
+                    _self_ft = self.struct_field_types.get(
+                        self._cpp_gen_self_struct, {}).get(s.iterable.member)
+                    if _self_ft not in ('int64_t', 'double', '_Bool', 'char *'):
+                        _self_field_itname = f"self->{s.iterable.member}"
+                        # The field's ELEMENT type (as opposed to the field's
+                        # own MojoList*-pointer type just checked above) —
+                        # `_field_elem_types` is the same struct-field
+                        # element-type map the ordinary GIMPLE path already
+                        # populates for a `self.x: list[str]`-shaped field
+                        # (e.g. from a class-body tuple/list literal
+                        # initializer of string constants, save_env.py's
+                        # `resources = ('sys.argv', 'cwd', ...)`). Drives
+                        # which `mojo_list_get_*` accessor/target C type is
+                        # correct below; unknown defaults to the same
+                        # int64_t/mojo_list_get_int convention the sibling
+                        # bare-identifier branch above already uses.
+                        _self_field_elem_ctype = self._field_elem_types.get(
+                            self._cpp_gen_self_struct, {}).get(s.iterable.member)
+                if ((isinstance(s.iterable, IdentExpr)
                         and self._cpp_declared is not None
                         and s.iterable.name in self._cpp_declared
-                        and self._cpp_declared[s.iterable.name] in ('int64_t', 'MojoList *')):
-                    _itname = s.iterable.name
+                        and self._cpp_declared[s.iterable.name] in ('int64_t', 'MojoList *'))
+                        or _self_field_itname is not None):
+                    _itname = _self_field_itname if _self_field_itname is not None else s.iterable.name
                     _ctr = self._cpp_fresh_name("_mg_i")
                     lines = []
-                    if not target_was_declared:
-                        lines.append(f"{indent}int64_t {target};")
-                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
-                                 f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
-                                 f"{_ctr}++) {{")
-                    lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
+                    if _self_field_elem_ctype == 'char *':
+                        if not target_was_declared:
+                            lines.append(f"{indent}char *{target};")
+                        lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                     f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                     f"{_ctr}++) {{")
+                        lines.append(f"{indent}    {target} = "
+                                     f"mojo_list_get_str((MojoList *)({_itname}), {_ctr});")
+                    else:
+                        if not target_was_declared:
+                            lines.append(f"{indent}int64_t {target};")
+                        lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                     f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                     f"{_ctr}++) {{")
+                        lines.append(f"{indent}    {target} = "
+                                     f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
+                    declared[target] = 'char *' if _self_field_elem_ctype == 'char *' else 'int64_t'
                     for inner in s.body:
                         lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                     lines.append(f"{indent}}}")
@@ -30242,6 +30436,27 @@ class GimpleGen:
                                 cur = self.struct_field_types[s.name].get(aname)
                                 if cur is None or cur in ('int', 'int64_t'):
                                     self.struct_field_types[s.name][aname] = ctype
+                                # Record the container's ELEMENT type too
+                                # (`_field_elem_types`, the same map an
+                                # instance `self.x = [...]` assignment in
+                                # `__init__` already populates — see the
+                                # CallExpr-branch companion in
+                                # `_collect_self_assigns`) so a later `for x
+                                # in self.<field>:` inside a generator body
+                                # (`_cpp_for_stmt`) knows whether to unpack
+                                # elements as `char *`/`int64_t` instead of
+                                # guessing. Without this, a class-body tuple-
+                                # of-strings attribute (save_env.py's
+                                # `resources = ('sys.argv', 'cwd', ...)`)
+                                # left `_field_elem_types` empty, and the
+                                # generator-body for-loop defaulted every
+                                # element to `int64_t` — wrong C type for a
+                                # string, cascading into `name.replace(...)`
+                                # "request for member ... non-class type
+                                # int64_t" downstream.
+                                if ctype == 'MojoList *' and isinstance(v, (ListExpr, TupleExpr)):
+                                    self._field_elem_types.setdefault(s.name, {})[aname] = (
+                                        self._infer_list_elem_type(v.elements))
                             elif isinstance(v, StringLiteral):
                                 self._global_var_types[mangled] = 'char *'
                             elif isinstance(v, (IntLiteral, BoolLiteral)):

@@ -1,5 +1,80 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-11 — 2 of the 3 stacked gaps below FIXED; 1 confirmed genuinely structural)
+
+Re-verified this doc's own 3-gap list (from the 2026-08-10 note directly
+below) with a fresh isolated build. Fixed 2 of the 3 for real:
+
+1. **`for name in self.resources:` (a `MojoList *`-typed struct FIELD,
+   not a local/param) inside a coroutine body** — FIXED. `_cpp_for_stmt`
+   only special-cased a bare identifier iterable typed `int64_t`/
+   `MojoList *`; a `self.<field>` `MemberExpr` iterable fell through to
+   the generic C++ range-for fallback (`for (auto x : self->field)`),
+   invalid for a raw pointer with no ADL `begin`/`end`. Extended that
+   same indexed-loop lowering to a `self.<field>` iterable whenever
+   `struct_field_types` says the field isn't one of the 4 known scalars
+   (i.e. it's pointer-shaped, per this codegen's own struct-field-boxing
+   convention). Also fixed the accompanying element-type gap this
+   exposed: `resources` is a CLASS-BODY tuple-of-strings attribute
+   (`resources = ('sys.argv', 'cwd', ...)`), and the class-body-attribute
+   scan (`gen_module`, ~line 30371) registered the field's own pointer
+   type (`MojoList *`) but never its ELEMENT type — so the new for-loop
+   defaulted `name` to `int64_t`/`mojo_list_get_int`, wrong for a string
+   element (`name.replace(...)` below then failed with "request for
+   member 'replace' in a non-class int64_t"). Added the matching
+   `_field_elem_types` population at the same class-body-attribute site
+   (reusing the existing `_infer_list_elem_type` helper, the same one
+   an ordinary `self.x = [...]` instance assignment already populates
+   this map with) — `_cpp_for_stmt` now consults it to pick `char
+   */mojo_list_get_str` instead of the `int64_t`/`mojo_list_get_int`
+   default when the element type is known-`char *`.
+2. **`get_name = 'get_' + method_suffix`, where `method_suffix = name.
+   replace('.', '_')`** — FIXED, two compounding gaps: (a) `_cpp_expr`'s
+   `CallExpr`/`MemberExpr` case had no `.replace(old, new)` case at all
+   for a `char *`-typed object (a real string method call, not a module/
+   struct-method call) — added, routing through the same
+   `_char_replace_impl` runtime helper the ordinary GIMPLE path's own
+   `str.replace(...)` lowering already uses (already declared via the
+   wholesale `#include <mojo_runtime.h>` every generated `.cpp` file
+   has). (b) `_infer_simple_expr_ctype` (used to pick a first-assigned
+   local's declared C++ type) had no case for `.replace(...)` either, so
+   `method_suffix` defaulted to `int64_t` — which then made the
+   subsequent `'get_' + method_suffix` string-concat detection
+   (`_is_str_operand`, keyed on the SAME type map) miss, emitting a raw,
+   invalid C++ `+` instead of `mojo_str_cat`. Added a matching `char *`
+   case there too.
+3. **`getattr(self, get_name)` (`get_name` a RUNTIME-computed string)**
+   — NOT fixed, confirmed genuinely structural on renewed investigation
+   (not just re-asserted from the prior note): this codegen's own
+   `mojo_getattr` runtime helper (`runtime/mojo_runtime.c`) is an
+   honest always-return-0 stub — there is no runtime name→member
+   reflection table anywhere in this codegen; every struct field/method
+   access is resolved to a fixed compile-time offset/symbol, never
+   dispatched by a runtime string value. Correctly supporting this
+   specific call would need real dynamic reflection (a name→offset/
+   symbol table built at compile time, consulted at runtime) — a new
+   feature, not a narrow fix. Converted the previous UN-diagnosed raw
+   miscompile (`'getattr' was not declared in this scope`, from falling
+   through to the generic bare-name-call fallback) into an honest
+   `_UnsupportedGeneratorShape` refusal instead, matching this cluster's
+   own established convention (e.g. the tuple-yield fix below) of
+   turning a raw miscompile into a clean, diagnosed fallback to
+   interpreting the module from source — a real improvement even though
+   it doesn't make the file itself compile.
+
+**save_env.py still does not build** — blocked solely by gap 3 now,
+confirmed via a fresh isolated compile (`resource_info` is refused with
+the honest "generator function(s) ... falling back to interpreting this
+module from source instead" message; no other gap remains in this
+function).
+
+### Gate verification (2026-08-11)
+
+`test_gimple.py`: 247 passed, 0 failed. `test_module_cache.py`: 76
+passed, 0 failed. `make check-selfhost`: clean. From-scratch stdlib
+dylib rebuild (`build_stdlib_dylib.build_stdlib(jobs=18)`): 0 `skip
+<module>:` lines. `compile_stdlib.py`: 664/664 passed, 0 unexpected.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; other, pre-existing gaps now block)
 
 Implemented real tuple-valued-`yield` support this session: `yield a,

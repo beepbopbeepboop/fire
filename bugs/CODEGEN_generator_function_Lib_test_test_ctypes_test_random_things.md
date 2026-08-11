@@ -1,5 +1,46 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (re-verified 2026-08-11, unchanged — deeper investigation confirms genuinely structural, not attempted)
+
+Re-ran a fresh isolated build; reproduces identically to the 2026-08-09
+note below (same 4 `cm.unraisable.*`/`int64_t` errors). Went one level
+deeper than the prior notes to confirm this is really #147-shaped and
+not narrowly fixable, by reading the real source
+(`Lib/test/support/__init__.py`'s `catch_unraisable_exception`):
+
+```python
+class catch_unraisable_exception:
+    def __init__(self): self.unraisable = None; self._old_hook = None
+    def _hook(self, unraisable): self.unraisable = unraisable
+    def __enter__(self):
+        self._old_hook = sys.unraisablehook
+        sys.unraisablehook = self._hook
+        return self
+```
+
+Even a maximally narrow, single-shape fix (special-casing exactly
+`with support.catch_unraisable_exception() as cm:` to type `cm` as
+`catch_unraisable_exception *` from its `__enter__`'s `return self`)
+would only get one level deeper before hitting the SAME wall twice
+more: (1) `cm.unraisable` is itself a field set from `sys.
+unraisablehook`'s callback argument — a real CPython `UnraisableHookArgs`
+object this compiled runtime has no representation for at all (`sys.
+unraisablehook` itself isn't implemented here), so the field's type is
+unknowable even in principle, not just untracked; and (2) `cm.
+unraisable.exc_value` is a THREE-level `self`-rooted chain (`_cpp_expr`'s
+`MemberExpr` case only supports a `self.field` one-level read and a
+`self.field1.field2` two-level chain, both rooted at `self` — never a
+chain rooted at an arbitrary non-`self` local/with-binding at any
+depth). Confirms the existing classification: a `with X() as y:`
+binding's real type has no representation anywhere in this narrow
+scalar-body codegen model (the same "no class-attribute/field-access
+story for non-`self` objects inside a generator body" gap #147 already
+tracks architecturally), and here it's compounded by a genuinely
+un-typeable field (sourced from an unimplemented CPython runtime hook)
+one level down. Not attempted, per this task's own guidance to leave
+#147-shaped gaps alone and per this session's direct confirmation that
+a narrow fix wouldn't reach past the first level anyway.
+
 ## Status (re-verified 2026-08-09, unchanged)
 
 Re-ran `python3 mojo.py build .../Lib/test/test_ctypes/test_random_things.py`
