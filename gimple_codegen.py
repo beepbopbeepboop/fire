@@ -17817,6 +17817,45 @@ class GimpleGen:
         return bool(result) if isinstance(result, (bool, int)) else None
         return None
 
+    def _cpp_short_circuit_bool(self, node) -> bool | None:
+        """Like `_eval_const_bool`, but implements REAL Python short-circuit
+        semantics for `and`/`or` at the top level, instead of requiring both
+        operands to be independently foldable.
+
+        Used only by `_cpp_stmt`'s `IfStmt` dead-branch elimination (the
+        generator/coroutine `.cpp` body path) to resolve guard idioms like
+        `if sys.platform == 'win32' and self.file_type ==
+        SomeEnum.WINDOWS_ONLY_MEMBER:` — `sys.platform` is a genuine
+        compile-time constant for this host (see `_eval_const`'s own
+        `sys.platform` case and its "conditional toplevel def" precedent),
+        and on a non-Windows host the left operand alone already proves the
+        whole `and` False. Python's `and`/`or` never evaluate their right
+        operand once the left side already decides the result, so the right
+        operand's own resolvability (here, a top-level enum class name this
+        codegen doesn't thread into a generator's coroutine scope — see
+        bugs/CODEGEN_generator_function_Lib_test_libregrtest_runtests.md)
+        is irrelevant to the branch's real, correct-for-this-host truth
+        value. Returns True/False only when the ENTIRE condition is decided
+        this way; None otherwise (ordinary runtime-dependent condition, or
+        an `and`/`or` whose outcome genuinely depends on an unresolvable
+        operand) — callers must fall back to normal codegen unchanged.
+        """
+        if isinstance(node, BinaryOp) and node.op == 'and':
+            l = self._cpp_short_circuit_bool(node.left)
+            if l is False:
+                return False  # short-circuit: right operand never evaluated
+            if l is True:
+                return self._cpp_short_circuit_bool(node.right)
+            return None
+        if isinstance(node, BinaryOp) and node.op == 'or':
+            l = self._cpp_short_circuit_bool(node.left)
+            if l is True:
+                return True  # short-circuit: right operand never evaluated
+            if l is False:
+                return self._cpp_short_circuit_bool(node.right)
+            return None
+        return self._eval_const_bool(node)
+
     # ── Statement generation ───────────────────────────────────────────────
 
     # Statement kinds whose handler recurses into gen_stmt for a nested body
@@ -25276,6 +25315,44 @@ class GimpleGen:
                 lines.append(f"{indent}}}")
             return lines
         if isinstance(s, IfStmt):
+            # Dead-branch elimination for a fully compile-time-decidable
+            # if/elif/.../else chain (see `_cpp_short_circuit_bool`'s
+            # docstring): if EVERY branch's condition, evaluated in order
+            # with real Python short-circuit `and`/`or` semantics, resolves
+            # to a definite True/False, pick the first True branch (or
+            # `else`) and emit ONLY its body, unconditionally — never
+            # emitting the untaken branches' condition/body text at all.
+            # This lets a host-platform guard like `if sys.platform ==
+            # 'win32' and self.file_type == SomeEnum.WINDOWS_ONLY:` compile
+            # even though `SomeEnum` (a top-level class) isn't threaded into
+            # this generator's coroutine scope — on a non-Windows host the
+            # left operand alone already proves the branch dead, so the
+            # right operand's own unresolvability is moot, exactly like
+            # CPython itself never evaluating it. Falls back to the
+            # original verbatim-condition emission the moment any branch in
+            # the chain isn't fully decidable this way (the overwhelmingly
+            # common case — an ordinary runtime-dependent `if`).
+            _branches = [(s.condition, s.then_body)] + list(s.elifs)
+            _resolved = []
+            _fully_determined = True
+            for _cond, _body in _branches:
+                _v = self._cpp_short_circuit_bool(_cond)
+                _resolved.append((_v, _body))
+                if _v is None:
+                    _fully_determined = False
+                    break
+            if _fully_determined:
+                for _v, _body in _resolved:
+                    if _v:
+                        lines = []
+                        for inner in _body:
+                            lines.extend(self._cpp_stmt(inner, declared, indent))
+                        return lines
+                lines = []
+                if s.else_body:
+                    for inner in s.else_body:
+                        lines.extend(self._cpp_stmt(inner, declared, indent))
+                return lines
             lines = self._cpp_hoist_walrus_decls(s.condition, declared, indent)
             cond = self._cpp_expr(s.condition)
             lines.append(f"{indent}if ({cond}) {{")
