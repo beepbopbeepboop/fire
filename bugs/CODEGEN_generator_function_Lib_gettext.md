@@ -1,5 +1,106 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-10, re-verified + deepened, no code change — 3 real root causes pinned down precisely)
+
+Re-verified against current master (`9d93746`): identical error list to
+the 2026-08-09 entry below, character for character (208/217/472/485/
+554/114, plus the 843 red herring). Confirmed still NOT a generator-
+codegen-cluster failure — `_expand_lang` compiles clean, no
+`MOJO_DEBUG=1` refusal naming it. Root-caused the three real remaining
+gaps precisely (previously only described at the symptom level):
+
+**1. `mojo_open_file`'s arity mismatch (line 554) is NOT a missing-
+mode-parameter gap in the runtime shim — it's a call-routing bug, and
+it's the SAME already-tracked hard bug as
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`,
+just manifesting through a BUILTIN instead of a struct name.**
+`_lower_builtin_open` (`gimple_codegen.py:15049`) already correctly
+handles both `open(path)` -> `mojo_open_file` (1 arg) and `open(path,
+mode)` -> `mojo_open` (2 args, `gimple_codegen.py:15059-15065`) — but
+it's gated on `fname_raw == 'open' and 'open' not in
+self.func_return_types` (`gimple_codegen.py:14449`). `Lib/_pyio.py`
+defines a REAL top-level `def open(file, mode="r", ...)`
+(`_pyio.py:75`); since `func_return_types` is a single FLAT, non-
+module-scoped namespace shared across every module in the combined
+compile (confirmed: no per-module key anywhere in this dict), once
+`_pyio.py` is anywhere in the transitive import graph, `'open' in
+self.func_return_types` is true GLOBALLY — including for `gettext.
+py`'s own, unrelated `open(mofile, 'rb')` call. That routes past the
+arity-aware special case straight to `_lower_named_call`
+(`gimple_codegen.py:15599`), whose OWN dispatch
+(`fname = self.BUILTIN_VALUE_MAP.get(fname_raw, self._func_csym(fname_
+raw))`, line 15605/15608) prefers `BUILTIN_VALUE_MAP['open'] =
+'mojo_open_file'` UNCONDITIONALLY over the real, arity-correct
+resolution — so even here, the call still gets routed to the 1-arg
+`mojo_open_file`, with both of the real 2 arguments (`mofile`, `'rb'`)
+passed through, producing this error. Confirmed `mojo_enumerate`'s
+appearance in this same doc's error list is NOT the same bug (see #2) —
+this specific one is purely about `open`.
+
+Not fixed: this is the identical flat-namespace architecture problem
+already tracked (and re-verified as still open THIS session, see
+`same_bare_name_struct_collision_across_modules.md`'s own 2026-08-09/10
+entries) — any narrow, `open`-specific patch (e.g. reordering the
+`BUILTIN_VALUE_MAP` vs. real-function preference in `_lower_named_call`)
+risks silently breaking `_pyio.py`'s own compilation if anything in
+that file calls its own top-level `open` bare (would then misroute to
+itself instead of... itself, actually, so probably safe there — but
+the SAME priority-ordering pattern is shared by `_lower_named_call`'s
+handling of every other `BUILTIN_VALUE_MAP` entry — `print`, `len`,
+`str`, `int`, `list`, `dict`, `enumerate`, `zip`, `map`, `filter`,
+`type`, `max`, `min`, `sum`, etc. — so a real fix needs to reason about
+ALL of them, not special-case `open`, without a full audit of what real
+stdlib modules define same-named top-level functions/methods of their
+own — genuinely the scope of the existing hard-bug doc, not a narrow
+fix). Cross-referenced there is unnecessary (that doc already owns this
+architecture); noting the concrete mechanism here for whoever revisits
+`open()`/`enumerate()` specifically.
+
+**2. `mojo_enumerate`'s 1-vs-2-arg gap (line 114, `enumerate(_binary_
+ops, 1)` inside a dict comprehension) is a genuinely separate, narrower
+feature gap — confirmed no shadowing involved.** Grepped for any
+`_lower_builtin_enumerate`-style 2-arg (`start=`) handling anywhere in
+`gimple_codegen.py`: none exists. The only `enumerate`-aware codegen
+(`gimple_codegen.py:19348-19356`'s `_gen_for_enumerate`,
+`gimple_codegen.py:24176`, `25505`) is for a bare `for i, x in
+enumerate(seq):` statement, and even that has no `start=` parameter
+handling. gettext.py's case is INSIDE a dict comprehension's `for`
+clause (a different, comprehension-specific lowering path), which also
+has nothing for the 2-arg form. `enumerate(iterable, start)`'s `start`
+argument is simply never modeled anywhere in this codegen — a real,
+narrow-but-nontrivial feature gap (thread a `start` value through
+`mojo_enumerate`'s runtime shim and both call sites), independent of
+gap #1. Not fixed here (out of scope for a generator-codegen pass, and
+the comprehension-embedded case specifically needs its own lowering
+path traced first).
+
+**3. `_parse()`'s return-type collapse (lines 208/217) is a real,
+unaddressed gap: this codegen has NO tuple-return-type inference for
+ordinary (non-generator) multi-return-path functions at all.**
+`c2py()`'s `result, nexttok = _parse(_tokenize(plural))` destructures a
+2-tuple `(str, str)` that `_parse(tokens, priority=-1)` returns from
+several different `return result, nexttok` sites (a recursive-descent
+parser). Grepped for any per-function tuple-return-type registry
+(`func_tuple_return_types` or equivalent): none exists anywhere in
+`gimple_codegen.py`. Contrast with generators, where an analogous gap
+for tuple-VALUED `yield` was real work fixed earlier this session
+(commit `a7b71a0`, boxing into `MojoList *`) — no equivalent exists for
+an ordinary function's tuple RETURN value. `MultiAssignStmt`'s CallExpr-
+RHS lowering has nothing to consult for `result`'s real per-slot type,
+so it defaults to a scalar (`int64_t`-ish), and both the `for c in
+result:` string iteration (`mojo_strlen`) and the `elif c == ')'`-
+adjacent `_mojo_at_char` access at line 217 get fed that wrong scalar
+where a `char *` is expected. This is a real, nontrivial feature (new
+per-function multi-return-path type-inference machinery, analogous to
+but NOT a copy of the generator tuple-yield work), not a narrow fix —
+not attempted here.
+
+472/485 (dynamic `%`-format-string gap) and 843 (the textwrap.py
+`#line`-stamping red herring) are unchanged from the 2026-08-09 entry
+below; nothing new to add there.
+
+No code change made for any of the 3 real gaps above; no gate run.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (post-merge `7df52a0`). Still fails,
