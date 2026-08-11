@@ -23987,6 +23987,31 @@ class GimpleGen:
             val = self._cpp_expr(e.value)
             return f"({name} = {val})"
         if isinstance(e, CallExpr):
+            # A `*`/`**`-unpack call ARGUMENT (this project's parser wraps
+            # a spread argument in UnaryOp(op='*'/'**', operand=...) — see
+            # this repo's own CLAUDE.md) has no case anywhere in this
+            # coroutine-body expression emitter's call-argument lowering
+            # (every call shape below just does a flat `', '.join(self.
+            # _cpp_expr(a) for a in e.args)` or an equivalent). Left
+            # unchecked, such an argument falls through to the generic
+            # UnaryOp case further down (`op == '**'` -> literally `(**x)`),
+            # which g++ parses as a double pointer-dereference of a
+            # MojoDict*/MojoList* local, not an argument-unpack — a silent
+            # MISCOMPILE (invalid/nonsensical C++), not just a missed
+            # feature. Real: codecs.py's `iterencode`/`iterdecode` doing
+            # `getincrementalencoder(encoding)(errors, **kwargs)` — the
+            # callee is itself a dynamically-obtained class, so even a
+            # correct implementation would need to know that class's real
+            # parameter names at compile time, which this scalar body model
+            # has no way to discover. Refuse the whole generator honestly
+            # here (falls the module back to interpreting it from source)
+            # instead of ever reaching one of those broken emission sites —
+            # same family as bugs/hard/CODEGEN_generator_lambda_expr_
+            # unsupported.md's existing LambdaExpr-argument refusal.
+            if any(isinstance(a, UnaryOp) and a.op in ('*', '**') for a in e.args):
+                raise _UnsupportedGeneratorShape(
+                    "a `*`/`**`-unpack call argument is not supported in a "
+                    "compiled generator/coroutine body")
             # Simple function call in generator body (e.g. os.path.join(a, b))
             if isinstance(e.func, MemberExpr):
                 # `.format(...)` on a string literal — mirrors the GIMPLE
