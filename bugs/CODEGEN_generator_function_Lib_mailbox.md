@@ -1,5 +1,109 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-11 — RECLASSIFIED: generator/tuple-yield concern now fully FIXED; file blocked by 3 unrelated, pre-existing structural bugs, none generator-related)
+
+Re-verified against current master via a fresh
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/mailbox.py`.
+
+**The generator-codegen issue this doc originally tracked (tuple-valued
+`yield (key, value)` in `Mailbox.iteritems`, and the follow-on
+`mojo_cstr_slice` "forming reference to void" gap noted 2026-08-10) is
+now completely gone.** No `RuntimeError: cannot compile module`
+refusal, no `mojo_cstr_slice` error anywhere in the log; `Mailbox_
+iteritems` (and every other `_iteritems`/`_popitem` generator-derived
+function across all mailbox format subclasses) compiles clean, only
+ordinary unused-variable/label warnings. This confirms this session's
+tuple-yield boxing work (`_cpp_yield_tuple`) is genuinely complete for
+this file.
+
+mailbox.py **still does not build**, now purely due to non-generator
+issues — investigated in real depth (traced actual root causes in
+`gimple_codegen.py`, not just error text), genuine fix attempts made
+on the first one, concrete blockers found on both:
+
+1. **`too many arguments to function 'mojo_open_file'; expected 1, have
+   2`** (mailbox.py lines 397, 395, 1108, 1110, 1128, 2186, plus
+   `_ProxyFile__read` arity at 2126). Root cause fully traced:
+   `_lower_named_call`'s builtin-`open` dispatch
+   (`gimple_codegen.py:14449`, `if fname_raw == 'open' and 'open' not
+   in self.func_return_types: return self._lower_builtin_open(node)`)
+   is gated on a **global, non-module-scoped** dict. In this file's
+   whole-program `do_imports=True` inline compile (triggered because
+   `driver.compile_program`'s link-mode path returns `None` for this
+   file), `Lib/tokenize.py`'s own module-level `def open(filename):`
+   (and similar in codecs.py/gzip.py/bz2.py/lzma.py/wave.py/shelve.py/
+   webbrowser.py, all transitively reachable) registers
+   `self.func_return_types['open'] = ...` via the generic free-function
+   registration at `gimple_codegen.py:22802`
+   (`self.func_return_types[node.name] = ret_type`) — keyed by bare
+   name only, no module qualifier. Once ANY transitively-compiled
+   module defines a top-level `open`, the guard flips false *for every
+   module in the same translation unit*, so mailbox.py's own genuine
+   `open(path, mode)` builtin calls fall through to generic call
+   lowering, which maps bare `open` to `mojo_open_file` (the 1-arg
+   builtin-open C symbol) via `BUILTIN_VALUE_MAP` and passes both
+   arguments positionally — hence the arity error.
+   Traced further: `self.module_name`/`self._current_module_ctx` are
+   **not actually module-scoped per originating function** in the
+   whole-program inline path either — `self.module_name` is set once
+   at `GimpleGen.__init__` and never changes as functions from
+   different transitively-imported modules are code-generated in the
+   same pass (confirmed by reading every `self._current_module_ctx =
+   self.module_name or "root"` assignment site — all unconditional,
+   none keyed off which module a given `FunctionDef` actually came
+   from). So there is no cheap per-call-site "is `open` really shadowed
+   in THIS module" check available today.
+   **Fix attempted and rejected**: unconditionally routing bare
+   `open(...)` calls through `_lower_builtin_open` (dropping the
+   collision guard entirely) would fix mailbox.py, but is a **real,
+   confirmed regression** against another file already in the 664-file
+   gate corpus — `Lib/webbrowser.py` deliberately shadows the builtin
+   (`# Please note: the following definition hides a builtin
+   function.`) and its own `open_new(url)`/`open_new_tab(url)` genuinely
+   bare-call `open(url, 1)`/`open(url, 2)` expecting **its own**
+   3-arg `open(url, new=0, autoraise=True)`, not the file-open builtin.
+   Verified this is a real, load-bearing case (not dead code) by reading
+   the call sites directly. A correct fix needs real per-module
+   free-function-name scoping in the whole-program inline compile path
+   — currently absent entirely (not just for `open`, the same
+   `self.func_return_types[node.name] = ret_type` bare-key pattern
+   applies to every free function in every merged module) — which is
+   the same class of foundational, shared bare-name-collision machinery
+   already documented and deliberately deprioritized for **structs** in
+   `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`.
+   That doc currently asserts the bug is "structurally unreachable"
+   through `mojo.py build`'s primary (link-mode) path and only reachable
+   via the inline fallback or `--dump-full`; this file is a **live,
+   concrete counter-example** — `driver.compile_program` fails for
+   mailbox.py and falls back to the inline path, which is exactly where
+   the collision (now confirmed to also affect free functions, not just
+   struct types) actually bites. Left a cross-reference note in that
+   doc.
+
+2. **`redefinition of 'email_message_Message___str__'`** (and ~25
+   sibling methods) at mailbox.py:1564 (`class Message(email.message.
+   Message):`), conflicting with `email/message.py`'s own definitions
+   in the same translation unit. Root cause not fully traced (budget
+   went to bug #1 above) but the signature — a subclass that doesn't
+   override a base method apparently gets an inherited-method stub
+   emitted under the *base class's own qualified symbol name*
+   (`email_message_Message___str__`) rather than a subclass-specific
+   one, colliding with the base class's real definition once both are
+   in the same whole-program unit — looks structurally related to
+   bug #1 (another bare/under-qualified symbol-naming gap in the same
+   whole-program inline path), not to generators.
+
+3. `type mismatch in 'pointer_diff_expr'` at mailbox.py:1299 — not
+   investigated (unreached in priority order; likely also downstream of
+   #1/#2 once those are fixed, or a separate narrow issue).
+
+None of 1-3 involve `yield`/`yield from`/coroutine lowering in any way.
+**Doc kept open** (file still doesn't build) but reclassified: this is
+no longer a generator-codegen bug. Suggest renaming/refiling under a
+non-generator bare-name-collision bucket in a future pass, once
+resolved — left as-is here since the required workflow for this task
+is scoped to re-verifying/fixing the generator concern specifically.
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring

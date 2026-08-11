@@ -1,5 +1,50 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+## Cross-reference (2026-08-11 — live counter-example found to the "unreachable via primary path" claim, PLUS the same mechanism confirmed for free functions, not just structs)
+
+Investigating `bugs/CODEGEN_generator_function_Lib_mailbox.md` (a
+different, generator-focused doc) found a live, concrete instance of
+this exact bare-name-collision mechanism reachable through `mojo.py
+build`'s documented inline fallback: `driver.compile_program` (link
+mode) returns `None` for `Lib/mailbox.py`, so `mojo.py build` falls
+back to the whole-program `do_imports=True` inline path — precisely
+the path this doc's 2026-08-08 entry calls "only reached as `mojo.py
+build`'s degraded fallback" with "no known live, reachable instance."
+mailbox.py IS such an instance. So the claim that the two named
+real-world triggers (`tkinter/filedialog.py`/`tkinter/simpledialog.py`)
+building clean via link-mode implies the bug is unreachable in
+practice does not generalize — any file whose link-mode compile fails
+for unrelated reasons falls into the vulnerable inline path.
+
+Also confirmed the **same bare-name-collision mechanism applies to
+free functions, not just structs**: `gimple_codegen.py`'s free-function
+return-type registration (`self.func_return_types[node.name] =
+ret_type`, ~line 22802) keys purely on bare name with no module
+qualifier, exactly like the struct case this doc documents. Concrete
+repro: `Lib/tokenize.py` (and codecs.py/gzip.py/bz2.py/lzma.py/wave.py/
+shelve.py/webbrowser.py) each define a module-level `def open(...)`
+that shadows the builtin; once any of these is transitively compiled
+into the same whole-program unit as mailbox.py, `_lower_named_call`'s
+builtin-`open`-vs-user-`open` guard (`gimple_codegen.py:14449`, `'open'
+not in self.func_return_types`) flips globally, misrouting mailbox.py's
+own genuine `open(path, mode)` calls to the 1-arg `mojo_open_file`
+builtin-C-symbol path (arity mismatch, `too many arguments to function
+'mojo_open_file'; expected 1, have 2`). See that doc's 2026-08-11 entry
+for full detail, including why a naive "just always treat bare `open`
+as the builtin" fix is rejected: it would silently regress
+`Lib/webbrowser.py`, which is already in the 664-file gate corpus and
+genuinely relies on its own shadowing `open(url, new, autoraise)` being
+bare-callable from `open_new()`/`open_new_tab()` in the same file.
+
+Not fixed here (out of scope for the generator-focused task that found
+it) — left as a precise pointer for whoever next picks up this doc:
+a real fix needs per-module free-function/struct-name scoping in the
+whole-program inline compile path (`self.module_name`/
+`self._current_module_ctx` are NOT actually module-scoped per
+originating `FunctionDef`/`StructDef` in that path today — confirmed by
+reading every assignment site, all unconditionally set to the single
+entry-module value for the whole `GimpleGen` instance's lifetime).
+
 ## Status (re-verified 2026-08-09 — unchanged, still deprioritized/not fixed)
 
 Re-ran both named repros again against current master via plain
