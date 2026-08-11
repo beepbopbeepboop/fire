@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (re-verified 2026-08-11, unchanged classification, error count down further)
+
+Re-ran against current master (154 commits past the 2026-08-09 note
+below, incl. this session's own generator-body struct-construction fix
+— see `bugs/CODEGEN_generator_function_Lib_test_test_doctest_test_
+doctest.md` — which doesn't touch anything reachable from this file).
+Error count has dropped again, from 29 to **8**. `test_dbm.py`'s own
+generator (`yield mod`, line 34) still contributes zero errors/warnings
+of substance (only `-Wunused-*`). All 8 remaining errors are still in
+transitively-imported dependency files (`Lib/test/support/__init__.py`
+lines 488/1184/1186/1420/1905-1908, `import_helper.py` line 50) —
+`assignment to 'int64_t *' from 'int64_t' makes pointer from integer`,
+`implicit declaration of function 'print_warning'`/`'unlink'`, and one
+`expected ')' before ';' token` parse error. **Classification unchanged:
+NOT a generator-codegen-cluster failure.** Still out of scope for this
+cluster; not investigated further.
+
 ## Status (re-verified 2026-08-09, unchanged classification, error count down further)
 
 Re-ran `python3 mojo.py build .../Lib/test/test_dbm.py` against current

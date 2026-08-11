@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_deque.py
 
+## Status (updated 2026-08-11)
+
+Re-verified against current master (post this session's generator-body
+struct-construction fix — see `bugs/CODEGEN_generator_function_Lib_
+test_test_doctest_test_doctest.md` — unrelated to this file, doesn't
+change anything here) with a real rebuild: 35 errors, same shape/lines
+as the 2026-08-09 note below (`Lib/test/support/__init__.py` errors,
+the lines-50/579/590/834 comprehension/`_quick_type` family, and line
+920's `expected expression before 'SubclassWithKwargs'`), plus one
+additional `Lib/test/support/__init__.py:3460` `'...itermulti_0c85c9'`
+undeclared-symbol error not previously itemized (same
+transitively-imported-dependency-file family, not this file's own
+code). The file's own 2 generators (`yield 1` line 16, `yield next
+(task)` line 1012) still show zero errors, only unused-variable
+warnings. Classification unchanged: NOT a generator-codegen-cluster
+failure; the `deque`-collision bug this doc tracked is resolved and
+stays resolved.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master with a real rebuild. Confirmed (and
