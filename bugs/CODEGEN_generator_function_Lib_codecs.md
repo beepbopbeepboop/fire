@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs, this file included (the `struct _opcode_toplev`
+error in the 2026-08-06 section below, already noted there as stale/
+from-the-wrong-gcc-binary). Confirmed via fresh rebuild: zero
+occurrences of that error now regardless (already fixed by the
+mechanism-1/mechanism-2 fixes, `bugs/hard/COMPILE_FAIL_module_toplev_
+struct_never_fully_defined.md`, deleted as resolved). Not this file's
+live blocker (that's the `**kwargs` coroutine-arg-lowering miscompile
+below, unrelated).
+
+While tracing the mechanism, found+fixed one closely related residual
+bug (`_gen_struct_method`/`_gen_lifted_closure` never setting `self.
+_current_module_ctx`, misrouting a `global`-statement write inside a
+class method to the wrong module's struct — full writeup in the
+module_toplev_struct_never_fully_defined doc's history and this
+session's commit) plus a related `_safe_coerce_emit` gap (`.`-accessed
+struct-field LHS not recognized, only `->`-accessed). Effect on this
+file: total build error count dropped 645 -> 643 via a fresh rebuild.
+The `**kwargs`-unpack blocker below is unaffected.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (`3d36ccd`). `python3 mojo.py build

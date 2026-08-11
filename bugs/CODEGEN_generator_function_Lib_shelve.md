@@ -1,5 +1,42 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; the 2026-08-09 "59 remaining toplev occurrences" claim was a grep-methodology false positive; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs, this file included. Re-checked the 2026-08-09
+section's own claim below ("the struct _*_toplev pattern... is not
+entirely eliminated (59 remaining toplev occurrences in this log)")
+precisely: of the 60 lines matching the substring `toplev` in a fresh
+rebuild's log, 59 are `gcc -fgimple`'s own "In function '_X_toplevel'"
+context-line annotations (this codegen's real, unrelated per-module
+`_toplevel()`/`_{module}_toplevel()` init-function NAME, which merely
+CONTAINS the substring "toplev") plus one occurrence of `pickle.py`'s
+own `_Pickler__save_toplevel_by_name` symbol — zero of the 60 are
+actual `invalid use of undefined type 'struct _X_toplev'` errors. The
+2026-08-09 claim conflated a substring-grep artifact with the real
+error class; corrected here. The ONE genuine struct-`_toplev`-family
+error that WAS present (a different symptom shape, `struct
+'_root_toplev' has no member named '_lazy_annotationlib'`, from
+transitively-imported `typing.py`) is a related-but-distinct bug this
+session found+fixed: `_gen_struct_method`/`_gen_lifted_closure`
+(gimple_codegen.py) never set `self._current_module_ctx`, misrouting a
+`global`-statement write inside a class method (typing.py's
+`_LazyAnnotationLib.__getattr__`, compiled first in its module) to the
+wrong module's globals struct. Also fixed a related `_safe_coerce_
+emit` gap (`.`-accessed struct-field LHS not recognized, only
+`->`-accessed). Full writeup in `bugs/hard/COMPILE_FAIL_module_toplev_
+struct_never_fully_defined.md`'s history and this session's commit.
+
+Effect on this file: total build error count dropped 552 -> 540 (12
+fewer — shelve.py's large transitive closure, via `dbm`, apparently
+hits the `_current_module_ctx` bug at more than one site; not traced
+further since none implicate shelve.py's own code or generator either
+way). `Shelf.__iter__` remains unaffected (still compiles cleanly); the
+`pickle.py`/`argparse.py`/`codecs.py`/`typing.py`/... cluster remains
+this file's real blocker. No reclassification — shelve.py still does
+not build.
+
 ## Status (updated 2026-08-09)
 
 Re-re-verified against current master (real `mojo.py build` rebuild, real

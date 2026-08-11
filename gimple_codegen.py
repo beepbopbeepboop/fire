@@ -6517,7 +6517,28 @@ class GimpleGen:
         """Emit `lhs = val` coercing src→dst; routes struct-field LHS and literal RHS
         through register temps as required by GIMPLE."""
 
-        is_field = '->' in lhs
+        # A dot-accessed struct member (e.g. a non-pointer module-globals
+        # instance's own field, `_typing_globals.some_field`) needs the exact
+        # same "coerce into a register temp first" treatment as an arrow-
+        # accessed one: `-fgimple` rejects a cast expression's result being
+        # stored directly through EITHER a COMPONENT_REF shape (`.` or `->`
+        # are both COMPONENT_REF at the GIMPLE level, just through a value
+        # vs. pointer base) — only checking for `->` here left every plain
+        # dot-accessed struct-field LHS requiring a cast (e.g. a module
+        # global whose declared C type is a struct pointer, assigned an
+        # int64_t-boxed source value) emitting an invalid single combined
+        # cast+store statement ("non-register as LHS of unary operation").
+        # A bare C identifier (local var/temp name) never itself contains a
+        # `.`, so this is unambiguous. Found via typing.py's `_lazy_
+        # annotationlib` global (`global _lazy_annotationlib; ...;
+        # _lazy_annotationlib = annotationlib` inside `_LazyAnnotationLib.
+        # __getattr__`) once its write target was fixed to correctly resolve
+        # to `_typing_globals._lazy_annotationlib` (see the module-context
+        # fix in _gen_struct_method/_gen_lifted_closure) — this dot-access
+        # gap was previously unreachable for that write because it hard-
+        # failed even earlier (an entirely undeclared struct member) before
+        # ever reaching -fgimple verification.
+        is_field = '->' in lhs or '.' in lhs
         # A dereferenced pointer lvalue (`*name`, e.g. a `{mut}`-capture-
         # spec's heap-boxed local -- see _seed_mut_captured_local_types)
         # needs the exact same "coerce into a register temp first, then a
@@ -21703,6 +21724,16 @@ class GimpleGen:
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str = None) -> str:
         """Generate a top-level C function for a nested (closure) function."""
         self._reset_func(ci.inner_def.body, ci.inner_def.params)
+        # Set module context for global field access -- same fix, same reason
+        # as _gen_struct_method's identical line just above: a lifted closure
+        # is emitted BEFORE its owning gen_func/_gen_struct_method call sets
+        # this (see the `_emit_closure_recursive(...)` loops in gen_module,
+        # which always run ahead of the owning function's own gen_func/
+        # _gen_struct_method call), so a closure that is the very FIRST thing
+        # processed for a fresh per-module GimpleGen instance would otherwise
+        # see the "" __init__ default (read as "root" downstream) instead of
+        # this module's real name.
+        self._current_module_ctx = self.module_name or "root"
         # Per-lexical-scope import tracking: a lifted closure body is its own
         # lexical scope (its own local `from X import ...` statements shadow
         # the enclosing function's / module's same-named bindings).
@@ -23422,6 +23453,36 @@ class GimpleGen:
 
     def _gen_struct_method(self, struct_name: str, node: FunctionDef, overload_id: str = '') -> str:
         self._reset_func(node.body, node.params)
+        # Set module context for global field access -- mirrors the identical
+        # line in gen_func/_gen_toplevel (this method was missing it entirely).
+        # Without this, `self._current_module_ctx` keeps whatever value the
+        # PREVIOUS gen_func/_gen_toplevel call in this same GimpleGen instance
+        # happened to leave it at (or its "" __init__ default, read as "root"
+        # via the `self._current_module_ctx or "root"` fallback used at every
+        # write-target resolution site) -- stale, order-dependent state that
+        # is correct only by coincidence. Concretely: a class whose methods
+        # are the FIRST thing processed in a module's own recursive compile
+        # (e.g. typing.py's `_LazyAnnotationLib`, defined right after the
+        # module's `__all__` list, before any ordinary function or executed
+        # module-level statement) generated its `global` write-target (see
+        # _gen_stmt_AssignStmt's `_func_declared_globals` branch) against
+        # `_root_globals` instead of `_typing_globals` -- "struct
+        # '_root_toplev' has no member named '_lazy_annotationlib'" at gcc
+        # -fsyntax-only stage. Confirmed via direct `.ci` inspection on a
+        # `mojo.py build .../Lib/glob.py` run (typing.py transitively
+        # imported): `typing__LazyAnnotationLib___getattr__`'s body wrote
+        # `_root_globals._lazy_annotationlib = ...` even though the function
+        # itself is correctly module-qualified "typing__"-prefixed and
+        # `_typing_toplev`'s struct definition genuinely has that field. Same
+        # class of bug (and identical fix shape: target
+        # `self._current_module_ctx` directly) as the write-side misrouting
+        # fixed for AssignStmt/MultiAssignStmt/_write_dest -- see
+        # bugs/hard/CODEGEN_module_globals_cross_contamination_via_imported_
+        # stmts.md's history -- just a 4th call site (struct/class methods)
+        # that fix's audit didn't cover because it never SET the context in
+        # the first place, rather than consulting the wrong (shared,
+        # first-writer-wins) map.
+        self._current_module_ctx = self.module_name or "root"
         # Per-lexical-scope import tracking: a method body is its own lexical
         # scope (its own local `from X import ...` statements shadow the
         # module-level same-named bindings).

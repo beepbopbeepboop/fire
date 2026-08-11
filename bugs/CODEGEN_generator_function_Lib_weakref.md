@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs (this file included, per the 2026-08-06 entry below).
+Confirmed via a fresh `python3 mojo.py build` rebuild: this file has
+**zero** occurrences of that exact error — already fully fixed by the
+mechanism-1/mechanism-2 fixes referenced below (deleted doc, `bugs/
+hard/COMPILE_FAIL_module_toplev_struct_never_fully_defined.md`), same
+conclusion this doc's own 2026-08-07 status already reached. Not this
+file's live blocker.
+
+Fixed one closely related, previously-undocumented residual bug found
+while tracing the mechanism: `_gen_struct_method`/`_gen_lifted_closure`
+(gimple_codegen.py) never set `self._current_module_ctx`, misrouting a
+`global`-statement write inside a class method compiled first in its
+module to a DIFFERENT module's globals struct (repro: typing.py's
+`_LazyAnnotationLib.__getattr__`). Also fixed a related `_safe_
+coerce_emit` gap (`.`-accessed struct-field LHS wasn't recognized,
+only `->`-accessed). Full writeup in `bugs/hard/COMPILE_FAIL_module_
+toplev_struct_never_fully_defined.md` and this session's commit.
+
+Effect on this file: total build error count dropped 644 -> 642 (this
+fix's own signature); the tuple-yield/`_cpp_for_stmt` blocker below is
+unaffected and remains this file's real blocker. No reclassification.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
 
 Implemented real tuple-valued-`yield` support this session (see
