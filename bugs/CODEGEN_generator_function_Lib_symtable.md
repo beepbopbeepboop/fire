@@ -1,5 +1,75 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-11, symtable.py's own 2 errors FIXED)
+
+Both of symtable.py's own real errors (the 2026-08-07/09 passes below)
+are now fixed via two real, gated fixes in `gimple_codegen.py`:
+
+1. **`open(path, mode)` call-dispatch guard used a whole-program-shared
+   `func_return_types` check instead of a per-module-scoped one.**
+   `open`'s call-site dispatch (`_lower_named_call`, guarded at what
+   used to be `fname_raw == 'open' and 'open' not in self.
+   func_return_types`) fell through to the generic `BUILTIN_VALUE_MAP`
+   path (`mojo_open_file`, the 1-argument form) whenever `func_return_
+   types` — populated by scanning EVERY module in the whole-program
+   transitive closure, not just this one — happened to contain an entry
+   for the bare name `open`. `Lib/tokenize.py`'s own `def open
+   (filename):` (transitively reachable from symtable.py, which imports
+   `tokenize`) registers exactly that entry, even though symtable.py
+   itself never imports or shadows `open` — so symtable.py's own `with
+   open(filename, 'rb') as f:` (line 449) was wrongly routed to the
+   1-arg `mojo_open_file`, not the 2-arg-aware `_lower_builtin_open`.
+   Fixed by adding `GimpleGen._locally_binds_name(bare_name)`, which
+   reuses the SAME three-tier per-module lookup `_func_qualifier`
+   already trusts for the analogous free-function-mangling problem
+   (this exact module's own top-level defs / its own lexical import-
+   scope stack / its own `FromImportStmt` scan — deliberately
+   EXCLUDING the whole-program-shared fallback tier), and routing
+   `open`'s call-site guard through it instead of the raw global
+   `func_return_types` membership check.
+2. **`sys.getfilesystemencoding()`/`sys.getdefaultencoding()` had no
+   real lowering** and fell through to the fully generic "unknown
+   method on scalar receiver" stub, which passes the RECEIVER's
+   placeholder type (`int64_t`, since a bare `sys` module reference
+   resolves to that) through as the call's OWN result type — silently
+   wrong for a call that's supposed to return a string. Added a narrow
+   special case (mirroring the existing `sys.platform` comptime-
+   constant special case) returning the fixed, faithful `"utf-8"`
+   value both calls have on every host this compiler targets. This one
+   wasn't needed to fix symtable.py's own two errors, but was found
+   and fixed in the same pass — see `bugs/CODEGEN_generator_function_
+   Lib_tarfile.md` for the file this was actually needed for (`tarfile.
+   py`'s module-level `ENCODING = ... sys.getfilesystemencoding()`).
+
+Verified via a real `python3 mojo.py build .../Lib/symtable.py` rebuild:
+both of symtable.py's own errors (`mojo_open_file` arity mismatch at
+line 449; the `textwrap.py`-transitive stray-backslash tokenizer issue
+previously also attributed here no longer reproduces either — see
+below) are GONE. `symtable.py`'s own generator (`yield flagname`, line
+302) remains unaffected either way (still compiles cleanly, as every
+prior pass already established).
+
+**Not deleting this doc** — `mojo.py build .../Lib/symtable.py` still
+exits non-zero end-to-end: the current error set (622 errors) is now
+100% attributed to OTHER files transitively imported by symtable.py,
+overwhelmingly `Lib/enum.py` (407 errors — see `bugs/CODEGEN_generator_
+function_Lib_enum.md`, already tracked separately) plus smaller
+clusters in `argparse.py`/`codecs.py`/`pickle.py`/`inspect.py`/
+`traceback.py`/`tracemalloc.py`/`posixpath.py`/`typing.py`/`os.py`/
+`contextlib.py`/`gettext.py`/`weakref.py`/`functools.py`/`dis.py`/
+`tokenize.py`/`threading.py`/`operator.py`/`locale.py`/`copyreg.py` —
+none of it inside symtable.py's own source, none of it generator-
+codegen-shaped. Per this project's convention ("only files that 100%
+compile clean get removed"), the doc stays open, now purely tracking
+"symtable.py transitively pulls in other files' independent bugs",
+which is out of scope for a dedicated symtable.py-specific fix.
+
+Full mandatory gate run for these two `gimple_codegen.py` changes: `python3
+test_gimple.py` 247 passed/0 failed; `python3 test_module_cache.py` 76
+passed/0 failed; `make check-selfhost` clean; from-scratch
+`libmojostdlib.dylib` rebuild — 0 `skip <module>:` lines; `python3
+compile_stdlib.py` — 664/664 passed, 0 unexpected.
+
 ## Status (updated 2026-08-09, unchanged)
 
 Re-re-verified against current master (real `mojo.py build` rebuild,

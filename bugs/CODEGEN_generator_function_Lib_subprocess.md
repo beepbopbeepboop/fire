@@ -1,5 +1,54 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (updated 2026-08-11, re-verified; unrelated fixes landed this pass, subprocess.py's own blocker unchanged)
+
+Re-verified against current master with a real `mojo.py build` rebuild.
+Classification unchanged: **NOT a generator-codegen-cluster failure** —
+`subprocess.py`'s one generator (`Popen.__enter__`-adjacent `yield
+to_close`) still shows zero signal of any problem, and `subprocess.py`
+itself contributes ZERO of the build's errors (confirmed via `grep
+'subprocess\.py.*error:'` against a fresh error log — no matches).
+
+Two real, unrelated `gimple_codegen.py` fixes landed in this session's
+pass (see `bugs/CODEGEN_generator_function_Lib_symtable.md`/`bugs/
+CODEGEN_generator_function_Lib_tarfile.md` for the full writeups — a
+per-module-scoped `open(path, mode)` call-dispatch fix, and a `sys.
+getfilesystemencoding()`/`sys.getdefaultencoding()` lowering); both are
+gated clean (`test_gimple.py` 247/247, `test_module_cache.py` 76/76,
+`make check-selfhost` clean, dylib rebuild 0 skips, `compile_stdlib.py`
+664/664). Effect on this file: total build error count dropped 488 ->
+486 via a fresh rebuild — neither fix targets subprocess.py's own real
+blocker.
+
+**subprocess.py's real blocker is unchanged**: the build is still
+completely dominated by `Lib/threading.py` (297 of 486 errors — mostly
+`'StrEnum_<method>' undeclared here ... did you mean 'enum_StrEnum_
+<method>'?`, i.e. an unqualified symbol reference expecting a module-
+qualified one, plus a smaller cluster of unrelated parse/struct-access
+errors). This is `bugs/hard/CODEGEN_generator_function_symbol_not_
+module_qualified.md` — already fully diagnosed (two DIFFERENT generator
+functions sharing the bare name `walk`, one in `os.py` one in `threading
+.py`, colliding at the C-symbol level once transitively pulled into one
+whole-program compile) and DELIBERATELY left unfixed pending a dedicated
+session, per that doc's own explicit reasoning: the analogous ordinary-
+function fix (`bf96f55`/SB-1) required two follow-up regression fixes to
+get right, and this generator-specific variant has additional correctness-
+sensitive seams (the `.c`/`.cpp` split, the bare-name-keyed `_generator_
+api`/`_supported_generators` dicts) that doc's own "What a real fix
+needs" section lays out in detail. Not re-attempted here — this pass's
+own investigation (tracing tarfile.py's separate `ENCODING` global-type
+collision, see that doc) independently reconfirmed the same underlying
+architectural pattern (whole-program-shared, bare-name-keyed lookup
+dicts) is the recurring root cause across THREE different codegen
+subsystems now (free functions, structs, and — newly confirmed this
+pass — module-level globals), reinforcing that doc's own conclusion
+that this needs a dedicated, careful session rather than a fix folded
+into an unrelated pass.
+
+Not deleting the doc — subprocess.py's full build still fails end-to-
+end (only files that 100% compile clean get removed per this project's
+convention).
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring
