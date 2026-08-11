@@ -1,5 +1,124 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-11 — 3 of the 4 documented `Idler.burst` gaps FIXED; 2 blockers remain, both precisely diagnosed, neither fixed)
+
+Re-verified with a fresh direct minimal repro (`Idler`/`IMAP4` reduced
+to just the shapes `burst()` touches, same methodology as the
+2026-08-09 entry below). Of the 4 previously-documented gaps, 3 are
+FIXED this pass (all in `gimple_codegen.py`, all generic — not
+imaplib.py-specific):
+
+1. **`self._imap.sock` (a 2-level `self.<field>.<field>` chain)** —
+   `_cpp_expr`'s `MemberExpr` case only ever recognized a single-level
+   `self.<field>` read; a chain through an INTERMEDIATE struct-pointer
+   field fell to the generic non-self fallback, emitting `self->_imap
+   .sock` (`.`, not `->`) on a field this narrow model's own boxing
+   convention stores as a raw `int64_t` in the C++ typedef regardless
+   of its real pointer type — g++: "member reference base type
+   'int64_t' is not a structure or union". Fixed by adding a case that
+   recognizes `self.<field1>.<field2>` when `field1`'s type (already
+   known via `struct_field_types`) is a registered struct pointer,
+   casting through it explicitly: `((Inner *)(self->field1))->field2`.
+   Also had to register the INNER struct name (`IMAP4`) into
+   `_cpp_param_struct_names` — gen_module's existing "struct layout(s)
+   needed by this module's compiled generator method(s)" .cpp-preamble
+   typedef collection only knew about a generator method's own
+   `self`-struct and a generator's declared parameter structs, neither
+   of which covers a struct reached only indirectly through a field's
+   pointer type.
+2. **`next(self)` (the builtin, not a method call)** — unhandled,
+   fell through to a bare undeclared C++ identifier. Fixed: `next(x)`
+   now recognized when `x` is `self` or a struct-pointer local,
+   dispatching to `x.__next__()` via the exact same struct-method-call
+   machinery `self.<method>(...)` already uses (only the common 1-arg
+   form; `next(x, default)`'s StopIteration-suppression not attempted).
+3. **`self._pop(interval, None)` inside `while response := ...:`** —
+   the self-method CALL itself was already correctly forwarding both
+   arguments (an EARLIER fix, before this session, already closed that
+   half — the doc's 2026-08-09 entry below describing "both real args
+   dropped" is now stale). What was still broken: the WALRUS TARGET
+   (`response`) was never declared at all — `_cpp_expr`'s `WalrusExpr`
+   case only ever emits the assignment, assuming the name is already a
+   declared C++ local (true for a walrus used as an ordinary
+   statement's RHS, never true for one embedded directly in an `if`/
+   `while` condition, which has no separate declaring statement) — g++:
+   "use of undeclared identifier 'response'". Fixed with a new
+   `_cpp_hoist_walrus_decls` helper, called from both `WhileStmt` and
+   `IfStmt` before their condition is lowered: walks the condition
+   (via the existing generic `_walk_ast`) for every `name := value`,
+   declaring each with its value's inferred ctype — including a new
+   special case for `self.<method>(...)`/`<struct-ptr-local>.
+   <method>(...)` RHS (resolved via `func_return_types[f"{struct}_
+   {method}"]`, mirroring `_quick_type`'s identical struct-method-call
+   lookup), since the shared `_infer_simple_expr_ctype` free function
+   has no self/struct-method-call case at all and would otherwise
+   always default to `int64_t`.
+
+Verified via a direct isolated repro (`Idler`/`IMAP4`/`burst`, all 3
+shapes together) compiling clean through g++ and, separately, a real
+end-to-end `mojo.py build` + run producing correct output values (not
+just exit 0) for a str-returning stand-in `_pop`. Also confirmed
+against the REAL `imaplib.py` inside the full transitive `mojo.py
+build`: `Idler`/`burst`'s own generated code now shows ZERO gcc/g++
+errors anywhere in the log (previously 4) — `MOJO_DEBUG=1` still shows
+no "not eligible" refusal either.
+
+Full mandatory gate (CLAUDE.md) re-run after all 3 fixes:
+- `python3 test_gimple.py`: 247 passed, 0 failed
+- `python3 test_module_cache.py`: 76 passed, 0 failed
+- `make check-selfhost`: clean
+- From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
+- `python3 compile_stdlib.py` (no `-j`): 664/664 passed, 0 unexpected
+
+**imaplib.py itself still does not build**, for two SEPARATE reasons,
+neither attempted here:
+
+**(a) A completely unrelated, severe, pre-existing symbol clash,
+confirmed via the real full-build log** — GCC bails out ("confused by
+earlier errors") partway through `ssl.py`, well before ever reaching
+`imaplib.py`'s own code in this whole-program compile:
+```
+/Users/mrs/net/Python-3.14.6/Lib/ssl.py:6952:44: error: 'socket___enter__' undeclared here (not in a function); did you mean 'Idler___enter__'?
+/Users/mrs/net/Python-3.14.6/Lib/ssl.py:6953:50: error: 'socket___exit__' undeclared here (not in a function); did you mean 'Idler___exit__'?
+```
+A cross-module symbol-resolution bug in `ssl.py`/`socket`-related
+struct methods, unrelated to generators or to anything fixed this
+session — out of scope for this doc, not investigated further (a
+`ssl.py`-specific bug report would be the right place).
+
+**(b) Even setting (a) aside, `self._imap`'s field is STILL wrong.**
+`Idler.__init__(self, imap, duration=None):` (imaplib.py:1432) leaves
+`imap` unannotated, so `_imap`'s registered field type defaults to
+`int64_t` instead of the real `IMAP4 *` — this is the ALREADY-TRACKED
+`bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+hard bug (re-verified unchanged earlier this same session), not
+re-attempted here. Confirmed directly: fix (1) above is real and
+correct — a minimal repro with `imap: IMAP4` annotated compiles and
+runs `self._imap.sock` correctly end-to-end — but doesn't fully
+activate for the REAL file until that separate hard bug is fixed.
+
+**Also found, NOT fixed (a genuinely separate, pre-existing gap, not
+introduced by any change this session, confirmed via a repro with NO
+walrus/self-method/next() involved at all):** the coroutine-body
+`_cpp_stmt`'s `if`/`while` condition lowering (`cond = self._cpp_expr
+(s.condition)`) never applies Python truthiness coercion to a non-bool
+condition value — a `char *`/`MojoList *` condition compiles to a raw
+C++ pointer-non-null check (`if ((!s))` for `if not s:`), not
+Python's real "is this string/list/tuple EMPTY" semantics. A minimal
+repro (`while (s := f()):` where `f()` eventually returns `""`) hangs
+forever at runtime instead of terminating, since a non-null pointer to
+an empty string is still "truthy" in raw C++. This would matter for
+`Idler.burst`'s own `while response := self._pop(interval, None):`
+once (a) and (b) above are both resolved — `_pop`'s real return type
+is a 2-tuple, which may also hit a SEPARATE representability limit in
+this scalar coroutine-body model. Not investigated further or fixed —
+a real, but broad, pre-existing gap (Python-truthiness coercion for
+pointer/container-typed values is already solved on the ORDINARY
+GIMPLE path via `_ensure_bool_cond`/`mojo_truthy_cstr`; porting the
+equivalent to the coroutine-body emitter is a bigger, separate step,
+not attempted here) — worth its own dedicated bug doc if it recurs
+elsewhere.
+
 ## Status (updated 2026-08-09, re-verified with a direct minimal repro)
 
 Re-verified against current master (post-merge `7df52a0`). The full
