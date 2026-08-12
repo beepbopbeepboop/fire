@@ -231,7 +231,7 @@ def _expand_dylib_modules(input_files):
     return modules
 
 
-def compile_dylib(input_files, output=None, jobs=1):
+def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
     """Compile one or more Mojo LIBRARY modules (no `main()`/top-level
     entry point required — same "library module" shape build_stdlib_dylib.py
     already compiles every stdlib file as) into a single, standalone,
@@ -261,7 +261,15 @@ def compile_dylib(input_files, output=None, jobs=1):
     build list too — see `_expand_dylib_modules` — so a module that's only
     referenced via a re-export ("import everything from X, ship it") still
     gets its full API compiled in and exported, not silently dropped for
-    having no local call site."""
+    having no local call site.
+
+    `opt_flag` defaults to '-O2': unlike the internal stdlib dylib (compiled
+    once, at -O0, optimized for build time and CAS cache-friendliness — see
+    build_stdlib_dylib.build()'s own docstring), a `mojo dylib` artifact is
+    meant to be linked into a real program and actually run — mojo.py's CLI
+    passes through an explicit -O0/-O1/-O3/-Os/-Oz/-Og if the caller gave
+    one (via the same `_extract_codegen_flags` every other subcommand uses),
+    so this default only applies when nothing was specified."""
     if isinstance(input_files, str):
         input_files = [input_files]
     ext = 'dylib' if platform.system() == 'Darwin' else 'so'
@@ -271,6 +279,7 @@ def compile_dylib(input_files, output=None, jobs=1):
     target = os.path.abspath(output)
     all_modules = _expand_dylib_modules(input_files)
     out = bsd.build(all_modules, target,
-                    use_cache=True, link_runtime=False, jobs=jobs)
+                    use_cache=True, link_runtime=False, jobs=jobs,
+                    opt_flag=opt_flag or '-O2')
     print(f"Built: {out}")
     return 0

@@ -480,7 +480,7 @@ def main():
   mojo -h, --help                  Show this help message
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
-  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0)
+  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
   -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)""")
         return
 
@@ -554,7 +554,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
             print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
             sys.exit(1)
         import driver
-        rc = driver.compile_dylib(dylib_inputs, output=dylib_output)
+        rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)
         sys.exit(rc)
 
     dump_full = '--dump-full' in sys.argv

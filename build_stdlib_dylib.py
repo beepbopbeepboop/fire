@@ -213,18 +213,19 @@ def _module_name_for(path: str) -> str:
     return module_name_for_path(path)
 
 
-def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str) -> bytes:
+def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
+                         objflags: tuple = _OBJ_FLAGS) -> bytes:
     """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
     with open(cfile, 'w') as f:
         f.write(compile_module_to_c(src, path, name))
-    subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
+    subprocess.run([gcc, *objflags, '-c', '-o', ofile, cfile], check=True)
     with open(ofile, 'rb') as f:
         return f.read()
 
 
-def _compile_module_job(path: str, workdir: str, use_cache: bool):
+def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -250,21 +251,31 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool):
     hit = None
     try:
         if use_cache:
-            key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
+            key = cas.module_key(src, _imported_sigs(src), gcc, objflags)
             ofile, hit = cas.get_or_build(
-                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc))
+                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc, objflags))
         else:
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
-                f.write(_compile_one_object(src, path, name, workdir, gcc))
+                f.write(_compile_one_object(src, path, name, workdir, gcc, objflags))
     except Exception as e:
         return path, name, None, exports, str(e), hit
     return path, name, ofile, exports, None, hit
 
 
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
-          extra_exports: list = None, jobs: int = 1) -> str:
+          extra_exports: list = None, jobs: int = 1, opt_flag: str = None) -> str:
+    """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
+    (mojo_runtime.c/mojo_async_runtime.cpp) own object-compile flags, and
+    into their CAS keys (so an -O2 build never serves a stale -O0-compiled
+    object, or vice versa) — `_OBJ_FLAGS`/plain `toolchain_fingerprint(gcc,
+    ())` on their own carry NO optimization flag (gcc's implicit -O0),
+    appropriate for the STDLIB dylib (compiled once, used everywhere,
+    optimized for compile time / cache-friendliness) but not for a
+    `mojo dylib`-built artifact meant to be linked into a real program and
+    actually run at speed."""
     gcc = find_gcc()
+    objflags = _OBJ_FLAGS + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
@@ -278,7 +289,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         with ProcessPoolExecutor(max_workers=jobs) as pool:
             results = list(pool.map(
                 _compile_module_job, modules,
-                [workdir] * len(modules), [use_cache] * len(modules)))
+                [workdir] * len(modules), [use_cache] * len(modules),
+                [objflags] * len(modules)))
         # Merge each job's own CAS hit/miss into this process's cas.stats —
         # see _compile_module_job's docstring on why worker-process stats
         # don't propagate on their own. Only needed here: the jobs<=1 path
@@ -291,7 +303,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             elif hit is False:
                 cas.stats['misses'] += 1
     else:
-        results = [_compile_module_job(path, workdir, use_cache) for path in modules]
+        results = [_compile_module_job(path, workdir, use_cache, objflags) for path in modules]
 
     # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
     # symbol from it if present, else falls back to source), so it need not be
@@ -341,9 +353,10 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     #   and fold it into the dylib (no separate runtime dylib needed)
     # - For testing (link_runtime=True): build separate runtime dylib and link against it
     rt_src = os.path.join(RUNTIME, 'mojo_runtime.c')
+    rt_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
     rt_key = 'rtobj/' + cas._hash(
         'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, ()), open(rt_src).read())
+        cas.toolchain_fingerprint(gcc, rt_cflags), open(rt_src).read())
 
     gxx = find_gxx()
 
@@ -357,7 +370,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # For production: include runtime object directly
         def _build_rt_obj():
             o = os.path.join(workdir, 'mojo_runtime.o')
-            subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o, rt_src], check=True)
+            subprocess.run([gcc, *rt_cflags, '-c', '-o', o, rt_src], check=True)
             return open(o, 'rb').read()
         rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
         objs.append(rt_o)
@@ -390,14 +403,14 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # even though that path never used the result (runtime_dylib()
         # already builds its own copy, untracked by cas.stats — see there).
         async_rt_src = os.path.join(RUNTIME, 'mojo_async_runtime.cpp')
+        async_rt_cflags = ('-std=c++20', '-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
         async_rt_key = 'rtobj/' + cas._hash(
             'mojo-async-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-            cas.toolchain_fingerprint(gcc, ()), open(async_rt_src).read())
+            cas.toolchain_fingerprint(gcc, async_rt_cflags), open(async_rt_src).read())
 
         def _build_async_rt_obj():
             o = os.path.join(workdir, 'mojo_async_runtime.o')
-            subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
-                            async_rt_src], check=True)
+            subprocess.run([gxx, *async_rt_cflags, '-c', '-o', o, async_rt_src], check=True)
             return open(o, 'rb').read()
         async_rt_o, _ = cas.get_or_build(async_rt_key, '.o', _build_async_rt_obj)
         objs.append(async_rt_o)
