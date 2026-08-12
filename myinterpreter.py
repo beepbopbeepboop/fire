@@ -1176,16 +1176,28 @@ class MojoClass:
         instance = MojoInstance(self)
         for f in self.fields:
             if self.interpreter._is_instance(f, 'VarDecl'):
-                type_ann = getattr(f, 'type_ann', None)
-                if f.value is None and isinstance(type_ann, str):
-                    array_default = self._array_field_default(type_ann)
-                else:
-                    array_default = None
-                if array_default is not None:
-                    value = array_default
-                else:
-                    value = self.interpreter.eval_expr(f.value) if f.value is not None else None
-                    value = self.interpreter._coerce_to_declared_type(value, type_ann)
+                # Array-default handled as its own early-exit branch, NOT
+                # folded into `value`'s own assignment chain below (self-host
+                # build note: MojoClass is one of myinterpreter.py's own
+                # hardcoded struct_field_types entries — the self-hosted
+                # compiler infers one C type per Python local from how it's
+                # used across the WHOLE function, so any assignment of
+                # `_array_field_default`'s result into `value` — even inside
+                # a ternary — made it infer `value` as `MojoList *`
+                # unconditionally, breaking `make check-selfhost` with
+                # "invalid types in conversion to integer" the moment
+                # `_coerce_to_declared_type`'s differently-typed result also
+                # flowed into that same `value`, even though the interpreter
+                # itself ran fine either way. `array_default` is its own
+                # local, assigned from nowhere else, so it can't contaminate
+                # `value`'s original, already-self-host-clean inference.)
+                if f.value is None:
+                    array_default = self._array_field_default(getattr(f, 'type_ann', None))
+                    if array_default is not None:
+                        setattr(instance, f.name, array_default)
+                        continue
+                value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -1234,8 +1246,10 @@ class MojoClass:
         fields not initialized when the struct is defined in an imported
         module, `TypeError: 'NoneType' object does not support item
         assignment` on the first indexed write). Returns None (not a
-        defaulted array) if `type_ann` isn't `ElemType[size]` shape, or the
-        size can't be resolved."""
+        defaulted array) if `type_ann` isn't a string, isn't `ElemType[size]`
+        shape, or the size can't be resolved."""
+        if not isinstance(type_ann, str):
+            return None
         m = self._ARRAY_TYPE_RE.match(type_ann)
         if not m:
             return None

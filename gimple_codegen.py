@@ -18090,6 +18090,23 @@ class GimpleGen:
             # Use the actual declared type (may differ if variable was already declared
             # in an earlier branch with a different inferred type)
             actual_dst = self.var_types.get(node.name, ctype)
+            # A module-level `var name = value`/`var name: T = value` (this
+            # module's OWN top-level statement, or a nested `global name`
+            # declaration) writes to the module-globals STRUCT FIELD, whose
+            # real declared C type can differ from the semantic `ctype`
+            # (a MojoDict*/MojoList*/MojoSet* global is boxed as int64_t at
+            # the struct-field level — see gen_module's global-scan DictExpr/
+            # ListExpr/SetExpr cases) — mirrors _gen_stmt_AssignStmt's
+            # identical `_global_c_decl_types.get(...)` coercion a few
+            # hundred lines below in this file. Missing this meant `var
+            # g_cooking_recipes = list()` at module scope emitted a raw,
+            # uncoerced `_mod_globals.g_cooking_recipes = <MojoList *>;` into
+            # a field GCC now (correctly) declares `int64_t` — "assignment to
+            # 'int64_t' from 'MojoList *' makes integer from pointer without
+            # a cast" — found via box.3d/game/lib/recipes.mojo.
+            if ((self._in_toplevel_gen or node.name in getattr(self, '_func_declared_globals', ()))
+                    and node.name in self._global_var_types):
+                actual_dst = self._global_c_decl_types.get(node.name, self._global_var_types[node.name])
             if ctype in ('MojoList *', 'MojoSet *') and v in self._elem_types:
                 self._elem_types[node.name] = self._elem_types[v]
             if ctype == 'MojoDict *':
@@ -29852,6 +29869,7 @@ class GimpleGen:
                 'bases': 'MojoList *',
                 'comptime_aliases': 'MojoDict *',
                 'static_methods': 'MojoSet *',
+                'def_scope': 'Scope *',
             }
             self.struct_field_types['MojoInstance'] = {
                 '_mojo_class': 'MojoClass *',
@@ -34754,7 +34772,27 @@ class GimpleGen:
                         self._global_c_decl_types[gname] = _resolved
                     continue
                 _gv = stmt.value
-                if isinstance(_gv, (IntLiteral, BoolLiteral)):
+                if (isinstance(_gv, CallExpr) and isinstance(_gv.func, IdentExpr)
+                        and _gv.func.name in ('list', 'List', 'dict', 'Dict', 'set', 'Set')):
+                    # `var g_cooking_recipes = list()` / `= dict()` — a
+                    # constructor CALL, not a `[...]`/`{...}` literal AST
+                    # node, so none of the ListExpr/DictExpr/SetExpr branches
+                    # below ever matched it; it fell all the way through to
+                    # the final "else: int gname;" catch-all, which is wrong
+                    # in the SAME way the literal-value branches were before
+                    # this fix (and just as unboxed on top of being the wrong
+                    # base type) — "assignment to 'int' from 'MojoList *'" at
+                    # every read/write of such a global. Found alongside the
+                    # `_fuel_burn_times` dict-literal bug in the same file
+                    # (box.3d/game/lib/recipes.mojo's `g_cooking_recipes`/
+                    # `g_stonecut_recipes`/`g_shapeless_recipes`/
+                    # `g_shaped_recipes`/`g_name_to_id`).
+                    _ctype = 'MojoDict *' if _gv.func.name in ('dict', 'Dict') else (
+                        'MojoSet *' if _gv.func.name in ('set', 'Set') else 'MojoList *')
+                    global_decls.append(f"int64_t {gname};  /* {_ctype} */")
+                    self._global_var_types[gname] = _ctype
+                    self._global_c_decl_types[gname] = 'int64_t'
+                elif isinstance(_gv, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")
                     self._global_var_types[gname] = 'int'
                     self._global_c_decl_types[gname] = 'int'
@@ -34763,20 +34801,40 @@ class GimpleGen:
                     self._global_var_types[gname] = 'char *'
                     self._global_c_decl_types[gname] = 'char *'
                 elif isinstance(_gv, (ListExpr, TupleExpr)):
-                    global_decls.append(f"MojoList * {gname};")
+                    # Boxed as int64_t at the struct-field level — the SAME
+                    # convention this loop's own bare-annotation branch just
+                    # above (and _gscan_declare_global's identical AssignStmt-
+                    # without-annotation case) already use for a
+                    # MojoDict*/MojoList*/MojoSet* global. This branch handles
+                    # `var name: T = [...]/{...}/{elem, ...}` — a VarDecl with
+                    # BOTH a type_ann and a value — and previously declared
+                    # the struct field as the real pointer type directly,
+                    # unboxed, while every *read* site of a module-level
+                    # dict/list/set global (_lower_IdentExpr et al) assumes
+                    # the boxed convention: "assignment to 'int64_t' from
+                    # 'MojoList *'/'MojoDict *'/'MojoSet *' makes integer from
+                    # pointer without a cast" at every read. Found via
+                    # box.3d/game/lib/recipes.mojo's
+                    # `var _fuel_burn_times: Dict[Int, Int] = {}`, which
+                    # failed to compile standalone (a WRITE —
+                    # `_fuel_burn_times[k] = v` — happened to declare its own
+                    # temp straight from the correct semantic type and so
+                    # never tripped over this).
+                    global_decls.append(f"int64_t {gname};  /* MojoList * */")
                     self._global_var_types[gname] = 'MojoList *'
-                    self._global_c_decl_types[gname] = 'MojoList *'
+                    self._global_c_decl_types[gname] = 'int64_t'
                 elif isinstance(_gv, DictExpr):
-                    global_decls.append(f"MojoDict * {gname};")
+                    global_decls.append(f"int64_t {gname};  /* MojoDict * */")
                     self._global_var_types[gname] = 'MojoDict *'
-                    self._global_c_decl_types[gname] = 'MojoDict *'
+                    self._global_c_decl_types[gname] = 'int64_t'
                 elif isinstance(_gv, SetExpr):
-                    global_decls.append(f"MojoSet * {gname};")
+                    global_decls.append(f"int64_t {gname};  /* MojoSet * */")
                     self._global_var_types[gname] = 'MojoSet *'
-                    self._global_c_decl_types[gname] = 'MojoSet *'
+                    self._global_c_decl_types[gname] = 'int64_t'
                 elif isinstance(_gv, IdentExpr) and _gv.name in self._global_var_types:
                     global_decls.append(f"{self._global_var_types[_gv.name]} {gname};")
-                    self._global_c_decl_types[gname] = self._global_var_types[_gv.name]
+                    self._global_c_decl_types[gname] = self._global_c_decl_types.get(
+                        _gv.name, self._global_var_types[_gv.name])
                 else:
                     global_decls.append(f"int {gname};")
                     self._global_var_types[gname] = 'int'
