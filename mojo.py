@@ -472,6 +472,8 @@ def main():
   mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
+  mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
+  mojo dylib -o <out> <file> [...] Same, with specified output path
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
   mojo -v, --version               Show the compiler version (git SHA / release)
@@ -526,6 +528,34 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                 build_output = sys.argv[idx + 1]
                 sys.argv.pop(idx)   # remove -o
                 sys.argv.pop(idx)   # remove output filename
+
+    # Check for dylib command: compile one or more .mojo LIBRARY modules
+    # (no main()/top-level entry point needed — same "library module" shape
+    # every stdlib file already compiles as) into a single, standalone,
+    # self-contained shared library (.dylib on macOS, .so elsewhere),
+    # callable directly from C/C++ via its plain C ABI. This is exactly
+    # build_stdlib_dylib.build() — already used internally to compile the
+    # whole stdlib as one dylib — exposed as a first-class command instead
+    # of only being reachable by hand-importing build_stdlib_dylib.py. See
+    # driver.compile_dylib's own docstring for the full design. Takes
+    # multiple input files (unlike `build`, which takes exactly one) so
+    # several library modules can be bundled into one output dylib.
+    if sys.argv[1] == 'dylib':
+        sys.argv.pop(1)
+        dylib_output = None
+        if '-o' in sys.argv:
+            idx = sys.argv.index('-o')
+            if idx + 1 < len(sys.argv):
+                dylib_output = sys.argv[idx + 1]
+                sys.argv.pop(idx)   # remove -o
+                sys.argv.pop(idx)   # remove output filename
+        dylib_inputs = sys.argv[1:]
+        if not dylib_inputs:
+            print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
+            sys.exit(1)
+        import driver
+        rc = driver.compile_dylib(dylib_inputs, output=dylib_output)
+        sys.exit(rc)
 
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv

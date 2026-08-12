@@ -176,3 +176,42 @@ def compile_program(input_file, src, output=None, run=True,
         return subprocess.run([target] + list(program_args or [])).returncode
     print(f"Built: {target}")
     return 0
+
+
+def compile_dylib(input_files, output=None, jobs=1):
+    """Compile one or more Mojo LIBRARY modules (no `main()`/top-level
+    entry point required — same "library module" shape build_stdlib_dylib.py
+    already compiles every stdlib file as) into a single, standalone,
+    self-contained shared library (.dylib on macOS, .so elsewhere), callable
+    directly from C/C++ via its plain C ABI (module-qualified symbol names,
+    e.g. `world.mojo`'s `def create_world():` exports as C symbol
+    `world_create_world`).
+
+    This is exactly `build_stdlib_dylib.build()` — already a fully general
+    "compile this LIST of .mojo modules into one dylib" function, with no
+    stdlib-tree-specific assumptions (confirmed: `_module_name_for`/
+    `_compile_module_job` derive the module name from the file's own path,
+    same as compiling any other module) — just exposed as a first-class
+    driver entry point instead of only being reachable by hand-importing
+    build_stdlib_dylib.py. `link_runtime=False` (the same "production" mode
+    the real stdlib dylib itself uses): mojo_runtime.c/mojo_async_runtime.cpp
+    are compiled and folded directly into the output dylib, so the result
+    is fully self-contained — a C/C++ host links or dlopen()s ONE file, with
+    no separate mojo runtime dylib to also manage.
+
+    `input_files`: a single path or a list of paths — every module's own
+    exported symbols land in the same output dylib (mirrors `mojo dylib
+    a.mojo b.mojo -o combined.dylib` bundling multiple library modules
+    together, the same way `build_stdlib_dylib.py`'s own CLI already
+    accepts multiple module args)."""
+    if isinstance(input_files, str):
+        input_files = [input_files]
+    ext = 'dylib' if platform.system() == 'Darwin' else 'so'
+    if output is None:
+        base = os.path.splitext(os.path.basename(input_files[0]))[0]
+        output = f'{base}.{ext}'
+    target = os.path.abspath(output)
+    out = bsd.build([os.path.abspath(f) for f in input_files], target,
+                    use_cache=True, link_runtime=False, jobs=jobs)
+    print(f"Built: {out}")
+    return 0
