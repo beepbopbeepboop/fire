@@ -17371,14 +17371,35 @@ class GimpleGen:
         base, vct = api['base'], api['value_ctype']
         # `[... for a, b in <tuple-yielding generator>():]` — mirrors
         # _gen_for_generator_iter's identical tuple-target handling (see
-        # its own comment): gen0.target arrives as the literal string
-        # "(a, b)" only when this generator's registration proved it's a
-        # real tuple-yielder.
+        # its own comment), EXCEPT a comprehension's target string is NOT
+        # guaranteed to be paren-wrapped for a bare (unparenthesized)
+        # tuple target the way ForStmt.target always is:
+        # `_parse_generator_target` (mojo_compiler.py) only wraps in
+        # parens when the SOURCE itself wrote them (`for (a, b) in ...`);
+        # `for a, b in ...` inside a comprehension parses to the literal
+        # string "a, b" with no parens at all, unlike `_parse_unpack_
+        # target`'s ForStmt path which always synthesizes the wrapping
+        # parens regardless of source spelling. The old strict
+        # startswith('(')/endswith(')') check here missed that bare form
+        # entirely, silently falling through to the single-var branch
+        # below and emitting a literal, invalid `e, _ = <tuple val>;`
+        # comma-expression statement — which doesn't just fail to compile
+        # cleanly itself, it desyncs the surrounding -fgimple parser badly
+        # enough to cascade into dozens of unrelated "type defaults to
+        # 'int'"/"conflicting types" errors on LATER, perfectly-formed
+        # declarations (real repro: Lib/test/test_exception_group.py's
+        # `[e for e, _ in leaf_generator(eg)]`). Mirrors `_compr_list_
+        # loop`'s own already-correct both-forms detection (its "Detect
+        # tuple unpacking target" comment) instead of reinventing a
+        # narrower check.
         tuple_slot_ctypes = api.get('tuple_slot_ctypes')
-        is_tuple_target = (gen0.target.startswith('(') and gen0.target.endswith(')')
-                            and tuple_slot_ctypes is not None)
+        _target_str = gen0.target.strip()
+        _inner_str = (_target_str[1:-1].strip()
+                      if (_target_str.startswith('(') and _target_str.endswith(')'))
+                      else _target_str)
+        is_tuple_target = (',' in _inner_str and tuple_slot_ctypes is not None)
         if is_tuple_target:
-            var_names = [v.strip() for v in gen0.target[1:-1].split(',')]
+            var_names = [v.strip() for v in _inner_str.split(',')]
         else:
             var_names = None
             self._declare_var(gen0.target, vct)

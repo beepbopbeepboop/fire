@@ -1,5 +1,70 @@
 # CODEGEN_generator_function: Lib/test/test_exception_group.py
 
+## Status (updated 2026-08-12 — this doc's own `leaf_generator` cascade FIXED; file still blocked by unrelated Lib/test/support/__init__.py gaps)
+
+Re-verified against current master with a real `MOJO_DEBUG=1 python3 mojo.py
+build`. The tuple-yield refusal described in the entry below is gone (as
+expected, since that fix already landed), but the file still failed with
+the SAME ~150-error malformed-declaration cascade first reported on
+2026-08-06 (`type defaults to 'int' in declaration of
+'mojo_list_append_int'`, `conflicting types for 'mojo_list_append_int'`,
+etc.), now traced to a real, different root cause than previously
+diagnosed.
+
+**Root cause, found and FIXED**: `LeafGeneratorTest.test_leaf_generator`
+contains `[e for e, _ in leaf_generator(eg)]` — a list COMPREHENSION
+consuming `leaf_generator`'s tuple-valued yields with a bare (no
+parentheses in the source), 2-name unpacking target. `gimple_codegen.py`'s
+`_compr_generator_loop` (the comprehension-specific consumer of a
+compiled coroutine generator) only recognized a tuple target when the
+target string was wrapped in parens (`"(a, b)"`). That's always true for
+an ordinary `for` STATEMENT's target (`mojo_compiler.py`'s
+`_parse_unpack_target`-based ForStmt path always synthesizes the wrapping
+parens regardless of source spelling), but comprehension targets go
+through the separate `_parse_generator_target`, which only adds parens
+when the SOURCE itself wrote them — `for e, _ in ...` inside a
+comprehension parses to the literal string `"e, _"`, no parens. The old
+check missed that bare form, silently fell through to the single-variable
+branch, and emitted a literal, invalid GIMPLE statement:
+`e, _ = <tuple-yield-value>;` (a comma-expression assignment, not a real
+per-slot unpack) — which didn't just fail to compile cleanly itself, it
+desynced `-fgimple`'s parser badly enough to cascade into dozens of
+unrelated-looking "type defaults to 'int'"/"conflicting types" errors on
+later, perfectly well-formed declarations. This is exactly the kind of
+narrow-fix-with-broad-blast-radius shape this project's history warns
+about (the "_tuplegetter incidents"), except here the ROOT bug itself was
+narrow and real, not a fix regression.
+
+**Fix** (`gimple_codegen.py`, `_compr_generator_loop`): detect the tuple
+target the same permissive way `_compr_list_loop` already does (strip,
+then check for a bare comma OR a paren-wrapped comma list), instead of
+requiring parens. Verified via an isolated repro
+(`pair_gen` yielding `i, i * 10` consumed via `[a for a, _ in
+pair_gen(4)]`) — compiles, links, and runs, printing the correct `0 1 2
+3`. Verified against the real file: the ~150-error cascade in
+`test_exception_group.py` itself is completely gone; `MOJO_DEBUG=1`
+confirms `leaf_generator`/`LeafGeneratorTest_test_leaf_generator` compile
+through the coroutine path cleanly now.
+
+**This file still does not build clean** — for entirely unrelated,
+pre-existing reasons transitively reached via `Lib/test/support/__init__.py`
+(7 errors: an `int64_t`/pointer argument-type mismatch in
+`mojo_list_set_int`, two `int64_t *` vs `int64_t` pointer-cast mismatches,
+an undeclared `print_warning`, a malformed statement around line 1905-1908,
+and a `mojo_getattr` pointer-cast mismatch) — none of these are generator
+codegen issues, none are in `test_exception_group.py`'s own source, and
+none are new (already noted as out-of-scope in
+`bugs/CODEGEN_generator_function_Lib_test_test_faulthandler.md`'s own
+history for the same transitively-imported file). Doc kept open, not
+deleted, since the file doesn't fully build — but its OWN bug (the
+generator/comprehension miscompile) is genuinely fixed, not merely
+narrowed.
+
+Full mandatory gate after the fix: `test_gimple.py` 247/0,
+`test_module_cache.py` 76/0, `make check-selfhost` clean, from-scratch
+`libmojostdlib.dylib` rebuild 0 `skip <module>:` lines, `compile_stdlib.py`
+664/664 passed 0 unexpected.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; other, pre-existing gaps now block)
 
 Implemented real tuple-valued-`yield` support this session (see
