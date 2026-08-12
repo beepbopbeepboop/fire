@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-12, re-verified — unchanged)
+
+Re-verified against current master with a real `MOJO_DEBUG=1 python3
+mojo.py build`. Confirmed unchanged from the 2026-08-09 entry below:
+`check_stderr_none` still doesn't appear in the "not eligible"/refused
+list; the full build still fails purely on the same unrelated errors in
+`Lib/test/support/__init__.py` (the `mojo_list_set_int`/`int64_t *`
+pointer-cast/`print_warning`/malformed-statement errors around lines
+488, 1184-1186, 1420, 1905-1908) plus, this time, two additional
+unrelated `Lib/test/support/script_helper.py` errors (`MojoCompletedProcess`
+has no member `__stdinp`; a call-arity mismatch on
+`test_support_script_helper_assert_python_ok`) — all pre-existing,
+already covered by this doc's general "OTHER, unrelated, non-generator
+errors transitively reached in `Lib/test/support/__init__.py`,
+`os_helper.py`, and `script_helper.py`" characterization above, none of
+them generator-codegen issues, none in this doc's scope. No code change
+made; nothing new to fix here beyond the already-documented structural
+gaps below.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (`42faf64`). Confirmed:
