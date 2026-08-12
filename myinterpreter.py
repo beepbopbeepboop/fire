@@ -1120,12 +1120,24 @@ class BoundMethod:
 
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
+    _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
+    _ARRAY_ELEM_DEFAULTS = {
+        'Bool': False, 'String': '',
+        'Float16': 0.0, 'Float32': 0.0, 'Float64': 0.0,
+    }
+
     def __init__(self, name, fields, methods, interpreter, bases=None,
-                 comptime_aliases=None, static_methods=None):
+                 comptime_aliases=None, static_methods=None, def_scope=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
         self.interpreter = interpreter
+        # The scope struct-definition executed in (same closure MojoFunction
+        # captures for methods) — needed to resolve a fixed-size array field's
+        # size expression (e.g. `Int[MAX_CELLS]`) by the comptime constant's
+        # OWN defining module, not whatever module happens to instantiate this
+        # struct (mirrors how `__init__` bodies already resolve such names).
+        self.def_scope = def_scope
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
         # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
         # once at struct-definition time and exposed as a class-level
@@ -1164,8 +1176,16 @@ class MojoClass:
         instance = MojoInstance(self)
         for f in self.fields:
             if self.interpreter._is_instance(f, 'VarDecl'):
-                value = self.interpreter.eval_expr(f.value) if f.value is not None else None
-                value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
+                type_ann = getattr(f, 'type_ann', None)
+                if f.value is None and isinstance(type_ann, str):
+                    array_default = self._array_field_default(type_ann)
+                else:
+                    array_default = None
+                if array_default is not None:
+                    value = array_default
+                else:
+                    value = self.interpreter.eval_expr(f.value) if f.value is not None else None
+                    value = self.interpreter._coerce_to_declared_type(value, type_ann)
                 setattr(instance, f.name, value)
             elif self.interpreter._is_instance(f, 'AssignStmt'):
                 # AssignStmt has a single `.target`, not a `.targets` list
@@ -1206,6 +1226,36 @@ class MojoClass:
                     fname = field_names[i]
                     setattr(instance, fname, a)
         return instance
+
+    def _array_field_default(self, type_ann):
+        """A fixed-size array field (`cell_ids: Int[MAX_CELLS]`) with no
+        explicit initializer must default to a zero-filled list of the
+        declared length, same as real Mojo — not None (BUG-2026: struct array
+        fields not initialized when the struct is defined in an imported
+        module, `TypeError: 'NoneType' object does not support item
+        assignment` on the first indexed write). Returns None (not a
+        defaulted array) if `type_ann` isn't `ElemType[size]` shape, or the
+        size can't be resolved."""
+        m = self._ARRAY_TYPE_RE.match(type_ann)
+        if not m:
+            return None
+        elem_type, size_str = m.group(1), m.group(2)
+        if size_str.isdigit():
+            size = int(size_str)
+        else:
+            # A named comptime constant (e.g. `MAX_CELLS`) — resolve it in
+            # the struct's OWN defining scope, not the caller's, mirroring
+            # how `__init__` bodies already resolve such names via their
+            # captured closure scope.
+            lookup_scope = self.def_scope or self.interpreter.scope
+            try:
+                size = lookup_scope.get(size_str)
+            except NameError:
+                return None
+            if not isinstance(size, int) or isinstance(size, bool):
+                return None
+        elem_default = self._ARRAY_ELEM_DEFAULTS.get(elem_type, 0)
+        return [elem_default] * size
 
     def __getitem__(self, item):
         # A user-defined generic struct instantiated with explicit type/value
@@ -3294,7 +3344,8 @@ class Interpreter:
                             pass
         fields = merged_fields + actual_fields
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
-                         comptime_aliases=comptime_aliases, static_methods=static_methods)
+                         comptime_aliases=comptime_aliases, static_methods=static_methods,
+                         def_scope=self.scope)
         self.scope.define(node.name, cls)
         return cls
 

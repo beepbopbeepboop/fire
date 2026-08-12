@@ -1067,6 +1067,7 @@ def py_tokenize(src: str) -> list[Token]:
     out: list[Token] = []
     stack = [0]
     paren_depth = 0  # Track (), [], {} nesting to suppress INDENT/DEDENT inside
+    continued_from_prev = False  # last physical line ended in an implicit-continuation token
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = line.expandtabs(_INDENT_SIZE)
@@ -1079,8 +1080,9 @@ def py_tokenize(src: str) -> list[Token]:
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
-            # Only emit INDENT/DEDENT when at paren depth 0
-            if stmt_idx == 0 and paren_depth == 0:
+            # Only emit INDENT/DEDENT when at paren depth 0, and not when this
+            # physical line is itself just the continuation of the previous one.
+            if stmt_idx == 0 and paren_depth == 0 and not continued_from_prev:
                 if indent > stack[-1]:
                     stack.append(indent)
                     out.append(Token("INDENT", "", line=physical_line, col=0))
@@ -1105,9 +1107,23 @@ def py_tokenize(src: str) -> list[Token]:
                 if kind in ("LPAREN", "LBRACKET", "LBRACE") or val in ("(", "[", "{"): paren_depth += 1
                 elif kind in ("RPAREN", "RBRACKET", "RBRACE") or val in (")", "]", "}"): paren_depth = max(0, paren_depth - 1)
                 out.append(Token(kind, val, line=physical_line, col=col))
-            # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens)
-            if paren_depth == 0:
+            # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens).
+            # Also suppress it when the last token on the line is one that can only
+            # be followed by more expression (a binary operator, assignment, `->`,
+            # or a low-precedence keyword operator like `and`/`or`/`not`/`in`/`is`)
+            # — real Mojo treats such a line as implicitly continued onto the next
+            # physical line, no enclosing parens required. Deliberately excludes a
+            # trailing `.` — `...` (Ellipsis, a common stub-function body) tokenizes
+            # as three DOTs and must NOT be treated as a continuation.
+            last = out[-1] if out else None
+            implicit_continuation = last is not None and (
+                (last.kind == "OP" and last.value != "^")  # `^` is the postfix transfer sigil, not a binary op
+                or last.kind in ("AUGASSIGN", "ASSIGN", "ARROW")
+                or (last.kind == "KW" and last.value in ("and", "or", "not", "in", "is"))
+            )
+            if paren_depth == 0 and not implicit_continuation:
                 out.append(Token("NEWLINE", "", line=physical_line, col=0))
+            continued_from_prev = paren_depth == 0 and implicit_continuation
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
