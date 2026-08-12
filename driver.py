@@ -178,6 +178,59 @@ def compile_program(input_file, src, output=None, run=True,
     return 0
 
 
+def _expand_dylib_modules(input_files):
+    """A dylib's whole point is to expose its FULL api — unlike an executable,
+    which only needs whatever its own call graph reaches, so per-module
+    compilation (deliberately, elsewhere) never treats "imported but never
+    called" as a reason to compile+export a definition. `from engine_world
+    import *` into a pure re-export wrapper file, with nothing in the wrapper
+    itself calling any of those names, compiled to a dylib with ZERO engine
+    symbols — every name IS defined somewhere, just not reachable from a
+    wrapper file with no call sites of its own to force it in.
+
+    Since `bsd.build()` already treats every module explicitly PASSED to it
+    as unconditionally exporting its own full top-level API (that's exactly
+    how the real 664-file stdlib dylib works — no module in that list is
+    "unused"), the fix is to make `mojo dylib` walk each input file's own
+    `from X import ...` statements (any form, not just `*` — a normal named
+    import of a name nothing else calls has the identical problem) and add
+    every LOCAL (non-stdlib) module it names to the build list too, so their
+    own top-level defs get the same unconditional-export treatment as if
+    the caller had listed them explicitly. Recurses (bounded) since a
+    pulled-in module may itself only re-export a further sibling. Stdlib
+    imports (`from std... import ...` et al) are deliberately left alone —
+    those are either already reachable through real call sites (the common
+    case) or are part of the separately-built, already-complete real stdlib
+    dylib; auto-expanding into that huge tree here would be wasteful and
+    risks re-exporting symbols that collide with it."""
+    import mojo_compiler as mc
+    import imports as _imp
+    gen = gimple_codegen.GimpleGen(emit_entry_points=False)
+    seen = set()
+    modules = []
+    queue = [os.path.abspath(f) for f in input_files]
+    while queue:
+        path = queue.pop(0)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        modules.append(path)
+        try:
+            stmts = mc.Parser(mc.py_tokenize(open(path).read())).parse_module()
+        except Exception:
+            continue
+        gen._current_filename = path
+        for s in stmts:
+            if not isinstance(s, mc.FromImportStmt) or s.module.startswith('std'):
+                continue
+            resolved = _imp.resolve_source(s.module) or gen._resolve_test_relative_module(s.module)
+            if resolved:
+                resolved = os.path.abspath(resolved)
+                if resolved not in seen:
+                    queue.append(resolved)
+    return modules
+
+
 def compile_dylib(input_files, output=None, jobs=1):
     """Compile one or more Mojo LIBRARY modules (no `main()`/top-level
     entry point required — same "library module" shape build_stdlib_dylib.py
@@ -203,7 +256,12 @@ def compile_dylib(input_files, output=None, jobs=1):
     exported symbols land in the same output dylib (mirrors `mojo dylib
     a.mojo b.mojo -o combined.dylib` bundling multiple library modules
     together, the same way `build_stdlib_dylib.py`'s own CLI already
-    accepts multiple module args)."""
+    accepts multiple module args). Each input file's own `from X import ...`
+    statements (local/sibling modules only) are auto-expanded into the
+    build list too — see `_expand_dylib_modules` — so a module that's only
+    referenced via a re-export ("import everything from X, ship it") still
+    gets its full API compiled in and exported, not silently dropped for
+    having no local call site."""
     if isinstance(input_files, str):
         input_files = [input_files]
     ext = 'dylib' if platform.system() == 'Darwin' else 'so'
@@ -211,7 +269,8 @@ def compile_dylib(input_files, output=None, jobs=1):
         base = os.path.splitext(os.path.basename(input_files[0]))[0]
         output = f'{base}.{ext}'
     target = os.path.abspath(output)
-    out = bsd.build([os.path.abspath(f) for f in input_files], target,
+    all_modules = _expand_dylib_modules(input_files)
+    out = bsd.build(all_modules, target,
                     use_cache=True, link_runtime=False, jobs=jobs)
     print(f"Built: {out}")
     return 0

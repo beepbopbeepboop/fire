@@ -73,10 +73,23 @@ SYM_GLOBAL = 2
 SYM_TYPE = 3
 
 
-def _c_signature(name: str, return_type, params) -> str:
-    """Build the C signature string for an exported function, per ABI.md."""
-    cret = _mojo_type(return_type) if return_type else 'void'
-    cparams = ', '.join(_mojo_type(t) for _, t in params) if params else 'void'
+def _c_signature(name: str, return_type, params, struct_names=frozenset()) -> str:
+    """Build the C signature string for an exported function, per ABI.md.
+
+    `struct_names` (a locally-defined struct's bare name) must resolve via
+    `_mt`, the SAME helper `collect_exports`'s method/TYPE entries already use
+    below — a free function taking/returning a local struct type (e.g.
+    `def engine_place_block(world: World, ...)`) otherwise fell through plain
+    `_mojo_type`'s int64_t default (unlike methods, which were never affected:
+    `self` is a struct pointer by construction). That wrong C type flows into
+    `_func_export_csym`'s overload-suffix hash, so the reflection table's
+    "expected" mangled symbol silently diverges from what gimple_codegen's
+    `_func_csym` (using its own live-inferred `World *` param type) actually
+    emits — build_stdlib_dylib.build()'s nm cross-check then can't find the
+    expected symbol and drops the export as "stale", even though the real
+    compiled function IS present under its own (differently-hashed) name."""
+    cret = _mt(return_type, struct_names) if return_type else 'void'
+    cparams = ', '.join(_mt(t, struct_names) for _, t in params) if params else 'void'
     return f"{cret} {name} ({cparams})"
 
 
@@ -131,7 +144,7 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
         if isinstance(s, FunctionDef) and not s.name.startswith('_'):
             exports.append({
                 'name': s.name,
-                'signature': _c_signature(s.name, s.return_type, s.params),
+                'signature': _c_signature(s.name, s.return_type, s.params, struct_names),
                 'kind': SYM_FUNCTION,
                 # SB-1 fix: this function's home-module qualifier, so
                 # export_csym/_func_export_csym can compute the same
