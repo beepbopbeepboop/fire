@@ -14,7 +14,7 @@ import dataclasses
 
 from mojo_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
-    EllipsisLiteral,
+    EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
     ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator,
@@ -5673,6 +5673,7 @@ class GimpleGen:
         '_mojo_dispatch_repr':       ('char *',    ['void *']),
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
+        'mojo_repr_list_ints':       ('char *',    ['MojoList *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -8067,7 +8068,18 @@ class GimpleGen:
         dict_val: dict[str, str] = {}
 
         def note_list_literal(v: str, lit: ListExpr):
-            elem[v] = self._infer_list_elem_type(lit.elements)
+            _e = self._infer_list_elem_type(lit.elements)
+            # See _literal_elements_include_none's docstring (_lower_list_
+            # literal's identical guard, which THIS pre-pass duplicates the
+            # underlying inference of): don't seed an int64_t-joined list's
+            # element type here either when the literal spells out a
+            # `None` among its elements, or _list_repr_fn would still route
+            # print(name)/repr(name) through mojo_repr_list_ints (no None-
+            # sentinel check) via this pre-pass's seeded entry, even though
+            # _lower_list_literal's own (later) codegen-time assignment
+            # correctly left it unset.
+            if not (_e == 'int64_t' and self._literal_elements_include_none(lit.elements)):
+                elem[v] = _e
             if lit.elements and isinstance(lit.elements[0], ListExpr):
                 elem[v] = 'MojoList *'
                 nested[v] = self._infer_list_elem_type(lit.elements[0].elements)
@@ -8282,9 +8294,26 @@ class GimpleGen:
         type is double (self._elem_types, e.g. from a `[3.5, 2.5]` literal),
         route to the double-aware runtime helper instead. Unknown/mixed element
         types keep the generic repr — never regress the int/str/nested cases.
+
+        Same reasoning applies to a genuinely homogeneous int64_t element
+        list (e.g. `[a for a in range(n)]`, `[i for i, _ in pair_gen(n)]`):
+        the generic `_mojo_repr_list` -> `_mojo_generic_elem_repr` pair
+        treats any slot holding the raw value 0 as the `None` sentinel
+        (load-bearing for genuinely dynamic/heterogeneous lists, where a
+        boxed 0 really can mean a null), which silently misprints a real
+        int element of 0 as `None` for a list statically known to hold
+        only plain ints — found via a real repro (`[a for a, _ in
+        pair_gen(4)]` where pair_gen yields (0, 0), (1, 10), ...: printed
+        `[None, 1, 2, 3]` instead of `[0, 1, 2, 3]`). Route to
+        mojo_repr_list_ints (mirrors mojo_repr_list_doubles's structure,
+        no None-sentinel check) whenever the element type is known to be
+        int64_t.
         """
-        if self._elem_types.get(rav) == 'double':
+        et = self._elem_types.get(rav)
+        if et == 'double':
             return 'mojo_repr_list_doubles'
+        if et == 'int64_t':
+            return 'mojo_repr_list_ints'
         return '_mojo_repr_list'
 
     def _repr_value(self, rat: str, rav: str) -> str:
@@ -16880,11 +16909,52 @@ class GimpleGen:
 
     # ── Collection literal lowering ───────────────────────────────────────
 
+    @staticmethod
+    def _is_none_literal(el) -> bool:
+        """`None` is parsed as a bare `IdentExpr(name='None')`, not a
+        dedicated literal node (see `_lower_IdentExpr`'s/`_quick_type`'s own
+        `name == 'None'` checks — this file has no case that ever
+        constructs `NoneLiteral`, despite mojo_compiler.py defining the
+        class). Centralized here so every None-in-a-literal check in this
+        file recognizes the same shape."""
+        return isinstance(el, IdentExpr) and el.name == 'None'
+
+    def _literal_elements_include_none(self, elements: list) -> bool:
+        """True when a list/tuple literal's own source elements contain a
+        literal `None` (directly, or as either branch of a top-level
+        ternary — the common `x if cond else None` shape). MojoList stores
+        every element as a raw int64_t slot with no per-element type tag,
+        and `None` lowers to the same all-zero bit pattern a genuine int
+        value of 0 does — `_list_repr_fn`'s int64_t-elem-type fast path
+        (mojo_repr_list_ints, no None-sentinel check) is only safe for a
+        list PROVABLY free of any real `None` element; a literal that
+        spells one out explicitly is the one case this codegen can check
+        cheaply and confidently. Not a full type-flow analysis (a `None`
+        arriving via a function call or a variable already holding it is
+        still missed, same accepted-risk shape `mojo_repr_list_doubles`
+        already carries for an Optional[Float] list — see _list_repr_fn's
+        docstring), just enough to stop this specific fix from regressing
+        the single most common explicit-`None`-in-a-literal shape."""
+        for el in elements:
+            if self._is_none_literal(el):
+                return True
+            if isinstance(el, TernaryExpr) and (
+                    self._is_none_literal(el.then_val)
+                    or self._is_none_literal(el.else_val)):
+                return True
+        return False
+
     def _lower_list_literal(self, node: ListExpr) -> tuple[str, str]:
         elem = self._infer_list_elem_type(node.elements)
         suf  = TypeLattice.list_suffix(elem)
         t    = self._new_temp('MojoList *')
-        self._elem_types[t] = elem
+        # See _literal_elements_include_none's docstring: don't tag an
+        # int64_t-joined list as elem-type int64_t when the literal itself
+        # spells out a `None` among its elements — _list_repr_fn would
+        # otherwise route it through mojo_repr_list_ints (no None-sentinel
+        # check), silently misprinting that `None` as `0`.
+        if not (elem == 'int64_t' and self._literal_elements_include_none(node.elements)):
+            self._elem_types[t] = elem
         self._emit(f"  {t} = mojo_list_new ();")
         # Lower elements first so we can see all their types before choosing how
         # to append. A single list-wide suffix mis-types a genuinely heterogeneous
@@ -17023,7 +17093,13 @@ class GimpleGen:
         elem = self._infer_list_elem_type(node.elements)
         suf  = TypeLattice.list_suffix(elem)
         t    = self._new_temp('MojoList *')
-        self._elem_types[t] = elem
+        # See _literal_elements_include_none's docstring (_lower_list_
+        # literal's identical guard) — a tuple literal spelling out a
+        # `None` element (`(x, None)`) must not be tagged elem-type
+        # int64_t, or _list_repr_fn would route it through
+        # mojo_repr_list_ints and silently misprint that `None` as `0`.
+        if not (elem == 'int64_t' and self._literal_elements_include_none(node.elements)):
+            self._elem_types[t] = elem
         self._emit(f"  {t} = mojo_list_new ();")
         # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
         # over `[...]` — see mojo_mark_as_tuple's doc comment in

@@ -443,6 +443,7 @@ char *mojo_repr_str(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
+char *mojo_repr_list_ints(MojoList *l);
 char *mojo_bool_to_str(int b);
 int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);

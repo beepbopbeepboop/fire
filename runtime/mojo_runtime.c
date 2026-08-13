@@ -1987,6 +1987,34 @@ char *mojo_repr_list_doubles(MojoList *l) {
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
 
+char *mojo_repr_list_ints(MojoList *l) {
+    /* Int-aware repr for a MojoList * whose element type is statically
+     * known (at codegen time, via gimple_codegen.py's _elem_types) to be a
+     * genuinely homogeneous int64_t (never a boxed pointer/None sentinel
+     * mixed in) -- e.g. a `[a for a in range(n)]`-style comprehension or
+     * list literal of plain ints. MojoList stores every element as a raw
+     * int64_t slot with no per-element type tag, and the generic codegen-
+     * emitted _mojo_repr_list/_mojo_generic_elem_repr pair treats a slot
+     * holding the literal value 0 as the `None` sentinel (needed for
+     * genuinely dynamic/heterogeneous lists, where 0 really can mean a
+     * boxed null), which is wrong for a list statically known to hold only
+     * real ints -- a real element value of 0 always printed as `None`
+     * instead of `0`. Mirrors mojo_repr_list_doubles's exact structure
+     * (tuple parens, single-element trailing comma, [..] otherwise) but
+     * reads each slot via mojo_list_get_int and formats it with
+     * mojo_repr_int unconditionally, with no None-sentinel check. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
