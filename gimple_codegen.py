@@ -3840,6 +3840,25 @@ class GimpleGen:
         # being compiled REASSIGNS (threaded through as pointer parameters,
         # dereferenced on every read/write) -- empty outside that context.
         self._cpp_mut_capture_names: frozenset = frozenset()
+        # Python param name -> escaped C++ identifier, for a generator/
+        # async coroutine unit currently being compiled whose parameter
+        # list contains a name that's a valid Python identifier but a
+        # reserved C/C++ keyword (e.g. `default`, `new`, `class` — the
+        # GIMPLE (.c) path already renames these via _declare_var's own
+        # `_C_KEYWORDS`/`_c_names` mechanism, but the coroutine (.cpp)
+        # emitter is a wholly separate translation with no equivalent).
+        # Set by _gen_cpp_generator_unit/_gen_cpp_async_unit around their
+        # own param-list construction, consulted by `cpp_sig`'s emission
+        # AND by _cpp_expr's IdentExpr fallback (so every reference to
+        # that parameter inside the body agrees with the signature) —
+        # `declared`/`param_ctypes` themselves stay keyed by the ORIGINAL
+        # Python name throughout (only used for type lookups, never
+        # emitted as C++ text directly), so this is the one place the
+        # rename needs to be threaded through. Empty outside that
+        # context, mirroring `_cpp_mut_capture_names`'s identical scoped-
+        # state convention. See COMPILE_FAIL_Tools_c-analyzer_c_common_
+        # tables.md.
+        self._cpp_kw_param_renames: dict = {}
         # struct_name -> verbatim "typedef struct Name { ... } Name;" text,
         # captured (not re-derived) from whichever of the two existing
         # struct-typedef emission sites (struct_field_types-based, or
@@ -24165,6 +24184,12 @@ class GimpleGen:
                     and e.name not in self._global_var_types):
                 self._cpp_module_func_refs.add(e.name)
                 return f"(int64_t)&{self._func_csym(e.name)}"
+            # A coroutine parameter whose Python name is a reserved C/C++
+            # keyword (e.g. `default`) was renamed in the emitted
+            # signature — see self._cpp_kw_param_renames's docstring.
+            # Every read of it must agree with that renamed identifier.
+            if e.name in self._cpp_kw_param_renames:
+                return self._cpp_kw_param_renames[e.name]
             return e.name
         if isinstance(e, MemberExpr):
             # Generator-METHOD `self.<field>` read — the only attribute
@@ -25397,8 +25422,15 @@ class GimpleGen:
                 # an observable backing value elsewhere, so silently
                 # eliding those would risk actually-wrong behavior, not
                 # just a no-op on an already-fictional value.
+                # `dont_write_bytecode` widened alongside stderr/stdout/
+                # stdin (same rationale: confirmed via grep to have no
+                # backing value anywhere else in this file either) — found
+                # via Tools/importbench/importbench.py's `sys.dont_write_
+                # bytecode = True`/`= False` (see COMPILE_FAIL_Tools_
+                # importbench_importbench.md's "gap 3").
                 if isinstance(s.target, MemberExpr) and isinstance(s.target.obj, IdentExpr) \
-                        and s.target.obj.name == 'sys' and s.target.member in ('stderr', 'stdout', 'stdin'):
+                        and s.target.obj.name == 'sys' \
+                        and s.target.member in ('stderr', 'stdout', 'stdin', 'dont_write_bytecode'):
                     val = self._cpp_expr(s.value)
                     return [f"{indent}(void)({val});"]
                 # x[:] = value  (full-slice replace-in-place; real
@@ -25503,6 +25535,24 @@ class GimpleGen:
                     "only a plain identifier assignment target is supported")
             name = s.target.name
             val = self._cpp_expr(s.value)
+            # See self._cpp_kw_param_renames's docstring — an assignment
+            # TARGET is emitted directly (`name = val`, bypassing
+            # _cpp_expr's own IdentExpr branch entirely), so a keyword-
+            # named coroutine parameter being REASSIGNED needs the exact
+            # same rename applied here too, or its write and every read
+            # of it would disagree. A brand-new local (first assignment,
+            # `name not in declared` below) that itself happens to be
+            # named a C/C++ keyword is a separate, rarer shape this fix
+            # also covers by the same rename-and-remember mechanism, so
+            # it doesn't regress the moment a local variable (not just a
+            # parameter) collides with a keyword.
+            if name in self._cpp_kw_param_renames:
+                cpp_name = self._cpp_kw_param_renames[name]
+            elif name in _C_KEYWORDS or name in _CPP_KEYWORD_FIELDS or name in _C_PARAM_EXTRA_KEYWORDS:
+                cpp_name = f"_kw_{name}"
+                self._cpp_kw_param_renames[name] = cpp_name
+            else:
+                cpp_name = name
             if name not in declared:
                 # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
                 # struct-constructor branch just above, which already
@@ -25535,15 +25585,15 @@ class GimpleGen:
                 # and is emitted at the top of the impl body.
                 if self._cpp_func_scope_decls is not None:
                     self._cpp_func_scope_decls.append(
-                        f"{_c_to_cpp_scalar_type(ctype)} {name};")
-                return [f"{indent}{name} = {val};"]
+                        f"{_c_to_cpp_scalar_type(ctype)} {cpp_name};")
+                return [f"{indent}{cpp_name} = {val};"]
             # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
             # `mut_capture_names` docstring) is a pointer parameter -- the
             # WRITE must go through it (`*name = ...`), not overwrite the
             # pointer itself.
             if name in self._cpp_mut_capture_names:
-                return [f"{indent}*{name} = {val};"]
-            return [f"{indent}{name} = {val};"]
+                return [f"{indent}*{cpp_name} = {val};"]
+            return [f"{indent}{cpp_name} = {val};"]
         if isinstance(s, AugAssignStmt):
             if not isinstance(s.target, IdentExpr) or s.target.name not in declared:
                 # self.field += val  →  self->field = self->field op val
@@ -27268,6 +27318,18 @@ class GimpleGen:
         # struct pointer, not a scalar, so a bare (non-`.field`) reference to
         # it must refuse (see _cpp_expr's IdentExpr case), not silently fall
         # through to the int64_t default every other unknown name gets.
+        # Reset + seed self._cpp_kw_param_renames for THIS unit's params
+        # before the body is lowered below (_cpp_stmt/_cpp_expr consult
+        # it while lowering `fn.body` a few lines down, so registration
+        # must happen before that, not alongside cpp_sig's later
+        # construction) — see that attribute's own docstring. Reset
+        # first so a PRIOR generator/async unit's own renames (e.g. some
+        # earlier function's unrelated keyword-named parameter) can
+        # never leak into this one.
+        self._cpp_kw_param_renames = {}
+        for _pn, _ in param_ctypes:
+            if _pn in _C_KEYWORDS or _pn in _CPP_KEYWORD_FIELDS or _pn in _C_PARAM_EXTRA_KEYWORDS:
+                self._cpp_kw_param_renames[_pn] = f"_kw_{_pn}"
         declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes if pn != 'self'}
         self_fields = self.struct_field_types.get(struct_name, {}) if struct_name else None
         # Instance-scoped context for _cpp_expr/_cpp_stmt (mirrors this
@@ -27366,9 +27428,14 @@ class GimpleGen:
         # based generator function can take ordinary by-value parameters and
         # they remain valid/in-scope across suspend/resume, same as a local
         # variable declared in the body).
-        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {pn}"
+        # Keyword-escaped parameter names were already registered into
+        # self._cpp_kw_param_renames earlier, before the body was lowered
+        # (see that attribute's own docstring for why it must happen
+        # there and not here) — just consult it for this signature text.
+        _sig_pn = lambda pn: self._cpp_kw_param_renames.get(pn, pn)
+        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {_sig_pn(pn)}"
                               for pn, ct in param_ctypes)) or 'void'
-        call_args = ', '.join(pn for pn, _ in param_ctypes)
+        call_args = ', '.join(_sig_pn(pn) for pn, _ in param_ctypes)
         lines = [
             f"struct {promise};",
             f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -27816,6 +27883,15 @@ class GimpleGen:
         # The C++ SIGNATURE itself (built from `param_ctypes`, above,
         # unchanged) still correctly declares the real pointer parameter --
         # only this type-inference-facing dict differs.
+        # Reset + seed self._cpp_kw_param_renames for THIS unit's params
+        # before the body is lowered below (see _gen_cpp_generator_unit's
+        # identical reset for the full rationale — must happen before
+        # _cpp_stmt/_cpp_expr are ever called for this function's body,
+        # not alongside cpp_sig's later construction).
+        self._cpp_kw_param_renames = {}
+        for _pn, _ in param_ctypes:
+            if _pn in _C_KEYWORDS or _pn in _CPP_KEYWORD_FIELDS or _pn in _C_PARAM_EXTRA_KEYWORDS:
+                self._cpp_kw_param_renames[_pn] = f"_kw_{_pn}"
         declared: dict[str, str] = {}
         for _pn, _pct in param_ctypes:
             if _pn in mut_capture_names and _pct.endswith(' *'):
@@ -27963,9 +28039,14 @@ class GimpleGen:
         # exactly (see that method's comment for why no promise-side
         # plumbing is needed: C++20 coroutine frame allocation copies
         # parameters into the frame itself automatically).
-        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {pn}"
+        # Keyword-escaped parameter names were already registered into
+        # self._cpp_kw_param_renames earlier, before the body was lowered
+        # (see that attribute's own docstring for why it must happen
+        # there and not here) — just consult it for this signature text.
+        _sig_pn = lambda pn: self._cpp_kw_param_renames.get(pn, pn)
+        cpp_sig = (', '.join(f"{_c_to_cpp_scalar_type(ct)} {_sig_pn(pn)}"
                               for pn, ct in param_ctypes)) or 'void'
-        call_args = ', '.join(pn for pn, _ in param_ctypes)
+        call_args = ', '.join(_sig_pn(pn) for pn, _ in param_ctypes)
         lines = [
             f"struct {promise};",
             f"using {handle_t} = std::coroutine_handle<{promise}>;",
@@ -28880,6 +28961,15 @@ class GimpleGen:
             param_ctypes.append((pn, ctype))
         base = f"_mojoasyncgen_{_safe_name(fn.name)}"
         declared: dict[str, str] = {pn: ct for pn, ct in param_ctypes}
+        # Reset self._cpp_kw_param_renames for this unit too (see its own
+        # docstring) — this method's own signature emission doesn't
+        # currently reuse keyword-collidable parameter names in its
+        # extern "C" boundary the way _gen_cpp_generator_unit/_gen_cpp_
+        # async_unit's do, but resetting here still matters: without it,
+        # a PRIOR sibling unit's own renames (e.g. some earlier generator
+        # method's `default` parameter) could otherwise leak into this
+        # one's body lowering via _cpp_expr's shared IdentExpr fallback.
+        self._cpp_kw_param_renames = {}
         self._cpp_gen_self_struct = None
         self._cpp_gen_self_fields = None
         self._cpp_emit_kind = 'async_gen'
