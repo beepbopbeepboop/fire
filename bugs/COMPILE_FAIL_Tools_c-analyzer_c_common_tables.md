@@ -92,3 +92,32 @@ generator/async-codegen project scope, not a narrow fix.
 (The old GCC-warning-log excerpt previously shown here was from the
 stale pre-hardening repro described above and has been removed —
 current repro fails before GCC is ever invoked.)
+
+## Status (updated 2026-08-13 — coroutine keyword-parameter-name blocker FIXED)
+
+Fixed: `gimple_codegen.py`'s coroutine (.cpp) parameter emission
+(`_gen_cpp_generator_unit`/`_gen_cpp_async_unit`) now escapes a
+parameter name that's a reserved C/C++ keyword (e.g. `default`) to
+`_kw_<name>`, consistently across the emitted signature, the
+`_start`-to-`impl` call-forwarding text, and every body reference
+(`_cpp_expr`'s IdentExpr fallback, `_cpp_stmt`'s AssignStmt target) —
+mirrors the escaping already applied to struct FIELD names
+(`_CPP_KEYWORD_FIELDS`) and to the ordinary (non-coroutine) GIMPLE
+path's own parameter names (`_C_KEYWORDS`/`_declare_var`), just ported
+to this separate coroutine emitter. Threaded through a new scoped-state
+map, `self._cpp_kw_param_renames` (mirrors `_cpp_mut_capture_names`'s
+identical reset-per-unit convention).
+
+Confirmed fixed: `parse_table`'s g++ signature-parse failure
+("expected ',' or '...' before 'default'") is gone — re-running
+`python3 mojo.py build .../c_common/tables.py` no longer produces that
+error or any of its cascaded "not declared in this scope" follow-on
+errors.
+
+**This file still does not build** — as anticipated by the
+2026-08-09 status below, the build now reaches (and reproduces) the
+separate, already-documented `ColumnSpec._parse`'s `cls(*values)`
+opaque-callee spread-call gap ("type mismatch in binary expression" at
+line 289), previously only a latent, unverified finding masked by the
+earlier (now-fixed) coroutine-signature failure. Not attempted here —
+out of scope for this narrow keyword-escaping fix.
