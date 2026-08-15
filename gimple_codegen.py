@@ -1800,6 +1800,31 @@ def _mojo_type(ann: str | type | None) -> str:
         if non_none:
             return _mojo_type(non_none[0])
         return 'int64_t'
+    # Bare call-shaped container annotation with NO type parameter --
+    # `var x: list()` / `var x: dict()` / `var x: set()`. This is this
+    # project's own idiom for "a dynamically-typed container, element type
+    # inferred from usage" (used throughout box.3d/game, e.g. `var
+    # g_item_ids: list()` in game/lib/recipes.mojo) -- distinct from the
+    # bracketed `List[T]`/`Dict[K,V]`/`Set[T]` form handled below. Before
+    # this, the annotation text "list()" had NO branch here (no `[` in it),
+    # fell straight through to `_TYPE_MAP.get(ann)`, found nothing, and
+    # silently defaulted to plain `int64_t` -- so a `var names: list()`
+    # global/local was declared as a scalar instead of `MojoList *`, and
+    # any `.append()`/subscript/read against it treated whatever garbage
+    # bits happened to be in that int64_t slot as a pointer: deterministic
+    # SIGSEGV on first use. See _gen_stmt_VarDecl's matching "()"-suffix
+    # branch, which also auto-allocates an empty container for this exact
+    # annotation shape when there's no initializer -- getting the TYPE
+    # right here alone isn't enough; the pointer still has to point
+    # somewhere real.
+    if isinstance(ann, str) and ann.endswith('()') and '[' not in ann:
+        base = ann[:-2].strip()
+        if base in ('list', 'List', 'DynamicVector'):
+            return 'MojoList *'
+        if base in ('dict', 'Dict'):
+            return 'MojoDict *'
+        if base in ('set', 'Set'):
+            return 'MojoSet *'
     # Handle parameterized types: UnsafePointer[Int], List[Float64], etc.
     if '[' in ann:
         base, rest = ann.split('[', 1)
@@ -18319,6 +18344,43 @@ class GimpleGen:
             _dv = self._annotation_dict_val_type(node.type_ann)
             if _dv is not None:
                 self._dict_val_types[node.name] = _dv
+            # `var x: list()` / `var x: dict()` / `var x: set()` -- a bare
+            # call-shaped annotation with NO initializer (see _mojo_type's
+            # matching "()"-suffix branch for the full story: this project's
+            # own "declare + implicitly construct an empty dynamic
+            # container" idiom, e.g. `var g_item_ids: list()` in box.3d/
+            # game/lib/recipes.mojo). `_declare_var` above only emits the
+            # bare C POINTER DECLARATION -- `_mojo_type` now resolves the
+            # annotation to the right pointer type, but the pointer itself
+            # is never actually allocated, so the first `.append()`/
+            # subscript/read dereferences whatever garbage bits happen to
+            # be sitting in that slot: a deterministic SIGSEGV (bisected
+            # via box.3d/game/bugs/DYLIB_string_copy_append_return_segv.md
+            # -- despite the bug report's title, this reproduces identically
+            # in `mojo build`'s linked-executable path too, nothing to do
+            # with dylib mode; the report's own p2/global-`list()` repro
+            # was simply never re-tested in build mode). Auto-allocate here,
+            # mirroring exactly what `var x = list()` (a real initializer)
+            # already does via `_lower_call`'s `list()`/`dict()`/`set()`
+            # handling.
+            #
+            # Deliberately scoped to ONLY this "()"-suffix annotation shape
+            # -- a bracketed `var x: List[T]` (no initializer) is real
+            # Mojo's own explicit "must assign before use" form, not this
+            # project's implicit-construct idiom, and auto-allocating THAT
+            # too would silently paper over genuine definite-assignment
+            # bugs instead of fixing this one, narrowly-reported gap.
+            if isinstance(node.type_ann, str) and node.type_ann.endswith('()') and '[' not in node.type_ann:
+                _alloc = {'MojoList *': 'mojo_list_new ()',
+                          'MojoDict *': 'mojo_dict_new ()',
+                          'MojoSet *': 'mojo_set_new ()'}.get(ctype)
+                if _alloc is not None:
+                    v = self._new_val(ctype, _alloc)
+                    actual_dst = self.var_types.get(node.name, ctype)
+                    if ((self._in_toplevel_gen or node.name in getattr(self, '_func_declared_globals', ()))
+                            and node.name in self._global_var_types):
+                        actual_dst = self._global_c_decl_types.get(node.name, self._global_var_types[node.name])
+                    self._safe_coerce_emit(ctype, actual_dst, v, self._write_dest(node.name))
         self._layout_hint = LayoutSolver.HEAP
 
     def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
