@@ -3381,6 +3381,30 @@ def _module_toplevel_name(module_name: str) -> str:
         safe = '_' + safe
     return f"_{safe}_toplevel"
 
+def _module_init_name(module_name: str) -> str:
+    """Public, documented C symbol name for a *library* module's module-scope
+    initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
+
+    A `mojo dylib` build (emit_entry_points=False) never emits any `main()` —
+    there is nothing in the produced .dylib's ABI that calls the module's own
+    `_<module>_toplevel()` (see `_module_toplevel_name`), so every module-scope
+    `var x = f()` / bare statement silently never ran. Two independent fixes
+    ride on this same name: (1) it's exported so a C host has a documented,
+    callable "run this module's scope now" entry point, and (2) it's also
+    invoked automatically from a `__attribute__((constructor))` so a host that
+    does nothing special still gets correct behavior (matches how the
+    executable path already runs top-level code unconditionally at process
+    start — see gen_module's `int main` wrapper). Both routes funnel through
+    the SAME underlying `_<module>_toplevel()`, which is itself guarded by a
+    one-shot static flag (see `_gen_toplevel`) so calling both the ctor and
+    the exported name (or calling the exported name more than once) is safe,
+    not a double-init bug."""
+    import re
+    safe = re.sub(r'[^A-Za-z0-9_]', '_', module_name)
+    if safe and safe[0].isdigit():
+        safe = '_' + safe
+    return f"{safe}_init"
+
 # ---------------------------------------------------------------------------
 # Free-variable helpers (module level, used by closure pre-pass)
 # ---------------------------------------------------------------------------
@@ -23304,10 +23328,26 @@ class GimpleGen:
         finally:
             self._in_toplevel_gen = False
 
+        # One-shot guard: this function may now be reached from more than one
+        # caller — the executable path's own explicit call in `main()`'s
+        # wrapper (unchanged, pre-existing), PLUS (library/dylib modules
+        # only, see gen_module) an automatic `__attribute__((constructor))`
+        # AND a publicly-exported `<module>_init()` a C host may call
+        # directly (bugs/DYLIB_module_scope_never_executes.md). Whichever
+        # combination of those actually fires at runtime, module-scope code
+        # must run exactly once — the guard lives HERE, inside the single
+        # underlying function every caller funnels through, rather than in
+        # each caller, so it can't be bypassed by adding a new call site.
+        # Plain C (this function is never `__GIMPLE`-tagged — see gen_module's
+        # identically-shaped `main()` wrapper, which already freely uses
+        # `if`/function calls/etc.), so a local `static` flag is safe here.
         lines = [
             f"void {fn_name} (void)",
             "{",
             *self.decls,
+            "  static int _ran = 0;",
+            "  if (_ran) return;",
+            "  _ran = 1;",
             *self.body_lines,
             "}",
         ]
@@ -34319,6 +34359,37 @@ class GimpleGen:
                 sub_fn = _module_toplevel_name(self.module_name)
                 if sub_fn not in self._sub_toplevels:
                     self._sub_toplevels.append(sub_fn)
+                # bugs/DYLIB_module_scope_never_executes.md (box.3d/game repo):
+                # a standalone `mojo dylib` compile of THIS module (do_imports
+                # is False here — an imported sibling pulled into an
+                # EXECUTABLE's own translation unit sets do_imports=True and
+                # is deliberately excluded below; its toplevel already runs
+                # correctly via the executable's own `main()` wrapper calling
+                # `_sub_toplevels` explicitly, and giving it an automatic
+                # ctor too would fire before that `main()`'s Py_Initialize(),
+                # which is unsafe for USE_PYTHON code even though it's
+                # otherwise harmless thanks to the one-shot guard in
+                # `_gen_toplevel`) has no `main()`/`_gimple_main` at all in
+                # its own ABI — nothing EVER calls `sub_fn`. Fix: emit an
+                # automatic `__attribute__((constructor))` (fires at dlopen
+                # time with no C host cooperation needed) AND export a
+                # documented `<module>_init()` alias a C host may call
+                # explicitly instead/as well — both simply call `sub_fn`,
+                # which is itself one-shot-guarded, so any combination of
+                # "ctor already ran it" / "host also called `<module>_init`"
+                # is safe, never a double-init.
+                if not self.do_imports:
+                    init_fn = _module_init_name(self.module_name)
+                    func_parts.append(f"__attribute__((constructor)) static void {sub_fn}_ctor (void)")
+                    func_parts.append("{")
+                    func_parts.append(f"  {sub_fn} ();")
+                    func_parts.append("}")
+                    func_parts.append('')
+                    func_parts.append(f"void {init_fn} (void)")
+                    func_parts.append("{")
+                    func_parts.append(f"  {sub_fn} ();")
+                    func_parts.append("}")
+                    func_parts.append('')
 
         # Only generate entry points (main/_gimple_main) for the root module
         if self.emit_entry_points:
