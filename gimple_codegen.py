@@ -22951,7 +22951,17 @@ class GimpleGen:
         """The C symbol for a free function: _safe_name + overload suffix when the
         function is a user/imported Mojo function eligible for mangling. Used at the
         definition, every forward declaration, and every call site so they agree."""
-        base = _safe_name(bare_name)
+        # `from X import real_name as bare_name`: the DEFINING module compiled
+        # `real_name` under ITS OWN bare (unaliased) name — an alias is purely a
+        # local binding in the IMPORTING module, so this call site's mangled
+        # symbol must be built from `real_name`, not the local alias, or it
+        # disagrees with what the defining module's own compile actually
+        # exports (e.g. `from b import add as plus` mangling to `b_plus_<hash>`
+        # here while b.mojo's own standalone compile emits `b_add_<hash>` —
+        # "implicit declaration"/undefined-symbol, not just a naming quirk).
+        _imp_info = self.imported_symbols.get(bare_name)
+        _orig = _imp_info.get('original_name') if _imp_info else None
+        base = _safe_name(_orig) if (_orig and _orig != bare_name) else _safe_name(bare_name)
         if not self._func_mangleable(bare_name):
             return base
         qualifier = self._func_qualifier(bare_name)
@@ -23501,6 +23511,52 @@ class GimpleGen:
                 _debug_note('cannot resolve/parse module', module)
                 cache[module] = (None, '', None)
         return cache[module]
+
+    def _local_sibling_module_exports(self, module: str):
+        """(exports_dict, qualifier) for a `from module import ...` that
+        module_loader.load_module() can't resolve because it isn't a
+        tracked stdlib/test module — i.e. a LOCAL project sibling file (see
+        bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md, box.3d/game
+        repo). (None, None) when `module` genuinely can't be found anywhere
+        (a real external/unmodeled package, or a bare relative import), in
+        which case the caller falls back to the existing weak-stub/
+        unresolved-alias behavior.
+
+        `mojo dylib` (driver.compile_dylib -> build_stdlib_dylib.build)
+        compiles each module SEPARATELY — one private GimpleGen instance per
+        file, do_imports=False, link_imports=False — so neither
+        _register_link_imports (link_imports-only) nor the do_imports
+        inline-compile loop's _imported_func_home bookkeeping ever runs for
+        this shape; the only registration pass that always runs
+        (_emit_stdlib_import_externs, and this gen_module's own "Process
+        imports" loop) previously just gave up on any non-stdlib module
+        name, degrading a same-dylib sibling to the SAME "genuinely
+        external, unmodeled package" weak-stub path real third-party C
+        packages use — even though the real definition compiles into the
+        very same output dylib (driver._expand_dylib_modules already walks
+        the same sibling-import closure to include it). The call sites just
+        never learned the sibling's module qualifier, so they emitted an
+        UNQUALIFIED call that bound to the weak stub instead of the real
+        module-qualified symbol sitting right there in the dylib.
+
+        Resolves via `_parsed_import` — the SAME sibling-resolution
+        machinery (imports.resolve_source, falling back to
+        _resolve_test_relative_module's walk-up-from-this-file directory
+        search) `_find_imported_struct`/`_find_generic_source` already use
+        for cross-module struct/generic lookups — then extracts real
+        fn/def signatures via module_loader.load_module_from_path (the same
+        text-scan logic load_module() itself uses for stdlib/test modules,
+        just entry-pointed by file path instead of by stdlib-relative
+        module name, since resolve_module_path is deliberately restricted
+        to STDLIB_PATH/TEST_PATH and cannot see a project's own local
+        files)."""
+        path, _src, _stmts = self._parsed_import(module)
+        if not path:
+            return None, None
+        import module_loader as _mlmod
+        exports = _mlmod.load_module_from_path(path)
+        qualifier = _mlmod.module_name_for_path(path)
+        return exports, (qualifier or None)
 
     @staticmethod
     def _abs_module(ref: str, base: str) -> str:
@@ -31299,10 +31355,61 @@ class GimpleGen:
         self.imported_symbols = dict(_phase0_imported)   # restore Phase 0 imported_symbols
         for s in stmts:
             if isinstance(s, FromImportStmt):
+                # A local project sibling module (e.g. `mojo dylib`'s
+                # per-module standalone compile importing a neighboring
+                # .mojo file — see bugs/DYLIB_sibling_import_calls_bind_
+                # to_weak_stubs.md) isn't in module_loader's stdlib/test
+                # tracked set, so load_module() raises. Before falling back
+                # to the "genuinely external/unresolved" path below (weak
+                # stub, no module qualifier), try resolving it the same way
+                # _find_imported_struct/_find_generic_source already do for
+                # cross-module struct/generic lookups: if it resolves, this
+                # sibling's real definition is compiled into the very same
+                # output (driver._expand_dylib_modules walks this same
+                # import closure into the dylib's build list) — so its call
+                # sites must learn the sibling's module qualifier via
+                # _note_own_func_home, not bind to an unqualified weak stub.
+                _sib_qualifier = None
                 try:
                     exports = load_module(s.module)
+                except Exception:
+                    exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
+                if exports is not None:
                     def _register_sym(sym_name, orig_name, sym_info):
                         if sym_name in self.struct_field_types:
+                            return
+                        if _sib_qualifier and not sym_info:
+                            # The sibling FILE resolved, but this particular
+                            # imported name wasn't found among its fn/def
+                            # signatures (module_loader's scanner — same one
+                            # load_module() itself uses for stdlib — only
+                            # extracts FUNCTIONS; a struct, comptime alias,
+                            # or re-exported-from-a-further-sibling name
+                            # comes back with no info). Unlike the stdlib
+                            # case just below (where this has always been a
+                            # silent no-op — untouched, pre-existing
+                            # behavior), a local sibling name reaching here
+                            # was, before this whole sibling-import fix
+                            # existed, marked `_unresolved_import_aliases`
+                            # (the module-load exception below used to fire
+                            # for EVERY name in a local-sibling import,
+                            # struct or not) — and callers like
+                            # `_lower_opaque_ctor`'s uppercase-constructor
+                            # guard rely on that marking to fall back to a
+                            # self-contained weak stub instead of emitting a
+                            # bare `extern` with no definition anywhere
+                            # (confirmed via box.3d/game's real `ItemSlot`
+                            # struct, imported cross-module exactly this
+                            # way: silently link-broken — "symbol not found"
+                            # at dlopen — without this fallback, since this
+                            # fix's own function scan never taught struct
+                            # constructors a home module). Restore that
+                            # fallback for exactly this "resolved file, but
+                            # this specific name isn't a function" case, so
+                            # non-function local-sibling imports keep
+                            # working exactly as before this fix.
+                            if not s.wildcard:
+                                self._unresolved_import_aliases.add(sym_name)
                             return
                         if isinstance(sym_info, str):
                             self.imported_symbols[sym_name] = {
@@ -31317,16 +31424,41 @@ class GimpleGen:
                             self.imported_symbols[sym_name] = sym_info
                             if 'c_return_type' in sym_info:
                                 self.func_return_types[sym_name] = sym_info['c_return_type']
-                    if not s.names:
-                        # Wildcard import: register all exported symbols
-                        for _wc_key, _wc_info in exports.items():
-                            _register_sym(_wc_key, _wc_key, _wc_info)
-                    else:
-                        for name, alias in s.names:
-                            sym_name = alias if alias else name
-                            sym_info = exports.get(name, {})
-                            _register_sym(sym_name, name, sym_info)
-                except Exception:
+                            if _sib_qualifier and 'c_parameters' in sym_info:
+                                # A local-sibling import bypasses
+                                # _emit_stdlib_import_externs (which raised
+                                # on this same non-stdlib module name and
+                                # gave up before reaching its own
+                                # func_param_types population) — the ONLY
+                                # other place that sets it. Without this,
+                                # _overload_suffix(sym_name) sees no param
+                                # types here and hashes '' while the
+                                # sibling's OWN standalone compile hashes
+                                # its real params, so this call site's
+                                # qualified symbol (module_suffix1) and the
+                                # sibling's actual definition (module_
+                                # suffix2) disagree — an undefined symbol at
+                                # link/dlopen time, not just a wrong-value
+                                # miscompile.
+                                self.func_param_types[sym_name] = [
+                                    ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                                    for cp in (sym_info.get('c_parameters') or [])
+                                ]
+                        if _sib_qualifier and sym_info:
+                            self._note_own_func_home(sym_name, _sib_qualifier)
+                    try:
+                        if not s.names:
+                            # Wildcard import: register all exported symbols
+                            for _wc_key, _wc_info in exports.items():
+                                _register_sym(_wc_key, _wc_key, _wc_info)
+                        else:
+                            for name, alias in s.names:
+                                sym_name = alias if alias else name
+                                sym_info = exports.get(name, {})
+                                _register_sym(sym_name, name, sym_info)
+                    except Exception:
+                        _debug_note('error registering sibling module imports', s.module)
+                else:
                     # Gracefully ignore module load errors — but still
                     # record each imported NAME (under its alias, if any)
                     # as *having been imported at all*, even with no real
@@ -36068,12 +36200,23 @@ class GimpleGen:
                     # New format: use full signature with parameters, applying safe name
                     signature = sym_info['signature']
                     orig_name = sym_info.get('original_name', sym_name)
-                    if safe != sym_name:
-                        # Replace first occurrence of the bare function name with safe name
-                        signature = re.sub(r'\b' + re.escape(sym_name) + r'\b', safe, signature, count=1)
-                    elif orig_name != sym_name:
-                        # Aliased import: signature has original name, but we expose alias name.
-                        # Replace original name in signature so the extern matches the call site.
+                    # `signature` text was built (module_loader/_local_sibling_
+                    # module_exports) from the ORIGINAL definition's own
+                    # source — it always literally contains `orig_name`, never
+                    # the local alias `sym_name` (when the two differ). Always
+                    # substitute `orig_name`, not `sym_name` — matches
+                    # `_func_csym`'s own aliased-import handling just above
+                    # (mangling base uses `original_name`, not the alias), so
+                    # this extern's symbol and the call sites' emitted symbol
+                    # always agree. Substituting `sym_name` here instead (the
+                    # previous logic, keyed off `safe != sym_name` — true for
+                    # nearly every mangled function) was a silent no-op for any
+                    # ALIASED import: the regex searched for the alias, which
+                    # never appears in a signature drawn from the real
+                    # definition, so the extern kept the unmangled,
+                    # unqualified original name — "implicit declaration of
+                    # function 'qualifier_origname_hash'" at every call site.
+                    if safe != orig_name:
                         signature = re.sub(r'\b' + re.escape(orig_name) + r'\b', safe, signature, count=1)
                     # Strip Mojo parameter modifiers (out, inout, mut, var, etc.) from signature
                     signature = re.sub(

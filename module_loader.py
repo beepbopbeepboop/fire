@@ -129,6 +129,7 @@ class ModuleLoader:
     def __init__(self):
         self.loaded_modules = {}  # module_path -> parsed AST
         self.exported_symbols = {}  # (module, name) -> type_info
+        self._path_cache = {}  # absolute file path -> exports (see load_module_from_path)
 
     def resolve_module_path(self, module_name: str) -> str:
         """Convert module name to file path.
@@ -189,10 +190,36 @@ class ModuleLoader:
             return _HARDCODED[module_name]
 
         path = self.resolve_module_path(module_name)
+        exports = self.load_module_from_path(path)
+        self.loaded_modules[module_name] = exports
+        return exports
 
-        if not os.path.exists(path):
-            # Gracefully degrade: return empty exports if module not found
-            self.loaded_modules[module_name] = {}
+    # Cache for load_module_from_path, keyed by absolute file path — separate
+    # from `loaded_modules` (keyed by the STDLIB-resolved module NAME string,
+    # which a local/sibling project module never has: resolve_module_path
+    # raises "Only stdlib and test imports supported" for anything not under
+    # STDLIB_PATH/TEST_PATH). Callers that already resolved an arbitrary
+    # local .mojo file's path themselves (e.g. gimple_codegen.py's sibling-
+    # import fallback for `mojo dylib`'s per-module standalone compiles,
+    # which resolves local project modules via imports.resolve_source /
+    # _resolve_test_relative_module instead of this class's stdlib-only
+    # resolve_module_path) call this directly, keeping the exact same
+    # signature-extraction logic `load_module` itself uses for stdlib/test
+    # modules — one implementation, two entry points, per this project's
+    # "consolidate, don't duplicate" convention. (self._path_cache is set
+    # up in __init__.)
+    def load_module_from_path(self, path: str) -> dict:
+        """Extract exported fn/def signatures from an ARBITRARY .mojo file
+        path (no STDLIB_PATH/TEST_PATH restriction — see docstring above).
+        Same text-scan/`_mojo_type_to_c` logic `load_module` uses once it
+        has resolved a stdlib/test module name to a path; factored out so
+        both a name-based stdlib/test lookup and a path-based local-sibling
+        lookup share one implementation."""
+        if path in self._path_cache:
+            return self._path_cache[path]
+
+        if not path or not os.path.exists(path):
+            self._path_cache[path] = {}
             return {}
 
         try:
@@ -258,6 +285,39 @@ class ModuleLoader:
                         if _n and _n not in _C_STDLIB_SKIP:
                             _name_counts[_n] = _name_counts.get(_n, 0) + 1
                 _overloaded = {n for n, c in _name_counts.items() if c > 1}
+
+                # NOTE: a function whose signature includes a struct type
+                # defined in ANOTHER file (e.g. box.3d/game's real
+                # `chest_total_count(c: Chest, item_id: UInt64)`) is a KNOWN,
+                # separate, deeper gap this text-only scan does not attempt
+                # to solve: this scan's blind int64_t default for `Chest`
+                # disagrees with the struct's own defining module's real,
+                # struct_field_types-aware C parameter type, so the overload-
+                # suffix hash this scan computes for such a function can
+                # differ from the hash its own compile actually used —
+                # producing an honest undefined-symbol link/dlopen failure
+                # for THAT function specifically, not the silent wrong-value
+                # weak-stub binding this whole fix (see bugs/DYLIB_sibling_
+                # import_calls_bind_to_weak_stubs.md) addresses for ordinary
+                # (scalar-signature) functions. A local `struct Name` pre-
+                # scan promoting such params to `Name *` was tried and
+                # reverted: while it fixes the HASH, the extern declaration
+                # text this scan emits into a DIFFERENT file's own
+                # translation unit then references `Name` as a bare type
+                # with no typedef/forward-declaration visible there (the
+                # established convention for a genuinely cross-TU struct
+                # reference this codebase already uses elsewhere — see
+                # gimple_codegen.py's Span/StringSlice handling in
+                # `_mojo_type_to_c` — is an opaque int64_t handle, not the
+                # literal struct pointer type), which broke unrelated,
+                # previously-working cross-module calls elsewhere in the
+                # same file (confirmed: box.3d/game/lib/game_ffi.mojo
+                # regressed from a clean build to "unknown type name
+                # 'World'" compile errors). Solving this correctly needs the
+                # real struct-materialization machinery (_find_imported_
+                # struct / struct_field_types) this text scan deliberately
+                # doesn't have — out of scope here; left as an honest
+                # (link-time, not silent) failure for that narrower case.
 
                 for line in src_content.split('\n'):
                     line = line.strip()
@@ -423,11 +483,12 @@ class ModuleLoader:
                     except Exception:
                         pass
 
-            self.loaded_modules[module_name] = exports
+            self._path_cache[path] = exports
             return exports
 
         except Exception:
             # Gracefully handle parse errors
+            self._path_cache[path] = {}
             return {}
 
     @staticmethod
@@ -562,6 +623,12 @@ _module_loader = ModuleLoader()
 def load_module(module_name: str) -> dict:
     """Load a module and get its exported symbols."""
     return _module_loader.load_module(module_name)
+
+
+def load_module_from_path(path: str) -> dict:
+    """Load a module's exported symbols from an arbitrary file path (no
+    STDLIB_PATH/TEST_PATH restriction — see ModuleLoader.load_module_from_path)."""
+    return _module_loader.load_module_from_path(path)
 
 
 def get_symbol_type(module_name: str, symbol_name: str) -> str:
