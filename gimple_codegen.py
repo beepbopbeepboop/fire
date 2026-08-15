@@ -6610,18 +6610,41 @@ class GimpleGen:
             if actual == 'char':
                 cv = self._new_val('char', f'(char){val}')
                 return 'char *', self._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
-            # An int64_t dict key is a BOXED char* pointer in this codegen's
-            # storage convention (the runtime's dict keys are always strings),
-            # not a raw char byte — the OLD check (any int64_t with no pointer
-            # record → char) truncated a named local whose pointer type wasn't
-            # tracked (e.g. `name = node.name` from the A5 getattr) to a
-            # single byte, so `name in self.var_types` looked up the low byte
-            # of the pointer as the key and ALWAYS missed — every dict
-            # membership test silently returned False in the compiled binary
-            # (and `x in ...` reads fell back to the int64_t-0 default, so
-            # `return x` on a stored local returned 0).
-            ip = self._new_val('int64_t', f'(int64_t){val}')
-            return 'char *', self._new_val('char *', f'(char *){ip}')
+            if actual is not None and actual.endswith(' *'):
+                # A KNOWN-boxed pointer (a char*/MojoDict*/... value that was
+                # type-erased through an int64_t slot elsewhere in this
+                # codegen's dynamic-typing convention, tracked explicitly in
+                # _actual_types — e.g. `name = node.name` from the A5
+                # getattr, where `name` really is a string pointer that was
+                # never re-typed as char*) — round-trip the bit pattern back
+                # instead of stringifying it. The OLD check (any int64_t with
+                # no pointer record → char) truncated such a local to a
+                # single byte, so `name in self.var_types` looked up the low
+                # byte of the pointer as the key and ALWAYS missed.
+                ip = self._new_val('int64_t', f'(int64_t){val}')
+                return 'char *', self._new_val('char *', f'(char *){ip}')
+            # No tracked boxed-pointer origin: this is a genuine numeric Int
+            # dict key (e.g. `Dict[Int, V]`'s `d[k] = v` / `k in d` / `d[k]`)
+            # — convert it to its decimal string, the same way
+            # _lower_dict_literal already does for literal `{intkey: v}`
+            # pairs (see its own comment: "Int key 0 -> '0' instead of
+            # C-casting the int to char* which produces NULL for 0"). Every
+            # OTHER dict-key site (subscript get/set/augmented-assign/`in`/
+            # comprehension) used to skip that conversion and just
+            # bit-reinterpret the int as a pointer — NULL for 0 (an
+            # immediate SIGSEGV the instant the runtime strdup()s/strcmp()s
+            # it), a wild unmapped read for any other small int. The
+            # previous default here (assume boxed pointer whenever
+            # _actual_types has no entry) was backwards: an untracked
+            # int64_t is overwhelmingly a real Int, not a pointer — every
+            # genuinely-boxed-pointer case in this codegen explicitly
+            # registers itself in _actual_types (see the call sites above).
+            # Found via box.3d/game/lib/recipes.mojo's
+            # `var _fuel_burn_times: Dict[Int, Int] = {}` — `init_recipes()`
+            # crashed with `strdup(NULL)` inside `_dict_set_raw_seq` on the
+            # very first `_fuel_burn_times[item_id] = ...` (item_id was a
+            # genuine, tracked-nowhere `Int` value of 0).
+            return 'char *', self._new_val('char *', f'mojo_str_from_int({val})')
         if typ != 'char *':
             return 'char *', self._new_val('char *', f'(char *){val}')
         return typ, val
@@ -17761,12 +17784,11 @@ class GimpleGen:
             vt, vv = self.lower_expr(node.key)        # key field holds the value expression
             # parser stores dict comprehension as: element=key_expr, key=val_expr
             # Dict keys are char* in the runtime: coerce the key to a char* local
-            # (handles a non-char* key, e.g. one boxed as int64_t, and loads
-            # global string literals into locals first).
+            # via _char_to_cstr (handles a non-char* key — e.g. a genuine Int
+            # key, stringified via mojo_str_from_int, or one actually boxed as
+            # int64_t — and loads global string literals into locals first).
             if kt != 'char *':
-                kv_tmp = self._new_temp('char *')
-                self._safe_coerce_emit(kt, 'char *', kv, kv_tmp)
-                kv = kv_tmp
+                kt, kv = self._char_to_cstr(kt, kv)
             elif kv.startswith('_slit_'):
                 kv_tmp = self._new_val('char *', f"{kv}")
                 kv = kv_tmp
@@ -18858,9 +18880,10 @@ class GimpleGen:
                 # once self-hosted.
                 if vtype in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *') or vtype.endswith(' *'):
                     self._dict_val_types[obj_v] = vtype
-                # dict[key] = val → mojo_dict_set_str_*
-                key_tmp = self._new_temp('char *')
-                self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
+                # dict[key] = val → mojo_dict_set_str_* (key coerced via
+                # _char_to_cstr, the single dict-key-to-string conversion
+                # used by both read and write sides — see its docstring).
+                _, key_tmp = self._char_to_cstr(it, idx_v)
                 if vtype == 'char *':
                     self._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
@@ -18903,8 +18926,7 @@ class GimpleGen:
                         dp = self._new_temp('MojoDict *')
                         self._emit(f"  {ip} = (int64_t){obj_v};")
                         self._emit(f"  {dp} = (MojoDict *){ip};")
-                        key_tmp2 = self._new_temp('char *')
-                        self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                        _, key_tmp2 = self._char_to_cstr(it, idx_v)
                         if isinstance(node.value, BoolLiteral):
                             self._emit(f"  mojo_mark_dict_bool_values ({dp});")
                         # Pass actual vtype so _emit_call can coerce pointers to int64_t
@@ -19119,8 +19141,7 @@ class GimpleGen:
                 # on a dict pointer — invalid GIMPLE, "non-register as LHS of
                 # unary operation". Found via mojolib BUG-2026-031: a closure
                 # capturing an outer dict and doing `counts[key] += 1` inside it.
-                key_tmp = self._new_temp('char *')
-                self._safe_coerce_emit(it, 'char *', idx_v, key_tmp)
+                _, key_tmp = self._char_to_cstr(it, idx_v)
                 if vtype == 'char *':
                     self._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
@@ -19138,8 +19159,7 @@ class GimpleGen:
                     dp = self._new_temp('MojoDict *')
                     self._emit(f"  {ip} = (int64_t){obj_v};")
                     self._emit(f"  {dp} = (MojoDict *){ip};")
-                    key_tmp2 = self._new_temp('char *')
-                    self._safe_coerce_emit(it, 'char *', idx_v, key_tmp2)
+                    _, key_tmp2 = self._char_to_cstr(it, idx_v)
                     if vtype == 'char *':
                         self._emit_call('void', '', 'mojo_dict_set_str',
                                         [('MojoDict *', dp), ('char *', key_tmp2), ('char *', v)])
@@ -19637,8 +19657,7 @@ class GimpleGen:
                     ev_cast = self._cast_for_list(vtype, v, suf)
                     self._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
                 elif ot == 'MojoDict *':
-                    key_tmp = self._new_temp('char *')
-                    self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp)
+                    _, key_tmp = self._char_to_cstr(it2, idx_v)
                     if isinstance(node.value, BoolLiteral):
                         self._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                     self._emit_call('void', '', 'mojo_dict_set_int',
@@ -19660,8 +19679,7 @@ class GimpleGen:
                         dp = self._new_temp('MojoDict *')
                         self._emit(f"  {ip} = (int64_t){obj_v};")
                         self._emit(f"  {dp} = (MojoDict *){ip};")
-                        key_tmp2 = self._new_temp('char *')
-                        self._safe_coerce_emit(it2, 'char *', idx_v, key_tmp2)
+                        _, key_tmp2 = self._char_to_cstr(it2, idx_v)
                         if isinstance(node.value, BoolLiteral):
                             self._emit(f"  mojo_mark_dict_bool_values ({dp});")
                         self._emit_call('void', '', 'mojo_dict_set_int',
