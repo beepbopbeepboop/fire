@@ -4143,30 +4143,6 @@ class GimpleGen:
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
         self.func_param_types: dict[str, list[str]] = {}  # func_name → [param_ctype, ...]
-        # Overload-suffix-hash-ONLY override for specific bare names (see
-        # `_overload_suffix`). Populated exclusively by the local-sibling-
-        # module import registration path (bugs/DYLIB_sibling_import_calls_
-        # bind_to_weak_stubs.md's "still broken" follow-on) when a scanned
-        # sibling function has a parameter typed as a struct DEFINED IN that
-        # sibling file: the real extern declaration text (func_param_types /
-        # imported_symbols[...]['signature']) must keep the opaque `int64_t`
-        # placeholder module_loader.py's text scanner already emits for such
-        # a param (no visible typedef exists in THIS translation unit for a
-        # struct genuinely defined in another file — the previously-reverted
-        # fix attempt's mistake was literally emitting the struct pointer
-        # type there), but the HASH must use the SAME canonical parameter
-        # type string the struct's home module's own standalone compile uses
-        # for ITS OWN identical hash computation (`<StructName> *`, via
-        # `_resolve_type`) — or the two independently-computed overload-
-        # suffix hashes disagree and the call site's qualified symbol never
-        # matches the real compiled-in definition (an honest but unnecessary
-        # undefined-symbol link failure). Keeping this a SEPARATE dict from
-        # func_param_types (rather than overwriting it) is deliberate: every
-        # other consumer of func_param_types (extern declaration text,
-        # call-site argument coercion, ...) must keep seeing the safe opaque
-        # `int64_t` type, since this module's own translation unit has no
-        # typedef for the cross-file struct to reference.
-        self._func_param_types_for_hash: dict[str, list[str]] = {}
         self._global_inline_defs: set[str] = set()   # all func names with inline definitions (shared)
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
         self._emitted_allocs: set[str] = set()       # struct names for which _alloc_ was already emitted
@@ -22608,15 +22584,7 @@ class GimpleGen:
         return f'_{h}'
 
     def _overload_suffix(self, bare_name: str) -> str:
-        # `_func_param_types_for_hash` (see its own docstring) wins when
-        # present — a local-sibling cross-file-struct-param function whose
-        # real extern declaration must keep the opaque int64_t placeholder
-        # but whose HASH must match the struct's home module's own real
-        # (struct-pointer-typed) computation.
-        types = self._func_param_types_for_hash.get(bare_name)
-        if types is None:
-            types = self.func_param_types.get(bare_name)
-        return self.overload_suffix_for(types)
+        return self.overload_suffix_for(self.func_param_types.get(bare_name))
 
     def _note_own_func_home(self, bare_name: str, module_name: str,
                             record_scope: bool = True) -> None:
@@ -31476,42 +31444,6 @@ class GimpleGen:
                                     ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
                                     for cp in (sym_info.get('c_parameters') or [])
                                 ]
-                                # Hash-only override for a parameter whose raw
-                                # Mojo type is a struct DEFINED DIRECTLY in
-                                # this sibling module: module_loader's text
-                                # scan can't see the definition and defaults
-                                # such a param to `int64_t` (kept above, in
-                                # func_param_types, for the extern's real
-                                # declaration text — this file has no
-                                # typedef for that struct to reference), but
-                                # the struct's home module's own standalone
-                                # compile resolves the SAME parameter to
-                                # `<Name> *` via _resolve_type (struct_
-                                # field_types lookup) and hashes THAT into
-                                # its overload suffix. Resolve via
-                                # _find_imported_struct — the same real-
-                                # parser-based lookup _register_imported_
-                                # struct_typedefs/_find_generic_source already
-                                # use for cross-module struct references, not
-                                # a text-only guess — so this only fires for
-                                # a genuine `struct <Name>:` in the sibling
-                                # file, never a false positive on an ordinary
-                                # scalar/builtin type name.
-                                _raw_params = sym_info.get('parameters') or []
-                                if _raw_params:
-                                    _hash_types = list(self.func_param_types[sym_name])
-                                    _changed = False
-                                    for _pidx, (_pn, _pt) in enumerate(_raw_params):
-                                        if _pidx >= len(_hash_types):
-                                            break
-                                        _bare = _pt.split('=')[0].strip().split('[')[0].strip()
-                                        if not _bare or not _bare[0].isalpha():
-                                            continue
-                                        if self._find_imported_struct(s.module, _bare) is not None:
-                                            _hash_types[_pidx] = f"{_bare} *"
-                                            _changed = True
-                                    if _changed:
-                                        self._func_param_types_for_hash[sym_name] = _hash_types
                         if _sib_qualifier and sym_info:
                             self._note_own_func_home(sym_name, _sib_qualifier)
                     try:
