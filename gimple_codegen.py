@@ -31621,6 +31621,41 @@ class GimpleGen:
                     exports = load_module(s.module)
                 except Exception:
                     exports, _sib_qualifier = self._local_sibling_module_exports(s.module)
+                # Whether `s.module` resolved to a file genuinely OUTSIDE the
+                # tracked stdlib/test trees — i.e. a real local PROJECT
+                # sibling (base/chest.mojo, this whole mechanism's actual
+                # target — see bugs/DYLIB_sibling_import_calls_bind_to_weak_
+                # stubs.md), not a stdlib-internal relative import that
+                # merely failed the bare `load_module(s.module)` call above
+                # because that call doesn't resolve leading-dot relative
+                # module strings itself (unlike `_emit_stdlib_import_
+                # externs`'s own explicit dot-resolution) even though the
+                # module IS a real, already-tracked stdlib file. Confirmed
+                # via std/pwd/__init__.mojo's `from .pwd import getpwnam,
+                # getpwuid`: `.pwd` hits this same `_local_sibling_module_
+                # exports` fallback (`_sib_qualifier` gets set) purely
+                # because of that dot-resolution gap, and `_emit_stdlib_
+                # import_externs` (Phase 0, run earlier) ALSO independently
+                # registers an extern for the SAME qualified symbol —
+                # harmless while both computed the same generic `int64_t`
+                # default, but a hard "conflicting types" compile error once
+                # the struct/return-type corrections below started
+                # resolving ONE of the two declarations to the real
+                # `Passwd *` while the other stayed stale. Scoping these
+                # corrections to genuine non-stdlib project files avoids
+                # this pre-existing dual-registration hazard entirely rather
+                # than trying to reconcile two independently-maintained
+                # extern-emission passes.
+                _sib_is_local_project = False
+                if _sib_qualifier:
+                    try:
+                        import module_loader as _mlmod_chk
+                        _sib_path0 = self._parsed_import(s.module)[0]
+                        _sib_is_local_project = bool(_sib_path0) and not (
+                            _sib_path0.startswith(_mlmod_chk.STDLIB_PATH)
+                            or _sib_path0.startswith(_mlmod_chk.TEST_PATH))
+                    except Exception:
+                        _sib_is_local_project = False
                 if exports is not None:
                     def _register_sym(sym_name, orig_name, sym_info):
                         if sym_name in self.struct_field_types:
@@ -31669,11 +31704,113 @@ class GimpleGen:
                             sym_info['module'] = s.module
                             sym_info['original_name'] = orig_name
                             self.imported_symbols[sym_name] = sym_info
+                            _ret_changed = False
+                            # A leading-underscore ORIGINAL name (e.g.
+                            # std/pwd/_macos.mojo's `_getpw_macos`) is NOT
+                            # exported by reflect.py's dylib-reflection table
+                            # (module_loader.py's own `_mojo_type_to_c`
+                            # docstring documents this — BUG-2026-036), so a
+                            # call site importing one is resolved through a
+                            # SEPARATE mechanism that computes its own extern
+                            # declaration independently of `sym_info`/
+                            # `imported_symbols` (confirmed: std/pwd/pwd.mojo
+                            # emits TWO differently-guarded externs for
+                            # `_getpw_macos` — one from this loop, one from
+                            # that other path — that happened to coincide on
+                            # the generic `int64_t`/`(...)` default before
+                            # this fix and diverge, a hard "conflicting
+                            # types" compile error, once this loop alone
+                            # started resolving its real `Passwd *` return
+                            # type). Correcting the type on only ONE of two
+                            # independently-emitted declarations for the same
+                            # symbol is unsafe by construction (exactly the
+                            # "two sides compute different signatures for one
+                            # symbol" class of bug this whole fix exists to
+                            # avoid) — leave leading-underscore names exactly
+                            # as module_loader's scan computed them, matching
+                            # `_register_imported_structs`'s own established
+                            # `nm.startswith('_')` skip for the same class of
+                            # name.
+                            if orig_name.startswith('_'):
+                                pass
+                            elif _sib_is_local_project and sym_info.get('return_type'):
+                                # Mirror the parameter-type correction below,
+                                # but for the sibling function's own RETURN
+                                # type — e.g. base/chest.mojo's `Chest_new()
+                                # -> Chest`. Left uncorrected, module_loader's
+                                # text-only scan defaults an unrecognized
+                                # `Chest` return type to plain int64_t, so a
+                                # caller's `c := Chest_new()` types `c` as a
+                                # bare scalar — NOT a `Chest *` — and a
+                                # subsequent local `c.s0_id = 5` then lowers
+                                # to a DYNAMIC `_mojo_dispatch_setattr` call
+                                # (the generic "unknown struct type" fallback)
+                                # instead of a real struct field write.
+                                # Meanwhile a later call whose PARAMETER type
+                                # WAS corrected (chest_total_count(c, ...))
+                                # casts that same `c` to a real `Chest *` and
+                                # reads its fields directly — a different
+                                # storage path than the dynamic setattr wrote
+                                # to, so the read silently comes back as the
+                                # zero-initialized default instead of the
+                                # value just assigned. No crash, no link
+                                # error — just a silently wrong value
+                                # (confirmed via `Chest_new()` + direct
+                                # `c.s0_id = 5`/`c.s0_count = 10` field writes
+                                # + `chest_total_count(c, 5)`: real Mojo/the
+                                # interpreter both return the correct `10`;
+                                # this gap alone made the compiled dylib path
+                                # return `0`). Correcting `c_return_type` here
+                                # (before it's read into func_return_types
+                                # just below, and before this loop's own
+                                # parameter/signature correction further down
+                                # rebuilds `signature` from it) makes both the
+                                # WRITE side (real struct field assignment,
+                                # once `c`'s real type is known) and the READ
+                                # side (already correct) agree on the same
+                                # real struct memory.
+                                _resolved_ret = self._resolve_sibling_param_ctype(
+                                    s.module, sym_info['return_type'])
+                                if _resolved_ret:
+                                    sym_info['c_return_type'] = _resolved_ret
+                                    _ret_changed = True
                             if 'c_return_type' in sym_info:
                                 self.func_return_types[sym_name] = sym_info['c_return_type']
-                            if (_sib_qualifier and sym_info.get('parameters')
-                                    and sym_info.get('c_parameters')
-                                    and len(sym_info['parameters']) == len(sym_info['c_parameters'])):
+                            if sym_info.get('variadic'):
+                                # An OVERLOADED sibling name (module_loader's
+                                # scan can't represent multiple real
+                                # signatures under one name, so it collapses
+                                # them to a variadic `name(...)` accepting
+                                # any arity — e.g. std/pwd/_macos.mojo's
+                                # `_getpw_macos` is defined twice, once per
+                                # parameter type) has an intentionally EMPTY
+                                # `parameters`/`c_parameters` and a `(...)`
+                                # signature — that emptiness is not "zero
+                                # arguments", so the parameter-correction
+                                # block below (keyed on `parameters`/
+                                # `c_parameters` having equal, iterable
+                                # length) must never treat it as a genuine
+                                # zero-arg function and rebuild `signature`
+                                # as `Name ()` (found via std/pwd/pwd.mojo
+                                # regressing to "too many arguments to
+                                # function ... expected 0, have 1" once the
+                                # RETURN type correction below started firing
+                                # for these two purely by virtue of returning
+                                # a struct, `Passwd`, independent of the
+                                # variadic-arity gap). Only rebuild the
+                                # signature's RETURN type here, preserving
+                                # the `(...)` marker verbatim.
+                                if _ret_changed:
+                                    sym_info['signature'] = (
+                                        f"{sym_info.get('c_return_type', 'int64_t')} "
+                                        f"{orig_name} (...)")
+                            elif (_sib_is_local_project and not orig_name.startswith('_')
+                                    and sym_info.get('c_parameters') is not None
+                                    and len(sym_info.get('parameters') or []) == len(sym_info['c_parameters'])
+                                    and (sym_info.get('parameters') or _ret_changed)):
+                                # (leading-underscore names excluded — see the
+                                # matching skip on the return-type correction
+                                # above, same dual-extern-declaration reason.)
                                 # A sibling function's OWN parameter may be
                                 # typed with a struct defined in ITS module
                                 # (e.g. base/chest.mojo's `chest_total_count(c:
@@ -31732,10 +31869,19 @@ class GimpleGen:
                                 # honest, unresolvable case keeps today's
                                 # honest link-failure behavior, never a
                                 # guess).
+                                # (Also reached, with an empty `parameters`
+                                # list, when only the RETURN type changed —
+                                # see `_ret_changed` above and its own
+                                # docstring-length comment just above this
+                                # block for why a zero-argument function like
+                                # `Chest_new() -> Chest` still needs its
+                                # `signature` text rebuilt here, not only
+                                # `c_return_type`.)
                                 _new_c_params = []
                                 _params_changed = False
                                 for (_p_name, _p_raw_type), _c_param in zip(
-                                        sym_info['parameters'], sym_info['c_parameters']):
+                                        sym_info.get('parameters') or [],
+                                        sym_info['c_parameters']):
                                     _resolved_ctype = self._resolve_sibling_param_ctype(
                                         s.module, _p_raw_type)
                                     if _resolved_ctype:
@@ -31745,7 +31891,7 @@ class GimpleGen:
                                         _params_changed = True
                                     else:
                                         _new_c_params.append(_c_param)
-                                if _params_changed:
+                                if _params_changed or _ret_changed:
                                     sym_info['c_parameters'] = _new_c_params
                                     _c_ret = sym_info.get('c_return_type', 'int64_t')
                                     _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
@@ -35701,6 +35847,56 @@ class GimpleGen:
                     global_decls.append(f"int64_t {gname};  /* {_ctype} */")
                     self._global_var_types[gname] = _ctype
                     self._global_c_decl_types[gname] = 'int64_t'
+                elif isinstance(_gv, CallExpr) and isinstance(_gv.func, IdentExpr):
+                    # `var g_world = engine_create_world()` — a general
+                    # user-function call (not a list()/dict()/set() literal
+                    # constructor, handled above), whose return type may be
+                    # a real struct pointer. This VarDecl-with-value inline
+                    # scan (distinct from, and previously missing the
+                    # CallExpr branch that, its sibling `_gscan_declare_
+                    # global` function above already has — that function is
+                    # only reached from the separate AssignStmt-based global
+                    # scan, never from this VarDecl one) fell all the way
+                    # through to the final "else: int gname;" catch-all for
+                    # ANY function-call initializer, unconditionally
+                    # declaring the struct field `int` regardless of the
+                    # function's real return type. Harmless while every
+                    # cross-module struct-typed consumer ALSO defaulted to a
+                    # generic int64_t/int placeholder (a self-consistent,
+                    # if imprecise, world) — but once a sibling function's
+                    # OWN parameter type is correctly resolved to a real
+                    # struct pointer (see _resolve_sibling_param_ctype /
+                    # the "Process imports" loop's return-type correction
+                    # above), a global initialized this way and then passed
+                    # to such a function mismatches: "assignment to 'World
+                    # *' from 'int' makes pointer from integer without a
+                    # cast" (confirmed via box.3d/game/lib/game_ffi.mojo's
+                    # real `var g_world = engine_create_world()` +
+                    # `engine_place_block(g_world, ...)`). Mirrors
+                    # `_gscan_declare_global`'s own CallExpr branch exactly
+                    # (same struct_field_types / func_return_types / char*
+                    # / generic-int64_t rules) rather than inventing a new
+                    # rule, so both scans agree on any name they might both
+                    # eventually see.
+                    if _gv.func.name in self.struct_field_types:
+                        _struct_name = _gv.func.name
+                        global_decls.append(f"{_struct_name} * {gname};")
+                        self._global_var_types[gname] = f"{_struct_name} *"
+                        self._global_c_decl_types[gname] = f"{_struct_name} *"
+                    else:
+                        _ret = self.func_return_types.get(_gv.func.name, '')
+                        if _ret.endswith(' *'):
+                            global_decls.append(f"{_ret} {gname};")
+                            self._global_var_types[gname] = _ret
+                            self._global_c_decl_types[gname] = _ret
+                        elif _ret == 'char *':
+                            global_decls.append(f"char * {gname};")
+                            self._global_var_types[gname] = 'char *'
+                            self._global_c_decl_types[gname] = 'char *'
+                        else:
+                            global_decls.append(f"int64_t {gname};")
+                            self._global_var_types[gname] = 'int64_t'
+                            self._global_c_decl_types[gname] = 'int64_t'
                 elif isinstance(_gv, (IntLiteral, BoolLiteral)):
                     global_decls.append(f"int {gname};")
                     self._global_var_types[gname] = 'int'
