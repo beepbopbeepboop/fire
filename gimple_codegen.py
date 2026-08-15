@@ -34572,6 +34572,107 @@ class GimpleGen:
                         self._global_to_module[_gname] = _phase17_mod
                     self._global_var_types[_gname] = _gtype
 
+        # A module-level `var g: list()` / `var g = list()` (no literal
+        # elements ever — the empty-at-declaration idiom, e.g. box.3d/
+        # game/lib/recipes.mojo's `g_item_names`/`g_item_ids`) has NO
+        # element type any of the branches above can see: they only ever
+        # look at the declaration's own literal elements (`_elt =
+        # self._quick_type(_value.elements[0])` above), and an empty/
+        # constructor-call declaration has none. Such a global is
+        # populated exclusively via `.append(...)` calls in some OTHER
+        # function (e.g. `register_item_name`), read via subscript/`in`/
+        # iteration in yet another (e.g. `_name_to_id`) — cross-function,
+        # usage-only element-type inference that nothing above attempts.
+        # Left unresolved, `_elem_types`/`_global_elem_types` stays empty
+        # for these globals and every later list-element codegen path
+        # (_lower_subscript's list-get, `.append` itself, `for x in g:`)
+        # falls back to its int64_t default: every STRING actually
+        # `.append()`-ed gets correctly stored via `mojo_list_append_str`
+        # (append lowering resolves the element type from the ARGUMENT's
+        # own type, not the global's), but every READ instead did
+        # `(char)mojo_list_get_int(...)` — truncating the stored string
+        # POINTER to its low byte and reinterpreting that single byte as
+        # a 1-char string. `len()` and the append itself are unaffected
+        # (the list is genuinely shared/populated correctly — only
+        # element READS silently misread), which is exactly why this
+        # shape is easy to miss: nothing crashes, nothing is empty, only
+        # every stored value reads back wrong. See box.3d/game/bugs/
+        # DYLIB_dict_int_key_strdup_null.md's final section.
+        #
+        # Fix: for every global already known to be a MojoList* (boxed
+        # int64_t at the C storage level) that STILL has no element type
+        # after the scan above, walk the ENTIRE module (own + imported,
+        # matching _phase17_stmts' own scope — an appending function need
+        # not be textually before its global's declaration) looking for
+        # `<name>.append(<expr>)` call sites anywhere, including nested
+        # inside other functions/if/while/for/try/with bodies, and
+        # TypeLattice.join the argument's _quick_type across every site
+        # found. Mirrors _infer_local_var_types' own param-seeding
+        # pattern: since this runs before Phase 2a populates var_types
+        # per-function, a function's own annotated parameters (e.g.
+        # `name: String`) must be seeded temporarily so `_quick_type` of
+        # a bare identifier argument (`g_item_names.append(name)`)
+        # resolves to 'char *' instead of falling through to the int64_t
+        # "unknown identifier" default.
+        def _phase17_collect_appends(_node_list, _append_hits):
+            for _n in _node_list:
+                if (isinstance(_n, ExprStmt)
+                        and isinstance(_n.value, CallExpr)
+                        and isinstance(_n.value.func, MemberExpr)
+                        and _n.value.func.member == 'append'
+                        and isinstance(_n.value.func.obj, IdentExpr)
+                        and len(_n.value.args) == 1):
+                    # Resolve the argument's type NOW, while self.var_types
+                    # still carries whatever function-parameter seeding is
+                    # active for this call site (see the FunctionDef branch
+                    # below) -- deferring to a later pass (after that seeding
+                    # has been restored) would silently lose it and infer
+                    # every string-typed parameter argument as int64_t again.
+                    _append_hits.setdefault(_n.value.func.obj.name, []).append(
+                        self._quick_type(_n.value.args[0]))
+                if isinstance(_n, FunctionDef):
+                    _saved = self.var_types
+                    self.var_types = dict(_saved)
+                    for _pname, _ptype in (_n.params or []):
+                        if _ptype:
+                            self.var_types[_pname] = _mojo_type(_ptype)
+                    _phase17_collect_appends(_n.body or [], _append_hits)
+                    self.var_types = _saved
+                elif isinstance(_n, IfStmt):
+                    _phase17_collect_appends(_n.then_body or [], _append_hits)
+                    if _n.else_body:
+                        _phase17_collect_appends(_n.else_body, _append_hits)
+                    for _cond2, _ebody2 in (_n.elifs or []):
+                        _phase17_collect_appends(_ebody2 or [], _append_hits)
+                elif isinstance(_n, (WhileStmt, ForStmt)):
+                    _phase17_collect_appends(_n.body or [], _append_hits)
+                    if getattr(_n, 'else_body', None):
+                        _phase17_collect_appends(_n.else_body, _append_hits)
+                elif isinstance(_n, TryStmt):
+                    _phase17_collect_appends(_n.body or [], _append_hits)
+                    for _h in (_n.handlers or []):
+                        _phase17_collect_appends(getattr(_h, 'body', None) or [], _append_hits)
+                    if isinstance(_n.else_body, list):
+                        _phase17_collect_appends(_n.else_body, _append_hits)
+                    if isinstance(getattr(_n, 'finally_body', None), list):
+                        _phase17_collect_appends(_n.finally_body, _append_hits)
+                elif isinstance(_n, WithStmt):
+                    _phase17_collect_appends(_n.body or [], _append_hits)
+
+        _phase17_append_hits: dict = {}
+        _phase17_collect_appends(_phase17_stmts, _phase17_append_hits)
+        for _gname, _gargs in _phase17_append_hits.items():
+            if self._global_var_types.get(_gname) != 'MojoList *':
+                continue
+            if _gname in self._global_elem_types:
+                continue
+            _elt = None
+            for _at in _gargs:
+                _elt = _at if _elt is None else TypeLattice.join(_elt, _at)
+            if _elt:
+                self._elem_types[_gname] = _elt
+                self._global_elem_types[_gname] = _elt
+
         # Also scan ImportStmts inside TryStmt/IfStmt blocks (e.g., try: import mojo_compiler)
         # These are missed by the flat scan above.
         def _scan_try_imports(stmt_list):
