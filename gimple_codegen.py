@@ -33740,6 +33740,44 @@ class GimpleGen:
             elif isinstance(_value, StringLiteral):
                 return 'char *'
             elif isinstance(_value, CallExpr):
+                # `g_mod = dict()` / `g_list = list()` / `g_set = set()` — a
+                # constructor CALL, not a `{...}`/`[...]`/`{elem, ...}`
+                # literal AST node, so none of the DictExpr/ListExpr/SetExpr
+                # branches above ever match it. Without this, it fell
+                # through to the generic IdentExpr-call branch just below,
+                # which only knows about USER functions (self.struct_field_types
+                # / self.func_return_types) — 'dict'/'list'/'set' are neither,
+                # so it silently defaulted to 'int64_t'. That wrong type,
+                # recorded here in Phase 1.7 (which runs BEFORE Phase 2a
+                # generates any function body), is what every function
+                # reading the global sees via _global_var_types at the time
+                # its OWN body is compiled — even though a separate, later
+                # "Module-level globals" pass (_gscan_declare_global's own
+                # sibling VarDecl branch) already special-cases this exact
+                # shape correctly, that pass runs AFTER Phase 2a and so never
+                # gets a chance to correct what function bodies already
+                # baked in. Symptom: a global dict/list/set populated via
+                # one function and read via `in`/subscript-get from another
+                # silently treated the read as a bare int64_t (the `_lower_
+                # in_dispatch`/subscript-get dispatch has no 'int64_t'
+                # branch, so `x in g_mod` always evaluated False and
+                # `g_mod[x]` always misread) even though a `for k in g_mod:`
+                # in the SAME function (a separate lowering path that
+                # defaults ambiguous globals to dict/falls back through
+                # _get_actual_type differently) still worked — see
+                # box.3d/game/bugs/DICT_global_rebound_lookup_miss_and_
+                # dylib_for_segv.md. Mirrors _quick_type's own _BUILTIN_CTORS
+                # map (kept as the single other place this exact mapping is
+                # spelled out; not merged into one shared table because
+                # _quick_type takes no `self` scan-context and is called in
+                # a different pass/signature — same reasoning as the
+                # existing three-way Phase-1.7/_gscan_declare_global/Module-
+                # level-globals split documented on those functions).
+                if (isinstance(_value.func, IdentExpr)
+                        and _value.func.name in ('dict', 'Dict', 'list', 'List', 'set', 'Set')):
+                    return {'dict': 'MojoDict *', 'Dict': 'MojoDict *',
+                            'list': 'MojoList *', 'List': 'MojoList *',
+                            'set': 'MojoSet *', 'Set': 'MojoSet *'}[_value.func.name]
                 if isinstance(_value.func, IdentExpr) and _value.func.name in self.struct_field_types:
                     return f"{_value.func.name} *"
                 elif isinstance(_value.func, IdentExpr):
@@ -34006,6 +34044,39 @@ class GimpleGen:
                             self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                         elif isinstance(_scan_stmt.value, StringLiteral):
                             self._global_var_types[_scan_stmt.name] = 'char *'
+                        elif (isinstance(_scan_stmt.value, CallExpr)
+                                and isinstance(_scan_stmt.value.func, IdentExpr)
+                                and _scan_stmt.value.func.name in ('dict', 'Dict', 'list', 'List', 'set', 'Set')):
+                            # `var g_mod = dict()` / `= list()` / `= set()` —
+                            # a constructor CALL, not a `{...}`/`[...]`
+                            # literal AST node, so none of the DictExpr/
+                            # ListExpr/SetExpr branches just above ever
+                            # matched it; it fell through to the generic
+                            # CallExpr branch below, which only recognizes
+                            # USER functions via self.func_return_types —
+                            # 'dict'/'list'/'set' aren't registered there, so
+                            # it silently defaulted to 'int64_t'. THIS branch
+                            # (Phase 1.7, which runs before Phase 2a generates
+                            # any function body) is what every function
+                            # reading the global actually sees — a separate,
+                            # correctly-special-cased "Module-level globals"
+                            # pass exists further down (_gscan_declare_global's
+                            # sibling VarDecl branch) but runs AFTER Phase 2a,
+                            # too late to fix what function bodies already
+                            # compiled against. See _phase17_value_type's
+                            # identical fix (this mirrors it exactly — kept
+                            # as a separate inline branch rather than calling
+                            # that helper here since this VarDecl scan also
+                            # needs to set _global_c_decl_types, which the
+                            # AssignStmt-oriented helper doesn't) and
+                            # box.3d/game/bugs/DICT_global_rebound_lookup_
+                            # miss_and_dylib_for_segv.md.
+                            self._global_var_types[_scan_stmt.name] = {
+                                'dict': 'MojoDict *', 'Dict': 'MojoDict *',
+                                'list': 'MojoList *', 'List': 'MojoList *',
+                                'set': 'MojoSet *', 'Set': 'MojoSet *',
+                            }[_scan_stmt.value.func.name]
+                            self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                         elif isinstance(_scan_stmt.value, CallExpr):
                             if isinstance(_scan_stmt.value.func, IdentExpr):
                                 ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
