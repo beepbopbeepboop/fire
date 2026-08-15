@@ -14355,15 +14355,41 @@ class GimpleGen:
             # parameter, unconditionally.
             _gen_kwargs = getattr(node, 'kwargs', []) or []
             _gen_expected = self.func_param_types.get(f"{api['base']}_start", [])
+            # Which C-signature slot (if any) is this generator function's
+            # OWN `**kwargs` parameter — see _func_kwargs_slot's docstring.
+            # A literal keyword argument destined for that slot must be
+            # PACKED into a real MojoDict (via _pack_kwargs_dict), exactly
+            # like _lower_named_call's identical `_kwslot_for_pack` handling
+            # for ordinary (non-generator) functions — mirrored here rather
+            # than duplicated differently. Without this, the loop below
+            # (before this fix) just popped the next literal keyword
+            # argument's raw lowered VALUE into whichever slot came next in
+            # sequence, with no awareness that one particular slot is a
+            # `MojoDict *`: `gen_forward(3, b=5)` emitted `_t4 = (MojoDict
+            # *)_t3` — the integer 5 reinterpreted as a dict pointer —
+            # which segfaults the moment the generator body reads its own
+            # `**kwargs` (same failure shape as the bug _func_kwargs_slot's
+            # own docstring documents for the ordinary call path; found via
+            # the coroutine-body `**kwargs`-forwarding repro in bugs/
+            # COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md, whose
+            # `gen_forward(3, b=5)` top-level call site hit this exact bug
+            # even before reaching the generator BODY's own separately
+            # fixed `**kwargs`-forwarding).
+            _gen_kwslot = self._func_kwargs_slot.get(
+                fname_raw, self._func_kwargs_slot.get(f"{api['base']}_start", -1))
             if _gen_expected and len(arg_pairs) < len(_gen_expected):
                 _gen_kwarg_dict = {kn: self.lower_expr(ke) for kn, ke in _gen_kwargs}
                 _gen_kwarg_values = list(_gen_kwarg_dict.values())
                 _gen_dflts = self._func_param_defaults.get(f"{api['base']}_start", [])
                 while len(arg_pairs) < len(_gen_expected):
+                    _pos = len(arg_pairs)
+                    if _gen_kwslot >= 0 and _pos == _gen_kwslot:
+                        arg_pairs.append(('MojoDict *', self._pack_kwargs_dict(_gen_kwarg_dict)))
+                        _gen_kwarg_values = []
+                        continue
                     if _gen_kwarg_values:
                         arg_pairs.append(_gen_kwarg_values.pop(0))
                         continue
-                    _pos = len(arg_pairs)
                     _dv = _gen_dflts[_pos][1] if _pos < len(_gen_dflts) else None
                     if _dv is not None:
                         arg_pairs.append(self._default_expr_to_pair(_dv))
@@ -24119,6 +24145,115 @@ class GimpleGen:
                 return sn
         return None
 
+    _cpp_kwfwd_counter: int = 0
+
+    def _cpp_try_kwargs_forward_call(self, e):
+        """Real runtime-lookup-based `**kwargs` forwarding for a compiled
+        generator/coroutine body call `f(pos..., **kwargs_var)`, where `f`
+        is a statically-known local free function that itself declares
+        `**kwargs`. See the call site's own comment (bugs/COMPILE_FAIL_
+        Tools_c-analyzer_c_analyzer___init__.md) for why a naive "pad the
+        gap with f's static defaults" fix is a WORKING WRONG ANSWER: it
+        ignores whatever the caller's kwargs dict actually contains at
+        runtime. This instead resolves each "gap" parameter (between the
+        given positional args and f's own `**kwargs` slot) with a genuine
+        `mojo_dict_contains`/`mojo_dict_pop_int` runtime lookup against a
+        COPY of the caller's dict — falling back to the static default only
+        when the key is genuinely absent — and forwards the copy's
+        unconsumed remainder into f's own `**kwargs` parameter. The dict is
+        copied (never mutated in place) because the spread variable may be
+        reused across further calls (e.g. this exact bug's `while i < n:
+        yield target(i, **kwargs)` loop — popping straight from the
+        caller's own dict on iteration 1 would silently lose the override
+        for iterations 2/3).
+
+        Only handles the narrow shape it can PROVE is exactly this:
+        `f`'s non-kwargs parameters are all either supplied positionally or
+        covered by a int64_t-typed static default, in that exact order,
+        with no `*args` in between (a real `*args` slot shifts positions in
+        a way this derivation doesn't attempt to untangle). Returns the
+        lowered C++ expression string, or None — never a guess — for
+        anything else, so the caller falls through to the existing honest
+        refusal.
+        """
+        fname_raw = e.func.name
+        spread = e.args[-1].operand
+        given = e.args[:-1]
+        # Only a statically-known LOCAL free function — never a dynamically
+        # obtained callee (a parameter/local holding a function value, e.g.
+        # codecs.py's `getincrementalencoder(encoding)(errors, **kwargs)`,
+        # or c_analyzer/__init__.py's own `parse_files=_parse_files`
+        # default-valued callable parameter), whose real parameter names/
+        # defaults can't be known at compile time.
+        if fname_raw not in self.func_param_types:
+            return None
+        # `fname_raw` must be an ORDINARY function with a real, directly-
+        # callable C symbol — never a generator/async function (compiled
+        # ones have no such symbol at all, only the `_start`/`_resume`/
+        # `_value` coroutine API; calling their mangled name directly is
+        # either a link error or, worse, an accidental collision), and
+        # never a struct method (no `self`, wrong call shape). Real
+        # instance: Tools/c-analyzer/c_analyzer/__init__.py's
+        # `iter_analysis_results` doing `iter_decls(filenames, **kwargs)`
+        # — `iter_decls` is itself a generator.
+        if fname_raw in self._generator_api or fname_raw in self._async_api:
+            return None
+        try:
+            fsym = self._func_csym(fname_raw)
+        except Exception:
+            fsym = fname_raw
+        kwslot = self._func_kwargs_slot.get(fsym, self._func_kwargs_slot.get(fname_raw, -1))
+        if kwslot < 0:
+            return None  # callee doesn't itself declare **kwargs
+        ctypes = self.func_param_types.get(fsym) or self.func_param_types.get(fname_raw) or []
+        if len(ctypes) <= kwslot:
+            return None
+        defaults = self._func_param_defaults.get(fsym) or self._func_param_defaults.get(fname_raw) or []
+        n_given = len(given)
+        if n_given > kwslot:
+            return None  # more positional args than f has non-kwargs params
+        n_required = kwslot - len(defaults)
+        if n_given < n_required:
+            return None  # a genuinely-required param wasn't supplied — can't safely guess
+        gap_defaults = defaults[max(0, n_given - n_required):]
+        if len(gap_defaults) != (kwslot - n_given):
+            return None  # shape doesn't line up cleanly (e.g. a real *args
+                          # in between) — don't guess, fall through to refusal
+        # Every gap param must be a plain int64_t slot — this narrow fix
+        # only has a real dict-pop primitive for int (mojo_dict_pop_int);
+        # a double/_Bool/pointer-typed gap param falls through to the
+        # honest refusal rather than mis-typing it.
+        gap_ctypes = ctypes[n_given:kwslot]
+        if any(ct != 'int64_t' for ct in gap_ctypes):
+            return None
+        given_vals = [self._cpp_expr(a) for a in given]
+        kwargs_val = self._cpp_expr(spread)
+        ret_ctype = self.func_return_types.get(fname_raw, 'int64_t')
+        # Register fname_raw so the .cpp preamble emits a real `extern "C"`
+        # forward declaration for it (see _cpp_module_func_refs' consumer
+        # a few thousand lines down) — without this, `target_5c8044` (the
+        # mangled C symbol) is referenced but never declared in this
+        # separately-compiled .cpp translation unit: "was not declared in
+        # this scope".
+        self._cpp_module_func_refs.add(fname_raw)
+        GimpleGen._cpp_kwfwd_counter += 1
+        uid = GimpleGen._cpp_kwfwd_counter
+        dict_var = f"_kwfwd{uid}"
+        lines = [f"MojoDict *{dict_var} = mojo_dict_copy((MojoDict *)({kwargs_val}));"]
+        call_args = list(given_vals)
+        for i in range(len(gap_defaults)):
+            pname, dflt_ast = gap_defaults[i]
+            _dt, dval = self._default_expr_to_pair(dflt_ast)
+            gap_var = f"_kwgap{uid}_{i}"
+            lines.append(
+                f'int64_t {gap_var} = mojo_dict_contains({dict_var}, "{pname}") '
+                f'? mojo_dict_pop_int({dict_var}, "{pname}") : (int64_t)({dval});')
+            call_args.append(gap_var)
+        call_args.append(dict_var)
+        lines.append(f"return {fsym}({', '.join(call_args)});")
+        body = ' '.join(lines)
+        return f"[&]() -> {ret_ctype} {{ {body} }}()"
+
     def _cpp_expr(self, e) -> str:
         if isinstance(e, IntLiteral):
             return str(e.value)
@@ -24363,6 +24498,33 @@ class GimpleGen:
             # instead of ever reaching one of those broken emission sites —
             # same family as bugs/hard/CODEGEN_generator_lambda_expr_
             # unsupported.md's existing LambdaExpr-argument refusal.
+            #
+            # One narrow, provably-safe exception: `f(pos..., **kwargs_var)`
+            # where `f` is a STATICALLY-KNOWN local free function (its real
+            # parameter names/defaults are known at compile time, unlike the
+            # codecs.py case above). See bugs/COMPILE_FAIL_Tools_c-analyzer_
+            # c_analyzer___init__.md — an earlier attempt at this special
+            # case (reverted, never merged) filled the "gap" between the
+            # given positional args and the callee's `**kwargs` slot with
+            # the callee's STATIC DEFAULT VALUES, ignoring what the caller's
+            # kwargs dict actually contains at runtime — `target(i,
+            # **kwargs)` with `kwargs={'b': 5}` silently computed `b=100`
+            # (the hardcoded default) instead of the real override `b=5`:
+            # a WORKING WRONG ANSWER, worse than an honest refusal.
+            # `_cpp_try_kwargs_forward_call` instead resolves each gap slot
+            # with a REAL runtime dict lookup (falling back to the static
+            # default only when the key is genuinely absent at runtime),
+            # and only ever fires when it can prove that's exactly right
+            # (see its own docstring for the full shape it requires) —
+            # returning None (never guessing) for anything else, which
+            # falls straight through to the honest refusal below.
+            if (isinstance(e.func, IdentExpr) and e.args
+                    and isinstance(e.args[-1], UnaryOp) and e.args[-1].op == '**'
+                    and not any(isinstance(a, UnaryOp) and a.op in ('*', '**')
+                                for a in e.args[:-1])):
+                _kwfwd = self._cpp_try_kwargs_forward_call(e)
+                if _kwfwd is not None:
+                    return _kwfwd
             if any(isinstance(a, UnaryOp) and a.op in ('*', '**') for a in e.args):
                 raise _UnsupportedGeneratorShape(
                     "a `*`/`**`-unpack call argument is not supported in a "
