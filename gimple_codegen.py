@@ -1862,6 +1862,44 @@ def _mojo_type(ann: str | type | None) -> str:
         # instead — see the argument-type check in _lower_method_call.
         # Unknown parameterized type — fall through to plain lookup
         ann = base
+    # Raw C-pointer annotation: `*Int8`, `*Int64`, `*Float32`, ... — Mojo's
+    # `@cdecl` bridge-function pointer-parameter syntax (`fn f(buf: *Int8)`),
+    # parsed by mojo_compiler.py's `_parse_type_ann_inner` as the literal
+    # text "*" + base-type-name (see its "Handle * prefix" branch). This is
+    # a DIFFERENT, concrete use of a leading '*' than the unbound generic
+    # variadic-type-pack placeholder (`*Ts`, `*T`) that also parses to the
+    # same "*"-prefixed shape — that placeholder's inner name is never a
+    # real _TYPE_MAP key (it's a type-parameter name like `Ts`/`T`/`T0`), so
+    # gating on an EXACT _TYPE_MAP hit (not a fallback/default resolution)
+    # distinguishes the two without misfiring on the generic case.
+    #
+    # Before this, `*Int8`/`*Int64` fell straight through to the plain
+    # `_TYPE_MAP.get(ann)` lookup below with the WHOLE "*Int8" string as the
+    # key (never a match) and silently defaulted to plain `int64_t` — same
+    # opaque scalar type as every other unresolved annotation. That made a
+    # `buf: *Int8` parameter indistinguishable, at the type-resolution
+    # layer, from a genuine boxed-int64_t handle. The real bug this caused:
+    # `buf[i] = data[i]` (`game/lib/game_ffi.mojo`'s `ffi_get_item_name`,
+    # and the same `out_id[] = ...`/`out_count[] = ...` pattern used by
+    # nearly every OTHER @cdecl bridge function in that file) lowers
+    # subscript-assignment on an `int64_t`-typed object through
+    # `_gen_stmt_Assign`'s "opaque int-typed container" fallback, which can
+    # only tell List from "default to Dict" — it has no third case for "a
+    # genuine raw pointer", so it silently emitted `mojo_dict_set_int(...)`
+    # against the caller's raw buffer pointer, an immediate EXC_BAD_ACCESS
+    # the moment that pointer wasn't itself a live MojoDict (real repro:
+    # `ffi_get_item_name(206, buf, 64)` segfaults inside `_dict_set_raw_seq`,
+    # confirmed via lldb backtrace, even though the wrapped
+    # `recipes_get_item_name` call one line above it returns the correct
+    # string). Resolving `*Int8` to its real C type here (`int8_t *`) fixes
+    # the root cause: `_gen_stmt_Assign`'s subscript-write lowering already
+    # has a correct, working raw-pointer branch (`ot.endswith(' *')`, using
+    # the generic `_mojo_at_<elem>` helper family) — it just never used to
+    # be reached because `ot` was always the wrong, opaque `int64_t`.
+    if isinstance(ann, str) and len(ann) > 1 and ann[0] == '*' and ann[1] != '*':
+        inner = ann[1:].strip()
+        if inner in _TYPE_MAP:
+            return f"{_TYPE_MAP[inner]} *"
     t = _TYPE_MAP.get(ann)
     return t if t is not None else 'int64_t'
 
@@ -6791,6 +6829,20 @@ class GimpleGen:
                 # instead of the correct "uint8_t *".
                 if elem_ann in self.struct_field_types and elem_ann not in _TYPE_MAP:
                     return f"{elem_ann} *"
+        # Same gap as above, for Mojo's OTHER raw-pointer spelling: `*T`
+        # (`fn f(p: *SomeStruct)`), parsed by mojo_compiler.py as the literal
+        # text "*" + T. `_mojo_type` (module-level, no struct_field_types
+        # access) now resolves `*Int8`/`*Int64`/... via its own exact-
+        # _TYPE_MAP-key check, but a struct element type needs this
+        # instance's struct_field_types the same way the UnsafePointer[...]
+        # branch above does — otherwise `*SomeStruct` falls through
+        # _mojo_type's fallback to the generic int64_t default, same class
+        # of bug as the UnsafePointer[MoveOnly_Int, ...] case this docstring
+        # already describes.
+        if (isinstance(ann, str) and len(ann) > 1 and ann[0] == '*' and ann[1] != '*'):
+            elem_ann = self._c_kw_struct_renames.get(ann[1:].strip(), ann[1:].strip())
+            if elem_ann in self.struct_field_types and elem_ann not in _TYPE_MAP:
+                return f"{elem_ann} *"
         return _mojo_type(ann)
 
     def _infer_param_types(self, func: FunctionDef) -> dict[str, str]:
