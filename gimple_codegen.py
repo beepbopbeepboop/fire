@@ -23426,12 +23426,154 @@ class GimpleGen:
             return 'char *'
         return self._resolve_type(type_ann) if type_ann else 'int64_t'
 
+    # Collection-like / pointer-like type base names: these have their own
+    # runtime representation (MojoDict*/MojoList*/…) or special handling, so
+    # they must never be treated as an ordinary imported struct (registering
+    # them as plain structs breaks that special handling). Shared between
+    # _register_imported_structs' direct-import scan and
+    # _resolve_sibling_param_ctype's function-parameter scan below, so the
+    # two sources of "is this name a struct we should materialize" agree.
+    _IMPORTED_STRUCT_SKIP_BASENAMES = frozenset({
+        'Dict', 'List', 'Set', 'Array', 'Map', 'Kwargs', 'Tuple', 'Span',
+        'Optional', 'Pointer', 'StringSlice', 'UnsafePointer', 'OwnedPointer',
+        'ArcPointer', 'MojoList', 'MojoDict', 'MojoSet',
+    })
+
+    def _materialize_imported_struct(self, module: str, nm: str, local: str) -> bool:
+        """Register `nm` (a struct defined directly in `module`'s real source,
+        looked up via the real parser through `_find_imported_struct`) into
+        this file's own `struct_field_types`/typedef bookkeeping under the
+        local name `local`, exactly as if it were a struct this file defines
+        itself: real field layout (`_imported_field_ctype`, the same
+        resolver used for every other imported-struct field), a queued
+        typedef (`_imported_typedef_structs`, emitted into THIS file's own
+        translation unit — see gen_module's "Struct typedefs" section,
+        which walks stmts + _imported_typedef_structs uniformly), and its
+        home module (`_imported_struct_home`, for correct call-site/extern
+        symbol qualification). Returns True iff `nm` is a genuine struct in
+        `module`'s own source and registration succeeded (already-registered
+        counts as success); False means `nm` isn't a struct there (caller
+        keeps its own generic/opaque fallback — an honest "can't help" case,
+        not a guess).
+
+        Shared by two call sites that both need "give the CALLER real,
+        parser-verified field-layout knowledge of a cross-module struct"
+        rather than the opaque-int64_t-handle fallback: (1)
+        _register_imported_structs below, for a struct named directly in a
+        `from B import S` and actually constructed/field-accessed/method-
+        called in this file; (2) _resolve_sibling_param_ctype, for a struct
+        that only appears as a PARAMETER TYPE of some other imported
+        function `f` (e.g. `from base.chest import chest_total_count` where
+        chest_total_count's own signature takes a `Chest`, but this file
+        never imports `Chest` itself) — see
+        bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "struct-
+        typed function parameter" gap and
+        bugs/hard/... crash-repro writeup for why a bare int64_t placeholder
+        there is unsafe (a caller-side `S()`/field-write on that placeholder
+        corrupts memory) and why symbol-hash-only patching without this real
+        materialization was reverted."""
+        if local in self.struct_field_types:
+            return True  # already registered (this call, or a prior one)
+        if local in getattr(self, '_imported_generic_structs', ()):
+            return False  # generic imported struct: out of scope here
+        if any(w in nm for w in self._IMPORTED_STRUCT_SKIP_BASENAMES):
+            return False
+        sdef = self._find_imported_struct(module, nm)
+        if sdef is None:
+            return False
+        # `_imported_generic_structs` (checked above) is only reliable once
+        # `_register_imported_generic_structs` has actually run — which
+        # happens AFTER `_register_imported_structs` in gen_module's own
+        # pass ordering, so it's empty on this call the first time a generic
+        # struct (e.g. std/collections/interval.mojo's `struct Interval[T:
+        # IntervalElement]`) reaches here. Don't rely on ordering: check the
+        # struct's OWN home-module source text directly for the same
+        # `struct Name[...]` shape `_find_generic_source` looks for. A
+        # generic struct's un-elaborated field/method types reference its
+        # own type parameters abstractly (e.g. `other: Self` resolving
+        # differently per instantiation) — registering the raw template as
+        # if it were a concrete struct produced a real regression
+        # (confirmed: test/collections/test_interval.mojo's `Interval.union`
+        # method extern ended up with a mismatched `int64_t` parameter type
+        # against the call site's real `Interval *` argument — "makes
+        # integer from pointer without a cast"). Elaboration/monomorphization
+        # of generics is a separate, already-existing mechanism
+        # (Elaborator.elaborate_generic_struct) this narrow, non-generic-only
+        # materialization deliberately doesn't attempt to replace.
+        _imp_path0, _imp_src0, _imp_mod0 = self._parsed_import(module)
+        if _imp_src0 and re.search(rf'\bstruct\s+{re.escape(nm)}\s*\[', _imp_src0):
+            return False
+        fields = {f.name: self._imported_field_ctype(f.type_ann)
+                  for f in sdef.fields if isinstance(f, VarDecl)}
+        # Carry the struct's real methods along so the signature-registration
+        # pass (all_structs_for_methods) resolves their return/param C types
+        # and mangled names exactly as it would for an in-file struct (see
+        # _register_imported_structs' original, longer comment on this same
+        # pattern for the full rationale) — smoke-test the overload-id
+        # computation first, falling back to a typedef-only (methods=[])
+        # registration if it raises, rather than risk a broken signature.
+        _methods_for_reg: list = []
+        try:
+            self._struct_method_overload_ids(sdef)
+            _methods_for_reg = sdef.methods
+        except Exception as e:
+            _debug_note(f'cannot resolve method signatures for imported struct {nm}', e)
+        self.struct_field_types[local] = fields
+        self._imported_struct_names.add(local)
+        self._imported_typedef_structs.append(
+            StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
+        _imp_path, _imp_src, _imp_mod = self._parsed_import(module)
+        if _imp_path:
+            import module_loader as _mlmod
+            self._imported_struct_home[local] = _mlmod.module_name_for_path(_imp_path)
+        return True
+
+    def _resolve_sibling_param_ctype(self, module: str, raw_ptype) -> str | None:
+        """For a sibling-imported FUNCTION's parameter whose raw Mojo type
+        annotation (from module_loader's text scan, still the original Mojo
+        source spelling — e.g. "Chest", not yet C-typed) names a struct
+        defined directly in that function's own home `module`, materialize
+        it (via _materialize_imported_struct, same field-layout resolution
+        as any other imported struct) and return its real C pointer type
+        (`"Chest *"`) for the caller to splice into that parameter's C
+        signature text. Returns None — the honest "not a struct I can give
+        you real layout for" case — for scalars, collection/pointer-like
+        types (Dict/List/UnsafePointer/…), and any name that genuinely isn't
+        a struct in `module`'s own source (a real external/unmodeled type,
+        or a struct defined somewhere OTHER than the function's own home
+        module — out of scope for this narrow, function-parameter-only
+        resolution; such cases keep today's honest link-failure behavior
+        rather than a guess)."""
+        if not isinstance(raw_ptype, str):
+            return None
+        base = raw_ptype.split('[', 1)[0].split('.')[0].strip()
+        if not base or not base[0].isupper():
+            return None  # Mojo/Python convention: only structs are capitalized
+        if base in self._IMPORTED_STRUCT_SKIP_BASENAMES:
+            return None
+        if base in self.struct_field_types:
+            return f"{base} *"
+        if _TYPE_MAP.get(base) is not None:
+            return None  # a real scalar/builtin Mojo type, not a struct
+        if self._materialize_imported_struct(module, base, base):
+            return f"{base} *"
+        return None
+
     def _register_imported_structs(self, stmts) -> None:
         """dylib mode: register a concrete imported struct's field layout + queue
-        its typedef, but ONLY for structs used as a parameter type AND whose field
-        is actually accessed here (so e.g. `info: CompiledFunctionInfo` +
-        `info.emission_kind` works). Tightly scoped to avoid disturbing the many
-        imported structs a module merely passes through."""
+        its typedef, for a struct used as a parameter type whose field is
+        actually accessed here (so e.g. `info: CompiledFunctionInfo` +
+        `info.emission_kind` works), OR a struct actually CONSTRUCTED locally
+        (`s := S(...)` / `s = S(...)`) — the latter needs real field layout
+        just as much as a param-typed field access does: without it, `S()`
+        collapses to an opaque `int64_t` placeholder (see
+        _lower_imported_struct_ctor) and a subsequent `s.x = 1` becomes a
+        dynamic `_mojo_dispatch_setattr` on that placeholder — a crash, not
+        merely a missed optimization (the exact shape a reverted symbol-hash-
+        only fix for a related gap was found to reintroduce; see
+        bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+        attempt #2" section). Tightly scoped beyond that to avoid disturbing
+        the many imported structs a module merely passes through untouched."""
         if self.do_imports or not getattr(self, '_current_filename', None):
             return
         try:
@@ -23483,6 +23625,52 @@ class GimpleGen:
                     _collect(m)
         param_type_names = set(params_by_struct)
 
+        # Local variable names directly assigned from a constructor call to
+        # an imported struct name (`s := S(...)` / `s = S(...)`, including as
+        # a VarDecl initializer), keyed by struct base name — the ASSIGNMENT
+        # shape specifically, not any bare in-place use (`for x in S(...):`,
+        # `f(S(...))`). A bare in-place use never gets a name to write a
+        # field through, so the existing opaque-int64_t-handle convention
+        # already handles it safely (confirmed: std/collections/string/
+        # _utf8.mojo's UTF8Chunks is constructed inline as a for-loop
+        # iterable, `for chunk in UTF8Chunks(x):`, with no assigned name —
+        # registering it as a real struct anyway, tried first, broke this:
+        # UTF8Chunks' own __iter__ overload signature couldn't be resolved
+        # by _struct_method_overload_ids, so no extern got emitted for it,
+        # regressing a previously-working dynamic dispatch call into an
+        # "implicit declaration of function" compile error). An ASSIGNED
+        # name, by contrast, is exactly the shape that needs real field
+        # layout to be safe at all: `s := S()` with no registration lowers
+        # to a bare `s = (int64_t)0` placeholder (_lower_imported_struct_ctor),
+        # and a later `s.x = 1` becomes a dynamic `_mojo_dispatch_setattr`
+        # call on that null placeholder — a crash, not merely imprecise
+        # codegen (the exact shape a reverted symbol-hash-only fix for a
+        # related gap was found to reintroduce; see
+        # bugs/DYLIB_sibling_import_calls_bind_to_weak_stubs.md's "follow-on
+        # attempt #2"). Combined with the existing _field_accessed check
+        # below (which already requires an actual `name.field` textual
+        # access, not just an assignment), this only pulls in structs that
+        # are BOTH constructed AND field-accessed locally — the same
+        # "genuinely needs real layout" bar the parameter-typed case already
+        # applies, just widened to also recognize local-variable typing, not
+        # only function-parameter typing.
+        _locally_constructed: dict = {}
+        for _node in _walk_ast(stmts):
+            _ctor_name = None
+            _target_name = None
+            if isinstance(_node, AssignStmt) and isinstance(_node.target, IdentExpr):
+                _target_name = _node.target.name
+                _val = _node.value
+            elif isinstance(_node, VarDecl):
+                _target_name = _node.name
+                _val = _node.value
+            else:
+                continue
+            if isinstance(_val, CallExpr) and isinstance(_val.func, IdentExpr):
+                _ctor_name = _val.func.name
+            if _ctor_name and _target_name:
+                _locally_constructed.setdefault(_ctor_name, set()).add(_target_name)
+
         for st in stmts:
             if not (isinstance(st, FromImportStmt) and not getattr(st, 'wildcard', False)):
                 continue
@@ -23490,20 +23678,16 @@ class GimpleGen:
                 local = alias or nm
                 if (nm.startswith('_') or local in self.struct_field_types
                         or local in self._imported_generic_structs
-                        or local not in param_type_names
-                        # Collection-like types have a runtime representation
-                        # (MojoDict*/MojoList*/…) and special method handling —
-                        # registering them as plain structs breaks that.
-                        or any(w in nm for w in ('Dict', 'List', 'Set', 'Array',
-                                                 'Map', 'Kwargs', 'Tuple', 'Span',
-                                                 'Optional', 'Pointer'))):
+                        or any(w in nm for w in self._IMPORTED_STRUCT_SKIP_BASENAMES)):
+                    continue
+                if local not in param_type_names and nm not in _locally_constructed:
                     continue
                 sdef = self._find_imported_struct(st.module, nm)
                 if sdef is None:
                     continue
                 fields = {f.name: self._imported_field_ctype(f.type_ann)
                           for f in sdef.fields if isinstance(f, VarDecl)}
-                pnames = params_by_struct.get(nm, set())
+                pnames = set(params_by_struct.get(nm, set())) | _locally_constructed.get(nm, set())
                 _field_accessed = fields and any(
                     f"{pn}.{fn}" in src for pn in pnames for fn in fields)
                 # A (non-trivial) method CALLED on this struct anywhere: common
@@ -23517,46 +23701,7 @@ class GimpleGen:
                     continue
                 if not _field_accessed and not _called_uncommon:
                     continue  # struct is merely passed through, untouched
-                # Carry the struct's real methods along so the signature-
-                # registration pass (all_structs_for_methods) resolves their
-                # return/param C types and mangled names exactly as it would
-                # for an in-file struct — this lets calls to e.g. DLHandle's
-                # get_symbol()/call() route to the real linked symbol (emitted
-                # when the struct's home module is compiled directly) via an
-                # extern declaration, instead of falling to the generic
-                # scalar-method stub. No body is emitted here (Phase 2a only
-                # walks `stmts`, never `_imported_typedef_structs`), so this
-                # is safe even though the method has no local implementation.
-                # Once a struct is registered, constructor/method call sites
-                # switch to per-overload hash-mangled symbol names (matching
-                # in-file struct handling) whenever it has 2+ overloads of the
-                # same method — so methods must ALWAYS be carried along (not
-                # just when an uncommon method is called), or those call
-                # sites reference a mangled symbol nothing declared an extern
-                # for. Smoke-test the overload-id computation first — if it
-                # raises (e.g. an exotic param type this pass can't handle),
-                # fall back to the previous typedef-only (methods=[])
-                # registration rather than risk a broken signature.
-                _methods_for_reg: list = []
-                try:
-                    self._struct_method_overload_ids(sdef)
-                    _methods_for_reg = sdef.methods
-                except Exception as e:
-                    _debug_note(f'cannot resolve method signatures for imported struct {nm}', e)
-                self.struct_field_types[local] = fields
-                self._imported_struct_names.add(local)
-                self._imported_typedef_structs.append(
-                    StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
-                # Record this struct's home module so cross-module call sites
-                # and extern decls can compute the SAME qualified C symbol the
-                # struct's home module actually emits when compiled directly
-                # (see build_stdlib_dylib.py / module_loader.module_name_for_path).
-                # _parsed_import is cached by module string (_imported_src_cache),
-                # so this is a cheap cache hit, not a re-parse.
-                _imp_path, _imp_src, _imp_mod = self._parsed_import(st.module)
-                if _imp_path:
-                    import module_loader as _mlmod
-                    self._imported_struct_home[local] = _mlmod.module_name_for_path(_imp_path)
+                self._materialize_imported_struct(st.module, nm, local)
 
     def _find_imported_struct(self, module: str, name: str):
         """The StructDef for `name` defined directly in `module`'s source, or None."""
@@ -31526,6 +31671,85 @@ class GimpleGen:
                             self.imported_symbols[sym_name] = sym_info
                             if 'c_return_type' in sym_info:
                                 self.func_return_types[sym_name] = sym_info['c_return_type']
+                            if (_sib_qualifier and sym_info.get('parameters')
+                                    and sym_info.get('c_parameters')
+                                    and len(sym_info['parameters']) == len(sym_info['c_parameters'])):
+                                # A sibling function's OWN parameter may be
+                                # typed with a struct defined in ITS module
+                                # (e.g. base/chest.mojo's `chest_total_count(c:
+                                # Chest, item_id: UInt64)`) that THIS file
+                                # never itself imports. module_loader's
+                                # text-only scan (which computed
+                                # sym_info['c_parameters']/['signature']
+                                # above, via load_module_from_path) has no
+                                # struct-layout knowledge at all and defaults
+                                # such a parameter to plain int64_t — while
+                                # `Chest`'s own home module (compiled
+                                # standalone) resolves it to `Chest *` via its
+                                # real struct_field_types. Left uncorrected,
+                                # that mismatch propagates into
+                                # func_param_types below (this call site's
+                                # emitted qualified symbol hashes int64_t,
+                                # the real definition hashes `Chest *` — an
+                                # undefined-symbol link/dlopen failure), and
+                                # even if only the HASH were patched (a prior,
+                                # reverted attempt: see bugs/DYLIB_sibling_
+                                # import_calls_bind_to_weak_stubs.md's
+                                # "follow-on attempt #2"), this file would
+                                # still pass a bare int64_t on the call —
+                                # `Chest`'s real caller-side construction
+                                # would be a null placeholder, corrupting
+                                # memory on first field write.
+                                #
+                                # Fix in place, at the source: resolve each
+                                # parameter's REAL Mojo type name (still
+                                # available in sym_info['parameters'], unlike
+                                # the already-C-typed 'c_parameters') against
+                                # the callee's OWN module via
+                                # _resolve_sibling_param_ctype below. When it
+                                # names a genuine struct there,
+                                # _materialize_imported_struct gives THIS
+                                # file a real local typedef (fields resolved
+                                # the same way _register_imported_structs
+                                # resolves any other imported struct's
+                                # fields) and this loop corrects
+                                # sym_info['c_parameters']/['signature'] to
+                                # match — the SAME dict object the extern-
+                                # declaration emission (gen_module's
+                                # "_emit_stdlib_import_externs"-adjacent pass,
+                                # which reads sym_info['signature'] verbatim)
+                                # and the func_param_types hash computation
+                                # just below both read, so both sides of the
+                                # symbol-name agreement AND the actual
+                                # calling convention are fixed together, by
+                                # construction, not independently patched
+                                # (the mistake the reverted attempt made).
+                                # Only genuine structs get corrected — a
+                                # param that's really a scalar/collection
+                                # type, or a struct this compile genuinely
+                                # can't find anywhere, is left exactly as
+                                # module_loader's scan computed it (an
+                                # honest, unresolvable case keeps today's
+                                # honest link-failure behavior, never a
+                                # guess).
+                                _new_c_params = []
+                                _params_changed = False
+                                for (_p_name, _p_raw_type), _c_param in zip(
+                                        sym_info['parameters'], sym_info['c_parameters']):
+                                    _resolved_ctype = self._resolve_sibling_param_ctype(
+                                        s.module, _p_raw_type)
+                                    if _resolved_ctype:
+                                        _c_name = (_c_param.split()[-1]
+                                                   if _c_param.strip() else _p_name)
+                                        _new_c_params.append(f"{_resolved_ctype} {_c_name}")
+                                        _params_changed = True
+                                    else:
+                                        _new_c_params.append(_c_param)
+                                if _params_changed:
+                                    sym_info['c_parameters'] = _new_c_params
+                                    _c_ret = sym_info.get('c_return_type', 'int64_t')
+                                    _param_str = ', '.join(_new_c_params) if _new_c_params else 'void'
+                                    sym_info['signature'] = f"{_c_ret} {orig_name} ({_param_str})"
                             if _sib_qualifier and 'c_parameters' in sym_info:
                                 # A local-sibling import bypasses
                                 # _emit_stdlib_import_externs (which raised
