@@ -31701,6 +31701,48 @@ class GimpleGen:
                             }
                             self.func_return_types[sym_name] = sym_info
                         elif isinstance(sym_info, dict):
+                            # Defensive shallow copy BEFORE any mutation: this
+                            # dict is NOT private to this call — it's the
+                            # actual object cached inside module_loader's
+                            # process-WIDE singleton (`_module_loader.
+                            # _path_cache[path][sym_name]`, returned by
+                            # `_local_sibling_module_exports` ->
+                            # `load_module_from_path`, keyed purely by file
+                            # path — the SAME dict object is handed back,
+                            # unconditionally, to every GimpleGen instance in
+                            # this process that ever imports this symbol from
+                            # this path, for the lifetime of the process, not
+                            # just this one compile). Mutating it in place
+                            # (as every line below this comment, and the
+                            # return-type/parameter-type corrections further
+                            # down, do) silently poisons that shared cache for
+                            # every OTHER, unrelated module's compile that
+                            # happens to import the same symbol later in the
+                            # same process — e.g. `mojo dylib`'s multi-module
+                            # build compiles dozens of files sequentially in
+                            # one process. Confirmed real: compiling game_
+                            # engine.mojo (which resolves `engine_world`'s
+                            # `engine_view_hopper_input` return type to a
+                            # real `ItemSlot *` ONLY because game_engine.mojo
+                            # ALSO separately imports `ItemSlot` directly from
+                            # base.items, pre-registering it in THAT
+                            # instance's own struct_field_types) mutated the
+                            # shared cache entry for `engine_view_hopper_
+                            # input` to `c_return_type='ItemSlot *'`; a LATER,
+                            # completely independent compile of game_ffi.mojo
+                            # then inherited that leaked `'ItemSlot *'` return
+                            # type from the poisoned cache (its OWN, correct,
+                            # from-scratch resolution attempt returns None —
+                            # traced and confirmed) WITHOUT also getting a
+                            # real local typedef for ItemSlot (materialization
+                            # is genuinely per-instance, so it did NOT leak) —
+                            # "unknown type name 'ItemSlot'". Copying here
+                            # makes every mutation below strictly local to
+                            # THIS sym_name/THIS import statement/THIS
+                            # GimpleGen instance, closing the leak at its
+                            # single point of entry rather than auditing every
+                            # mutation site individually.
+                            sym_info = dict(sym_info)
                             sym_info['module'] = s.module
                             sym_info['original_name'] = orig_name
                             self.imported_symbols[sym_name] = sym_info
