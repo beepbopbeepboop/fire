@@ -26875,7 +26875,9 @@ class GimpleGen:
         return lines
 
     def _cpp_for_generator_delegate(self, target, call: 'CallExpr', body: list,
-                                     declared: dict, indent: str) -> list[str]:
+                                     declared: dict, indent: str,
+                                     index_var: str = None,
+                                     index_start_expr: str = '0') -> list[str]:
         """`for <target> in <call to another already-compiled generator>():`
         inside a coroutine body — an ordinary (non-`yield from`) consuming
         loop over a sibling generator (e.g. dis.py's
@@ -26884,6 +26886,19 @@ class GimpleGen:
         (single loop variable) or a list of names (a tuple target — see
         `_cpp_for_stmt`'s own "(a, b, ...)" string convention, already
         unwrapped by the caller).
+
+        `index_var`/`index_start_expr`: optional support for `_cpp_for_stmt`'s
+        NESTED-tuple-target `enumerate()` case (`for i, (y, m, d) in
+        enumerate(self.itermonthdays3(...)):` — calendar.py's `itermonthdays4`)
+        composing an `enumerate()` index with this same sub-generator drive
+        loop, rather than duplicating it. When given, `index_var` is declared
+        as an `int64_t` OUTSIDE the drive `while` loop (so it survives across
+        iterations, unlike the per-iteration tuple-slot locals below),
+        initialized to `index_start_expr` (supporting `enumerate(x, start)`'s
+        optional 2nd argument the same way the flat-target case already
+        does), and incremented once at the end of each iteration — an
+        ordinary indexed-loop counter composed around the unchanged
+        tuple-unpack/single-value logic below.
 
         Mirrors `_cpp_yield_from`'s existing sub-generator delegation drive
         loop almost exactly: same `<base>_start/_resume/_value/_destroy`
@@ -27039,12 +27054,14 @@ class GimpleGen:
         self._yield_from_seq = getattr(self, '_yield_from_seq', 0) + 1
         guard = f"__mojogen_forgen{self._yield_from_seq}"
         args_text = ', '.join(arg_exprs)
-        lines = [
-            f"{indent}{{",
-            f"{indent}    _mojogen_sub_guard {guard}"
-            f"{{ {base}_start({args_text}), &{base}_destroy }};",
-            f"{indent}    while ({base}_resume({guard}.g)) {{",
-        ]
+        lines = [f"{indent}{{"]
+        if index_var is not None:
+            if index_var not in declared:
+                declared[index_var] = 'int64_t'
+            lines.append(f"{indent}    int64_t {index_var} = ({index_start_expr});")
+        lines.append(f"{indent}    _mojogen_sub_guard {guard}"
+            f"{{ {base}_start({args_text}), &{base}_destroy }};")
+        lines.append(f"{indent}    while ({base}_resume({guard}.g)) {{")
         body_indent = indent + '        '
         if is_tuple:
             val_var = self._cpp_fresh_name("_mg_forgen_val")
@@ -27103,6 +27120,8 @@ class GimpleGen:
             lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
         for inner in body:
             lines.extend(self._cpp_stmt(inner, declared, body_indent))
+        if index_var is not None:
+            lines.append(f"{body_indent}{index_var}++;")
         lines.append(f"{indent}    }}")
         # Same Milestone-D pending-exception disambiguation _cpp_yield_from
         # already does at its own `_resume`-driven while-loop boundary (see
@@ -27166,8 +27185,73 @@ class GimpleGen:
             # Any OTHER tuple-target shape falls through to the string-target
             # path below (which range-fors over the whole tuple-as-identifier,
             # or refuses honestly) — unchanged from the pre-enumerate behavior.
-            _names = [t.strip() for t in target[1:-1].split(',') if t.strip()]
-            if len(_names) == 2 and (isinstance(s.iterable, CallExpr)
+            # Depth-aware split — a naive `.split(',')` here breaks a
+            # NESTED tuple target's own inner commas (`(i, (y, m, d))`
+            # would wrongly split into 4 pieces: 'i', '(y', 'm', 'd)').
+            _names = [t.strip() for t in _split_top_level_commas(target[1:-1]) if t.strip()]
+            # `for i, (a, b, ...) in enumerate(...):` — a NESTED tuple
+            # target whose second element is ITSELF a (flat, depth-1)
+            # tuple of plain names (calendar.py's `itermonthdays4`: `for
+            # i, (y, m, d) in enumerate(self.itermonthdays3(...)):`;
+            # dis.py's `_find_imports`: `for i, (op, oparg) in
+            # enumerate(opargs):`). Only recognized when the second
+            # element is a flat parenthesized, comma-joined list of plain
+            # identifiers — arbitrary further nesting isn't needed by
+            # either real-world case and isn't attempted here.
+            _nested_inner = None
+            if len(_names) == 2 and _names[1].startswith('(') and _names[1].endswith(')'):
+                _cand = [t.strip() for t in _split_top_level_commas(_names[1][1:-1]) if t.strip()]
+                if _cand and all(re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', n) for n in _cand):
+                    _nested_inner = _cand
+            if (_nested_inner is not None
+                    and isinstance(s.iterable, CallExpr)
+                    and isinstance(s.iterable.func, IdentExpr)
+                    and s.iterable.func.name == 'enumerate'
+                    and s.iterable.args):
+                # `enumerate`'s own iterable argument — may be a plain
+                # collection expression OR a call to another compiled
+                # generator (delegated to `_cpp_for_generator_delegate`,
+                # composing its index-tracking `index_var` support with
+                # that method's existing sub-generator drive loop).
+                _idx_name = _names[0]
+                _enum_src_node = s.iterable.args[0]
+                _idx_start_expr = '0'
+                if len(s.iterable.args) >= 2:
+                    _idx_start_expr = self._cpp_expr(s.iterable.args[1])
+                if not s.else_body and self._cpp_iterable_is_delegatable_generator_call(_enum_src_node):
+                    return self._cpp_for_generator_delegate(
+                        _nested_inner, _enum_src_node, s.body, declared, indent,
+                        index_var=_idx_name, index_start_expr=_idx_start_expr)
+                # Plain collection: a `MojoList *` of boxed tuples — same
+                # element-boxing convention the plain-GIMPLE `_gen_for_list`
+                # tuple-target case already uses (each element is itself a
+                # `MojoList *`, boxed as an int64_t pointer value, read back
+                # via `mojo_list_get_int` per inner slot; narrow int64_t-only
+                # default, matching the existing flat-target enumerate case's
+                # own scalar-only assumption just above).
+                _src = self._cpp_expr(_enum_src_node)
+                _ctr = self._cpp_fresh_name("_mg_i")
+                _tup = self._cpp_fresh_name("_mg_tup")
+                lines = []
+                if _idx_name not in declared:
+                    declared[_idx_name] = 'int64_t'
+                    lines.append(f"{indent}int64_t {_idx_name};")
+                for _nm in _nested_inner:
+                    if _nm not in declared:
+                        declared[_nm] = 'int64_t'
+                        lines.append(f"{indent}int64_t {_nm};")
+                lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                             f"{_ctr} < mojo_list_len((MojoList *)({_src})); {_ctr}++) {{")
+                lines.append(f"{indent}    {_idx_name} = ({_ctr} + ({_idx_start_expr}));")
+                lines.append(f"{indent}    MojoList * {_tup} = "
+                             f"(MojoList *)mojo_list_get_int((MojoList *)({_src}), {_ctr});")
+                for _si, _nm in enumerate(_nested_inner):
+                    lines.append(f"{indent}    {_nm} = mojo_list_get_int({_tup}, {_si});")
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
+            if len(_names) == 2 and _nested_inner is None and (isinstance(s.iterable, CallExpr)
                     and isinstance(s.iterable.func, IdentExpr)
                     and s.iterable.func.name == 'enumerate'
                     and s.iterable.args):

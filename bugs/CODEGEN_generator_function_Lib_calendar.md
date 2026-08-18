@@ -1,5 +1,97 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-18, later same day — `itermonthdays4`'s NESTED-tuple-`enumerate` target FIXED; file still blocked by the other, separate, already-documented gaps)
+
+**Fixed**: `itermonthdays4`'s `for i, (y, m, d) in
+enumerate(self.itermonthdays3(year, month)):` — the NESTED-tuple-target
+`enumerate()` gap this doc's "2026-08-18" and "2026-08-10, later same
+session" status sections both documented as open (`_cpp_for_stmt`'s
+existing `enumerate` branch only ever recognized a FLAT 2-name unpack,
+e.g. `for i, x in enumerate(...):`; a nested second element like `(y, m,
+d)` fell through to the generic string-target fallback, which naively
+comma-split the WHOLE target string — `"i, (y, m, d)"` — into 4 bogus
+pieces and emitted `for (auto i, (y, m, d) : ...)`, invalid C++:
+"declaration of 'auto i' has no initializer" / "expected ')' before ','
+token"). Confirmed via `bugs/CODEGEN_generator_function_Lib_dis.md`'s
+`_find_imports` as the SAME shared gap (its own `for i, (op, oparg) in
+enumerate(opargs):`), fixed in the same pass.
+
+`gimple_codegen.py`'s `_cpp_for_stmt`: the target string is now split with
+the existing (previously module-scoped-but-unused-here)
+`_split_top_level_commas` helper instead of a naive `.split(',')`
+(depth-aware, so a nested tuple's own inner comma no longer corrupts the
+outer split), and a new case recognizes `(idx, (a, b, ...))` — a flat
+depth-1 nested tuple as the second element — paired with an
+`enumerate(...)` iterable. `enumerate`'s own iterable argument can be
+EITHER a call to another compiled generator (composed with the existing
+`_cpp_for_generator_delegate` sub-generator drive loop — see that
+method's extended signature below) OR a plain collection expression
+(a `MojoList *` of boxed tuples, read back via the same
+`mojo_list_get_int`-per-slot convention the plain-GIMPLE `_gen_for_list`
+tuple-target case already uses, default int64_t per slot — matching the
+existing FLAT-target enumerate case's own scalar-only assumption, not a
+new limitation).
+
+`_cpp_for_generator_delegate` gained two new optional parameters,
+`index_var`/`index_start_expr`, so the nested-target case can compose an
+`enumerate()` index with its existing sub-generator drive loop instead of
+duplicating it: `index_var` is declared as `int64_t` OUTSIDE the drive
+`while` loop (so it survives across iterations, unlike the tuple slots'
+per-iteration locals), initialized to `index_start_expr` (also finally
+plumbing `enumerate(x, start)`'s optional 2nd argument into this
+composed path), and incremented once at the end of each iteration — the
+rest of the method (tuple-slot unpack, single-value consumption,
+self-recursion, exception re-throw) is completely unchanged.
+
+**Verification**:
+- Isolated compile (`relaxed_imports=True` `GimpleGen` direct call, the
+  same methodology this doc's own prior status entries use to get past
+  dis.py's/calendar.py's OTHER, unrelated hard-refusal generators without
+  raising) + `g++ -std=c++20 -fsyntax-only` on real `Lib/calendar.py`:
+  error count dropped from 10 (baseline, matching the "2026-08-18" status
+  entry's own count) to 2 — the only 2 remaining are `itermonthdays2`'s
+  SEPARATE, still-open "generator call as enumerate's own argument" gap
+  (`cannot cast from type 'void' to pointer type 'MojoList *'`, lines
+  275/277 in the isolated compile). `grep`-confirmed: zero occurrences of
+  `auto i`/`no initializer`/`expected ')'` anywhere in the new error
+  output — `itermonthdays4` itself is now completely clean.
+- Two standalone end-to-end compiled-and-RUN repros (via
+  `test_gimple_generator_runner.py`'s own harness — real compile ->
+  `gcc -fgimple`/`g++ -std=c++20` -> link -> RUN, asserting on actual
+  stdout):
+  - `for i, (a, b, c) in enumerate(pairs()):` where `pairs()` is another
+    compiled generator yielding 3-tuples (the `itermonthdays4`-shaped
+    case, generator-delegate composition): correct index AND correct
+    unpacked values for all 3 iterations, exact stdout match.
+  - `for i, (a, b) in enumerate(xs):` where `xs` is a `list[tuple]`
+    PARAMETER (a real `MojoList *`, not an inline list-of-tuples
+    literal — see note below): correct index AND correct unpacked values,
+    exact stdout match.
+  - Note: an inline list-of-tuples LITERAL assigned to a local inside a
+    generator body (`xs = [(1, 2), (3, 4)]`) fails to compile — but this
+    is confirmed to be a PRE-EXISTING, unrelated gap shared identically
+    by the FLAT (non-nested) enumerate case (`xs = [10, 20, 30]` alone,
+    with no nested tuple involved, fails with the exact same "cannot
+    convert '<brace-enclosed initializer list>' to 'int64_t'" error) —
+    list-literal-to-local assignment inside a coroutine body has no
+    codegen at all yet, orthogonal to this fix. Not attempted here.
+
+**Quality gate** (CLAUDE.md mandatory gate): `python3 test_gimple.py`
+(248 passed, 0 failed), `python3 test_module_cache.py` (76 passed, 0
+failed), `make check-selfhost` (clean), and a from-scratch stdlib dylib
+rebuild (`rm -f build/libmojostdlib.dylib` +
+`build_stdlib_dylib.build_stdlib(jobs=8)`) compared against a baseline
+rebuild on the pre-fix tree via `git stash`: **0 skip lines before, 0
+skip lines after**, and the full stderr build log is **byte-identical**
+before/after (`diff` clean). No regression.
+
+**calendar.py as a whole still does not build.** The remaining blockers
+are exactly `itermonthdays2`'s separate generator-call-as-enumerate's-
+own-argument gap and the whole-program (`do_imports=True`) build's
+hundreds of unrelated, pre-existing errors in transitively-imported
+files — both already documented above, neither touched by this fix.
+Doc kept open.
+
 ## Status (updated 2026-08-18 — item 2 (`itertools.repeat` in `yield from`) FIXED; file still blocked by other, separate, already-documented gaps)
 
 **Item 2 FIXED**: `itermonthdays`'s `yield from repeat(0, days_before)` /

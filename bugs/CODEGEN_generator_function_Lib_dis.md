@@ -1,5 +1,87 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-18 — `_find_imports`'s NESTED-tuple-`enumerate` target FIXED; file still doesn't build)
+
+**Fixed**: `_find_imports`'s `for i, (op, oparg) in enumerate(opargs):` —
+one of the two remaining gaps this doc's "2026-08-10" status section
+listed for `_find_imports` (the other, `code.co_lines()` native
+code-object introspection in `findlinestarts`, is untouched, see below).
+`_cpp_for_stmt`'s existing `enumerate` branch only ever recognized a FLAT
+2-name unpack target (`for i, x in enumerate(...):`); a NESTED second
+element like `(op, oparg)` fell through to the generic string-target
+fallback, which naively comma-split the WHOLE target string —
+`"i, (op, oparg)"` — into 3 bogus pieces and emitted `for (auto i, (op,
+oparg) : opargs)`, invalid C++ ("declaration of variable 'i' with
+deduced type 'auto' requires an initializer" / "expected ')'"). Same
+shared gap independently confirmed in `calendar.py`'s `itermonthdays4`
+(see that doc), fixed together in the same pass.
+
+Fix (full mechanism in `bugs/CODEGEN_generator_function_Lib_calendar.md`'s
+matching status entry, not duplicated here): `_cpp_for_stmt`'s target
+string is now split with the existing `_split_top_level_commas` helper
+(depth-aware) instead of a naive `.split(',')`, and a new case handles
+`(idx, (a, b, ...))` paired with `enumerate(...)`. `opargs` here is a
+plain `MojoList *` local (built earlier in the function by a list
+comprehension over `_unpack_opargs(...)` — that comprehension's own
+codegen is untouched/unrelated), so this hits the new "plain collection"
+branch: an indexed loop reading each element back as a boxed-tuple
+`MojoList *` via `mojo_list_get_int`, then each of `op`/`oparg` via
+`mojo_list_get_int` per slot (default int64_t) — mirroring the
+plain-GIMPLE `_gen_for_list` tuple-target convention. (`itermonthdays4`'s
+own real case instead hits the OTHER new branch — `enumerate` wrapping a
+call to another compiled generator, composed with the existing
+`_cpp_for_generator_delegate` sub-generator drive loop — dis.py has no
+real-corpus example of that composition, but it's exercised by an
+isolated end-to-end repro below and by `itermonthdays4` itself.)
+
+**Verification**:
+- Isolated compile (`GimpleGen(do_imports=False, relaxed_imports=True)`
+  direct call — bypasses `_get_instructions_bytes`'s unrelated, currently
+  totally-unsupported generator shape so the rest of the module still
+  gets a `.cpp` emitted instead of a hard `RuntimeError`, matching the
+  spirit of this doc's own "isolated compile" methodology) +
+  `g++ -std=c++20 -fsyntax-only` on real `Lib/dis.py`: the specific
+  "declaration of variable 'i' ... requires an initializer" / "expected
+  ')'" error pair at the `for i, (op, oparg) in enumerate(opargs):` site
+  is gone — `grep`-confirmed zero remaining occurrences of that error
+  shape anywhere in the output. The loop now lowers to a real indexed
+  loop over `opargs` with `op`/`oparg` correctly unpacked per iteration.
+  (Total error count in this isolated compile went from 20 to 28 — NOT a
+  regression: the previous broken-syntax emission silently swallowed/
+  mangled everything textually downstream of it, so several PRE-EXISTING,
+  unrelated errors inside `_find_imports`'s own loop body — `opmap`
+  module-global-dict resolution, `op == IMPORT_NAME` comparing an
+  `int64_t` against a `char *`, `opargs[i-1]` raw-pointer subscripting —
+  are now reachable/visible for the first time rather than newly
+  introduced. Confirmed each new error line is inside `_find_imports`'s
+  loop BODY, never the loop statement itself.)
+- Two standalone end-to-end compiled-and-RUN repros (via
+  `test_gimple_generator_runner.py`'s harness — real compile ->
+  `gcc -fgimple`/`g++ -std=c++20` -> link -> RUN, asserting on actual
+  stdout): `for i, (a, b, c) in enumerate(<3-tuple generator>()):` and
+  `for i, (a, b) in enumerate(<list[tuple] parameter>):` both produced
+  the correct index AND correctly unpacked values for every iteration,
+  exact stdout match. (Full detail, including the one confirmed-unrelated
+  gap found along the way — inline list-of-tuples LITERAL locals inside a
+  coroutine body don't compile, matching the FLAT enumerate case's
+  identical pre-existing limitation — is in the calendar.py doc's
+  matching status entry.)
+
+**Quality gate** (CLAUDE.md mandatory gate): `python3 test_gimple.py`
+(248 passed, 0 failed), `python3 test_module_cache.py` (76 passed, 0
+failed), `make check-selfhost` (clean), and a from-scratch stdlib dylib
+rebuild compared byte-for-byte against a `git stash`-baseline rebuild:
+**0 skip lines before, 0 skip lines after**, full stderr build log
+byte-identical. No regression.
+
+**dis.py as a whole still does not build.** Remaining, still-open,
+unrelated gaps (unchanged from the "2026-08-10" status below):
+`findlinestarts`'s `code.co_lines()` native code-object introspection,
+module-level dict globals (`opmap`) unresolved inside a coroutine body,
+`opargs[i-1]`-style raw-pointer subscripting, and the whole-program
+(`do_imports=True`) build's hundreds of unrelated pre-existing errors in
+transitively-imported files. Doc kept open.
+
 ## Status (updated 2026-08-10 — tuple-yield now FIXED, a separate pre-existing `_cpp_for_stmt` gap found+fixed too; file still doesn't build)
 
 Re-verified against current master. The tuple-valued-`yield` fix landed
