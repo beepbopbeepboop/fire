@@ -4008,6 +4008,42 @@ def main():
     # before or after this step).
     test("plain_for_inside_async_function", """""")
 
+    # A module-level `comptime NAME = value` must be visible to every later
+    # reference in the file -- including inside a function body's ordinary
+    # runtime reads (`_lower_IdentExpr`'s ordinary IdentExpr path, not just
+    # comptime `if`/expression contexts) and a struct's own bounds-mask
+    # arithmetic. Before this fix, a TOP-LEVEL ComptimeVarStmt was never
+    # folded into self._comptime_vals at all (only a comptime var declared
+    # INSIDE a function's own body got folded, by a narrower pre-pass) --
+    # every reference anywhere in the file silently read the "ct param or
+    # undeclared" placeholder value 0 instead of the real constant.
+    _comptime_toplevel_src = """\
+comptime MAX_N: Int = 8
+
+def mask(x: Int) -> Int:
+    return x & (MAX_N - 1)
+
+def main():
+    i = 0
+    while i < MAX_N:
+        print(mask(i))
+        i = i + 1
+"""
+    name = "toplevel_comptime_const_visible_everywhere"
+    ok, c_src, stderr = gimple_compiles(_comptime_toplevel_src)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif 'ct param or undeclared: MAX_N' in c_src:
+        print(f"FAIL  {name}: MAX_N still resolved to the undeclared placeholder, not its real value")
+        _FAIL += 1
+    elif '(int64_t)8' not in c_src:
+        print(f"FAIL  {name}: MAX_N's real value (8) not found folded into the generated C")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0

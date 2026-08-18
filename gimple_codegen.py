@@ -5690,7 +5690,34 @@ class GimpleGen:
         # verifier, same as it doesn't for int->int64_t. Both need the
         # explicit cast.
         if ctype in ('int64_t', '_Bool') and rhs.lstrip('-').isdigit():
-            self._emit(f'  {t} = ({ctype}){rhs};')
+            if rhs.startswith('-'):
+                # A cast applied directly to a NEGATIVE literal
+                # (`(int64_t)-1`, or even parenthesized: `(int64_t)(-1)`)
+                # is rejected by a `__GIMPLE`-tagged function's STRICT
+                # raw-GIMPLE parser ("expected expression before '-'/'('
+                # token") — unlike an ordinary (non-`__GIMPLE`) C function,
+                # which GCC itself lowers to GIMPLE and so tolerates normal
+                # C expression syntax, a `__GIMPLE` function's body must
+                # already BE valid GIMPLE: one operation per statement, no
+                # literal directly following a cast when that literal is
+                # negative. Real Mojo source `-1` (parsed as UnaryOp('-',
+                # IntLiteral(1)), see _lower_UnaryOp) already produces
+                # exactly this safe two-step shape — cast the POSITIVE
+                # magnitude into its own temp first (valid: a cast of a
+                # non-negative literal is fine), then negate that TEMP
+                # (NEGATE_EXPR on an SSA name, not a literal, is always
+                # valid GIMPLE) — mirror it here so a negative literal
+                # reaching `_new_val` some other way (e.g. a folded
+                # comptime int constant) gets the same safe lowering.
+                # Found via a negative top-level `comptime` constant (e.g.
+                # `comptime _InvalidTypeIndex: Int = -1`) read inside a
+                # `__GIMPLE`-tagged struct method — see test_gimple.py's
+                # "toplevel_comptime_const_visible_everywhere".
+                mag = self._new_temp(ctype)
+                self._emit(f'  {mag} = ({ctype}){rhs[1:]};')
+                self._emit(f'  {t} = -{mag};')
+            else:
+                self._emit(f'  {t} = ({ctype}){rhs};')
         else:
             self._emit(f'  {t} = {rhs};')
         return t
@@ -8074,6 +8101,19 @@ class GimpleGen:
                         collect_assigned_types(node.finally_body)
                 elif isinstance(node, WithStmt):
                     collect_assigned_types(node.body)
+                elif isinstance(node, ExprStmt) and isinstance(node.value, WalrusExpr):
+                    # `name := expr` used as a bare statement (e.g. `r :=
+                    # ShapedRecipe()`) parses as an ExprStmt wrapping a
+                    # WalrusExpr, NOT an AssignStmt -- unlike a walrus used
+                    # inside a larger expression, this shape was invisible
+                    # to this scan entirely, so a local first bound only via
+                    # a statement-level `:=` (never a plain `=`) never got an
+                    # inferred type here. See box.3d/game/bugs/DYLIB_struct_
+                    # list_index_reads_first_field_only_wrong_craft_results.md.
+                    vname = node.value.name
+                    if vname not in inferred:
+                        inferred[vname] = []
+                    inferred[vname].append(self._quick_type(node.value.value))
 
         try:
             collect_assigned_types(func.body)
@@ -8963,7 +9003,13 @@ class GimpleGen:
         if isinstance(_ct, bool):
             return '_Bool', self._new_val('_Bool', 'true' if _ct else 'false')
         if isinstance(_ct, int):
-            return 'int64_t', self._new_val('int64_t', f'(int64_t){_ct}')
+            # Pass the BARE literal (not pre-wrapped in a cast) so
+            # `_new_val`'s own int64_t/_Bool literal handling applies —
+            # including its negative-literal parenthesization fix, needed
+            # since a comptime int can legitimately be negative (e.g. a
+            # sentinel `comptime _InvalidIndex: Int = -1`) and `-fgimple`
+            # rejects a cast applied directly to a negative literal.
+            return 'int64_t', self._new_val('int64_t', str(_ct))
         # Unknown identifier (compile-time param, undeclared external, etc.).
         # Emit a placeholder so GCC doesn't see an undeclared reference.
         t = self._new_temp('int64_t')
@@ -16904,6 +16950,36 @@ class GimpleGen:
                 t = self._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
                 return 'double', t
             t = self._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            # Any OTHER pointer element type (struct pointers like Recipe*,
+            # or MojoDict*/MojoList*/MojoSet*) was falling all the way
+            # through to the plain int64_t return below, unlike the direct
+            # `ot == 'MojoList *'` branch above which already casts back to
+            # `elem` when it ends in ' *'. Every global container is boxed
+            # as int64_t at the C struct level (see "Globals are stored at
+            # C level as int64_t" elsewhere in this file), so a global
+            # `List[Struct]` ALWAYS arrives here via this opaque-cast path,
+            # never the direct branch -- meaning a struct-element global
+            # list's reads always silently degraded to raw int64_t instead
+            # of the real struct pointer, and a later `.field` access on
+            # that mistyped int64_t fell back to dynamic `_mojo_dispatch_
+            # getattr`, which only recognizes the FIRST field of the
+            # boxed-int64_t "value" mojo_list_get_int actually returned
+            # (the pointer's own low bytes were being read further, not the
+            # struct's memory at all) -- e.g. `r.width`/`r.output_id` in
+            # box.3d/game/lib/recipes.mojo's `match_shaped` reading garbage
+            # for every recipe. See bugs/DYLIB_struct_list_index_reads_
+            # first_field_only_wrong_craft_results.md.
+            if elem and elem.endswith(' *'):
+                self._actual_types[t] = elem
+                cast_t = self._new_val(elem, f'({elem}){t}')
+                self._actual_types[cast_t] = elem
+                if elem == 'MojoList *':
+                    if ov in self._nested_elem_types:
+                        self._elem_types[cast_t] = self._nested_elem_types[ov]
+                        self._elem_types[t] = self._nested_elem_types[ov]
+                if elem == 'MojoDict *' and ov in self._dict_val_types:
+                    self._dict_val_types[cast_t] = self._dict_val_types[ov]
+                return elem, cast_t
             return 'int64_t', t
 
         # Struct pointer subscript: Span[i] → Span->_data[i] etc.
@@ -23460,6 +23536,45 @@ class GimpleGen:
         finally:
             self._in_toplevel_gen = False
 
+        # Dependency-init prelude: a `mojo dylib` build compiles every
+        # module SEPARATELY (see gen_module's population of
+        # `_toplevel_dep_init_modules`) and links them together, each with
+        # its own unprioritized `__attribute__((constructor))`. Constructor
+        # firing order across translation units follows link/discovery
+        # order (driver._expand_dylib_modules' BFS over `from X import`
+        # statements), NOT the real import dependency graph — so a module
+        # whose top-level code (or a ctor-invoked function it calls) reads
+        # another module's globals has no guarantee that module's own ctor
+        # has already run. Real Python/Mojo import semantics require an
+        # imported module's top-level code to run before the importer's own
+        # — restore that here explicitly by calling each directly-imported
+        # local sibling's one-shot-guarded `<module>_init()` before this
+        # module's own body executes. This composes transitively: if A
+        # imports B and B imports C, A's prelude calls B_init() first,
+        # whose OWN prelude (compiled the identical way) calls C_init()
+        # first — so by the time A's own top-level statements run, both B
+        # and C are fully initialized, regardless of ctor link order.
+        # Reproduced via box.3d/game: `game_ffi.mojo`'s ctor called
+        # `engine_create_world()` -> `init_default_conversions()` ->
+        # `base/resource.mojo`'s `g_conversions.append(...)` while
+        # `resource`'s own ctor (transitively imported via `engine_world`,
+        # never directly by game_ffi) hadn't fired yet — `g_conversions`
+        # was still unallocated, `mojo_list_append_int` on it segfaulted at
+        # dlopen time. Only applies to standalone library-module compiles
+        # (matches gen_module's own ctor/`_init()`-emission condition) —
+        # a `do_imports=True` inline build has no separate per-module
+        # `_init()` to call (everything is already inlined in true
+        # execution order), and the root/emit_entry_points module has no
+        # exported `_init()` name of its own to match against.
+        _dep_init_lines = []
+        if not self.emit_entry_points and not self.do_imports:
+            for _dep_mod in self._toplevel_dep_init_modules:
+                _dep_init_fn = _module_init_name(_dep_mod)
+                _dep_init_lines.append(f"extern void {_dep_init_fn} (void);")
+        _dep_init_calls = [f"  {_module_init_name(_dep_mod)} ();"
+                            for _dep_mod in self._toplevel_dep_init_modules] \
+            if (not self.emit_entry_points and not self.do_imports) else []
+
         # One-shot guard: this function may now be reached from more than one
         # caller — the executable path's own explicit call in `main()`'s
         # wrapper (unchanged, pre-existing), PLUS (library/dylib modules
@@ -23474,12 +23589,14 @@ class GimpleGen:
         # identically-shaped `main()` wrapper, which already freely uses
         # `if`/function calls/etc.), so a local `static` flag is safe here.
         lines = [
+            *_dep_init_lines,
             f"void {fn_name} (void)",
             "{",
             *self.decls,
             "  static int _ran = 0;",
             "  if (_ran) return;",
             "  _ran = 1;",
+            *_dep_init_calls,
             *self.body_lines,
             "}",
         ]
@@ -29622,6 +29739,61 @@ class GimpleGen:
         # Ensure _actual_types knows stmts is MojoList* so for-loop dispatch
         # works when this method is compiled by the self-hosted backend.
         self._actual_types['stmts'] = 'MojoList *'
+        # Direct local-sibling modules this file imports at top level (e.g.
+        # `from base.resource import ...`) — populated by the "Process
+        # imports" loop below, consumed by _gen_toplevel to call each
+        # sibling's own <module>_init() before this module's own top-level
+        # code runs. Fresh per gen_module call (never leaks across the
+        # separate GimpleGen instances driver.compile_dylib/build_stdlib_
+        # dylib.py spin up per module). See _gen_toplevel's own comment for
+        # why this is needed: cross-module __attribute__((constructor))
+        # firing order in a `mojo dylib` build follows link/discovery order
+        # (driver._expand_dylib_modules' BFS), NOT the real dependency
+        # graph, so a module whose top-level code calls into a transitively
+        # -imported sibling's globals can run before that sibling's own
+        # ctor has initialized them.
+        self._toplevel_dep_init_modules: list[str] = []
+        # Fold every TOP-LEVEL `comptime NAME = value` into self._comptime_vals
+        # BEFORE anything else in this module gets compiled. Without this, a
+        # module-level comptime constant was invisible everywhere: the only
+        # two existing fold sites are `_gen_stmt_ComptimeVarStmt` (fires
+        # during ordinary Phase 2a statement generation — but a top-level
+        # ComptimeVarStmt is never even added to `toplevel_stmts` below,
+        # since its isinstance tuple doesn't include ComptimeVarStmt, so
+        # that never runs for one) and the FUNCTION-nested pre-fold a few
+        # thousand lines down (scoped to `stmt.body` of the function
+        # currently being compiled, not file/module scope). Every OTHER
+        # reference anywhere in the file — struct field array-size
+        # annotations, ordinary runtime reads via `_lower_IdentExpr`, bounds
+        # checks — silently read the "ct param or undeclared" placeholder
+        # value 0 instead. See test_gimple.py's
+        # "toplevel_comptime_const_visible_everywhere". Recurses into
+        # IfStmt/TryStmt/While/For bodies (mirroring this file's other
+        # top-level pre-scans) since a comptime constant can legitimately be
+        # declared inside a platform-resolved `if` block; processes in
+        # source order so a later comptime referencing an earlier one folds
+        # correctly.
+        def _prefold_toplevel_comptime(_node_list):
+            for _cn in _node_list:
+                if isinstance(_cn, ComptimeVarStmt):
+                    _cv = self._eval_const(_cn.value)
+                    if _cv is not None:
+                        self._comptime_vals.setdefault(_cn.target, _cv)
+                    if isinstance(_cn.value, ListExpr):
+                        self._comptime_list_asts.setdefault(_cn.target, _cn.value)
+                elif isinstance(_cn, IfStmt):
+                    _prefold_toplevel_comptime(_cn.then_body or [])
+                    if _cn.else_body:
+                        _prefold_toplevel_comptime(_cn.else_body)
+                    for _, _eb in (_cn.elifs or []):
+                        _prefold_toplevel_comptime(_eb or [])
+                elif isinstance(_cn, (WhileStmt, ForStmt)):
+                    _prefold_toplevel_comptime(_cn.body or [])
+                elif isinstance(_cn, TryStmt):
+                    _prefold_toplevel_comptime(_cn.body or [])
+                    for _h in (_cn.handlers or []):
+                        _prefold_toplevel_comptime(getattr(_h, 'body', None) or [])
+        _prefold_toplevel_comptime(stmts)
         # Per-lexical-scope import tracking: push THIS module's own top-level
         # scope (frame 0) before any import scan or body generation runs.
         # _emit_stdlib_import_externs / _register_link_imports populate it from
@@ -31726,6 +31898,8 @@ class GimpleGen:
                             or _sib_path0.startswith(_mlmod_chk.TEST_PATH))
                     except Exception:
                         _sib_is_local_project = False
+                if _sib_is_local_project and _sib_qualifier not in self._toplevel_dep_init_modules:
+                    self._toplevel_dep_init_modules.append(_sib_qualifier)
                 if exports is not None:
                     def _register_sym(sym_name, orig_name, sym_info):
                         if sym_name in self.struct_field_types:
@@ -34688,6 +34862,22 @@ class GimpleGen:
                     for _pname, _ptype in (_n.params or []):
                         if _ptype:
                             self.var_types[_pname] = _mojo_type(_ptype)
+                    # Also seed LOCAL (walrus/assign) variable types, not just
+                    # annotated params -- e.g. `r := ShapedRecipe(); g_list.
+                    # append(r)`. Without this, `_quick_type(IdentExpr('r'))`
+                    # below finds no var_types entry and falls through to its
+                    # int64_t default, so a global struct list populated only
+                    # via a local-var append (never a literal or a bare-param
+                    # append) gets no element type at all. Every subsequent
+                    # `g_list[i]` read then emits `mojo_list_get_int`, which
+                    # reads only the boxed pointer's first 8 bytes worth of
+                    # dispatch instead of the real struct pointer -- see
+                    # box.3d/game/bugs/DYLIB_struct_list_index_reads_first_
+                    # field_only_wrong_craft_results.md (game/lib/recipes.mojo's
+                    # `register_shaped_recipe` etc.).
+                    for _lname, _ltype in self._infer_local_var_types(_n).items():
+                        if _lname not in self.var_types:
+                            self.var_types[_lname] = _ltype
                     _phase17_collect_appends(_n.body or [], _append_hits)
                     self.var_types = _saved
                 elif isinstance(_n, IfStmt):
