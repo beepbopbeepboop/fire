@@ -12790,15 +12790,28 @@ class GimpleGen:
                     self._elem_types[ov] = actual_elem
                     if actual_elem == 'MojoList *' and av in self._elem_types:
                         self._nested_elem_types[ov] = self._elem_types[av]
-                        # Propagate to _field_elem_types when ov originated from a
-                        # struct field (e.g. self.errors). The field-access read path
-                        # in _lower_MemberExpr checks _field_elem_types to recover
-                        # element type info when the list is read back later.
-                        if ov in self._struct_field_owners:
-                            for _sn, _fn in self._struct_field_owners[ov]:
-                                if _sn not in self._field_elem_types:
-                                    self._field_elem_types[_sn] = {}
-                                self._field_elem_types[_sn][_fn] = actual_elem
+                    # Propagate to _field_elem_types when ov originated from a
+                    # struct field (e.g. self.errors / self.blocks). The
+                    # field-access read path in _lower_MemberExpr checks
+                    # _field_elem_types to recover element type info when the
+                    # list is read back later (possibly from a different
+                    # function/module entirely). This must fire for ANY
+                    # pointer-typed element (a plain struct pointer like
+                    # `Block *`, not just the nested-list `MojoList *` case
+                    # above) — previously this was nested inside the
+                    # `actual_elem == 'MojoList *'` check, so appending a
+                    # struct instance (e.g. `self.blocks.append(Block())`)
+                    # never recorded the element type, and a later read of
+                    # that field elsewhere fell back to opaque int64_t and
+                    # runtime dynamic-dispatch getattr instead of a direct
+                    # `->block_type` field access (AttributeError: block_type
+                    # in dlopen'd dylibs — box.3d/game's
+                    # DYLIB_dlopen_extern_fn_attributeerror.md).
+                    if ov in self._struct_field_owners:
+                        for _sn, _fn in self._struct_field_owners[ov]:
+                            if _sn not in self._field_elem_types:
+                                self._field_elem_types[_sn] = {}
+                            self._field_elem_types[_sn][_fn] = actual_elem
             return 'int', self._new_val('int', '0')
         if method == 'extend' and args:
             at, av = self.lower_expr(args[0])
@@ -23864,6 +23877,41 @@ class GimpleGen:
         if _imp_path:
             import module_loader as _mlmod
             self._imported_struct_home[local] = _mlmod.module_name_for_path(_imp_path)
+        # Transitively materialize `List[X]`-typed fields whose element `X`
+        # is itself a struct defined in the SAME home `module` (e.g.
+        # `World.blocks: List[Block]`, both defined in engine_world.mojo).
+        # `_imported_field_ctype`/`_resolve_type` erase `List[Block]` down to
+        # the generic `MojoList *` (the runtime has no per-instantiation
+        # list type), which loses the element type — without this, a caller
+        # in a DIFFERENT module that only imports `World` (not `Block`
+        # itself, since it never names `Block` directly — it only reaches
+        # it transitively through `World.blocks`) has no registered
+        # `struct_field_types['Block']` and no `_field_elem_types['World']
+        # ['blocks']`, so `w.blocks[i].block_type` can't be resolved to a
+        # direct `->block_type` C field access and falls back to the
+        # runtime's fully-dynamic `_mojo_dispatch_getattr` (which returns 0 /
+        # raises `AttributeError: block_type` for a struct that isn't
+        # reflect-registered on this path) instead of a real, correct read.
+        # Reproduced via box.3d/game's DYLIB_dlopen_extern_fn_attributeerror.md
+        # (dlopen of a dylib whose module-scope var, in a DIFFERENT module
+        # from World/Block's own definitions, reads `g_world.blocks[hash].
+        # block_type`). Scoped to same-module element structs only (the
+        # common real-world shape); an element struct defined in yet another,
+        # third module would need the field's own annotation to carry that
+        # module's name, which the plain `List[Block]` spelling doesn't.
+        for f in sdef.fields:
+            if not isinstance(f, VarDecl) or not isinstance(f.type_ann, str):
+                continue
+            _ann = f.type_ann.strip()
+            if not (_ann.startswith('List[') and _ann.endswith(']')):
+                continue
+            _elem_name = _ann[len('List['):-1].strip()
+            if not _elem_name or not _elem_name[0].isupper():
+                continue
+            if _elem_name in self._IMPORTED_STRUCT_SKIP_BASENAMES:
+                continue
+            if self._materialize_imported_struct(module, _elem_name, _elem_name):
+                self._field_elem_types.setdefault(local, {})[f.name] = f"{_elem_name} *"
         return True
 
     def _resolve_sibling_param_ctype(self, module: str, raw_ptype) -> str | None:
