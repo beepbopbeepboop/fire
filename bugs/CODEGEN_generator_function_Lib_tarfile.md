@@ -1,5 +1,54 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-18 — targeted investigation of the 2026-08-09 `:2418:27` "unexpected RHS" error: already fixed, no code change needed)
+
+Investigated the specific remaining item flagged in the 2026-08-09
+section below: `TarFile._get_extraction_filter`'s `return
+_NAMED_FILTERS[filter]` inside `try:`/`except KeyError:`, which used to
+fail with:
+```
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py:2418:27: error: unexpected RHS for assignment before ';' token
+```
+
+Built several isolated repros of exactly this shape (a module-level
+dict of callables, a function/method doing `try: return d[key] except
+KeyError: raise ...`, plus sibling variants — plain `return d[key]`
+outside any try, and `x = d[key]; return x` inside a try) via `python3
+mojo.py build`. All of them compile AND run correctly (verified actual
+returned values, not just "no compile error") on current master. Also
+did a full from-scratch `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/tarfile.py`: `TarFile__get_filter_
+function` (the mangled name for `_get_extraction_filter`) now compiles
+with only ordinary unused-variable/unused-label warnings — no error at
+line 2418, and grepping the full build log for "unexpected RHS" finds
+only 4 unrelated occurrences elsewhere (`weakref.py:157`/`353`,
+`inspect.py:1233`, `functools.py:950` — different files, not
+investigated here, out of scope). The rest of the previously-documented
+error set for this file (the `149:26`/`151:26` ENCODING pointer-from-
+int errors, `754:7` SpecialFileError.tarinfo, the bz2/lzma implicit-
+declaration errors) is still present, unchanged, confirming this is a
+real apples-to-apples re-run against the same file and not a fluke.
+
+Root cause of why it went away: not pinned down to a specific commit —
+`_gen_stmt_TryStmt`'s early-return interception (the `intercepted_emit`
+closure around `_mojo_exc_top` bookkeeping) and `_gen_stmt_ReturnStmt`
+itself are unchanged in this region since well before 2026-08-09, so
+the fix was very likely an incidental side effect of one of the several
+unrelated dict/list/global-type-inference fixes landed in the
+intervening sessions (e.g. the Phase 1.7 global-list/global-dict
+element-type inference work, or the raw-pointer `*T` resolution work) —
+plausibly the dict-subscript-read's value type for `_NAMED_FILTERS`
+(module-level dict of function references) now resolves to a real,
+single consistent C type where it previously didn't, avoiding whatever
+malformed GIMPLE the mismatch used to produce. Not worth spending more
+time isolating retroactively since the bug is simply gone and verified
+gone from multiple independent angles.
+
+No code change made — CLAUDE.md's gimple_codegen.py quality gate was
+not invoked since nothing was touched; `test_gimple.py` (248/248) and
+`test_module_cache.py` (76/76) re-run clean as a baseline sanity check
+regardless.
+
 ## Status (updated 2026-08-11, one root cause fixed; real blocker root-caused, left open)
 
 Re-verified against current master. Classification unchanged: **NOT a
