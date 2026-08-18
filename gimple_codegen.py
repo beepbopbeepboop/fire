@@ -1809,6 +1809,19 @@ def _class_attr_ctype(v) -> str | None:
     return None
 
 
+# Fixed-size-array struct-field-annotation shape: `var x: [ElemType; N]`
+# (mojo_compiler.py's `_parse_type_ann_inner` LBRACKET branch captures the
+# bracket contents verbatim via `_capture_bracketed_text`, which joins
+# tokens with single spaces — so `[Block; MAX_BLOCKS]` round-trips as the
+# string "[Block ; MAX_BLOCKS]"). `N` may be a decimal-literal size or a
+# NAME referencing a module-level `comptime NAME: Int = <int-literal-or-
+# foldable-expr>` constant (the common real-world shape, e.g. box.3d/game's
+# `comptime MAX_BLOCKS: Int = 4096`) — see GimpleGen._module_const_int.
+# See bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case.
+_FIXED_ARRAY_ANN_RE = re.compile(
+    r'^\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*;\s*([A-Za-z_0-9]+)\s*\]$')
+
+
 def _mojo_type(ann: str | type | None) -> str:
     if not ann:
         return 'int64_t'  # Default to 64-bit signed integer
@@ -4096,6 +4109,20 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # Fixed-size-array struct fields (`var x: [ElemType; N]`, mojo_compiler.py's
+        # `_parse_type_ann_inner` LBRACKET-annotation shape): struct_name ->
+        # field_name -> (elem_ctype, N). The field's C type in struct_field_types
+        # is the marker string f"{elem_ctype}[{N}]" (distinguishable from every
+        # other ctype shape this codegen produces — never ends in ' *', never a
+        # bare _TYPE_MAP/struct name) so struct-typedef emission (gen_module's
+        # "Struct typedefs" sections) can special-case it into a REAL embedded C
+        # array field (`ElemType name[N];`) instead of the usual `ctype name;`,
+        # and _lower_subscript/_array_field_elem_ptr can special-case
+        # `obj.field[i]` on such a field into real C array indexing
+        # (`&obj->field[i]` via array-decay + `_mojo_at_` helper) instead of
+        # falling through to the MojoList*/generic-pointer paths, neither of
+        # which understands this shape. See bugs/BUG-2026-008.md (box.3d/game).
+        self._array_field_sizes: dict[str, dict[str, tuple[str, int]]] = {}
         # Module-level GLOBAL container element/value types: global_name ->
         # elem/value C type. Populated once by gen_module's Phase 1.7
         # pre-scan (_phase17_infer_global_type), consulted by _reset_func
@@ -16799,6 +16826,52 @@ class GimpleGen:
 
     # ── Subscript lowering ────────────────────────────────────────────────
 
+    def _array_field_elem_ptr(self, member_expr) -> tuple[str, str] | None:
+        """If `member_expr` (a MemberExpr, e.g. `world.blocks`) reads a
+        fixed-size-array struct field (`var blocks: [Block; N]` — see
+        _FIXED_ARRAY_ANN_RE and self._array_field_sizes, populated at struct
+        registration in gen_module), return (elem_ptr_ctype, c_expr) where
+        c_expr is the array field DECAYED to a real pointer to its first
+        element (ordinary C array-to-pointer decay: `obj->field` used where
+        a pointer value is expected). Returns None for every other MemberExpr
+        (the ordinary field-read path handles those).
+
+        This is the one place that understands the fixed-array field shape's
+        C representation; both `_lower_subscript` (read: `obj.field[idx]`
+        and, chained, `obj.field[idx].member`) and `_gen_stmt_AssignStmt`'s
+        SubscriptExpr-target branch (write: `obj.field[idx] = ...`) call this
+        BEFORE falling through to the ordinary `self.lower_expr(member_expr)`
+        MemberExpr-read codegen, which has no notion of "this field is a
+        whole embedded array, not a scalar or pointer" and could not
+        otherwise produce it as a single valid C value. Once this returns a
+        real pointer-to-element-type value, every existing pointer-based
+        struct/array subscript mechanism elsewhere in this codegen (the
+        working List[Struct]-element path, the generic `_mojo_at_` scaled-
+        pointer-arithmetic helpers, and the existing whole-struct-array-
+        element assignment field-by-field-copy branch) already handles it
+        correctly with no further special-casing needed. See
+        bugs/BUG-2026-008.md (box.3d/game) for the motivating real-world case
+        (`World.blocks: [Block; MAX_BLOCKS]`)."""
+        if not isinstance(member_expr, MemberExpr):
+            return None
+        base_t, base_v = self.lower_expr(member_expr.obj)
+        if not base_t.endswith(' *'):
+            return None
+        sn = _struct_name_of(base_t)
+        info = self._array_field_sizes.get(sn, {}).get(member_expr.member)
+        if not info:
+            return None
+        elem_ct, _n = info
+        safe_fn = _safe_field(member_expr.member)
+        ptr_t = f"{elem_ct} *"
+        # `-fgimple` rejects a bare array-typed component-ref assigned
+        # directly to a pointer variable ("non-trivial conversion in
+        # 'component_ref'") — ordinary C's implicit array-to-pointer decay
+        # isn't a legal single GIMPLE rvalue; the address of the first
+        # element (`&obj->field[0]`, an ADDR_EXPR of an ARRAY_REF) is.
+        arr_base = self._new_val(ptr_t, f"&{base_v}->{safe_fn}[0]")
+        return ptr_t, arr_base
+
     def _struct_data_field(self, ctype: str):
         """Return (field_name, field_ctype) if ctype is a struct pointer with a pointer _data/data field, else (None, None)."""
         if not ctype.endswith(' *'):
@@ -16849,6 +16922,29 @@ class GimpleGen:
         if isinstance(node.index, SliceExpr):
             node.index.obj = node.obj
             return self._lower_slice(node.index)
+
+        # Fixed-size-array struct field: `obj.field[idx]` (and, chained,
+        # `obj.field[idx].member`). See _array_field_elem_ptr's own
+        # docstring for why this must run BEFORE the generic
+        # `self.lower_expr(node.obj)` just below.
+        if isinstance(node.obj, MemberExpr):
+            _arr = self._array_field_elem_ptr(node.obj)
+            if _arr is not None:
+                _ot, _ov = _arr
+                _elem_ct = _ot[:-2]  # strip trailing ' *'
+                _idx_type, _iv = self.lower_expr(node.index)
+                _idx64 = self._new_val('int64_t', f"(int64_t) {_iv}")
+                self._ptr_helpers_needed.add(_elem_ct)
+                _addr = self._new_val(_ot, f"_mojo_at_{_c_id(_elem_ct)} ({_ov}, {_idx64})")
+                if _elem_ct in self.struct_field_types:
+                    # Struct-valued element: return a POINTER to it (this
+                    # codegen's universal struct-field convention — same
+                    # shape the working List[Struct]-element path returns),
+                    # so a chained `.member` read/write off this subscript
+                    # routes through the ordinary `ptr->member` path.
+                    return _ot, _addr
+                _t = self._new_val(_elem_ct, f"*{_addr}")
+                return _elem_ct, _t
 
         ot, ov = self.lower_expr(node.obj)
 
@@ -18240,6 +18336,38 @@ class GimpleGen:
 
     # ── Compile-time constant evaluators (for comptime) ───────────────────
 
+    def _module_const_int(self, name: str, stmts: list, imported_stmts: list | None) -> int | None:
+        """Resolve a bare NAME to a compile-time int, by looking for a
+        module-level `comptime NAME: T = <expr>` (or plain `NAME = <expr>`)
+        binding in `stmts`/`imported_stmts` whose value folds to an int via
+        `_eval_const_int`. Used by the fixed-size-array struct-field
+        annotation (`[ElemType; N]`) to resolve a named size like box.3d/
+        game's `comptime MAX_BLOCKS: Int = 4096`, since that array shape's
+        size is very commonly a named constant rather than a bare literal.
+        Cached (per-name) since struct field registration can look up the
+        same name repeatedly across many fields/structs in one compile."""
+        cache = getattr(self, '_module_int_consts_cache', None)
+        if cache is None:
+            cache = self._module_int_consts_cache = {}
+        if name in cache:
+            return cache[name]
+        val = None
+        for src in (stmts, imported_stmts or []):
+            for st in src:
+                if isinstance(st, ComptimeVarStmt) and st.target == name:
+                    val = self._eval_const_int(st.value)
+                elif isinstance(st, VarDecl) and st.name == name and st.value is not None:
+                    val = self._eval_const_int(st.value)
+                elif (isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr)
+                      and st.target.name == name):
+                    val = self._eval_const_int(st.value)
+                if val is not None:
+                    break
+            if val is not None:
+                break
+        cache[name] = val
+        return val
+
     def _eval_const_int(self, node) -> int | None:
         """Evaluate an expression as a compile-time integer, or return None."""
         if isinstance(node, IntLiteral):  return node.value
@@ -19179,7 +19307,17 @@ class GimpleGen:
                     if self._elem_types[v] == 'MojoDict *' and v in self._dict_val_types:
                         self._field_dict_val_types.setdefault(struct_name, {})[node.target.member] = self._dict_val_types[v]
         elif isinstance(node.target, SubscriptExpr):
-            ot, obj_v = self.lower_expr(node.target.obj)
+            # Fixed-size-array struct field write: `obj.field[idx] = ...` /
+            # `obj.field[idx] += ...` (whole-element assignment, e.g. a
+            # constructor-call RHS). See _array_field_elem_ptr's docstring —
+            # must run before the generic `self.lower_expr(node.target.obj)`
+            # below, which has no notion of the fixed-array field shape.
+            _arr_tgt = (self._array_field_elem_ptr(node.target.obj)
+                        if isinstance(node.target.obj, MemberExpr) else None)
+            if _arr_tgt is not None:
+                ot, obj_v = _arr_tgt
+            else:
+                ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
             if ot == 'MojoList *':
                 elem = self._elem_of(obj_v)
@@ -19272,8 +19410,63 @@ class GimpleGen:
                                     ptr_typed = self._new_val(ot, f"({ot}){obj_v}")
                                     addr = self._new_val(ot, f"_mojo_at_{_c_id(elem_t)} ({ptr_typed}, {idx64})")
                                     for fname, ftype in fields.items():
-                                        fv = self._new_val(ftype, f"{v}->{_safe_field(fname)}")
-                                        self._emit(f"  {addr}->{_safe_field(fname)} = {fv};")
+                                        safe_fn = _safe_field(fname)
+                                        if re.match(r'^.+\[\d+\]$', ftype):
+                                            # Fixed-size-array field (marker
+                                            # "ElemCtype[N]", see
+                                            # _FIXED_ARRAY_ANN_RE): the field
+                                            # is a real embedded C array, not
+                                            # a scalar/pointer value — it
+                                            # can't be read into a GIMPLE
+                                            # register via `_new_val` (that
+                                            # emitted an illegal
+                                            # `int64_t[6] _tN;` local
+                                            # declaration) nor assigned with
+                                            # plain `=` (C arrays aren't
+                                            # assignable). A whole-array
+                                            # `memcpy` is the correct C
+                                            # equivalent of Mojo's by-value
+                                            # array-field copy semantics.
+                                            # The byte count must be a
+                                            # SIMPLE operand (a literal or a
+                                            # plain variable) — `-fgimple`
+                                            # rejects `sizeof(addr->field)`
+                                            # ("expected expression before
+                                            # 'sizeof'": its sizeof grammar
+                                            # only accepts a bare TYPE NAME,
+                                            # never an arbitrary expression;
+                                            # see _gen_stmt_VarDecl's boxed-
+                                            # mut-local allocator comment for
+                                            # the same finding). Resolve the
+                                            # element ctype + count from
+                                            # self._array_field_sizes (the
+                                            # authoritative source populated
+                                            # at struct registration) rather
+                                            # than re-parsing `ftype`.
+                                            _ainfo = self._array_field_sizes.get(elem_t, {}).get(fname)
+                                            if _ainfo:
+                                                _ect, _acnt = _ainfo
+                                            else:
+                                                _am = re.match(r'^(.+)\[(\d+)\]$', ftype)
+                                                _ect, _acnt = (_am.group(1), int(_am.group(2))) if _am else ('int64_t', 1)
+                                            if _ect in _SCALAR_CTYPE_SIZE:
+                                                # Scalar element type: `sizeof(int64_t)` itself
+                                                # is rejected by GIMPLE's sizeof grammar (see
+                                                # above), so use a literal byte count computed
+                                                # in Python instead.
+                                                _nbytes = _SCALAR_CTYPE_SIZE[_ect] * _acnt
+                                            else:
+                                                # Struct element type: unlike a scalar typedef,
+                                                # `sizeof(StructName)` (a bare aggregate type
+                                                # name) IS accepted by GIMPLE — this is the same
+                                                # pattern already used for `calloc(1, sizeof(...))`
+                                                # struct allocation elsewhere in this codegen.
+                                                _esz = self._new_val('int64_t', f"(int64_t) sizeof({_ect})")
+                                                _nbytes = self._new_val('int64_t', f"{_esz} * {_acnt}")
+                                            self._emit(f"  memcpy({addr}->{safe_fn}, {v}->{safe_fn}, {_nbytes});")
+                                            continue
+                                        fv = self._new_val(ftype, f"{v}->{safe_fn}")
+                                        self._emit(f"  {addr}->{safe_fn} = {fv};")
                                 else:
                                     _debug_note('struct subscript write dropped',
                                                 f'{elem_t}[...] = {vtype}')
@@ -19449,7 +19642,17 @@ class GimpleGen:
                 field_type = self.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
                 self._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{_safe_field(node.target.member)}")
         elif isinstance(node.target, SubscriptExpr):
-            ot, obj_v = self.lower_expr(node.target.obj)
+            # Fixed-size-array struct field write: `obj.field[idx] = ...` /
+            # `obj.field[idx] += ...` (whole-element assignment, e.g. a
+            # constructor-call RHS). See _array_field_elem_ptr's docstring —
+            # must run before the generic `self.lower_expr(node.target.obj)`
+            # below, which has no notion of the fixed-array field shape.
+            _arr_tgt = (self._array_field_elem_ptr(node.target.obj)
+                        if isinstance(node.target.obj, MemberExpr) else None)
+            if _arr_tgt is not None:
+                ot, obj_v = _arr_tgt
+            else:
+                ot, obj_v = self.lower_expr(node.target.obj)
             it, idx_v  = self.lower_expr(node.target.index)
             if ot == 'MojoList *':
                 elem = self._elem_of(obj_v)
@@ -31944,6 +32147,36 @@ class GimpleGen:
                         # Don't overwrite hardcoded entries (e.g. BinaryOp.op)
                         if f_name not in self.struct_field_types[s.name]:
                             ft = _mojo_type(field.type_ann)
+                            # Fixed-size-array field: `var x: [ElemType; N]`.
+                            # See _FIXED_ARRAY_ANN_RE's own comment and
+                            # bugs/BUG-2026-008.md (box.3d/game) — `ft` here
+                            # becomes the marker string "ElemCtype[N]" (never
+                            # produced by any other branch: it doesn't end in
+                            # ' *', isn't a bare _TYPE_MAP/struct name), which
+                            # the struct-typedef emission (gen_module) turns
+                            # into a REAL embedded C array field, and
+                            # _lower_subscript's dedicated branch (via
+                            # self._array_field_sizes) turns `obj.field[i]`
+                            # into real C array indexing instead of falling
+                            # through to the MojoList*/generic-pointer paths.
+                            _arr_m = (_FIXED_ARRAY_ANN_RE.match(str(field.type_ann).strip())
+                                      if field.type_ann else None)
+                            if _arr_m:
+                                _elem_nm, _size_txt = _arr_m.group(1), _arr_m.group(2)
+                                _n = (int(_size_txt) if _size_txt.isdigit()
+                                      else self._module_const_int(_size_txt, stmts, imported_stmts))
+                                if _n is not None and _n > 0:
+                                    # A locally-defined struct element type is
+                                    # embedded BY VALUE (the bare struct-typedef
+                                    # name, not "Name *" — this is genuinely
+                                    # different from every other struct-typed
+                                    # field in this codegen, which are always
+                                    # pointers; see the array-field comment
+                                    # block above _FIXED_ARRAY_ANN_RE).
+                                    _elem_ct = (_elem_nm if _elem_nm in self.struct_field_types
+                                                else _mojo_type(_elem_nm))
+                                    ft = f"{_elem_ct}[{_n}]"
+                                    self._array_field_sizes.setdefault(s.name, {})[f_name] = (_elem_ct, _n)
                             if f_name == 'value' and s.name == 'Generator':
                                 ft = 'int'  # boxed object field
                             _ann_bare = str(field.type_ann).strip() if field.type_ann else ''
@@ -31958,7 +32191,7 @@ class GimpleGen:
                             # MojoDict *, MojoSet *, or double-pointer like MojoDict * *)
                             # but there is a locally-defined struct, prefer the local struct.
                             # Also handle Pointer[LocalStruct[...]] → LocalStruct *.
-                            if field.type_ann:
+                            if field.type_ann and not _arr_m:
                                 _ann_str = str(field.type_ann)
                                 # Extract the outermost base name (e.g. 'Pointer', 'Dict', 'List')
                                 _outer_base = _ann_str.split('[')[0].strip()
@@ -36182,7 +36415,11 @@ class GimpleGen:
                         # as int64_t) so `.rstrip(' *')`/comparison see real
                         # text — without it the self-hosted dependency check saw
                         # garbage and emitted structs out of dependency order.
-                        base_type = ('' + field_type).rstrip(' *')
+                        # Also strip a fixed-size-array marker suffix ("Block[4096]"
+                        # -> "Block", see _FIXED_ARRAY_ANN_RE) so a struct embedding
+                        # a fixed-size array of another local struct still gets
+                        # correctly ordered AFTER that element struct's own typedef.
+                        base_type = re.sub(r'\[\d+\]$', '', ('' + field_type).rstrip(' *'))
                         # Allow self-references: Scope can have a field of type Scope*
                         if base_type == struct_name:
                             continue  # Self-reference is OK
@@ -36223,7 +36460,16 @@ class GimpleGen:
                                 # Change Scope * to struct Scope * for self-references
                                 ft = f"struct {struct_name} *"
                             safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
-                            parts.append(f"  {ft} {safe_fn};")
+                            # Fixed-size-array field marker ("ElemCtype[N]",
+                            # see _FIXED_ARRAY_ANN_RE): C array-declarator
+                            # syntax puts the size after the FIELD NAME, not
+                            # after the type ("ElemCtype name[N];"), unlike
+                            # every other field shape here.
+                            _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
+                            if _arr_dm:
+                                parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
+                            else:
+                                parts.append(f"  {ft} {safe_fn};")
                     else:
                         # Empty struct - add a dummy field for valid C
                         parts.append(f"  int _dummy;")
@@ -37103,14 +37349,26 @@ class GimpleGen:
                             else:
                                 ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
                             safe_fn = f'_kw_{field.name}' if (field.name in _C_KEYWORDS or field.name in _C_PARAM_EXTRA_KEYWORDS) else field.name
-                            parts.append(f"  {ft} {safe_fn};")
+                            # Fixed-size-array field marker ("ElemCtype[N]",
+                            # see _FIXED_ARRAY_ANN_RE / Section 1's identical
+                            # handling above): the size goes after the field
+                            # name in C array-declarator syntax.
+                            _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
+                            if _arr_dm:
+                                parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
+                            else:
+                                parts.append(f"  {ft} {safe_fn};")
                             emitted_fields.add(field.name)
                     # Also emit any fields that are in struct_field_types but not in AST fields
                     if sd.name in self.struct_field_types:
                         for field_name, field_type in self.struct_field_types[sd.name].items():
                             if field_name not in emitted_fields:
                                 safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
-                                parts.append(f"  {field_type} {safe_fn};")
+                                _arr_dm2 = re.match(r'^(.+)\[(\d+)\]$', field_type)
+                                if _arr_dm2:
+                                    parts.append(f"  {_arr_dm2.group(1)} {safe_fn}[{_arr_dm2.group(2)}];")
+                                else:
+                                    parts.append(f"  {field_type} {safe_fn};")
                     parts.append(f"}} {sd.name};")
                     # Milestone C step 3: see the identical capture in the
                     # struct_field_types-based typedef path above (Section 1)
@@ -37278,6 +37536,19 @@ class GimpleGen:
                     if fname == '__mojo_type_id':
                         continue
                     safe_f = _safe_field(fname)
+                    # Fixed-size-array field ("ElemCtype[N]", see
+                    # _FIXED_ARRAY_ANN_RE): `obj->field` names the whole
+                    # embedded array, not a scalar/pointer value — casting
+                    # a VALUE to an array type ("(Block[4096])val") is not
+                    # legal C, so this generic reflection dispatch (only
+                    # ever reached for dynamically-typed/unknown-receiver
+                    # getattr/setattr, never ordinary compiled field access)
+                    # just skips it, same as any other field shape this
+                    # dispatch doesn't understand — no regression, since this
+                    # shape had no reflection support before this fix either.
+                    if re.match(r'^.+\[\d+\]$', ftype):
+                        name_lits.append(f'"{fname}"')
+                        continue
                     if ftype.endswith(' *'):
                         get_lines.append(
                             f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')

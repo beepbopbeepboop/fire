@@ -660,7 +660,7 @@ class ComptimeVarStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del'}
 
-_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 
 # ── T-string helpers: handle nested braces/interpolations ────────────────────────
@@ -881,8 +881,21 @@ def _strip_inline_comment(s: str) -> str:
     return s
 
 def _split_on_separators(s: str) -> list[str]:
-    """Split on ';' statement separator, respecting quoted strings (including backtick strings)."""
-    parts, buf, in_str = [], [], None
+    """Split on ';' statement separator, respecting quoted strings (including
+    backtick strings) AND bracket/paren/brace nesting — a ';' inside an
+    unmatched `[`/`(`/`{` is never a real statement separator (real Python
+    has no such thing as a semicolon inside an expression at all), so it's
+    left in place for the surrounding bracketed text to consume whole. This
+    matters for a fixed-size-array type-annotation position, `var x:
+    [ElemType; N]` (see mojo_compiler.py's `_parse_type_ann_inner` LBRACKET
+    branch / `_capture_bracketed_text`, and gimple_codegen.py's
+    `_FIXED_ARRAY_ANN_RE`) — without bracket-depth tracking here, the ';'
+    was treated as an ordinary statement separator and silently DROPPED
+    (never even reaching the token stream, unlike a real SEMICOLON token —
+    see py_tokenize's `kind in ("WS", "UNK", "XFER"): continue`), losing the
+    array's size entirely with no way to recover it downstream. See
+    bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case."""
+    parts, buf, in_str, depth = [], [], None, 0
     i = 0
     while i < len(s):
         c = s[i]
@@ -894,7 +907,11 @@ def _split_on_separators(s: str) -> list[str]:
                 in_str = None
         elif c in ('"', "'", '`'):
             in_str = c; buf.append(c)
-        elif c == _SEP_CHAR:
+        elif c in ('[', '(', '{'):
+            depth += 1; buf.append(c)
+        elif c in (']', ')', '}'):
+            depth = max(0, depth - 1); buf.append(c)
+        elif c == _SEP_CHAR and depth == 0:
             parts.append("".join(buf)); buf = []
         else:
             buf.append(c)
