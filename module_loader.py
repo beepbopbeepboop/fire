@@ -469,6 +469,80 @@ class ModuleLoader:
             # Extract function definitions with full signatures
             _scan_source(content)
 
+            # Extract module-scope PLAIN `var NAME = EXPR` globals (not
+            # `comptime` — those are handled separately, by re-parsing and
+            # constant-folding the imported module's own source directly at
+            # the call site in gimple_codegen.py's `_prefold_imported_
+            # comptime`, since a comptime constant's VALUE — not a runtime
+            # symbol reference — is what a bare cross-module import needs).
+            # See BUG-2026-009 (box.3d/game): a bare `from X import
+            # <module_global>` for a plain `var` was previously invisible
+            # to this scanner entirely (only fn/def signatures were ever
+            # extracted here), so `_emit_stdlib_import_externs`/its callers
+            # in gimple_codegen.py had no way to know the name even existed,
+            # let alone that it needs a real cross-translation-unit
+            # reference into the DEFINING module's own storage — the
+            # importing module's own compile (each `mojo dylib` module is a
+            # fully independent translation unit — see driver.compile_dylib)
+            # silently fell through to codegen's "unknown identifier"
+            # placeholder (0 / NULL), reading zero or segfaulting on a
+            # stale/garbage pointer instead. This entry is consumed by
+            # gimple_codegen.py's `_emit_imported_global_accessors`, which
+            # declares a real `extern <c_type> <mod>__mojo_global_get_<name>
+            # (void);` and routes any bare read of the imported name through
+            # a call to it — a synthesized accessor function the DEFINING
+            # module (see gen_module's own "Module-level globals" emission)
+            # unconditionally exports for every one of its own module-scope
+            # `var` globals, mirroring how every free function is already
+            # unconditionally exported (no separate "who imports me"
+            # tracking needed on the defining side).
+            #
+            # Deliberately NOT using an AST parse here (this whole file's
+            # established convention — see `_scan_source`'s own docstring
+            # comparison to gimple_codegen.py — is a fast, dependency-free
+            # text scan, the same approach already used for fn/def). Only a
+            # top-level (column-0, no indent) `var NAME = EXPR` line counts;
+            # anything inside a function/struct body is indented and never
+            # matches. `EXPR`'s own shape (not its evaluated value — this
+            # scanner cannot evaluate arbitrary expressions) picks the C
+            # return type: a scalar literal shape maps to the same concrete
+            # C type gimple_codegen.py's own real compile would give it;
+            # everything else (in particular a constructor call like
+            # `World()`) defaults to `int64_t`, matching this codebase's
+            # established convention that a struct-instance global is always
+            # stored/returned as a boxed pointer via int64_t (see
+            # gimple_codegen.py's own "Globals are stored at C level as
+            # int64_t (boxed pointers)..." — the SAME default this scanner
+            # mirrors here so both sides of the accessor call agree on the
+            # return type without either side needing to know the other's
+            # verdict in advance).
+            import re as _re
+            _VAR_GLOBAL_RE = _re.compile(
+                r'^var\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?=\s*(.+?)\s*$')
+            for _line in content.split('\n'):
+                if not _line or _line[0] in ' \t#':
+                    continue   # indented (not top-level) or a comment
+                _m = _VAR_GLOBAL_RE.match(_line.strip()) if _line.strip().startswith('var ') else None
+                if not _m:
+                    continue
+                _vname, _vrhs = _m.group(1), _m.group(2).strip()
+                if _vname in exports or _vname in _C_STDLIB_SKIP:
+                    continue   # a same-named fn/def export always wins
+                if _vrhs.startswith('"') or _vrhs.startswith("'"):
+                    _vctype = 'char *'
+                elif _vrhs in ('True', 'False'):
+                    _vctype = '_Bool'
+                elif _re.match(r'^-?\d+\.\d+', _vrhs):
+                    _vctype = 'double'
+                elif _re.match(r'^-?\d+$', _vrhs):
+                    _vctype = 'int64_t'
+                else:
+                    _vctype = 'int64_t'   # struct instance / call / other: boxed pointer convention
+                exports[_vname] = {
+                    'kind': 'global_var',
+                    'c_return_type': _vctype,
+                }
+
             # Package fallback: when the primary source is __init__.mojo,
             # also scan the same-named sibling file (common Mojo package
             # pattern: std.os/__init__.mojo re-exports from os.mojo, etc.)

@@ -4627,6 +4627,16 @@ class GimpleGen:
         # Imported function name -> module source path, for comptime evaluation
         # (run the function at compile time via comptime.evaluate; slice 3).
         self._imported_fn_sources: dict = {}
+        # Bare-imported module-scope `var` global name -> (c_return_type,
+        # accessor_c_symbol). Populated by `_emit_imported_global_accessors`
+        # (see its own docstring — BUG-2026-009) from module_loader's
+        # 'kind': 'global_var' export entries. Consulted by `_lower_
+        # IdentExpr` to route a bare read of the imported name through a
+        # real cross-translation-unit call into the DEFINING module's own
+        # accessor function, instead of the "unknown identifier" zero/NULL
+        # placeholder a per-module-independent `mojo dylib` compile
+        # previously fell through to for this shape.
+        self._imported_global_accessors: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
@@ -5476,6 +5486,53 @@ class GimpleGen:
                 decl = f'#ifndef {guard}\n#define {guard}\nextern {sig};\n#endif'
                 self._link_import_decl_list.append(decl)
                 seen.add(sym)
+
+    def _emit_imported_global_accessors(self, stmts) -> None:
+        """Bare `from X import <module_scope_var>` — BUG-2026-009. See
+        `_imported_global_accessors`'s own docstring and module_loader.py's
+        'kind': 'global_var' export entries (module_loader._VAR_GLOBAL_RE)
+        for the full picture; this is the consuming half.
+
+        Resolution mirrors gen_module's own "Process imports" sibling
+        handling (module_loader.load_module for stdlib/test modules,
+        falling back to `_local_sibling_module_exports` for a local project
+        sibling file — the exact shape `mojo dylib`'s per-module-
+        independent compile needs, since a local sibling like box.3d/
+        game's `engine_world.mojo` is never in module_loader's tracked
+        stdlib/test set). Safe to call unconditionally (like
+        `_emit_stdlib_import_externs`, right next to which this runs): a
+        module with no `global_var`-kind import is an untouched no-op.
+        """
+        for stmt in stmts:
+            if not isinstance(stmt, FromImportStmt):
+                continue
+            mod = stmt.module
+            try:
+                exports = load_module(mod)
+                qual = None
+                import module_loader as _mlmod
+                _imp_path = _mlmod._module_loader.resolve_module_path(mod)
+                if _imp_path and os.path.exists(_imp_path):
+                    qual = _mlmod.module_name_for_path(_imp_path)
+            except Exception:
+                exports, qual = self._local_sibling_module_exports(mod)
+            if not exports or not qual:
+                continue
+            for name, alias in stmt.names:
+                info = exports.get(name)
+                if not info or info.get('kind') != 'global_var':
+                    continue
+                sym = alias if alias else name
+                if sym in self._imported_global_accessors:
+                    continue
+                ctype = info.get('c_return_type', 'int64_t')
+                accessor_csym = (f'{_c_field_name(qual)}__mojo_global_get_'
+                                  f'{_c_field_name(name)}')
+                self._imported_global_accessors[sym] = (ctype, accessor_csym)
+                guard = _stub_guard_name(accessor_csym)
+                decl = (f'#ifndef {guard}\n#define {guard}\n'
+                        f'extern {ctype} {accessor_csym} (void);\n#endif')
+                self._link_import_decl_list.append(decl)
 
     def _register_link_imports(self, stmts) -> list:
         """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
@@ -8933,6 +8990,19 @@ class GimpleGen:
             else:
                 t = self._new_val(ctype, f'{self._env_param}->{_c_field_name(name)}')
             return ctype, t
+        # Bare-imported module-scope `var` global (BUG-2026-009) — read it
+        # via a real cross-translation-unit call into the DEFINING module's
+        # own synthesized accessor, instead of falling through to the
+        # "unknown identifier" zero/NULL placeholder further below (which
+        # a per-module-independent `mojo dylib` compile previously always
+        # hit for this shape, silently reading zero or a stale/garbage
+        # pointer). `name not in self.var_types`: an ordinary same-named
+        # LOCAL variable always shadows the imported global, exactly like
+        # every other special-case branch in this method.
+        if name in self._imported_global_accessors and name not in self.var_types:
+            _acc_ctype, _acc_csym = self._imported_global_accessors[name]
+            t = self._call_expr(_acc_ctype, _acc_csym, [])
+            return _acc_ctype, t
         # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
         _BUILTIN_TYPE_NAMES = frozenset({
             'Bool', 'Int', 'UInt', 'Int8', 'Int16', 'Int32', 'Int64',
@@ -30458,6 +30528,69 @@ class GimpleGen:
                     for _h in (_cn.handlers or []):
                         _prefold_toplevel_comptime(getattr(_h, 'body', None) or [])
         _prefold_toplevel_comptime(stmts)
+        # Bare `from X import <comptime_const>` (BUG-2026-009): a `comptime`
+        # constant is normally inlined as a literal VALUE at every use site
+        # within its own home module (`_prefold_toplevel_comptime` just
+        # above) — a genuinely different strategy from an ordinary runtime
+        # `extern` symbol reference (which is what `_emit_imported_global_
+        # accessors`, right above, does for a plain `var` global). Crossing
+        # a module boundary, the constant's VALUE still needs to become
+        # visible here somehow: `mojo dylib`'s per-module-independent
+        # compile (driver.compile_dylib -> one GimpleGen per file, no
+        # shared state) means this module's own `_comptime_vals` prefold
+        # above only ever sees ITS OWN top-level statements, never module
+        # X's — so `MAX_N` used directly (`Int64(MAX_N)`) previously fell
+        # through `_lower_IdentExpr` all the way to the "unknown identifier"
+        # placeholder and silently read 0.
+        #
+        # Reuses `_parsed_import` — the same source-resolution/parse-cache
+        # this file already uses to resolve a sibling/stdlib module's
+        # source text for OTHER purposes (comptime function calls via
+        # `_imported_fn_sources`, the fixed-size-array `[Elem; N]`
+        # annotation's `_module_const_int`) — and the identical recursive
+        # `_prefold_toplevel_comptime` walk, just pointed at the imported
+        # module's own top-level statements instead of this module's own.
+        # Only DIRECT (this module's own top-level `from X import ...`)
+        # imports are resolved — matches `_module_const_int`'s own scope,
+        # not a full transitive closure.
+        for _fis in stmts:
+            if not isinstance(_fis, FromImportStmt):
+                continue
+            try:
+                _imp_path, _imp_src, _imp_stmts = self._parsed_import(_fis.module)
+            except Exception:
+                continue
+            if not _imp_stmts:
+                continue
+            for _iname, _ialias in _fis.names:
+                _isym = _ialias if _ialias else _iname
+                if _isym in self._comptime_vals:
+                    continue   # a same-named local binding always wins
+                _found = {}
+                def _find_one(_node_list, _target=_iname, _out=_found):
+                    if _out:
+                        return
+                    for _cn in _node_list:
+                        if isinstance(_cn, ComptimeVarStmt) and _cn.target == _target:
+                            _cv = self._eval_const(_cn.value)
+                            if _cv is not None:
+                                _out['v'] = _cv
+                            return
+                        elif isinstance(_cn, IfStmt):
+                            _find_one(_cn.then_body or [], _target, _out)
+                            if _cn.else_body:
+                                _find_one(_cn.else_body, _target, _out)
+                            for _, _eb in (_cn.elifs or []):
+                                _find_one(_eb or [], _target, _out)
+                        elif isinstance(_cn, (WhileStmt, ForStmt)):
+                            _find_one(_cn.body or [], _target, _out)
+                        elif isinstance(_cn, TryStmt):
+                            _find_one(_cn.body or [], _target, _out)
+                            for _h in (_cn.handlers or []):
+                                _find_one(getattr(_h, 'body', None) or [], _target, _out)
+                _find_one(_imp_stmts)
+                if 'v' in _found:
+                    self._comptime_vals[_isym] = _found['v']
         # Per-lexical-scope import tracking: push THIS module's own top-level
         # scope (frame 0) before any import scan or body generation runs.
         # _emit_stdlib_import_externs / _register_link_imports populate it from
@@ -31066,6 +31199,7 @@ class GimpleGen:
         # functions like `is_occupied` imported from other stdlib modules.
         self._link_import_decl_list = list(self._link_import_decl_list)
         self._emit_stdlib_import_externs(stmts)
+        self._emit_imported_global_accessors(stmts)
 
         # ── Phase 0: Compile imported modules and extract their type info ────
         # Do this FIRST so imported function types are available for everything
@@ -37240,6 +37374,40 @@ class GimpleGen:
                         init_val = '0'
                 globals_struct_lines.append(f"  .{_c_field_name(gname)} = {init_val},")
             globals_struct_lines.append("};")
+            globals_struct_lines.append("")
+
+            # Synthesized cross-module accessor for every one of THIS
+            # module's own plain `var` globals (BUG-2026-009) — a real,
+            # externally-linked, module-qualified C function that a
+            # DIFFERENT translation unit (a bare `from thismodule import
+            # <this_global>` in another `mojo dylib`-compiled module — see
+            # `_emit_imported_global_accessors`, the consuming half) can
+            # `extern`-declare and call to read this global's REAL, live
+            # value/pointer, instead of trying to replicate this module's
+            # own internal globals-struct FIELD LAYOUT in a foreign TU
+            # (fragile: two independently-compiled translation units
+            # agreeing byte-for-byte on a whole struct's field order/
+            # offsets is not something this per-module-independent compile
+            # path can guarantee — a partial/foreign reconstruction of
+            # this struct with only ONE field, e.g., would read the WRONG
+            # offset whenever this real struct has other fields ahead of
+            # it). Emitted unconditionally for every global — mirroring
+            # how every free function is already unconditionally exported
+            # (module A's own compile has no visibility into which OTHER
+            # modules, if any, actually import a given name) — so this is
+            # pure additional exported surface, never a behavior change
+            # for this module's own code (nothing here is called from
+            # THIS module's own body). Symbol naming
+            # (`<safe_name>__mojo_global_get_<field>`) must exactly match
+            # what `_emit_imported_global_accessors` independently derives
+            # on the importing side — both computed via the same
+            # `_c_field_name`/`module_name_for_path` convention, so a
+            # sibling module's compile agrees on the symbol without either
+            # side needing to see the other's actual compile.
+            for gname, c_type, _ in globals_list:
+                _acc_sym = f'{safe_name}__mojo_global_get_{_c_field_name(gname)}'
+                globals_struct_lines.append(
+                    f'{c_type} {_acc_sym} (void) {{ return {instance_name}.{_c_field_name(gname)}; }}')
             globals_struct_lines.append("")
 
             insert_idx = _module_globals_insert_idx
