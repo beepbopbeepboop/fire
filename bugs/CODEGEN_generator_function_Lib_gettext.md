@@ -1,5 +1,77 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-18 — root cause #2, `mojo_enumerate`'s `start` gap, FIXED)
+
+`enumerate(iterable, start)`'s `start` argument is now modeled everywhere
+in `gimple_codegen.py` that lowers `enumerate(...)`:
+
+- `_gen_for_enumerate` (bare `for i, x in enumerate(seq[, start]):`
+  statement form) — previously silently DROPPED the 2nd argument
+  entirely (no arity check at all), so `for i, x in enumerate(items,
+  5):` compiled clean but silently produced 0-based indices instead of
+  5-based ones. Now threads a `start` value through: the internal
+  0-based loop counter (`idx_t`, used for every `mojo_list_get_*` call)
+  is unchanged, but the user-visible index variable gets `idx_t +
+  start` when `start` is present.
+- The comprehension-embedded `for` clause form (dict/list/set/generator
+  comprehensions, e.g. gettext.py:114's `{i: c for i, c in
+  enumerate(_binary_ops, 1)}`) was a genuinely separate lowering path
+  in `_lower_comprehension` with NO enumerate-awareness at all — it fell
+  through to the generic iterable dispatch, which called
+  `lower_expr(gen0.iterable)` and hit the `mojo_enumerate` runtime
+  shim's real arity (1 arg) directly, producing the reported "too many
+  arguments to function 'mojo_enumerate'; expected 1, have 2" error for
+  the 2-arg form. Worse: even the 1-arg form (`enumerate(seq)` with no
+  `start`) was previously silently producing an EMPTY comprehension
+  result (`mojo_enumerate` is an identity passthrough returning the
+  unchanged list; the generic tuple-target branch then treated each
+  element as if it were itself a sub-list/tuple to unpack, which a
+  plain enumerated list never is). Added a dedicated `is_enumerate`
+  check in `_lower_comprehension` plus a new `_compr_enumerate_loop`
+  method that walks the underlying list by index directly, mirroring
+  `_gen_for_enumerate`'s index-loop shape, with the same `start`-offset
+  handling. Fixes both the crash AND the pre-existing silent-empty-
+  result bug for the 1-arg case.
+- The separate C++20-coroutine scalar-body model's `_cpp_for_stmt`
+  (used for `for`-loops inside compiled generator/async bodies) had an
+  enumerate-tuple-target special case whose own docstring already used
+  `enumerate(iterable, start=1)` as the motivating example but never
+  actually implemented `start` (always looped from 0). Fixed the same
+  way: the loop counter stays 0-based, only the value assigned to the
+  first target slot gets the offset added.
+
+The runtime shim `mojo_enumerate` itself (`runtime/mojo_runtime.c`) was
+NOT touched — it's a 1-arg identity passthrough only ever consulted by
+the generic (non-enumerate-aware) call-lowering fallback; all 3 real
+codegen paths above bypass it entirely and lower the underlying
+iterable directly, so no runtime-shim signature change was needed.
+
+Interpreter path (`myinterpreter.py`) needed no fix: `self.scope.
+define('enumerate', enumerate)` binds Python's own real builtin
+directly, which already supports `start` correctly (confirmed with a
+standalone test exercising both the bare-`for` and dict-comprehension
+forms with `enumerate(items, 5)`/`enumerate(items, 1)`).
+
+Verified narrowly (`for i, x in enumerate(items, 5):`, dict/list/set
+comprehensions with `enumerate(items, 5)`/`enumerate(nums, 100)`) —
+all produce correct start-offset indices in a real compiled binary.
+Verified against the real target: gettext.py:114's `too many arguments
+to function 'mojo_enumerate'` error is GONE from a full real build
+(`python3 mojo.py build .../Lib/gettext.py`); root causes #1
+(`mojo_open_file`, line 554) and the 843 red herring also no longer
+appear in this run (likely resolved incidentally by unrelated work
+since the 2026-08-10 entry — not investigated further here, out of
+scope). Root cause #3 (lines 208/217, `_parse()`'s tuple-return-type
+collapse) and the 472/485 dynamic-`%`-format gap are UNCHANGED and
+still open, exactly as previously documented — both out of scope for
+this fix.
+
+Quality gate: `test_gimple.py` (248/248 pass), `test_module_cache.py`
+(76/76 pass), `make check-selfhost` (clean), and a from-scratch stdlib
+dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+`build_stdlib_dylib.build_stdlib(jobs=8)`) — 0 skip lines before AND
+after (no regression). Committed.
+
 ## Status (updated 2026-08-10, re-verified + deepened, no code change — 3 real root causes pinned down precisely)
 
 Re-verified against current master (`9d93746`): identical error list to

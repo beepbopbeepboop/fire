@@ -17414,6 +17414,50 @@ class GimpleGen:
 
         res = self._new_val(res_type, f"{res_new} ()")
 
+        # `for i, x in enumerate(seq)` / `enumerate(seq, start)` inside a
+        # comprehension's `for` clause — a genuinely separate lowering path
+        # from the generic dispatch below, which has no notion of pairing
+        # an index with each element at all: falling through to it made
+        # `lower_expr(gen0.iterable)` lower the CallExpr generically (a
+        # direct call to the `mojo_enumerate` runtime shim, which only
+        # takes 1 arg — "too many arguments to function 'mojo_enumerate'"
+        # for the 2-arg `start=` form, e.g. Lib/gettext.py:114's
+        # `{i: c for i, c in enumerate(_binary_ops, 1)}") and, even for the
+        # 1-arg form, silently produced an EMPTY result (mojo_enumerate is
+        # an identity passthrough returning the same list unchanged, then
+        # _compr_list_loop's tuple-target branch treated each element as if
+        # it were itself a sub-list/tuple to unpack — which a plain
+        # enumerate()'d list never is). Handled directly here instead: lower
+        # the underlying iterable once, then walk it by index, assigning
+        # the (optionally start-offset) counter to the target's first slot
+        # and each element to the second — mirrors `_gen_for_enumerate`'s
+        # (the bare `for i, x in enumerate(...):` statement path) identical
+        # index-loop shape.
+        is_enumerate = (isinstance(gen0.iterable, CallExpr) and
+                         isinstance(gen0.iterable.func, IdentExpr) and
+                         gen0.iterable.func.name == 'enumerate' and
+                         gen0.iterable.args)
+        if is_enumerate:
+            _inner_it_type, _inner_it_val = self.lower_expr(gen0.iterable.args[0])
+            _resolved = self._get_actual_type(_inner_it_type, _inner_it_val)
+            if _resolved != _inner_it_type and _resolved.endswith(' *'):
+                _old_val = _inner_it_val
+                _inner_it_val = self._new_val(_resolved, f'({_resolved}){_inner_it_val}')
+                if _old_val in self._elem_types:
+                    self._elem_types[_inner_it_val] = self._elem_types[_old_val]
+                if _old_val in self._nested_elem_types:
+                    self._nested_elem_types[_inner_it_val] = self._nested_elem_types[_old_val]
+            _inner_it_type = _resolved
+            _start_val = None
+            if len(gen0.iterable.args) >= 2:
+                _, _start_raw = self.lower_expr(gen0.iterable.args[1])
+                _start_val = self._new_val('int64_t', f"(int64_t){_start_raw}")
+            if _inner_it_type == 'MojoList *':
+                self._compr_enumerate_loop(node, gen0, res, res_type, _inner_it_val, _start_val)
+            else:
+                self._emit(f"  /* TODO: enumerate comprehension over {_inner_it_type} */")
+            return res_type, res
+
         is_range = (isinstance(gen0.iterable, CallExpr) and
                     isinstance(gen0.iterable.func, IdentExpr) and
                     gen0.iterable.func.name == 'range')
@@ -17552,6 +17596,66 @@ class GimpleGen:
         # range(*idx.indices(len(self))))`.
         st = self._new_val('int64_t', f"{gen0.target} + {step_v}")
         self._emit(f"  {gen0.target} = {st};")
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_after)
+
+    def _compr_enumerate_loop(self, node, gen0, res, res_type, it_val, start_val):
+        """`[... for i, x in enumerate(seq[, start]):]` (and dict/set
+        equivalents) — walks `it_val` (the already-lowered underlying
+        list) by index, assigning the (optionally `start`-offset) 0-based
+        counter to the target's first slot and each element to the
+        second. See `_lower_comprehension`'s call site for why this needs
+        its own path rather than falling through to `_compr_list_loop`."""
+        target_str = gen0.target.strip()
+        inner_str = (target_str[1:-1].strip()
+                     if (target_str.startswith('(') and target_str.endswith(')'))
+                     else target_str)
+        parts = [p.strip() for p in inner_str.split(',')]
+        idx_var = parts[0] if len(parts) >= 1 and parts[0] else '_enum_i'
+        val_var = parts[1] if len(parts) >= 2 and parts[1] else '_enum_val'
+
+        elem = self._elem_of(it_val)
+        self._declare_var(idx_var, 'int64_t')
+        self._declare_var(val_var, elem if elem else 'int64_t')
+
+        len64 = self._new_val('int64_t', f'mojo_list_len ({it_val})')
+        idx64 = self._new_val('int64_t', '(int64_t)0')
+        bb_cond = self._new_bb(); bb_body = self._new_bb()
+        bb_post = self._new_bb(); bb_after = self._new_bb()
+        self._emit(f"  goto {bb_cond};")
+        self._emit_label(bb_cond)
+        cond_t = self._new_val('_Bool', f"{idx64} < {len64}")
+        self._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
+        self._emit_label(bb_body)
+        if start_val is not None:
+            disp_idx = self._new_val('int64_t', f"{idx64} + {start_val}")
+            self._emit(f"  {idx_var} = {disp_idx};")
+        else:
+            self._emit(f"  {idx_var} = {idx64};")
+        suf = TypeLattice.list_suffix(elem) if elem else 'int'
+        if suf == 'double':
+            self._emit(f"  {val_var} = mojo_list_get_double ({it_val}, {idx64});")
+        elif suf == 'str':
+            temp_str = self._new_val('char *', f"mojo_list_get_str ({it_val}, {idx64})")
+            target_type = self._type_of(val_var)
+            if target_type == 'char *':
+                self._emit(f"  {val_var} = {temp_str};")
+            else:
+                int_ptr = self._new_val('int64_t', f"(int64_t){temp_str}")
+                self._emit(f"  {val_var} = {int_ptr};")
+        else:
+            raw64 = self._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
+            target_type = self._type_of(val_var)
+            if target_type and target_type != 'int64_t':
+                self._safe_coerce_emit('int64_t', target_type, raw64, val_var)
+            else:
+                self._emit(f"  {val_var} = (int64_t) {raw64};")
+        self._gen_compr_append(node, gen0, res, res_type, bb_post)
+        self._emit(f"  goto {bb_post};")
+        self._emit_label(bb_post)
+        one64 = self._new_val('int64_t', "(int64_t)1")
+        st = self._new_val('int64_t', f"{idx64} + {one64}")
+        self._emit(f"  {idx64} = {st};")
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
@@ -21731,10 +21835,27 @@ class GimpleGen:
         return parts
 
     def _gen_for_enumerate(self, node):
-        """Handle: for (idx, val) in enumerate(lst): ..."""
+        """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
         lst_arg = node.iterable.args[0]
         lst_type, lst_val = self.lower_expr(lst_arg)
         lst_type = self._get_actual_type(lst_type, lst_val)
+
+        # `enumerate(lst, start)` — the optional 2nd arg was previously
+        # silently dropped entirely (no arity check anywhere in this
+        # function), so `for i, x in enumerate(items, 5):` compiled clean
+        # but silently produced 0-based indices instead of 5-based ones —
+        # a silent wrong-value bug, not a compile error (the compile-error
+        # shape of this same gap showed up separately in the
+        # comprehension-embedded `for` clause form; see
+        # `_lower_comprehension`'s `is_enumerate` handling and
+        # bugs/CODEGEN_generator_function_Lib_gettext.md root cause #2).
+        # `idx_t` below stays the 0-based list-access index (used for
+        # every `mojo_list_get_*` call); only the user-visible `cidx_var`
+        # gets the start offset added.
+        start_val = None
+        if len(node.iterable.args) >= 2:
+            _, start_raw = self.lower_expr(node.iterable.args[1])
+            start_val = self._new_val('int64_t', f"(int64_t){start_raw}")
 
         target = node.target
         if isinstance(target, str) and target.startswith('(') and target.endswith(')'):
@@ -21790,7 +21911,11 @@ class GimpleGen:
         self._emit_label(bb_body, f'count(guessed_local({10 ** self._loop_depth}))')
         self.loop_stack.append((bb_post, bb_after))
 
-        self._emit(f"  {cidx_var} = {idx_t};")
+        if start_val is not None:
+            disp_idx = self._new_val('int64_t', f"{idx_t} + {start_val}")
+            self._emit(f"  {cidx_var} = {disp_idx};")
+        else:
+            self._emit(f"  {cidx_var} = {idx_t};")
 
         suf = TypeLattice.list_suffix(elem) if elem else 'int'
         if val_is_tuple:
@@ -26893,6 +27018,18 @@ class GimpleGen:
                     and s.iterable.args):
                 _src = self._cpp_expr(s.iterable.args[0])
                 _ctr = self._cpp_fresh_name("_mg_i")
+                # Optional 2-arg `enumerate(iterable, start)` form
+                # (statistics.py's own motivating example in this
+                # function's docstring above — `start=1` — was never
+                # actually implemented until now: the loop counter always
+                # started at 0 regardless of a `start` argument being
+                # present). `_ctr` itself stays the 0-based list-access
+                # index; only the value assigned to the user-visible
+                # first target gets the offset added.
+                _idx_expr = _ctr
+                if len(s.iterable.args) >= 2:
+                    _start_e = self._cpp_expr(s.iterable.args[1])
+                    _idx_expr = f"({_ctr} + ({_start_e}))"
                 lines = []
                 for _nm in _names:
                     if _nm not in declared:
@@ -26900,7 +27037,7 @@ class GimpleGen:
                         lines.append(f"{indent}int64_t {_nm};")
                 lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                              f"{_ctr} < mojo_list_len((MojoList *)({_src})); {_ctr}++) {{")
-                lines.append(f"{indent}    {_names[0]} = {_ctr};")
+                lines.append(f"{indent}    {_names[0]} = {_idx_expr};")
                 lines.append(f"{indent}    {_names[1]} = "
                              f"mojo_list_get_int((MojoList *)({_src}), {_ctr});")
                 for inner in s.body:
