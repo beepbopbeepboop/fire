@@ -1,5 +1,78 @@
 # HARD BUG: the self-hosting `getattr(self, x)`-dispatch-table heuristic mis-fires on ordinary stdlib code, emitting invalid C
 
+## Fixed 2026-08-18: root cause (the over-eager "assume all methods" fallback) gated off for non-self-host compiles
+
+Implemented **option 1** from "What a real fix needs" below, in full:
+the `else` branch of `DispatchSolver._analyze_getattr_pattern`
+(gimple_codegen.py, the "assume all methods might be called" fallback)
+now only fires when `DispatchSolver.allow_assume_all_methods` is
+`True`. That flag is threaded in from `DispatchSolver.__init__`'s new
+`allow_assume_all_methods` parameter, set at the single call site in
+`gen_module` (Phase 1.5, "dispatch solving") to the SAME `_is_selfhost_file`
+local already computed earlier in that function (path-based: the root
+file currently being compiled is one of this repo's own `.py` sources
+under `_SELFHOST_DIR` — the exact test already used by
+`_struct_method_qualifier`/the hardcoded self-host struct tables
+elsewhere in this file, so no new detection mechanism was invented).
+For any ordinary stdlib/user compile, the fallback branch is now
+skipped entirely; `_analyze_getattr_pattern` leaves the `DispatchPattern`
+with zero callees, and `_plan_dispatch_tables`'s existing `if not
+pattern.possible_callees: continue` guard means NO dispatch table is
+planned or emitted for that pattern at all — confirmed by inspecting
+the generated C for `Lib/importlib/util.py`'s `_LazyModule` directly
+(`gimple_codegen.compile_linked(...)`): zero occurrences of
+`dispatch_t` anywhere in the output now (previously it contained a
+`_lazymodule__dispatch_t` typedef + init, per this doc's own original
+symptom). The narrowly-scoped, correctly-shaped `f'{prefix}_{...}'`
+branch (`_infer_getattr_targets`) is untouched and still applies to any
+code, self-hosting or not — it was never the over-broad piece.
+
+This also resolves the 2026-08-10 "new symptom" entry below
+(`Popen__close_pipe_fds`/`calendar.Month`/`Day` "undeclared here"
+errors from `subprocess.py`/`calendar.py`'s own ordinary
+`getattr(self, attr)`-shaped methods getting mis-registered as
+dispatch-table callees under their unqualified names): since the
+fallback no longer fires on those non-self-host structs at all, no
+dispatch table — qualified or not — is ever built for them, so
+"option 3" (module-qualifying the dispatch-table callee registry) was
+verified unnecessary for these repros and NOT implemented; if some
+future, still-undiscovered self-hosting-context repro combines the
+fallback firing with a non-root-module struct, that residual
+qualification gap (`gimple_codegen.py:753-758`'s plain
+`f"{stmt.name}_{method.name}"` callee registration) would still need
+fixing then, but no live repro of that combination exists.
+
+Verification performed (all clean, no regressions):
+- `make check-selfhost` — clean both immediately before AND after the
+  change (`mojo.py` compiling its own source: 1 passed, 0 failed both
+  times).
+- `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py` —
+  the `Popen__close_pipe_fds`/`calendar.Month`/`Day` "undeclared here"
+  errors are GONE (confirmed via `grep -i undeclared` on the full build
+  log: zero matches for those symbols). The file still fails to build
+  end-to-end for several other, unrelated, already-documented reasons
+  (`_varsubb`/`_t3`/`hits`/`misses` etc. undeclared-identifier errors
+  elsewhere in `posixpath.py`/`codecs.py`/`inspect.py`/`functools.py`/
+  `reprlib.py`) — out of scope for this fix, not claimed fixed.
+- `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/util.py`
+  — still builds clean (exit 0), and direct inspection of the generated
+  C (via `gimple_codegen.compile_linked`) confirms zero `dispatch_t`
+  occurrences for `_LazyModule` now (previously the malformed
+  `_lazymodule__dispatch_t` this doc's title symptom describes).
+- `python3 test_gimple.py` — 248 passed, 0 failed.
+- `python3 test_module_cache.py` — 76 passed, 0 failed.
+- From-scratch `libmojostdlib.dylib` rebuild
+  (`build_stdlib_dylib.build_stdlib(jobs=8)`) — 0 `skip <module>:`
+  lines before AND after the change (baseline was already a clean
+  595/0-style build per prior sessions' notes; stayed that way).
+
+Committed. This doc is being kept open (not deleted) only because the
+theoretical residual risk noted in the "Status" section below (a
+self-hosting-context callee whose owning struct is in a non-root
+module) remains unconfirmed/unaddressed in principle, even though it
+has no live repro — see that section's own wording, unchanged from
+2026-08-10.
+
 ## New symptom found 2026-08-10 (same mechanism, different manifestation — not fixed)
 
 While re-verifying `bugs/CODEGEN_generator_function_Lib_ftplib.md`

@@ -1,5 +1,29 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-18 — blocker (a) below, the `socket___enter__`/`socket___exit__` "undeclared here" symbol clash, is FIXED)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/imaplib.py`
+after `bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_
+on_ordinary_code.md` landed its fix (the over-eager "assume all
+methods" `getattr(self, x)` dispatch-table fallback is now gated to
+only fire when compiling this compiler's own self-hosting source).
+Blocker (a) below (`socket___enter__`/`socket___exit__` "undeclared
+here" from `ssl.py`, the same mechanism/shape as ftplib.py's
+`Popen__close_pipe_fds` blocker traced to that hard-bug doc) is GONE:
+grepped the full build log for "undeclared" — no `socket___enter__`/
+`socket___exit__` hits anywhere.
+
+**imaplib.py still does not build end-to-end** — the build now fails
+earlier, in unrelated code (`posixpath.py`'s `_varsubb`/`_varsub`,
+`codecs.py`'s `_t3`/`_t5`/etc., `inspect.py`'s
+`_mojo_cb_formatannotation_repl`/`_tNN` temporaries, `reprlib.py`'s
+`functools__make_key_0c85c9`, `functools.py`'s `hits`/`misses`) —
+same unrelated undeclared-identifier errors seen blocking
+`ftplib.py` post-fix, not this doc's concern. Blocker (b) (the
+unannotated-`__init__`-param field-type bug) and the coroutine-body
+truthiness gap noted below are both still unaddressed, unrelated to
+this fix.
+
 ## Status (updated 2026-08-11 — 3 of the 4 documented `Idler.burst` gaps FIXED; 2 blockers remain, both precisely diagnosed, neither fixed)
 
 Re-verified with a fresh direct minimal repro (`Idler`/`IMAP4` reduced

@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-18 — the `Popen__close_pipe_fds`/`calendar.Month`/`Day` blocker below is FIXED, file still doesn't build for other unrelated reasons)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py`
+after `bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_
+on_ordinary_code.md` landed its fix (the over-eager "assume all
+methods" `getattr(self, x)` dispatch-table fallback is now gated to
+only fire when compiling this compiler's own self-hosting source, not
+ordinary stdlib files like `subprocess.py`/`calendar.py`). Confirmed:
+zero occurrences of `Popen__close_pipe_fds` or `calendar.Month`/`Day`
+"undeclared here" errors anywhere in the build log now (grepped for
+`-i undeclared` across the full output) — the exact blocker described
+below is resolved.
+
+**Still does not build end-to-end**, for other, unrelated,
+already-documented-elsewhere reasons: undeclared-identifier errors in
+`posixpath.py` (`_varsubb`/`_varsub`), `codecs.py` (`_t3`/`_t5`/`_t6`/
+etc.), `inspect.py` (`_mojo_cb_formatannotation_repl`, several `_tNN`
+temporaries), `reprlib.py` (`functools__make_key_0c85c9`), and
+`functools.py` (`hits`/`misses`). None of these are the dispatch-table
+mechanism this doc was blocked on; not investigated further here since
+that's out of scope for this specific fix.
+
 ## Status (updated 2026-08-10, re-verified — this doc's OWN generator bug is FIXED, file still doesn't build for an unrelated reason)
 
 Re-ran `MOJO_DEBUG=1 python3 mojo.py build

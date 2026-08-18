@@ -675,9 +675,26 @@ class DispatchSolver:
     Output: Planned dispatch tables and call graph analysis
     """
 
-    def __init__(self, struct_field_types: dict, func_return_types: dict):
+    def __init__(self, struct_field_types: dict, func_return_types: dict,
+                 allow_assume_all_methods: bool = False):
         self.struct_field_types = struct_field_types
         self.func_return_types = func_return_types
+        # Gate for the "assume all methods might be called" fallback in
+        # _analyze_getattr_pattern (see that method's own comment and
+        # bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md).
+        # That fallback exists ONLY to make this compiler's own self-hosted
+        # `Interpreter.execute`-style `getattr(self, f'execute_{...}')(node)`
+        # dispatch idiom compile — it is a real false-positive magnet on
+        # ordinary code (`getattr(self, attr)` for plain attribute
+        # delegation, e.g. `__getattribute__`/`__getattr__` overrides are a
+        # common Python idiom with nothing to do with a dispatch table).
+        # Restrict it to firing only when compiling this repo's own
+        # self-hosting source (root file under _SELFHOST_DIR, see
+        # `_is_selfhost_file` at this class's call site in gen_module) —
+        # every other compile (ordinary stdlib/user files) skips the
+        # fallback entirely rather than roping in every method of the
+        # enclosing struct as a bogus dispatch-table callee.
+        self.allow_assume_all_methods = allow_assume_all_methods
 
         # Call graph: caller_name → Set[callee_name]
         # Only includes direct, static calls (not through getattr/dict)
@@ -933,14 +950,23 @@ class DispatchSolver:
                 # Pattern like f'{prefix}_{something}'
                 # Find all methods matching this pattern
                 self._infer_getattr_targets(pattern, name_expr, struct_name)
-            else:
-                # If we can't analyze the pattern, assume all methods might be called
-                # This is conservative but correct
+            elif self.allow_assume_all_methods:
+                # If we can't analyze the pattern, assume all methods might be
+                # called. This is conservative but correct ONLY for this
+                # compiler's own self-hosted `Interpreter.execute`-style
+                # dispatch idiom (see `allow_assume_all_methods`'s own
+                # docstring in __init__) — gated off for ordinary code, where
+                # `getattr(self, attr)` on a bare parameter is far more often
+                # plain attribute delegation than a dispatch table.
                 if struct_name in self.struct_methods:
                     for method_name, full_name in self.struct_methods[struct_name].items():
                         # Skip __init__ and the method doing the dispatch itself
                         if method_name not in ('__init__', 'execute'):
                             pattern.add_callee(full_name)
+            # else: pattern shape unrecognized and we're not in the
+            # self-hosting context this fallback was built for — leave
+            # `pattern` with no callees rather than over-broadly assuming
+            # every method of the struct could be the dispatch target.
 
             self.dispatch_patterns[pattern_key] = pattern
 
@@ -34062,7 +34088,9 @@ class GimpleGen:
         # virtual method tables before generating code. This enables static
         # dispatch instead of dynamic getattr/dict lookups.
         if self.emit_struct_defs:  # Only main module does dispatch solving
-            self._dispatch_solver = DispatchSolver(self.struct_field_types, self.func_return_types)
+            self._dispatch_solver = DispatchSolver(
+                self.struct_field_types, self.func_return_types,
+                allow_assume_all_methods=_is_selfhost_file)
             all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
             self._dispatch_solver.analyze(all_stmts_for_dispatch)
             self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
