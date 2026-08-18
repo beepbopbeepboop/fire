@@ -1,5 +1,110 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-18 — item 2 (`itertools.repeat` in `yield from`) FIXED; file still blocked by other, separate, already-documented gaps)
+
+**Item 2 FIXED**: `itermonthdays`'s `yield from repeat(0, days_before)` /
+`yield from repeat(0, days_after)` (the finite 2-argument `itertools.repeat`
+form — `from itertools import repeat` at the top of the file) previously
+had no lowering anywhere in the coroutine-body (`.cpp`) emitter: `repeat`
+isn't a list/tuple literal, isn't a generator this compile has itself
+translated, so it fell into `_cpp_yield_from`'s generic "plain collection
+expression" fallback, which tried to evaluate `repeat(0, days_before)` as
+an ordinary call via `_cpp_expr` — `repeat` has no C symbol anywhere in
+this codegen, producing `'repeat' was not declared in this scope`.
+
+Fixed in `gimple_codegen.py` with a new narrow, shared helper
+`_is_itertools_repeat2_call(call)` (matches bare `repeat(value, times)` or
+qualified `itertools.repeat(value, times)`, exactly 2 positional args, no
+kwargs — deliberately NOT the 1-arg infinite form) used at three call
+sites:
+- `_yield_from_delegate_ctype`: a `yield from repeat(value, times)` site
+  now contributes `value`'s own inferred type (via
+  `_infer_simple_expr_ctype`, default `int64_t`) to the enclosing
+  generator's unified promise type, instead of falling to the function's
+  generic "anything else -> char *" default.
+- `_cpp_yield_from`: emits a native counted loop — evaluate `value` and
+  `times` ONCE (matching Python's own one-time-evaluation semantics), then
+  `co_yield value` exactly `times` times:
+  ```cpp
+  {
+      auto _rep_val = <value-expr>;
+      int64_t _rep_n = <times-expr>;
+      for (int64_t _rep_i = 0; _rep_i < _rep_n; _rep_i++) {
+          co_yield _rep_val;
+      }
+  }
+  ```
+- `_cpp_for_stmt`: the analogous PLAIN (non-`yield from`) `for x in
+  repeat(value, times):` consumption path got the same native-loop
+  treatment for completeness (mirroring how `range(...)` already gets its
+  own indexed-loop special case there), though no real corpus source this
+  doc covers actually uses that shape — `_cpp_for_stmt` and
+  `_cpp_yield_from` are genuinely separate code paths, each needed its own
+  case, not a shared one.
+
+**A second, closely-related gap surfaced and was fixed in the same pass**:
+`itermonthdays`'s THREE `yield from` sites are `repeat(0, days_before)`,
+`range(1, ndays + 1)`, `repeat(0, days_after)` — all three must agree on
+one promise type. Fixing `repeat` alone (contributing `int64_t`) exposed
+that `yield from range(...)` had NO special case in either
+`_yield_from_delegate_ctype` (fell to the generic "anything else -> char
+*" default, clobbering the whole function's promise type to `char *`) or
+`_cpp_yield_from` (fell to the generic `mojo_range()`-as-`MojoList*`-of-
+strings fallback, `co_yield`-ing `mojo_list_get_str(...)` — char*, wrong
+for a promise now correctly typed `int64_t`, and wrong even on its own
+terms since `range()`'s elements are always integers). This was
+previously invisible because `repeat`'s own hard "not declared" compile
+error always fired first. Fixed by adding the same-shape pair of cases for
+`range(...)` (mirroring `_cpp_for_stmt`'s own pre-existing, working
+`range()` indexed-loop special case): `_yield_from_delegate_ctype` now
+returns `int64_t` for any `range(...)` yield-from (1-3 args), and
+`_cpp_yield_from` emits a native indexed counted loop instead of the
+generic string-based fallback.
+
+**Verification**:
+- Two isolated runtime repros via `test_gimple_generator_runner.py`'s own
+  `_build_generator_program`/`test_generator_stdout` harness (real
+  compile -> `gcc -fgimple`/`g++ -std=c++20` -> link -> RUN, asserting on
+  actual stdout, not just "compiles clean"): `yield from repeat(0, 3)`
+  interleaved with a sibling scalar `yield 99` and a second
+  `repeat(0, 2)` site produces `0\n0\n0\n99\n0\n0\n` exactly; a second
+  repro mixing `repeat(0, n)` / `range(1, 4)` / `repeat(0, 2)` in one
+  generator (mirroring `itermonthdays`'s exact real shape) produces
+  `0\n0\n0\n1\n2\n3\n0\n0\n` exactly. Both PASS.
+- Real `Lib/calendar.py`, isolated `compile_to_gimple_with_cpp(src,
+  do_imports=False)` + `g++ -std=c++20 -fsyntax-only`: **zero** occurrences
+  of `repeat` or `range`/type-mismatch errors anywhere in the output.
+  `Calendar.itermonthdays` and `Calendar.itermonthdays3` now compile
+  completely cleanly. The g++ syntax check's remaining 11 errors are
+  ALL inside `itermonthdays2`/`itermonthdays4` and are exactly the two
+  separate, already-documented, unrelated gaps from this doc's own
+  "2026-08-10, later same session" status below: `itermonthdays2`'s
+  `for i, d in enumerate(self.itermonthdays(...), self.firstweekday):`
+  (generator call as `enumerate`'s own argument, wrong extern "C" stub —
+  "void value not ignored") and `itermonthdays4`'s `for i, (y, m, d) in
+  enumerate(...)` (nested tuple target inside `enumerate` — "declaration
+  of 'auto i' has no initializer"). Neither touched by this fix; both
+  remain open, as before.
+
+**Quality gate** (CLAUDE.md mandatory gate for `gimple_codegen.py`
+changes): `python3 test_gimple.py` (248 passed, 0 failed), `python3
+test_module_cache.py` (76 passed, 0 failed), `make check-selfhost` (clean:
+"self-host compiles + links clean"), and a from-scratch stdlib dylib
+rebuild (`rm -f build/libmojostdlib.dylib` +
+`build_stdlib_dylib.build_stdlib(jobs=8)`) compared byte-for-byte against
+a baseline rebuild on the pre-fix tree via `git stash`: **0 skips before,
+0 skips after**, and the full stderr build log (160 "drop stale export"
+lines, 1 "localize" line, 0 "exclude" lines) is **byte-identical**
+before/after. No regression.
+
+**calendar.py as a whole still does not build end-to-end** — this was
+never in scope for item 2. The remaining blockers are exactly the ones
+already documented elsewhere in this file: the nested-tuple-target
+`enumerate()` gap and the generator-call-as-`enumerate`'s-own-argument gap
+(both `itermonthdays2`/`itermonthdays4`, see above), and the whole-program
+(`do_imports=True`) build's hundreds of unrelated, pre-existing errors in
+transitively-imported files. Doc kept open.
+
 ## Status (updated 2026-08-10, later same session — item 1's `_cpp_for_stmt` gap FIXED for the plain-tuple-target case; file still blocked by other, separate gaps)
 
 Item 1 below (`_cpp_for_stmt` treating a non-`enumerate` tuple target as

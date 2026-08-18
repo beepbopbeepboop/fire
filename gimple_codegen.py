@@ -2756,6 +2756,32 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
             et = _infer_simple_expr_ctype(call.elements[0])
             return et if et is not None else 'int64_t'
         return 'int64_t'
+    # yield from itertools.repeat(value, times) (the finite 2-arg form):
+    # contributes VALUE's own type, e.g. the `0` in Lib/calendar.py's
+    # `yield from repeat(0, days_before)` — an int64_t, which must agree
+    # with that same generator's other yield sites (`yield from range(...)`
+    # also contributes int64_t). Checked before the generator_api/None
+    # check below since this shape needs no generator_api lookup at all.
+    if isinstance(call, CallExpr) and _is_itertools_repeat2_call(call):
+        et = _infer_simple_expr_ctype(call.args[0])
+        return et if et is not None else 'int64_t'
+    # yield from range(...): always yields plain integers, regardless of
+    # arg count/type — same builtin `range()` `_cpp_for_stmt`'s own
+    # (non-`yield from`) indexed-loop special case already recognizes.
+    # Needed alongside the `repeat` case just above: Lib/calendar.py's
+    # `Calendar.itermonthdays` does `yield from repeat(0, days_before)` /
+    # `yield from range(1, ndays + 1)` / `yield from repeat(0, days_after)`
+    # in the SAME generator, all of which must agree on one promise type
+    # — without this case, `range(...)`'s yield-from fell to the generic
+    # "anything else -> char *" default below, clobbering the whole
+    # function's promise type to char* even though every site here is
+    # actually an int, which used to be silently masked by `repeat` itself
+    # raising _UnsupportedGeneratorShape first (via the undeclared-symbol
+    # compile failure) before this mismatch was ever reached.
+    if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+            and call.func.name == 'range' and not call.kwargs
+            and len(call.args) in (1, 2, 3)):
+        return 'int64_t'
     if generator_api is None:
         return None
     # yield from over a known compiled generator call: use its value type
@@ -2767,6 +2793,32 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
     # non-generator function call returning a collection): the yielded
     # values are strings (char*).
     return 'char *'
+
+
+def _is_itertools_repeat2_call(call: 'CallExpr') -> bool:
+    """True for the FINITE 2-argument form of `itertools.repeat(value,
+    times)` — either bare `repeat(value, times)` (the common shape after
+    `from itertools import repeat`, e.g. Lib/calendar.py's
+    `Calendar.itermonthdays`: `yield from repeat(0, days_before)`) or the
+    qualified `itertools.repeat(value, times)` form, with exactly 2
+    positional arguments and no keyword arguments. The 1-argument INFINITE
+    form (`repeat(value)`, no `times` — yields forever) is a different,
+    harder shape (would need a `while (true)` loop) and is deliberately
+    NOT matched here; callers fall through to whatever generic handling
+    they already have for it. Shared by `_yield_from_delegate_ctype` (type
+    inference for `yield from repeat(...)`), `GimpleGen._cpp_yield_from`
+    (emission for the same), and `GimpleGen._cpp_for_stmt` (the analogous
+    plain `for x in repeat(...):` consumption path) so all three agree on
+    exactly which call shapes count."""
+    if not isinstance(call, CallExpr) or call.kwargs or len(call.args) != 2:
+        return False
+    fn = call.func
+    if isinstance(fn, IdentExpr):
+        return fn.name == 'repeat'
+    if isinstance(fn, MemberExpr):
+        return (fn.member == 'repeat' and isinstance(fn.obj, IdentExpr)
+                and fn.obj.name == 'itertools')
+    return False
 
 
 def _walk_own_body(node):
@@ -27218,6 +27270,32 @@ class GimpleGen:
                     lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
                 return lines
+            # `for x in itertools.repeat(value, times):` (finite 2-arg
+            # form — see `_is_itertools_repeat2_call`'s docstring): the
+            # analogous plain-`for`-loop sibling of `_cpp_yield_from`'s own
+            # `yield from repeat(...)` special case just above in this
+            # file. Not hit by any real corpus source this doc's bug is
+            # about (Lib/calendar.py only uses the `yield from` form), but
+            # `repeat` is equally undeclared-in-scope if a plain
+            # consuming `for` loop over it were ever compiled, so handled
+            # here too for the same reason `range(...)` gets its own
+            # indexed-loop special case just above rather than falling to
+            # the generic `_cpp_expr` fallback.
+            if isinstance(s.iterable, CallExpr) and _is_itertools_repeat2_call(s.iterable):
+                val_expr = self._cpp_expr(s.iterable.args[0])
+                times_expr = self._cpp_expr(s.iterable.args[1])
+                ctr = self._cpp_fresh_name("_mg_i")
+                lines = []
+                if not target_was_declared:
+                    lines.append(f"{indent}int64_t {target};")
+                lines.append(f"{indent}auto _rep_val = {val_expr};")
+                lines.append(f"{indent}int64_t _rep_n = {times_expr};")
+                lines.append(f"{indent}for (int64_t {ctr} = 0; {ctr} < _rep_n; {ctr}++) {{")
+                lines.append(f"{indent}    {target} = _rep_val;")
+                for inner in s.body:
+                    lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
+                return lines
             try:
                 iter_expr = self._cpp_expr(s.iterable)
             except _UnsupportedGeneratorShape:
@@ -27841,6 +27919,65 @@ class GimpleGen:
             return [f"{indent}for (auto _yf_item : {coll}) {{",
                     f"{indent}    co_yield _yf_item;",
                     f"{indent}}}"]
+        # `yield from itertools.repeat(value, times)` (finite 2-arg form —
+        # see `_is_itertools_repeat2_call`'s docstring): `repeat` has no C
+        # symbol anywhere in this codegen (it isn't a list/tuple literal
+        # and isn't a generator this compile has translated), so without
+        # this case it fell into the generic "plain collection expression"
+        # fallback below, which evaluates `repeat(value, times)` as an
+        # ordinary call via `_cpp_expr` — 'repeat' was not declared in this
+        # scope. Emit a native counted loop instead: evaluate `value` and
+        # `times` ONCE up front (matching Python's own one-time-evaluation
+        # semantics), then co_yield `value` exactly `times` times. Real:
+        # Lib/calendar.py's `Calendar.itermonthdays`: `yield from
+        # repeat(0, days_before)` / `yield from repeat(0, days_after)`.
+        if isinstance(call, CallExpr) and _is_itertools_repeat2_call(call):
+            val_expr = self._cpp_expr(call.args[0])
+            times_expr = self._cpp_expr(call.args[1])
+            rep_val = self._cpp_fresh_name("_rep_val")
+            rep_n = self._cpp_fresh_name("_rep_n")
+            rep_i = self._cpp_fresh_name("_rep_i")
+            return [
+                f"{indent}{{",
+                f"{indent}    auto {rep_val} = {val_expr};",
+                f"{indent}    int64_t {rep_n} = {times_expr};",
+                f"{indent}    for (int64_t {rep_i} = 0; {rep_i} < {rep_n}; {rep_i}++) {{",
+                f"{indent}        co_yield {rep_val};",
+                f"{indent}    }}",
+                f"{indent}}}",
+            ]
+        # `yield from range(...)`: a native indexed counted loop, mirroring
+        # `_cpp_for_stmt`'s own (non-`yield from`) `for i in range(...):`
+        # special case, instead of falling into the generic "plain
+        # collection" fallback below — that fallback goes through
+        # `mojo_range()`'s opaque MojoList*-of-boxed-ints via
+        # `mojo_list_get_str`, co_yield-ing char* even though `range()`'s
+        # elements are always integers, which mismatches the int64_t
+        # promise type `_yield_from_delegate_ctype`'s own `range(...)` case
+        # (just above, in this file) now correctly infers. Handles
+        # range(stop), range(start, stop), and range(start, stop, step)
+        # with a constant step (positive or negative), same 3 shapes
+        # `_cpp_for_stmt` supports. Real: Lib/calendar.py's
+        # `Calendar.itermonthdays`: `yield from range(1, ndays + 1)`,
+        # alongside its sibling `yield from repeat(...)` sites, all of
+        # which must agree on one int64_t promise type.
+        if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+                and call.func.name == 'range' and not call.kwargs
+                and len(call.args) in (1, 2, 3)):
+            rargs = [self._cpp_expr(a) for a in call.args]
+            if len(rargs) == 1:
+                start_e, stop_e, step_e = '0', rargs[0], '1'
+            elif len(rargs) == 2:
+                start_e, stop_e, step_e = rargs[0], rargs[1], '1'
+            else:
+                start_e, stop_e, step_e = rargs[0], rargs[1], rargs[2]
+            ctr = self._cpp_fresh_name("_yf_range_i")
+            return [
+                f"{indent}for (int64_t {ctr} = {start_e}; "
+                f"({ctr} < {stop_e}) == ({step_e} > 0); {ctr} += {step_e}) {{",
+                f"{indent}    co_yield {ctr};",
+                f"{indent}}}",
+            ]
         # `yield from <expr>` where the value is a plain collection (any
         # non-generator-call expression — a method chain, a bare name, etc.):
         # iterate the MojoList* result with an indexed loop, co_yield-ing
