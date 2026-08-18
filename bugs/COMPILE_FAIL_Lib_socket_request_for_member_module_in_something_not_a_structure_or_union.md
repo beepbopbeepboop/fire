@@ -1,5 +1,35 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (updated 2026-08-18): `perror` sub-blocker fixed, file still fails overall
+
+One item from the "~280 other errors" grab-bag listed in the
+2026-08-09 status below is now fixed: `Lib/tokenize.py`'s `conflicting
+types for 'perror'` (reached transitively from `socket.py`'s own import
+chain). Root cause was a general gap in gimple_codegen.py, not
+`perror`-specific: `_gen_stmt_ExprStmt` (the lowering path for a bare,
+value-discarding call statement) had its own copy of the "resolve a
+call to a nested closure" logic that never got the sibling-closure
+(`_lambda_outer_closures`) fallback `_lower_call` (the value-consuming
+call path) already had — so a nested `def` calling one of its own
+SIBLING nested `def`s as a bare statement (e.g. `tokenize.py`'s
+`_main()`, whose `error()` calls its sibling `perror()`) emitted a
+bare, unqualified `perror (...)` C call that collides with libc's real
+`perror`. Fixed by adding the same sibling-closure lookup to
+`_gen_stmt_ExprStmt`. Full analysis and verification in
+`bugs/CODEGEN_generator_function_Lib_tokenize.md`'s matching
+2026-08-18 entry.
+
+Re-verified via a real `mojo.py build` of
+`/Users/mrs/net/Python-3.14.6/Lib/socket.py`: `grep -c "conflicting
+types for 'perror'"` on the build output is now 0. The build **still
+fails overall** — none of the other blockers below (task #141 cross-
+module bare-name collisions, `operator.py`'s `partial`/lambda lowering,
+`posixpath`/`ntpath`'s struct collision, `enum.py`'s struct/dict
+codegen, etc.) are affected by this fix; only the `perror` error class
+is gone. Quality gate (`test_gimple.py` 248/248, `test_module_cache.py`
+76/76, `make check-selfhost`, from-scratch stdlib dylib rebuild: 0
+skipped modules before and after) all pass with no regression.
+
 ## Status (re-verified 2026-08-09, fresh against current master post-merge): still not PASS, same two blocker classes, error count 669→650
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`

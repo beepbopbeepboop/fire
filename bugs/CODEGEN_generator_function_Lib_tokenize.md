@@ -1,5 +1,53 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (updated 2026-08-18)
+
+The `perror` half of the "`any`/`perror` name collisions" blocker
+described below is now FIXED (gimple_codegen.py). Root cause was NOT a
+libc-name-specific gap: `_gen_stmt_ExprStmt` (the codegen's dedicated
+lowering path for a bare, value-discarding call statement — e.g.
+`perror("...")` used as its own statement, not assigned/consumed) had
+its own independent copy of the "is this call to a nested sibling
+closure" resolution logic, and that copy never got the
+`_lambda_outer_closures` sibling-closure fallback that `_lower_call`
+(the value-CONSUMING call path) already had. So a nested `def` calling
+one of its OWN SIBLING nested `def`s (e.g. `tokenize.py`'s `_main()`
+defining both `perror(message)` and `error(...)`, with `error()` calling
+`perror(...)` as a bare statement) fell through to the generic
+unqualified-name path and emitted a bare, unmangled `perror (...)` C
+call — which collides with libc's real `perror` (declared via
+`<stdio.h>`), producing `conflicting types for 'perror'`. Confirmed via
+a minimal isolated repro (a module-level function with two nested
+`def`s, one calling the other by bare statement) and by direct
+inspection of the emitted `.ci`: before the fix, calls to a nested
+`perror` sibling from within another sibling closure's body emitted
+bare `perror (_t6);`; after the fix they correctly emit the mangled
+`_main_perror (_t6);` (matching the qualified symbol the closure was
+actually defined under).
+
+Fix: added the same `_lambda_outer_closures.get(raw_name)` sibling-
+closure lookup already used by `_lower_call` to `_gen_stmt_ExprStmt`'s
+closure-call handling, right after its existing (enclosing-scope-only)
+`self._closure_envs` check.
+
+Re-verified via a real, direct `mojo.py build` of the actual
+`/Users/mrs/net/Python-3.14.6/Lib/tokenize.py` (not just the isolated
+repro): `grep -c "conflicting types for 'perror'"` on the build output
+is now 0 (previously nonzero, confirmed reproduced pre-fix in this same
+session). The build as a whole **still fails** — the `any` builtin-name
+collision noted below is untouched (separate, unrelated mechanism —
+`_lower_named_call`'s own `fname_raw in ('all', 'any')` special case, not
+investigated/fixed here), plus a large number of other, already-
+documented unrelated cascading failures in transitively-imported stdlib
+files (`Lib/codecs.py`, `Lib/argparse.py`, `Lib/typing.py`, etc., per the
+2026-08-09 status below). Only the specific `perror`/libc-collision error
+class is confirmed resolved.
+
+Quality gate: `test_gimple.py` (248/248), `test_module_cache.py`
+(76/76), `make check-selfhost` all pass unchanged. A from-scratch
+`build_stdlib_dylib.build_stdlib()` rebuild shows 0 skipped modules both
+before and after the fix (no regression).
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (98e5aa3) with a real rebuild (real

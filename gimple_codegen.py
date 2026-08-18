@@ -20126,6 +20126,35 @@ class GimpleGen:
                     full_arg_pairs = arg_pairs
                 self._emit_call('void', '', fname_c, full_arg_pairs)
                 return
+            # Sibling-closure call, bare-statement twin of _lower_call's
+            # identical `_lambda_outer_closures` fallback a few hundred
+            # lines up. `self._closure_envs` just above only covers
+            # closures nested directly in THIS closure's own body -- a
+            # closure calling one of its SIBLINGS (another nested `def` in
+            # the same enclosing function, e.g. Lib/tokenize.py's `_main()`
+            # defining both `perror()` and `error()`, with `error()` then
+            # calling `perror(...)` as a bare, value-discarding statement)
+            # was never checked here at all, so it fell all the way through
+            # to the generic-name handling below and was emitted as a bare,
+            # unqualified `perror (...)` call -- colliding with libc's own
+            # `perror` (a real "conflicting types for 'perror'" GCC error;
+            # for a non-colliding name it would instead silently call
+            # whatever unrelated same-named symbol happens to exist, or
+            # fail to link). The value-CONSUMING call path (`_lower_call`)
+            # already had this fallback; this bare-statement path just
+            # never got the same fix.
+            _outer_ci = getattr(self, '_lambda_outer_closures', {}).get(raw_name)
+            if _outer_ci:
+                lifted   = _outer_ci.lifted_name
+                arg_pairs = [self.lower_expr(a) for a in node.value.args]
+                fname_c  = _safe_name(lifted)
+                if _outer_ci.env_struct:
+                    null_env = self._new_val(f'{_outer_ci.env_struct} *', f'({_outer_ci.env_struct} *)0')
+                    full_arg_pairs = [(f'{_outer_ci.env_struct} *', null_env)] + arg_pairs
+                else:
+                    full_arg_pairs = arg_pairs
+                self._emit_call('void', '', fname_c, full_arg_pairs)
+                return
             # Redirect calls to user's main() to its renamed symbol (root ->
             # _gimple_main; sub-module -> _{module}_main), matching gen_func.
             # If raw_name is a local (or captured) variable holding a function
