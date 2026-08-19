@@ -7702,7 +7702,24 @@ class GimpleGen:
             # lists silently read/return as int.
             _BUILTIN_SCALARS = {'float': 'double', 'int': 'int64_t', 'str': 'char *',
                                 'len': 'int64_t', 'ord': 'int64_t', 'chr': 'char *',
-                                'bool': '_Bool', 'repr': 'char *'}
+                                'bool': '_Bool', 'repr': 'char *',
+                                # isinstance()/all()/any() always return a plain
+                                # Python bool regardless of their arguments' types
+                                # (same "no argument-type inspection needed"
+                                # reasoning as len/ord above) — without this,
+                                # `return isinstance(...)`/`return all(...)`/
+                                # `return any(...)` fell through to the int64_t
+                                # default below. Real emission (_lower_builtin_
+                                # isinstance/_lower_builtin_all_any) actually
+                                # produces a C `int`, but declaring the more
+                                # precise `_Bool` here still matches every other
+                                # boolean-producing case above (BinaryOp compare/
+                                # 'in', CompareChain, UnaryOp 'not', BoolLiteral)
+                                # and avoids joining as an opaque int64_t/pointer
+                                # against a sibling return path of a real pointer
+                                # type (see bugs/hard/CODEGEN_comprehension_
+                                # return_type_defaults_int64.md's follow-up note).
+                                'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
             if fname in _BUILTIN_SCALARS:
                 return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:

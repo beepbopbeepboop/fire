@@ -57,6 +57,89 @@ due diligence given this touches shared type-inference machinery used
 by both the generator and async codegen paths — no new failures in
 either.
 
+## Follow-up (2026-08-18): the `isinstance`/`all`/`any` related data point
+
+Confirmed and fixed the separate, related gap this doc's "Confirmed
+occurrences" section flagged but left unconfirmed: `_quick_type`'s
+`CallExpr`-on-`IdentExpr` handling (`_BUILTIN_SCALARS`) had no entry for
+the builtins `isinstance`/`all`/`any` — all three always return a plain
+Python `bool` regardless of their arguments, same "no argument-type
+inspection needed" reasoning that made the `len`/`ord` addition safe —
+so a bare `return isinstance(...)`/`return all(...)`/`return any(...)`
+fell through to the `int64_t` default, same as this doc's own now-fixed
+`Comprehension` gap.
+
+**Important correction to this doc's original speculation:** extensive
+isolated testing did **NOT** reproduce the same class of `-fgimple`
+hard error ("non-trivial conversion in 'integer_cst'"/"type mismatch")
+that the `Comprehension` bug produced. Tried, all clean (`gcc -fgimple
+-fsyntax-only`, isolated `do_imports=False` compiles):
+- A bare `return isinstance(x, int)` (single-return, unannotated).
+- The literal shape from `Lib/functools.py:920`'s `_is_valid_dispatch_
+  type` (`return True` / `return isinstance(cls, UnionType) and
+  all(isinstance(arg, type) for arg in cls.__args__)`), reproduced
+  verbatim as a `.mojo` repro AND compiled from the **real**
+  `Lib/functools.py` in isolation (`compile_to_gimple(src,
+  do_imports=False)` + `gcc -fgimple -fsyntax-only`) — no errors either
+  way.
+- A deliberately adversarial mixed-return-path shape (`if isinstance(x,
+  str): return "text: " + x` / `return isinstance(x, int)`, forcing
+  `TypeLattice.join` to pick `char *` as the declared return type over
+  the isinstance branch's int64_t-defaulted guess) — still compiled
+  clean. Inspecting the emitted `.ci`: `_safe_coerce_emit` always
+  routes the int64_t→pointer coercion through an explicit `(char
+  *)_tN;` cast **statement**, which `-fgimple`'s verifier accepts even
+  for a pointer/int mismatch — unlike the original `Comprehension` bug,
+  where GCC's complaint was specifically about an *implicit* mismatch
+  against a raw integer constant, not an explicit cast assignment.
+
+So the real `functools.py:920` function does NOT currently fail to
+compile — this doc's original "same class of error" concern doesn't
+hold up under direct testing. The gap in `_quick_type` is nonetheless
+real (a genuinely wrong `int64_t` type estimate where the true value is
+`_Bool`), so the fix was still applied as a narrow, mechanical, low-risk
+precision correction mirroring the `len`/`ord` precedent exactly — not
+because a live crash was confirmed.
+
+### Fix
+
+Added `'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'` to
+`_quick_type`'s `_BUILTIN_SCALARS` dict (`gimple_codegen.py`), same
+dict `len`/`ord`/`float`/`int`/`str`/`chr`/`bool`/`repr` already live
+in. No existing/partial handling of these three names elsewhere in
+`_quick_type` (confirmed via grep for `'isinstance'`/`'all'`/`'any'`
+across the whole file before adding — the only other hits are the real
+LOWERING code for these builtins, `_lower_builtin_isinstance`/
+`_lower_builtin_all_any`, a separate method). No name-shadowing guard
+added, matching `len`/`ord`'s own precedent (neither of those guards
+against a local variable named `len`/`ord` either).
+
+### Verification
+
+Two standalone repros, both compile AND run with correct boolean
+output (not just clean compiles):
+- `isinstance` against a user-defined class (`Animal`/`Rock`):
+  `is_animal(Animal())` -> `True`, `is_animal(Rock())` -> `False`.
+- `all`/`any` over a generator-expression argument: `all(x > 0 for x in
+  [1,2,3])` -> `1`, `any(x < 0 for x in [1,2,3])` -> `0`, `any(x < 0
+  for x in [1,-2,3])` -> `1`.
+
+Also confirmed via `git stash` that a pre-existing, unrelated bug
+(`isinstance(x, int)` against a plain `int64_t` scalar value doesn't
+match — a separate `mojo_isinstance`/type-tag gap, out of this fix's
+scope) reproduces identically before and after this change — not a
+regression introduced here.
+
+### Gate
+
+All five gates in CLAUDE.md's quality-gate section passed, no
+regression: `test_gimple.py` (248/248), `test_module_cache.py`
+(76/76), `make check-selfhost` clean (self-host compiles + links,
+`mojo_selfhost` runs), from-scratch `libmojostdlib.dylib` rebuild (0
+`skip <module>:` lines, same as baseline), `compile_stdlib.py -j8`
+(664/664, 0 unexpected — unchanged count, matching this doc's own
+`Comprehension`-fix precedent exactly).
+
 ## Original diagnosis (unfixed-era notes, kept for history)
 
 Not attempted at the time — see "What a fix needs" below for the
