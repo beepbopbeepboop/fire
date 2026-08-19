@@ -34632,6 +34632,27 @@ class GimpleGen:
         # pass never populated `_async_closure_api` and `await
         # create_task(test_asyncrt_add[1](a))` fell through to the honest
         # whole-module refusal).
+        #
+        # MUST equally exclude any async def nested INSIDE A STRUCT
+        # METHOD's own body — device_context.mojo's `async def wrapper(...)
+        # capturing -> None:` shape, owned exclusively by the dedicated
+        # "Async closures NESTED INSIDE A METHOD" pass further below (keyed
+        # by (struct_name, method_name), threading `self`/method params/
+        # threaded comptime function-typed params as captures). Originally
+        # this set was only ever built by walking top-level FunctionDefs
+        # (`_st in stmts`), never StructDefs — so a nested-in-a-METHOD async
+        # def's id was never added here, and this pass (running BEFORE the
+        # dedicated method-nested pass) claimed it first: compiled as a bare
+        # top-level-style unit with `extra_captures=None`, silently dropping
+        # every captured free variable (e.g. `func`), and popped it out of
+        # `_async_fns` so the dedicated pass never got a turn. The generated
+        # C++ body then referenced the captured name directly (`func()`)
+        # with no parameter/local ever declaring it — a real, hand-verified
+        # `'func' was not declared in this scope` g++ compile failure (see
+        # test_async_void_return.py's test_device_context_shaped_repro_
+        # end_to_end / test_enqueue_cpu_range_shaped_repro_multiple_
+        # handles). Fixed by ALSO walking every struct method's body here,
+        # exactly mirroring the top-level-FunctionDef loop just above.
         _nested_in_fn_ids: set = set()
         for _st in stmts:
             if not (isinstance(_st, FunctionDef)
@@ -34641,6 +34662,15 @@ class GimpleGen:
             for _nf in _walk_ast(_st):
                 if isinstance(_nf, FunctionDef):
                     _nested_in_fn_ids.add(id(_nf))
+        for _st in stmts:
+            if not isinstance(_st, StructDef):
+                continue
+            for _sm in _st.methods:
+                if not isinstance(_sm, FunctionDef):
+                    continue
+                for _nf in _walk_ast(_sm.body):
+                    if isinstance(_nf, FunctionDef):
+                        _nested_in_fn_ids.add(id(_nf))
         if _async_fns:
             for _gm_id, s in list(_async_fns.items()):
                 if _gm_id in _generator_fns:
