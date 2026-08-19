@@ -8,9 +8,10 @@ what landed). **Steps 1-4 implemented and verified 2026-08-07** (see
 attribute storage, a genuine catchable AttributeError on a miss, and
 Sub-case C (fixed-layout runtime structs like `MojoBoundMethod`) all now
 work end-to-end, confirmed via full compile+run repros (not just "stops
-erroring at compile time"). One residual gap found during real-world
-verification and deliberately NOT fixed here — see "Residual gap: caught
-exception objects" below.
+erroring at compile time"). **The residual gap (caught exception objects,
+e.g. `Lib/pathlib/_os.py`'s `err.filename = ...`) is now ALSO fixed, as of
+2026-08-18** — see "Residual gap FIXED (2026-08-18)" below for the
+narrower, syntactic (not type-keyed) approach used.
 
 ### Steps 1-4 implementation notes (2026-08-07)
 
@@ -123,6 +124,123 @@ NOT re-verified against the full gate-style error-count comparison; it
 simply still shows the exact same 2 "request for member 'filename'/
 'filename2' in something not a structure or union" errors as before this
 session's changes, unchanged.
+
+### Residual gap FIXED (2026-08-18)
+
+Fixed via the narrower alternative this section itself flagged as worth
+trying instead of broadening the type-keyed `ot in (...)` dispatch
+condition to include `char *`: key the new dispatch case off the
+SYNTACTIC fact that a `MemberExpr`'s receiver is an identifier bound by an
+`except <ExcType> as <name>:` clause, not off its C type. An ordinary
+`char *` string variable is never introduced by an except-as binding, so
+this can't accidentally widen to match unrelated string code, unlike the
+rejected type-keyed broadening.
+
+- **Tracking which names are except-as-bound**: a new per-function set,
+  `GimpleGen._except_as_names`, populated/cleared by `_emit_except_handler`
+  (gimple_codegen.py) using the exact same save/restore convention already
+  used there for `_c_names`/`had_c_name`/`restore_c_name` (so sequential
+  `except ... as e:` blocks in the same function, and nested/shadowed
+  bindings, behave correctly — verified via a repro with two sequential
+  `except OSError as e: / except ValueError as e:` blocks in the same
+  function, both binding attributes on `e` correctly). Only added for the
+  `char *`-typed binding case (builtin exceptions / bare `except as e`) —
+  a struct-typed caught exception (a user-defined exception class already
+  in `struct_field_types`) is untouched, since that case already has real
+  field storage and was never part of this gap.
+- **New dispatch call sites**: a new helper, `_is_except_as_member_target
+  (obj_node)`, checks whether a `MemberExpr`'s `.obj` is an `IdentExpr`
+  whose name is currently in `_except_as_names`. Added as a new `elif`
+  branch (checked AFTER Sub-case A/B's `ot in (...)` check and Sub-case
+  C's `_FIXED_RUNTIME_STRUCT_NAMES` check, so it only ever fires for the
+  genuinely-uncovered case) at all three write-side call sites Steps 1-4
+  already touched — `_gen_stmt_AssignStmt`, `_gen_stmt_AugAssignStmt`,
+  `_gen_stmt_MultiAssignStmt`'s MemberExpr-target handling — routing
+  through the SAME `_mojo_dispatch_setattr` Sub-case A/B/C already use.
+  Factored into a small shared helper, `_emit_dynattr_setattr_dispatch`,
+  since this would otherwise have been a FOURTH copy-pasted instance of
+  that emission (Sub-case A/B and Sub-case C were already two separate
+  copies at each of the three write sites — six total — before this
+  change; the new case reuses one shared helper instead of adding a
+  seventh/eighth/ninth).
+- **Read side**: `_lower_MemberExpr`'s existing opaque-dispatch branch
+  (`elif ot in ('int', 'int64_t', 'void *', 'char *') or ot in
+  ('MojoList *', ...)`) turned out to ALREADY include `char *` in its type
+  check — pre-existing, unrelated to this fix, and evidently added for a
+  different reason at some earlier point (this session did not audit why;
+  out of scope). So `err.filename` as a read already reached
+  `_mojo_dispatch_getattr` before this session's changes — the real gap on
+  the read side was TYPE, not dispatch: the call's result was always typed
+  `int64_t` (the generic boxed default), so `print(err.filename)` printed
+  raw pointer bits as a number instead of the string. Fixed with a second
+  new piece of state, `GimpleGen._except_attr_str_fields` (a whole-program,
+  NOT per-function-reset set, following the same convention as
+  `_field_dict_val_types`/`_field_elem_types` right next to it in
+  `__init__` — a field written in one function may be read in another):
+  `_emit_dynattr_setattr_dispatch` records a member name into it whenever
+  the value being written is `char *`-typed; `_lower_MemberExpr`'s
+  existing `_boxed_ft = self._known_field_type(node.member)` computation
+  (which already casts the boxed dispatch result back to a resolved type
+  when non-None/non-`int64_t`) now also resolves to `char *` when
+  `_known_field_type` found nothing AND the receiver is except-as-bound
+  AND the member name was previously recorded as a string — reusing the
+  EXISTING cast-back code path immediately below unchanged, not a new one.
+  This mirrors the precedent set by the `.__name__`-special-case fix under
+  Steps 1-4 above (also an unconditional "this attribute is always
+  conceptually a string" cast), scoped here to attribute names actually
+  observed being written as strings rather than assumed universally.
+- **Verification**:
+  - Minimal repro (`try: raise OSError("boom") except OSError as err:
+    err.filename = "somepath"; print(err.filename)`) via `python3 mojo.py
+    build`: compiles and RUNS, printing `somepath` (previously: compile
+    error). Extended repro also confirmed: reading a never-set dynamic
+    attribute on the same except-bound object raises a genuinely catchable
+    `AttributeError` (`try: x = err.never_set except AttributeError:
+    print("caught")` → prints the catch branch, not a crash), setting a
+    SECOND attribute afterward and re-reading the first still round-trips
+    correctly, the `AugAssignStmt` shape (`err.note += "-more"`) and the
+    `MultiAssignStmt`/chained-assignment shape (`a = err.tag = "x"`) both
+    work end to end.
+  - Zero-regression check: an ordinary `char *` string variable literally
+    NAMED `err` in a different function (never touched by an except-as
+    binding) — `.` isn't applicable to a plain string in this repro since
+    Python strings have no attribute syntax used this way, so the check
+    used a same-named plain string var with ordinary string operations
+    (`len()`, `+` concatenation) in one function while `err` is
+    except-as-bound with attribute writes in a DIFFERENT function in the
+    same compile unit — both behave correctly and independently, since
+    `_except_as_names` is per-function state, exactly mirroring how
+    `_c_names` already isolates the same kind of same-name-different-
+    function collision for the exception-binding temp-rename mechanism
+    this new set sits right next to. Two sequential `except ... as e:`
+    blocks (different exception types, same bind name) in the SAME
+    function also verified independent and correct.
+  - Real `Lib/pathlib/_os.py` (`/Users/mrs/net/Python-3.14.6/Lib/pathlib/
+    _os.py`), compiled via `gimple_codegen.compile_to_gimple(...,
+    do_imports=True)` + `gcc -fgimple -fsyntax-only`: **0 errors of ANY
+    kind** (not just 0 "structure or union" errors — the file now compiles
+    fully clean). Confirmed via direct `.c` inspection that lines 158-159
+    (`err.filename = source_f.name` / `err.filename2 = target_f.name`,
+    inside `except OSError as err:`) now lower through
+    `_mojo_dispatch_setattr`/`_mojo_dispatch_getattr` with interned
+    `"filename"`/`"filename2"` key strings, instead of a rejected direct
+    `->filename` access. (The file also has two OTHER, unrelated
+    `err.filename = ...`/`err.filename2 = ...` write sites, at lines
+    228-229 and 250-251, from a DIFFERENT pattern — `err = OSError(...)`
+    directly assigned, not `except ... as err:` — that were already
+    compiling clean before this session's changes, via the pre-existing
+    Sub-case A/B opaque-object path; not part of this gap, not touched.)
+- **Quality gate (2026-08-18)**: `python3 test_gimple.py` — 248 passed, 0
+  failed. `python3 test_module_cache.py` — 76 passed, 0 failed. `make
+  check-selfhost` — clean. From-scratch stdlib dylib rebuild — clean, 0
+  `skip <module>:` lines. `python3 compile_stdlib.py` (default jobs, full
+  664-file corpus) — 664/664 passed, 0 unexpected failures (unchanged from
+  baseline). `python3 test_gimple_runner.py` — 17 passed, 1 failed
+  (`gimple_dynamic_attribute_fixed_runtime_struct_bound_method`) — this
+  failure is PRE-EXISTING and unrelated to this change: confirmed via
+  `git stash` (reverting this session's `gimple_codegen.py` edit entirely)
+  and re-running the same suite, which reproduces the identical single
+  failure with this session's changes completely absent.
 
 ### Verification against real-world files (2026-08-07)
 

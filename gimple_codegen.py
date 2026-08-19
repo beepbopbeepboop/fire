@@ -4109,6 +4109,22 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # Attribute names written as a `char *` (string) value onto an
+        # except-as-bound exception object (`err.filename = some_str`) —
+        # whole-program, like _field_dict_val_types above, NOT reset per
+        # function, since the write and a later read can be in different
+        # functions/modules. `mojo_setattr`'s storage always boxes as a
+        # generic int64_t (see bugs/hard/CODEGEN_dynamic_attribute_on_
+        # generic_object.md's Step 0 notes on why there's no per-value type
+        # tag), so a read-back through `_mojo_dispatch_getattr` alone can't
+        # recover the real C type — this mirrors `_known_field_type`'s own
+        # whole-program field-name→type convention, scoped to this narrow
+        # except-as case, letting `err.filename` used as a plain expression
+        # (e.g. `print(err.filename)`) cast the boxed result back to `char *`
+        # instead of printing raw pointer bits as a number. Confirmed
+        # real-world need: Lib/pathlib/_os.py's `err.filename`/`err.filename2`
+        # are always strings.
+        self._except_attr_str_fields: set[str] = set()
         # Fixed-size-array struct fields (`var x: [ElemType; N]`, mojo_compiler.py's
         # `_parse_type_ann_inner` LBRACKET-annotation shape): struct_name ->
         # field_name -> (elem_ctype, N). The field's C type in struct_field_types
@@ -5010,6 +5026,25 @@ class GimpleGen:
         self._inner_func_name: str          = ''
         # C keyword renaming: Python name → C name (for vars that clash with C keywords)
         self._c_names:    dict[str, str]    = {}
+        # Names currently bound by an `except <ExcType> as <name>:` clause in
+        # this function (see _emit_except_handler, which adds/removes as it
+        # enters/leaves each handler body — mirrors the had_c_name/
+        # restore_c_name save-restore convention right next to it so nested/
+        # shadowed except-as bindings and sequential try/except blocks in the
+        # same function behave correctly). A caught exception object is
+        # lowered as a bare `char *` message string (see _gen_stmt_RaiseStmt/
+        # _emit_except_handler), not a real struct — so ordinary MemberExpr
+        # field dispatch (which keys off `ot`, the C type) can never resolve
+        # it. This set lets a MemberExpr's write/read lowering recognize
+        # "this receiver is genuinely an except-as-bound exception object"
+        # SYNTACTICALLY (the identifier's name, not its `char *` C type) and
+        # route it through the dynamic-attribute dispatch machinery, without
+        # broadening the type-keyed dispatch condition to match `char *` in
+        # general (which is used pervasively for ordinary strings — see
+        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+        # "Residual gap: caught exception objects" section for why that
+        # broader fix was rejected as too risky).
+        self._except_as_names: set          = set()
         # Names declared `global` inside this function — reads/writes route to module struct
         self._func_declared_globals: set    = set()
         # True only while generating a module's own _toplevel()/_{module}_toplevel()
@@ -10092,6 +10127,21 @@ class GimpleGen:
             # boxed int64_t default is kept (correct for the overwhelmingly common
             # boxed-expression/IntLiteral use).
             _boxed_ft = self._known_field_type(node.member)
+            if (_boxed_ft is None and self._is_except_as_member_target(node.obj)
+                    and node.member in self._except_attr_str_fields):
+                # `err.filename` (a caught exception object's dynamically-set
+                # attribute) — `_known_field_type` has no notion of dynamic
+                # attributes, only real declared struct fields, so it's
+                # always None here. `self._except_attr_str_fields` (populated
+                # at the matching write site, `_emit_dynattr_setattr_
+                # dispatch`) records which attribute names were actually
+                # written as a string on SOME except-as-bound object; casting
+                # the boxed result back to char * here is what makes
+                # `print(err.filename)` show the real string instead of raw
+                # pointer bits as a number. See `_is_except_as_member_target`
+                # /bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+                # "Residual gap: caught exception objects" section.
+                _boxed_ft = 'char *'
             if _boxed_ft is not None and _boxed_ft != 'int64_t':
                 if ot in ('int', 'char'):
                     ov = self._new_val('int64_t', f'(int64_t){ov}')
@@ -19054,6 +19104,41 @@ class GimpleGen:
                 sev = self._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
                 self._assign_target(sub, set_et, sev)
 
+    def _is_except_as_member_target(self, obj_node) -> bool:
+        """True when `obj_node` (a MemberExpr's `.obj`) is a bare identifier
+        currently bound by an enclosing `except <ExcType> as <name>:` clause
+        — see `self._except_as_names`'s own docstring. Deliberately keyed off
+        this SYNTACTIC fact (which name was introduced by an except-as
+        binding), not the receiver's C type (`char *`), so this can never
+        accidentally match an ordinary string variable that merely happens
+        to share a name — an ordinary string is never added to
+        `_except_as_names` in the first place. See bugs/hard/
+        CODEGEN_dynamic_attribute_on_generic_object.md's "Residual gap"
+        section for why the type-keyed alternative was rejected."""
+        return (isinstance(obj_node, IdentExpr)
+                and obj_node.name in self._except_as_names)
+
+    def _emit_dynattr_setattr_dispatch(self, member: str, vtype: str, v: str,
+                                        ot: str, ov: str) -> None:
+        """Emit a `_mojo_dispatch_setattr(obj, "member", val)` call — the
+        same emission Sub-cases A/B/C already duplicate at each of their own
+        write-side call sites (AssignStmt/AugAssignStmt/MultiAssignStmt), now
+        shared here so the new except-as-bound-exception-object case (see
+        `_is_except_as_member_target`) doesn't add a FOURTH copy of it."""
+        if vtype == 'char *':
+            # Record so a later read of this same attribute name (see
+            # `self._except_attr_str_fields`'s own docstring) can cast the
+            # generic boxed-int64_t dispatch result back to `char *`.
+            self._except_attr_str_fields.add(member)
+        key_slit = self._intern_string(_c_escape(member))
+        key_tmp = self._new_val('char *', f"{key_slit}")
+        v64 = self._new_temp('int64_t')
+        self._safe_coerce_emit(vtype, 'int64_t', v, v64)
+        obj64 = self._to_int64(ot, ov)
+        vp_tmp = self._new_val('void *', f"(void *){obj64}")
+        self._emit_call('void', '', '_mojo_dispatch_setattr',
+                        [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+
     def _gen_stmt_AssignStmt(self, node):
         # Tuple unpacking: a, b, c = x, y, z  (targets may nest: (a,b),(c,d) = ...)
         if isinstance(node.target, TupleExpr):
@@ -19417,6 +19502,22 @@ class GimpleGen:
                 vp_tmp = self._new_val('void *', f"(void *){obj64}")
                 self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+            elif self._is_except_as_member_target(node.target.obj):
+                # A caught exception object (`except OSError as err: ...
+                # err.filename = ...`) — `ot` is a bare `char *` (this
+                # runtime models an exception's payload as a plain message
+                # string, not a real struct/object), so it's neither Sub-case
+                # A/B above nor Sub-case C's fixed-runtime-struct set. Routed
+                # here SYNTACTICALLY (`node.target.obj` is a name introduced
+                # by an `except ... as name:` clause — see
+                # `_is_except_as_member_target`/`self._except_as_names`), not
+                # by broadening the `ot in (...)` check above to include
+                # `char *` in general, which would also match every ordinary
+                # string variable in this codegen. Confirmed real instance:
+                # Lib/pathlib/_os.py's `err.filename = source_f.name`. See
+                # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+                # "Residual gap: caught exception objects" section.
+                self._emit_dynattr_setattr_dispatch(node.target.member, vtype, v, ot, ov)
             else:
                 op = '->' if '*' in ot else '.'
                 struct_name = _struct_name_of(ot)
@@ -19750,6 +19851,14 @@ class GimpleGen:
                 vp_tmp = self._new_val('void *', f"(void *){ov}")
                 self._emit_call('void', '', '_mojo_dispatch_setattr',
                                 [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+            elif self._is_except_as_member_target(node.target.obj):
+                # Augmented-assignment analogue of the AssignStmt MemberExpr
+                # branch above (`err.filename += ...` on a caught exception
+                # object) — see `_is_except_as_member_target`/
+                # `self._except_as_names` and bugs/hard/
+                # CODEGEN_dynamic_attribute_on_generic_object.md's "Residual
+                # gap: caught exception objects" section.
+                self._emit_dynattr_setattr_dispatch(node.target.member, vtype, v, ot, ov)
             else:
                 # Mirrors _gen_stmt_AssignStmt's identical MemberExpr
                 # struct-field branch: look up the field's REAL declared C
@@ -20314,6 +20423,13 @@ class GimpleGen:
                     vp_tmp = self._new_val('void *', f"(void *){obj64}")
                     self._emit_call('void', '', '_mojo_dispatch_setattr',
                                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
+                    continue
+                if self._is_except_as_member_target(target.obj):
+                    # Chained-assignment analogue (`slotnames = err.filename
+                    # = value`) of the caught-exception-object case in
+                    # _gen_stmt_AssignStmt — see
+                    # `_is_except_as_member_target`/`self._except_as_names`.
+                    self._emit_dynattr_setattr_dispatch(target.member, vtype, v, ot, ov)
                     continue
                 op = '->' if '*' in ot else '.'
                 # Coerce to the field's real declared C type (mirrors
@@ -20915,6 +21031,8 @@ class GimpleGen:
         it — kept flat here instead."""
         had_c_name = False
         restore_c_name = None
+        was_except_as_char = False
+        added_except_as = False
         bind_name = self._handler_bind_name(handler)
         if bind_name:
             # Exception handlers are typed as pointers to exception objects.
@@ -20928,6 +21046,19 @@ class GimpleGen:
                 # as char * — matches what is actually stored instead of an
                 # opaque void * that would print as a raw address.
                 exc_ctype = 'char *'
+                # Track that `bind_name` is, for the extent of this handler's
+                # body, an except-as-bound `char *` exception object — see
+                # `self._except_as_names`'s own docstring for why this is
+                # needed (a caught exception has no struct type for ordinary
+                # MemberExpr dispatch to key off). Save/restore exactly like
+                # `had_c_name`/`restore_c_name` just below, so a second,
+                # sequential `except ... as e:` in the same function (or a
+                # nested one shadowing an outer binding) can't leave a stale
+                # entry once this handler's body is done.
+                was_except_as_char = bind_name in self._except_as_names
+                if not was_except_as_char:
+                    self._except_as_names.add(bind_name)
+                    added_except_as = True
 
             # Bind through a fresh, guaranteed-unique C temp rather than
             # declaring `handler.name` itself as a plain local: GCC's raw
@@ -20969,6 +21100,8 @@ class GimpleGen:
                 self._c_names[bind_name] = restore_c_name
             else:
                 del self._c_names[bind_name]
+            if added_except_as:
+                self._except_as_names.discard(bind_name)
 
     def _gen_stmt_TryStmt(self, node):
         sj_ret = self._new_temp('int')
