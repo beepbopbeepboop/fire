@@ -25,15 +25,17 @@ c_code = compile_to_gimple(test_code)
 # mangleable free function (a local def or an imported Mojo function with a
 # resolved signature) also gets a 6-hex-digit overload-hash suffix appended
 # to its C symbol (gimple_codegen.py's _func_csym/overload_suffix_for) so
-# that two same-named functions with different signatures can't collide —
-# so the C symbol is "mojo_double_<hash>", not bare "mojo_double". And
-# `Int` is this codegen's boxed machine word, which maps to `int64_t`
-# (ABI.md), not plain C `int` — an old/stale convention this test used to
-# assert that has since been corrected everywhere else in the codegen (see
+# that two same-named functions with different signatures can't collide,
+# and (per a later module-qualification change) may additionally be
+# prefixed with its defining module's name — so the C symbol looks like
+# "[<module>_]mojo_double_<hash>", not bare "mojo_double". And `Int` is
+# this codegen's boxed machine word, which maps to `int64_t` (ABI.md), not
+# plain C `int` — an old/stale convention this test used to assert that
+# has since been corrected everywhere else in the codegen (see
 # gimple_codegen.py's _TYPE_MAP and module_loader.py's _mojo_type_to_c,
 # which must both agree or the extern declaration's mangled name won't even
 # match the symbol the defining module actually emits).
-if re.search(r'extern int64_t mojo_double_[0-9a-f]{6} \(int64_t x\);', c_code):
+if re.search(r'extern int64_t (\w+_)?mojo_double_[0-9a-f]{6} \(int64_t x\);', c_code):
     print("✓ extern declaration for 'double' with parameters found")
 else:
     print("✗ extern declaration for 'double' with parameters NOT found")
@@ -41,7 +43,7 @@ else:
     print(c_code[:1000])
     sys.exit(1)
 
-if re.search(r'extern int64_t add_[0-9a-f]{6} \(int64_t x, int64_t y\);', c_code):
+if re.search(r'extern int64_t (\w+_)?add_[0-9a-f]{6} \(int64_t x, int64_t y\);', c_code):
     print("✓ extern declaration for 'add' with parameters found")
 else:
     print("✗ extern declaration for 'add' with parameters NOT found")

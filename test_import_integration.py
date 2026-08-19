@@ -72,8 +72,13 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
         # arch rather than trusting any prebuilt runtime/mojo_runtime.o
         # (which may be stale for a different architecture).
         runtime_obj = os.path.join(tmpdir, 'mojo_runtime.o')
+        # Use the project's own selected gcc (not the bare `cc` alias, which
+        # on macOS is clang defaulting to a strict-ISO-C mode that rejects
+        # mojo_runtime.h's `int mojo_type(...)` GNU-extension-style
+        # unnamed-leading-param variadic prototype) -- matches
+        # build_stdlib_dylib.py's own mojo_runtime.c compile flags.
         rt_result = subprocess.run(
-            ['cc', '-c', f'-I{HERE}/runtime', '-o', runtime_obj,
+            [find_gcc(), '-fPIC', '-c', f'-I{HERE}/runtime', '-o', runtime_obj,
              f'{HERE}/runtime/mojo_runtime.c'],
             capture_output=True, text=True, timeout=30
         )
@@ -172,8 +177,10 @@ def main() -> Int:
 
     # Verify extern declarations: real resolved signature, int64_t (Int's
     # canonical C type), one named param, with the overload-hash suffix
-    # _func_csym appends to every mangleable free function's C symbol.
-    if re.search(r'extern int64_t double_value_[0-9a-f]{6} \(int64_t x\);', main_c):
+    # _func_csym appends to every mangleable free function's C symbol, and
+    # (per a module-qualification change) possibly prefixed with the
+    # defining module's name (e.g. "test_helper_values_double_value_...").
+    if re.search(r'extern int64_t (\w+_)?double_value_[0-9a-f]{6} \(int64_t x\);', main_c):
         print("✓ Correct extern declaration for double_value")
     else:
         print("✗ Missing/incorrect extern declaration for double_value")
@@ -182,7 +189,7 @@ def main() -> Int:
                 print(line)
         return False
 
-    if re.search(r'extern int64_t triple_value_[0-9a-f]{6} \(int64_t x\);', main_c):
+    if re.search(r'extern int64_t (\w+_)?triple_value_[0-9a-f]{6} \(int64_t x\);', main_c):
         print("✓ Correct extern declaration for triple_value")
     else:
         print("✗ Missing/incorrect extern declaration for triple_value")
