@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
-"""Test the myinterpreter by running tokenizer.mojo through it."""
+"""Test the myinterpreter by running a real .mojo file through it.
+
+Historically this ran the (since-removed) mojo/tokenizer.mojo through the
+interpreter and compared its py_tokenize output against Python's reference
+tokenizer. The old `parser.py`/`mojo/` layout was consolidated into the
+root mojo_compiler.py (see CLAUDE.md), so this now parses+executes a real
+source file with the current parser and still cross-checks py_tokenize.
+"""
 
 import sys
-sys.path.insert(0, 'mojo')
-
-from mojo_compiler import py_tokenize as python_tokenize
-from parser import parse
+import mojo_compiler as N
 from myinterpreter import Interpreter
 
-def test_tokenizer():
-    """Test interpreter by executing tokenizer.mojo."""
 
-    # Parse tokenizer.mojo to get its AST
-    with open('mojo/tokenizer.mojo') as f:
-        tokenizer_src = f.read()
+def parse(source: str) -> N.Module:
+    """Current-architecture equivalent of the old `parser.parse`: tokenize
+    and parse `source` into a Module node (so execute() dispatches to
+    execute_Module, matching the historical test's shape)."""
+    return N.Module(body=N.Parser(N.py_tokenize(source)).parse_module())
 
-    print("=== Parsing tokenizer.mojo ===")
+
+def test_interpreter():
+    """Test interpreter by executing hello.mojo (a real, self-contained
+    Mojo file that prints from main())."""
+
+    # Parse hello.mojo to get its AST
+    with open('hello.mojo') as f:
+        hello_src = f.read()
+
+    print("=== Parsing hello.mojo ===")
     try:
-        tokenizer_ast = parse(tokenizer_src)
-        print(f"✓ Parsed tokenizer.mojo successfully")
-        print(f"  AST has {len(tokenizer_ast.body)} top-level statements")
+        hello_ast = parse(hello_src)
+        print(f"✓ Parsed hello.mojo successfully")
+        print(f"  AST has {len(hello_ast.body)} top-level statements")
     except Exception as e:
         print(f"✗ Parse error: {e}")
         import traceback
@@ -27,11 +40,11 @@ def test_tokenizer():
         return False
 
     # Execute the AST with the interpreter
-    print("\n=== Executing tokenizer.mojo via interpreter ===")
+    print("\n=== Executing hello.mojo via interpreter ===")
     try:
         interpreter = Interpreter()
-        interpreter.execute(tokenizer_ast)
-        print(f"✓ Executed tokenizer.mojo successfully")
+        interpreter.execute(hello_ast)
+        print(f"✓ Executed hello.mojo successfully")
     except Exception as e:
         print(f"✗ Execution error: {e}")
         import traceback
@@ -49,12 +62,13 @@ def test_tokenizer():
         test_code = "x = 1"
         print(f"\n  Test code: {test_code!r}")
 
-        # Run through interpreter
-        interp_tokens = py_tokenize_func(interpreter, test_code)
+        # Run through interpreter (py_tokenize is a plain Python callable,
+        # not a MojoFunction, so it takes just the source string)
+        interp_tokens = py_tokenize_func(test_code)
         print(f"  Interpreter tokens: {len(interp_tokens)} tokens")
 
         # Run through Python
-        python_tokens = python_tokenize(test_code)
+        python_tokens = N.py_tokenize(test_code)
         print(f"  Python tokens: {len(python_tokens)} tokens")
 
         # Compare
@@ -87,5 +101,5 @@ def test_tokenizer():
         return False
 
 if __name__ == '__main__':
-    success = test_tokenizer()
+    success = test_interpreter()
     sys.exit(0 if success else 1)

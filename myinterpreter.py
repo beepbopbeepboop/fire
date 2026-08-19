@@ -18,8 +18,15 @@ import platform
 import operator
 import math
 import collections
+import threading
 from dataclasses import dataclass
 import mojo_compiler as N
+
+# Operators handled by Interpreter._apply_compare_op — both eval_BinaryOp
+# (a single comparison, e.g. plain `a < b`) and eval_CompareChain (Python
+# chained comparisons, `a < b < c`) dispatch through this same set/method
+# rather than duplicating the operator table.
+_COMPARE_OPS = {'==', '!=', '<', '>', '<=', '>=', 'in', 'not in', 'is', 'is not'}
 
 
 class ReturnValue(Exception):
@@ -81,6 +88,13 @@ class Scope:
             return self.parent.get(name)
         raise NameError(f"name '{name}' is not defined")
 
+    def has(self, name: str) -> bool:
+        if name in self.vars:
+            return True
+        if self.parent:
+            return self.parent.has(name)
+        return False
+
     def set(self, name: str, value):
         if name in self.vars:
             self.vars[name] = value
@@ -100,7 +114,8 @@ class Scope:
 
 class MojoFunction:
     """Represents a function defined in Mojo code."""
-    def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None):
+    def __init__(self, name, params, body, closure_scope, comptime_params=None, param_defaults=None,
+                 is_generator=False, is_async=False):
         self.name = name
         self.params = params
         self.body = body
@@ -112,6 +127,20 @@ class MojoFunction:
         self.comptime_params = comptime_params or []
         if param_defaults:
             self._pd = param_defaults
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # mirrors FunctionDef.is_generator (see mojo_compiler.py) — copied
+        # onto the MojoFunction at construction time (see
+        # execute_FunctionDef/execute_StructDef/execute_TraitDef) so
+        # `_invoke` can branch to the generator-construction path without
+        # needing the original FunctionDef node around at call time.
+        self.is_generator = is_generator
+        # Milestone 3b of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # mirrors FunctionDef.is_async (see mojo_compiler.py) exactly the
+        # same way is_generator mirrors FunctionDef.is_generator above —
+        # copied onto the MojoFunction at construction time so `_invoke`
+        # can branch to the coroutine-construction path without needing
+        # the original FunctionDef node around at call time.
+        self.is_async = is_async
 
     def __call__(self, interpreter, *args, **kwargs):
         return self._invoke(interpreter, {}, args, kwargs)
@@ -129,7 +158,12 @@ class MojoFunction:
             func_scope.define(name, value)
 
         # Bind comptime params that have defaults but weren't provided
-        _pdl = getattr(self, 'param_defaults', None)
+        # (`self._pd` — the constructor stores param_defaults under that
+        # name, see __init__; reading the constructor argument's name here
+        # would always find nothing and silently drop every default value,
+        # which is exactly the bug this line fixed — see the LambdaExpr
+        # handler, whose `lambda x=5: ...` defaults rely on it working).
+        _pdl = getattr(self, '_pd', None)
         for cp_name in self.comptime_params:
             if cp_name not in comptime_bindings:
                 _found = False
@@ -141,12 +175,31 @@ class MojoFunction:
                 if not _found and cp_name not in func_scope.vars:
                     func_scope.define(cp_name, None)
 
-        # Bind parameters to arguments
-        for i, param in enumerate(self.params):
-            if i < len(args):
-                func_scope.define(param, args[i])
+        # Bind parameters to arguments.
+        #
+        # `*args` / `**kwargs` catch-alls arrive here still carrying their
+        # stars (see _extract_param_names). Everything AFTER a `*` — whether
+        # a named `*rest` or a bare `*` separator — is keyword-only and must
+        # never consume a positional, exactly as in real Python.
+        _pos_i = 0
+        _seen_star = False
+        _var_pos_name = ''
+        _var_kw_name = ''
+        _consumed_kw = []
+        for param in self.params:
+            if param.startswith('**'):
+                _var_kw_name = param[2:]
+                continue
+            if param.startswith('*'):
+                _var_pos_name = param[1:]  # '' for a bare `*` separator
+                _seen_star = True
+                continue
+            if (not _seen_star) and _pos_i < len(args):
+                func_scope.define(param, args[_pos_i])
+                _pos_i += 1
             elif param in kwargs:
                 func_scope.define(param, kwargs[param])
+                _consumed_kw.append(param)
             else:
                 _found = False
                 if _pdl is not None:
@@ -156,21 +209,749 @@ class MojoFunction:
                             _found = True; break
                 if not _found:
                     func_scope.define(param, None)
+        # Leftover positionals -> `*rest`; leftover keywords -> `**kw`. Built
+        # with plain loops rather than a slice/comprehension: this file is
+        # itself self-hosted, and plain loops are what that compiler lowers
+        # reliably (see the MojoGeneratorObject single-return note above for
+        # the same class of concession).
+        if _var_pos_name:
+            _rest = []
+            _ri = _pos_i
+            while _ri < len(args):
+                _rest.append(args[_ri])
+                _ri += 1
+            func_scope.define(_var_pos_name, _rest)
+        if _var_kw_name:
+            _rest_kw = {}
+            for _kk in kwargs:
+                if _kk not in _consumed_kw:
+                    _rest_kw[_kk] = kwargs[_kk]
+            func_scope.define(_var_kw_name, _rest_kw)
 
-
-        # Execute function body
-        old_scope = interpreter.scope
-        interpreter.scope = func_scope
-        try:
-            for stmt in self.body:
-                interpreter.execute(stmt)
-            result = None
-        except ReturnValue as ret:
-            result = ret.value
-        finally:
-            interpreter.scope = old_scope
+        if self.is_generator and self.is_async:
+            # `async def f(): yield x` — a real async generator. Python's
+            # actual protocol for these (`__aiter__`/`__anext__`, driven by
+            # `async for`, not by plain `await`) is a THIRD distinct
+            # protocol from both the sync-generator protocol
+            # (MojoGeneratorObject: __iter__/__next__/send/throw) and the
+            # coroutine protocol (MojoCoroutine: __await__) built for this
+            # milestone — see bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # Milestone 3b report. Deliberately NOT built here: rather than
+            # silently picking one of the two existing wrappers (either
+            # would behave subtly wrong under `async for`), fail loudly so
+            # this reads as a known, documented gap rather than a silent
+            # correctness bug.
+            raise NotImplementedError(
+                f"async generators (`async def {self.name}(): yield ...`) are not "
+                f"yet supported by the interpreter — __aiter__/__anext__ protocol "
+                f"is a documented follow-up gap, see Milestone 3b report")
+        elif self.is_async:
+            # Calling an async function must NOT run any of its body eagerly
+            # — mirrors is_generator immediately below (same rationale: real
+            # Python doesn't execute a single statement of a coroutine
+            # function's body until something actually drives it via
+            # __await__/.send()). Construct-and-return only; func_scope
+            # becomes this coroutine's own private scope, swapped in by
+            # MojoCoroutine around every resume — see its docstring.
+            result = MojoCoroutine(interpreter, func_scope, self.body)
+        elif self.is_generator:
+            # Calling a generator function must NOT run any of its body —
+            # real Python doesn't execute a single statement of a generator
+            # function until the caller starts pulling values out of it.
+            # Construct-and-return only; func_scope (with params/comptime
+            # bindings already bound above, exactly like the eager path)
+            # becomes this generator's own private scope, swapped in by
+            # MojoGeneratorObject around every resume — see its docstring
+            # for why the swap can't just happen once here.
+            #
+            # Routed through the same single `result`-variable/single-return
+            # shape as the eager path just below (rather than an early
+            # `return MojoGeneratorObject(...)`) deliberately: this file is
+            # itself self-hosted (gimple_codegen.py compiles it), and that
+            # compiler's return-type inference is a simple whole-function
+            # unification that got confused by two differently-shaped
+            # return statements in the same function (a boxed generic value
+            # vs. a directly-constructed local struct type) — see
+            # bugs/INTERP_generator_yield_entirely_unimplemented.md's
+            # Milestone 2 report for the concrete compile errors this
+            # produced before the fix.
+            result = MojoGeneratorObject(interpreter, func_scope, self.body)
+        else:
+            # Execute function body
+            old_scope = interpreter.scope
+            interpreter.scope = func_scope
+            try:
+                for stmt in self.body:
+                    interpreter.execute(stmt)
+                result = None
+            except ReturnValue as ret:
+                result = ret.value
+            finally:
+                interpreter.scope = old_scope
 
         return result
+
+
+class _RealAwaitStep:
+    """Milestone 3b marker object: yielded (via a worker thread's
+    `yield_fn`, exactly like a Mojo `yield` would be) by `eval_AwaitExpr`
+    to mean "please advance THIS real iterator/generator (from a real
+    native coroutine's `__await__()`, or another `MojoCoroutine`'s) by one
+    step, on whatever thread is actually driving me" — see
+    `_ThreadedGenerator._resume`'s handling of it for why this can't be
+    stepped on the worker thread itself (real asyncio internals like
+    `asyncio.sleep` call `get_running_loop()`, which is thread-affine —
+    stepping them from the wrong OS thread raises
+    `RuntimeError: no running event loop`, confirmed empirically while
+    prototyping this milestone)."""
+    __slots__ = ("it",)
+    def __init__(self, it):
+        self.it = it
+
+
+class _RealThreadCall:
+    """Milestone 3b marker, sibling to `_RealAwaitStep`: some real Python
+    callables touch the running event loop the instant they're CALLED, not
+    merely when later awaited — `asyncio.gather(...)`, `ensure_future`,
+    `create_task`, `asyncio.Queue()`, etc. all call `get_running_loop()`/
+    `get_event_loop()` eagerly at call time (confirmed empirically:
+    `asyncio.gather(...)` invoked from a Mojo coroutine's worker thread
+    raised `RuntimeError: no running event loop`, the exact same
+    thread-affinity problem `_RealAwaitStep` solves for awaiting, but at
+    call time instead of await time). `Interpreter.invoke` wraps any plain
+    (non-Mojo) callable invocation made from inside a coroutine's worker
+    thread in one of these and hands it to `yield_fn`, so
+    `_ThreadedGenerator._resume` executes the call itself — a single
+    one-shot step, not a multi-round drive like `_RealAwaitStep` — on
+    whichever thread is actually driving this coroutine, then hands the
+    result (or propagates the exception) straight back to the worker
+    thread. Deliberately NOT applied to plain Mojo `yield` generators —
+    only coroutines interact with an event loop, so
+    `MojoGeneratorObject`/`_body_fn` never sets the `is_coroutine` TLS flag
+    this is gated on, keeping the existing generator fast path completely
+    unchanged."""
+    __slots__ = ("func", "args", "kwargs")
+    def __init__(self, func, args, kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _ThreadedGenerator:
+    """A from-scratch generator-protocol implementation (`.send()`/
+    `.throw()`/`.close()`, raising `StopIteration` like a real Python
+    generator does) backed by a dedicated worker `threading.Thread`,
+    DELIBERATELY not using Python's native `yield` keyword anywhere in this
+    file. `body_fn(yield_fn)` runs entirely on the worker thread; it calls
+    `yield_fn(value)` to suspend and receive back whatever `.send()` later
+    passes in, and its `return value` becomes `StopIteration(value)`.
+
+    Why not just a plain Python generator function (as originally
+    implemented -- see git history)? myinterpreter.py is itself one of the
+    sources this project self-hosts (`mojo.py` compiling its own source,
+    `myinterpreter.py` included, via gimple_codegen.py). gimple_codegen.py's
+    generator detection (added for real Mojo-language `yield` support)
+    operates on the raw syntax tree it parses this file's own source into
+    and cannot distinguish "this Python function happens to use `yield` as
+    its own implementation technique" from "this is a user's Mojo generator
+    function" -- see commit 7ab861d, which hit and fixed the identical
+    problem in a different file (gimple_codegen.py's own internal
+    tree-walkers used `yield` purely as an implementation detail) by
+    rewriting them away from `yield` entirely. A single real `yield`
+    anywhere in myinterpreter.py's own top-level function bodies makes
+    gimple_codegen.py's module-level "fall back to interpreting from
+    source" trigger for the WHOLE of myinterpreter.py -- which in turn broke
+    `make check-selfhost`: other self-hosted modules calling into
+    `Interpreter` methods generate a properly-typed extern declaration for
+    them from myinterpreter.py's (normally available) static type info,
+    while mojo.py's own compiled code -- unable to get that info once
+    myinterpreter.py falls back -- instead emits a bare variadic stub
+    declaration for the very same C symbol. Two conflicting declarations of
+    one symbol in a single linked program is a hard GCC error
+    ("conflicting types for 'Interpreter_execute'"), confirmed by actually
+    running `make check-selfhost` against a native-generator-based first
+    draft of this mechanism.
+
+    A worker-thread coroutine gives the exact same suspend-from-anywhere
+    semantics as a native generator -- the Mojo body can `yield` from
+    arbitrarily deep inside execute()/eval_expr()'s ordinary recursive call
+    chain, with NO per-statement/per-expression-kind mirroring needed
+    (unlike the reverted native-generator draft's parallel `_exec_gen`/
+    `_eval_gen` dispatch family) -- without the keyword. Exactly one of
+    {caller thread, worker thread} runs at a time, handed off via two
+    `threading.Event`s: never real concurrency, just cooperative suspension
+    implemented with a thread instead of a generator frame.
+
+    Milestone 3b (async/await execution) REUSES this class as-is for
+    `MojoCoroutine` too, rather than duplicating it — per CLAUDE.md's
+    consolidation principle, the underlying "run this body on a worker
+    thread, suspend via yield_fn+Events" mechanism is identical between a
+    Mojo `yield` and a Mojo `await`; only the protocol MojoGeneratorObject
+    vs. MojoCoroutine expose to their respective callers differs. To
+    support `await`, `_resume` additionally recognizes when the worker
+    yields a `_RealAwaitStep` (meaning: "step this real awaitable/
+    MojoCoroutine, not the Mojo body, and don't wake the Mojo body up
+    until that real thing is actually done") and drives it in a loop on
+    the CALLING thread — see `_resume`'s docstring for why the calling
+    thread specifically, not the worker thread, must do that stepping."""
+
+    def __init__(self, body_fn):
+        self._to_worker = threading.Event()
+        self._to_caller = threading.Event()
+        self._sent_value = None
+        self._yielded_value = None
+        self._inject_exc = None    # caller -> worker: exception to raise at the suspend point
+        self._raised_exc = None    # worker -> caller: exception the body raised (propagates from send/throw)
+        self._return_value = None
+        self._done = False
+        # Milestone 3b: set while `_resume` is mid-stepping a real awaitable
+        # on behalf of `await` (see `_RealAwaitStep`) — non-None means "the
+        # worker thread is parked waiting for the FINAL result of this real
+        # await, don't resume it with an ordinary send/throw value; keep
+        # stepping `it` instead" (see `_resume`).
+        self._active_real_it = None
+
+        def _yield_fn(value):
+            self._yielded_value = value
+            self._to_caller.set()
+            self._to_worker.wait()
+            self._to_worker.clear()
+            if self._inject_exc is not None:
+                exc, self._inject_exc = self._inject_exc, None
+                raise exc
+            return self._sent_value
+
+        def _worker():
+            self._to_worker.wait()
+            self._to_worker.clear()
+            try:
+                if self._inject_exc is not None:
+                    exc, self._inject_exc = self._inject_exc, None
+                    raise exc
+                self._return_value = body_fn(_yield_fn)
+            except BaseException as e:
+                self._raised_exc = e
+            finally:
+                self._done = True
+                self._to_caller.set()
+
+        # Deep *Mojo-level* recursion inside a generator body fans out into
+        # many nested Python frames per Mojo call the same way mojo.py's own
+        # `interpret_and_execute` worker thread does (eval_expr ->
+        # eval_CallExpr -> invoke -> _invoke -> execute -> ...) — the default
+        # OS thread stack is nowhere near big enough. threading.stack_size()
+        # is a process-global setting applied to threads created after the
+        # call, matching the same pattern mojo.py itself already uses.
+        _old_stack_size = threading.stack_size()
+        threading.stack_size(1024 * 1024 * 1024)
+        try:
+            self._thread = threading.Thread(target=_worker, daemon=True)
+            self._thread.start()
+        finally:
+            threading.stack_size(_old_stack_size)
+
+    def _resume_once(self):
+        """The single Event-handoff step (exactly the original `_resume`
+        body, pre-Milestone-3b): hand off to the worker thread and wait for
+        it to either yield again or finish. Raises a BARE `StopIteration`
+        (no constructor argument) when done — the return value is read
+        back off `self._return_value` afterward instead of
+        `StopIteration.value`/`.args` deliberately: this file self-hosts,
+        and the compiler's exception model represents a raised exception as
+        a type tag + opaque payload, not a real struct with a typed
+        `.value`/`.args` field it can generate attribute-access code
+        against (only `MojoError`'s dedicated `_raised_mojo_value` channel
+        and plain string messages are supported that way) — reading a
+        value off one of OUR OWN classes' ordinary fields instead sidesteps
+        that entirely. Assumes `self._sent_value`/`self._inject_exc` are
+        already set by the caller (`_resume`)."""
+        self._to_worker.set()
+        self._to_caller.wait()
+        self._to_caller.clear()
+        if self._done:
+            exc, self._raised_exc = self._raised_exc, None
+            if exc is not None:
+                raise exc
+            raise StopIteration
+        return self._yielded_value
+
+    def _resume(self):
+        """Drives one logical send()/throw() step to completion, which may
+        take MULTIPLE Event handoffs when a `_RealAwaitStep` is involved
+        (Milestone 3b). Loop body, each pass:
+
+        - If `self._active_real_it` is set, the worker is currently parked
+          waiting on the FINAL outcome of a real await — step `it` itself
+          right here, on THIS (the calling) thread. This is the crux of
+          why real asyncio interop works at all: `it` is (transitively) a
+          real native coroutine/Future's own `__await__()` iterator, and
+          real asyncio internals like `asyncio.sleep` call
+          `get_running_loop()`, which is thread-affine (fails with
+          `RuntimeError: no running event loop` off the loop's own thread —
+          confirmed empirically). Since `_resume` is always invoked by
+          whatever thread is legitimately driving this coroutine/generator
+          (the real event loop's Task-stepping code, for a top-level
+          `await`; another worker thread, for Mojo-await-Mojo), stepping
+          `it` HERE is always on a correct thread, transitively, all the
+          way up the chain.
+            - `it` raises `StopIteration(v)`: the real await is done;
+              clear `_active_real_it` and loop back around to hand `v` to
+              the worker as its ordinary yield_fn(...) return value —
+              exactly as if the worker's `yield_fn` call is now returning.
+            - `it` raises any other exception: same, but inject it instead
+              (the worker's `yield_fn` call raises it, matching real
+              `await`'s "the awaited thing raised" propagation).
+            - `it` yields again (still not done, e.g. `Future.__await__`'s
+              `yield self`): propagate that value straight back OUT to
+              whoever is driving US, untouched, WITHOUT touching the
+              worker thread at all — it stays parked. This is what lets a
+              real `Future` bubble all the way up to real asyncio's Task
+              machinery for actual timer/IO scheduling.
+        - Otherwise, do one ordinary Event handoff (`_resume_once`). If the
+          worker yielded a `_RealAwaitStep`, record its iterator as
+          `_active_real_it` and loop back around (first step: send(None),
+          matching how a freshly-`__await__()`-ed iterator is always first
+          primed with `None`). Any other yielded value (a genuine Mojo
+          `yield`, for MojoGeneratorObject) — or the worker finishing —
+          returns/raises straight out to the caller, unchanged from
+          pre-Milestone-3b behavior.
+
+        Routed through `self._yielded_value` as the SOLE carrier of
+        whatever this call ultimately returns, with exactly ONE textual
+        `return self._yielded_value` statement at the very end (`break`
+        out of the loop rather than returning from several different
+        points) — deliberately, mirroring the documented
+        `MojoFunction._invoke` workaround for `is_generator`/`is_async`:
+        this file is itself self-hosted, and the self-hosted compiler's
+        return-type inference is a simple whole-function unification that
+        gets confused by differently-shaped return statements/fresh local
+        variables in the same function — confirmed empirically while
+        building this (an earlier draft using a fresh local `result`
+        variable, even with a single `return result` statement, compiled
+        fine interpreted but failed `make check-selfhost` with a gimple
+        `non-trivial conversion in 'var_decl'` verifier error; routing
+        through the ALREADY-established `self._yielded_value` field —
+        whose type the inferencer already resolved correctly from
+        `_yield_fn`'s pre-existing, unmodified assignment — fixed that.
+        A SECOND, separate self-host failure of the same species hit right
+        after: this method used to take `send_val`/`exc` as its own
+        parameters (defaulting to `None`, reassigned across loop
+        iterations to real objects/exceptions). The self-hosted compiler's
+        exception representation is a `char *` message string (see
+        `_resume_once`'s docstring), and a local/parameter that's
+        SOMETIMES `None` (inferred `int64_t`) and SOMETIMES a real
+        exception (`char *`) is a genuine, unreconcilable C type conflict
+        for it — confirmed via the exact gimple dump
+        (`int64_t / char * / exc = _t38;`). `send()`/`throw()` (below)
+        instead set `self._sent_value`/`self._inject_exc` directly, the
+        exact same pre-existing fields `_resume_once`/`_yield_fn` already
+        use for this — proven to self-host correctly before this
+        milestone touched anything — and `_resume` takes no parameters at
+        all, consulting/updating only those fields."""
+        while True:
+            if self._active_real_it is not None:
+                it = self._active_real_it
+                try:
+                    if self._inject_exc is not None:
+                        e, self._inject_exc = self._inject_exc, None
+                        step_result = it.throw(e)
+                    else:
+                        step_result = it.send(self._sent_value)
+                        self._sent_value = None
+                except StopIteration as si:
+                    self._active_real_it = None
+                    self._sent_value = si.value
+                    self._inject_exc = None
+                    continue
+                except BaseException as e:
+                    self._active_real_it = None
+                    self._prime_inject(e)
+                    continue
+                self._yielded_value = step_result
+                break
+            y = self._resume_once()
+            if isinstance(y, _RealAwaitStep):
+                self._active_real_it = y.it
+                self._sent_value = None
+                self._inject_exc = None
+                continue
+            if isinstance(y, _RealThreadCall):
+                # One-shot version of the above: execute the call itself
+                # (not an iterator step) right here, on the correct
+                # thread, then immediately hand the result/exception back
+                # to the worker and loop around for its next suspension —
+                # see _RealThreadCall's docstring.
+                try:
+                    call_result = y.func(*y.args, **y.kwargs)
+                except BaseException as e:
+                    self._prime_inject(e)
+                else:
+                    self._sent_value = call_result
+                    self._inject_exc = None
+                continue
+            self._yielded_value = y
+            break
+        return self._yielded_value
+
+    def send(self, value):
+        if self._done:
+            raise StopIteration
+        self._sent_value = value
+        self._inject_exc = None
+        return self._resume()
+
+    def throw(self, exc):
+        if self._done:
+            raise exc
+        self._prime_inject(exc)
+        return self._resume()
+
+    def _prime_inject(self, exc):
+        """Sets up `self._inject_exc`/`self._sent_value` for the next
+        `_resume()` call to inject `exc` at the worker's suspension point —
+        factored out of `throw()` (whose `self._inject_exc = exc` /
+        `self._sent_value = None` pair is unchanged, just moved here) so
+        `_resume`'s own real-await-exception-handling branches (Milestone
+        3b) can reuse the EXACT SAME assignment shape for exceptions they
+        catch via `except BaseException as e:` from a real iterator/call.
+        This split mattered empirically, not just stylistically: assigning
+        an except-as-bound exception straight into `self._inject_exc`
+        inline inside `_resume`'s own try/except produced a genuine
+        self-hosted gimple type conflict (`int64_t` vs. `char *` — an
+        except-as binding apparently infers narrower than a same-shaped
+        assignment reached via an ordinary function parameter). Passing it
+        as a plain parameter across this method-call boundary instead —
+        identical statement, different call site — self-hosts correctly."""
+        self._inject_exc = exc
+        self._sent_value = None
+
+    def close(self):
+        if self._done:
+            return
+        try:
+            self.throw(GeneratorExit())
+        except (GeneratorExit, StopIteration):
+            pass
+
+
+class MojoGeneratorObject:
+    """Wraps the `_ThreadedGenerator` produced by driving a Mojo generator
+    function's body through the ORDINARY, unmodified `execute()`/
+    `eval_expr()` dispatch (see `_ThreadedGenerator`'s docstring for why a
+    worker thread instead of a native Python generator), exposing the
+    subset of Python's generator protocol Mojo programs can observe:
+    `__iter__`, `__next__`, `.send()`, `.throw()`, `.close()`.
+
+    THE SHARP EDGE: `interpreter.scope` is a single mutable attribute, not a
+    parameter threaded through calls (see Scope/MojoFunction docstrings
+    elsewhere in this file). A naive design would swap `interpreter.scope`
+    to `func_scope` once when the underlying generator is first created and
+    swap it back once when the generator finally completes -- mirroring how
+    MojoFunction._invoke does it for an ordinary (non-suspending) call. That
+    is wrong here: between any two resumes of a suspended generator, the
+    interpreter keeps right on running other code (the code that called
+    `next()`/`.send()`, possibly itself another generator's body) with
+    `interpreter.scope` pointing wherever THAT code needs it to point.
+    Interleaved generators (e.g. two counters advanced in lockstep by a
+    `zip`-like loop) would otherwise read/write each other's locals -- even
+    though each generator's body runs on its own dedicated OS thread, only
+    one of {any generator's worker thread, the caller's thread} ever
+    actually runs at a time (strict handoff via `_ThreadedGenerator`'s
+    Events), so this is the exact same single-mutable-attribute hazard a
+    native-generator design would have, just realized with real threads
+    instead of generator frames.
+
+    The fix: every single entry into the underlying raw generator (each
+    `__next__`/`send`/`throw`/`close` call, not just the first/last one)
+    saves whatever scope is currently active, swaps in this generator's own
+    `func_scope` for the duration of exactly that one resume, and restores
+    the caller's scope the instant control returns -- whether by yielding
+    again, returning, or raising. This is exactly a context switch, done at
+    every switch point, not just at thread start/end."""
+
+    def __init__(self, interpreter, func_scope, body):
+        self.interpreter = interpreter
+        self.func_scope = func_scope
+
+        def _body_fn(yield_fn):
+            tls = interpreter._gen_tls
+            old_yield_fn = getattr(tls, 'yield_fn', None)
+            tls.yield_fn = yield_fn
+            try:
+                try:
+                    for stmt in body:
+                        interpreter.execute(stmt)
+                    return None
+                except ReturnValue as ret:
+                    return ret.value
+            finally:
+                tls.yield_fn = old_yield_fn
+
+        self._raw_gen = _ThreadedGenerator(_body_fn)
+        self._started = False
+        self._finished = False
+        # The delegate's `return value` (a Mojo `return` inside a generator
+        # body — becomes `StopIteration.value` in real Python), read off
+        # `_ThreadedGenerator._return_value` and re-exposed here as an
+        # ordinary field on one of THIS FILE's OWN classes rather than ever
+        # touching `.value`/`.args` on the `StopIteration` exception object
+        # itself — see `_ThreadedGenerator._resume`'s docstring for why
+        # (this file self-hosts; the compiler's exception model has no
+        # typed-attribute-access story for a builtin exception's payload).
+        # `eval_YieldFromExpr` reads this after catching a bare
+        # `StopIteration` to propagate `yield from`'s return value.
+        self.return_value = None
+
+    def __iter__(self):
+        return self
+
+    def _enter(self):
+        """Start one resume step: swap `interpreter.scope` to this
+        generator's own scope and return whatever scope was active before,
+        so the caller can restore it in `_leave()` — see class docstring.
+        Split into explicit enter/leave methods (rather than a single
+        `_drive(thunk)` taking a `lambda: ...` closure, the original shape)
+        because gimple_codegen.py's self-hosted compile of THIS file
+        couldn't resolve a lambda passed as a callable argument at a call
+        site (`_MojoGeneratorObject___next___lambda_1` etc. came back as
+        undefined symbols at link time) — an open/close pair with no
+        closure argument sidesteps that compiled-path gap entirely."""
+        old = self.interpreter.scope
+        self.interpreter.scope = self.func_scope
+        return old
+
+    def _leave(self, old):
+        self.interpreter.scope = old
+        self._started = True
+
+    def __next__(self):
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            return self._raw_gen.send(None)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def send(self, value):
+        if value is not None and not self._started:
+            # Matches real Python: a just-started generator can only be
+            # resumed with `.send(None)` (equivalent to `next()`) — it
+            # hasn't reached a `yield` expression yet to receive a value.
+            raise TypeError("can't send non-None value to a just-started generator")
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            return self._raw_gen.send(value)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def throw(self, exc_type, exc_val=None, exc_tb=None):
+        # Normalize the (exc_type, exc_val, exc_tb) / bare-instance call
+        # shapes real Python's generator.throw() accepts down to a single
+        # exception instance — `_ThreadedGenerator.throw` (see its
+        # docstring) only needs to inject one exception object at the
+        # suspend point, not reconstruct a full three-arg raise.
+        if isinstance(exc_type, BaseException):
+            exc = exc_type
+        elif exc_val is not None:
+            exc = exc_type(exc_val) if not isinstance(exc_val, BaseException) else exc_val
+        else:
+            exc = exc_type()
+        if self._finished:
+            raise exc
+        old = self._enter()
+        try:
+            return self._raw_gen.throw(exc)
+        except StopIteration:
+            self._finished = True
+            self.return_value = self._raw_gen._return_value
+            raise
+        finally:
+            self._leave(old)
+
+    def close(self):
+        """Throws GeneratorExit into the generator at its current suspension
+        point (delegating to `_ThreadedGenerator.close()`, which already
+        implements this correctly) so a `try/finally` holding a resource
+        inside the Mojo generator body runs its cleanup even if the
+        generator is never fully consumed."""
+        if self._finished:
+            return
+        old = self._enter()
+        try:
+            self._raw_gen.close()
+        finally:
+            self._leave(old)
+        self._finished = True
+
+
+class MojoCoroutine:
+    """Milestone 3b: the `async def` counterpart of `MojoGeneratorObject`.
+    Wraps a `_ThreadedGenerator` driving a Mojo coroutine function's body
+    through the ORDINARY, unmodified `execute()`/`eval_expr()` dispatch —
+    exactly the same underlying mechanism as `MojoGeneratorObject`, reused
+    directly rather than duplicated (see `_ThreadedGenerator`'s docstring)
+    since the only thing that differs is which protocol gets exposed:
+    `__iter__`/`__next__`/`.send()`/`.throw()` there, `__await__` here.
+
+    `__await__` is a PLAIN method (not `def __await__(self): yield ...`,
+    which would itself be a native-yield trap — see the module-wide
+    constraint documented on `_ThreadedGenerator`) that returns `self`,
+    since `MojoCoroutine` itself implements the `__next__`/`send`/`throw`
+    iterator protocol real Python's `await`/`asyncio` machinery actually
+    drives an awaitable's `__await__()` result through. This is genuinely
+    real-asyncio-compatible: `asyncio.run(mojo_coro)`,
+    `asyncio.gather(mojo_coro1, mojo_coro2)`, and `await mojo_coro` from
+    ordinary real Python `async def` code all work, validated empirically
+    (see bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+    3b report) — including a Mojo body that internally does
+    `await asyncio.sleep(...)`, which really suspends on the real event
+    loop and really takes real wall-clock time, and `asyncio.gather` of
+    several Mojo coroutines really running concurrently (interleaved by
+    the real event loop, not just sequentially).
+
+    Raises `StopIteration(value)` — WITH the constructor argument, unlike
+    `_ThreadedGenerator._resume_once`'s deliberately-bare `StopIteration`
+    — from `send`/`throw`/`__next__` when the coroutine body returns. This
+    might look like it contradicts `_ThreadedGenerator`'s documented
+    self-hosting workaround (avoiding `StopIteration.value` because the
+    self-hosted compiler's exception model can't do typed attribute access
+    against a builtin exception), but it doesn't: this file's OWN source
+    never reads `.value` off a `StopIteration` anywhere (`return_value` is
+    tracked as an ordinary field, exactly like `MojoGeneratorObject`, and
+    used to build the argument passed to `StopIteration(...)` here) — only
+    CONSTRUCTS and RAISES one. Real Python's own `await`/`SEND` bytecode
+    (running in the genuinely-interpreted path, where these objects are
+    real CPython objects) is what reads `.value` back out, and that's real
+    CPython machinery, not code inside this self-hosted file.
+
+    Same `interpreter.scope` swap-on-every-resume discipline as
+    `MojoGeneratorObject` (identical hazard: `interpreter.scope` is one
+    mutable attribute, not a per-call parameter — see that class's
+    docstring for the full explanation), extended to also cover
+    concurrent-by-real-asyncio coroutines, not just hand-interleaved
+    generators: since real asyncio only ever runs ONE callback at a time
+    on its single event-loop thread, and every one of a coroutine's worker
+    threads only ever runs while its OWN `_enter`/`_leave` window holds
+    `interpreter.scope` pinned to that coroutine's own scope (strictly
+    alternating with whichever OTHER coroutine/generator/plain call is
+    active at that instant, exactly like `_ThreadedGenerator`'s handoff
+    guarantees), the same single-mutable-attribute swap remains correct
+    even when several `MojoCoroutine`s are "concurrently" in flight from
+    asyncio's point of view."""
+
+    def __init__(self, interpreter, func_scope, body):
+        self.interpreter = interpreter
+        self.func_scope = func_scope
+
+        def _body_fn(yield_fn):
+            tls = interpreter._gen_tls
+            old_yield_fn = getattr(tls, 'yield_fn', None)
+            old_is_coroutine = getattr(tls, 'is_coroutine', False)
+            tls.yield_fn = yield_fn
+            # Gates Interpreter.invoke's _RealThreadCall bounce (see its
+            # docstring) — only coroutine bodies interact with an event
+            # loop, so plain Mojo generators never pay for or risk this.
+            tls.is_coroutine = True
+            try:
+                try:
+                    for stmt in body:
+                        interpreter.execute(stmt)
+                    return None
+                except ReturnValue as ret:
+                    return ret.value
+            finally:
+                tls.yield_fn = old_yield_fn
+                tls.is_coroutine = old_is_coroutine
+
+        self._raw = _ThreadedGenerator(_body_fn)
+        self._started = False
+        self._finished = False
+
+    def _enter(self):
+        """See MojoGeneratorObject._enter — identical swap-in, split out of
+        a lambda-taking `_drive` for the identical self-hosted-compile
+        reason documented there."""
+        old = self.interpreter.scope
+        self.interpreter.scope = self.func_scope
+        return old
+
+    def _leave(self, old):
+        self.interpreter.scope = old
+        self._started = True
+
+    def __await__(self):
+        """The entire real-asyncio-interop hinge point: returning `self`
+        (which implements `__next__`/`send`/`throw`) is all real Python's
+        `await`/`SEND` bytecode needs to drive this coroutine exactly like
+        any other awaitable — a real native coroutine, a real `Future`, or
+        another `MojoCoroutine` (Mojo-await-Mojo — see `eval_AwaitExpr`,
+        which treats a `MojoCoroutine` no differently from a real one,
+        uniformly, since both merely need to expose `__await__`)."""
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.send(None)
+
+    def send(self, value):
+        if self._finished:
+            raise StopIteration
+        old = self._enter()
+        try:
+            result = self._raw.send(value)
+            return result
+        except StopIteration:
+            self._finished = True
+            raise StopIteration(self._raw._return_value)
+        finally:
+            self._leave(old)
+
+    def throw(self, exc_type, exc_val=None, exc_tb=None):
+        # Normalize the (exc_type, exc_val, exc_tb) / bare-instance call
+        # shapes real Python's coroutine.throw() accepts — see
+        # MojoGeneratorObject.throw, identical normalization.
+        if isinstance(exc_type, BaseException):
+            exc = exc_type
+        elif exc_val is not None:
+            exc = exc_type(exc_val) if not isinstance(exc_val, BaseException) else exc_val
+        else:
+            exc = exc_type()
+        if self._finished:
+            raise exc
+        old = self._enter()
+        try:
+            result = self._raw.throw(exc)
+            return result
+        except StopIteration:
+            self._finished = True
+            raise StopIteration(self._raw._return_value)
+        finally:
+            self._leave(old)
+
+    def close(self):
+        """See MojoGeneratorObject.close — identical GeneratorExit-based
+        cleanup, delegated to the same `_ThreadedGenerator.close()`."""
+        if self._finished:
+            return
+        old = self._enter()
+        try:
+            self._raw.close()
+        finally:
+            self._leave(old)
+        self._finished = True
 
 
 class _MojoSelfType:
@@ -339,12 +1120,24 @@ class BoundMethod:
 
 class MojoClass:
     """Represents a class/struct defined in Mojo code."""
+    _ARRAY_TYPE_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\[([A-Za-z_][A-Za-z0-9_]*|\d+)\]$')
+    _ARRAY_ELEM_DEFAULTS = {
+        'Bool': False, 'String': '',
+        'Float16': 0.0, 'Float32': 0.0, 'Float64': 0.0,
+    }
+
     def __init__(self, name, fields, methods, interpreter, bases=None,
-                 comptime_aliases=None, static_methods=None):
+                 comptime_aliases=None, static_methods=None, def_scope=None):
         self.name = name
         self.fields = fields  # list of VarDecl/AssignStmt (field declarations)
         self.methods = methods  # dict: name -> MojoFunction
         self.interpreter = interpreter
+        # The scope struct-definition executed in (same closure MojoFunction
+        # captures for methods) — needed to resolve a fixed-size array field's
+        # size expression (e.g. `Int[MAX_CELLS]`) by the comptime constant's
+        # OWN defining module, not whatever module happens to instantiate this
+        # struct (mirrors how `__init__` bodies already resolve such names).
+        self.def_scope = def_scope
         self.bases = bases or []  # base MojoClass objects, e.g. `struct Child(Base):`
         # `comptime EOF_TOKEN: Int = 69` inside the struct body — evaluated
         # once at struct-definition time and exposed as a class-level
@@ -383,6 +1176,26 @@ class MojoClass:
         instance = MojoInstance(self)
         for f in self.fields:
             if self.interpreter._is_instance(f, 'VarDecl'):
+                # Array-default handled as its own early-exit branch, NOT
+                # folded into `value`'s own assignment chain below (self-host
+                # build note: MojoClass is one of myinterpreter.py's own
+                # hardcoded struct_field_types entries — the self-hosted
+                # compiler infers one C type per Python local from how it's
+                # used across the WHOLE function, so any assignment of
+                # `_array_field_default`'s result into `value` — even inside
+                # a ternary — made it infer `value` as `MojoList *`
+                # unconditionally, breaking `make check-selfhost` with
+                # "invalid types in conversion to integer" the moment
+                # `_coerce_to_declared_type`'s differently-typed result also
+                # flowed into that same `value`, even though the interpreter
+                # itself ran fine either way. `array_default` is its own
+                # local, assigned from nowhere else, so it can't contaminate
+                # `value`'s original, already-self-host-clean inference.)
+                if f.value is None:
+                    array_default = self._array_field_default(getattr(f, 'type_ann', None))
+                    if array_default is not None:
+                        setattr(instance, f.name, array_default)
+                        continue
                 value = self.interpreter.eval_expr(f.value) if f.value is not None else None
                 value = self.interpreter._coerce_to_declared_type(value, getattr(f, 'type_ann', None))
                 setattr(instance, f.name, value)
@@ -406,7 +1219,57 @@ class MojoClass:
                 init(interp, instance, *args, **kwargs)
             finally:
                 interp.scope = old_scope
+        elif args:
+            # Implicit memberwise constructor: a struct/class with NO explicit
+            # __init__ binds positional ctor args to its fields in declaration
+            # order — `struct Point: var x: Int; var y: Int; Point(3, 4)` sets
+            # x=3, y=4 (matches gimple_codegen's _synthesize_fieldwise_inits
+            # and real Mojo). Previously the interpreter ignored the args,
+            # leaving every field None ("unsupported operand +: None + None").
+            field_names = []
+            for f in self.fields:
+                if self.interpreter._is_instance(f, 'VarDecl'):
+                    field_names.append(f.name)
+                elif self.interpreter._is_instance(f, 'AssignStmt') \
+                        and self.interpreter._is_instance(f.target, 'IdentExpr'):
+                    field_names.append(f.target.name)
+            for i, a in enumerate(args):
+                if i < len(field_names):
+                    fname = field_names[i]
+                    setattr(instance, fname, a)
         return instance
+
+    def _array_field_default(self, type_ann):
+        """A fixed-size array field (`cell_ids: Int[MAX_CELLS]`) with no
+        explicit initializer must default to a zero-filled list of the
+        declared length, same as real Mojo — not None (BUG-2026: struct array
+        fields not initialized when the struct is defined in an imported
+        module, `TypeError: 'NoneType' object does not support item
+        assignment` on the first indexed write). Returns None (not a
+        defaulted array) if `type_ann` isn't a string, isn't `ElemType[size]`
+        shape, or the size can't be resolved."""
+        if not isinstance(type_ann, str):
+            return None
+        m = self._ARRAY_TYPE_RE.match(type_ann)
+        if not m:
+            return None
+        elem_type, size_str = m.group(1), m.group(2)
+        if size_str.isdigit():
+            size = int(size_str)
+        else:
+            # A named comptime constant (e.g. `MAX_CELLS`) — resolve it in
+            # the struct's OWN defining scope, not the caller's, mirroring
+            # how `__init__` bodies already resolve such names via their
+            # captured closure scope.
+            lookup_scope = self.def_scope or self.interpreter.scope
+            try:
+                size = lookup_scope.get(size_str)
+            except NameError:
+                return None
+            if not isinstance(size, int) or isinstance(size, bool):
+                return None
+        elem_default = self._ARRAY_ELEM_DEFAULTS.get(elem_type, 0)
+        return [elem_default] * size
 
     def __getitem__(self, item):
         # A user-defined generic struct instantiated with explicit type/value
@@ -653,6 +1516,97 @@ def _mojo_as_dim3(d):
         vals = list(d) + [1, 1, 1]
         return (vals[0], vals[1], vals[2])
     return (getattr(d, 'x', 1), getattr(d, 'y', 1), getattr(d, 'z', 1))
+
+
+class MojoComplex:
+    """Minimal runtime representation of Python's `j`/`J`-suffixed imaginary
+    literal (`0j`, `1.5j`, `3J` — see mojo_compiler.py's `ImagLiteral`) and
+    the complex values that result from combining one with a real number via
+    `+`/`-`. This deliberately does NOT implement the full Python `complex`
+    API (no `*`, `/`, `conjugate()`, `abs()`, comparisons, ...) — per
+    bugs/PARSE_FAIL_complex_number_literal.md's scope guidance, construction
+    + printing + `+`/`-` against int/float/other MojoComplex is enough to
+    cover the two real stdlib patterns that motivated this (a complex value
+    sitting in a set/list literal, never used in further arithmetic).
+    `__add__`/`__sub__`/`__radd__`/`__rsub__` are all that's needed for
+    `left + right`/`left - right` in eval_BinaryOp to "just work" via
+    Python's own operator dispatch — no changes to eval_BinaryOp itself."""
+    __slots__ = ('real', 'imag')
+
+    def __init__(self, real=0.0, imag=0.0):
+        self.real = float(real)
+        self.imag = float(imag)
+
+    @staticmethod
+    def _coerce(other):
+        if isinstance(other, MojoComplex):
+            return other.real, other.imag
+        if isinstance(other, (int, float)) and not isinstance(other, bool):
+            return float(other), 0.0
+        return None
+
+    def __add__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(self.real + c[0], self.imag + c[1])
+
+    def __radd__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(c[0] + self.real, c[1] + self.imag)
+
+    def __sub__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(self.real - c[0], self.imag - c[1])
+
+    def __rsub__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return MojoComplex(c[0] - self.real, c[1] - self.imag)
+
+    def __eq__(self, other):
+        c = self._coerce(other)
+        if c is None: return NotImplemented
+        return self.real == c[0] and self.imag == c[1]
+
+    def __hash__(self):
+        # Deliberately id(self)-based, like `_MojoDeviceContext.__hash__`
+        # above (a pre-existing example in this same file of the same
+        # eq-by-value/hash-by-identity tradeoff) — NOT `hash((self.real,
+        # self.imag))`: the self-hosted compiler (gimple_codegen.py) only
+        # declares Python's `hash()` builtin as an unimplemented extern stub
+        # ("undefined symbol _hash" at link time), and a `int(float_expr)`
+        # replacement hit an unrelated existing gimple_codegen miscompile
+        # (int() return type inferred as `char *` in this context). Per
+        # bugs/PARSE_FAIL_complex_number_literal.md's scope guidance this
+        # class isn't meant to support full value-equality hashing (e.g.
+        # collapsing `{1, 1+0j}` into `{1}` the way real Python's `complex`
+        # does) — just construct/print/`+`/`-` without crashing.
+        return id(self)
+
+    @staticmethod
+    def _fmt(x: float) -> str:
+        """Match Python complex repr's per-part float formatting: same
+        shortest-round-trip digits as float repr, but WITHOUT the trailing
+        `.0` float repr always adds to a whole number (e.g. `1.0` -> `1`,
+        matching `repr(1+0j) == '(1+0j)'`, not `'(1.0+0j)'`)."""
+        s = repr(x)
+        if s.endswith('.0'):
+            s = s[:-2]
+        return s
+
+    def __repr__(self):
+        # A pure-imaginary value (real part is exactly positive zero) prints
+        # as just "Nj", matching Python (`repr(3j) == '3j'`); everything
+        # else, including negative-zero real parts, prints in full
+        # "(a+bj)"/"(a-bj)" form (`repr(-0j) == '(-0-0j)'`).
+        if self.real == 0.0 and math.copysign(1.0, self.real) == 1.0:
+            return f"{self._fmt(self.imag)}j"
+        sign = '-' if math.copysign(1.0, self.imag) < 0 else '+'
+        return f"({self._fmt(self.real)}{sign}{self._fmt(abs(self.imag))}j)"
+
+    __str__ = __repr__
 
 
 class _MojoEnqueueFunctionCall:
@@ -1618,6 +2572,14 @@ class Interpreter:
         self._mojo_module_cache = {}
         self._func_specs = {}
         self._raised_mojo_value = None
+        # Milestone 2 of bugs/INTERP_generator_yield_entirely_unimplemented.md:
+        # per-OS-thread storage for "the yield_fn of the generator whose body
+        # is currently running on THIS thread" — see MojoGeneratorObject
+        # (each generator body runs on its own dedicated worker thread, so
+        # this is naturally scoped correctly with no explicit save/restore
+        # needed around individual yield/resume points, unlike
+        # `interpreter.scope` itself).
+        self._gen_tls = threading.local()
         self._setup_builtins()
 
     def _load_mojo_module_from_path(self, file_path):
@@ -2224,7 +3186,15 @@ class Interpreter:
                             params.append(p_str)
                     else:
                         params.append(p_str)
-        return [p.lstrip('*') for p in params]
+        # Stars are DELIBERATELY preserved: `*args` / `**kwargs` are bound
+        # by _invoke, which is the only reader of MojoFunction.params, and
+        # it needs the marker to tell a catch-all from an ordinary
+        # parameter. Stripping here used to leave `_invoke` binding the
+        # literal name (`kwargs` -> None, `args` -> just the first extra
+        # positional), so `def __init__(self, t, **fields): self.fields =
+        # fields` stored None -- the root cause of ast_rewriter.py's
+        # `for fname in pat.fields:` finding nothing (A5-BUG.md section 1).
+        return params
 
     @staticmethod
     def _classify_params(node):
@@ -2290,10 +3260,10 @@ class Interpreter:
         params = self._extract_param_names(node)
         comptime_params = getattr(node, 'comptime_params', None)
         _pd = getattr(node, 'param_defaults', None)
-        _pdv = None
-        if _pd:
-            _pdv = [(k, self.eval_expr(v)) for k, v in _pd.items()]
-        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv)
+        _pdv = list(_pd.items()) if _pd else None
+        func = MojoFunction(node.name, params, node.body, self.scope, comptime_params, param_defaults=_pdv,
+                             is_generator=getattr(node, 'is_generator', False),
+                             is_async=getattr(node, 'is_async', False))
         spec = self._classify_params(node)
         return self._register_function(self.scope.vars, node.name, func, spec)
 
@@ -2330,7 +3300,9 @@ class Interpreter:
             comptime_params = getattr(m, 'comptime_params', None)
             _pd = getattr(m, 'param_defaults', None)
             _pdl = list(_pd.items()) if _pd else None
-            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
+            method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
             spec = self._classify_params(m)
             if m.name in from_base:
                 from_base.discard(m.name)
@@ -2386,7 +3358,8 @@ class Interpreter:
                             pass
         fields = merged_fields + actual_fields
         cls = MojoClass(node.name, fields, methods, self, bases=base_classes,
-                         comptime_aliases=comptime_aliases, static_methods=static_methods)
+                         comptime_aliases=comptime_aliases, static_methods=static_methods,
+                         def_scope=self.scope)
         self.scope.define(node.name, cls)
         return cls
 
@@ -2416,7 +3389,9 @@ class Interpreter:
                 comptime_params = getattr(m, 'comptime_params', None)
                 _pd = getattr(m, 'param_defaults', None)
                 _pdl = list(_pd.items()) if _pd else None
-                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl)
+                method_func = MojoFunction(m.name, params, m.body, self.scope, comptime_params, param_defaults=_pdl,
+                                        is_generator=getattr(m, 'is_generator', False),
+                                        is_async=getattr(m, 'is_async', False))
                 spec = self._classify_params(m)
                 self._register_function(methods, m.name, method_func, spec)
         cls = MojoClass(node.name, [], methods, self)
@@ -2444,13 +3419,14 @@ class Interpreter:
                 return True
             return False
 
-    def execute_ImportStmt(self, node: N.ImportStmt):
-        """Execute `import mod` / `import mod as alias`.
+    def _bind_one_import(self, module: str, alias):
+        """Resolve and bind a single `import module [as alias]` target.
 
-        The interpreter runs the AST as Python, so we resolve through Python's
-        real import machinery and bind the resulting module object into scope.
-        Failing loudly (rather than the old silent skip) is the point: a skipped
-        import surfaces later as a baffling "name '...' is not defined".
+        Shared by execute_ImportStmt for both the primary `module`/`alias`
+        and every extra `(module, alias)` pair from a comma-separated
+        `import a, b, c` so all targets get identical resolution logic
+        (sys special-case, sibling .mojo preference, real importlib
+        fallback) instead of only the first being handled.
         """
         # `import sys` is special: the program must see its own argv (see
         # _SysProxy), not the real process argv reinstated by a fresh
@@ -2458,9 +3434,9 @@ class Interpreter:
         # what turned `mojo run mojo.py help` into unbounded recursion — the
         # nested interpretation of mojo.py would re-read the host's live
         # argv instead of the isolated one and take the same branch forever.
-        if node.module == 'sys' or node.module.split('.')[0] == 'sys':
-            self.scope.define(node.alias or 'sys', self.scope.get('sys'))
-            return None
+        if module == 'sys' or module.split('.')[0] == 'sys':
+            self.scope.define(alias or 'sys', self.scope.get('sys'))
+            return
         # Prefer a sibling .mojo file/package over a same-named *real*
         # Python module — otherwise a coincidentally-named .py file
         # anywhere on sys.path (including this very project's own helper
@@ -2470,23 +3446,39 @@ class Interpreter:
         # instead of a clean import. A .mojo file sitting right next to the
         # importing source is a much stronger signal of intent than a
         # name collision with an installed/local Python module.
-        mod = self._load_mojo_sibling_module(node.module)
+        mod = self._load_mojo_sibling_module(module)
         if mod is not None:
-            if node.alias:
-                self.scope.define(node.alias, mod)
+            if alias:
+                self.scope.define(alias, mod)
             else:
-                self._bind_dotted_import(node.module, mod)
-            return None
+                self._bind_dotted_import(module, mod)
+            return
         try:
-            mod = importlib.import_module(node.module)
+            mod = importlib.import_module(module)
         except ModuleNotFoundError:
-            return None
-        if node.alias:
-            self.scope.define(node.alias, mod)
+            return
+        if alias:
+            self.scope.define(alias, mod)
         else:
             # `import a.b` binds the top-level package name `a`.
-            top = node.module.split('.')[0]
+            top = module.split('.')[0]
             self.scope.define(top, importlib.import_module(top))
+
+    def execute_ImportStmt(self, node: N.ImportStmt):
+        """Execute `import mod` / `import mod as alias` / `import a, b, c`.
+
+        The interpreter runs the AST as Python, so we resolve through Python's
+        real import machinery and bind the resulting module object into scope.
+        Failing loudly (rather than the old silent skip) is the point: a skipped
+        import surfaces later as a baffling "name '...' is not defined".
+
+        `node.extra` holds any additional comma-separated `(module, alias)`
+        targets past the first (`import a, b, c`) — each gets the same
+        resolution as the primary target via _bind_one_import.
+        """
+        self._bind_one_import(node.module, node.alias)
+        for extra_module, extra_alias in (node.extra or []):
+            self._bind_one_import(extra_module, extra_alias)
         return None
 
     def execute_FromImportStmt(self, node: N.FromImportStmt):
@@ -2578,6 +3570,19 @@ class Interpreter:
                 obj = self.eval_expr(target.obj)
                 idx = self.eval_expr(target.index)
                 del obj[idx]
+            elif self._is_instance(target, 'SliceExpr'):
+                # `del a[b:c]` — a bare single-slice subscript parses as a
+                # SliceExpr with .obj attached directly (mojo_compiler.py's
+                # `_parse_postfix` never wraps that shape in a SubscriptExpr;
+                # see gimple_codegen.py's _gen_stmt_DelStmt for the identical
+                # note), so this needs its own branch alongside SubscriptExpr
+                # above, not a variant of it. Mirrors eval_SliceExpr's own
+                # start/stop/step evaluation.
+                obj = self.eval_expr(target.obj)
+                start = self.eval_expr(target.start) if target.start else None
+                stop = self.eval_expr(target.stop) if target.stop else None
+                step = self.eval_expr(target.step) if target.step else None
+                del obj[start:stop:step]
             else:
                 raise NotImplementedError(f"{self._loc(target)}Cannot delete {type(target).__name__}")
         return None
@@ -2621,44 +3626,68 @@ class Interpreter:
 
     def execute_AugAssignStmt(self, node):
         """Execute augmented assignment (+=, -=, etc.)."""
-        # Get current value
         current = self.eval_expr(node.target)
-        # Get RHS value
         rhs = self.eval_expr(node.value)
-        # Apply operator
-        op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
-        if op == '+':
-            new_value = current + rhs
-        elif op == '-':
-            new_value = current - rhs
-        elif op == '*':
-            new_value = current * rhs
-        elif op == '/':
-            new_value = current / rhs
-        elif op == '%':
-            new_value = current % rhs
-        elif op == '//':
-            new_value = current // rhs
-        elif op == '**':
-            new_value = current ** rhs
-        elif op == '&':
-            new_value = current & rhs
-        elif op == '|':
-            new_value = current | rhs
-        elif op == '^':
-            new_value = current ^ rhs
-        elif op == '<<':
-            new_value = current << rhs
-        elif op == '>>':
-            new_value = current >> rhs
-        else:
-            raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
-        # Assign new value
-        self._assign_target(node.target, new_value)
+        new_value = self._apply_augassign_op(node, current, rhs)
+        self._assign_target(node.target, new_value, augassign=True)
         return new_value
 
-    def _assign_target(self, target, value):
-        """Assign a value to a target (variable, member, subscript, tuple, etc.)."""
+    def _apply_augassign_op(self, node, current, rhs):
+        """Compute the new value for `target OP= value` given already-
+        evaluated `current`/`rhs`. Factored out of execute_AugAssignStmt as
+        its own named step for clarity."""
+        op = node.op[:-1]  # Remove '=' from the operator (e.g., '+=' -> '+')
+        if op == '+':
+            return current + rhs
+        elif op == '-':
+            return current - rhs
+        elif op == '*':
+            return current * rhs
+        elif op == '/':
+            return current / rhs
+        elif op == '%':
+            return current % rhs
+        elif op == '//':
+            return current // rhs
+        elif op == '**':
+            return current ** rhs
+        elif op == '&':
+            return current & rhs
+        elif op == '|':
+            return current | rhs
+        elif op == '^':
+            return current ^ rhs
+        elif op == '<<':
+            return current << rhs
+        elif op == '>>':
+            return current >> rhs
+        else:
+            raise NotImplementedError(f"{self._loc(node)}Augmented operator {node.op} not implemented")
+
+    def _assign_target(self, target, value, augassign=False):
+        """Assign a value to a target (variable, member, subscript, tuple, etc.).
+
+        `augassign`: True only when called from execute_AugAssignStmt (`x
+        += ...` etc.), never from a plain `x = ...`. A plain assignment to
+        an identifier always creates/overwrites a LOCAL binding (Python's
+        own default nested-function-scoping rule, already the existing
+        behavior here) -- but real Mojo's `{mut}`-capture-spec idiom
+        (`def inc() {mut}: counter += 1`, see bugs/CODEGEN_comptime_
+        bracket_parametrized_function_calls_silently_wrong.md) needs an
+        augmented assignment to a captured free variable (one this
+        closure's own scope never independently defines) to mutate the
+        ENCLOSING scope's binding, not silently shadow it with a
+        same-named local that vanishes when the closure returns -- the
+        exact bug this parameter fixes (previously ALL assignment here,
+        aug or plain, used Scope.define, which only ever writes the
+        innermost scope's own dict, so a captured counter's mutation was
+        never visible to the caller across separate calls).
+        Scope.set (used only for this augassign case) already does
+        exactly the right thing for every other case too: if `target.name`
+        is already bound in the CURRENT scope's own dict (an ordinary
+        local `x = 0; x += 1` within the same function, or a parameter),
+        it updates that local in place, identical to `define`'s prior
+        behavior for anyone not intending nonlocal effects."""
         if self._is_instance(target, 'IdentExpr'):
             # Check if this is a global variable
             global_vars = getattr(self, 'global_vars', set())
@@ -2668,6 +3697,8 @@ class Interpreter:
                 while scope.parent:
                     scope = scope.parent
                 scope.define(target.name, value)
+            elif augassign:
+                self.scope.set(target.name, value)
             else:
                 self.scope.define(target.name, value)
         elif self._is_instance(target, 'MemberExpr'):
@@ -2678,13 +3709,44 @@ class Interpreter:
             idx = self.eval_expr(target.index)
             obj[idx] = value
         elif self._is_instance(target, 'TupleExpr') or self._is_instance(target, 'TupleLiteral'):
-            # Tuple unpacking: a, b, c = expr or (a, b, c) = expr
+            # Tuple unpacking: a, b, c = expr or (a, b, c) = expr. One
+            # element may be starred (`*row, last = data` / `first, *rest =
+            # data`, real Python extended-unpacking syntax) — the parser
+            # represents a starred target as UnaryOp(op='*', operand=<the
+            # real target>) inside `elements` (see mojo_compiler.py), a
+            # different representation from _bind_comprehension_target's
+            # comma-joined-STRING for-loop targets, so this needs its own
+            # star handling rather than delegating to that helper. The
+            # starred name collects whatever's left over after the
+            # non-starred names on either side of it have each claimed one
+            # value, matching Python's own semantics and mirroring
+            # _bind_comprehension_target's identical before/star/after
+            # split for the for-loop-target case.
             values = list(value) if hasattr(value, '__iter__') and not isinstance(value, (str, bytes)) else [value]
             elements = target.elements
-            if len(values) != len(elements):
-                raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
-            for t, v in zip(elements, values):
-                self._assign_target(t, v)
+            star_idx = None
+            for i, e in enumerate(elements):
+                if self._is_instance(e, 'UnaryOp') and e.op == '*':
+                    star_idx = i
+                    break
+            if star_idx is None:
+                if len(values) != len(elements):
+                    raise ValueError(f"{self._loc(target)}Cannot unpack {len(values)} values into {len(elements)} targets")
+                for t, v in zip(elements, values):
+                    self._assign_target(t, v)
+            else:
+                before, after = elements[:star_idx], elements[star_idx + 1:]
+                star_target = elements[star_idx].operand
+                n_before, n_after = len(before), len(after)
+                if len(values) < n_before + n_after:
+                    raise ValueError(
+                        f"{self._loc(target)}Cannot unpack {len(values)} values into "
+                        f"{len(elements)} targets (starred target needs at least {n_before + n_after})")
+                for t, v in zip(before, values[:n_before]):
+                    self._assign_target(t, v)
+                self._assign_target(star_target, values[n_before:len(values) - n_after])
+                for t, v in zip(after, values[len(values) - n_after:]):
+                    self._assign_target(t, v)
         else:
             raise NotImplementedError(f"{self._loc(target)}Cannot assign to {type(target).__name__}")
 
@@ -2728,6 +3790,27 @@ class Interpreter:
             matched = False
             for pattern in match_case.patterns:
                 if self._is_instance(pattern, 'IdentExpr') and pattern.name == '_':
+                    matched = True
+                    break
+                if self._is_instance(pattern, 'IdentExpr') and not self.scope.has(pattern.name):
+                    # Bare name that isn't an already-defined constant: a
+                    # PEP 634 capture pattern, not a switch-style equality
+                    # comparison (see MatchStmt's docstring in
+                    # mojo_compiler.py — every *other* real use here is
+                    # `case SOME_CONSTANT:`, which stays equality-dispatch
+                    # via the eval_expr branch below since that name IS
+                    # already bound). A capture always matches and binds
+                    # the subject's value into scope, so a guard clause
+                    # (`case n if n > 0:`) can reference it.
+                    # define() (writes into *this* scope only) rather than
+                    # set() (which walks up to whichever ancestor scope
+                    # already has the name, or the outermost/global scope
+                    # if none do) — set() here would leak the capture into
+                    # the global scope after the first call, then have
+                    # every subsequent call's has() check above see it as
+                    # a pre-existing constant and wrongly fall through to
+                    # equality-dispatch instead of re-capturing.
+                    self.scope.define(pattern.name, subject)
                     matched = True
                     break
                 if self.eval_expr(pattern) == subject:
@@ -2784,6 +3867,23 @@ class Interpreter:
 
     def execute_ForStmt(self, node: N.ForStmt):
         """Execute for statement."""
+        if getattr(node, 'is_async', False):
+            # `async for` — ForStmt.is_async (see mojo_compiler.py's
+            # docstring: a parser-only flag since Milestone 3a). Driving an
+            # async iterable's `__aiter__`/`__anext__` (and propagating a
+            # StopAsyncIteration) is a real protocol this interpreter has
+            # never implemented — running the loop body against the raw
+            # iterable synchronously would be silently-wrong behavior (the
+            # async generator's bodies would never even execute, exactly the
+            # trap MojoFunction._invoke already refuses for async generators
+            # under `async for`), so refuse loudly and honestly instead of
+            # pretending `async for` is a plain `for`.
+            raise NotImplementedError(
+                f"{self._loc(node)}'async for' is not yet supported by the "
+                f"interpreter — the __aiter__/__anext__/StopAsyncIteration "
+                f"protocol is a documented follow-up gap (see MojoFunction."
+                f"_invoke's async-generator refusal); use a plain 'for' loop "
+                f"or drive the async iterator's __anext__() manually")
         iterable = self.eval_expr(node.iterable)
 
         if not hasattr(iterable, '__iter__') and not hasattr(iterable, '__getitem__'):
@@ -2862,32 +3962,94 @@ class Interpreter:
         """Execute continue statement."""
         raise ContinueException()
 
+    def _has_dunder(self, obj, name):
+        """Does `obj` implement dunder method `name`? For a MojoInstance
+        (an interpreted Mojo class), real Python `hasattr(obj, name)` is
+        always False for interpreted methods like `__enter__`/`__exit__` —
+        MojoInstance only exposes a FIXED set of dunders as real Python
+        methods (`__len__`/`__getitem__`/`__setitem__`/...), so anything
+        else defined by the underlying Mojo class (`self._mojo_class.
+        methods`) is invisible to plain `hasattr`/`getattr`. Route through
+        the class's own method table instead for MojoInstance; fall back to
+        plain `hasattr` for everything else (native Python-backed runtime
+        objects). See bugs/INTERP_with_as_binding_for_loop_keyerror.md:
+        `with SomeInterpretedClass() as x:` never actually called the
+        interpreted `__enter__`, silently using the un-entered instance
+        itself instead — found via a KeyError inside `MojoInstance.
+        __getitem__` (old-style `for` iteration protocol) because `x` was
+        the raw instance instead of whatever `__enter__` was supposed to
+        return."""
+        if isinstance(obj, MojoInstance):
+            return name in obj._mojo_class.methods
+        return hasattr(obj, name)
+
+    def _call_dunder(self, obj, name, *args):
+        """Call dunder method `name` on `obj`, dispatching through the
+        interpreted method table for a MojoInstance (mirrors _has_dunder;
+        see its docstring) or plain attribute access otherwise."""
+        if isinstance(obj, MojoInstance):
+            method = obj._mojo_class.methods[name]
+            return method(obj._mojo_class.interpreter, obj, *args)
+        return getattr(obj, name)(*args)
+
     def execute_WithStmt(self, node: N.WithStmt):
         """Execute with statement."""
+        if getattr(node, 'is_async', False):
+            # `async with` — WithStmt.is_async (see mojo_compiler.py's
+            # docstring: a parser-only flag since Milestone 3a). Entering
+            # via `await __aenter__()`/exiting via `await __aexit__()` is
+            # the async context-manager protocol this interpreter has never
+            # implemented — falling through to the synchronous
+            # __enter__/__exit__ path below would call methods an async
+            # context manager doesn't even define (AttributeError) or, worse,
+            # run a sync-protocol object's enter/exit in an async context,
+            # silently-wrong either way. Refuse loudly and honestly instead.
+            raise NotImplementedError(
+                f"{self._loc(node)}'async with' is not yet supported by the "
+                f"interpreter — the await __aenter__/__aexit__ protocol is a "
+                f"documented follow-up gap; use a plain 'with' or drive the "
+                f"context manager's async methods manually")
         if not node.items:
             for stmt in node.body:
                 self.execute(stmt)
             return None
 
         contexts = []
+        exc_occurred = False
         try:
             for item in node.items:
                 ctx = self.eval_expr(item.expr)
-                entered = ctx.__enter__() if hasattr(ctx, '__enter__') else ctx
+                entered = (self._call_dunder(ctx, '__enter__')
+                           if self._has_dunder(ctx, '__enter__') else ctx)
                 contexts.append((ctx, entered))
                 if item.alias:
-                    self.scope.define(item.alias, entered)
+                    # item.alias is the same comma-joined unpacking-target
+                    # string mojo_compiler.py's _parse_unpack_target
+                    # produces for for-loop targets (a bare name, or a
+                    # parenthesized tuple like "(a, b)") — bind it through
+                    # the same shared helper for-loop/comprehension targets
+                    # use, rather than a with-specific unpacking path.
+                    self._bind_comprehension_target(item.alias, entered)
             for stmt in node.body:
                 self.execute(stmt)
         except Exception as e:
+            # See the `finally` block below: this branch already calls
+            # __exit__ on every context itself (with real exception info),
+            # so `exc_occurred` tells `finally` not to call it AGAIN with
+            # (None, None, None) — the original code did both
+            # unconditionally, double-invoking every context manager's
+            # __exit__ on any exception.
+            exc_occurred = True
             for ctx, _ in reversed(contexts):
-                if hasattr(ctx, '__exit__') and ctx.__exit__(type(e), e, None):
+                if (self._has_dunder(ctx, '__exit__')
+                        and self._call_dunder(ctx, '__exit__', type(e), e, None)):
                     return None
             raise
         finally:
-            for ctx, _ in reversed(contexts):
-                if hasattr(ctx, '__exit__'):
-                    ctx.__exit__(None, None, None)
+            if not exc_occurred:
+                for ctx, _ in reversed(contexts):
+                    if self._has_dunder(ctx, '__exit__'):
+                        self._call_dunder(ctx, '__exit__', None, None, None)
         return None
 
     def execute_RaiseStmt(self, node):
@@ -2984,6 +4146,24 @@ class Interpreter:
                             should_handle = self._matches_exc_type(e, exc_class)
                         except NameError:
                             should_handle = False
+                    elif isinstance(exc_type, list):
+                        # `except (A, B):` — mojo_compiler.py's _parse_try
+                        # stores a parenthesized exception tuple as a plain
+                        # list of dotted-name strings, not an AST node (see
+                        # its own comment: "codegen ORs the tag match across
+                        # every type in the tuple"). Falling through to the
+                        # `eval_expr` branch below tried to dispatch on a raw
+                        # Python list, raising "No handler for list" — hit by
+                        # any `except (ImportError, Exception):`-style
+                        # handler (mojolib BUG-2026-032).
+                        for name in exc_type:
+                            try:
+                                exc_class = self.scope.get(name)
+                            except NameError:
+                                continue
+                            if self._matches_exc_type(e, exc_class):
+                                should_handle = True
+                                break
                     else:
                         # Otherwise evaluate it as an expression
                         try:
@@ -3046,6 +4226,135 @@ class Interpreter:
         self.scope.define(expr.name, value)
         return value
 
+    def eval_LambdaExpr(self, expr: N.LambdaExpr):
+        """`lambda <params>: <expr>` — an anonymous function. Returns a
+        MojoFunction whose body is the single statement `return <expr>` and
+        whose closure scope is the scope in effect where the lambda appears,
+        so the body can read enclosing locals just like a nested `def`.
+        Callable through the exact same eval_CallExpr/invoke path as any
+        other MojoFunction (was "No handler for LambdaExpr" — the compiled
+        path's `_lower_LambdaExpr` instead lifts the lambda to a named
+        function; a MojoFunction is this dialect's runtime equivalent).
+
+        Lambda params are `(name, default_expr)` pairs (see mojo_compiler.py's
+        lambda parser) — names come from `_extract_param_names`, defaults are
+        passed through as raw expression nodes and evaluated lazily by
+        `_invoke` exactly like a `def`'s defaults."""
+        params = self._extract_param_names(expr)
+        body = [N.ReturnStmt(value=expr.body)]
+        defaults = [(p[0], p[1]) for p in expr.params if p[1] is not None]
+        return MojoFunction('<lambda>', params, body, self.scope,
+                            param_defaults=defaults or None)
+
+    def _current_yield_fn(self, expr):
+        """The `yield_fn` of the generator/coroutine whose body is
+        currently running on THIS OS thread — see
+        MojoGeneratorObject/MojoCoroutine/_ThreadedGenerator. `None` means
+        eval_YieldExpr/eval_YieldFromExpr/eval_AwaitExpr is somehow running
+        outside any generator/coroutine body, which mojo_compiler.py's
+        parser-level `is_generator`/`yield_bearing_node_ids` detection
+        (Milestone 1) and `is_async` detection (Milestone 3a) should make
+        unreachable in practice — a plain SyntaxError-style message rather
+        than an obscure AttributeError if it ever is. Deliberately shared
+        by both `yield` and `await` (Milestone 3b): both suspend "whichever
+        generator/coroutine body is running on this thread" via the exact
+        same `_ThreadedGenerator`-backed channel, and only one of
+        {a generator body, a coroutine body} ever runs on a given worker
+        thread at a time, so there's no ambiguity in reusing one TLS slot
+        for both."""
+        fn = getattr(self._gen_tls, 'yield_fn', None)
+        if fn is None:
+            raise SyntaxError(f"{self._loc(expr)}'yield'/'await' outside a generator/coroutine function")
+        return fn
+
+    def eval_YieldExpr(self, expr: N.YieldExpr):
+        """`yield` / `yield expr`. Suspends the CURRENT thread (this Mojo
+        generator's own dedicated worker thread — see MojoGeneratorObject)
+        by calling that generator's `yield_fn`, which blocks until the
+        generator is resumed via `.send()`/`.__next__()`/`.throw()`, and
+        returns whatever value the resumer passed in (None for a plain
+        `next()`)."""
+        value = self.eval_expr(expr.value) if expr.value is not None else None
+        return self._current_yield_fn(expr)(value)
+
+    def eval_YieldFromExpr(self, expr: N.YieldFromExpr):
+        """`yield from <expr>` — delegating yield. If the delegated source
+        is itself another Mojo generator, drive it via its own `.send()`/
+        `.throw()`/`.close()` protocol so its `MojoGeneratorObject.
+        return_value` (a Mojo `return value` inside the delegate; see that
+        field's docstring for why the value is read from there rather than
+        `StopIteration.value`/`.args`) correctly becomes this expression's
+        own value, and a `.throw()`/`.close()` sent to THIS (outer)
+        generator is forwarded into the delegate before propagating —
+        matching real Python `yield from` semantics for a generator source.
+        A plain (non-generator) iterable falls back to a manual loop with
+        no `.send()` forwarding and no return value, also matching real
+        Python."""
+        source = self.eval_expr(expr.value)
+        yield_fn = self._current_yield_fn(expr)
+        if not isinstance(source, MojoGeneratorObject):
+            for item in source:
+                yield_fn(item)
+            return None
+        sent = None
+        while True:
+            try:
+                value = source.send(sent)
+            except StopIteration:
+                return source.return_value
+            try:
+                sent = yield_fn(value)
+            except GeneratorExit:
+                source.close()
+                raise
+            except BaseException as e:
+                try:
+                    value = source.throw(e)
+                except StopIteration:
+                    return source.return_value
+                sent = yield_fn(value)
+
+    def eval_AwaitExpr(self, expr: N.AwaitExpr):
+        """`await <expr>` — Milestone 3b. Evaluates the awaited expression,
+        then drives it via `_RealAwaitStep` regardless of what kind of
+        awaitable it turned out to be: a `MojoCoroutine` (Mojo-await-Mojo),
+        a real native coroutine/Task/Future (real asyncio interop — e.g.
+        `await asyncio.sleep(...)`), or anything else implementing
+        `__await__`, matching real Python `await`'s own actual protocol
+        (bytecode-level, not type-based — see
+        bugs/INTERP_generator_yield_entirely_unimplemented.md's Milestone
+        3b report for why this is genuinely real-asyncio-compatible).
+
+        This method itself runs on the current Mojo coroutine's OWN worker
+        thread (same as `eval_YieldExpr` for a generator's worker thread —
+        see `_current_yield_fn`). It does NOT step the real awaitable
+        itself — real asyncio internals like `asyncio.sleep` call
+        `get_running_loop()`, which is thread-affine and would raise
+        `RuntimeError: no running event loop` off this worker thread
+        (confirmed empirically). Instead it hands a `_RealAwaitStep`
+        wrapping the awaitable's own `__await__()` iterator to
+        `yield_fn` (the same suspension channel `eval_YieldExpr` uses) —
+        `_ThreadedGenerator._resume` recognizes that marker and does the
+        actual stepping on whichever thread is legitimately driving THIS
+        coroutine (the real event loop's thread, for a top-level `await`;
+        another worker thread, for Mojo-await-Mojo), looping until the
+        real awaitable is actually done, then delivers the final value (or
+        propagates the real exception) back here as this call's ordinary
+        return value/raised exception — the worker thread just blocks the
+        whole time, exactly like a plain Mojo `yield` blocks waiting for
+        `.send()`."""
+        value = self.eval_expr(expr.value)
+        if hasattr(value, '__await__'):
+            it = value.__await__()
+        elif hasattr(value, 'send') and hasattr(value, '__next__'):
+            # Old-style (pre-3.5 @asyncio.coroutine-style) generator-based
+            # awaitable, or a bare iterator — driveable the same way.
+            it = value
+        else:
+            raise TypeError(f"{self._loc(expr)}object {value!r} is not awaitable")
+        yield_fn = self._current_yield_fn(expr)
+        return yield_fn(_RealAwaitStep(it))
+
     def eval_EllipsisLiteral(self, expr: N.EllipsisLiteral):
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
         EllipsisLiteral" — hit by tomllib/_types.py)."""
@@ -3054,7 +4363,19 @@ class Interpreter:
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""
         if expr.name == 'super':
-            return self._eval_super(expr)
+            # `super` is only real Python-style base-class magic when
+            # nothing in scope actually shadows it. Real Python gives
+            # `super` no keyword status at all, so a user-defined struct
+            # literally named `super` (see CPython's own test_super.py,
+            # which does exactly this) must resolve to that ordinary
+            # binding instead — matching real Python's name-shadowing
+            # semantics rather than this dialect's `super()` base-class
+            # sugar. Only fall back to the magic behavior when `super`
+            # isn't bound to anything in the current scope chain.
+            try:
+                return self.scope.get(expr.name)
+            except NameError:
+                return self._eval_super(expr)
         if expr.name == 'Self':
             return self._resolve_Self(expr)
         if expr.name.startswith('`'):
@@ -3095,6 +4416,13 @@ class Interpreter:
     def eval_FloatLiteral(self, expr: N.FloatLiteral):
         """Evaluate float literal."""
         return expr.value
+
+    def eval_ImagLiteral(self, expr: N.ImagLiteral):
+        """Evaluate a Python-style imaginary-number literal (`0j`, `1.5j`).
+        `expr.value` is the magnitude before the implicit multiply-by-i
+        (e.g. 2.5 for `2.5j`), so the literal itself is purely imaginary:
+        `2.5j` -> MojoComplex(real=0.0, imag=2.5)."""
+        return MojoComplex(0.0, expr.value)
 
     def eval_StringLiteral(self, expr: N.StringLiteral):
         """Evaluate string literal."""
@@ -3363,24 +4691,72 @@ class Interpreter:
         """Evaluate None literal."""
         return None
 
+    @staticmethod
+    def _spread_operand(node, op):
+        """If `node` is a `*expr`/`**expr` spread marker (a UnaryOp with the
+        given op, produced by `_parse_unary` for spreads inside collection
+        displays — see mojo_compiler.py's `_parse_unary` and
+        `_parse_dict_or_set`/`_parse_dict_entry`), return the spread
+        operand AST node; otherwise return None. Spreading isn't a real
+        unary operation — there's no single value `*x` evaluates to outside
+        a collection display — so the collection-literal evaluators below
+        recognize and expand it directly rather than routing it through
+        eval_UnaryOp (which correctly still errors on a bare `*x`/`**x`)."""
+        if isinstance(node, N.UnaryOp) and node.op == op:
+            return node.operand
+        return None
+
     def eval_ListLiteral(self, expr: N.ListLiteral):
-        """Evaluate list literal."""
-        return [self.eval_expr(e) for e in expr.elements]
+        """Evaluate list literal, expanding any `*expr` spread elements
+        (PEP 448 iterable unpacking, e.g. `[*a, *b]`) in place."""
+        result = []
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.extend(self.eval_expr(spread))
+            else:
+                result.append(self.eval_expr(e))
+        return result
 
     def eval_DictLiteral(self, expr: N.DictLiteral):
-        """Evaluate dict literal."""
+        """Evaluate dict literal, expanding any `**expr` spread pairs (PEP
+        448 mapping unpacking, e.g. `{**a, **b}`). A spread pair is
+        represented as `(UnaryOp(op='**', operand=<mapping expr>), None)` by
+        the parser (see mojo_compiler.py). Pairs are applied in source
+        order, matching Python: a later spread or key overwrites an earlier
+        one on key collision."""
         result = {}
         for key, value in expr.pairs:
-            result[self.eval_expr(key)] = self.eval_expr(value)
+            spread = self._spread_operand(key, "**") if value is None else None
+            if spread is not None:
+                result.update(self.eval_expr(spread))
+            else:
+                result[self.eval_expr(key)] = self.eval_expr(value)
         return result
 
     def eval_SetLiteral(self, expr: N.SetLiteral):
-        """Evaluate set literal."""
-        return {self.eval_expr(e) for e in expr.elements}
+        """Evaluate set literal, expanding any `*expr` spread elements
+        (e.g. `{*a, *b}`) as a union into the resulting set."""
+        result = set()
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.update(self.eval_expr(spread))
+            else:
+                result.add(self.eval_expr(e))
+        return result
 
     def eval_TupleLiteral(self, expr: N.TupleLiteral):
-        """Evaluate tuple literal."""
-        return tuple(self.eval_expr(e) for e in expr.elements)
+        """Evaluate tuple literal, expanding any `*expr` spread elements
+        (e.g. `(*a, *b)`) in place."""
+        result = []
+        for e in expr.elements:
+            spread = self._spread_operand(e, "*")
+            if spread is not None:
+                result.extend(self.eval_expr(spread))
+            else:
+                result.append(self.eval_expr(e))
+        return tuple(result)
 
     @staticmethod
     def _wrap_int(v):
@@ -3448,7 +4824,13 @@ class Interpreter:
 
         left = self.eval_expr(expr.left)
         right = self.eval_expr(expr.right)
+        return self._apply_binary_op(expr, op, left, right)
 
+    def _apply_binary_op(self, expr, op, left, right):
+        """Compute a binary operator's result from already-evaluated
+        operands (everything except the short-circuiting 'and'/'or'/'as',
+        handled directly in eval_BinaryOp before operands are evaluated).
+        Factored out of eval_BinaryOp as its own named step for clarity."""
         if op in ('&', '|', '^', '-'):
             left, right = self._resolve_ambiguous_empty_braces(left, right)
         if op == '+':
@@ -3482,15 +4864,7 @@ class Interpreter:
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
-        elif op == '==': return left == right
-        elif op == '!=': return left != right
-        elif op == '<': return left < right
-        elif op == '>': return left > right
-        elif op == '<=': return left <= right
-        elif op == '>=': return left >= right
-        elif op == 'in': return left in right
-        elif op == 'is': return left is right
-        elif op == 'is not': return left is not right
+        elif op in _COMPARE_OPS: return self._apply_compare_op(op, left, right)
         elif op == '&': return self._wrap_int(left & right)
         elif op == '|': return self._wrap_int(left | right)
         elif op == '^': return self._wrap_int(left ^ right)
@@ -3499,11 +4873,51 @@ class Interpreter:
         else:
             raise NotImplementedError(f"{self._loc(expr)}Binary operator {op!r} not implemented")
 
+    def _apply_compare_op(self, op: str, left, right):
+        """Apply a single comparison-family operator to two already-evaluated
+        operands. Factored out of eval_BinaryOp so eval_CompareChain (Python
+        chained comparisons, `a < b < c`) can reuse the identical per-link
+        semantics instead of re-deriving them — this is also where 'not in'
+        got added: eval_BinaryOp's own operator table never had a case for
+        it (only 'in'/'is'/'is not'), so a plain `x not in y` outside any
+        chain silently raised NotImplementedError before this."""
+        if op == '==': return left == right
+        elif op == '!=': return left != right
+        elif op == '<': return left < right
+        elif op == '>': return left > right
+        elif op == '<=': return left <= right
+        elif op == '>=': return left >= right
+        elif op == 'in': return left in right
+        elif op == 'not in': return left not in right
+        elif op == 'is': return left is right
+        elif op == 'is not': return left is not right
+        else:
+            raise NotImplementedError(f"Comparison operator {op!r} not implemented")
+
+    def eval_CompareChain(self, expr: N.CompareChain):
+        """Python-style chained comparison `a < b < c`: each operand is
+        evaluated exactly once, left-to-right; the whole expression
+        short-circuits to False (without evaluating any remaining operands)
+        the moment one `operands[i] ops[i] operands[i+1]` link fails, and is
+        True only if every link holds — `(a < b) and (b < c)`, never `(a <
+        b) < c`. See bugs/CHAINED_COMPARISON_WRONG_RESULT.md."""
+        left = self.eval_expr(expr.operands[0])
+        for op, operand_expr in zip(expr.ops, expr.operands[1:]):
+            right = self.eval_expr(operand_expr)
+            if not self._apply_compare_op(op, left, right):
+                return False
+            left = right
+        return True
+
     def eval_UnaryOp(self, expr: N.UnaryOp):
         """Evaluate unary operation."""
         operand = self.eval_expr(expr.operand)
-        op = expr.op
+        return self._apply_unary_op(expr, operand)
 
+    def _apply_unary_op(self, expr, operand):
+        """Compute a unary operator's result from an already-evaluated
+        operand. Factored out of eval_UnaryOp as its own named step."""
+        op = expr.op
         if op == '-': return self._wrap_int(-operand)
         elif op == '+': return +operand
         elif op == '~': return self._wrap_int(~operand)
@@ -3516,8 +4930,24 @@ class Interpreter:
     def eval_CallExpr(self, expr: N.CallExpr):
         """Evaluate function call."""
         func = self.eval_expr(expr.func)
-        args = [self.eval_expr(arg) for arg in expr.args]
+        # Call-site unpacking: `g(*args)` / `g(**opts)`. mojo_compiler.py's
+        # LPAREN arg-list parser lets `_parse_unary` wrap a starred argument
+        # expression in UnaryOp(op='*'/'**', operand=...) instead of
+        # consuming the star itself, so the marker survives into the AST.
+        # Without this, the starred expression's *value* (e.g. the whole
+        # list) got appended as a single ordinary positional argument,
+        # silently binding to just the callee's first parameter and leaving
+        # the rest unbound instead of splicing the iterable's elements (or
+        # the mapping's items) into the flat args/kwargs actually passed.
+        args = []
         kwargs = {}
+        for arg in expr.args:
+            if isinstance(arg, N.UnaryOp) and arg.op == '*':
+                args.extend(self.eval_expr(arg.operand))
+            elif isinstance(arg, N.UnaryOp) and arg.op == '**':
+                kwargs.update(self.eval_expr(arg.operand))
+            else:
+                args.append(self.eval_expr(arg))
 
         # Evaluate keyword arguments. CallExpr stores these as `kwargs`, a
         # list of (name, expr) tuples (see mojo_compiler.py's CallExpr and
@@ -3539,15 +4969,34 @@ class Interpreter:
         """Call a value that may be a Mojo-defined function (which needs the
         interpreter threaded through as its first argument) or a plain Python
         callable — shared by eval_CallExpr and builtins like map[func] that
-        need to invoke a callee passed to them at runtime."""
+        need to invoke a callee passed to them at runtime.
+
+        Milestone 3b: a plain Python callable invoked from inside a
+        coroutine's own worker thread gets bounced through
+        `_RealThreadCall` instead of called directly — some real asyncio
+        functions (`asyncio.gather`, `ensure_future`, `create_task`, ...)
+        touch the running event loop the instant they're CALLED, not just
+        when later awaited, and the event loop is thread-affine (see
+        `_RealThreadCall`'s docstring for the empirically-confirmed
+        failure this fixes). Gated on the `is_coroutine` TLS flag
+        (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
-        else:
-            return func(*args, **kwargs)
+        tls = self._gen_tls
+        if getattr(tls, 'is_coroutine', False):
+            yield_fn = getattr(tls, 'yield_fn', None)
+            if yield_fn is not None:
+                return yield_fn(_RealThreadCall(func, args, kwargs))
+        return func(*args, **kwargs)
 
     def eval_MemberExpr(self, expr: N.MemberExpr):
         """Evaluate member access."""
         obj = self.eval_expr(expr.obj)
+        return self._eval_member_of(expr, obj)
+
+    def _eval_member_of(self, expr, obj):
+        """Resolve `expr.member` against an already-evaluated `obj`.
+        Factored out of eval_MemberExpr as its own named step."""
         if isinstance(obj, MojoInstance):
             if expr.member in obj.__dict__:
                 return obj.__dict__[expr.member]
@@ -3576,7 +5025,8 @@ class Interpreter:
         obj = self.eval_expr(expr.obj)
         start = self.eval_expr(expr.start) if expr.start else None
         stop = self.eval_expr(expr.stop) if expr.stop else None
-        return obj[start:stop]
+        step = self.eval_expr(expr.step) if expr.step else None
+        return obj[start:stop:step]
 
     def eval_TernaryExpr(self, expr: N.TernaryExpr):
         """Evaluate ternary conditional."""
@@ -3587,8 +5037,9 @@ class Interpreter:
             return self.eval_expr(expr.else_val)
 
     def eval_TupleExpr(self, expr):
-        """Evaluate tuple expression."""
-        return tuple(self.eval_expr(e) for e in expr.elements)
+        """Evaluate tuple expression (mojo_compiler naming; TupleExpr is
+        TupleLiteral — see mojo_compiler.py's `TupleLiteral = TupleExpr`)."""
+        return self.eval_TupleLiteral(expr)
 
     # Aliases for mojo_compiler node types (ListExpr, DictExpr, SetExpr)
     def eval_ListExpr(self, expr):
@@ -3608,7 +5059,18 @@ class Interpreter:
         (possibly comma-joined for tuple unpacking, e.g. "a, b" or "(a, b)"
         — see mojo_compiler.py's _parse_generator_target), not an Expr node.
         Mirrors execute_VarDecl's handling of the same comma-joined-string
-        representation for `var a, b = ...`."""
+        representation for `var a, b = ...`.
+
+        One element of the comma-list may be starred (e.g. "a, *rest" or
+        "*rest, a, b" — see mojo_compiler.py's _parse_for_target), matching
+        Python's extended-unpacking-in-for-target semantics: the starred
+        name collects whatever's left over after the non-starred names on
+        either side of it have each claimed one value.
+
+        One element may also be a dotted attribute-access expression
+        (e.g. "st.lineno", possibly chained "a.b.c" — see mojo_compiler.py's
+        _parse_for_target), which SETS an existing object's attribute each
+        iteration instead of binding a fresh local; see _bind_single_target."""
         name = target_str.strip()
         if name.startswith('(') and name.endswith(')'):
             name = name[1:-1].strip()
@@ -3616,10 +5078,124 @@ class Interpreter:
             names = [n.strip() for n in name.split(',')]
             values = (list(value) if hasattr(value, '__iter__')
                       and not isinstance(value, (str, bytes)) else [value])
-            for n, v in zip(names, values):
-                self.scope.define(n, v)
+            # Plain loop, not next()+genexpr: this file is itself compiled by
+            # this project's self-hosting gimple_codegen.py, which has no
+            # runtime `next()` builtin -- that emitted an undefined-symbol
+            # link error ("_next", referenced from Interpreter__bind_
+            # comprehension_target) rather than a compile-time diagnostic.
+            star_idx = None
+            for i, n in enumerate(names):
+                if n.startswith('*'):
+                    star_idx = i
+                    break
+            if star_idx is None:
+                for n, v in zip(names, values):
+                    self._bind_single_target(n, v)
+            else:
+                before, after = names[:star_idx], names[star_idx + 1:]
+                star_name = names[star_idx][1:]
+                n_before, n_after = len(before), len(after)
+                if len(values) < n_before + n_after:
+                    raise ValueError(
+                        f"Cannot unpack {len(values)} values into {len(names)} "
+                        f"targets (starred target needs at least {n_before + n_after})")
+                for n, v in zip(before, values[:n_before]):
+                    self._bind_single_target(n, v)
+                self.scope.define(star_name, values[n_before:len(values) - n_after])
+                for n, v in zip(after, values[len(values) - n_after:]):
+                    self._bind_single_target(n, v)
         else:
+            self._bind_single_target(name, value)
+
+    def _bind_single_target(self, name, value):
+        """Bind one non-starred element of a for-loop/comprehension target
+        string to `value`. A plain name (no dot, no bracket) binds a fresh
+        local via scope.define(), same as always. A name containing a "."
+        and/or a "[" (e.g. "st.lineno", chained "a.b.c", "d[\"k\"]", or
+        chained "targets[1][0]") is an attribute/subscript SET on an
+        existing object instead: reconstruct the equivalent
+        IdentExpr/MemberExpr/SubscriptExpr AST — walking the string
+        left-to-right so attribute and subscript access can be freely mixed
+        in the same target path — and route through _assign_target, the
+        same mechanism plain `obj.attr = value` / `obj[idx] = value`
+        assignment statements already use, rather than writing new
+        attribute/subscript-set logic specific to for/with targets. A
+        subscript's `[...]` contents are an arbitrary expression (not just
+        a bare name like an attribute), so they're re-parsed as real Mojo
+        source through this interpreter's own tokenizer/parser — the same
+        approach _eval_fstring_expr already uses for f-string field
+        interpolation — rather than special-casing simple literal keys."""
+        if '.' not in name and '[' not in name:
             self.scope.define(name, value)
+            return
+        target_expr = self._parse_target_path(name)
+        self._assign_target(target_expr, value)
+
+    def _parse_target_path(self, name: str):
+        """Parse a for/with target-string path like "st.lineno",
+        "d[\"k\"]", or a chained/mixed "targets[1][0]" / "a.b[0].c" into
+        the equivalent IdentExpr/MemberExpr/SubscriptExpr AST, for
+        _bind_single_target to hand to _assign_target. See
+        mojo_compiler.py's _parse_unpack_target docstring for the string
+        representation this consumes (bracket contents are literal,
+        re-parseable Mojo source text; the whole string is never itself
+        re-tokenized as one expression because a bare leading NAME
+        followed by "[" would otherwise parse as a subscript of an
+        as-yet-undefined variable rather than the intended target path)."""
+        from mojo_compiler import py_tokenize, Parser
+        i = 0
+        n = len(name)
+        # Leading identifier (the base name). Deliberately NOT `name[i].isalnum()`
+        # (a bare single-`char` method call): gimple_codegen.py's compiled
+        # path has no lowering for method calls on a bare `char` (only on
+        # `char *`/string receivers, via _lower_str_method) — `isalnum` is
+        # also in _C_RESERVED_FUNCS, so it silently mangles to an
+        # undefined-at-link-time `char_mojo_isalnum` symbol instead of
+        # raising a compile-time error. Range comparisons on the char are
+        # well-supported (see mojo_compiler.py's own `_pfx_c == 'f'`-style
+        # single-char comparisons in its multiline-string-prefix scanner)
+        # and avoid the gap entirely.
+        start = i
+        while i < n and self._is_ident_char(name[i]):
+            i += 1
+        expr = N.IdentExpr(name=name[start:i])
+        while i < n:
+            if name[i] == '.':
+                i += 1
+                start = i
+                while i < n and self._is_ident_char(name[i]):
+                    i += 1
+                expr = N.MemberExpr(obj=expr, member=name[start:i])
+            elif name[i] == '[':
+                depth = 1
+                start = i + 1
+                i += 1
+                while i < n and depth > 0:
+                    if name[i] == '[':
+                        depth += 1
+                    elif name[i] == ']':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                index_text = name[start:i]
+                i += 1  # consume the closing ']'
+                index_tokens = py_tokenize(index_text)
+                index_expr = Parser(index_tokens)._parse_expr(0)
+                expr = N.SubscriptExpr(obj=expr, index=index_expr)
+            else:
+                raise SyntaxError(f"Cannot parse for/with target path {name!r}")
+        return expr
+
+    @staticmethod
+    def _is_ident_char(ch: str) -> bool:
+        """True if `ch` (a single character) can appear in a Mojo
+        identifier: letters, digits, or underscore. Written with explicit
+        range comparisons rather than `ch.isalnum()` — see
+        _parse_target_path's docstring for why a bare-`char` method call
+        can't be used here."""
+        return (('a' <= ch and ch <= 'z') or ('A' <= ch and ch <= 'Z')
+                or ('0' <= ch and ch <= '9') or ch == '_')
 
     def eval_Comprehension(self, expr):
         """List/set/dict comprehensions and parenthesized generator

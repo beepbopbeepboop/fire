@@ -28,8 +28,9 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-from build_config import find_gcc
+from build_config import find_gcc, find_gxx
 _GCC_BIN = find_gcc()
+_GXX_BIN = find_gxx()
 
 def _extract_codegen_flags(args: list):
     """Pull optimization (-O0/-O1/-O2/-O3/-Os/-Oz/-Og) and debug (-g/-g0../-g3)
@@ -251,17 +252,37 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src, opt_flag=None, debug_flag=None):
-    """JIT compile and execute Mojo source code for ARM64."""
+def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None, program_args=None):
+    """JIT compile and execute Mojo source code for ARM64.
+    
+    Returns True on success, False on failure.
+    """
     try:
         from jit.arm64 import ARM64JIT
         jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
-        jit.compile_and_execute(src, filename=input_file)
-        jit.cleanup()
+        return bool(jit.compile_and_execute(src, filename=input_file, program_args=program_args))
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+        return False
+
+def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
+    """Run the final link step for an executable — factored out of
+    build_executable so the exact link-driver-selection logic is reusable by
+    any caller linking in a non-gcc-compiled object (e.g. a C++-derived
+    generator-coroutine object from the coroutine codegen path — see
+    build_config.find_gxx()'s docstring; not yet produced by any real build,
+    this milestone is toolchain plumbing only).
+
+    cxx=True selects g++ (find_gxx()) as the link driver instead of gcc for
+    just this invocation. Every individual .c/.ci compile step upstream is
+    unaffected — only the final link driver choice changes. Defaults to
+    cxx=False (gcc), so build_executable's ordinary all-C link is unchanged."""
+    driver = _GXX_BIN if cxx else _GCC_BIN
+    link_cmd = [driver, "-o", exe_file] + list(objs) + list(extra_ldflags or [])
+    return subprocess.run(link_cmd, capture_output=True, text=True)
+
 
 def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=None):
     """Compile Mojo source to executable using GIMPLE codegen."""
@@ -278,7 +299,22 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
 
         # Generate GIMPLE code (output C code, compile with -fgimple)
         # do_imports=True: inline transitive closure for a standalone binary
-        c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+        #
+        # Milestone B (C++20-coroutine generator codegen): a module that
+        # mentions `yield` at all MIGHT contain a generator this codegen can
+        # now compile natively (gimple_codegen.compile_to_gimple_with_cpp) —
+        # cheaply pre-screened by module_may_have_supported_generator so the
+        # overwhelmingly common case (no `yield` anywhere) keeps using the
+        # existing CAS-cached compile_to_gimple_cached path completely
+        # unchanged. cpp_code is '' whenever there's no ACTUAL supported
+        # generator (module mentions `yield` but it's an unsupported shape,
+        # or a false-positive textual match) — same single-.o build below.
+        cpp_code = ''
+        if gimple_codegen.module_may_have_supported_generator(src):
+            c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                src, do_imports=True, filename=input_file)
+        else:
+            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -304,6 +340,62 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         if result.returncode != 0:
             print(f"Runtime compilation failed: {result.stderr}", file=sys.stderr)
             return False
+
+        # Milestone B: this module contains at least one supported generator
+        # — compile its companion .cpp (Milestone A's g++ plumbing) into its
+        # OWN object file and link it in alongside the ordinary -fgimple .o
+        # (Milestone A's link_executable(cxx=True) selects g++ as the final
+        # link driver so the C++ runtime/coroutine-support symbols resolve;
+        # every individual .c/.ci compile step above is completely
+        # unaffected — cxx=True only changes the driver for this final link).
+        # Otherwise (the overwhelming common case) extra_objs/cxx_link stay
+        # at their defaults and this is byte-for-byte the pre-Milestone-B
+        # single-.o build.
+        extra_objs = []
+        cxx_link = False
+        if cpp_code:
+            cpp_file = f"{basename}_gen.cpp"
+            with open(cpp_file, "w") as f:
+                f.write(cpp_code)
+            gen_o = f"{basename}_gen.o"
+            cpp_cmd = ([_GXX_BIN] + cg_flags +
+                       ["-std=c++20", "-I", runtime_dir, "-c", "-o", gen_o, cpp_file])
+            result = subprocess.run(cpp_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Generator (.cpp) compilation failed: {result.stderr}", file=sys.stderr)
+                return False
+            extra_objs = [gen_o]
+            cxx_link = True
+
+            # Step B (compiled-path async/await codegen): this module's
+            # generated .c/.ci preamble includes <mojo_async_runtime.h>
+            # exactly when gimple_codegen's async pre-pass actually
+            # compiled at least one `async def` (see GimpleGen.gen_module's
+            # "if self._supported_async:" preamble block) — a reliable
+            # textual proxy for "does this build need Step A's scheduler
+            # linked in", same cheap-textual-check spirit as
+            # module_may_have_supported_generator's own pre-scan, just
+            # applied to the ALREADY-GENERATED C instead of the raw source
+            # (no separate flag threaded out of gen_module needed). Compiled
+            # with g++ (same toolchain as the generator .cpp unit, and for
+            # the same reason: real C++20 coroutines), linked in as its own
+            # object file alongside mojo_runtime.o and the generator/async
+            # .cpp unit's own object — mirrors mojo_runtime.c always being
+            # linked in for ordinary programs, just conditional on actually
+            # needing it (this repo's own runtime/mojo_async_runtime.cpp has
+            # never been linked into a real mojo.py build before this step —
+            # Step A only proved it out via test_async_runtime_scaffold.py's
+            # own hand-written, separately-linked test binary).
+            if 'mojo_async_runtime.h' in c_code:
+                async_rt_src = os.path.join(runtime_dir, 'mojo_async_runtime.cpp')
+                async_rt_o = f"{basename}_async_runtime.o"
+                art_cmd = ([_GXX_BIN] + cg_flags +
+                           ["-std=c++20", "-I", runtime_dir, "-c", "-o", async_rt_o, async_rt_src])
+                result = subprocess.run(art_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"Async runtime compilation failed: {result.stderr}", file=sys.stderr)
+                    return False
+                extra_objs.append(async_rt_o)
 
         # Link executable with CPython runtime
         exe_file = output if output else basename
@@ -334,10 +426,7 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         except:
             py_ldflags = []
 
-        link_cmd = [_GCC_BIN, "-o", exe_file, o_file, runtime_o]
-        link_cmd.extend(py_ldflags)
-
-        result = subprocess.run(link_cmd, capture_output=True, text=True)
+        result = link_executable([o_file, runtime_o] + extra_objs, exe_file, py_ldflags, cxx=cxx_link)
         if result.returncode != 0:
             print(f"Linking failed: {result.stderr}", file=sys.stderr)
             return False
@@ -383,13 +472,15 @@ def main():
   mojo --jit <file.mojo>           JIT compile and execute (ARM64)
   mojo build <file.mojo>           Compile to executable (same name as file, no extension)
   mojo build -o <output> <file>    Compile to executable with specified output name
+  mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
+  mojo dylib -o <out> <file> [...] Same, with specified output path
   mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
   mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
   mojo -v, --version               Show the compiler version (git SHA / release)
   mojo -h, --help                  Show this help message
 
 Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
-  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0)
+  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
   -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)""")
         return
 
@@ -438,13 +529,41 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                 sys.argv.pop(idx)   # remove -o
                 sys.argv.pop(idx)   # remove output filename
 
-    dump_full = '--dump-full' in sys.argv
-    if dump_full:
-        sys.argv.remove('--dump-full')
+    # Check for dylib command: compile one or more .mojo LIBRARY modules
+    # (no main()/top-level entry point needed — same "library module" shape
+    # every stdlib file already compiles as) into a single, standalone,
+    # self-contained shared library (.dylib on macOS, .so elsewhere),
+    # callable directly from C/C++ via its plain C ABI. This is exactly
+    # build_stdlib_dylib.build() — already used internally to compile the
+    # whole stdlib as one dylib — exposed as a first-class command instead
+    # of only being reachable by hand-importing build_stdlib_dylib.py. See
+    # driver.compile_dylib's own docstring for the full design. Takes
+    # multiple input files (unlike `build`, which takes exactly one) so
+    # several library modules can be bundled into one output dylib.
+    if sys.argv[1] == 'dylib':
+        sys.argv.pop(1)
+        dylib_output = None
+        if '-o' in sys.argv:
+            idx = sys.argv.index('-o')
+            if idx + 1 < len(sys.argv):
+                dylib_output = sys.argv[idx + 1]
+                sys.argv.pop(idx)   # remove -o
+                sys.argv.pop(idx)   # remove output filename
+        dylib_inputs = sys.argv[1:]
+        if not dylib_inputs:
+            print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
+            sys.exit(1)
+        import driver
+        rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)
+        sys.exit(rc)
 
+    dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
-    if dump:
-        sys.argv.remove('--dump')
+    # Strip flags from sys.argv so input_file = sys.argv[1] works.
+    # sys.argv.remove() is broken in the compiled binary (list method
+    # dispatch fails), so rebuild the list instead.
+    if dump_full or dump:
+        sys.argv = [a for a in sys.argv if a not in ('--dump-full', '--dump')]
 
     if len(sys.argv) < 2:
         run_repl()
@@ -469,8 +588,8 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
 
     # If JIT requested, compile and execute
     if jit:
-        jit_compile_and_execute(input_file, src, opt_flag, debug_flag)
-        return
+        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
+        sys.exit(0 if ok else 1)
 
     # If build requested, compile to executable through the module-cache system
     # (link mode + per-import dylibs + CAS + reflection); fall back to the inline
@@ -493,7 +612,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
         basename = os.path.splitext(os.path.basename(input_file))[0]
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -560,7 +679,14 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
                     any_failed = True
 
             # Generate C intermediate (with transitive imports)
-            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+            # NOTE: call compile_to_gimple directly — compile_to_gimple_cached
+            # imports cas.py which depends on CPython stdlib (hashlib, subprocess)
+            # that the compiled binary can't run.
+            try:
+                c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
+            except Exception as e:
+                import traceback; traceback.print_exc(file=sys.stderr)
+                c_code = ''
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
 

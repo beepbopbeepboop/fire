@@ -2,6 +2,30 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <setjmp.h>
+#include <stdlib.h>  /* malloc — mojo_bound_method_new below; mojo_runtime.c includes this
+                       * header before its own <stdlib.h>, so the header must self-provide it. */
+
+/* Milestone D (compiled-generator exception boundary) is the first thing in
+ * this project to #include this header from a real .cpp translation unit
+ * (gimple_codegen.py's generated generator .cpp calls mojo_exc_type_get/
+ * mojo_exc_msg_get/mojo_exc_obj_get/mojo_exc_pending_get/set at the extern
+ * "C" `_resume()` boundary — see that .cpp's own preamble). Without this
+ * guard, every declaration below gets C++ (mangled) linkage when included
+ * from a .cpp file, while mojo_runtime.c itself is always compiled as plain
+ * C — a real link failure ("symbol not found ... declaration possibly
+ * missing 'extern \"C\"'"), found and fixed via this milestone's own
+ * required real compile+link+run verification, not just a syntax-only
+ * check (test_gimple.py's `-fsyntax-only` .c/.cpp checks never actually
+ * link the two together, so this was invisible there). Verified this
+ * header is otherwise already valid, unchanged, plain C++ (no `_Bool`-typed
+ * declarations, no C-only syntax) before wrapping it wholesale rather than
+ * hand-picking a handful of individual redeclarations (which would need to
+ * exactly match every attribute of the header's own declaration anyway, or
+ * conflict on language linkage — simplest and most robust to make the
+ * WHOLE header C-linkage when seen from C++, once, here). */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Mojo type aliases */
 typedef int mojo_int;
@@ -48,6 +72,43 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
+/* ── Bound method values ──────────────────────────────────────────────────
+ * A method referenced as a plain VALUE (not called immediately) — `f =
+ * self.b`, `readline.set_completer(self.complete)` — needs to carry both
+ * the method's C function pointer AND the bound `self` receiver as a single
+ * first-class value; a bare function pointer alone (mojo_fnptr_call_N above,
+ * used for FREE functions stored as values) has nowhere to keep `self`.
+ * gimple_codegen.py's _lower_bound_method_value allocates one of these
+ * (fn = the method's real, statically-known C symbol; self = the receiver
+ * object pointer already in hand at the reference site) and a later call
+ * through the stored value goes through mojo_bound_method_call_N, which
+ * re-supplies `self` as the method's implicit first argument — the same
+ * "self, then N ordinary args" convention every compiled struct method
+ * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
+typedef struct { void *fn; void *self; } MojoBoundMethod;
+
+static inline MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
+    MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
+    bm->fn = fn;
+    bm->self = self;
+    return bm;
+}
+static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
+    return ((int64_t (*)(void *))bm->fn)(bm->self);
+}
+static inline int64_t mojo_bound_method_call_1(MojoBoundMethod *bm, int64_t a) {
+    return ((int64_t (*)(void *, int64_t))bm->fn)(bm->self, a);
+}
+static inline int64_t mojo_bound_method_call_2(MojoBoundMethod *bm, int64_t a, int64_t b) {
+    return ((int64_t (*)(void *, int64_t, int64_t))bm->fn)(bm->self, a, b);
+}
+static inline int64_t mojo_bound_method_call_3(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c);
+}
+static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, int64_t b, int64_t c, int64_t d) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
+}
+
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
  * setjmp is emitted directly in generated functions (see gimple_codegen).
  * mojo_exc_pop / mojo_raise are real functions (no setjmp, safe to wrap). */
@@ -73,6 +134,37 @@ extern int64_t _mojo_exc_type;
 void    mojo_exc_type_set(int64_t type_id);
 int64_t mojo_exc_type_get(void);
 
+/* ── Compiled-generator (C++20 coroutine) exception boundary ─────────────
+ * A coroutine body can't use setjmp/longjmp directly (the C stack frame
+ * that ran setjmp() no longer exists once the coroutine has suspended by
+ * returning to its caller once) -- see gimple_codegen.py's _cpp_stmt
+ * TryStmt/RaiseStmt lowering. Instead, raise/try/except INSIDE a compiled
+ * generator's .cpp body use real C++ exceptions, confined to that one
+ * translation unit; an exception that escapes uncaught out of the whole
+ * coroutine body is caught once, at the extern "C" `<base>_resume()`
+ * boundary (a plain, never-suspended function call, so it's always
+ * running on an ordinary live C stack frame), and translated into these
+ * SAME mojo_exc_type/msg/obj slots above.
+ *
+ * `_resume()` still just returns a `_Bool` "did this produce a value"
+ * flag, and returning false is otherwise ambiguous between "the generator
+ * is genuinely exhausted" and "the generator's body raised, uncaught, and
+ * unwound the whole coroutine" -- this flag disambiguates the two. Every
+ * ordinary (never-suspended) consumer of a compiled generator's `_resume`
+ * (a `for` loop, `next()`, or another generator's own `yield from`
+ * delegation loop -- see gimple_codegen.py's _gen_for_generator_iter /
+ * next() lowering / _cpp_yield_from) checks this flag immediately after
+ * `_resume` reports false, and if set, propagates for real: ordinary
+ * GIMPLE C code calls mojo_raise() itself (safe -- that call site was
+ * never suspended, so the longjmp only ever crosses ordinary, live C
+ * frames); a `yield from` delegation loop re-throws a fresh C++ exception
+ * built from these same slots, so the exception keeps propagating as a
+ * real C++ exception through any further-nested coroutine frames instead
+ * of ever longjmp-ing across one. */
+extern int _mojo_exc_pending;
+void mojo_exc_pending_set(int v);
+int  mojo_exc_pending_get(void);
+
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
  * string pointers are stored as uintptr_t casts (64-bit only).           */
@@ -84,6 +176,7 @@ typedef struct {
 
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
+int mojo_is_registered_dict(int64_t addr);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
 void      mojo_list_free(MojoList *l);
@@ -107,6 +200,7 @@ void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);
 MojoList*mojo_list_slice(MojoList *l, int64_t start, int64_t stop);
+void     mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 
@@ -165,6 +259,8 @@ MojoList *mojo_str_split(char *s, char *sep);
 MojoList *mojo_str_splitlines(char *s);
 int64_t mojo_str_count(char *s, char *sub);
 MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit);
+MojoList *mojo_str_partition(char *s, char *sep);
+MojoList *mojo_str_rpartition(char *s, char *sep);
 char *mojo_c_getenv(char *name);
 int mojo_truthy_cstr(char *s);
 int64_t mojo_strlen(char *s);
@@ -214,6 +310,7 @@ typedef struct {
 MojoDict   *mojo_dict_new(void);
 int64_t    *mojo_dict_order_indices(MojoDict *d);
 void        mojo_dict_free(MojoDict *d);
+void        mojo_dict_clear(MojoDict *d);
 void        mojo_mark_dict_bool_values(MojoDict *d);
 int         mojo_is_bool_dict(MojoDict *d);
 
@@ -246,9 +343,25 @@ int64_t     mojo_list_index_str(MojoList *l, const char *v);
 int64_t     mojo_list_index_int(MojoList *l, int64_t v);
 int64_t     MojoList_index(MojoList *l, int v);
 
-/* Generic Python-object attribute accessor (used by GIMPLE codegen for opaque int nodes) */
+/* Generic Python-object attribute accessor (used by GIMPLE codegen for
+ * opaque int nodes) — real per-object dynamic-attribute storage, raises a
+ * genuine, catchable AttributeError on a miss. See mojo_runtime.c's own
+ * doc comment above the definition and bugs/hard/CODEGEN_dynamic_
+ * attribute_on_generic_object.md. */
 int64_t     mojo_obj_getattr(void *obj, char *attr);
+/* Raises a real AttributeError for attribute `attr` — same runtime call
+ * sequence compiled `raise AttributeError(...)` itself lowers to, so a
+ * compiled `except AttributeError:` genuinely catches this. Used by
+ * mojo_obj_getattr on a miss; also usable directly by any other runtime
+ * helper that needs to raise the same typed exception. */
+void        mojo_raise_attribute_error(char *attr);
 void        mojo_unsupported_iter(const char *type_name);
+
+/* Real `hash(x)` builtin -- see mojo_runtime.c's docstring above their
+ * definitions. mojo_hash_str for a statically-known string argument,
+ * mojo_hash for the generic (statically-opaque-type) fallback. */
+int64_t     mojo_hash_str(char *s);
+int64_t     mojo_hash(int64_t val);
 
 int         mojo_dict_contains(MojoDict *d, char *key);
 void        mojo_dict_print(MojoDict *d);
@@ -287,6 +400,7 @@ typedef struct {
 
 MojoSet *mojo_set_new(void);
 void     mojo_set_free(MojoSet *s);
+void     mojo_set_clear(MojoSet *s);
 
 void     mojo_set_add_int(MojoSet *s, int64_t v);
 void     mojo_set_add_str(MojoSet *s, char *v);
@@ -328,13 +442,23 @@ char *mojo_repr_int(int64_t obj);
 char *mojo_repr_str(char *s);
 char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
+char *mojo_repr_list_doubles(MojoList *l);
+char *mojo_repr_list_ints(MojoList *l);
 char *mojo_bool_to_str(int b);
-int mojo_type(int obj);
+int mojo_type(...);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
+/* Real per-object dynamic-attribute storage (see mojo_obj_getattr's own
+ * doc comment in mojo_runtime.c) — no longer a no-op. */
 void mojo_setattr(void *obj, char *attr, int64_t val);
+void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
+MojoList *mojo_divmod(int64_t a, int64_t b);
+int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod);
+char *mojo_hex(int64_t v);
+char *mojo_oct(int64_t v);
+char *mojo_bin(int64_t v);
 char *mojo_int_literal_decimal(char *raw);
 char *mojo_path_join(char *base, char *name);
 char *mojo_cstr_repeat(char *s, int64_t n);
@@ -359,8 +483,13 @@ float  mojo_div_float(float a, float b);
 int64_t mojo_max(void *args);
 int64_t mojo_min(void *args);
 int64_t mojo_sum(void *args);
+double mojo_sum_double(void *args);
 void *mojo_sorted(void *iterable);
 void *mojo_reversed(void *iterable);
+MojoList *mojo_list_sorted_str(MojoList *src);
+MojoList *mojo_set_sorted(MojoSet *s);
+MojoList *mojo_dict_sorted_keys(MojoDict *d);
+MojoList *mojo_dict_items_sorted(MojoDict *d);
 
 /* Context manager protocol */
 int mojo_obj_enter(int obj);
@@ -377,6 +506,7 @@ int int_items(int obj);
 /* Command-line arguments */
 void mojo_set_argv(int argc, const char **argv);
 MojoList *mojo_get_argv(void);
+void mojo_replace_argv(MojoList *lst);
 
 /* File I/O - opaque handle for Python file objects */
 typedef void* MojoFileHandle;
@@ -428,8 +558,17 @@ char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
 char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
+char *mojo_str_rstrip_chars(char *str, char *chars);
+char *mojo_str_lstrip_chars(char *str, char *chars);
+char *mojo_str_rjust(char *s, int64_t width, char *fill);
+char *mojo_str_ljust(char *s, int64_t width, char *fill);
+char *mojo_str_center(char *s, int64_t width, char *fill);
 char *mojo_str_expandtabs(char *str, int tabsize);
 char *mojo_str_join(char *sep, MojoList *parts);
+/* shlex.join(iterable): space-join, POSIX-quoting each element like CPython's
+ * shlex.quote() (a distinct helper from mojo_str_join since shlex.join takes
+ * no separator argument at all — see gimple_codegen.py's shlex.join dispatch). */
+char *mojo_shlex_join(MojoList *parts);
 
 /* ── SIMD select helper ──────────────────────────────────────────────────
  * Lowers SIMD[_Bool,N].select(a, b) → cond ? a : b for scalar path.   */
@@ -562,3 +701,7 @@ char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClass
                          char *(*callback)(void *, char *), void *env, char *src);
 char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
                           int root, int ngroups, char *repl, char *src);
+
+#ifdef __cplusplus
+}
+#endif

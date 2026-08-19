@@ -1,0 +1,146 @@
+# CODEGEN_generator_function: Lib/pickletools.py
+
+## Status (updated 2026-08-11, real fix attempted — found genuinely stacked, not narrow)
+
+Re-verified against current master via a real `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/pickletools.py`: identical `_genops`/
+`LambdaExpr` refusal reproduces exactly, unchanged from below.
+
+This time actually attempted a real fix rather than re-confirming the
+classification: traced what it would take to make `getpos = lambda:
+None` compile (lift the lambda to a real non-capturing C++ function,
+give `getpos` the existing "opaque callable pointer" `int64_t`
+convention `_cpp_stmt`'s bare-call branch already uses via
+`mojo_fnptr_call_N`, and add a matching VALUE-producing-call case to
+`_cpp_expr`'s `CallExpr`/`IdentExpr` branch — that call form only
+exists today in `_cpp_stmt`'s value-discarding bare-`ExprStmt` case,
+around `gimple_codegen.py:24846`, not in `_cpp_expr` itself, so `pos =
+getpos()` — a VALUE use — has no path to it either).
+
+That alone would not unblock this file — `_genops` has (at least) two
+further, independent stacked gaps in the exact same function body,
+confirmed by reading both `gimple_codegen.py` and the real source
+(`pickletools.py:2268-2298`):
+
+1. The `if hasattr(data, "tell"): getpos = data.tell` branch (the
+   sibling of the `lambda` branch, same `getpos` local) assigns a
+   BOUND METHOD reference (`data.tell`, no call parens) as a value.
+   `_cpp_expr`'s `MemberExpr` case (`gimple_codegen.py:23972-23982`)
+   has no bound-method-value case at all — a non-self `MemberExpr`
+   read falls through to the generic `f"{obj}.{member}"` fallback,
+   which is invalid/wrong C++ here (`data` is a raw `int64_t`/`char *`
+   in this scalar model, not a real object with a `.tell` member —
+   `g++`: "member reference base type ... is not a structure or
+   union"). Both `if`/`else` branches of the SAME statement are
+   compiled unconditionally (this is straight-line C++, not templated
+   per-branch), so fixing only the `lambda` side leaves this side
+   broken.
+2. `_genops` yields BOTH a 3-tuple (`yield opcode, arg, pos`) and a
+   4-tuple (`yield opcode, arg, pos, getpos()`, gated by the
+   `yield_end_pos` parameter) at two different call sites in the same
+   function body. Confirmed directly against
+   `_generator_tuple_yield_slot_ctypes` (`gimple_codegen.py:2689-2755`):
+   its own docstring and `elif len(slots) != len(site): return True,
+   None` make disagreeing ARITY across tuple-yield sites an
+   unconditional refusal — "this generator's single promise type can
+   only ever carry one fixed shape." This is a third, fully
+   independent blocker from the other two.
+
+Net: fixing the `LambdaExpr` gap alone provably would not unblock this
+file — `_genops` has three independent, stacked structural gaps (an
+opaque-callable-value type category for `_cpp_expr`, a bound-method-
+value representation, and varying-arity tuple yields), each on its own
+already the class of change this project's process reserves for a
+dedicated, carefully-verified pass rather than a drive-by fix bundled
+with two others at once. Not implemented — genuinely feature-sized,
+confirmed (not assumed) via direct code tracing this session, matching
+the existing `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
+classification. Doc kept open.
+
+## Status (updated 2026-08-09, re-verified — unchanged)
+
+Re-verified against current master (`c79a013`) via a real
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py`.
+Identical refusal reproduces exactly:
+
+```
+[gimple_codegen] generator '_genops' not eligible for C++ coroutine
+  path, falling back to honest refusal: unsupported expression in
+  generator body: LambdaExpr
+Error building: cannot compile module: function(s) _genops (generator
+  function(s), contain a `yield`/`yield from`) — ...
+```
+
+Still exactly `_genops`'s `getpos = lambda: None` (pickletools.py:34
+in this checkout — the `if hasattr(data, "tell"): ... else: getpos =
+lambda: None` fallback). No new information; the 2026-08-07
+classification below (`bugs/hard/CODEGEN_generator_lambda_expr_
+unsupported.md`, feature-sized, needs a lifted-closure-style value
+category for `LambdaExpr` in the coroutine body model) still stands.
+Not re-attempted here.
+
+## Status (updated 2026-08-07, classified — doc reference now exists)
+
+**Classification: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`**
+— this file's `_genops`/`getpos = lambda: None` is that doc's own
+first confirmed occurrence (written 2026-08-07). Investigated there and
+assessed feature-sized (needs a new "callable-typed local variable"
+value category in the coroutine body model — see that doc's "Why this
+is feature-sized, not narrow" section); not re-attempted here, no new
+information found that would change that assessment.
+
+## Status (updated 2026-08-06, superseded above)
+
+**STILL FAILING**, confirmed reproducing identically against current
+master (`2b0c4c5`) — the 2026-07-30 note's diagnosis was correct; this
+elaborates it.
+
+```
+$ MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/pickletools.py
+[gimple_codegen] generator '_genops' not eligible for C++ coroutine path, falling back to honest refusal: unsupported expression in generator body: LambdaExpr
+Error building: cannot compile module: function(s) _genops (generator function(s), contain a `yield`/`yield from`) — ... falling back to interpreting this module from source instead
+```
+
+**Root cause:** `_genops`:
+```python
+def _genops(data, yield_end_pos=False):
+    ...
+    if hasattr(data, "tell"):
+        getpos = data.tell
+    else:
+        getpos = lambda: None          # <-- the refused expression
+    while True:
+        pos = getpos()
+        ...
+        yield opcode, arg, pos
+```
+`getpos = lambda: None` assigns a `LambdaExpr` to a local inside the
+generator's own body. The coroutine codegen's expression lowering
+(`_cpp_expr`) has no case for `LambdaExpr` at all — every AST node shape
+it doesn't recognize is refused via `_UnsupportedGeneratorShape` at that
+statement, and (same escalation as the struct-typed-param and dynamic-
+`raise` gaps found elsewhere in this cluster) refusing a MODULE-LEVEL
+generator like this one hard-fails the entire file's `mojo.py build`.
+
+**New, narrow gap — not yet folded into a hard-bug doc** (only one
+instance seen in this cluster so far). A `lambda` literal used as a
+plain callable value (assigned to a local, later called with `()`) is a
+common enough Python idiom that this is likely to recur; if a second/
+third instance turns up elsewhere in this cluster, fold into a new
+`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` — the likely
+minimal fix shape (worth noting for whoever picks it up) mirrors how
+this codegen already handles ordinary (non-generator) closures elsewhere
+via `_gen_lifted_closure`: lower the lambda to a lifted, non-capturing-
+or-capturing helper function the SAME way, then have `_cpp_expr`'s
+`LambdaExpr` case just reference that lifted function's pointer, rather
+than inventing new lambda-specific C++ codegen inside the coroutine path.
+
+Not fixed here — narrow-looking but touches expression-lowering inside
+the coroutine `.cpp` emission path, which this task's guidance flags as
+warranting its own dedicated verification pass rather than a drive-by
+change during cluster classification.
+
+## Build error
+
+
+Source file: /Users/mrs/net/Python-3.14.6/Lib/pickletools.py

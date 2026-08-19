@@ -60,6 +60,28 @@ def test(name: str, mojo_src: str):
         _FAIL += 1
 
 
+def test_raises(name: str, mojo_src: str, expected_substr: str):
+    """Assert compile_to_gimple honestly refuses this input (raises with a
+    message containing expected_substr) instead of either crashing gcc on
+    broken generated C or silently emitting wrong code. Used for shapes this
+    codegen deliberately does not (yet) support — see
+    bugs/CODEGEN_conditional_toplevel_def_name_collision.md."""
+    global _PASS, _FAIL
+    try:
+        compile_to_gimple(mojo_src)
+    except Exception as e:
+        if expected_substr in str(e):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: wrong error: {e}")
+            _FAIL += 1
+        return
+    print(f"FAIL  {name}: expected an exception containing {expected_substr!r}, "
+          f"compile_to_gimple succeeded instead")
+    _FAIL += 1
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -554,6 +576,25 @@ def set_missing(x: Int) -> Int:
     if x not in s:
         return 1
     return 0
+""")
+
+    # 56b. set(iterable) constructor — see
+    # bugs/CODEGEN_set_list_ctor_ignores_iterable_arg.md: this used to
+    # silently produce an EMPTY set (the constructor arg's value was
+    # discarded). Behavioral (len/iteration) coverage is in
+    # test_gimple_runner.py; this just checks it compiles.
+    test("set_ctor_from_list", """\
+def make_set_from_list() -> Int:
+    var s: Set = set([1, 2, 3, 3])
+    return len(s)
+""")
+
+    # 56c. list(iterable) constructor — same bug, `_lower_builtin_list`
+    # never even looked at its argument.
+    test("list_ctor_from_list", """\
+def make_list_from_list() -> Int:
+    var l: List = list([1, 2, 3])
+    return len(l)
 """)
 
     # ── Multi-target assignment ──────────────────────────────────────────
@@ -1599,6 +1640,2409 @@ def main():
             for line in _find_stderr.splitlines():
                 print(f"      {line}")
         _FAIL += 1
+
+    # BUG-2026-033: id() builtin on a struct instance must compile in --jit
+    # mode, not just the interpreter. (Root cause turned out to be a cascade
+    # from an unrelated Parser-import failure earlier in the same file, per
+    # BUG-2026-032 — id() itself already lowers to a real function via the
+    # `'id': ('int64_t', ['int64_t'])` signature table entry. This test pins
+    # the standalone case so a regression here is caught directly instead of
+    # being misdiagnosed as "id() unsupported" again.)
+    test("id_builtin_on_struct", """\
+struct Foo:
+    var x: Int
+    def __init__(out self):
+        self.x = 42
+
+def test():
+    var f = Foo()
+    var key = id(f)
+    print(key)
+""")
+
+    # 160. Multi-name import `import a, b, c` must bind *every* name, not
+    # just the first (bugs/INTERP_multi_name_import_only_binds_first.md).
+    # gimple_codegen.py's ImportStmt lowering used to declare a module-marker
+    # global only for node.module/node.alias; any comma-separated target
+    # past the first (node.extra) was undeclared, so referencing it here
+    # would fail to compile as an unknown identifier.
+    test("multi_name_import_binds_all", """\
+import sys, os, difflib
+
+def main():
+    var a = sys
+    var b = os
+    var c = difflib
+""")
+
+    # 161. map(str, param) over a plain/unannotated parameter, used inside
+    # another expression (str.join(...)) — bugs/CODEGEN_map_over_untyped_param_arg.md.
+    # Before the fix this failed to even compile (GCC -Wint-conversion: `args`
+    # defaulted to int64_t instead of MojoList*, and the temp holding
+    # mojo_map(...)'s pointer result was declared int64_t too), AND the
+    # `map(str, args)` sub-expression was silently lowered/emitted twice
+    # (once into a dead, unused temp) by a `_lower_str_method` bug that called
+    # `self.lower_expr(a)` twice per join() argument. Assert both: it compiles
+    # AND mojo_map appears exactly once in the generated C.
+    _map_src = """\
+def join_strs(args) -> String:
+    return ", ".join(map(str, args))
+"""
+    _map_ok, _map_c_src, _map_stderr = gimple_compiles(_map_src)
+    _map_call_count = _map_c_src.count('mojo_map (')
+    if _map_ok and _map_call_count == 1:
+        print("PASS  map_over_untyped_param_arg"); _PASS += 1
+    else:
+        print("FAIL  map_over_untyped_param_arg")
+        print(f"      mojo_map(...) call count = {_map_call_count} (expected 1)")
+        print("      --- generated C ---")
+        for i, line in enumerate(_map_c_src.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _map_ok:
+            print("      --- gcc stderr ---")
+            for line in _map_stderr.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 162. A convention/ownership keyword (`var`, `ref`, `read`, etc.) used
+    # as a plain parameter name inside `assert(x not in y)` must NOT be
+    # misparsed as a parenthesized ownership-prefix binding target — see
+    # bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md. Real Python
+    # has no such keywords, so they're common ordinary identifiers; the old
+    # `_parse_primary` LPAREN carve-out for `(var x), (ref y) = ...` only
+    # checked that the token after the keyword was NAME/KW-shaped, which
+    # `not` (a KW) also satisfies, so `(var not in lst)` wrongly swallowed
+    # `var` as a bogus prefix and failed with "Expected RPAREN got NAME".
+    test("conv_kw_as_plain_ident_not_in", """\
+def f(var: Int, lst: Int) -> Bool:
+    return not (var == lst)
+
+def g(read: Int, seen: Int) -> Bool:
+    return not (read == seen)
+""")
+
+    # 163. The legitimate parenthesized ownership-prefix binding target this
+    # carve-out exists for, `(var x), (ref y) = ...`, must still parse and
+    # compile correctly after tightening the disambiguation (peek(2) must be
+    # RPAREN) in test 162 above.
+    test("conv_kw_prefix_tuple_unpack_still_works", """\
+def get_pair() -> (Int, Int):
+    return (1, 2)
+
+def main():
+    (var x), (var y) = get_pair()
+    print(x, y)
+""")
+
+    # 164. `var` used as a plain identifier (Python compat: real Python has
+    # no `var` keyword) followed by member access/assignment, a method
+    # call, or as one of several tuple-unpack targets must NOT be misparsed
+    # as a var declaration — see bugs/PARSE_FAIL_var_as_identifier_member_access.md.
+    # The statement-level `_parse_stmt` dispatch for `var` only special-cased
+    # the `var = expr` shape; anything else (`.`, `,`, etc. right after
+    # `var`) unconditionally committed to `_parse_var_decl()` and crashed on
+    # the unexpected next token.
+    test("var_as_plain_ident_member_access", """\
+struct C:
+    var x: Int
+    fn __init__(out self):
+        self.x = 0
+    fn bump(mut self):
+        self.x = self.x + 1
+
+def main():
+    var = C()
+    var.x = 5
+    var.bump()
+    print(var.x)
+""")
+
+    # 165. `var` as one of several plain tuple-unpack targets (`var, x = ...`)
+    # must fall through to ordinary assignment parsing, not var-decl parsing.
+    test("var_as_plain_ident_tuple_unpack_target", """\
+def get_pair() -> (Int, Int):
+    return (1, 2)
+
+def main():
+    var, x = get_pair()
+    print(var, x)
+""")
+
+    # 166. Legitimate var-declaration forms must still work after the fix
+    # above: bare declaration, type-annotated declaration, and declaration
+    # with an initializer.
+    test("var_decl_forms_still_work", """\
+def main():
+    var a: Int
+    a = 1
+    var b: Int = 2
+    var c = 3
+    print(a, b, c)
+""")
+
+    # 167. `var`/etc. as the FIRST element of a plain tuple-unpack for-loop
+    # target (`for var, other_var in pairs:`) must NOT be misparsed as a
+    # bogus convention-keyword prefix — see
+    # bugs/PARSE_FAIL_var_as_for_loop_target_comma.md. `_parse_for`'s
+    # convention-keyword carve-out already excluded peek(1) == KW('in') and
+    # peek(1) == COLON, but not COMMA, so this real-stdlib shape
+    # (Tools/cases_generator/stack.py:606) swallowed `var` as a bogus prefix
+    # and then choked on the unpack target.
+    test("var_as_for_loop_target_comma", """\
+def main():
+    pairs = [(1, 2), (3, 4)]
+    for var, other_var in pairs:
+        print(var, other_var)
+""")
+
+    # 168. The `comptime for` sibling of test 167 above — `_parse_comptime_for`
+    # had the exact same bug in a worse form: no guard at all, so it
+    # unconditionally swallowed any leading _CONV_KWS token regardless of
+    # what followed.
+    test("var_as_comptime_for_loop_target_comma", """\
+def main():
+    comptime for var, j in [(1, 2), (3, 4)]:
+        print(var, j)
+""")
+
+    # 169. Legitimate convention-prefixed for-loop targets (`for ref x in
+    # y:`, `for var x in y:`) must still parse correctly after tightening
+    # the exclusion list in tests 167/168 above — these shapes have peek(1)
+    # be a plain NAME, which none of the new/existing exclusions (KW('in'),
+    # COLON, COMMA) match, so the convention keyword is still consumed.
+    test("conv_kw_prefix_for_loop_target_still_works", """\
+def main():
+    items = [1, 2, 3]
+    for ref x in items:
+        print(x)
+""")
+
+    # 170. A raw string containing a `\t` escape (or any prefixed ordinary
+    # string whose content happens to look like a t-string prefix run
+    # ending right before its own closing quote), followed later in the
+    # same statement by another quoted string, must not corrupt the token
+    # stream — see
+    # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    # `_process_nested_tstrings`'s ordinary-string-skip guard used to check
+    # only the single character immediately before a quote for
+    # alphanumeric-ness, so `r"..."` (prefix letter `r` IS alphanumeric)
+    # was never skipped as one opaque unit; the scan then walked into the
+    # raw string's own escaped content and, on reaching the literal `t` in
+    # `\t`, misdetected the string's own closing quote as the *opening*
+    # quote of a brand-new bogus bare t-string, swallowing everything up
+    # to the next unrelated quote later in the statement.
+    test("raw_string_backslash_t_escape_then_another_string", """\
+def main():
+    d = {r"\\t": 1}
+    print(d[r"\\t"], ord("\\t"))
+""")
+
+    # 171. The legitimate t/f-string-with-nested-braces case
+    # `_process_nested_tstrings` exists for must still work after the fix
+    # above (dispatch now keyed off the quote character via a backward
+    # prefix scan, rather than a forward prefix-letter-then-quote regex).
+    test("tstring_nested_braces_still_works", """\
+def main():
+    a = 1
+    b = 2
+    s = t"L1: {t'L2: {a + b}'}"
+    print(s)
+""")
+
+    # 171b/171c. An f-string whose nested `{...}` interpolation contains a
+    # string literal that reuses the SAME quote character as the f-string's
+    # own delimiter (legal since PEP 701 / Python 3.12, e.g.
+    # `f'...{g('a')}...'`). `_process_nested_tstrings` used to gate its
+    # brace-depth-aware closing-quote scan on a literal `t`/`T` in the
+    # prefix only (meant for Mojo's own `t"..."` template strings), so a
+    # plain `f`-prefixed string (no `t`/`T`) fell into the plain
+    # simple-scan-to-matching-quote branch, which has no `{...}` awareness
+    # and truncated the string at the first reused quote inside the braces.
+    # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md. Covers both quote
+    # characters, since the bug was quote-character-specific in the sense
+    # that a DIFFERENT nested quote already worked.
+    test("fstring_nested_same_single_quote_reused", """\
+def g(a, b):
+    return a + b
+
+def main():
+    x = f'result: {g('a', 'b')}'
+    print(x)
+""")
+
+    test("fstring_nested_same_double_quote_reused", """\
+def g(a, b):
+    return a + b
+
+def main():
+    x = f"result: {g("a", "b")}"
+    print(x)
+""")
+
+    # 172. `_parse_type_ann_inner`'s trailing-operator gap: a type-shaped
+    # annotation prefix (a real NAME) followed by a TRAILING operator that
+    # continues an arbitrary (non-type) expression, e.g. `gamma: some < obj`.
+    # Only `|`/`&` (real PEP 604 union/intersection syntax) were consumed as
+    # trailing operators before; any other operator (`<`, `>`, `==`, binary
+    # `+`/`-`, etc.) was left dangling for the caller to choke on. This
+    # mirrors CPython's own Lib/test/test_annotationlib.py
+    # test_nonexistent_attribute, which deliberately exercises a whole
+    # battery of nonsensical-but-syntactically-legal annotation expressions
+    # on function parameters (PEP 649: annotations accept an arbitrary
+    # expression, never semantically type-checked). All of these EXCEPT
+    # `gamma` already worked; this test covers the whole battery in one
+    # signature so a fix to `gamma` can't regress a sibling shape.
+    test("annotation_trailing_binary_op_battery", """\
+some = 1
+obj = 2
+module = 3
+def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta: +some, gamma: some < obj, delta: some | {obj: module}, epsilon: some | {obj}, zeta: some | [obj, module], eta: some | ()):
+    pass
+""")
+
+    # 173. `_parse_type_ann_inner`'s trailing-operator gap, the OTHER half:
+    # an annotation whose FIRST token is already non-name-shaped (a literal),
+    # hitting the catch-all single-token fallback branch (added by 6ee8291)
+    # instead of the NAME/KW path. That branch returned immediately without
+    # ever calling `_consume_trailing_annotation_ops` (unlike the NAME/KW
+    # path, fixed by 6e6020f for `gamma: some < obj` above), so `radd: 1 + a`
+    # left `+ a` dangling for the parameter-list parser to choke on. This
+    # mirrors CPython's own Lib/test/test_annotationlib.py test_reverse_ops,
+    # which exercises a whole battery of reverse-dunder-shaped binary-op
+    # annotations (all NUMBER-literal prefixes) in one signature.
+    # See bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md.
+    test("annotation_leading_literal_trailing_op_battery", """\
+a = 1
+def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rmod: 1 % a, rlshift: 1 << a, rrshift: 1 >> a, ror: 1 | a, rxor: 1 ^ a, rand: 1 & a, rfloordiv: 1 // a, rpow: 1**a):
+    pass
+print("ok")
+""")
+
+    # 174. `_parse_type_ann_inner` had no case for `...` (Ellipsis) in
+    # annotation position. The tokenizer produces THREE separate DOT tokens
+    # for `...` (no single ELLIPSIS token kind), and the dispatch's
+    # NAME/KW/STRING/LPAREN/LBRACKET/LBRACE branches don't match a DOT, so it
+    # fell to the generic catch-all single-token fallback, which consumed
+    # only the FIRST dot and left the other two dangling for the
+    # parameter-list parser to choke on with a confusing "Expected NAME or KW
+    # got DOT" error. Mirrors CPython's own Lib/test/test_annotationlib.py
+    # test_literals, which exercises a battery of literal annotations
+    # (NUMBER, STRING, bytes, bool, None, Ellipsis, complex) in one
+    # signature — `g: ...` is the Ellipsis case.
+    # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+    test("annotation_literals_battery", """\
+def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
+    pass
+print("ok")
+""")
+
+    # 175. `_parse_type_ann_inner`'s `LPAREN` branch (a parenthesized-
+    # expression-shaped annotation like `(1)`) returned its opaquely-captured
+    # text immediately, unlike the LBRACKET/LBRACE/catch-all branches (fixed
+    # in bb28e80 to route through `_consume_trailing_annotation_ops`) — so a
+    # trailing `.attr` member-access continuation after the parens, e.g.
+    # `y: (1).__class__`, left `.__class__` dangling for the parameter-list
+    # parser to choke on with "Expected NAME or KW got DOT". Worse than the
+    # three branches fixed in bb28e80: even routing through
+    # `_consume_trailing_annotation_ops` alone wouldn't suffice, since that
+    # helper only continues `OP`-kind tokens (`|`, `&`, ...), not a `DOT`
+    # chain. Fixed by introducing `_finish_type_ann_tail`, a single shared
+    # continuation tail (dotted-name loop + call-parens + subscript loop +
+    # trailing-op consumption) that EVERY branch of `_parse_type_ann_inner`
+    # (NAME/KW, LPAREN, LBRACKET, LBRACE, ellipsis, catch-all) now routes
+    # through, instead of each branch needing its own early-return special
+    # case — this was the fourth follow-on bug in this exact function in one
+    # session (6ee8291 -> 6e6020f -> bb28e80 -> c2933a7 -> this one), so a
+    # structural fix was chosen over a fifth narrow patch. Mirrors CPython's
+    # own Lib/test/test_annotationlib.py test_shenanigans.
+    # See bugs/PARSE_FAIL_annotation_paren_then_dot.md.
+    test("annotation_paren_then_dot_battery", """\
+x = 1
+def f(x: x | (1).__class__, y: (1).__class__):
+    pass
+print("ok")
+""")
+
+    # 176. Two top-level `def NAME(...):` statements with the SAME name,
+    # nested in mutually-exclusive if/else branches at module scope (a
+    # common platform-conditional idiom, e.g. multiprocessing/connection.py's
+    # `def wait(...)` under `if sys.platform == 'win32': ... else: ...`).
+    # This codegen compiles every top-level def into a single, unmangled C
+    # symbol regardless of which branch it's nested in, so both bodies
+    # previously collided (or, worse, neither was compiled at all and the
+    # call site fell back to an extern declaration that happened to collide
+    # with libc's own `wait(int *)` from <sys/wait.h> — a confusing error
+    # unrelated to the real problem). Since there's no runtime-dispatch
+    # mechanism to represent "whichever branch executes wins" as distinct C
+    # symbols, this must be refused honestly rather than silently miscompiled
+    # — see bugs/CODEGEN_conditional_toplevel_def_name_collision.md.
+    test("conditional_toplevel_def_name_collision", """\
+import sys
+if sys.platform == 'win32':
+    def wait(x):
+        return x + 1
+else:
+    def wait(x):
+        return x + 2
+
+def f():
+    print(wait(5))
+f()
+""")
+
+    # Generator function (`yield`) honest-fallback: this codegen has no
+    # general suspend/resume state-machine transform, so a generator
+    # function outside the C++20-coroutine allowlist (see
+    # gimple_codegen.py's _generator_quick_eligible/_gen_cpp_generator_unit)
+    # must still be refused clearly (RuntimeError from
+    # gen_module/compile_to_gimple) rather than silently miscompiled into a
+    # single straight-line C function that just drops the yield. Milestone 1
+    # of bugs/INTERP_generator_yield_entirely_unimplemented.md — see
+    # mojo_compiler.py's YieldExpr/YieldFromExpr/FunctionDef.is_generator
+    # and gimple_codegen.py's gen_module pre-pass. A generator taking a
+    # plain scalar parameter (`def f(n): yield n`) is now COMPILED, not
+    # refused — see generator_param_shape_compiles_via_cpp_path below — as
+    # of the parameter-support step; *args/**kwargs generator parameters are
+    # the still-out-of-scope shape used here instead (string/struct params
+    # are covered separately by
+    # generator_string_param_honest_fallback below).
+    test("generator_varargs_param", """\
+def f(*args):
+    yield args
+""")
+
+    # A generator parameter typed as something other than a scalar
+    # int64_t/double/_Bool (e.g. String) is also still explicitly out of
+    # scope for the parameter-support step — see _gen_cpp_generator_unit's
+    # "Parameters" comment (string/struct/pointer params cross the C++/C
+    # boundary with lifetime/ownership questions deliberately deferred).
+    test("generator_string_param", """\
+def f(s: String):
+    yield 1
+""")
+
+    # An UNANNOTATED generator parameter that is actually a string at its
+    # call site must be refused exactly like the explicitly-annotated case
+    # immediately above, not silently compiled with the parameter (and the
+    # coroutine's `current_value` field) mistyped as int64_t — a char*/
+    # MojoStr* pointer value stored into and read back out of an int64_t
+    # slot "works" only by platform-ABI luck (never arithmetically touched)
+    # and would break the moment it were used for anything that depends on
+    # its real type. Before the fix, this generator's compile attempt ran
+    # BEFORE the cross-call scalar-contract inference (Pass 1.3d) had
+    # populated self._inferred_param_types, so the unannotated `s` fell
+    # straight through to _resolve_type(None)'s naive int64_t default with
+    # no cross-call-site evidence at all — see
+    # bugs/CODEGEN_compiled_generator_unannotated_string_param_mistyped.md.
+    # The fix reuses the exact same cross-call scalar-contract mechanism
+    # that already protects ordinary (non-generator) unannotated parameters
+    # (e387af9/8799ec4) by deferring the generator compile attempt until
+    # after that inference has run, so a unanimous `char *` observation
+    # across g's call site(s) lands in _inferred_param_types before
+    # _gen_cpp_generator_unit's existing scalar-only refusal check
+    # (`ctype not in ('int64_t', 'double', '_Bool')`) ever looks — no new
+    # inference logic, just correct ordering.
+    test("generator_unannotated_string_param", """\
+def g(s):
+    yield s
+print(list(g("hi")))
+""")
+
+    # Async function (`async def`) honest-fallback: originally (before the
+    # compiled-path async/await codegen project's Step B) this codegen had
+    # NO event loop / suspend-resume codegen at all, so EVERY `async def`
+    # was refused unconditionally — this exact case (`async def f(): return
+    # 1`, no params, no await) was that blanket refusal's own example. Step
+    # B narrowed that refusal (see _async_quick_eligible/_gen_cpp_async_unit
+    # in gimple_codegen.py): a parameterless async function whose body is
+    # just a scalar `return <expr>` and contains no `await` now genuinely
+    # compiles via a real C++20-coroutine promise_type — see
+    # test_async_simple_shape_compiles_via_cpp_path (this exact shape, just
+    # with a consuming call site added so it's a complete module) and
+    # test_gimple_async_runner.py's real compile+link+run counterpart.
+    #
+    # `await` on ANOTHER compiled async function's call (`x = await f()`) —
+    # this exact shape — used to be refused (Step B/C's honest boundary,
+    # "genuinely no composition codegen for a real cross-coroutine await
+    # yet"). Step D (async-awaits-async composition) now compiles it for
+    # real — see test_async_await_composition_compiles_via_cpp_path further
+    # below (this exact shape) and test_gimple_async_runner.py's real
+    # compile+link+run+timed counterpart. `await` on anything ELSE (a
+    # forward reference to a not-yet-compiled callee, an arbitrary non-call
+    # expression, a socket op) remains refused — see
+    # async_await_forward_reference_honest_fallback and
+    # async_await_non_call_expression_honest_fallback further below.
+    def test_async_await_composition_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+async def f():
+    return 1
+
+async def g():
+    x = await f()
+    return x
+
+def main():
+    result = asyncio.run(g())
+    print(result)
+"""
+        name = "async_await_composition_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src or '_mojoasync_f_Awaiter' not in cpp_src:
+            print(f"FAIL  {name}: expected the generated .cpp to contain "
+                  "the composition Awaiter for the awaited callee ('f')")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as fh:
+            fh.write(c_src)
+            c_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as fh:
+            fh.write(cpp_src)
+            cpp_path = fh.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_composition_compiles_via_cpp_path()
+
+    # Forward reference: `g` (the caller) is defined BEFORE `f` (the
+    # callee) in source order — gen_module's async pre-pass is a single
+    # forward pass over the module's top-level statements (see
+    # _is_async_call_to_known_fn's docstring), so `f` isn't registered in
+    # self._async_api yet at the point `g`'s own eligibility is checked.
+    # Honest whole-module refusal, not a guess/dangling forward reference.
+    test("async_await_forward_reference", """\
+async def g():
+    x = await f()
+    return x
+
+async def f():
+    return 1
+""")
+
+    # `await` on an arbitrary non-call expression (not asyncio.sleep(...),
+    # not a call to another compiled async function) is still refused —
+    # composition only recognizes the one specific call shape.
+    test_raises("async_await_non_call_expression_honest_fallback", """\
+async def f():
+    x = await 5
+    return x
+""", "async function")
+
+    # Async generator (`async def f(): yield x`) -- REVISED (final step of
+    # the async/await codegen project): the simplest possible shape (no
+    # params, one `yield`, no `yield from`/`with`) is now this step's own
+    # target shape and successfully compiles via a combined promise type
+    # (_gen_cpp_async_generator_unit) -- see
+    # async_generator_simple_shape_compiles_via_cpp_path further below
+    # (defined after _generator_compiles_via_cpp exists) for the compile-
+    # only smoke test, and async_generator_with_param_honest_fallback/
+    # async_generator_with_yield_from_honest_fallback for the narrower
+    # shapes that still correctly hit the (no-longer-blanket) combined
+    # refusal.
+
+    # Milestone B narrowing checks: a generator containing try/except is
+    # explicitly excluded from the new C++20-coroutine allowlist (richer
+    # generator semantics — Milestone D, not this one) and must still hit
+    # the same honest whole-module refusal as before this milestone.
+    #
+    # `yield from` itself is NO LONGER blanket-excluded as of Milestone C
+    # step 2 (yield-from delegation) — but `yield from [1, 2, 3]` doesn't
+    # target a call to another generator at all (it targets a list
+    # literal), so it's still refused, just via a different check now (see
+    # GimpleGen._cpp_yield_from's "not isinstance(call, CallExpr)" branch)
+    # instead of the old blanket _generator_quick_eligible disqualification.
+    # See test_generator_yield_from_delegation_compiles_via_cpp_path and its
+    # neighboring still-out-of-scope-shape refusal tests, further below,
+    # for the positive/narrower-negative coverage this step actually adds.
+    test("generator_yield_from_list", """\
+def f():
+    yield from [1, 2, 3]
+""")
+
+    # Milestone D: try/except/raise inside a generator body now compiles via
+    # the C++20-coroutine path instead of falling back — see
+    # test_generator_try_except_compiles_via_cpp_path below for the positive
+    # compile-only smoke test, and test_gimple_generator_runner.py for the
+    # REAL behavioral (compile+link+run) coverage of this exact shape.
+
+    # Mixed yield-value types (int then float): passes the cheap
+    # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
+    # but _gen_cpp_generator_unit's own _generator_yield_ctype check must
+    # still reject it (Milestone B requires one consistent scalar type
+    # across every `yield` in the body) and gen_module's pre-pass must fall
+    # back to the honest refusal cleanly — exercises the
+    # _UnsupportedGeneratorShape catch path itself, not just the cheap
+    # pre-filter.
+    test_raises("generator_mixed_yield_types_honest_fallback", """\
+def f():
+    yield 1
+    yield 1.5
+""", "generator function")
+
+    # Milestone B positive case: the ONE generator shape this codegen now
+    # actually compiles — no params, no try/except/with, no `yield from` —
+    # gets routed to the new C++20-coroutine .cpp path instead of the
+    # honest refusal above. Confirms BOTH halves of the dual-output build:
+    # the .c/.ci side (gcc -fgimple -fsyntax-only) declares the extern "C"
+    # API and has NO ordinary body for `counter` at all, and the companion
+    # .cpp side (g++ -std=c++20 -fsyntax-only) is real, syntactically valid
+    # C++20 coroutine code. See test_gimple_generator_runner.py for the
+    # REAL behavioral (compile+link+run) counterpart of this same shape.
+    def test_generator_simple_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter():
+    i = 0
+    while i < 5:
+        yield i
+        i = i + 1
+
+def main():
+    for x in counter():
+        print(x)
+"""
+        name = "generator_simple_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start' not in c_src or 'MojoGenerator' not in c_src:
+            print(f"FAIL  {name}: .c/.ci output missing extern \"C\" generator API decls")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_simple_shape_compiles_via_cpp_path()
+
+    # Parameter-support step: a generator taking parameters (`start`,
+    # `count`) now compiles via the same C++20-coroutine path instead of
+    # hitting the honest whole-module refusal — mirrors
+    # test_generator_simple_shape_compiles_via_cpp_path immediately above,
+    # but also asserts the extern "C" `_start` declaration on the .c/.ci
+    # side actually carries the two int64_t parameters through (not just a
+    # bare `(void)`), and that the call site inside `main` passes real
+    # argument expressions rather than an empty arg list. See
+    # test_gimple_generator_runner.py for the REAL behavioral (compile+
+    # link+run, actual printed output) counterpart of this same shape.
+    def test_generator_param_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(start, count):
+    i = start
+    n = 0
+    while n < count:
+        yield i
+        i = i + 1
+        n = n + 1
+
+def main():
+    for x in counter(10, 3):
+        print(x)
+"""
+        name = "generator_param_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start (int64_t, int64_t)' not in c_src:
+            print(f"FAIL  {name}: .c/.ci extern decl doesn't carry both "
+                  f"int64_t params through")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start (int64_t start, int64_t count)' not in cpp_src:
+            print(f"FAIL  {name}: .cpp _start definition doesn't carry both "
+                  f"int64_t params through")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_start ()' in c_src or '_mojogen_counter_start ();' in c_src:
+            print(f"FAIL  {name}: call site still emits a bare no-arg call")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_param_shape_compiles_via_cpp_path()
+
+    # Milestone C step 2 (yield-from delegation): the exact target shape
+    # from that step's writeup — `outer` delegates its entire output to
+    # `inner` via a bare `yield from inner()`, both zero-param, both
+    # int64_t-yielding. `inner` must be defined BEFORE `outer` in the
+    # module (see GimpleGen._cpp_yield_from's docstring on the source-order
+    # restriction — self._generator_api is only populated as gen_module's
+    # single compile-attempt pass reaches each generator in source order).
+    # Confirms both halves of the dual-output build compile for real, and
+    # that the .cpp side actually emits the hand-rolled resume/yield/
+    # exhaust delegation loop (not e.g. silently dropping the `yield from`
+    # to nothing). See test_gimple_generator_runner.py for the REAL
+    # behavioral (compile+link+run, actual printed output) counterpart,
+    # including early-break/empty-inner/two-level-delegation/parameterized-
+    # delegation coverage beyond this compile-only smoke test.
+    def test_generator_yield_from_delegation_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def inner():
+    yield 1
+    yield 2
+    yield 3
+
+def outer():
+    yield from inner()
+
+def main():
+    for x in outer():
+        print(x)
+"""
+        name = "generator_yield_from_delegation_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_inner_start' not in cpp_src or '_mojogen_outer_start' not in cpp_src:
+            print(f"FAIL  {name}: .cpp output missing one of the two "
+                  "generators' extern \"C\" API")
+            _FAIL += 1
+            return
+        if '_mojogen_inner_resume(' not in cpp_src or '_mojogen_inner_value(' not in cpp_src:
+            print(f"FAIL  {name}: outer's body doesn't call inner's "
+                  "resume/value -- the delegation loop wasn't actually emitted")
+            _FAIL += 1
+            return
+        if '_mojogen_sub_guard' not in cpp_src:
+            print(f"FAIL  {name}: expected the RAII sub-generator lifetime "
+                  "guard to appear in the .cpp preamble")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_yield_from_delegation_compiles_via_cpp_path()
+
+    # Still-out-of-scope `yield from` shapes: delegating to a generator
+    # that ITSELF failed to compile via the C++20-coroutine path (here,
+    # because its own parameter is a String, out of scope since the
+    # parameter-support step) must fall back to the honest whole-module
+    # refusal, not silently miscompile.
+    test("generator_yield_from_unsupported_sub_generator", """""")
+
+    # Still-out-of-scope: `yield from` targeting a generator defined LATER
+    # in the module. This step's delegation support is deliberately scoped
+    # to same-module, already-compiled-by-the-time-we-get-here generators
+    # (see GimpleGen._cpp_yield_from's docstring) -- a forward reference
+    # isn't yet supported (would need a second, dependency-ordered pass)
+    # and must refuse cleanly rather than miscompile or crash.
+    test("generator_yield_from_forward_reference", """""")
+
+    # Still-out-of-scope: the delegating generator's own yield-value type
+    # doesn't agree with the sub-generator's (double vs int64_t) -- Milestone
+    # B's "one consistent scalar type across every yield site" rule extends
+    # naturally to `yield from` sites (see _yield_from_delegate_ctype), and
+    # this must refuse rather than silently truncate/misinterpret bits.
+    test_raises("generator_yield_from_type_mismatch_honest_fallback", """\
+def inner():
+    yield 1.5
+
+def outer():
+    yield from inner()
+    yield 2
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
+
+    # Still-out-of-scope: wrong argument count at the `yield from` call
+    # site for a PARAMETERIZED sub-generator.
+    test_raises("generator_yield_from_argcount_mismatch_honest_fallback", """\
+def inner(a, b):
+    yield a + b
+
+def outer():
+    yield from inner(1)
+
+def main():
+    for x in outer():
+        print(x)
+""", "generator function")
+
+    # Milestone C step 3: generator METHODS on structs — the target shape
+    # from that step's writeup, a method reading a scalar `self` field.
+    # Mirrors test_generator_yield_from_delegation_compiles_via_cpp_path's
+    # shape (compile via compile_to_gimple_with_cpp, assert the extern "C"
+    # API + a `self->value` read appear in the .cpp text, then real-compile
+    # both the .c and .cpp outputs with gcc/g++ -fsyntax-only).
+    def test_generator_method_self_field_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value - i
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+"""
+        name = "generator_method_self_field_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_Counter_countdown_start' not in cpp_src:
+            print(f"FAIL  {name}: .cpp output missing the generator "
+                  "method's extern \"C\" API")
+            _FAIL += 1
+            return
+        if 'self->value' not in cpp_src:
+            print(f"FAIL  {name}: expected a self->value field read in "
+                  "the generated .cpp body")
+            _FAIL += 1
+            return
+        if 'typedef struct Counter' not in cpp_src:
+            print(f"FAIL  {name}: expected the Counter struct's C layout "
+                  "to be re-emitted (shared verbatim with the .c output) "
+                  "in the .cpp preamble")
+            _FAIL += 1
+            return
+        # No ordinary Counter_countdown(...) C function/forward-declaration
+        # should exist for this method at all — only the generator API.
+        if 'Counter_countdown (' in c_src or 'Counter_countdown(' in c_src:
+            print(f"FAIL  {name}: an ordinary (non-generator) forward "
+                  "declaration/definition for Counter_countdown leaked "
+                  "into the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_method_self_field_compiles_via_cpp_path()
+
+    # Still-out-of-scope generator-method shapes (Milestone C step 3):
+    # mutating a self field from inside the generator body. AssignStmt's
+    # target is a MemberExpr (self.value), not a plain identifier — refused
+    # by _cpp_stmt's existing AssignStmt case, unchanged; confirms this
+    # falls back to the honest whole-module refusal rather than silently
+    # dropping the mutation.
+    test("generator_method_self_mutation", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            yield self.value
+            self.value = self.value - 1
+            i = i + 1
+
+def main():
+    c = Counter(10)
+    for x in c.countdown(3):
+        print(x)
+""")
+
+    # Still-out-of-scope: a generator method calling ANOTHER method on self
+    # (`self.helper()`) — that's a CallExpr, which the narrow .cpp expression
+    # emitter has no case for, so it refuses cleanly.
+    test("generator_method_calls_other_self_method", """""")
+
+    # Still-out-of-scope: a nested attribute chain (self.inner.v) — only a
+    # direct self.<field> read is supported; self.inner resolves via the
+    # MemberExpr obj-is-not-plain-'self' branch and refuses.
+    test("generator_method_nested_attribute_chain", """""")
+
+    # Still-out-of-scope: yielding a non-scalar self field (a String) --
+    # _infer_simple_expr_ctype's self_fields lookup refuses any field type
+    # outside int64_t/double/_Bool, same as any other non-scalar value.
+    test("generator_method_nonscalar_field", """""")
+
+    # Milestone C step 4 (this step): compiled-generator objects as
+    # first-class values — bugs/CODEGEN_compiled_generator_not_first_class_
+    # value.md's exact repro. Before this step, `g = counter(3)` typed `g`
+    # as `void` (the local-variable-type inference had no notion that a
+    # bare call to a known compiled generator function returns
+    # `MojoGenerator *`), and gcc genuinely failed to compile at all
+    # ("invalid use of void expression" / "variable or field 'g' declared
+    # void") — a real, loud build failure, not a silent miscompile. Asserts
+    # `g` is declared `MojoGenerator *` (not `void`/`int64_t`) and the
+    # `for`-loop over the plain-identifier `g` still drives the same
+    # `_resume`/`_value` API Milestone B's inline-call shape already used.
+    # See test_gimple_generator_runner.py for the REAL behavioral (compile+
+    # link+run) counterpart.
+    def test_generator_assign_then_for_loop_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    for x in g:
+        print(x)
+"""
+        name = "generator_assign_then_for_loop_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if 'MojoGenerator * g;' not in c_src and 'MojoGenerator *g;' not in c_src:
+            print(f"FAIL  {name}: expected `g` to be declared MojoGenerator *, "
+                  "not void/int64_t — .c/.ci decls:")
+            for line in c_src.splitlines():
+                if ' g;' in line or '*g;' in line:
+                    print(f"      {line}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume (g)' not in c_src:
+            print(f"FAIL  {name}: expected the for-loop over `g` to drive "
+                  "_resume(g)/_value(g), not fall back to the unsupported-"
+                  "iterable path")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_assign_then_for_loop_compiles_via_cpp_path()
+
+    # Same step: `next(g)` called directly on an assigned generator variable
+    # — bugs/CODEGEN_compiled_generator_not_first_class_value.md's SECOND
+    # failure (previously an undefined-symbol LINK error, since the generic
+    # `next()` builtin had no case for MojoGenerator* at all — only a
+    # variadic FIXME extern stub with no definition anywhere). Asserts the
+    # .c/.ci output calls _resume/_value directly (no reference to a bare,
+    # undefined `next (...)` C symbol) and signals exhaustion via the same
+    # mojo_exc_type_set()/mojo_raise() StopIteration convention
+    # `raise StopIteration` already uses elsewhere in this file, not a
+    # novel signaling scheme.
+    def test_generator_next_on_assigned_var_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    g = counter(3)
+    print(next(g))
+"""
+        name = "generator_next_on_assigned_var_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume (g)' not in c_src or '_mojogen_counter_value (g)' not in c_src:
+            print(f"FAIL  {name}: expected next(g) to lower to direct "
+                  "_resume(g)/_value(g) calls")
+            _FAIL += 1
+            return
+        if 'mojo_raise ()' not in c_src or 'mojo_exc_type_set' not in c_src:
+            print(f"FAIL  {name}: expected the exhaustion path to signal "
+                  "StopIteration via mojo_exc_type_set()/mojo_raise(), "
+                  "same as `raise StopIteration` elsewhere")
+            _FAIL += 1
+            return
+        # A bare, unresolved CALL SITE to the generic `next` extern stub
+        # would read `next (g)` (this file's call-lowering convention is a
+        # space before the paren) — distinct from the always-present,
+        # unconditional `int64_t next(...);` FORWARD DECLARATION emitted
+        # defensively in every build's preamble regardless of whether
+        # anything actually calls it (harmless on its own; only a real call
+        # site referencing it would fail at link time).
+        if 'next (g)' in c_src or 'next(g)' in c_src:
+            print(f"FAIL  {name}: a bare, undefined `next (...)` call site "
+                  "still leaked into the .c/.ci output instead of lowering "
+                  "to _resume/_value")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_next_on_assigned_var_compiles_via_cpp_path()
+
+    # Same milestone: a stored generator passed AS AN ARGUMENT to a
+    # function (`consume(g)` where `g = counter(3)`). Pass 1.3f-gen must
+    # re-observe the call site AFTER local-variable inference typed `g` as
+    # MojoGenerator* (the earlier cross-call scalar-contract pass ran before
+    # that and left the unannotated callee param defaulted to int64_t) and
+    # propagate the generator type onto the callee's param, so the `for`
+    # loop inside the callee drives _resume/_value instead of falling back.
+    # Asserts the param is declared `MojoGenerator *` and the callee's loop
+    # uses the _resume/_value API. bugs/CODEGEN_compiled_generator_not_
+    # first_class_value.md.
+    def test_generator_param_from_call_boundary_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def consume(g):
+    for x in g:
+        print(x)
+
+def main():
+    g = counter(3)
+    consume(g)
+"""
+        name = "generator_param_from_call_boundary_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume' not in c_src:
+            print(f"FAIL  {name}: expected the callee's for-loop over the "
+                  "param to drive the generator _resume/_value API")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_param_from_call_boundary_compiles_via_cpp_path()
+
+    # Same milestone: a generator RETURNED from a function
+    # (`def mk(): return counter(3)`), then consumed by the caller. The
+    # returned value's result temp must be typed MojoGenerator* with the
+    # underlying generator function's api recorded on it (via _lower_named_
+    # call's _fn_returns_generator lookup), so the caller's `for x in g:`
+    # drives the right _resume/_value pair. bugs/CODEGEN_compiled_generator_
+    # not_first_class_value.md.
+    def test_generator_returned_from_function_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def counter(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def mk():
+    return counter(3)
+
+def main():
+    g = mk()
+    for x in g:
+        print(x)
+"""
+        name = "generator_returned_from_function_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if '_mojogen_counter_resume' not in c_src:
+            print(f"FAIL  {name}: expected the for-loop over the returned "
+                  "generator to drive the counter's _resume/_value API")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_returned_from_function_compiles_via_cpp_path()
+
+    # A `for` loop over a generator whose body does `in`/`not in` membership
+    # tests — bugs/CODEGEN_compiled_generator_not_first_class_value.md-adjacent
+    # .cpp emission. Python's `in`/`not in` operators are NOT emitted as infix
+    # tokens in the C++20-coroutine body (that would spell Python keywords
+    # `in`/`not in` directly into C++ — invalid: `not` is a C++ keyword and
+    # `in` is not an operator). The .cpp CompareChain lowers them through the
+    # same mojo_str_contains / mojo_list_contains_* helpers the GIMPLE path
+    # uses, gated on the container's declared C++ type. `'\0' in s` / `'\0'
+    # not in s` on a char * haystack is the exact shape that lit up mimetypes.py
+    # (`if '\\0' not in ctype`).
+    test("generator_in_not_in_membership_compiles_via_cpp_path", """\
+def gen(s):
+    if 'a' in s:
+        yield 1
+    if 'z' not in s:
+        yield 2
+
+def main():
+    for x in gen("abracadabra"):
+        print(x)
+""")
+
+    # 177. A bound method referenced as a plain VALUE (not called
+    # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
+    # method directly (`self.b()`) already worked; a bare method reference
+    # used to fall through to the generic struct-field lookup and emit an
+    # invalid `self->b` field access (`'C' has no member named 'b'` from the
+    # C compiler, since `b` is a method, not a data field) — see
+    # bugs/CODEGEN_bound_method_as_value_not_resolved.md. Real stdlib
+    # trigger: Lib/cmd.py's `readline.set_completer(self.complete)` passes a
+    # bound method as a callback value the same way.
+    test("bound_method_as_value", """\
+class C:
+    def b(self):
+        return 42
+    def a(self):
+        f = self.b
+        return f()
+
+def main():
+    c = C()
+    print(c.a())
+main()
+""")
+
+    # 178. Untyped-parameter identity function called with a string argument
+    # — bugs/CODEGEN_untyped_param_string_passthrough_wrong.md. `a` has no
+    # body-usage evidence at all (just returned unchanged), so the parameter
+    # and the function's inferred return type used to default to int64_t;
+    # the real char* argument then got silently truncated/reinterpreted as
+    # an integer at the call site and the call's result. Assert the param
+    # and the generated function both compile as real pointers, not just
+    # that gcc accepts the file (a wrong-but-gimple-legal int64_t version
+    # would also pass a bare compile check).
+    _ok, _c, _err = gimple_compiles("""\
+def g(a):
+    return a
+print(g("ab"))
+""")
+    if _ok and 'char * g_' in _c and 'int64_t g_' not in _c:
+        print("PASS  untyped_param_string_passthrough"); _PASS += 1
+    else:
+        print("FAIL  untyped_param_string_passthrough")
+        print(f"      ok={_ok}")
+        print("      --- generated C ---")
+        for i, line in enumerate(_c.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _ok:
+            print("      --- gcc stderr ---")
+            for line in _err.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 179. Same bug, two-untyped-parameter shape (`a + b`, both strings) —
+    # the shape that originally surfaced via an f-string interpolating a
+    # run-time-computed string value from a function just like this one.
+    _ok, _c, _err = gimple_compiles("""\
+def g(a, b):
+    return a + b
+y = g("a", "b")
+print(y)
+""")
+    if _ok and 'char * g_' in _c and 'int64_t g_' not in _c:
+        print("PASS  untyped_param_string_concat_passthrough"); _PASS += 1
+    else:
+        print("FAIL  untyped_param_string_concat_passthrough")
+        print(f"      ok={_ok}")
+        print("      --- generated C ---")
+        for i, line in enumerate(_c.splitlines(), 1):
+            print(f"      {i:3}: {line}")
+        if not _ok:
+            print("      --- gcc stderr ---")
+            for line in _err.splitlines():
+                print(f"      {line}")
+        _FAIL += 1
+
+    # 180. Explicitly annotated identity function — must keep working exactly
+    # as before (this path never went through the unannotated-parameter
+    # inference this fix touches).
+    test("typed_param_string_passthrough_still_works", """\
+def g(a: str) -> str:
+    return a
+print(g("ab"))
+""")
+
+    # ── Milestone D: try/except/raise inside a compiled generator body ─────
+    def _generator_compiles_via_cpp(name: str, src: str, must_contain_cpp=None):
+        """Shared compile-only smoke-test helper for Milestone D's generator
+        try/except/raise support — mirrors
+        test_generator_simple_shape_compiles_via_cpp_path's own dance
+        (compile_to_gimple_with_cpp, then gcc -fsyntax-only the .c/.ci and
+        g++ -std=c++20 -fsyntax-only the .cpp) without duplicating that
+        subprocess plumbing a third/fourth/fifth time."""
+        global _PASS, _FAIL
+        import gimple_codegen
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        if must_contain_cpp is not None and must_contain_cpp not in cpp_src:
+            print(f"FAIL  {name}: expected {must_contain_cpp!r} in generated .cpp")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    # A generator whose own internal try/except catches everything it
+    # raises — the simplest positive shape.
+    _generator_compiles_via_cpp("generator_try_except_compiles_via_cpp_path", """\
+def f():
+    i = 0
+    while i < 5:
+        try:
+            if i == 2:
+                raise ValueError("boom")
+            yield i
+        except ValueError:
+            yield -1
+        i = i + 1
+
+def main():
+    for x in f():
+        print(x)
+""", must_contain_cpp="_MojoCppExc")
+
+    # A generator whose raise is NOT caught internally — must compile (the
+    # exception propagates via the extern "C" `_resume` boundary + the
+    # mojo_exc_pending flag, checked by the ordinary GIMPLE consumer, not by
+    # anything inside the .cpp translation unit itself).
+    _generator_compiles_via_cpp("generator_raise_propagates_compiles_via_cpp_path", """\
+def f():
+    yield 1
+    raise ValueError("boom")
+
+def main():
+    try:
+        for x in f():
+            print(x)
+    except ValueError:
+        print("caught")
+""")
+
+    # try/except/finally together — the RAII-scope-guard finally translation
+    # composing with real dispatch.
+    _generator_compiles_via_cpp("generator_try_except_finally_compiles_via_cpp_path", """\
+def f():
+    cleanups = 0
+    i = 0
+    while i < 3:
+        try:
+            if i == 1:
+                raise KeyError("nope")
+            yield i
+        except KeyError:
+            yield -1
+        finally:
+            cleanups = cleanups + 1
+        i = i + 1
+    yield cleanups
+
+def main():
+    for x in f():
+        print(x)
+""")
+
+    # Multiple typed handlers plus a bare catch-all, and a re-raise (`raise`
+    # with no value) inside one of them — exercises the descendant-OR
+    # dispatch chain AND the `throw;` re-raise path together.
+    _generator_compiles_via_cpp("generator_try_multi_except_reraise_compiles_via_cpp_path", """\
+def f():
+    i = 0
+    while i < 3:
+        try:
+            if i == 0:
+                raise ValueError("v")
+            if i == 1:
+                raise KeyError("k")
+            yield i
+        except ValueError:
+            yield -1
+        except KeyError as e:
+            raise
+        except:
+            yield -2
+        i = i + 1
+
+def main():
+    for x in f():
+        print(x)
+""")
+
+    # `yield from` delegating to a generator that itself raises — confirms
+    # Milestone C step 2 (delegation) and Milestone D (exceptions) compose,
+    # not a fourth separate code path (see _cpp_yield_from's pending-
+    # exception check).
+    _generator_compiles_via_cpp("generator_yield_from_raise_compiles_via_cpp_path", """\
+def inner():
+    yield 1
+    raise ValueError("boom")
+
+def outer():
+    try:
+        yield from inner()
+    except ValueError:
+        yield -1
+
+def main():
+    for x in outer():
+        print(x)
+""")
+
+    # A generator METHOD (Milestone C step 3: `self` field reads) combined
+    # with try/except — confirms this composes with self-binding too, not
+    # just free functions.
+    _generator_compiles_via_cpp("generator_method_try_except_compiles_via_cpp_path", """\
+class Counter:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def countdown(self, n: Int):
+        i = 0
+        while i < n:
+            try:
+                if self.value - i == 0:
+                    raise ValueError("zero")
+                yield self.value - i
+            except ValueError:
+                yield -1
+            i = i + 1
+
+def main():
+    c = Counter(2)
+    for x in c.countdown(3):
+        print(x)
+""")
+
+    # Still-refused shapes: `yield` inside a `finally:` block (a destructor
+    # can't `co_yield`) and a bare `raise` with no enclosing handler both
+    # honestly fall back to the whole-module refusal, exactly like every
+    # other out-of-scope shape in this file.
+    test_raises("generator_yield_in_finally_honest_fallback", """\
+def f():
+    try:
+        yield 1
+    finally:
+        yield 2
+""", "generator function")
+
+    test_raises("generator_bare_raise_outside_handler_honest_fallback", """\
+def f():
+    raise
+    yield 1
+""", "generator function")
+
+    # `with` inside a generator body is still out of this milestone's scope
+    # (needs its own __enter__/__exit__ codegen story) — confirms adding
+    # try/except support didn't accidentally also let `with` through
+    # _generator_quick_eligible's pre-filter.
+    test("generator_with", """""")
+
+    # ── Step B (compiled-path async/await codegen project) ─────────────────
+    # The exact target shape from that step's writeup: a parameterless
+    # `async def` whose body is just `return 42`, called (bare, value-
+    # DISCARDING — see the revised design note below) from `main` — the
+    # smallest possible real compiled async function. Mirrors
+    # test_generator_simple_shape_compiles_via_cpp_path's shape exactly
+    # (compile via compile_to_gimple_with_cpp, assert both halves of the
+    # dual-output build are real gcc-fsyntax-only/g++-fsyntax-only-clean
+    # C/C++), plus asserts the async-specific extern "C" API names (no
+    # `_resume`, unlike the generator convention — see
+    # GimpleGen._gen_cpp_async_unit's docstring) actually appear. See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run)
+    # counterpart of this same shape.
+    #
+    # REVISED (bugs/CODEGEN_compiled_async_eager_execution_semantic_
+    # mismatch.md): Step B's first cut called `f()` here as `x = f();
+    # print(x)`, which independent hand-verification against real CPython
+    # found to be a genuine semantic bug -- that shape got construct+
+    # schedule+run+read+destroy fused into ONE expression's lowering, so
+    # `x` was `42` immediately, even though real Python (and this project's
+    # own interpreter) never runs an async function's body just from
+    # calling it -- only `await`/an explicit driver does, and this codegen
+    # has neither yet. Fixed by narrowing this step's scope: the ONLY
+    # supported call shape is now a bare, value-discarding statement (see
+    # test_async_value_consuming_call_honest_fallback below for the
+    # honest-refusal counterpart proving the old eager-execution shape no
+    # longer silently compiles).
+    def test_async_simple_shape_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+async def f():
+    return 42
+
+def main():
+    f()
+"""
+        name = "async_simple_shape_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        missing = [s for s in ('_mojoasync_f_start', '_mojoasync_f_value',
+                                '_mojoasync_f_destroy', '_mojoasync_f_is_done',
+                                'MojoAsync')
+                   if s not in c_src]
+        if missing:
+            print(f"FAIL  {name}: .c/.ci output missing async extern \"C\" API "
+                  f"decl(s): {missing}")
+            _FAIL += 1
+            return
+        if '_mojoasync_f_resume' in c_src or '_mojoasync_f_resume' in cpp_src:
+            print(f"FAIL  {name}: async API should have NO `_resume` (unlike "
+                  "the generator convention) -- see _gen_cpp_async_unit's "
+                  "docstring")
+            _FAIL += 1
+            return
+        # A bare, value-discarding call must NOT drive the coroutine via
+        # Step A's scheduler at all -- if it did, the body would run, which
+        # is exactly the bug this revision fixes (see the module-level
+        # comment above).
+        if 'mojo_async_schedule_ready' in c_src or 'mojo_async_run_until_complete' in c_src:
+            print(f"FAIL  {name}: a bare, value-discarding async call must "
+                  "never reach the scheduler -- its body must never run")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_simple_shape_compiles_via_cpp_path()
+
+    # The bug's exact repro (bugs/CODEGEN_compiled_async_eager_execution_
+    # semantic_mismatch.md): consuming an async call's result as a value
+    # (`x = f()`, then using `x`) must now be an honest whole-module
+    # refusal, NOT the old eager construct+schedule+run+read+destroy
+    # behavior that silently produced `42` with no `await` in sight.
+    test("async_value_consuming_call", """\
+async def f():
+    return 42
+
+def main():
+    x = f()
+    print(x)
+""")
+
+    # Same bug, `print(f())` shape (argument position, not assignment) --
+    # confirms the refusal isn't assignment-specific.
+    test("async_value_consuming_call_as_arg", """\
+async def f():
+    return 42
+
+def main():
+    print(f())
+""")
+
+    # Narrowing checks: every out-of-scope async shape from this step's plan
+    # must still hit the honest whole-module refusal, not be silently
+    # (mis)compiled. async_function_honest_fallback/
+    # async_generator_function_honest_fallback above already cover the two
+    # broadest categories (a plain `async def` at all, and an async
+    # generator); these add the specific narrower shapes Step B's own
+    # eligibility narrowing needs to keep refusing even though a bare
+    # `async def f(): return <scalar>` now compiles.
+
+    # Step H (create_task/Task/TaskGroup/RaisingTask project): a scalar
+    # (or untyped, which defaults to int64_t) parameter is now SUPPORTED —
+    # mirrors the generator project's own identical parameter-support step
+    # exactly (see _gen_cpp_async_unit's docstring: a C++20 coroutine's
+    # formal parameters are ordinary frame-local values, same as a
+    # generator's). This replaces the old "any parameter at all is an
+    # honest fallback" assertion — a NON-scalar-typed parameter (String,
+    # below) is still refused.
+    test("async_function_with_scalar_param_compiles", """\
+async def f(x):
+    return x
+""")
+
+    test("async_function_with_nonscalar_param", """\
+async def f(x: String) -> String:
+    return x
+""")
+
+    # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
+    # function>` (Step D) are both supported now — see
+    # test_async_await_composition_compiles_via_cpp_path and
+    # test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path. `await`
+    # on a call to an async function that ITSELF is out of scope (here: has
+    # a non-scalar-typed parameter, so `f` never gets compiled/registered
+    # in self._async_api at all) still correctly falls back to the honest
+    # whole-module refusal — not silently emitting a dangling reference to
+    # a callee that was never actually compiled.
+    test("async_function_await_on_unsupported_callee", """""")
+
+    # A non-scalar return value (a string) — mirrors the generator
+    # project's own honest-fallback precedent for a non-scalar yielded
+    # value.
+    test("async_function_string_return", """""")
+
+    # No return value at all (`pass`) — UPDATE: this shape is now genuinely
+    # supported (was an honest refusal through Step G; the device_context.mojo
+    # follow-on added real void/None-returning compiled-async-function
+    # support — see _gen_cpp_async_unit's "value_ctype = 'void'" branch),
+    # needed for device_context.mojo's `async def wrapper(...) capturing ->
+    # None:` closures, which never return a value at all. Compile-only smoke
+    # test here (mirrors this file's other `test(...)` entries); real
+    # behavioral (compile+link+run) proof lives in
+    # test_closure_capture_comptime_func_params.py /
+    # test_async_void_return.py.
+    test("async_function_no_return_value_now_supported", """\
+async def f():
+    pass
+""")
+
+    # Two `return`s that don't agree on one consistent scalar type — the
+    # async counterpart of generator_mixed_yield_types_honest_fallback.
+    test_raises("async_function_mixed_return_types_honest_fallback", """\
+async def f():
+    if True:
+        return 1
+    return 1.5
+""", "async function")
+
+    # ── Step C (compiled-path async/await codegen project): real `await`,
+    # driven via an explicit `asyncio.run(...)` top-level bridge ──────────
+    # The exact target shape from Step C's writeup: `await asyncio.sleep(...)`
+    # inside an async function body, its result actually consumed via
+    # `asyncio.run(f())` at the top level. Compile-only smoke test — asserts
+    # BOTH halves of the dual-output build are real gcc -fsyntax-only/g++
+    # -fsyntax-only-clean C/C++ AND that the generated code actually reaches
+    # Step A's real scheduler primitives (mojo_async_schedule_timer for the
+    # `co_await`, mojo_async_schedule_ready/_run_until_complete for the
+    # `asyncio.run` driver) rather than faking either one. See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run,
+    # WITH wall-clock timing proving genuine suspension) counterpart.
+    def test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
+
+async def f():
+    await asyncio.sleep(0.05)
+    return 42
+
+def main():
+    result = asyncio.run(f())
+    print(result)
+"""
+        name = "async_await_sleep_and_asyncio_run_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected a non-empty generated .cpp for a "
+                  "compiled async function")
+            _FAIL += 1
+            return
+        if 'co_await' not in cpp_src or 'mojo_async_schedule_timer' not in cpp_src:
+            print(f"FAIL  {name}: the async function's body should lower "
+                  "`await asyncio.sleep(...)` to a real `co_await` on "
+                  "Step A's timer-scheduling API")
+            _FAIL += 1
+            return
+        if ('mojo_async_schedule_ready' not in c_src
+                or 'mojo_async_run_until_complete' not in c_src):
+            print(f"FAIL  {name}: the top-level `asyncio.run(f())` call "
+                  "should drive the coroutine to completion via Step A's "
+                  "own scheduler API in the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path()
+
+    # `x = f()` alone (no `asyncio.run`) must STILL be honestly refused,
+    # unchanged from the bug fix's own bar (9a3a62b) — re-verified here
+    # under Step C's own test rather than assuming the pre-existing test
+    # above still covers it after this step's changes (it does — this is
+    # the exact same shape, unmodified — but this re-asserts it explicitly
+    # as part of Step C's own coverage, since Step C is precisely the step
+    # that could have accidentally regressed it by loosening the async-call
+    # value-consumption rule).
+    test("async_bare_call", """\
+async def f():
+    await asyncio.sleep(0.01)
+    return 42
+
+def main():
+    x = f()
+    print(x)
+""")
+
+    # ── Step F: `await asyncio.sock_recv(<fd>)` real-socket-I/O compile-only
+    # smoke test — same two-part bar as Step C's own
+    # test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path above
+    # (real gcc/g++ -fsyntax-only-clean output AND the generated code
+    # actually reaches Step A's real reactor primitive
+    # mojo_async_register_read, not a faked stand-in). See
+    # test_gimple_async_runner.py for the REAL behavioral (compile+link+run
+    # against a genuine socketpair(), with wall-clock timing proving actual
+    # reactor-driven suspension) counterpart.
+    def test_async_sock_recv_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
+
+async def recv_one():
+    fd = 3
+    b = await asyncio.sock_recv(fd)
+    return b
+
+def main():
+    x = asyncio.run(recv_one())
+    print(x)
+"""
+        name = "async_sock_recv_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected a non-empty generated .cpp for a "
+                  "compiled async function")
+            _FAIL += 1
+            return
+        if ('co_await' not in cpp_src
+                or 'mojo_async_register_read' not in cpp_src
+                or '_mojoasync_SockRecvAwaiter' not in cpp_src):
+            print(f"FAIL  {name}: the async function's body should lower "
+                  "`await asyncio.sock_recv(...)` to a real `co_await` on "
+                  "Step A's reactor read-registration API via "
+                  "_mojoasync_SockRecvAwaiter")
+            _FAIL += 1
+            return
+        if ('mojo_async_schedule_ready' not in c_src
+                or 'mojo_async_run_until_complete' not in c_src):
+            print(f"FAIL  {name}: the top-level `asyncio.run(recv_one())` "
+                  "call should drive the coroutine to completion via Step "
+                  "A's own scheduler API in the .c output")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_sock_recv_compiles_via_cpp_path()
+
+    # `asyncio.sock_recv(...)` referenced WITHOUT `await` (e.g. assigned) has
+    # no meaning at compiled-program runtime — same honest-fallback shape as
+    # `asyncio.sleep(...)` used without `await`, immediately above.
+    test_raises("asyncio_sock_recv_without_await_honest_fallback", """\
+import asyncio
+
+def main():
+    fd = 3
+    x = asyncio.sock_recv(fd)
+    print(x)
+""", "asyncio.sock_recv")
+
+    # A multi-argument `asyncio.sock_recv(fd, nbytes)` call — this step's
+    # deliberately narrow scope only recognizes the fixed-1-byte, single-
+    # argument shape (see gimple_codegen._is_asyncio_sock_recv_call's
+    # docstring); a 2-argument call doesn't match that shape at all, so it
+    # falls through to the generic "unsupported await target" refusal.
+    test_raises("asyncio_sock_recv_with_nbytes_arg_still_refused", """\
+async def f():
+    fd = 3
+    b = await asyncio.sock_recv(fd, 1024)
+    return b
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "async function(s), declared")
+
+    # A hypothetical `asyncio.sock_sendall(...)` (the write-side counterpart)
+    # remains entirely out of this step's scope — no special-case
+    # recognition exists for it at all, so it's refused exactly like any
+    # other unrecognized await target.
+    test_raises("asyncio_sock_sendall_not_recognized_still_refused", """\
+async def f():
+    fd = 3
+    await asyncio.sock_sendall(fd, 65)
+    return 0
+
+def main():
+    import asyncio
+    asyncio.run(f())
+""", "async function(s), declared")
+
+    # Step D: async-awaits-async composition (one Mojo async function
+    # awaiting ANOTHER Mojo async function's call) now compiles for real —
+    # see test_async_await_composition_compiles_via_cpp_path above for the
+    # 2-level compile-only smoke test; this one exercises a 3-level chain
+    # (`c` awaits `b` awaits `a`), each with its own real `await
+    # asyncio.sleep(...)` mixed in, confirming the composition
+    # awaiter/continuation mechanism generalizes past exactly one level of
+    # nesting and coexists with Step C's sleep-awaiter in the same body.
+    def test_async_await_composition_three_level_chain_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+import asyncio
+
+async def a():
+    await asyncio.sleep(0.01)
+    return 10
+
+async def b():
+    x = await a()
+    await asyncio.sleep(0.01)
+    return x + 1
+
+async def c():
+    x = await b()
+    await asyncio.sleep(0.01)
+    return x + 100
+
+def main():
+    result = asyncio.run(c())
+    print(result)
+"""
+        name = "async_await_composition_three_level_chain_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        needed = ('_mojoasync_a_Awaiter', '_mojoasync_b_Awaiter', 'continuation')
+        if not cpp_src or any(n not in cpp_src for n in needed):
+            print(f"FAIL  {name}: expected the generated .cpp to contain "
+                  f"every composition awaiter/continuation piece {needed}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as fh:
+            fh.write(c_src)
+            c_path = fh.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as fh:
+            fh.write(cpp_src)
+            cpp_path = fh.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_async_await_composition_three_level_chain_compiles_via_cpp_path()
+
+    # `await` on a socket-style operation (no such Mojo-level API exists in
+    # this codegen at all yet — Step F's job) remains refused exactly like
+    # any other unrecognized await target: falls through to "not a call to
+    # asyncio.sleep nor to a known compiled async function".
+    test_raises("async_await_socket_like_expression_honest_fallback", """\
+async def f():
+    x = await some_socket.recv()
+    return x
+""", "async function")
+
+    # `asyncio.sleep(...)` referenced WITHOUT `await` (e.g. assigned) has no
+    # meaning in compiled code -- honest refusal, not a silent no-op or a
+    # call to an undefined symbol.
+    test_raises("asyncio_sleep_without_await_honest_fallback", """\
+import asyncio
+
+def main():
+    x = asyncio.sleep(0.1)
+""", "asyncio.sleep")
+
+    # `asyncio.run(...)` of anything other than a bare call to a supported
+    # compiled async function -- e.g. a non-call expression -- is an honest
+    # refusal, not a guessed-at lowering.
+    test_raises("asyncio_run_non_call_argument_honest_fallback", """\
+import asyncio
+
+def main():
+    x = 5
+    asyncio.run(x)
+""", "asyncio.run")
+
+    # ── Step E (compiled-path async/await codegen project): raise/try/
+    # except/finally inside async function bodies ───────────────────────────
+    # Compile-only smoke tests, mirroring the sleep/composition tests above
+    # (-fsyntax-only on both the .c and .cpp outputs) — REAL compile+link+run
+    # behavioral coverage (including the propagates-through-await-to-caller's-
+    # own-except case, the key new behavior) is test_gimple_async_runner.py's
+    # job, not this file's.
+    def _check_async_syntax_only(name, src, cpp_substrs=(), c_substrs=()):
+        global _PASS, _FAIL
+        import gimple_codegen
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: unexpected exception: {e}")
+            _FAIL += 1
+            return
+        missing = [s for s in cpp_substrs if s not in cpp_src]
+        missing += [s for s in c_substrs if s not in c_src]
+        if missing:
+            print(f"FAIL  {name}: expected substrings missing: {missing}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src)
+            c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    # An async function with an internal try/except -- real C++ try/throw/
+    # catch, the EXACT SAME _MojoCppExc/_cpp_try_stmt/_cpp_raise_stmt
+    # machinery generator Milestone D already built, reused (not
+    # duplicated) for the async emitter path.
+    _check_async_syntax_only(
+        "async_internal_try_except_compiles_via_cpp_path", """\
+async def f():
+    total = 0
+    try:
+        total = 1
+        raise ValueError("boom")
+    except ValueError:
+        total = total + 10
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(f()))
+""",
+        cpp_substrs=('throw _MojoCppExc', 'catch (_MojoCppExc'))
+
+    # An exception raised inside an awaited callee propagates through the
+    # `await` into the awaiting function's OWN try/except -- the per-
+    # awaiter rethrow this step actually adds (see `{base}_Awaiter::
+    # await_resume` in gimple_codegen.py's _gen_cpp_async_unit): the
+    # callee's promise stages "completed via exception" (exc/exc_pending),
+    # and `await_resume` throws a fresh _MojoCppExc into the CALLER's own
+    # body, catchable by its own ordinary try/except exactly like real
+    # Python's `await` propagating an exception.
+    _check_async_syntax_only(
+        "async_exception_propagates_through_await_to_caller_except_compiles", """\
+async def inner():
+    raise ValueError("boom")
+    return 0
+
+async def outer():
+    result = 0
+    try:
+        result = await inner()
+    except ValueError:
+        result = -1
+    return result
+
+def main():
+    import asyncio
+    print(asyncio.run(outer()))
+""",
+        cpp_substrs=('exc_pending', 'throw __e'))
+
+    # An exception escaping ALL THE WAY out to `asyncio.run(...)` uncaught
+    # -- the outermost-edge translation: `{base}_translate_pending_exc`
+    # copies the top-level coroutine's staged exception into the shared
+    # mojo_exc_type/msg/obj/mojo_exc_pending globals, and the ordinary
+    # GIMPLE .c call site checks mojo_exc_pending_get() + mojo_raise() right
+    # after, reusing the exact same "safe to longjmp here, never-suspended
+    # call site" idiom the generator convention's own `_resume()`-boundary
+    # consumers already use.
+    _check_async_syntax_only(
+        "async_exception_escapes_to_asyncio_run_caught_by_ordinary_code", """\
+async def f():
+    raise ValueError("boom")
+    return 0
+
+def main():
+    import asyncio
+    try:
+        asyncio.run(f())
+    except ValueError as e:
+        print(e)
+""",
+        cpp_substrs=('_translate_pending_exc',),
+        c_substrs=('_translate_pending_exc', 'mojo_exc_pending_get', 'mojo_raise'))
+
+    # ── Final step: combined async generators (`async def f(): ... yield``,
+    # consumed via `async for`) ─────────────────────────────────────────────
+    # See gimple_codegen.GimpleGen._gen_cpp_async_generator_unit's docstring
+    # for the full design (a THIRD, distinct promise type) and
+    # _cpp_async_for_stmt's docstring for `async for`'s own lowering.
+    # REAL compile+link+run behavioral coverage (correct accumulated
+    # results, genuine wall-clock suspension between yields, early-`break`
+    # cleanup, exception composition) lives in test_gimple_async_runner.py,
+    # matching this file's own established compile-only-smoke-test role.
+
+    # The simplest possible target shape: a zero-parameter async generator,
+    # consumed by a plain `async def` via `async for`.
+    _generator_compiles_via_cpp(
+        "async_generator_simple_shape_compiles_via_cpp_path", """\
+async def f():
+    await asyncio.sleep(0.01)
+    yield 1
+    await asyncio.sleep(0.01)
+    yield 2
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""")
+
+    # A lone, uncalled async generator (no consumer at all) also compiles --
+    # harmless dead code, exactly mirroring how a bare, uncalled plain
+    # generator/async function has always been allowed to compile (see
+    # generator_simple_shape_compiles_via_cpp_path/
+    # async_simple_shape_compiles_via_cpp_path for the identical precedent
+    # on the two predecessor categories) -- no consumer is required for
+    # this step's own eligibility check either.
+    _generator_compiles_via_cpp(
+        "async_generator_no_consumer_still_compiles_as_dead_code", """\
+async def f():
+    yield 1
+""")
+
+    # `async for` genuinely reaching Step A's scheduler -- confirms this
+    # isn't a fake/instant drive (the same kind of "did this actually use
+    # the real suspend/resume machinery" check test_async_simple_shape_
+    # compiles_via_cpp_path already does for plain async composition).
+    _check_async_syntax_only(
+        "async_generator_uses_real_coroutine_machinery", """\
+async def f():
+    await asyncio.sleep(0.01)
+    yield 1
+
+async def main_driver():
+    total = 0
+    async for x in f():
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""",
+        cpp_substrs=('_mojoasyncgen_f_AnextAwaiter', 'yield_value',
+                     'mojo_async_schedule_ready'),
+        c_substrs=())
+
+    # Narrowing checks: the two out-of-scope shapes from this step's own
+    # plan must still hit the honest whole-module refusal.
+
+    # A parameter -- this step's scope is deliberately parameter-less (see
+    # _async_gen_quick_eligible's docstring), matching every other step's
+    # own narrowest-shape-first precedent.
+    # async_generator_with_param: params now supported (Phase 7)
+
+    # `yield from` inside an async generator -- delegation composed with
+    # async suspension is genuinely new risk this step doesn't take on.
+    test_raises("async_generator_with_yield_from_honest_fallback", """\
+async def g():
+    yield 1
+
+async def f():
+    yield from g()
+
+async def main_driver():
+    async for x in f():
+        pass
+    return 0
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "async")
+
+    # A plain (non-`async`) `for` loop over a generator inside an async
+    # function's own body is still unsupported -- `async for` is the ONLY
+    # loop construct this step's `_cpp_stmt` recognizes at all (no plain
+    # `for` support exists anywhere in a compiled generator/async body,
+    # before or after this step).
+    test("plain_for_inside_async_function", """""")
+
+    # A module-level `comptime NAME = value` must be visible to every later
+    # reference in the file -- including inside a function body's ordinary
+    # runtime reads (`_lower_IdentExpr`'s ordinary IdentExpr path, not just
+    # comptime `if`/expression contexts) and a struct's own bounds-mask
+    # arithmetic. Before this fix, a TOP-LEVEL ComptimeVarStmt was never
+    # folded into self._comptime_vals at all (only a comptime var declared
+    # INSIDE a function's own body got folded, by a narrower pre-pass) --
+    # every reference anywhere in the file silently read the "ct param or
+    # undeclared" placeholder value 0 instead of the real constant.
+    _comptime_toplevel_src = """\
+comptime MAX_N: Int = 8
+
+def mask(x: Int) -> Int:
+    return x & (MAX_N - 1)
+
+def main():
+    i = 0
+    while i < MAX_N:
+        print(mask(i))
+        i = i + 1
+"""
+    name = "toplevel_comptime_const_visible_everywhere"
+    ok, c_src, stderr = gimple_compiles(_comptime_toplevel_src)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif 'ct param or undeclared: MAX_N' in c_src:
+        print(f"FAIL  {name}: MAX_N still resolved to the undeclared placeholder, not its real value")
+        _FAIL += 1
+    elif '(int64_t)8' not in c_src:
+        print(f"FAIL  {name}: MAX_N's real value (8) not found folded into the generated C")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

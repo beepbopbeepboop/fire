@@ -1,0 +1,381 @@
+# CODEGEN_generator_function: Lib/glob.py
+
+## Status (updated 2026-08-10, later same day — 2 of 3 remaining blockers FIXED; 1 precisely diagnosed, not fixed)
+
+Re-verified against current master. Two real, previously-undiagnosed
+bugs found and fixed this pass (both in `gimple_codegen.py`, both
+generic — not glob.py-specific):
+
+**Fix 1 — self-recursive generator consumed via plain `for`, not
+`yield from`, was refused on every pass.** `_glob2`'s `yield from
+_rlistdir(...)` compiles fine, but `_rlistdir` itself is recursive via
+an ORDINARY consuming loop (`for y in _rlistdir(path, ...): yield
+_join(x, y)`, glob.py:224 — the classic `os.walk`-style recursive-
+directory-listing shape), not `yield from`. `_cpp_for_generator_
+delegate` (the codegen for "plain `for` over an already-compiled
+sibling generator") had no self-recursion case at all — only `_cpp_
+yield_from` did (added for a previous, `yield from`-only bug). Since a
+generator only registers into `self._generator_api`/`self._supported_
+generators` AFTER its own body finishes compiling, a genuinely self-
+recursive `for` loop inside that SAME body can never find itself there
+on any retry pass (unlike an ordinary forward-reference to a sibling
+defined later, which the existing multi-pass retry loop already
+handles) — `MOJO_DEBUG=1` showed `_rlistdir` permanently refused:
+"`for ... in _rlistdir(...)` does not consume a generator this compile
+has itself already translated... — the consumed generator must be
+defined earlier", taking the whole module's compile down every time.
+Fixed by mirroring `_cpp_yield_from`'s existing self-recursion handling
+(`self._cpp_gen_self_name`/`_base`/`_params`, the same locally-tracked
+context) into `_cpp_for_generator_delegate`: detects `for x in
+<this-same-function>(...)`, builds the delegate call from the
+in-progress self-context instead of the not-yet-populated real
+registry, and declares the per-iteration loop-consumption local via
+C++ `auto` (its real type isn't known until AFTER this whole
+generator's own body finishes — but `_gen_cpp_generator_unit` already
+emits a forward `extern "C"` declaration for `{base}_value` whenever
+self-recursion is detected, so `auto` deduction against that forward
+declaration is provably correct, not a guess). A tuple-valued
+self-recursive loop target is refused honestly (falls through the
+existing `tuple_slot_ctypes is None` check) rather than guessed at —
+out of scope here.
+
+**Fix 2 — `_func_csym`'s mangled-key mirror used `setdefault`, freezing
+a function's return/param type at whatever it was on the FIRST call,
+even after later passes corrected it.** `_join`'s return type is
+correctly inferred `char *` by Pass 1.3e ("refresh return types now
+that param inference is final") — confirmed directly via debug
+instrumentation: `func_return_types['_join']` == `'char *'` throughout.
+But `_glob0` (which calls `_join`, and is compiled EARLIER in source
+order) resolves its OWN call site's C symbol via `_func_csym('_join')`,
+which mirrors the bare-name entry into the mangled-symbol key
+(`func_return_types['_join_abb124']`) via `setdefault` — so whichever
+call happened to run FIRST froze the mangled key's value forever,
+regardless of any later correction to the bare key. `_emit_call` (the
+GIMPLE call-emission helper) looks up the callee's return type BY THE
+MANGLED KEY specifically to decide whether a cast is needed — a stale,
+wrong mangled entry there overrides an otherwise-correct `ret_type`
+with the wrong one, and then emits the call's real (correct) result
+straight into a temp declared with the WRONG type, with no cast at all
+(since the whole point of that lookup is "insert a cast when the two
+disagree" — it never considered its own answer might itself be stale).
+Concretely: `_t8 = _join_abb124(_t5, _t7);` assigned a genuine `char *`
+return into an `_t8` declared `int64_t` — GCC's `-Wint-conversion`
+"assignment to 'int64_t' from 'char *'" — reported at `glob.py:175`
+only because of `-fgimple`'s unreliable un-`#line`-stamped physical-line
+counting (the 2026-08-09 entry below already established the real
+offending statement is inside `_glob0`, not `_glob2` — this pass
+confirms and fixes the actual root cause that entry left open).
+Fixed by changing both `func_param_types`/`func_return_types` mirrors in
+`_func_csym` from `setdefault` to a plain assignment — always
+re-mirroring the CURRENT bare-name value is strictly more correct than
+freezing at first use, since later passes only ever have MORE
+information than earlier ones, never less.
+
+Verified via a direct isolated compile (both `do_imports=False` and the
+full `do_imports=True` build): `_t3 = _join_abb124(_t5, _t7);` now (no
+more int64_t detour), `_join`'s own definition/forward-declaration were
+already correct (`char * _join_abb124 (char *, char *)`) and unchanged.
+Whole-build error count for the SAME full `mojo.py build`: 505 → 504
+(exactly the one fixed error; a full before/after error-message-set
+diff confirms zero new error categories introduced — the other 2
+pre-existing `-Wint-conversion` "int64_t from char*" instances
+elsewhere in the build, unrelated call sites, are untouched).
+
+Full mandatory gate (CLAUDE.md) re-run after BOTH fixes together:
+- `python3 test_gimple.py`: 247 passed, 0 failed
+- `python3 test_module_cache.py`: 76 passed, 0 failed
+- `make check-selfhost`: clean (mojo.py compiling its own source)
+- From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
+- `python3 compile_stdlib.py` (no `-j`): 664/664 passed, 0 unexpected
+
+**glob.py itself still does not build** — exactly ONE error remains,
+precisely diagnosed but NOT fixed this pass (same architectural class
+as the already-tracked, deliberately-deferred `bugs/hard/CODEGEN_same_
+bare_name_struct_collision_across_modules.md`, just for FREE-FUNCTION
+signatures instead of struct layouts):
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:354:9: error: too few arguments to function 'translate_584a43'; expected 4, have 1
+```
+
+Root cause, confirmed by direct inspection of the generated `.ci`:
+glob.py's own `translate(pat, *, recursive=False, include_hidden=False,
+seps=None)` (glob.py:294, 1 positional + 3 keyword-only params) is
+compiled correctly as a real 4-parameter C function
+(`char * translate_584a43 (char * pat, int64_t recursive, int64_t
+include_hidden, int64_t seps)`). But its ONE call site
+(`_compile_pattern`, glob.py:354: `translate(pat, recursive=recursive,
+include_hidden=True, seps=seps)`) emits `translate_584a43 (_t11)` — only
+`pat`, all 3 keyword arguments silently dropped. `Lib/fnmatch.py`
+(transitively imported) has its OWN, UNRELATED top-level `def
+translate(pat):` (fnmatch.py:95 — a single-positional-arg, no-kwonly-
+param function, mangled separately as `fnmatch_translate_584a43` since
+its own module-qualification differs). `_lower_named_call`'s keyword-
+argument-padding logic (`expected_params = self.func_param_types.get
+(fname_raw, [])`, keyed by the BARE name `'translate'`) reads from
+`self.func_param_types` — a dict SHARED across the entire `do_imports=
+True` transitive compile, not module-qualified, first/last-write-wins
+— so glob.py's own `translate` call site ends up reading fnmatch.py's
+`translate`'s signature (1 param) instead of its own (4 params),
+padding zero extra arguments instead of the 3 needed. This reproduces
+even though `mojo.py build`'s PRIMARY path (`driver.py`'s per-module
+link mode) would normally make this class of collision unreachable
+(each module its own translation unit there) — glob.py's build falls
+through to the vulnerable `do_imports=True` WHOLE-PROGRAM inline path
+(`build_executable`'s fallback) for unrelated reasons (its own
+coroutine-generator content), which is exactly the "structurally
+possible when the primary link-mode path is bypassed" caveat the
+same-bare-name-collision hard-bug doc already documents for the
+struct-layout version of this same architectural gap. Not attempted
+here: fixing it properly means module-qualifying `func_param_types`/
+`func_return_types`/`_func_kwargs_slot` (or an equivalent conflict-
+detection layer) across the whole `do_imports=True` compile — the same
+broad, high-blast-radius shared-registry rework the struct-collision
+doc already deliberately declined to attempt in a narrow pass, now
+confirmed to also affect free-function signature/kwarg-padding
+resolution, not just struct field layouts. Flagged here precisely so a
+future pass targeting that whole hard-bug family has a second, cleanly
+independent confirmed instance to fix alongside the struct one.
+
+## Status (updated 2026-08-10 — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
+
+Investigated this session's cross-cutting task tracing a recurring
+`invalid use of undefined type 'struct _<modname>_toplev'` GCC error
+across 9 bug docs. This file was named in the 2026-08-07 entry below as
+"likely another symptom of the same cross-module collision class" —
+confirmed via a fresh rebuild that's WRONG (or at least stale): zero
+occurrences of that exact error now (already fixed by the mechanism-1/
+mechanism-2 fixes referenced there, `bugs/hard/COMPILE_FAIL_module_
+toplev_struct_never_fully_defined.md`, deleted as resolved).
+
+Found and fixed one closely related, previously-undocumented bug while
+tracing the mechanism, and this file was the one that pinned it down
+precisely: `typing.py` (transitively imported) does
+```python
+class _LazyAnnotationLib:
+    def __getattr__(self, attr):
+        global _lazy_annotationlib
+        import annotationlib
+        _lazy_annotationlib = annotationlib
+        return getattr(annotationlib, attr)
+```
+`_gen_struct_method`/`_gen_lifted_closure` (gimple_codegen.py) never
+set `self._current_module_ctx` — so this class's methods, compiled
+FIRST in typing.py's own recursive do_imports=True compile (before any
+ordinary function/toplevel statement had set the context), inherited
+stale/default state and routed the `global` write to the wrong
+module's struct: `struct '_root_toplev' has no member named
+'_lazy_annotationlib'` (should have been `_typing_globals`). Fixed by
+setting the context explicitly in both methods, mirroring `gen_func`/
+`_gen_toplevel`'s existing identical line. Also fixed a related
+`_safe_coerce_emit` bug this exposed: its `is_field` check only
+recognized `->`-accessed struct-field LHS (needed to route a cast
+through a register temp first, an `-fgimple` requirement), not plain
+`.`-accessed ones (a non-pointer globals-struct instance's own field)
+— once the write correctly targeted `_typing_globals._lazy_
+annotationlib`, it produced an invalid combined cast+store statement,
+"non-register as LHS of unary operation". Fixed by recognizing `.` too.
+
+Effect on this file: total build error count dropped 504 -> 502 (both
+of the above, confirmed via a full category diff — zero new error
+categories introduced, only these 2 disappeared). This file's real
+remaining blockers (line 175 / `_join_abb124`'s return-type gap, line
+354 / `translate_584a43` keyword-arg-arity gap, described below) are
+unaffected. No reclassification — glob.py still does not build.
+
+## Correction (2026-08-09, later same day): the line-175 error's root cause was misattributed
+
+The "updated 2026-08-09" note directly below (from an earlier commit
+the same day) claimed `bugs/hard/CODEGEN_cross_module_bare_import_name_
+collision.md`'s `_global_to_module` collision was "the real root cause
+of the line-175 error" and "still present and unfixed." A careful
+re-derivation (not just re-matching the same misleading `glob.py:175`
+GCC line number, which this doc's own earlier methodology note already
+warns is unreliable for this function) found this was wrong: the
+`_global_to_module` read-side misattribution for `contextlib`
+(glob.py's own `_listdir`, reading `_subprocess_globals.contextlib`)
+was ALREADY fixed as a side effect of `bugs/hard/CODEGEN_module_globals_
+cross_contamination_via_imported_stmts.md`'s "Mechanism 3" fix (commit
+`21f5f49`, landed before this doc's own "updated 2026-08-09" note was
+written — the note re-matched the symptom without re-verifying the
+mechanism still applied). Confirmed directly: stripping all `#line`
+directives from the generated `.ci` and recompiling shows GCC's real
+physical-line error is inside `_glob0_737363` (`_t8 =
+_join_abb124(_t5, _t7)` — assigning `_join_abb124`'s `char *` return
+into an `int64_t`-declared temp), NOT any `contextlib`/`_global_to_
+module` misattribution — a distinct, unrelated return-type-inference
+gap in codegen for a path-join-style helper call. Separately confirmed
+`_listdir_132aaf`'s own generated code no longer reads `_subprocess_
+globals.contextlib` at all (falls through to the safe "unknown
+identifier" placeholder, since it correctly recognizes it does not own
+that name). `bugs/hard/CODEGEN_cross_module_bare_import_name_collision.
+md` has been removed as fixed (see its own former content / this
+commit's message for the full evidence). glob.py itself still does not
+build — same practical bottom line — but for the `_join_abb124`
+return-type bug above (not yet investigated further) and the line-354
+`translate()` keyword-arg-arity gap already described below, not this
+one.
+
+## Status (updated 2026-08-09, re-verified — unchanged)
+
+Re-verified against current master (post-merge `7df52a0`). Still fails
+identically to the 2026-08-07 diagnosis below — exact same two errors,
+same lines:
+```
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:175:7: error: assignment to 'int64_t' {aka 'long long int'} from 'char *' makes integer from pointer without a cast [-Wint-conversion]
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:354:9: error: too few arguments to function 'translate_584a43'; expected 4, have 1
+```
+Confirmed again: `MOJO_DEBUG=1` shows no "not eligible" refusal for any
+of glob.py's own generators. (See the correction above — the line-175
+root-cause claim in this section is superseded/wrong.)
+
+One addition: pinned down the second error (line 354,
+`translate_584a43` arity mismatch) precisely — it is NOT generator-
+related either. `translate(pat, *, recursive=False, include_hidden=
+False, seps=None)` (glob.py:294) is an ordinary function with 3
+keyword-only parameters; its one call site, `_compile_pattern`
+(glob.py:354, `translate(pat, recursive=recursive, include_hidden=True,
+seps=seps)`), passes all 3 by keyword. `translate` itself contains no
+`yield` — this is a plain call-codegen gap in keyword-only-argument
+forwarding for an ORDINARY function call, unrelated to the coroutine
+generator path this cluster of bug docs is about. Left uninvestigated
+further here (out of scope for the generator-codegen cluster; would be
+better tracked as its own non-generator `CODEGEN_` doc if it recurs
+elsewhere — a quick grep of the other 2 bug docs in this batch,
+gettext.py/imaplib.py, found no matching symptom, so not folded into a
+shared doc yet).
+
+## Status (updated 2026-08-07, re-diagnosed — previous root cause was WRONG)
+
+**STILL FAILING**, but the 2026-08-06 note's root-cause analysis below
+(a generator yield-value forward-reference type-inference bug) has been
+**re-investigated and disproven**. Re-confirmed against current master:
+`MOJO_DEBUG=1` still shows NO "not eligible" refusal for any of glob.py's
+own generators (`_iglob`, `_glob1`/`_glob0`, `_glob2`, `_iterdir`,
+`_rlistdir`) — they all still reach real `.cpp` coroutine generation, and
+directly inspecting the generated `.cpp` (both in isolation, `do_imports=
+False`, and inside the full `do_imports=True` build) confirms
+`_mojogen__glob2_value` is correctly typed `char *` in BOTH — i.e.
+`_glob2`'s own promise/yield-value type inference is and was already
+CORRECT. The forward-reference `_generator_yield_ctype` theory doesn't
+hold up: `_yield_from_delegate_ctype` (gimple_codegen.py:2560) already
+defaults an unregistered-generator `yield from` target to `'char *'`
+(not `int64_t` — that default was fixed by commit `c234efb`, already on
+master), so even the forward-reference case was never actually broken
+here.
+
+**Real root cause: `bugs/hard/CODEGEN_cross_module_bare_import_name_
+collision.md`** (new hard-bug doc, written this session). The failing
+line is NOT inside `_glob2` at all — GCC's reported `glob.py:175` is a
+red herring (an artifact of un-`#line`-stamped physical-line counting
+past the end of the PREVIOUS `#line`-stamped statement; `_glob2`'s own
+source-line range never appears in the `.ci` at all, since it compiles
+entirely via the `.cpp` coroutine path). The real offending code is
+`_listdir` (a plain, non-generator helper a few lines later in the same
+`.ci` region):
+
+```python
+def _listdir(dirname, dir_fd, dironly):
+    with contextlib.closing(_iterdir(dirname, dir_fd, dironly)) as it:
+        return list(it)
+```
+
+`glob.py` does `import contextlib` at module scope, but the compiled
+`.ci` resolves that bare name to `_subprocess_globals.contextlib` —
+`Lib/subprocess.py` (transitively reachable from glob.py's own import
+graph) ALSO does `import contextlib`, and `self._global_to_module`
+(gimple_codegen.py:3907), the name-only "which module owns this bare
+global name" map, is SHARED across every module compiled in the same
+`do_imports=True` build with first-registration-wins semantics —
+subprocess's registration happens first (its own recursive sub-compile
+runs before glob.py's own root-level preamble scan), so glob.py's own
+`contextlib` reads get silently redirected to subprocess's globals
+struct instead of its own. The resulting type mismatch (subprocess's
+`contextlib` field's C type vs. what `_listdir`'s locals expect) is what
+actually produces the `-Wint-conversion` "assignment to int64_t from
+char*" error. See the hard-bug doc for the full trace, breadth (at
+least 9 `Lib/*.py` files `import contextlib` alone — this is not
+glob.py/contextlib-specific), and why it's deliberately NOT fixed here
+(same architectural shape/blast radius as the already-deferred task
+#141, `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_
+modules.md` — a shared, name-only, first-writer-wins cross-module map
+used at 4+ separate read sites project-wide, not a narrow generator-
+codegen bug at all).
+
+**Classification: NOT a generator-codegen-cluster failure.** Both of
+glob.py's own generators compile correctly; the failure is entirely in
+plain (`.ci`) code that happens to consume one, via a totally unrelated
+cross-module global-resolution bug.
+
+The two other current errors (`translate_584a43` arity mismatch,
+`struct _subprocess_toplev` undefined) were not investigated further —
+still look unrelated to the generator-codegen cluster (arity/import-
+resolution issues in non-generator code; the `_subprocess_toplev`
+naming is likely itself another symptom of the same cross-module
+collision class, given the pattern above) and are left for a separate
+pass.
+
+## Status (updated 2026-08-06, SUPERSEDED — root cause below was wrong, kept for history)
+
+**STILL FAILING**, re-diagnosed against current master (`2b0c4c5`) — the
+2026-07-30 `'os' was not declared` .cpp error no longer reproduces
+(dyld.py's documented "module attribute access not threaded into
+generator scope" gap — see `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`
+— appears fixed for glob.py's shape at least). `MOJO_DEBUG=1` shows NO
+"not eligible" refusal for any of glob.py's own generators (`_iglob`,
+`_glob1`/`_glob0`, `_glob2`, `_iterdir`, `_rlistdir`) — all pass the
+eligibility pre-filter and reach real `.cpp` generation.
+
+Current failure, still inside the generator-codegen cluster but a
+DIFFERENT, narrower bug than the old one:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/glob.py:175:7: error: assignment to 'int64_t' {aka 'long long int'} from 'char *' makes integer from pointer without a cast [-Wint-conversion]
+```
+
+**Root cause (read from `_glob2`'s source) — WRONG, see 2026-08-07 above:**
+```python
+def _glob2(dirname, pattern, dir_fd, dironly, include_hidden=False):
+    assert _isrecursive(pattern)
+    if not dirname or _isdir(dirname, dir_fd):
+        yield pattern[:0]                                    # char* (empty string slice)
+    yield from _rlistdir(dirname, dir_fd, dironly,            # forward reference!
+                         include_hidden=include_hidden)
+```
+`_glob2` has TWO yield sites of apparently different shapes: a direct
+`yield pattern[:0]` (a string slice, `char *`) and a `yield from
+_rlistdir(...)` — but `_rlistdir` is DEFINED LATER in the file (line
+218, vs. `_glob2` at line 170). This is the same forward-reference
+caveat already surfaced in this session's `MOJO_DEBUG` output for a
+different function in this same file (`tokenize`-style note: *"the
+delegated-to generator must be defined earlier"*) — when the overall
+generator's yielded-VALUE type is computed (`_generator_yield_ctype`),
+the `yield from` to a not-yet-registered generator apparently doesn't
+contribute its real element type to the join, so the combined value type
+collapses to the `int64_t` default instead of joining to `char *` (the
+correct common type, since `_rlistdir` itself ultimately yields strings
+too). The result: the coroutine promise's `yield_value` is generated
+expecting `int64_t`, but the `yield pattern[:0]` call site still
+produces a real `char *` — hence "assignment to int64_t from char*".
+
+This is a variant of the already-documented "generator yielded-value
+type inference" gap (`bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s
+bullet 1, and the untyped-generator-param cousin in
+`bugs/hard/CODEGEN_generator_struct_typed_param_refused.md`'s sibling
+docs) — specifically the FORWARD-REFERENCE angle of it: a generator with
+a `yield from` to a same-file sibling generator defined LATER, combined
+with an earlier plain `yield` of a different concrete type, produces a
+wrong combined promise type. Not folded into a new hard-bug doc here
+(only one clean instance traced end-to-end so far) — flagged for whoever
+next hits this shape to fold into a broader "generator yield-value type
+inference" hard doc once 2-3 more instances are confirmed.
+
+The two other current errors (`translate_584a43` arity mismatch,
+`struct _subprocess_toplev` undefined) were not investigated — they look
+unrelated to the generator-codegen cluster (arity/import-resolution
+issues in non-generator code) and are left for a separate pass.
+
+## Build error
+
+
+Source file: /Users/mrs/net/Python-3.14.6/Lib/glob.py

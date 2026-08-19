@@ -197,7 +197,7 @@ int main() {{
 
         return so_file
 
-    def compile_and_execute(self, mojo_src: str, filename: str = "") -> any:
+    def compile_and_execute(self, mojo_src: str, filename: str = "", program_args: list = None) -> any:
         """Compile Mojo code to ARM64 and execute it.
 
         Uses SHA256-based caching to avoid recompilation of identical source.
@@ -205,6 +205,9 @@ int main() {{
         `filename` is threaded into compile_to_gimple so the --jit path produces
         byte-identical GIMPLE to the --dump-full/build path (filename feeds the
         module-name derivation and #line directives).
+
+        `program_args` are forwarded as the executed binary's argv (after the
+        binary path itself), matching how `mojo.py run` and `mojo.py build` work.
         """
         try:
             # Check cache first
@@ -213,12 +216,13 @@ int main() {{
             if os.path.exists(cache_file):
                 if os.environ.get('DEBUG_JIT'):
                     print(f"Using cached binary: {cache_file}", file=sys.stderr)
-                # Execute cached binary
-                result = subprocess.run([cache_file])
+                # Execute cached binary with forwarded arguments
+                cmd = [cache_file] + (list(program_args) if program_args else [])
+                result = subprocess.run(cmd)
                 if result.returncode != 0:
                     print(f"JIT execution failed with code {result.returncode}", file=sys.stderr)
-                    return None
-                return None
+                    return False
+                return True
 
             # Generate GIMPLE code with transitive closure (do_imports=True)
             gimple_code = compile_to_gimple(mojo_src, do_imports=True, filename=filename)
@@ -258,7 +262,7 @@ int main() {{
             result = subprocess.run(compile_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"JIT compilation failed: {result.stderr}", file=sys.stderr)
-                return None
+                return False
 
             # Compile runtime
             runtime_o = os.path.join(self.temp_dir, f"{source_hash}_runtime.o")
@@ -274,31 +278,32 @@ int main() {{
             result = subprocess.run(runtime_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"JIT runtime compilation failed: {result.stderr}", file=sys.stderr)
-                return None
+                return False
 
             # Link executable to cache location
             link_cmd = [_GCC_BIN, "-o", cache_file, o_file, runtime_o]
             result = subprocess.run(link_cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"JIT linking failed: {result.stderr}", file=sys.stderr)
-                return None
+                return False
 
             if os.environ.get('DEBUG_JIT'):
                 print(f"Cached binary saved to: {cache_file}", file=sys.stderr)
 
             # Execute the compiled binary (don't capture output so it goes directly to stdout)
-            result = subprocess.run([cache_file])
+            cmd = [cache_file] + (list(program_args) if program_args else [])
+            result = subprocess.run(cmd)
             if result.returncode != 0:
                 print(f"JIT execution failed with code {result.returncode}", file=sys.stderr)
-                return None
+                return False
 
-            return None  # Output already printed to stdout
+            return True  # Output already printed to stdout
 
         except Exception as e:
             print(f"JIT error: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
-            return None
+            return False
 
     def cleanup(self):
         """Clean up temporary files."""

@@ -24,7 +24,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import cas
 import reflect
-from build_config import find_gcc
+from build_config import find_gcc, find_gxx
 from gimple_codegen import GimpleGen, FromImportStmt
 from mojo_compiler import py_tokenize, Parser
 from module_loader import load_module, STDLIB_PATH, module_name_for_path
@@ -213,18 +213,19 @@ def _module_name_for(path: str) -> str:
     return module_name_for_path(path)
 
 
-def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str) -> bytes:
+def _compile_one_object(src: str, path: str, name: str, workdir: str, gcc: str,
+                         objflags: tuple = _OBJ_FLAGS) -> bytes:
     """Cold-path builder: Mojo → C → .o; returns the object's bytes."""
     cfile = os.path.join(workdir, name + '.c')
     ofile = os.path.join(workdir, name + '.o')
     with open(cfile, 'w') as f:
         f.write(compile_module_to_c(src, path, name))
-    subprocess.run([gcc, *_OBJ_FLAGS, '-c', '-o', ofile, cfile], check=True)
+    subprocess.run([gcc, *objflags, '-c', '-o', ofile, cfile], check=True)
     with open(ofile, 'rb') as f:
         return f.read()
 
 
-def _compile_module_job(path: str, workdir: str, use_cache: bool):
+def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tuple = _OBJ_FLAGS):
     """Per-module independent work (source → object): read, collect exports,
     compile (cache-or-build). Each module is fully independent — no shared
     state — so this parallelizes across processes the same way
@@ -250,21 +251,31 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool):
     hit = None
     try:
         if use_cache:
-            key = cas.module_key(src, _imported_sigs(src), gcc, _OBJ_FLAGS)
+            key = cas.module_key(src, _imported_sigs(src), gcc, objflags)
             ofile, hit = cas.get_or_build(
-                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc))
+                key, '.o', lambda: _compile_one_object(src, path, name, workdir, gcc, objflags))
         else:
             ofile = os.path.join(workdir, name + '.o')
             with open(ofile, 'wb') as f:
-                f.write(_compile_one_object(src, path, name, workdir, gcc))
+                f.write(_compile_one_object(src, path, name, workdir, gcc, objflags))
     except Exception as e:
         return path, name, None, exports, str(e), hit
     return path, name, ofile, exports, None, hit
 
 
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
-          extra_exports: list = None, jobs: int = 1) -> str:
+          extra_exports: list = None, jobs: int = 1, opt_flag: str = None) -> str:
+    """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
+    (mojo_runtime.c/mojo_async_runtime.cpp) own object-compile flags, and
+    into their CAS keys (so an -O2 build never serves a stale -O0-compiled
+    object, or vice versa) — `_OBJ_FLAGS`/plain `toolchain_fingerprint(gcc,
+    ())` on their own carry NO optimization flag (gcc's implicit -O0),
+    appropriate for the STDLIB dylib (compiled once, used everywhere,
+    optimized for compile time / cache-friendliness) but not for a
+    `mojo dylib`-built artifact meant to be linked into a real program and
+    actually run at speed."""
     gcc = find_gcc()
+    objflags = _OBJ_FLAGS + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
@@ -278,7 +289,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         with ProcessPoolExecutor(max_workers=jobs) as pool:
             results = list(pool.map(
                 _compile_module_job, modules,
-                [workdir] * len(modules), [use_cache] * len(modules)))
+                [workdir] * len(modules), [use_cache] * len(modules),
+                [objflags] * len(modules)))
         # Merge each job's own CAS hit/miss into this process's cas.stats —
         # see _compile_module_job's docstring on why worker-process stats
         # don't propagate on their own. Only needed here: the jobs<=1 path
@@ -291,7 +303,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
             elif hit is False:
                 cas.stats['misses'] += 1
     else:
-        results = [_compile_module_job(path, workdir, use_cache) for path in modules]
+        results = [_compile_module_job(path, workdir, use_cache, objflags) for path in modules]
 
     # Greedy symbol-collision dedup: the dylib is a speed hack (a client uses a
     # symbol from it if present, else falls back to source), so it need not be
@@ -341,26 +353,102 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     #   and fold it into the dylib (no separate runtime dylib needed)
     # - For testing (link_runtime=True): build separate runtime dylib and link against it
     rt_src = os.path.join(RUNTIME, 'mojo_runtime.c')
+    rt_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
     rt_key = 'rtobj/' + cas._hash(
         'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, ()), open(rt_src).read())
+        cas.toolchain_fingerprint(gcc, rt_cflags), open(rt_src).read())
+
+    gxx = find_gxx()
 
     if link_runtime:
-        # For test modules: link against standalone runtime dylib
+        # For test modules: link against standalone runtime dylib (which
+        # itself now also folds in mojo_async_runtime.o — see
+        # runtime_dylib()'s own docstring).
         rt_dylib = runtime_dylib(gcc)
         rt_path = rt_dylib
     else:
         # For production: include runtime object directly
         def _build_rt_obj():
             o = os.path.join(workdir, 'mojo_runtime.o')
-            subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o, rt_src], check=True)
+            subprocess.run([gcc, *rt_cflags, '-c', '-o', o, rt_src], check=True)
             return open(o, 'rb').read()
         rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
         objs.append(rt_o)
+
+        # runtime/mojo_async_runtime.cpp's mojo_coro_resume_generic/
+        # mojo_coro_destroy_generic (+ the AsyncRT_DeviceContext_
+        # enqueueHostFunction(Range) stubs) — needed the moment ANY
+        # compiled stdlib module references `_coro_resume_fn`/
+        # `_coro_destroy_fn` as a bare value (device_context.mojo's own
+        # enqueue_cpu_function/enqueue_cpu_range, and std/runtime/
+        # asyncrt.mojo's `_async_execute` generic — see gimple_codegen.py's
+        # BUILTIN_VALUE_MAP entries for these two names) or defines a
+        # compiled async function/closure at all (MojoAsync's own `_start`/
+        # `_is_done`/`_value`/`_destroy` API). A real, hand-verified
+        # regression otherwise: the module itself compiles clean (gcc
+        # -fgimple -fsyntax-only never sees a linker), and this production
+        # dylib link uses `-undefined dynamic_lookup` (below) so even the
+        # DYLIB LINK doesn't fail — the missing symbol only surfaces as a
+        # dyld "symbol not found in flat namespace" crash the first time a
+        # real program actually calls into the affected stdlib code at
+        # runtime. Compiled with g++ (C++20; the .cpp needs real coroutine/
+        # exception support mojo_runtime.c's plain-C -fgimple objects
+        # don't), CAS-cached exactly like mojo_runtime.o's own object above
+        # — folded into the SAME production dylib (not a separate runtime
+        # piece) via a C++ link driver (find_gxx()) so the final link pulls
+        # in libstdc++ correctly. Scoped to ONLY this (production) branch —
+        # computing it unconditionally added a spurious extra CAS hit/miss
+        # to the link_runtime=True test path's own cas.stats bookkeeping
+        # (test_module_cache.py's stage3 "exactly 2 cache ops" assertions),
+        # even though that path never used the result (runtime_dylib()
+        # already builds its own copy, untracked by cas.stats — see there).
+        async_rt_src = os.path.join(RUNTIME, 'mojo_async_runtime.cpp')
+        async_rt_cflags = ('-std=c++20', '-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
+        async_rt_key = 'rtobj/' + cas._hash(
+            'mojo-async-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
+            cas.toolchain_fingerprint(gcc, async_rt_cflags), open(async_rt_src).read())
+
+        def _build_async_rt_obj():
+            o = os.path.join(workdir, 'mojo_async_runtime.o')
+            subprocess.run([gxx, *async_rt_cflags, '-c', '-o', o, async_rt_src], check=True)
+            return open(o, 'rb').read()
+        async_rt_o, _ = cas.get_or_build(async_rt_key, '.o', _build_async_rt_obj)
+        objs.append(async_rt_o)
         rt_path = None
 
     if extra_exports:
         all_exports.extend(extra_exports)
+
+    # Safety net: an export entry (from reflect.collect_exports_src's source
+    # scan, or from extra_exports/collect_runtime_exports_h's header scan)
+    # can drift out of sync with what actually got a compiled body — e.g.
+    # BUG-2026-036, where a same-file overloaded free function (`def
+    # CUDA(...)` declared twice in std/gpu/host/_nvidia_cuda.mojo) was still
+    # advertised as a normal export even though gen_module's own "overloaded
+    # top-level functions ... can't be emitted as distinct C symbols, drop
+    # them here" pass never compiled a body for it, or a stale prototype in
+    # mojo_runtime.h (e.g. MojoList__write_to) was never actually defined in
+    # mojo_runtime.c. Either way the reflection table would forward-declare
+    # and take the address of a symbol with zero definitions anywhere in the
+    # dylib — `extern void sym();` with nothing behind it — which links fine
+    # (production dylibs use `-undefined dynamic_lookup`) but crashes EVERY
+    # dlopen of the dylib at runtime with "symbol not found in flat
+    # namespace", not just uses of the broken function. Cross-check every
+    # non-TYPE export's expected C symbol against what `nm` says the actual
+    # object set defines, and drop anything orphaned instead of shipping a
+    # dylib that can't even be loaded.
+    all_defs = set()
+    for o in objs:
+        all_defs |= _defined_symbols(gcc, o)
+    _kept = []
+    for e in all_exports:
+        if e['kind'] == reflect.SYM_TYPE or ('_' + reflect.export_csym(e)) in all_defs:
+            _kept.append(e)
+        else:
+            print(f"  drop stale export {e['name']!r}: "
+                  f"{reflect.export_csym(e)} has no definition in the built objects",
+                  file=sys.stderr)
+    all_exports = _kept
 
     # Reflection table source — deterministic given all_exports, so it can
     # participate in the dylib link key before writing the file.
@@ -394,14 +482,18 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     subprocess.run([gcc, '-fno-builtin', '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
-    # Linking depends on whether runtime is included or linked separately
+    # Linking depends on whether runtime is included or linked separately.
+    # link_driver=gxx: the production dylib now always folds in mojo_
+    # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
+    # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
+    # mojo.py's own link_executable(cxx=True) convention exactly.
     if link_runtime:
         # For test modules: link against runtime dylib, all symbols must resolve
         link = _dylink(gcc, out, objs, undefined=False, extra_libs=[rt_path],
-                      rpath=os.path.dirname(rt_path))
+                      rpath=os.path.dirname(rt_path), link_driver=gxx)
     else:
         # For production: cross-module references resolve at load time
-        link = _dylink(gcc, out, objs, undefined=True)
+        link = _dylink(gcc, out, objs, undefined=True, link_driver=gxx)
     subprocess.run(link, check=True)
     # Publish the linked dylib to the shared CAS so future builds skip the link
     # (even on use_cache=False runs: the fresh link is the correct artifact).
@@ -410,18 +502,27 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     return out
 
 
-def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None):
+def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None, link_driver=None):
     """Platform dylib link command. undefined=True allows unresolved symbols
-    (resolved at load from other dylibs, via dyld dynamic lookup)."""
+    (resolved at load from other dylibs, via dyld dynamic lookup).
+
+    link_driver: override the link-time driver binary (e.g. find_gxx()'s g++)
+    used in place of `gcc` for just this final link invocation. Every
+    individual module's .c -> .o compile step is unaffected — this only
+    matters when `objs` includes at least one C++-derived object (the
+    generator-coroutine codegen path, not yet wired into any real build —
+    see build_config.find_gxx()'s docstring). Defaults to `gcc`, so ordinary
+    all-C builds are unchanged."""
+    driver = link_driver or gcc
     if platform.system() == 'Darwin':
-        cmd = [gcc, '-dynamiclib',
+        cmd = [driver, '-dynamiclib',
                '-install_name', '@rpath/' + os.path.basename(out), '-o', out]
         if rpath:
             cmd += ['-Wl,-rpath,' + rpath]
         if undefined:
             cmd += ['-undefined', 'dynamic_lookup']
     else:
-        cmd = [gcc, '-shared', '-fPIC', '-o', out]
+        cmd = [driver, '-shared', '-fPIC', '-o', out]
         if undefined:
             cmd += ['-Wl,--allow-shlib-undefined']
         if rpath:
@@ -440,12 +541,20 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     The stdlib dylib now includes the runtime, but test modules and external
     clients need a separate runtime dylib to link against and resolve symbols.
     Built with all symbols resolved (undefined=False).
-    """
+
+    Also folds in runtime/mojo_async_runtime.o (mojo_coro_resume_generic/
+    mojo_coro_destroy_generic/AsyncRT_DeviceContext_enqueueHostFunction(Range))
+    for the same reason build()'s production dylib path does — a compiled
+    stdlib module (test or production) can reference these via
+    `_coro_resume_fn`/`_coro_destroy_fn` used as bare values, or define a
+    compiled async function/closure, independent of link_runtime mode."""
     gcc = gcc or find_gcc()
+    gxx = find_gxx()
     src = open(os.path.join(RUNTIME, 'mojo_runtime.c')).read()
+    async_src = open(os.path.join(RUNTIME, 'mojo_async_runtime.cpp')).read()
     key = 'rtdylib/' + cas._hash(
-        'mojo-rtdylib-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, flags), src)
+        'mojo-rtdylib-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(gcc, flags), src, async_src)
     out = cas.path_for(key, '.dylib')
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -453,7 +562,11 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
         o = os.path.join(wd, 'mojo_runtime.o')
         subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
                         os.path.join(RUNTIME, 'mojo_runtime.c')], check=True)
-        subprocess.run(_dylink(gcc, out, [o], undefined=False), check=True)
+        async_o = os.path.join(wd, 'mojo_async_runtime.o')
+        subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', async_o,
+                        os.path.join(RUNTIME, 'mojo_async_runtime.cpp')], check=True)
+        subprocess.run(_dylink(gcc, out, [o, async_o], undefined=False, link_driver=gxx),
+                       check=True)
     return out
 
 

@@ -99,6 +99,33 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
 
         return exe_file
 
+def test_multi_name_import_interpreter():
+    """`import a, b, c` must bind *every* name into scope, not just the
+    first (bugs/INTERP_multi_name_import_only_binds_first.md). Regression
+    test for myinterpreter.py's execute_ImportStmt: previously only
+    node.module/node.alias were bound, and every entry in node.extra (the
+    comma-separated targets past the first) was silently dropped, so using
+    e.g. `argparse` after `import sys, os, difflib, argparse` raised a
+    NameError."""
+    from mojo_compiler import py_tokenize, Parser
+    from myinterpreter import Interpreter
+
+    src = "import sys, os, difflib, argparse\n"
+    tokens = py_tokenize(src)
+    stmts = Parser(tokens).with_filename('<test>').parse_module()
+    interpreter = Interpreter(filename='<test>', argv=['<test>'])
+    for stmt in stmts:
+        interpreter.execute(stmt)
+
+    for name in ('sys', 'os', 'difflib', 'argparse'):
+        value = interpreter.scope.get(name)
+        if value is None:
+            print(f"✗ {name!r} was not bound by multi-name import")
+            return False
+        print(f"✓ {name!r} bound: {value!r}")
+    return True
+
+
 def test_import_integration():
     """Test that imports work with compilation and linking.
 
@@ -192,8 +219,18 @@ def main() -> Int:
     return True
 
 if __name__ == '__main__':
+    ok = True
     if test_import_integration():
         print("\n✓ Import integration test passed!")
     else:
         print("\n✗ Import integration test failed")
+        ok = False
+
+    if test_multi_name_import_interpreter():
+        print("\n✓ Multi-name import interpreter test passed!")
+    else:
+        print("\n✗ Multi-name import interpreter test failed")
+        ok = False
+
+    if not ok:
         sys.exit(1)

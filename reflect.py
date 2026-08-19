@@ -42,14 +42,28 @@ def _sig_param_ctypes(signature: str) -> list:
     return out
 
 
-def _func_export_csym(name: str, signature: str) -> str:
-    """The mangled C symbol for a SYM_FUNCTION export — `_safe_name(name)` plus the
-    same overload suffix gimple_codegen._func_csym appends, so the reflection table
-    advertises the symbol the dylib actually defines."""
+def _func_export_csym(name: str, signature: str, module_prefix: str = '') -> str:
+    """The mangled C symbol for a SYM_FUNCTION export — `_safe_name(name)` plus a
+    `module_prefix` qualifier plus the same overload suffix gimple_codegen._func_csym
+    appends, so the reflection table advertises the symbol the dylib actually
+    defines.
+
+    The `module_prefix` qualifier mirrors gimple_codegen.py's _func_qualifier
+    (SB-1 fix, doc/STDLIB-BUGS.md): every free function collect_exports sees is,
+    by construction, declared directly in the module being reflected (this
+    function's own top-level source) — never an inlined import — the same "this
+    compile is that function's true home" condition _func_qualifier checks via
+    _local_top_level_func_names, just always true here. Without it, two modules'
+    same-named overloads that box down to the same C parameter shape (e.g.
+    math.abs(SIMD) and complex.abs(Complex), both boxing to a lone int64_t) would
+    still hash to the identical suffix and collide at link — qualifying by the
+    function's home module (like struct methods already do via
+    _struct_method_csym_static) makes them distinct without touching the hash."""
     base = _safe_name(name)
     if name in _NO_MANGLE_FUNCS:
         return base
-    return base + GimpleGen.overload_suffix_for(_sig_param_ctypes(signature))
+    qualified_base = f"{module_prefix}_{base}" if module_prefix else base
+    return qualified_base + GimpleGen.overload_suffix_for(_sig_param_ctypes(signature))
 
 
 # Symbol kinds — must match reflect.h.
@@ -59,10 +73,23 @@ SYM_GLOBAL = 2
 SYM_TYPE = 3
 
 
-def _c_signature(name: str, return_type, params) -> str:
-    """Build the C signature string for an exported function, per ABI.md."""
-    cret = _mojo_type(return_type) if return_type else 'void'
-    cparams = ', '.join(_mojo_type(t) for _, t in params) if params else 'void'
+def _c_signature(name: str, return_type, params, struct_names=frozenset()) -> str:
+    """Build the C signature string for an exported function, per ABI.md.
+
+    `struct_names` (a locally-defined struct's bare name) must resolve via
+    `_mt`, the SAME helper `collect_exports`'s method/TYPE entries already use
+    below — a free function taking/returning a local struct type (e.g.
+    `def engine_place_block(world: World, ...)`) otherwise fell through plain
+    `_mojo_type`'s int64_t default (unlike methods, which were never affected:
+    `self` is a struct pointer by construction). That wrong C type flows into
+    `_func_export_csym`'s overload-suffix hash, so the reflection table's
+    "expected" mangled symbol silently diverges from what gimple_codegen's
+    `_func_csym` (using its own live-inferred `World *` param type) actually
+    emits — build_stdlib_dylib.build()'s nm cross-check then can't find the
+    expected symbol and drops the export as "stale", even though the real
+    compiled function IS present under its own (differently-hashed) name."""
+    cret = _mt(return_type, struct_names) if return_type else 'void'
+    cparams = ', '.join(_mt(t, struct_names) for _, t in params) if params else 'void'
     return f"{cret} {name} ({cparams})"
 
 
@@ -117,8 +144,13 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
         if isinstance(s, FunctionDef) and not s.name.startswith('_'):
             exports.append({
                 'name': s.name,
-                'signature': _c_signature(s.name, s.return_type, s.params),
+                'signature': _c_signature(s.name, s.return_type, s.params, struct_names),
                 'kind': SYM_FUNCTION,
+                # SB-1 fix: this function's home-module qualifier, so
+                # export_csym/_func_export_csym can compute the same
+                # module-qualified symbol gimple_codegen._func_csym emits for
+                # it (see _func_export_csym's docstring).
+                'module_prefix': module_prefix,
             })
         elif isinstance(s, StructDef) and not s.name.startswith('_'):
             exports.append({
@@ -163,7 +195,23 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     it on demand (ELABORATION.md). (The parser drops `[...]`, so we detect generics
     from the source text.) `module_prefix` is passed straight through to
     collect_exports — see its docstring."""
-    generic = set(re.findall(r'\bfn\s+(\w+)\s*\[', src))
+    # Mojo functions may be declared `fn` or `def` — both forms must be
+    # detected here, or an `def`-declared overload/generic slips past this
+    # filter as a normal single export while gimple_codegen (whose own
+    # equivalent scans use `(?:fn|def)`, e.g. the local-generics regex a few
+    # hundred lines into gen_module) silently drops it from the compiled
+    # object (overloaded top-level functions aren't emitted — see
+    # gen_module's "Overloaded top-level functions ... can't be emitted as
+    # distinct C symbols. Drop them here" pass). The mismatch produced a real
+    # bug (BUG-2026-036): std/gpu/host/_nvidia_cuda.mojo's two `def CUDA(...)`
+    # overloads were still advertised as one export, so the reflection table
+    # forward-declared and took the address of a symbol with zero definitions
+    # in the dylib — `extern void CUDA_0c85c9();` with nothing behind it —
+    # which crashed EVERY interpreter/compiler invocation at dlopen with
+    # "symbol not found in flat namespace '_CUDA_0c85c9'" the moment the
+    # stdlib dylib (loaded unconditionally by driver.py's compile_program) is
+    # bound, regardless of what Mojo file was actually being run.
+    generic = set(re.findall(r'\b(?:fn|def)\s+(\w+)\s*\[', src))
     # Generic struct templates (`struct Name[T]`) aren't a concrete type either —
     # they're instantiated per type-args at use sites (ELABORATION.md slice 5),
     # not a single layout in the dylib. Only concrete structs become TYPE entries.
@@ -171,7 +219,7 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     # Overloaded names (same name, multiple non-generic defs) aren't a single
     # concrete symbol either — they're selected + instantiated per call site.
     counts = {}
-    for n in re.findall(r'\bfn\s+(\w+)\s*\(', src):
+    for n in re.findall(r'\b(?:fn|def)\s+(\w+)\s*\(', src):
         counts[n] = counts.get(n, 0) + 1
     overloaded = {n for n, c in counts.items() if c > 1}
     skip = generic | overloaded
@@ -193,6 +241,18 @@ def _cstr(s: str) -> str:
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def export_csym(e: dict) -> str:
+    """The C symbol an export entry's `(void *)` table address points at.
+    SYM_FUNCTION free functions are overload-mangled by the codegen; methods
+    already carry their mangled name inside the signature. Shared by
+    emit_table_c (to forward-declare/address it) and build_stdlib_dylib.py
+    (to verify, via `nm`, that the compiled object actually defines it before
+    trusting the export — see that module's `build()`)."""
+    if e['kind'] == SYM_FUNCTION:
+        return _func_export_csym(e['name'], e['signature'], e.get('module_prefix', ''))
+    return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
+
+
 def emit_table_c(exports: list) -> str:
     """Emit the C translation unit defining `__mojo_reflect` for these exports.
     Compiled into the dylib alongside the module objects."""
@@ -209,17 +269,11 @@ def emit_table_c(exports: list) -> str:
     # carry a NULL address and are never forward-declared. The C symbol of a
     # METHOD entry is the name inside its signature, not the lookup key
     # (`Struct.method`), so we extract it.
-    def _csym(e):
-        # SYM_FUNCTION free functions are overload-mangled by the codegen; methods
-        # already carry their mangled name inside the signature.
-        if e['kind'] == SYM_FUNCTION:
-            return _func_export_csym(e['name'], e['signature'])
-        return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
     seen = set()
     for e in exports:
         if e['kind'] == SYM_TYPE:
             continue
-        sym = _csym(e)
+        sym = export_csym(e)
         if sym not in seen:
             seen.add(sym)
             # Unprototyped extern avoids referencing struct types that may not
@@ -231,7 +285,7 @@ def emit_table_c(exports: list) -> str:
         if e['kind'] == SYM_TYPE:
             addr = '0'
         else:
-            sym = _csym(e)
+            sym = export_csym(e)
             addr = '(void *)' + sym
         L.append(f"  {{ {_cstr(e['name'])}, {_cstr(e['signature'])}, "
                  f"{addr}, {e['kind']} }},")

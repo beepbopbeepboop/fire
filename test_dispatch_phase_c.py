@@ -1,8 +1,34 @@
 #!/usr/bin/env python3
 """Test DispatchSolver Phase C: GimpleGen integration and dispatch table emission."""
 
+import gimple_codegen
 from mojo_compiler import py_tokenize, Parser
 from gimple_codegen import GimpleGen
+
+
+def _make_selfhost_gen(**kwargs) -> GimpleGen:
+    """Construct a GimpleGen configured as if compiling one of this
+    repo's own self-hosting source files.
+
+    This module's `myinterp_test`/`multi_pattern_test` sources are
+    deliberate, self-contained repros of THIS COMPILER'S OWN self-hosted
+    `Interpreter.execute`-style getattr-as-vtable-dispatch idiom (see the
+    module docstring below) — exactly the pattern
+    `DispatchSolver.allow_assume_all_methods` exists to recognize
+    (gimple_codegen.py, gated to self-hosting compiles only since commit
+    02b14c5's fix, to avoid misfiring on ordinary `getattr(self, attr)`
+    delegation elsewhere — see bugs/hard/CODEGEN_selfhost_getattr_
+    dispatch_heuristic_misfires_on_ordinary_code.md). `gen_module`'s
+    `_is_selfhost_file` gate is path-based (is `self._current_filename`
+    physically under this repo's own source directory?), so we opt in
+    explicitly here the same way a real self-hosting compile would,
+    rather than widening the production gate to cover non-self-host
+    callers too.
+    """
+    gen = GimpleGen(**kwargs)
+    gen._current_filename = gimple_codegen.__file__
+    return gen
+
 
 # Test case: myinterpreter pattern
 myinterp_test = """
@@ -33,7 +59,7 @@ def test_dispatch_table_emission_in_codegen():
     stmts = Parser(tokens).parse_module()
 
     # Generate GIMPLE code with dispatch solver enabled
-    gen = GimpleGen(do_imports=False, emit_str_pool=True, emit_struct_defs=True)
+    gen = _make_selfhost_gen(do_imports=False, emit_str_pool=True, emit_struct_defs=True)
     gimple_code = gen.gen_module(stmts)
 
     print(f"  Generated code length: {len(gimple_code)} bytes")
@@ -80,7 +106,7 @@ def test_dispatch_table_structure():
     tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
-    gen = GimpleGen()
+    gen = _make_selfhost_gen()
     gimple_code = gen.gen_module(stmts)
 
     # Extract typedef section
@@ -149,7 +175,7 @@ class Dispatcher:
     tokens = py_tokenize(multi_pattern_test)
     stmts = Parser(tokens).parse_module()
 
-    gen = GimpleGen()
+    gen = _make_selfhost_gen()
     gimple_code = gen.gen_module(stmts)
 
     # Should have detected multiple patterns
@@ -170,7 +196,7 @@ def test_gimple_syntax_validity():
     tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
-    gen = GimpleGen()
+    gen = _make_selfhost_gen()
     gimple_code = gen.gen_module(stmts)
 
     # Check basic syntax elements
@@ -207,7 +233,7 @@ def test_dispatch_tables_before_functions():
     tokens = py_tokenize(myinterp_test)
     stmts = Parser(tokens).parse_module()
 
-    gen = GimpleGen()
+    gen = _make_selfhost_gen()
     gimple_code = gen.gen_module(stmts)
 
     # Find positions

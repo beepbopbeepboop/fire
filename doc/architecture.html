@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Architecture — Mojo Self-Hosting Compiler</title>
+<style>
+  body { max-width: 56em; margin: 0 auto; padding: 2em; font-family: system-ui, sans-serif; line-height: 1.6; }
+  h1 { border-bottom: 2px solid #222; padding-bottom: .3em; }
+  h2 { margin-top: 2.5em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
+  h3 { margin-top: 1.8em; }
+  code, pre { font-family: "SF Mono", "Fira Code", monospace; font-size: 92%; }
+  pre { background: #f5f5f5; padding: .8em 1em; border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: .4em .7em; text-align: left; }
+  th { background: #eee; }
+  .note { background: #fffbe6; border-left: 4px solid #d4a017; padding: .6em 1em; margin: 1em 0; }
+  .bug { background: #fef0f0; border-left: 4px solid #d44; padding: .6em 1em; margin: 1em 0; }
+</style>
+</head>
+<body>
+
+<h1>Architecture — the self-hosting Mojo compiler</h1>
+
+<p>This doc captures the architecture as discovered through the self-hosting
+bootstrap effort. It focuses on the two-path compilation model and the
+subprocess shim — the bridge that lets the compiled self-hosted binary
+delegate to real Python while the true native backend is being hardened.</p>
+
+<h2>1. Overview</h2>
+
+<p>A Mojo compiler written in Python, bootstrapped to a native binary via GCC
+<code>-fgimple</code>. The end goal: <code>build/mojo</code> (the compiled
+binary) runs <em>its own</em> compiled compiler for everything — no Python
+subprocess at runtime.</p>
+
+<pre>
+┌──────────────────────────────────────────────────┐
+│  Mojo source (.mojo)                             │
+│                                                  │
+│  Path A: python3 mojo.py &lt;file&gt;.mojo  ────────┐  │
+│  Path B: build/mojo &lt;file&gt;.mojo       ──────┐ │  │
+│                                             │ │  │
+│         ┌────────────────────────────────────┤ │  │
+│         │  gimple_codegen.compile_to_gimple  │ │  │
+│         │         │                          │ │  │
+│         │  ┌──────┴──────┐  ┌──────────────┐ │ │  │
+│         │  │ Path A       │  │ Path B        │ │ │  │
+│         │  │ in-process   │  │ INTERCEPTED → │ │ │  │
+│         │  │ (no shim)    │  │ runtime shim  │ │ │  │
+│         │  └──────────────┘  └──────┬───────┘ │ │  │
+│         │                           │         │ │  │
+│         └───────────────────────────┤─────────┘ │  │
+│                                     │           │  │
+│          C + __GIMPLE annotations ◄─┘           │  │
+│                     │                           │  │
+│            gcc -fgimple -c ───► .o              │  │
+│                     │                           │  │
+│            gcc -o ◄─┼──── mojo_runtime.c        │  │
+│                     │                           │  │
+│                  executable                     │  │
+└──────────────────────────────────────────────────┘
+</pre>
+
+<h2>2. Two execution paths</h2>
+
+<h3>Path A — Python-driven (interpreted)</h3>
+<p><code>python3 mojo.py &lt;file&gt;.mojo</code></p>
+<ol>
+<li>Reads source; tokenises via <code>py_tokenize</code>; parses via <code>Parser</code>; rewrites via <code>ast_rewriter.rewrite</code>.</li>
+<li>Calls <code>gimple_codegen.compile_to_gimple*()</code> <em>in-process</em> (no subprocess for codegen).</li>
+<li>Writes <code>.ci</code> (C + <code>__GIMPLE</code> annotations); shells out to <code>gcc -fgimple</code> to compile, then links with <code>runtime/mojo_runtime.c</code>.</li>
+</ol>
+<p>The interpreter path (<code>mojo.py run</code> / <code>interpret_and_execute</code>) uses <code>myinterpreter.py</code> directly, bypassing compilation entirely.</p>
+
+<h3>Path B — Self-hosted (compiled)</h3>
+<p><code>build/mojo &lt;file&gt;.mojo</code></p>
+<p><code>build/mojo</code> is the <em>compiled</em> transitive closure of <code>mojo.py</code> — it contains compiled versions of <code>mojo_compiler.py</code>, <code>gimple_codegen.py</code>, <code>module_loader.py</code>, etc. When it compiles code, every call to <code>gimple_codegen.compile_to_gimple[_cached](...)</code> is <strong>intercepted at lowering time</strong> and replaced by the C runtime shim (§4). The compiled binary therefore never runs its own compiled codegen for <code>.ci</code> generation — it shells out to real Python.</p>
+
+<p>Why this matters: <strong><code>.ci</code> output from the compiled binary is real Python's, not the compiled compiler's.</strong> Bug fidelity for the self-hosted backend has never been tested for <code>.ci</code>. Only the <code>.tok</code> / <code>.ast</code> diagnostic dumps call compiled <code>Parser</code> / <code>py_tokenize</code> directly — and those historically exposed many bugs (<code>doc/IMPL.md:302-309</code>).</p>
+
+<h2>3. Component inventory</h2>
+
+<table>
+<tr><th>File</th><th>Role</th></tr>
+<tr><td><code>mojo_compiler.py</code></td><td>Tokenizer (<code>py_tokenize</code>) + recursive-descent <code>Parser</code>. <strong>Single source of truth</strong> for all AST node definitions — <code>myinterpreter.py</code> and <code>gimple_codegen.py</code> both import AST nodes as <code>import mojo_compiler as N</code>.</td></tr>
+<tr><td><code>gimple_codegen.py</code></td><td><code>GimpleGen</code> class — lowers Mojo AST → C with GNU GIMPLE annotations. Key entry points: <code>compile_to_gimple</code> (3-arg ABI pinned), <code>compile_to_gimple_cached</code> (CAS layer), <code>compile_to_gimple_with_cpp</code> (generator/async), <code>compile_to_gimple_linked</code> / <code>compile_linked</code> (link mode).</td></tr>
+<tr><td><code>ast_rewriter.py</code></td><td>AST rewrite pass (Python → Mojo normalization). Runs between parsing and codegen.</td></tr>
+<tr><td><code>myinterpreter.py</code></td><td>Tree-walking interpreter — imports AST nodes from <code>mojo_compiler</code>; executes them directly. Used by <code>mojo.py run</code>.</td></tr>
+<tr><td><code>module_loader.py</code></td><td>Stdlib import resolution, signature scanning (reflection-based), <code>tokenize</code>/<code>os</code>/<code>typing</code>/<code>ctypes</code> special-casing. Sibling file scan for <code>__init__.mojo</code> packages.</td></tr>
+<tr><td><code>reflect.py</code></td><td>Emits the <code>__mojo_reflect</code> C-ABI table per dylib (name + signature + address). Read by <code>module_loader.read_reflection</code> via ctypes.</td></tr>
+<tr><td><code>driver.py</code></td><td><code>mojo build</code> / <code>mojo run</code>: link-mode compile via <code>compile_linked</code>; CAS-cached program binary; stdlib dylib link; run.</td></tr>
+<tr><td><code>cas.py</code></td><td>Content-addressed artifact store (<code>~/.gmojo/cas</code>). Key covers: ABI version + compiler fingerprint + toolchain fingerprint + source bytes + imported signatures. Tier 1 (dup-tolerant, no coordination).</td></tr>
+<tr><td><code>build_stdlib_dylib.py</code></td><td>Builds monolithic <code>build/libmojostdlib.dylib</code>. Runtime folded in; per-import dylibs recorded by <code>import</code>; CAS-cached.</td></tr>
+<tr><td><code>monomorphize.py</code></td><td>Generic instantiation engine. Per-instantiation CAS keys; C++ coroutine units (companion <code>.cpp</code>).</td></tr>
+<tr><td><code>elaborate.py</code></td><td>Generic elaboration — produces instantiation object files; records <code>cpp_object</code> for coroutine codegen.</td></tr>
+<tr><td><code>runtime/mojo_runtime.c</code></td><td>C runtime: <code>MojoList</code>, <code>MojoDict</code>, strings, regex (<code>mojo_regex_search</code>), the subprocess shim (<code>gimple_codegen_compile_to_gimple</code>), <code>mojo_platform_system</code>, <code>mojo_c_getenv</code>.</td></tr>
+<tr><td><code>mojo_async_runtime.cpp</code></td><td>C++20 coroutine runtime — scheduler API, <code>asyncio.run()</code> bridge for compiled path.</td></tr>
+<tr><td><code>build_config.py</code></td><td>GCC / G++ discovery (<code>find_gcc</code>, <code>find_gxx</code>).</td></tr>
+<tr><td><code>checked_run.py</code></td><td>Deterministic test replay cache — hash input → cache result, skip re-run on hit.</td></tr>
+</table>
+
+<h2>4. The subprocess shim</h2>
+
+<p>This is the bridge between the self-hosted compiled binary and the real Python compiler. It's the single most important mechanism in the bootstrap story, and the primary bug surface for "compiling code" via the self-hosted binary.</p>
+
+<h3>4.1 Lowering</h3>
+<p><code>gimple_codegen.py</code>, lines 9175-9218. When <code>GimpleGen</code> encounters a call to <code>gimple_codegen.compile_to_gimple</code> or <code>gimple_codegen.compile_to_gimple_cached</code> from <em>outside</em> that module (e.g. <code>mojo.py</code>'s <code>--dump</code> handler), it replaces the entire call with a single C function call:</p>
+
+<pre>gimple_codegen_compile_to_gimple(src, do_imports, filename)</pre>
+
+<p>Keyword arguments are supported: the lowering reads <code>node.kwargs</code> to extract <code>do_imports</code> and <code>filename</code>. Positional args win if present. The shim's forward declaration lives at line 25371; its symbol is registered in the externs list at line 16935.</p>
+
+<div class="note">
+<strong>Why interception exists:</strong> the compiled <code>gimple_codegen.compile_to_gimple</code> function body is enormous (~10k lines of compiled Python AST-walking and C-generation). Running it natively in the compiled binary is the frontier; the shim is the current workaround.
+</div>
+
+<h3>4.2 The C shim</h3>
+<p><code>runtime/mojo_runtime.c</code>, lines 2296-2377:</p>
+
+<pre>char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename) {
+    // 1. Write source to temp file: /tmp/_mojo_src_&lt;pid&gt;.mojo
+    // 2. popen("PYTHONPATH='&lt;MOJO_HOME|.&gt;' python3 -c \"import gimple_codegen; ...\" 2&gt;/dev/null")
+    // 3. Read ALL stdout into a static growing buffer
+    // 4. If (n &gt; 64 &amp;&amp; rc == 0): return the buffer
+    // 5. Else: return a silent do-nothing stub
+}</pre>
+
+<p>The Python one-liner inside the shim:</p>
+
+<pre>PYTHONPATH='&lt;mojo_home&gt;' python3 -c "
+import sys; import gimple_codegen;
+src = open('/tmp/_mojo_src_&lt;pid&gt;.mojo').read();
+print(gimple_codegen.compile_to_gimple(src, &lt;do_imports&gt;, '&lt;filename&gt;'), end='')
+" 2&gt;/dev/null</pre>
+
+<h3>4.3 Known bugs in the shim</h3>
+
+<div class="bug">
+<p><strong>1. Silent error masking (<code>2&gt;/dev/null</code> + stub fallback)</strong><br>
+Every Python traceback is sent to <code>/dev/null</code>. On any failure (Python exception, import error, syntax error), the shim returns a do-nothing C stub. The compiled binary writes this stub as the <code>.ci</code> — it compiles and links, but the program does nothing. Errors are invisible: <code>build/mojo --dump bad.mojo</code> silently succeeds with a stub.</p>
+</div>
+
+<div class="bug">
+<p><strong>2. <code>if (n &gt; 64 &amp;&amp; rc == 0)</code> threshold</strong><br>
+A valid output ≤64 bytes is treated as failure → stub. In practice, generated C is 20-54KB (the preamble alone exceeds 1KB), so this is harmless for real programs. But a pathological input that produces a tiny valid output would be silently replaced.</p>
+</div>
+
+<div class="bug">
+<p><strong>3. Filename/path quoting injection</strong><br>
+The filename is embedded raw into the Python one-liner: <code>print(gimple_codegen.compile_to_gimple(src, %d, '%s'), end='')</code>. A filename containing a single quote <code>'</code>, backslash <code>\</code>, or newline breaks the shell command → Python raises SyntaxError → rc≠0 → silent stub. Same risk for <code>MOJO_HOME</code> in <code>PYTHONPATH='...'</code>.</p>
+</div>
+
+<div class="bug">
+<p><strong>4. <code>PYTHONPATH='.'</code> CWD default</strong><br>
+When <code>MOJO_HOME</code> is unset, <code>pythonpath</code> defaults to <code>"."</code> (the process CWD). Running the compiled binary from a directory that doesn't contain <code>gimple_codegen.py</code> → <code>import gimple_codegen</code> fails → silent stub. The Makefile stage2/stage3 targets work around this with <code>MOJO_HOME=.. PYTHONPATH=..</code>, but any other invocation without the env var fails silently.</p>
+</div>
+
+<div class="bug">
+<p><strong>5. <code>cmd[1024]</code> truncation</strong><br>
+The command buffer is 1024 bytes. A long <code>PYTHONPATH</code> or <code>filename</code> (deep directory nesting, macOS long names) gets truncated mid-string → broken Python code → rc≠0 → stub.</p>
+</div>
+
+<div class="bug">
+<p><strong>6. Static buffer reuse</strong><br>
+<code>result_buf</code> is a process-lifetime <code>static char *</code>. A second call in one process clobbers the first caller's pointer. In current usage: each <code>--dump</code> invocation is a separate process, so this is latent. But any compiled program that calls <code>compile_to_gimple</code> twice (e.g. a multi-file build) would silently corrupt earlier results.</p>
+</div>
+
+<h3>4.4 Why it masks reality</h3>
+<p><code>doc/IMPL.md:302-309</code> documents the consequence:</p>
+<blockquote>
+<code>mojo --dump</code>'s main <code>.ci</code> generation routes through a subprocess that runs the real <em>interpreted</em> tokenizer/parser, so <code>make bootstrap</code>'s <code>verify</code> step gave no signal at all about whether the self-hosted Parser/tokenizer actually <em>worked</em> when executed — only the <code>.tok</code>/<code>.ast</code> diagnostic dump code calls the compiled <code>Parser</code>/<code>py_tokenize</code> directly, in-process, which is exactly where this surfaced.
+</blockquote>
+
+<p>The compiled <code>py_tokenize</code> silently produced an empty token stream for every input (because <code>re.Pattern.finditer()</code> had no codegen lowering → loop body dropped). Only the <code>.tok</code> dump exposed it. The shim ensures <code>.ci</code> output always comes from real Python, hiding whether the compiled backend works.</p>
+
+<h2>5. Bootstrap machinery</h2>
+
+<h3>Three stages</h3>
+<pre>
+Stage 1:  Python mojo.py --dump-full mojo.py  →  stage1/mojo.ci  (transitive closure)
+Stage 2:  gcc -fgimple stage1/mojo.ci         →  stage2/mojo     (compiled binary)
+Stage 3:  stage2/mojo --dump mojo.py           →  stage2/mojo.ci  (+ .tok .ast .pyi)
+Stage 4:  stage2/mojo --dump mojo.py           →  stage3/mojo.ci  (idempotency check)
+Verify:   stage1 == stage2 == stage3            for all artifacts
+</pre>
+
+<p>The Makefile drives this: <code>make stage1</code>, <code>make stage2/mojo</code>, <code>make stage2</code>, <code>make stage3</code>, <code>make verify</code>. Each stage target collects dump failures and reports at the end.</p>
+
+<h3>Key targets</h3>
+<table>
+<tr><th>Target</th><th>What it does</th></tr>
+<tr><td><code>check-selfhost</code></td><td>Compile + link guard only (does NOT execute — runtime still SIGSEGVs). Compiles <code>mojo.py</code> → binary via <code>test_selfhost.py</code>.</td></tr>
+<tr><td><code>check-gimple</code></td><td>GIMPLE codegen unit suite (<code>test_gimple.py</code>).</td></tr>
+<tr><td><code>check-runner</code></td><td>Execution tests via the interpreter (<code>test_runner.py</code>).</td></tr>
+<tr><td><code>check-modcache</code></td><td>Module cache end-to-end stages (<code>test_module_cache.py</code>).</td></tr>
+<tr><td><code>mojoc</code></td><td>One-step build: <code>python3 mojo.py build mojo.py -o mojoc</code>.</td></tr>
+<tr><td><code>bootstrap</code></td><td>Full end-to-end: stage1→2→3 + <code>verify</code> + <code>validate-all</code>.</td></tr>
+</table>
+
+<h2>6. Roadmap to remove the shim</h2>
+
+<h3>What's already working</h3>
+<ul>
+<li><strong>Compiled <code>py_tokenize</code> + <code>Parser</code></strong> — once the regex engine (<code>regex_compile.py</code> + <code>mojo_regex_search</code>) enabled the compiled tokenizer's <code>.finditer()</code> loop, a cascade of self-host bugs was exposed and fixed (NULL deref, short-circuit semantics, varargs sentinel overwrites). The compiled tokenizer now produces correct token streams.</li>
+<li><strong><code>.tok</code> / <code>.ast</code> dumps</strong> — these call compiled <code>Parser</code>/<code>py_tokenize</code> directly, confirming the compiled parser works for the project's own source.</li>
+<li><strong>Stage 2/3 bootstrap</strong> — <code>make verify</code> confirms byte-identical <code>.ci</code> outputs across stages (though <code>.ci</code> still comes from the shim).</li>
+</ul>
+
+<h3>The remaining frontier</h3>
+<p>Disable the interception at <code>gimple_codegen.py:9175-9218</code> so the compiled binary calls its own compiled <code>compile_to_gimple</code> / <code>gen_module</code> natively. The compiled <code>gen_module</code> is the largest single function in the closure (~10k lines of compiled Python AST-walking and C-generation). It has never run natively.</p>
+
+<h3>Steps</h3>
+<ol>
+<li><strong>Temporarily remove the interception</strong> (comment out lines 9175-9218, or add a runtime flag) so the compiled <code>compile_to_gimple</code> is called as an ordinary module function.</li>
+<li><strong>Rebuild</strong> <code>mojoc</code> / <code>build/mojo</code> from the modified source.</li>
+<li><strong>Run <code>--dump</code> on a small file</strong> (e.g. <code>test_simple.mojo</code> or a minimal <code>def main(): print(42)</code>).</li>
+<li><strong>Observe the first bugs</strong> — likely in compiled <code>gen_module</code>, <code>GimpleGen</code> internals, or the compiled <code>py_tokenize</code> / <code>Parser</code> pipeline when invoked from inside the codegen (vs. the <code>.tok</code> path).</li>
+<li><strong>Fix bugs iteratively</strong>, rebuild, re-test.</li>
+<li><strong>When byte-identical</strong> with Python's output for the test corpus, delete the shim: remove the interception (<code>gimple_codegen.py:9175-9218</code>), the C shim (<code>runtime/mojo_runtime.c:2296-2377</code>), the forward declaration (<code>gimple_codegen.py:25371</code>), the extern registration (<code>gimple_codegen.py:16935</code>), and the <code>int_parse_module</code> stub (<code>runtime/mojo_runtime.c:2405</code>).</li>
+<li><strong>Verify</strong>: <code>make check</code> + <code>make bootstrap</code> + stdlib dylib rebuild (skip count unchanged).</li>
+</ol>
+
+<h2>Quality gates</h2>
+<p>Any change to <code>gimple_codegen.py</code> / <code>module_loader.py</code> / <code>mojo_runtime.c</code> (the compiled path) must pass:</p>
+<ol>
+<li><code>make check-selfhost</code> — compile + link guard.</li>
+<li>From-scratch stdlib dylib build — <code>rm -f build/libmojostdlib.dylib</code> then <code>python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib(jobs=8)"</code>. Compare the <code>skip &lt;module&gt;:</code> count before/after; it must not increase.</li>
+</ol>
+<p>A change passing <code>test_gimple.py</code>/<code>test_module_cache.py</code>/<code>make check-selfhost</code> alone is NOT sufficient evidence the compiled path is unaffected — only the stdlib build exercises the breadth of real Mojo source the compiler needs to keep working.</p>
+
+</body>
+</html>

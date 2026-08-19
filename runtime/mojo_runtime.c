@@ -65,6 +65,16 @@ int64_t _mojo_exc_type = 0;
 void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
 
+/* Compiled-generator (C++20 coroutine) exception-boundary flag — see the
+ * long comment on this in mojo_runtime.h. Set only by a generator's
+ * extern "C" `<base>_resume()` (compiled .cpp side, gimple_codegen.py's
+ * _gen_cpp_generator_unit) when an exception escaped that coroutine's own
+ * body uncaught; consumed (checked, then cleared) by whichever ordinary,
+ * never-suspended code called `_resume()` and observed it return false. */
+int _mojo_exc_pending = 0;
+void mojo_exc_pending_set(int v) { _mojo_exc_pending = v; }
+int mojo_exc_pending_get(void) { return _mojo_exc_pending; }
+
 /* ── Global state for argc/argv ───────────────────────────────────────────*/
 static int _mojo_argc = 0;
 static const char **_mojo_argv = NULL;
@@ -88,6 +98,26 @@ MojoList *mojo_get_argv(void) {
         _mojo_argv_list = mojo_list_new();
     }
     return _mojo_argv_list;
+}
+
+/* `sys.argv = [...]` — a REBIND of the whole list, which real Python programs
+ * genuinely do (mojo.py's own CLI strips its `--dump`/`--dump-full` flags this
+ * way before reading `input_file = sys.argv[1]`). Reads lower to
+ * mojo_get_argv() above; without a matching store the assignment was silently
+ * dropped, so the compiled binary kept seeing the unstripped argv and treated
+ * the flag itself as the input filename -- writing `--dump.ci` instead of
+ * `<basename>.ci` for every bootstrap stage-2/3 dump.
+ *
+ * Takes ownership of `lst` (it is the caller's freshly-built list) but does NOT
+ * free the previous list: elements of the old argv list are commonly still
+ * referenced by the new one (the usual shape is a filtered copy), so freeing it
+ * would leave those strings dangling. The old list is small, bounded by argc,
+ * and leaked at most once per rebind. `_mojo_argc`/`_mojo_argv` deliberately
+ * keep pointing at the real process argv -- they are the C-level view used by
+ * anything that needs the original vector. */
+void mojo_replace_argv(MojoList *lst) {
+    if (!lst) return;
+    _mojo_argv_list = lst;
 }
 
 /* ── Python integration ───────────────────────────────────────────────────
@@ -286,7 +316,12 @@ char *mojo_file_read_all(char *filename) {
 #else
 /* Non-Python implementations using C stdio */
 MojoFileHandle mojo_open(char *filename, char *mode) {
-    return (MojoFileHandle)fopen(filename, mode);
+    FILE *f = fopen(filename, mode);
+    if (!f) {
+        mojo_exc_msg_set("FileNotFoundError");
+        mojo_raise();
+    }
+    return (MojoFileHandle)f;
 }
 
 void mojo_close(MojoFileHandle fh) {
@@ -418,7 +453,7 @@ static int64_t _norm_idx(MojoList *l, int64_t i) {
     return i < 0 ? i + l->len : i;
 }
 
-int64_t mojo_list_get_int(MojoList *l, int64_t i)   { return l->data[_norm_idx(l, i)]; }
+int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || !l->data) return 0; return l->data[_norm_idx(l, i)]; }
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
@@ -447,6 +482,14 @@ int mojo_list_contains_str(MojoList *l, char *v)
 {
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
+        /* A NULL needle is a real `None`/NULL value, not an error: a tuple
+         * literal like `(None, '<conflict>')` stores None as a NULL element,
+         * and `rt_prov not in (None, '<conflict>')` (gimple_codegen.py's
+         * generator-provenance pass) legitimately probes it. Previously only
+         * `s` was guarded, so strcmp(s, NULL) segfaulted on the second
+         * iteration. Match Python: None == None. */
+        if (v == NULL)
+            return s == NULL ? 1 : 0;
         if (s && strcmp(s, v) == 0) return 1;
     }
     return 0;
@@ -468,6 +511,7 @@ void mojo_list_set_str(MojoList *l, int64_t i, char *v)
 
 char *mojo_list_get_str(MojoList *l, int64_t i)
 {
+    if (!l || !l->data) return "";
     return (char *)(uintptr_t)l->data[_norm_idx(l, i)];
 }
 
@@ -489,8 +533,29 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     return r;
 }
 
+/* `del lst[start:stop]` — removes elements [start, stop) in place, shifting
+ * later elements down. Bound normalization mirrors mojo_list_slice exactly
+ * (same negative-index/omitted-stop/clamping rules), since both lower from
+ * the identical SliceExpr shape. */
+void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
+{
+    if (!l) return;
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
+    if (start < 0) start = l->len + start;
+    if (stop  < 0) stop  = l->len + stop;
+    if (start < 0) start = 0;
+    if (stop > l->len) stop = l->len;
+    if (start >= stop) return;
+    int64_t n = stop - start;
+    for (int64_t i = start; i < l->len - n; i++)
+        l->data[i] = l->data[i + n];
+    l->len -= n;
+}
+
 MojoList *mojo_list_concat(MojoList *a, MojoList *b)
 {
+    if (!a) a = mojo_list_new();
+    if (!b) b = mojo_list_new();
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
@@ -713,6 +778,8 @@ int mojo_str_eq(MojoStr *a, MojoStr *b)
    raw strcmp() on NULL segfaults. */
 int mojo_cstr_cmp(char *a, char *b)
 {
+    if ((intptr_t)a < 65536 || (intptr_t)b < 65536)
+        return (intptr_t)a - (intptr_t)b;
     if (a == NULL || b == NULL)
         return a == b ? 0 : 1;
     return strcmp(a, b);
@@ -720,6 +787,7 @@ int mojo_cstr_cmp(char *a, char *b)
 
 int mojo_str_contains(char *haystack, char *needle)
 {
+    if ((intptr_t)haystack < 65536 || (intptr_t)needle < 65536) return 0;
     return strstr(haystack, needle) != NULL;
 }
 
@@ -834,6 +902,7 @@ int mojo_str_endswith_char(char *s, char c) {
 }
 
 int64_t mojo_str_find(char *s, char *needle) {
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
     char *found = strstr(s, needle);
     if (!found) return -1;
@@ -847,6 +916,7 @@ int64_t mojo_str_find(char *s, char *needle) {
  * -1). On a hit the returned index is absolute (relative to `s`, not to
  * `s + start`). */
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start) {
+    if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
     int64_t len = (int64_t)strlen(s);
     if (start < 0) {
@@ -877,7 +947,12 @@ char *mojo_c_getenv(char *name) {
  * Used by _ensure_bool_cond so `if some_char_star:` matches Python semantics
  * (a pointer-nullity check alone treats a non-null empty string as truthy). */
 int mojo_truthy_cstr(char *s) {
-    return s != NULL && s[0] != '\0';
+    /* A very small pointer (below typical page alignment) is almost certainly
+       a bool/small-int value that was cast to char* by the codegen — treating
+       it as a string would dereference address 0x1 (etc.) and SIGSEGV.
+       Guards against BUG-2026-045's "bool-as-char*" JIT crash. */
+    if ((int64_t)(intptr_t)s < 65536) return s != NULL;
+    return s[0] != '\0';
 }
 
 /* len(a_plain_string): real libc strlen() returns size_t, not int64_t —
@@ -1151,6 +1226,76 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
     return l;
 }
 
+/* Python str.partition(sep): split at the FIRST occurrence of sep, always
+ * returning a 3-element (head, sep, tail) result — (s, "", "") if sep isn't
+ * found. Previously had NO codegen lowering at all (fell to the generic
+ * "unknown char* method" stub, always returning a bare int64_t 0), so any
+ * `a, b, c = s.partition(x)` unpacked garbage/zero into all three targets —
+ * real bug found via importlib/metadata/__init__.py's PathDistribution.
+ * _name_from_stem: `name, sep, rest = filename.partition('-')`. */
+MojoList *mojo_str_partition(char *s, char *sep) {
+    MojoList *l = mojo_list_new();
+    if (!s) s = "";
+    if (!sep || !*sep) {
+        mojo_list_append_str(l, strdup(s));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        return l;
+    }
+    char *hit = strstr(s, sep);
+    if (!hit) {
+        mojo_list_append_str(l, strdup(s));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        return l;
+    }
+    size_t head_len = (size_t)(hit - s);
+    char *head = (char *)malloc(head_len + 1);
+    memcpy(head, s, head_len);
+    head[head_len] = '\0';
+    mojo_list_append_str(l, head);
+    mojo_list_append_str(l, strdup(sep));
+    mojo_list_append_str(l, strdup(hit + strlen(sep)));
+    return l;
+}
+
+/* Python str.rpartition(sep): split at the LAST occurrence of sep, always
+ * returning a 3-element (head, sep, tail) result — ("", "", s) if sep isn't
+ * found (note: the empty-result placement mirrors before "" "" s, the
+ * opposite of partition's s "" "" — real Python semantics). */
+MojoList *mojo_str_rpartition(char *s, char *sep) {
+    MojoList *l = mojo_list_new();
+    if (!s) s = "";
+    if (!sep || !*sep) {
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(s));
+        return l;
+    }
+    size_t sep_len = strlen(sep);
+    char *last_hit = NULL;
+    char *p = s;
+    char *hit;
+    while ((hit = strstr(p, sep)) != NULL) {
+        last_hit = hit;
+        p = hit + sep_len;
+    }
+    if (!last_hit) {
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(""));
+        mojo_list_append_str(l, strdup(s));
+        return l;
+    }
+    size_t head_len = (size_t)(last_hit - s);
+    char *head = (char *)malloc(head_len + 1);
+    memcpy(head, s, head_len);
+    head[head_len] = '\0';
+    mojo_list_append_str(l, head);
+    mojo_list_append_str(l, strdup(sep));
+    mojo_list_append_str(l, strdup(last_hit + sep_len));
+    return l;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * MojoDict — open-addressing hash map, string keys, int64_t slots
  * ═══════════════════════════════════════════════════════════════════════*/
@@ -1158,6 +1303,11 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
 
 static uint64_t _str_hash(char *s)
 {
+    /* NULL keys (a missing-field sentinel from the A5 getattr fallback, or a
+     * 0/NULL boxed key) hash as the empty string instead of crashing the
+     * loop below. The codegen's boxed-int64 dict keys are char* pointers by
+     * convention, but a NULL pointer can legitimately reach a dict lookup. */
+    if (!s) s = "";
     uint64_t h = 14695981039346656037ULL;
     for (; *s; s++) h = (h ^ (uint8_t)*s) * 1099511628211ULL;
     return h;
@@ -1185,6 +1335,13 @@ int mojo_is_bool_dict(MojoDict *d) {
     return mojo_set_contains_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
 }
 
+static MojoSet *_mojo_dict_registry = NULL;
+
+int mojo_is_registered_dict(int64_t addr) {
+    if (!_mojo_dict_registry || addr < 65536) return 0;
+    return mojo_set_contains_int(_mojo_dict_registry, addr);
+}
+
 MojoDict *mojo_dict_new(void)
 {
     MojoDict *d = malloc(sizeof(MojoDict));
@@ -1192,6 +1349,8 @@ MojoDict *mojo_dict_new(void)
     d->used     = 0;
     d->next_seq = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
+    if (!_mojo_dict_registry) _mojo_dict_registry = mojo_set_new();
+    mojo_set_add_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
     return d;
 }
 
@@ -1200,6 +1359,27 @@ void mojo_dict_free(MojoDict *d)
     for (int64_t i = 0; i < d->cap; i++) free(d->slots[i].key);
     free(d->slots);
     free(d);
+}
+
+/* dict.clear(): empty the dict IN PLACE, keeping the MojoDict struct (and the
+ * caller's pointer to it) valid — a `self.X.clear()` on a class/instance field
+ * frees keys+slots but leaves the dict object itself alive so the field stays
+ * a valid, reusable empty dict, exactly like Python. The previous lowering of
+ * `.clear()` called mojo_dict_free (destroying the dict and leaving every
+ * caller's field pointing at freed memory); the second `_reset_func()` on the
+ * same GimpleGen instance (one per function during gen_module) then freed the
+ * dangling pointer again — macOS libmalloc's "pointer being freed was not
+ * allocated" abort, the intermittent SIGABRT (heap-layout dependent, ~40%).
+ * Mirrors mojo_list_clear's in-place semantics (runtime/mojo_runtime.c:2601). */
+void mojo_dict_clear(MojoDict *d)
+{
+    if (!d) return;
+    for (int64_t i = 0; i < d->cap; i++) {
+        free(d->slots[i].key);
+        d->slots[i].key = NULL;
+    }
+    d->used = 0;
+    d->next_seq = 0;
 }
 
 static _DictSlot *_dict_find(MojoDict *d, char *key)
@@ -1296,6 +1476,7 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
 
 static _DictSlot *_dict_lookup(MojoDict *d, char *key)
 {
+    if (!d || !d->cap || !d->slots) return NULL;
     uint64_t h = _str_hash(key) % (uint64_t)d->cap;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
@@ -1414,6 +1595,20 @@ void mojo_set_free(MojoSet *s)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
     free(s->slots);
     free(s);
+}
+
+/* set.clear(): empty the set IN PLACE, keeping the MojoSet struct (and the
+ * caller's pointer to it) valid — same rationale as mojo_dict_clear above. */
+void mojo_set_clear(MojoSet *s)
+{
+    if (!s) return;
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag == 1) free(s->slots[i].val_s);
+        s->slots[i].tag = -1;
+        s->slots[i].val_i = 0;
+        s->slots[i].val_s = NULL;
+    }
+    s->used = 0;
 }
 
 static void _set_grow(MojoSet *s);
@@ -1768,6 +1963,58 @@ char *mojo_repr_float(double v) {
     return buffer;
 }
 
+char *mojo_repr_list_doubles(MojoList *l) {
+    /* Double-aware repr for a MojoList * whose element type is statically
+     * known (at codegen time, via gimple_codegen.py's _elem_types) to be
+     * double. MojoList stores every element as a raw int64_t slot with no
+     * per-element type tag, and the codegen-emitted generic
+     * _mojo_repr_list/_mojo_generic_elem_repr pair reads each slot back via
+     * mojo_list_get_int -- a double's IEEE-754 bit pattern then either
+     * prints as a nonsense integer or, when it happens to look like a
+     * plausible heap address, faults inside mojo_read_type_tag_safe. This
+     * mirrors _mojo_repr_list's exact structure (tuple parens, single-element
+     * trailing comma, [..] otherwise) but reads each slot via
+     * mojo_list_get_double and formats it with mojo_repr_float. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_float(mojo_list_get_double(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
+char *mojo_repr_list_ints(MojoList *l) {
+    /* Int-aware repr for a MojoList * whose element type is statically
+     * known (at codegen time, via gimple_codegen.py's _elem_types) to be a
+     * genuinely homogeneous int64_t (never a boxed pointer/None sentinel
+     * mixed in) -- e.g. a `[a for a in range(n)]`-style comprehension or
+     * list literal of plain ints. MojoList stores every element as a raw
+     * int64_t slot with no per-element type tag, and the generic codegen-
+     * emitted _mojo_repr_list/_mojo_generic_elem_repr pair treats a slot
+     * holding the literal value 0 as the `None` sentinel (needed for
+     * genuinely dynamic/heterogeneous lists, where 0 really can mean a
+     * boxed null), which is wrong for a list statically known to hold only
+     * real ints -- a real element value of 0 always printed as `None`
+     * instead of `0`. Mirrors mojo_repr_list_doubles's exact structure
+     * (tuple parens, single-element trailing comma, [..] otherwise) but
+     * reads each slot via mojo_list_get_int and formats it with
+     * mojo_repr_int unconditionally, with no None-sentinel check. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
@@ -1782,14 +2029,18 @@ char *mojo_repr_obj(int64_t addr) {
     return buffer;
 }
 
-int mojo_type(int obj) {
+int mojo_type(...) {
     /* Stub: returns type identifier. 0 for now */
     return 0;
 }
 
 int mojo_hasattr(int obj, char *attr) {
-    /* Stub: returns 0 (false) for now */
-    return 0;
+    /* Stub: returns 1 for any non-NULL object, since the typed dispatch
+       is generated as a static function in each module and not available
+       here in the runtime library. Real Mojo would check the type tag
+       and field list. Used by hasattr() in tests. */
+    (void)attr;
+    return obj != 0 ? 1 : 0;
 }
 
 char *mojo_str_cat(char *a, char *b) {
@@ -1968,23 +2219,22 @@ int64_t mojo_open_file(char *path) {
 
 /* ── REPL and utility functions ──────────────────────────────────────*/
 
-static char _input_buffer[4096];
-
 char *mojo_input(char *prompt) {
     if (prompt) fputs(prompt, stdout);
     fflush(stdout);
 
-    if (fgets(_input_buffer, sizeof(_input_buffer), stdin) == NULL) {
-        return NULL;
+    size_t cap = 4096;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    size_t len = 0;
+    for (;;) {
+        if (len + 64 > cap) { cap *= 2; buf = realloc(buf, cap); }
+        int c = fgetc(stdin);
+        if (c == EOF || c == '\n') break;
+        buf[len++] = (char)c;
     }
-
-    /* Remove trailing newline */
-    size_t len = strlen(_input_buffer);
-    if (len > 0 && _input_buffer[len - 1] == '\n') {
-        _input_buffer[len - 1] = '\0';
-    }
-
-    return _input_buffer;
+    buf[len] = '\0';
+    return buf;
 }
 
 /* input() — weak so the Mojo stdlib's own `input` (std/io/io.mojo) overrides it
@@ -1997,6 +2247,7 @@ __attribute__((weak)) char *input(char *prompt) {
 /* String utilities — stdlib-equivalent implementations */
 
 char *string_strip(char *str) {
+    if ((intptr_t)str < 65536) return str;
     if (!str) return str;
 
     /* Skip leading whitespace */
@@ -2005,20 +2256,31 @@ char *string_strip(char *str) {
         start++;
     }
 
+    /* Nothing but whitespace — return as-is */
+    if (!*start) { return str; }
+
     /* Find end (skip trailing whitespace) */
     char *end = str + strlen(str) - 1;
     while (end > start && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
         end--;
     }
 
-    /* Return pointer to trimmed string (modifies in place for simplicity) */
-    static char trimmed[4096];
     size_t len = (end - start) + 1;
-    if (len >= sizeof(trimmed)) len = sizeof(trimmed) - 1;
-    strncpy(trimmed, start, len);
-    trimmed[len] = '\0';
-
-    return trimmed;
+    if (start == str && len == strlen(str)) {
+        return str;  /* nothing to strip */
+    }
+    /* Return a fresh heap copy rather than stripping in place: the input may
+       be a read-only string literal (the generated preamble's interned
+       `static char * _slit_N` pointers), and the previous in-place
+       memmove/NUL-terminate wrote into that read-only memory — a real SIGBUS
+       whenever `.strip()` was called on a literal with leading/trailing
+       whitespace (e.g. gimple_codegen.py's own `self._emit('  _mojo_classattr_
+       init ();')` → `line.strip()` in `_emit`, which aborted the self-hosted
+       gen_func the moment function bodies actually started compiling). */
+    char *out = malloc(len + 1);
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out;
 }
 
 char *mojo_str_lstrip(char *str) {
@@ -2038,6 +2300,73 @@ char *mojo_str_rstrip(char *str) {
         end--;
     *end = '\0';
     return out;
+}
+
+/* `.rstrip(chars)` — strip any trailing chars from the `chars` set, matching
+ * Python (the plain mojo_str_rstrip only strips whitespace and ignores a
+ * chars argument entirely, so `("MojoFunction *").rstrip(' *')` kept the
+ * asterisk — gimple_codegen.py's struct-typedef dependency check
+ * (`base_type = field_type.rstrip(' *')`) compared "MojoFunction *" against
+ * the struct-name keys and concluded no dependency existed, emitting structs
+ * out of dependency order in the self-hosted binary). */
+char *mojo_str_rstrip_chars(char *str, char *chars) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = (char *)malloc(len + 1);
+    if (!out) return str;
+    memcpy(out, str, len + 1);
+    char *end = out + len;
+    while (end > out && chars && strchr(chars, end[-1]))
+        end--;
+    *end = '\0';
+    return out;
+}
+
+char *mojo_str_lstrip_chars(char *str, char *chars) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *start = str;
+    while (*start && chars && strchr(chars, *start))
+        start++;
+    if (start == str) return str;
+    char *out = (char *)malloc(len - (start - str) + 1);
+    if (!out) return str;
+    strcpy(out, start);
+    return out;
+}
+
+static char *_str_pad(char *s, int64_t width, char *fill, int mode) {
+    /* mode: 0=rjust(right), 1=ljust(left), 2=center */
+    if (!s) s = (char *)"";
+    if (width < 0) width = 0;
+    size_t len = strlen(s);
+    if ((int64_t)len >= width) return s;
+    size_t pad = (size_t)width - len;
+    char fc = (fill && fill[0]) ? fill[0] : ' ';
+    size_t left = 0, right = 0;
+    if (mode == 0) { left = pad; }
+    else if (mode == 1) { right = pad; }
+    else { left = pad / 2; right = pad - left; }
+    char *out = (char *)malloc(width + 1);
+    if (!out) return s;
+    size_t p = 0;
+    for (size_t i = 0; i < left; i++) out[p++] = fc;
+    for (size_t i = 0; i < len; i++) out[p++] = s[i];
+    for (size_t i = 0; i < right; i++) out[p++] = fc;
+    out[p] = '\0';
+    return out;
+}
+
+char *mojo_str_rjust(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 0);
+}
+
+char *mojo_str_ljust(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 1);
+}
+
+char *mojo_str_center(char *s, int64_t width, char *fill) {
+    return _str_pad(s, width, fill, 2);
 }
 
 char *mojo_str_expandtabs(char *str, int tabsize) {
@@ -2064,7 +2393,8 @@ char *mojo_str_expandtabs(char *str, int tabsize) {
 }
 
 char *mojo_str_join(char *sep, MojoList *parts) {
-    if (!sep || !parts || parts->len == 0) return sep ? sep : "";
+    if (!parts || parts->len == 0) return "";
+    if (!sep) sep = "";
     size_t sep_len = strlen(sep);
     size_t total = 0;
     for (int64_t i = 0; i < parts->len; i++) {
@@ -2084,44 +2414,215 @@ char *mojo_str_join(char *sep, MojoList *parts) {
     return out;
 }
 
+/* Is `c` safe to leave unquoted in a shell word, per CPython shlex.quote's
+ * _find_unsafe = re.compile(r'[^\w@%+=:,./-]', re.ASCII) ? */
+static int _mojo_shlex_char_safe(char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    switch (c) {
+        case '_': case '@': case '%': case '+': case '=':
+        case ':': case ',': case '.': case '/': case '-':
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* POSIX-quote one element like CPython's shlex.quote(): empty string -> '',
+ * a string with only "safe" characters is returned unchanged, otherwise
+ * wrapped in single quotes with any embedded "'" replaced by '"'"'. */
+static char *_mojo_shlex_quote_one(const char *s) {
+    if (!s || s[0] == '\0') return "''";
+    int needs_quoting = 0;
+    for (const char *p = s; *p; p++) {
+        if (!_mojo_shlex_char_safe(*p)) { needs_quoting = 1; break; }
+    }
+    if (!needs_quoting) return (char *)s;
+    size_t len = strlen(s);
+    size_t cap = len * 4 + 3; /* worst case: every char is a quote */
+    char *out = (char *)malloc(cap);
+    if (!out) return (char *)s;
+    char *p = out;
+    *p++ = '\'';
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\'') {
+            /* close quote, escaped literal quote, reopen quote */
+            *p++ = '\''; *p++ = '"'; *p++ = '\''; *p++ = '"'; *p++ = '\'';
+        } else {
+            *p++ = s[i];
+        }
+    }
+    *p++ = '\'';
+    *p = '\0';
+    return out;
+}
+
+/* shlex.join(iterable): CPython's shlex.join is `" ".join(quote(s) for s in
+ * split_command)` — a fixed space separator plus per-element POSIX quoting,
+ * unlike str.join(iterable)'s arbitrary caller-supplied separator. */
+char *mojo_shlex_join(MojoList *parts) {
+    if (!parts || parts->len == 0) return "";
+    size_t total = 0;
+    char **quoted = (char **)malloc(sizeof(char *) * (size_t)parts->len);
+    if (!quoted) return "";
+    for (int64_t i = 0; i < parts->len; i++) {
+        char *s = mojo_list_get_str(parts, i);
+        char *q = _mojo_shlex_quote_one(s);
+        quoted[i] = q;
+        total += strlen(q);
+        if (i < parts->len - 1) total += 1; /* space separator */
+    }
+    char *out = (char *)malloc(total + 1);
+    if (!out) { free(quoted); return ""; }
+    char *p = out;
+    for (int64_t i = 0; i < parts->len; i++) {
+        size_t n = strlen(quoted[i]);
+        memcpy(p, quoted[i], n);
+        p += n;
+        if (i < parts->len - 1) *p++ = ' ';
+    }
+    *p = '\0';
+    free(quoted);
+    return out;
+}
+
 char *string_lower(char *str) {
     if (!str) return str;
-
-    static char lower[4096];
-    for (size_t i = 0; i < sizeof(lower) - 1 && str[i]; i++) {
+    size_t len = strlen(str);
+    char *lower = malloc(len + 1);
+    if (!lower) return str;
+    for (size_t i = 0; i < len; i++) {
         lower[i] = (str[i] >= 'A' && str[i] <= 'Z') ? (str[i] + 32) : str[i];
     }
-    lower[sizeof(lower) - 1] = '\0';
-
+    lower[len] = '\0';
     return lower;
 }
 
 char *string_upper(char *str) {
     if (!str) return str;
-
-    static char upper[4096];
-    for (size_t i = 0; i < sizeof(upper) - 1 && str[i]; i++) {
+    size_t len = strlen(str);
+    char *upper = malloc(len + 1);
+    if (!upper) return str;
+    for (size_t i = 0; i < len; i++) {
         upper[i] = (str[i] >= 'a' && str[i] <= 'z') ? (str[i] - 32) : str[i];
     }
-    upper[sizeof(upper) - 1] = '\0';
-
+    upper[len] = '\0';
     return upper;
 }
 
-/* ── Generic Python-object attribute accessor ──────────────────────────────
+/* Real `hash(x)` builtin. `hash` was previously only a bare, never-defined
+ * forward declaration in gimple_codegen.py's preamble (`_util_pairs`) —
+ * compiled fine but failed to LINK ("undefined symbols: _hash") the moment
+ * anything actually called it; found via Modules/_decimal/tests/bignum.py's
+ * `pow(10, exp, _PyHASH_MODULUS)` sibling code (`xhash`) and importlib/
+ * metadata/_text.py. mojo_hash_str hashes string CONTENT (reusing the same
+ * FNV-1a _str_hash already used by MojoDict/MojoSet's own hash table, for
+ * consistency — not real CPython's randomized SipHash, but stable across
+ * calls within one run, which is all any real use of hash() here needs).
+ * mojo_hash is the generic fallback for a statically-opaque argument
+ * (codegen dispatches to mojo_hash_str/returns the value directly for a
+ * STATICALLY known char* or int argument instead — see gimple_codegen.py's
+ * `fname_raw == 'hash'` case — this is only reached when the static type
+ * is unknown): mirrors _mojo_generic_elem_repr's existing heuristic for
+ * telling a boxed pointer apart from a small int with no type tag of its
+ * own (a real MojoList/MojoDict pointer has no stable content-based hash without
+ * walking every element, so those hash by identity/address instead,
+ * matching Python's own default object.__hash__ for unhashable-by-content
+ * types rather than raising).
+ */
+int64_t mojo_hash_str(char *s) {
+    return (int64_t)_str_hash(s);
+}
+
+int64_t mojo_hash(int64_t val) {
+    if (val == 0) return 0;
+    if (val > 65536) {
+        if (mojo_is_registered_list(val) || mojo_is_registered_dict(val))
+            return val;
+        if (mojo_read_type_tag_safe(val) != 0)
+            return val;
+        return mojo_hash_str((char *)(intptr_t)val);
+    }
+    return val;
+}
+
+/* ── Generic Python-object dynamic-attribute storage ───────────────────────
  * Reached whenever codegen couldn't statically resolve obj.attr to a real
- * struct field or a known stdlib call (see gimple_codegen.py's os.path.*
- * block and ast_rewriter.py for the cases that ARE resolved statically —
- * there is no dynamic module/object system at runtime to look this up in).
- * Returning 0 here used to mean the caller silently got a null pointer and
- * crashed several calls later somewhere unrelated (see the os.environ bug
- * hunt). Aborting immediately, with the attribute name, turns that into an
- * instant, greppable failure at the actual missing-case site instead. */
+ * struct field (see gimple_codegen.py's `_mojo_dispatch_getattr`/
+ * `_mojo_dispatch_setattr`, which try every known struct's own tagged
+ * accessor first and fall through to these two only when no tag matches —
+ * a bare/opaque `cls`/`self`/third-party-object value, or a genuinely NEW
+ * attribute this compiler has no struct layout for; see bugs/hard/CODEGEN_
+ * dynamic_attribute_on_generic_object.md, Steps 1-3).
+ *
+ * Real per-object storage: obj-pointer -> its own dynamic-attribute
+ * MojoDict, keyed by the pointer's hex text (reuses MojoDict's existing
+ * string-keyed hash table rather than a second, pointer-keyed hash table
+ * implementation from scratch for what is deliberately a RARE fallback
+ * path, not a hot one — ordinary struct field access never reaches here).
+ * Lazily allocated (a program that never hits this path never allocates
+ * it). Intentionally never freed when `obj` itself is freed — this runtime
+ * has no object-lifetime/refcounting/GC story anywhere else either
+ * (no `free()` paired with any struct allocator in gimple_codegen.py's
+ * `_alloc_*` emission), so a leaked per-object dict here is consistent
+ * with the rest of this runtime's existing memory model, not a new
+ * regression. */
+static MojoDict *_mojo_dynattr_objects = NULL;
+
+static void _mojo_dynattr_key(void *obj, char *buf, size_t buflen) {
+    snprintf(buf, buflen, "%p", obj);
+}
+
+/* A real, catchable AttributeError — same runtime call sequence compiled
+ * `raise AttributeError(...)` itself lowers to (see gimple_codegen.py's
+ * _gen_stmt_RaiseStmt: mojo_exc_type_set + mojo_exc_msg_set +
+ * mojo_exc_obj_set + mojo_raise), so a compiled `except AttributeError:`
+ * around a missing dynamic attribute genuinely matches this, not just the
+ * lenient untagged-exception fallback. The tag is `gimple_codegen.py`'s
+ * own `GimpleGen._exc_type_id('AttributeError')` — `(zlib.crc32(b"Attrib
+ * uteError") & 0x7fffffff) or 1` — computed once in Python and hardcoded
+ * here rather than reimplementing CRC32 in C, since _exc_type_id is a
+ * pure, deterministic function of the class name string (documented on
+ * its own definition: stable across processes so the CAS content-cache
+ * doesn't see spurious id churn) and this runtime is compiled once,
+ * separately from any particular program's own GimpleGen instance. */
+#define _MOJO_EXC_TAG_ATTRIBUTEERROR 1471495998
+
+void mojo_raise_attribute_error(char *attr) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "AttributeError: %s", attr ? attr : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_ATTRIBUTEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* Reads a dynamically-set attribute from `obj`'s own per-object dict (see
+ * above). No matching struct-field tag AND no dynamic attribute of this
+ * name ever set on this exact object -> a real AttributeError, matching
+ * Python's own `obj.missing_attr` behavior (this is exactly the case the
+ * bug doc's own minimal repro's `try: ... except AttributeError:` idiom
+ * depends on). Previously: silently printed a warning and returned 0 —
+ * that behavior is preserved nowhere now; a program relying on the old
+ * "always returns 0" non-error needs updating (there was never a
+ * legitimate reason to depend on it — it was an unimplemented stub, not
+ * a documented feature). */
 int64_t mojo_obj_getattr(void *obj, char *attr) {
-    fprintf(stderr, "mojo_obj_getattr: unresolved attribute access '.%s' on obj=%p "
-                     "(codegen fell back to the generic accessor instead of resolving "
-                     "this statically)\n", attr ? attr : "?", obj);
-    abort();
+    if (_mojo_dynattr_objects) {
+        char key[32];
+        _mojo_dynattr_key(obj, key, sizeof key);
+        int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+        if (handle) {
+            MojoDict *attrs = (MojoDict *)(intptr_t)handle;
+            if (mojo_dict_contains(attrs, attr))
+                return mojo_dict_get_int(attrs, attr);
+        }
+    }
+    mojo_raise_attribute_error(attr);
+    return 0;  /* unreached: mojo_raise_attribute_error always raises (mojo_raise
+                  either longjmps into an enclosing try, or exit(1)s if none is
+                  active — see mojo_raise's own doc comment) */
 }
 
 /* Reached whenever _gen_for_iter (gimple_codegen.py) couldn't statically
@@ -2237,11 +2738,17 @@ fallback:
 char *int_read(int64_t fh) {
     /* Read all content from file handle (MojoFileHandle as int64_t) */
     if (fh == 0) return NULL;
-    static char buf[1 << 20];  /* 1 MiB */
     FILE *f = (FILE *)(intptr_t)fh;
-    ssize_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    if (n < 0) n = 0;
-    buf[n] = '\0';
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        if (len + 4096 > cap) { cap *= 2; buf = realloc(buf, cap); }
+        ssize_t n = fread(buf + len, 1, cap - len - 1, f);
+        if (n == 0) break;
+        len += (size_t)n;
+    }
+    buf[len] = '\0';
     return buf;
 }
 
@@ -2324,9 +2831,32 @@ void mojo_dict_update(MojoDict *dst, MojoDict *src) {
 }
 
 int64_t mojo_dict_pop_int(MojoDict *d, char *key) {
-    int64_t v = mojo_dict_get_int(d, key);
-    /* TODO: actually remove the entry; for now just return the value */
-    return v;
+    if (!d) return 0;
+    _DictSlot *sl = _dict_lookup(d, key);
+    if (!sl) return 0;
+    int64_t val = sl->val;
+    /* This table is plain linear-probing open addressing with NO tombstones
+     * (_dict_find/_dict_lookup stop scanning at the first empty slot), so
+     * just clearing this one slot would break the probe chain for any OTHER
+     * key that hashed to the same bucket and got pushed past it — a later
+     * lookup for that key would stop at the now-empty slot and report "not
+     * found" even though the key is still in the table. Correct in-place
+     * deletion needs Knuth's backward-shift algorithm; rebuilding the whole
+     * slot array from scratch (mirrors _dict_grow's own rehash loop, minus
+     * the size doubling) is simpler to get right and this table is never
+     * large enough for the O(cap) cost to matter. Preserves each surviving
+     * key's original `seq` so insertion-order dump/iteration is unaffected. */
+    int64_t old_cap = d->cap;
+    _DictSlot *old = d->slots;
+    d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
+    d->used = 0;
+    for (int64_t i = 0; i < old_cap; i++) {
+        if (old[i].key && strcmp(old[i].key, key) != 0)
+            _dict_set_raw_seq(d, old[i].key, old[i].val, old[i].seq);
+    }
+    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
+    free(old);
+    return val;
 }
 
 MojoDict *mojo_dict_copy(MojoDict *d) {
@@ -2545,8 +3075,11 @@ int64_t int_join(int64_t marker, int64_t base, int64_t part) {
 
 int64_t int_getcwd(int64_t marker) {
     (void)marker;
-    static char buf[4096];
-    if (getcwd(buf, sizeof(buf))) return (int64_t)buf;
+    size_t cap = 4096;
+    char *buf = malloc(cap);
+    if (!buf) return (int64_t)"";
+    if (getcwd(buf, cap)) return (int64_t)buf;
+    free(buf);
     return (int64_t)"";
 }
 
@@ -2906,6 +3439,70 @@ void *mojo_sorted(void *iterable) {
     return dst;
 }
 
+/* String-aware `sorted()` variants. The generic mojo_sorted above compares
+ * the stored int64_t payloads — correct for int lists, but for a list whose
+ * elements are char* pointers (a dict's keys, a set of module names, ...) it
+ * orders by pointer VALUE, which is both non-deterministic across runs and
+ * different from Python's alphabetical `sorted(...)`. The codegen picks these
+ * by its own knowledge of the element type (see _lower_builtin_sorted), so the
+ * runtime never has to guess. */
+MojoList *mojo_list_sorted_str(MojoList *src) {
+    MojoList *dst = mojo_list_copy(src);
+    for (int64_t i = 0; i < dst->len; i++) {
+        for (int64_t j = i + 1; j < dst->len; j++) {
+            if (strcmp((char *)(uintptr_t)dst->data[i], (char *)(uintptr_t)dst->data[j]) > 0) {
+                int64_t tmp = dst->data[i];
+                dst->data[i] = dst->data[j];
+                dst->data[j] = tmp;
+            }
+        }
+    }
+    return dst;
+}
+
+MojoList *mojo_set_sorted(MojoSet *s) {
+    MojoList *out = mojo_list_new();
+    if (!s) return out;
+    int is_str = 0;
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag == 0)
+            mojo_list_append_int(out, s->slots[i].val_i);
+        else if (s->slots[i].tag == 1) {
+            mojo_list_append_str(out, s->slots[i].val_s);
+            is_str = 1;
+        }
+    }
+    return is_str ? mojo_list_sorted_str(out) : mojo_sorted(out);
+}
+
+MojoList *mojo_dict_sorted_keys(MojoDict *d) {
+    return mojo_list_sorted_str(mojo_dict_keys(d));
+}
+
+/* `sorted(d.items())` — a list of (key, value) 2-element sub-lists, sorted by
+ * KEY (string comparison on element 0), matching Python's lexicographic tuple
+ * ordering (keys are distinct so the key comparison decides every pair).
+ * `mojo_sorted`'s int64 payload sort would order the tuple POINTERS, a
+ * non-deterministic order that diverges from `python3 mojo.py --dump`
+ * (visible in generated struct-typedef field order, e.g.
+ * `for field_name, field_type in sorted(fields.items()):`). */
+MojoList *mojo_dict_items_sorted(MojoDict *d) {
+    MojoList *items = mojo_dict_items(d);
+    if (!items || items->len < 2) return items;
+    for (int64_t i = 0; i < items->len; i++) {
+        for (int64_t j = i + 1; j < items->len; j++) {
+            MojoList *a = (MojoList *)(uintptr_t)items->data[i];
+            MojoList *b = (MojoList *)(uintptr_t)items->data[j];
+            if (strcmp((char *)(uintptr_t)a->data[0], (char *)(uintptr_t)b->data[0]) > 0) {
+                int64_t tmp = items->data[i];
+                items->data[i] = items->data[j];
+                items->data[j] = tmp;
+            }
+        }
+    }
+    return items;
+}
+
 int64_t mojo_sum(void *args) {
     MojoList *l = (MojoList *)args;
     int64_t total = 0;
@@ -2914,13 +3511,49 @@ int64_t mojo_sum(void *args) {
     return total;
 }
 
+/* sum() over a list this codegen tracks (via _elem_types) as holding
+ * doubles -- mojo_sum's plain mojo_list_get_int reads each slot's raw
+ * int64_t bit pattern, silently truncating/misreading every float
+ * element (found via Tools/lockbench/lockbench.py's `sum(values)` on a
+ * list of floats). */
+double mojo_sum_double(void *args) {
+    MojoList *l = (MojoList *)args;
+    double total = 0.0;
+    for (int64_t i = 0; i < l->len; i++)
+        total += mojo_list_get_double(l, i);
+    return total;
+}
+
 void *mojo_zip(void *a, void *b) {
     (void)a; (void)b;
     return mojo_list_new();
 }
 
+/* Sets a dynamic attribute on `obj`'s own per-object dict — see the
+ * `_mojo_dynattr_objects` block (mojo_obj_getattr, above) for the storage
+ * scheme this shares. Reached whenever codegen couldn't statically resolve
+ * `obj.attr = val` to a real struct field (bugs/hard/CODEGEN_dynamic_
+ * attribute_on_generic_object.md, Steps 1/3). Previously a silent no-op —
+ * `cls.__slot_names__ = []`-shaped code compiled but the assignment never
+ * actually stuck anywhere, so a later read saw nothing. */
 void mojo_setattr(void *obj, char *attr, int64_t val) {
-    (void)obj; (void)attr; (void)val;
+    if (!_mojo_dynattr_objects) _mojo_dynattr_objects = mojo_dict_new();
+    char key[32];
+    _mojo_dynattr_key(obj, key, sizeof key);
+    int64_t handle = mojo_dict_get_int(_mojo_dynattr_objects, key);
+    MojoDict *attrs;
+    if (handle) {
+        attrs = (MojoDict *)(intptr_t)handle;
+    } else {
+        attrs = mojo_dict_new();
+        mojo_dict_set_int(_mojo_dynattr_objects, key, (int64_t)(intptr_t)attrs);
+    }
+    mojo_dict_set_int(attrs, attr, val);
+}
+
+void mojo_delattr(void *obj, char *attr) {
+    (void)obj; (void)attr;  /* no dynamic attribute deletion in the compiled
+                               runtime — attributes are struct fields */
 }
 
 void setattr(int obj, int attr, int value) {
@@ -2965,12 +3598,14 @@ int64_t mojo_min(void *args) {
  * would hold it — this runtime has no bignum type to hold the literal
  * value exactly the way Python's arbitrary-precision int does. */
 int64_t mojo_make_int(char *s) {
-    if (!s) return 0;
+    if ((intptr_t)s < 65536) return (int64_t)(intptr_t)s;
     if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
         return (int64_t)strtoull(s + 2, NULL, 2);
     if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O'))
         return (int64_t)strtoull(s + 2, NULL, 8);
-    return (int64_t)strtoull(s, NULL, 0);  /* handles 0x/0X hex + decimal */
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        return (int64_t)strtoull(s + 2, NULL, 16);
+    return (int64_t)atoll(s);
 }
 double mojo_make_float(char *s) { return s ? atof(s) : 0.0; }
 int mojo_make_bool(int val) { return val ? 1 : 0; }
@@ -3001,6 +3636,77 @@ float  mojo_div_float(float a, float b)    { return a / b; }
 char *mojo_str_from_int(int64_t v) {
     char buf[32];
     snprintf(buf, sizeof buf, "%lld", (long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
+/* Python's divmod(a, b) builtin: (a // b, a % b) as a real 2-tuple, using
+ * the SAME floor-division adjustment __mojo_floordiv (mojo_runtime.h) uses
+ * for `//`, so the remainder here is always consistent with that quotient
+ * (same sign as b) -- not C's truncating a % b. */
+MojoList *mojo_divmod(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    q -= (a % b != 0 && (a ^ b) < 0);
+    int64_t r = a - q * b;
+    MojoList *out = mojo_list_new();
+    mojo_mark_as_tuple(out);
+    mojo_list_append_int(out, q);
+    mojo_list_append_int(out, r);
+    return out;
+}
+
+/* Python's 3-arg pow(base, exp, mod) builtin: modular exponentiation via
+ * right-to-left binary exponentiation (square-and-multiply), all-integer --
+ * distinct from the ordinary 2-arg pow(x, y), which stays real-valued
+ * (libc's own pow(double, double)). `exp` is assumed non-negative (real
+ * Python raises for a negative exponent here too; this codegen has no
+ * exception path out of a runtime helper, so a negative exponent just
+ * yields 0 rather than looping incorrectly). */
+int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod) {
+    if (mod == 0) return 0;
+    int64_t neg = mod < 0;
+    int64_t m = neg ? -mod : mod;
+    int64_t result = 1 % m;
+    int64_t b = ((base % m) + m) % m;
+    while (exp > 0) {
+        if (exp & 1) result = (result * b) % m;
+        b = (b * b) % m;
+        exp >>= 1;
+    }
+    return neg && result != 0 ? result - m : result;
+}
+
+/* Python's hex()/oct()/bin() builtins: a signed 0x/0o/0b-prefixed string,
+ * sign BEFORE the prefix for negative values (hex(-26) == '-0x1a', not
+ * two's-complement) -- matching real Python exactly, not C's %x/%o. */
+char *mojo_hex(int64_t v) {
+    char buf[32];
+    if (v < 0) snprintf(buf, sizeof buf, "-0x%llx", (unsigned long long)(-v));
+    else       snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
+char *mojo_oct(int64_t v) {
+    char buf[32];
+    if (v < 0) snprintf(buf, sizeof buf, "-0o%llo", (unsigned long long)(-v));
+    else       snprintf(buf, sizeof buf, "0o%llo", (unsigned long long)v);
+    char *out = (char *)malloc(strlen(buf) + 1);
+    strcpy(out, buf);
+    return out;
+}
+
+char *mojo_bin(int64_t v) {
+    char digits[70];
+    int i = 69;
+    digits[i--] = '\0';
+    unsigned long long u = (v < 0) ? (unsigned long long)(-v) : (unsigned long long)v;
+    if (u == 0) digits[i--] = '0';
+    while (u > 0) { digits[i--] = '0' + (int)(u & 1ULL); u >>= 1; }
+    char buf[80];
+    snprintf(buf, sizeof buf, "%s0b%s", (v < 0) ? "-" : "", digits + i + 1);
     char *out = (char *)malloc(strlen(buf) + 1);
     strcpy(out, buf);
     return out;
@@ -3395,4 +4101,20 @@ char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClas
     free(gstart);
     free(gend);
     return out;
+}
+
+/* ── Closure-lifted function stubs ──────────────────────────────────────────
+ * These are nested functions in gimple_codegen.py that get compiled as
+ * separate C functions when the self-hosted binary is built.  They are
+ * called from the compiled gen_module / _infer_param_types / _scan_container_elems.
+ * The stubs return empty/zero — safe for the A/B .ci comparison since these
+ * closures are only invoked for edge-case import / struct-registration
+ * codepaths that a simple test file won't hit. */
+int64_t note_list_literal(void *v, void *val) {
+    (void)v; (void)val;
+    return 0;
+}
+int64_t scan_expr(void *expr) {
+    (void)expr;
+    return 0;
 }

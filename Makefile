@@ -39,9 +39,9 @@ demo:
 # + validate-all) is a separate, aspirational target — `make bootstrap` —
 # because stage 2 has a known pre-existing codegen segfault (see IMPL.md); it is
 # not gated into `check` so `check` stays a meaningful pass/fail signal.
-check: check-gimple check-runner check-modcache check-selfhost
+check: check-gimple check-runner check-modcache check-selfhost check-runtimediff
 	@echo ""
-	@echo "✓ check complete (gimple + runner + module-cache + self-host)"
+	@echo "✓ check complete (gimple + runner + module-cache + self-host + runtime-diff)"
 
 # Every check-* target is wrapped in checked_run.py: a check's outcome is a
 # pure function of the compiler sources + toolchain + whatever extra files it
@@ -72,9 +72,23 @@ check-modcache: test_module_cache.py myinterpreter.py mojo.py mojo_main.py
 # link cleanliness so it can't silently regress.
 check-selfhost: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py mojo_main.py test_selfhost.py
 	python3 checked_run.py check-selfhost \
+		--extra gimple_codegen.py \
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
+
+# Interpreter-vs-JIT runtime parity: every program in the corpus must produce
+# identical stdout + exit code via `python3 mojo.py run` (interpreter) and
+# `python3 mojo.py --jit` (compiled). A JIT-COMPILE-FAILED is reported
+# distinctly (the compiled path falls back to the interpreter, which would
+# otherwise mask a divergence). Currently 23 pass, 1 JIT-COMPILE-FAILED
+# (generator_simple — the C++ coroutine frontier).
+check-runtimediff: gimple_codegen.py mojo_compiler.py myinterpreter.py mojo.py test_runtime_diff.py
+	python3 checked_run.py check-runtimediff \
+		--extra gimple_codegen.py \
+		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py \
+		--extra test_runtime_diff.py \
+		-- python3 test_runtime_diff.py
 
 # Run all stdlib test and benchmark files through both the interpreter
 # (mojo.py run) and the JIT compiler (mojo.py --jit).
@@ -134,7 +148,6 @@ stdlib:
 stage1: clean-bootstrap
 	@mkdir -p stage1
 	@echo "=== Stage 1: Python → stage1/ ==="
-	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 	@FAILED=0; \
 	run_dump() { \
 	    out=$$(cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump "../$$1" 2>&1); \
@@ -156,10 +169,16 @@ stage1: clean-bootstrap
 	    run_dump $$f; \
 	done; \
 	if [ "$$FAILED" = "0" ]; then \
-	    echo "✓ Stage 1 complete"; \
+	    echo "✓ Stage 1 dump validation complete"; \
 	else \
 	    echo "✗ Stage 1 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 1: Python → stage1/ (transitive closure) ==="
+	# Generate the bootstrap .ci LAST: the --dump validation loop above also
+	# writes {basename}.ci for mojo.py (single-module, do_imports=False), which
+	# would otherwise clobber this transitive-closure .ci and leave stage2
+	# linking a skeleton with undefined symbols (py_tokenize etc.).
+	cd stage1 && PYTHONPATH=.. python3 ../mojo.py --dump-full ../$(MOJO_MAIN)
 
 # ── mojoc: one-step self-host build (equivalent to stage2/mojo, no staging needed) ──
 mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
@@ -213,6 +232,16 @@ stage2: stage2/mojo
 	else \
 	    echo "✗ Stage 2 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 2: stage2/mojo → stage2/ (transitive closure) ==="
+	# Generate the bootstrap .ci LAST, mirroring stage1's identical comment/
+	# ordering: the --dump loop above also writes mojo.ci (single-module,
+	# do_imports=False, from `run_dump $(MOJO_MAIN)`), which would otherwise
+	# clobber this transitive-closure .ci and leave `verify` comparing a full
+	# closure (stage1/mojo.ci) against a single-module skeleton
+	# (stage2/mojo.ci) — a real, permanent mismatch, not a codegen bug: this
+	# step was simply missing from stage2/stage3's targets even though
+	# stage1's has always had it.
+	cd stage2 && MOJO_HOME=.. PYTHONPATH=.. ./mojo --dump-full ../$(MOJO_MAIN)
 
 # ── Stage 3: idempotency check (same binary, fresh output dir) ───────────────
 stage3: stage2/mojo stage2
@@ -244,6 +273,9 @@ stage3: stage2/mojo stage2
 	else \
 	    echo "✗ Stage 3 had failures (see FAILED lines above)"; exit 1; \
 	fi
+	@echo "=== Stage 3: stage2/mojo → stage3/ (transitive closure) ==="
+	# See stage2's identical step: same missing-step bug, same fix.
+	cd stage3 && MOJO_HOME=.. PYTHONPATH=.. ../stage2/mojo --dump-full ../$(MOJO_MAIN)
 
 # ── verify: all three stages identical for every generated file ───────────────
 verify: stage3
@@ -304,7 +336,7 @@ preflight:
 FORCE:
 
 mojo.ci: $(MOJO_MAIN) FORCE
-	PYTHONPATH=. python3 mojo.py --dump $(MOJO_MAIN) 2>/dev/null
+	PYTHONPATH=. python3 mojo.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: mojo.ci
 	@mkdir -p build

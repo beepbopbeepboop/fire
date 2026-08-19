@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A/B + Interpreter Parity Plan — 100% Python Compatibility</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  h2 { margin-top: 2rem; border-bottom: 1px solid #ccc; padding-bottom: .2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; font-size: .92em; }
+  th { background: #f0f0f0; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 3px; }
+  .note { background: #fffbe6; border-left: 4px solid #f0c000; padding: .6rem 1rem; margin: 1rem 0; }
+  .danger { background: #ffecec; border-left: 4px solid #c00; padding: .6rem 1rem; margin: 1rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .2rem 0; }
+</style>
+</head>
+<body>
+
+<h1>A/B + Interpreter Parity — 100% Python Compatibility</h1>
+<p><strong>Goal:</strong> (1) byte-identical <code>.ci</code> between <code>python3 mojo.py --dump X.mojo</code> and <code>MOJO_NO_SHIM=1 ./mojoc X.mojo --dump</code>; (2) runtime output parity between <code>python3 mojo.py run X.mojo</code> (interpreter) and <code>python3 mojo.py --jit X.mojo</code> (compiled); (3) all existing quality gates stay green after every change.</p>
+
+<h2>Architecture reality</h2>
+<p>Both <code>gimple_codegen.py</code> and <code>myinterpreter.py</code> dispatch on AST nodes via <code>getattr(self, f'handler_{type(node).__name__}')(node)</code>. As Python both work. But <code>mojoc</code> is gimple_codegen.py <em>compiled to C</em> — the <code>getattr(self, name)(node)</code> compiles to an indirect call stubbed to <code>(int64_t)0</code>, so <strong>every statement/expression body is dropped</strong> in the native output. This is the linchpin (Class B).</p>
+
+<h2>Five A/B divergence classes</h2>
+<table>
+<tr><th>#</th><th>Class</th><th>Cause</th><th>Status</th></tr>
+<tr><td>B</td><td>Dispatch no-op — all function bodies dropped, string pool empty</td><td><code>getattr(self, handler)(node)</code> indirect call stubbed to 0</td><td>FIXED (A1 static dispatch refactor)</td></tr>
+<tr><td>A</td><td><code>_mojo_type_name</code> fwd decl always emitted / table never emitted</td><td><code>if some_set:</code> / <code>not some_set:</code> on module-level set compiles to pointer-existence</td><td>FIXED (bool(container) length-check)</td></tr>
+<tr><td>C</td><td>Function unmangled + empty fwd-decl return type</td><td>list-comprehension lowering no-op; <code>(char)</code> pointer-truncation in dict-key lookup</td><td>RESOLVED via A5 field access + loop rewrite</td></tr>
+<tr><td>D</td><td>Missing AST struct typedefs / selfhost decls</td><td><code>__file__</code> = <code>"&lt;bootstrap&gt;"</code> → <code>_SELFHOST_DIR</code> = process CWD</td><td>PARTIAL — MOJO_HOME + run-from-repo-root harness; compiled <code>cls.join</code> classmethod receiver still miscompiles (open)</td></tr>
+<tr><td>E</td><td>Segfault on top-level statements</td><td>indirect-call no-op returns NULL fnptr</td><td>FIXED (A1)</td></tr>
+</table>
+
+<h2>Interpreter vs compiled semantic gaps</h2>
+<table>
+<tr><th>Construct</th><th>Interpreter</th><th>Compiled</th><th>Resolution</th></tr>
+<tr><td>LambdaExpr</td><td>missing (raises)</td><td>✓ <code>_lower_LambdaExpr</code> 12367</td><td>add interp <code>eval_LambdaExpr</code></td></tr>
+<tr><td>ImagLiteral</td><td>✓ <code>eval_ImagLiteral</code> 4152</td><td>missing (→ int 0)</td><td>add compiled <code>_lower_ImagLiteral</code></td></tr>
+<tr><td>MatchStmt capture</td><td>PEP-634 unbound-name capture 3620–3639</td><td>switch-equality + <code>_</code> only</td><td>align both to PEP-634 capture</td></tr>
+<tr><td>DelStmt</td><td>full 3427</td><td>silently dropped</td><td>compiled refuses honestly (interp is fallback)</td></tr>
+<tr><td>async for / async with</td><td>silently sync 3693, 3773</td><td>refuses</td><td>decide: both refuse or both implement (check test_generators/test_async_execution first)</td></tr>
+<tr><td>Unknown-node failure</td><td>raises NotImplementedError</td><td>silent <code>/* TODO */</code> / int 0</td><td>both refuse honestly with interp fallback</td></tr>
+</table>
+
+<h2>Track A — Native backend A/B parity (byte-identical .ci)</h2>
+<ol>
+<li><strong>A1. Static dispatch refactor (linchpin, Class B).</strong> Replace <code>getattr(self, handler_name)(node)</code> in <code>gen_stmt</code>/<code>lower_expr</code> with a compiled-friendly static dispatch: explicit <code>isinstance</code> chain (precedent: <code>_cpp_stmt</code> compiles cleanly). Keep handler bodies byte-identical; only change the dispatch seam. Verify Python-path output unchanged (diff the 7 A/B files before/after). Unblocks string pool / <code>_intern_string</code> / <code>_slit_</code>.</li>
+<li><strong>A2. Container-truthiness for module-level sets (Class A).</strong> Extend the existing <code>bool(container)</code> length-check fix (<code>_ensure_bool_cond</code>/<code>_lower_UnaryOp</code>) to module-level globals boxed as <code>int64_t</code>, so empty-set tests are correct.</li>
+<li><strong>A3. Comprehension no-op + char-truncation (Class C).</strong> Fix <code>[self._param_ctype(pn, pt, s) for pn, pt in s.params]</code> lowering (23733); fix <code>(char)</code> pointer-truncation in the <code>func_return_types.get(fn.name,...)</code> dict-key path (27513).</li>
+<li><strong>A4. Deterministic <code>_SELFHOST_DIR</code> (Class D).</strong> Make <code>__file__</code>-derived <code>_SELFHOST_DIR</code> a compile-time constant in the binary, not process CWD.</li>
+<li><strong>A5. Verify Class E.</strong> Top-level segfault should vanish once A1 lands; fix residual indirect-call paths if any.</li>
+</ol>
+<p><strong>Order:</strong> A1 first (unblocks everything), then A2–A4 independently, A5 as verification.</p>
+
+<h2>Track B — Interpreter parity + runtime harness (parallel)</h2>
+<ol>
+<li><strong>B1. Runtime-diff harness.</strong> New harness: run corpus via <code>mojo.py run</code> and <code>mojo.py --jit</code>, diff stdout+exit. Corpus: 7 A/B files → test_simple + builtins → stdlib tests. Wire into <code>make check</code>.</li>
+<li><strong>B2. Close interp-vs-compiled gaps</strong> (per the table above: LambdaExpr, ImagLiteral, MatchStmt capture, DelStmt, async for/with, failure mode alignment).</li>
+<li><strong>B3. Cross-path lockstep discipline.</strong> Apply each fix to BOTH paths with a cross-path test (pattern: <code>bugs/CHAINED_COMPARISON_WRONG_RESULT.md</code>). Add per-fix coverage to the runtime-diff harness.</li>
+</ol>
+
+<h2>Shared verification (every change)</h2>
+<ul>
+<li><code>test_gimple.py</code> 247/247, <code>test_module_cache.py</code> 76/76</li>
+<li><code>make check</code> (gimple + runner + modcache + selfhost + runtime-diff)</li>
+<li><code>compile_stdlib.py</code> 664/664; from-scratch stdlib dylib (0 skip)</li>
+<li><code>test_runner.py</code>, <code>test_gimple_runner.py</code>, <code>test_gimple_generator_runner.py</code>, <code>test_gimple_async_runner.py</code></li>
+<li><code>test_stdlib.py</code> (interp + jit), <code>test_async_execution.py</code>, <code>test_generators.py</code>, <code>test_myinterpreter*.py</code></li>
+<li><strong>Runtime-diff gate (in make check)</strong>: interp vs JIT stdout+exit parity — currently 23/23 + 1 JIT-COMPILE-FAILED</li>
+<li><strong>A/B byte-identity harness</strong>: currently REGRESSED on temp-dir native runs (cls.join) — not yet a gate</li>
+</ul>
+
+<h2>Execution model</h2>
+<ul>
+<li>Two agents in parallel: Track A (native dispatch + divergence classes), Track B (interpreter parity + runtime harness).</li>
+<li>Independent file surfaces: Track A → <code>gimple_codegen.py</code>, <code>module_loader.py</code>, runtime; Track B → <code>myinterpreter.py</code>, new harness.</li>
+<li>After each landing: run the full shared gate; reconcile cross-track breakage.</li>
+<li>Land changes as separate commits per divergence class / semantic gap.</li>
+</ul>
+
+<h2>Risks / mitigations</h2>
+<ul>
+<li>Static dispatch refactor is large → change only the dispatch seam, never handler bodies; verify Python-path output byte-unchanged.</li>
+<li>Comprehension fix (A3) could ripple → isolate; rely on full gate.</li>
+<li>Interp async-refusal could break tests → check <code>test_generators.py</code>/<code>test_async_execution.py</code> before changing async for/with.</li>
+</ul>
+
+<h2>Progress log</h2>
+<table id="progress">
+<tr><th>Date</th><th>Item</th><th>Status</th></tr>
+<tr><td>2026-08-02</td><td>Plan written</td><td>done</td></tr>
+<tr><td>2026-08-02</td><td>A1: static dispatch refactor (getattr → isinstance chains)</td><td>done — byte-identical add/main</td></tr>
+<tr><td>2026-08-02</td><td>B2: interpreter parity (lambda, defaults, async refusal)</td><td>done</td></tr>
+<tr><td>2026-08-02</td><td>A5: AST-node struct field registration (53 structs)</td><td>done</td></tr>
+<tr><td>2026-08-02</td><td>A5: boxed AST field access + MOJO_HOME harness fix</td><td>done — 7/7 A/B byte-identical at the time</td></tr>
+<tr><td>2026-08-02</td><td>A/B harness: 28 built-in cases + repo files all byte-identical</td><td>done at the time (35+ files); REGRESSED by later work — see open item below</td></tr>
+<tr><td>2026-08-02</td><td>A2: container-truthiness for module-level sets (Class A)</td><td>verified resolved (set/dict/type-name byte-identical)</td></tr>
+<tr><td>2026-08-02</td><td>A3: comprehension no-op + char-truncation (Class C)</td><td>mostly resolved via A5 field access + _infer_list_elem_type loop rewrite; residual edge not separately tracked</td></tr>
+<tr><td>2026-08-02</td><td>B2c: module-level VarDecl globals + global write routing</td><td>done — runtime-diff 19/19</td></tr>
+<tr><td>2026-08-02</td><td>f-string format-spec (:{spec}) + default args + memberwise ctor</td><td>done — runtime-diff 23/23</td></tr>
+<tr><td>2026-08-02</td><td>B3: wire runtime-diff into make check (check-runtimediff)</td><td>done</td></tr>
+<tr><td>2026-08-02</td><td>Pathlib fix: compile-time string params (StaticString etc.) as char*</td><td>done — compile_stdlib 664/0 (was 663/1)</td></tr>
+<tr><td>2026-08-02</td><td>generator_simple runtime-diff (C++ coroutine frontier)</td><td>OPEN — the only runtime-diff JIT-COMPILE-FAILED remaining</td>
+<tr><td>2026-08-03</td><td>cls.join root cause: current_func_name.rsplit('_',1) breaks when the METHOD name contains an underscore (TypeLattice_join_all → 'TypeLattice_join'); replaced with longest-`_`-prefix struct-name match</td><td>done — cls.join now emits TypeLattice_join(...); fixes list-literal segfault (strcat.mojo --dump exit 0)</td></tr>
+<tr><td>2026-08-03</td><td>for-loop var segfault: isinstance(node.target, str) falls to always-false mojo_isinstance stub in the compiled binary (ForStmt.target is boxed int64_t but the parser ALWAYS stores a plain str); node.target.name then dispatches on raw string bytes</td><td>done — use the parser contract (node.target is always a str) directly; fixes test_simple.mojo --dump exit 0</td></tr>
+ <tr><td>2026-08-03</td><td>Remaining native-path A/B blockers (all pre-existing, NOT from the above fixes)</td><td>OPEN — (1) struct-count divergence 79 vs 53 for user files (Class D: _compiled_selfhost forces _is_selfhost_file=True for every file); (2) print(42) miscompile — sprintf(buf, fmt, &lt;boxed IntLiteral handle&gt;) instead of 42; (3) bogus `0 (_t4);` statement; (4) intermittent corrupted temp declarations (list_ops range loop)</td></tr></tr>
+ <tr><td>2026-08-03</td><td>Tuple return element types: `-> tuple[str, str]` resolves to boxed int64_t (via _mojo_type), so call-returned tuples only unpacked via mojo_list_get_int — reading the (ctype, cval) char* string pairs as decimal pointers. Two gaps: (a) _return_elem_types only populated when the callee's body was emitted (call sites before the callee missed it — lower_expr dispatches to the _lower_* helpers defined after it); (b) the tuple-unpack consumers (_gen_stmt_AssignStmt / _gen_stmt_VarDecl) only handled vtype == 'MojoList *', never the boxed int64_t case</td><td>done — Pass 2c pre-pass infers container-return element types to a fixpoint before emission; new _tuple_elem_value consumer helper resolves the boxed handle via _actual_types and picks get_str/get_int from the elem type; self-host .ci now unpacks `vtype, v = lower_expr(...)` via mojo_list_get_str; mojoc now RUNS (was SIGSEGV at startup); blockers (1) and (2) resolved</td></tr>
+ <tr><td>2026-08-03</td><td>A/B harness with mojoc running: native .ci now produced, but diverges — (a) boxed AST field access still broken (`pat.fields` for-loop iterates int64_t; `.body`/`.orelse` fall to mojo_obj_getattr), the A5 frontier; (b) struct-shape diff (`int _dummy;` in Python vs omitted natively for empty structs); (c) one native .ci is corrupt UTF-8</td><td>OPEN — pre-existing A5 field-access gaps exposed now that mojoc runs past the earlier crash; blocks test_ab_shim byte-identity</td></tr></tr>
+ <tr><td>2026-08-03</td><td>getattr(s, 'elifs', []) on a boxed AST handle dropped the default and returned untyped int64_t — the codegen's own structural walkers' `for ... in getattr(s, 'elifs', []):` saw an opaque int64_t iterable and fell to mojo_unsupported_iter (if/else/try bodies silently never emitted in the compiled binary)</td><td>done — A5-style getattr() field-type resolution (_known_field_type + _mojo_dispatch_getattr) with _Bool-ternary default substitution; compiled gimple_codegen.py walkers now resolve. Remaining: ast_rewriter.py's dynamic pattern-class dict fields (Node.fields etc.) are not statically registerable — a deeper frontier</td></tr></tr>
+ <tr><td>2026-08-03</td><td>Compiled-codegen deep fixes (mojoc now runs and compiles user programs): tuple-target for-loops + dict.items() unpacking (eb7b1ce); corrupted temp declarations root cause — _char_to_cstr treated any untracked int64_t as a char byte so every dict membership test failed, _simple_emit's untyped params boxed strings and f-strings printed addresses, _lower_tuple_literal didn't extend *spreads, _str_hash NULL guard (11e3a3b); print_fn closure-capture (de367b7); elif conditions skipped _ensure_bool_cond so a char* elif used raw pointer truthiness (e4d6f56); _decode_str_literal_text heterogeneous (str, bool) tuple (c3cf1fa)</td><td>done — minimal_main native .ci compiles with gcc -fgimple and runs (prints 42); 16/27 builtin A/B cases compile; make check green, stdlib 0 skips. Remaining: deep compiled-string corruption in the _slit_ pool for multi-char user strings, and emission-ordering diffs (_mojo_type_name fwd-decl)</td></tr></tr>
+<tr><td>2026-08-02</td><td>Class D compiled-selfhost + cls.join classmethod receiver</td><td>OPEN/REGRESSION — compiled cls.join still miscompiles to mojo_str_join (getattr on func.obj.name returns NULL for boxed IdentExpr handle; the ov==cls check is committed but needs A5-style field-access resolution for the compiled path to fire); the A/B harness's temp-dir native runs now hang/crash on list-literal files (t_list etc.), so the earlier 28/28 byte-identical A/B is REGRESSED until this is fixed. The runtime-diff harness (repo-CWD, jit) is unaffected at 23/23.</td></tr>
+</table>
+
+<h2>Current gate status (last verified)</h2>
+<ul>
+<li><code>test_gimple.py</code>: 247/247 ✓</li>
+<li><code>test_module_cache.py</code>: 76/76 ✓</li>
+<li><code>make check-selfhost</code>: clean ✓</li>
+<li><code>compile_stdlib.py</code>: <strong>664/664</strong> ✓ (pathlib fixed)</li>
+<li><code>test_runtime_diff.py</code>: <strong>23 pass / 0 fail</strong>, 1 JIT-COMPILE-FAILED (generator_simple) ✓</li>
+<li><code>make check</code>: includes check-runtimediff, green</li>
+ <li><code>test_ab_shim.py</code>: mojoc now compiles user programs end-to-end (minimal_main runs, prints 42); 16/27 builtin cases produce gcc-compilable .ci (was 0 — mojoc couldn't even run at session start). Remaining: deep compiled-string corruption in the _slit_ pool for multi-char strings + emission-ordering diffs — open</li>
+</ul>
+
+<h2>Next steps (priority order)</h2>
+<ol>
+<li><strong>Fix compiled <code>cls.join</code></strong> (Class D follow-on): make the compiled backend's <code>_lower_method_call</code> resolve <code>func.obj.name</code> for a boxed IdentExpr handle (A5-style), so classmethod receivers compile; this also un-regresses the A/B harness (t_list native crash).</li>
+<li><strong>Restore A/B harness full-corpus run</strong> (28 cases byte-identical again) once the cls.join fix lands.</li>
+<li><strong>generator_simple</strong>: the C++ coroutine frontier — the last runtime-diff FAIL.</li>
+</ol>
+</body>
+</html>

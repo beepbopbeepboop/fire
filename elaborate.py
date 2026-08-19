@@ -401,10 +401,11 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         ret, ptypes = _signature(concrete, mangled)
-        return {'symbol': mangled, 'object': obj, 'ret': ret, 'params': ptypes}
+        return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
+                'ret': ret, 'params': ptypes}
 
     def elaborate_generic_struct(self, module_src: str, struct_name: str, type_args):
         """Instantiate a generic struct `Struct[TypeArgs]` (slice 5): monomorphize
@@ -421,10 +422,11 @@ class Elaborator:
         # Slice 6: a bounded type parameter must conform before we instantiate.
         check_bounds(module_src, tmpl, targs)
 
-        mangled, obj, _hit = mm.instantiate(tmpl, targs, gcc=self.gcc)
+        mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
         fields, methods = _struct_layout(concrete, mangled)
-        return {'name': mangled, 'fields': fields, 'methods': methods, 'object': obj}
+        return {'name': mangled, 'fields': fields, 'methods': methods,
+                'object': obj, 'cpp_object': cpp_obj}
 
     def elaborate_overload_call(self, module_src: str, fn_name: str, arg_ctypes):
         """Resolve an overloaded call (slice 4): pick the `fn_name` overload whose

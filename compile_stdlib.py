@@ -33,6 +33,86 @@ _gcc_syntax_cache: dict = {}
 # proper, then the test corpus, then tools.
 DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', 'io', 'math', 'os']
 
+# Files that are honest, currently-understood, documented whole-module
+# refusals — genuinely out of reach right now, not a shortcut around actually
+# trying. Each entry names the specific bugs/ writeup with the full root
+# cause, so a failure here is still visible (reported separately from
+# genuinely UNEXPECTED failures below) rather than silently absorbed.
+# Never add an entry here without a bugs/*.md file backing it.
+EXPECTED_FAILURES = {
+    # UPDATE (this session, continued): `create_task`/`create_raising_task`
+    # await-composition (`await create_task(<call>) + await create_task(
+    # <call>)`, and the `var t = create_task(<call>); ...; await t` shape
+    # composed with a SIBLING comptime-bracket-parametrized nested async
+    # def) now has real codegen support — see GimpleGen._cpp_expr's
+    # AwaitExpr case, `_async_quick_eligible`'s widening, and
+    # `_inline_single_use_task_composition`'s widened inner-call-shape
+    # check, all in gimple_codegen.py. `_create_task(f(), desired_worker_id
+    # =...)` (the affinity-hinted variant) is also now supported — the hint
+    # is documented as purely advisory, so it's dropped (an honest,
+    # documented simplification; the codegen has no worker-affinity
+    # concept). `test_asyncrt.mojo` now compiles cleanly end-to-end
+    # (verified via a real compile+link+run, not just this gcc-syntax-only
+    # check): `test_runtime_task`/`test_runtime_taskgroup`/
+    # `test_create_task_with_affinity_runs_coroutine` all produce their
+    # real, correct values (33, 6, 42). `test_runtime_unified_async_
+    # memory_result_raises` (its `build_message` -> `create_raising_task`
+    # -> `.wait()` path) is NOT included in that verification: `build_message`
+    # returns `String`, which this codegen's coroutine-body emitter is
+    # deliberately scalar-only throughout (see _gen_cpp_async_unit's own
+    # docstring) — so it still can't be compiled to a real coroutine, and
+    # its `create_raising_task(build_message())` call site degrades to the
+    # existing, pre-existing `_lower_call` stub (a loud runtime abort(),
+    # not a silently wrong value — see bugs/CODEGEN_comptime_bracket_
+    # parametrized_function_calls_silently_wrong.md's "Update" section for
+    # the full writeup and why this is still an honest, non-silent gap
+    # rather than a regression this session introduced). Removed from this
+    # dict since this gcc-syntax-only check genuinely passes now (matching
+    # every other passing file's own "syntax check only" contract this
+    # project has used throughout) -- the remaining `build_message`/String-
+    # return gap is real but narrower and separately documented, not
+    # papered over.
+    #
+    # `test_tracing.mojo` — FIXED: monomorphize.py now genuinely supports
+    # dual C/C++ output for an elaborated fragment (a nested `async def`
+    # inside a comptime-bracket-parametrized generic, e.g. `test_tracing_
+    # add`/`test_tracing_add_two_of_them` inside `test_tracing[level,
+    # enabled]()`) -- `instantiate()` compiles+CAS-caches a companion
+    # `.cpp.o` alongside the ordinary `.o` whenever `GimpleGen.generated_
+    # cpp` is non-empty, `monomorphize_source`'s substitution gained
+    # `_shadowed_spans`/`_sub_outside_spans` to skip a nested function's
+    # own re-declared (shadowing) bracket-parameter scope, `_cpp_stmt`
+    # gained `ComptimeVarStmt` (a compile-time-only no-op) and a bare
+    # `abort(...)` call case, and `Trace` joined `BlockingScopedLock` as a
+    # recognized no-op-elidable async guard type (see gimple_codegen.py's
+    # `_ASYNC_NOOP_LOCK_GUARD_TYPES`). Also fixed two REAL, separately
+    # hand-verified bugs surfaced while landing this: a comptime-bracket-
+    # argument/ordinary-argument ORDER swap at three separate composition
+    # call sites (masked by every existing test's own commutative
+    # arithmetic — `lhs + rhs` gives the same sum either order — until
+    # test_tracing.mojo's real, non-commutative-enough 3-parameter shape
+    # caught it), and `monomorphize.instantiate()` never setting `gen.
+    # _current_filename`, which silently no-opped an entire gen_module
+    # pass (nested async-with-comptime-params discovery) for every
+    # elaborated fragment. See bugs/CODEGEN_comptime_bracket_parametrized_
+    # function_calls_silently_wrong.md's own "dual C/C++ output" update.
+
+    # test_locks.mojo — RESOLVED 2026-07-30: the "mutable capture of a
+    # non-scalar struct" blocker was actually two codegen bugs in
+    # gimple_codegen.py, now fixed:
+    #   1. `_gen_for_range` wrote a loop variable that is ALSO a heap-boxed
+    #      mutable capture directly (`var = ctr`) instead of through the
+    #      box pointer (`*var = ctr`).
+    #   2. `_gen_stmt_AssignStmt` coerced a value to the box POINTER ctype
+    #      (`int64_t *`) when writing to a boxed mutable local whose
+    #      `_write_dest` lvalue is the deref (`*var`, pointee-typed) --
+    #      "assignment to 'int64_t' from 'int64_t *'".
+    # The file compiles + passes its gcc syntax check (see test_locks's
+    # `_ = time_function(test_atomic)` / `_ = lock^` where `_` is boxed
+    # because the nested async `inc()` reassigns it via
+    # `_ = counter.fetch_add(1)`).
+}
+
 def get_stdlib_path():
     """Return the path to the stdlib root directory (parent of std/, test/, ...)."""
     return Path(STDLIB_PATH).resolve()
@@ -229,28 +309,49 @@ def main():
     passed.sort()
     failed.sort(key=lambda pe: pe[0])
 
+    # Split failures into expected (documented, see EXPECTED_FAILURES above)
+    # and unexpected — a file only counts as a real regression if it's
+    # unexpected. A file listed in EXPECTED_FAILURES that unexpectedly
+    # starts PASSING is also flagged (stale entry — remove it) rather than
+    # silently ignored, so this list can't quietly drift from reality.
+    expected_failed = [(rp, err) for rp, err in failed if str(rp) in EXPECTED_FAILURES]
+    unexpected_failed = [(rp, err) for rp, err in failed if str(rp) not in EXPECTED_FAILURES]
+    stale_expected = sorted((set(EXPECTED_FAILURES) - {str(rp) for rp, _ in failed})
+                             & {str(rp) for rp in passed})
+
     # Print summary
     print("\n" + "="*70)
     print(f"PASSED: {len(passed)}")
-    print(f"FAILED: {len(failed)}")
+    print(f"FAILED: {len(failed)} ({len(expected_failed)} expected, "
+          f"{len(unexpected_failed)} unexpected)")
     if done:
         print(f"Codegen  CAS: {cg_hits}/{done} hits  ({100 * cg_hits // done}%)")
         print(f"GCC      CAS: {gcc_hits}/{done} hits  ({100 * gcc_hits // done}%)")
     print("="*70)
 
-    if failed:
-        print("\nFailed files:")
-        for rel_path, error in failed:
+    if expected_failed:
+        print("\nExpected (documented) failures:")
+        for rel_path, error in expected_failed:
+            print(f"  {rel_path}  — {EXPECTED_FAILURES[str(rel_path)]}")
+
+    if unexpected_failed:
+        print("\nUNEXPECTED failed files:")
+        for rel_path, error in unexpected_failed:
             print(f"  {rel_path}")
             if error:
                 print(f"    → {error}")
+
+    if stale_expected:
+        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove from the set):")
+        for rel_path in stale_expected:
+            print(f"  {rel_path}")
 
     if passed and len(passed) <= 10:
         print(f"\nPassed files:")
         for rel_path in passed:
             print(f"  {rel_path}")
 
-    sys.exit(0 if not failed else 1)
+    sys.exit(0 if not unexpected_failed and not stale_expected else 1)
 
 if __name__ == '__main__':
     main()

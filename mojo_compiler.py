@@ -6,6 +6,7 @@ compiler_gen.py from .md specs; that generation path is now DEAD.)
 from __future__ import annotations
 import re
 import sys
+import dataclasses
 from dataclasses import dataclass, field
 
 # ── Mojo pointer type shims ────────────────────────────────────────
@@ -130,6 +131,17 @@ class FloatLiteral:
     col: int = 0
 
 @dataclass
+class ImagLiteral:
+    """Python-style imaginary-number literal (`0j`, `1.5j`, `3J`). `value`
+    is the magnitude BEFORE multiplying by i — i.e. the digits that preceded
+    the `j`/`J` suffix, parsed exactly like a FloatLiteral's mantissa — not
+    the resulting complex number itself; `myinterpreter.py`'s
+    `eval_ImagLiteral` is what turns it into a MojoComplex(0.0, value)."""
+    value: float
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class StringLiteral:
     value: str
     line: int = 0
@@ -178,6 +190,22 @@ class BinaryOp:
     op: str
     left: object
     right: object
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class CompareChain:
+    """Python-style chained comparison: `a < b < c` (or any length/mix of
+    comparison operators, e.g. `a < b == c > d`). NOT the same as nested
+    BinaryOp: each of `operands` is evaluated exactly once, left-to-right,
+    and the whole chain short-circuits to False as soon as one
+    `operands[i] ops[i] operands[i+1]` link fails, without ever feeding a
+    comparison's boolean RESULT into the next comparison as an operand
+    (that was the original bug this node exists to avoid — see
+    bugs/CHAINED_COMPARISON_WRONG_RESULT.md). `len(operands) ==
+    len(ops) + 1`."""
+    operands: list
+    ops: list
     line: int = 0
     col: int = 0
 
@@ -264,6 +292,38 @@ ListLiteral = ListExpr
 DictLiteral = DictExpr
 SetLiteral = SetExpr
 TupleLiteral = TupleExpr
+
+
+@dataclass
+class YieldExpr:
+    """`yield` / `yield expr` / `yield a, b` (implicit tuple, folded into a
+    single TupleExpr `value` by the parser, matching how `return a, b` is
+    represented). `value` is None for a bare `yield`. Milestone 1: parser +
+    static generator-detection only — no interpreter/codegen execution
+    support yet (see bugs/INTERP_generator_yield_entirely_unimplemented.md).
+    """
+    value: object = None
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class YieldFromExpr:
+    """`yield from expr` — delegating yield. Always carries a value (the
+    delegated iterable expression), unlike YieldExpr."""
+    value: object = None
+    line: int = 0
+    col: int = 0
+
+@dataclass
+class AwaitExpr:
+    """`await expr` — Milestone 3a: parser + AST only, matching how
+    Milestone 1 handled YieldExpr/YieldFromExpr (no interpreter/codegen
+    execution support yet — see FunctionDef.is_async and
+    bugs/INTERP_generator_yield_entirely_unimplemented.md for the sibling
+    generator precedent this mirrors)."""
+    value: object = None
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
@@ -380,6 +440,11 @@ class ForStmt:
     iterable: object
     body: list
     else_body: object = None
+    is_async: bool = False  # True for `async for` — Milestone 3a (parser-only,
+        # mirrors FunctionDef.is_async; see AwaitExpr's docstring). A flag on
+        # the existing node rather than a new node type, matching how
+        # ComptimeForStmt is a distinct node only because comptime for-loops
+        # have genuinely different semantics/codegen, not just a modifier.
     line: int = 0
     col: int = 0
 
@@ -395,6 +460,22 @@ class FunctionDef:
     param_defaults: dict = field(default_factory=dict)  # name -> default value expression AST node
     kwonly: list = field(default_factory=list)  # names appearing after a bare `*,` separator
     comptime_params: list = field(default_factory=list)  # names from `def f[dtype: DType, ...](...)`
+    is_generator: bool = False  # True if `yield`/`yield from` appears directly in this
+        # function's own body (not inside a nested def/lambda/comprehension — a `yield`
+        # there belongs to THAT inner scope, matching real Python scoping rules).
+    yield_bearing_node_ids: object = None  # frozenset of id() of every statement/expression
+        # node in this function's own body (same nested-scope exclusion as is_generator)
+        # whose subtree contains a YieldExpr/YieldFromExpr. None for non-generator functions.
+        # Lets a later milestone's generator-execution pass cheaply ask "does this specific
+        # node need generator-aware handling" without re-walking the whole tree at runtime.
+    is_async: bool = False  # True if declared `async def` — Milestone 3a
+        # (bugs/INTERP_generator_yield_entirely_unimplemented.md's async/await
+        # sibling). Detection is trivial (just "was `async` seen before this
+        # `def`/`fn`"), unlike is_generator's body tree-walk. A function CAN be
+        # both is_async AND is_generator (`async def f(): yield x` — a real,
+        # valid Python "async generator"); the two flags are independent, not
+        # mutually exclusive. No execution semantics are implied by this flag
+        # yet — see AwaitExpr's docstring.
     line: int = 0
     col: int = 0
 
@@ -513,15 +594,22 @@ class MatchStmt:
     Deliberately implemented as switch-style equality dispatch (evaluate
     each case's pattern(s) as plain expressions, compare with `==` against
     the subject) rather than full PEP 634 structural pattern matching
-    (capture patterns, class patterns, sequence/mapping patterns, `as`
-    bindings). Real Python match statements treat a bare lowercase name in a
-    pattern as an *irrefutable capture* that always matches and rebinds the
-    name — but every real use of `match`/`case` seen in practice here uses
-    bare names as references to already-defined constants (e.g.
-    `case NODE_FUNCTION_DECL:`) expecting a value comparison, not a capture.
-    Switch-style dispatch matches that intent; true capture-pattern
-    semantics would make those cases match unconditionally on the first
-    case, which is never what's wanted here."""
+    (class patterns, sequence/mapping patterns, `as` bindings). Real Python
+    match statements treat a bare lowercase name in a pattern as an
+    *irrefutable capture* that always matches and rebinds the name — but
+    every real use of `match`/`case` seen in practice here uses bare names
+    as references to already-defined constants (e.g. `case
+    NODE_FUNCTION_DECL:`) expecting a value comparison, not a capture.
+    Switch-style dispatch matches that intent for those.
+
+    One exception: a bare name that is NOT already bound anywhere in scope
+    (myinterpreter.py's `execute_MatchStmt` checks `Scope.has`) is treated
+    as a genuine PEP 634 capture — it always matches and binds the
+    subject's value into the current (innermost, non-global) scope, mainly
+    so a guard clause (`case n if n > 0:`, see `MatchCase.guard`) has
+    something to test. Since every pre-existing use already refers to a
+    bound constant, this is purely additive and doesn't change dispatch
+    for any name that was already meaningful as an equality comparison."""
     subject: object
     cases: list
     line: int = 0
@@ -538,6 +626,8 @@ class WithItem:
 class WithStmt:
     items: list
     body: list
+    is_async: bool = False  # True for `async with` — Milestone 3a (parser-only,
+        # mirrors ForStmt.is_async/FunctionDef.is_async; see AwaitExpr's docstring).
     line: int = 0
     col: int = 0
 
@@ -570,13 +660,58 @@ class ComptimeVarStmt:
 # ── Lexer ──────────────────────────────────────────────────────────
 _KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del'}
 
-_TOKEN_RE = re.compile(r'(?P<FLOAT>\d[\d_]*\.\d*(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?|\d[\d_]*[eE][+-]?\d+)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
+_TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
 
 # ── T-string helpers: handle nested braces/interpolations ────────────────────────
 # The regex-based tokenizer can't handle nested t-strings like:
 #   t"L1: {t'L2: {t"L3: {val}"}'}"}
 # So we replace them with placeholders before tokenization.
+
+def _string_prefix_start(source: str, quote_pos: int) -> int:
+    """Scan backward from a quote character to find the start of any
+    legitimate 0-2 letter string prefix (f/F/r/R/b/B/u/U/t/T) immediately
+    preceding it.
+
+    Returns `quote_pos` itself if there's no such prefix — either because
+    there are no prefix-shaped letters right before the quote, or because
+    those letters are actually the tail of a longer identifier (e.g. the
+    `r` in `self.attr"..."`) rather than a standalone prefix token; that
+    distinction is made by checking that the character before the
+    letter-run isn't itself alphanumeric/underscore.
+
+    Shared by `_process_nested_tstrings` (which needs to know whether an
+    ordinary string has a prefix in order to skip the whole thing as one
+    opaque unit) and `py_tokenize`'s `replace_multiline_strings` (which
+    needs the same prefix boundary for triple-quoted strings). Extracted
+    here instead of duplicated per CLAUDE.md's "consolidate duplicates"
+    rule — see bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+    """
+    # Explicit `==` comparisons, not `c in 'fFrRbBuUtT'`: this codegen's
+    # compiled `in`-for-char* path is a documented stub (always returns
+    # False), so under self-hosting an `in`-based check here would never
+    # advance and every string prefix would go undetected (the exact
+    # regression `replace_multiline_strings`'s own prefix scan — the code
+    # this helper replaces — was already written to avoid; see its
+    # history/comments above its former inline copy of this logic).
+    k = quote_pos
+    letters = 0
+    while letters < 2:
+        if k <= 0:
+            break
+        c = source[k - 1]
+        is_pfx = (c == 'f' or c == 'F' or c == 'r' or c == 'R'
+                  or c == 'b' or c == 'B' or c == 'u' or c == 'U'
+                  or c == 't' or c == 'T')
+        if not is_pfx:
+            break
+        k -= 1
+        letters += 1
+    if letters == 0:
+        return quote_pos
+    prev = source[k - 1] if k > 0 else ''
+    return k if not (prev.isalnum() or prev == '_') else quote_pos
+
 
 def _find_tstring_closing_quote(source: str, quote_pos: int, quote_ch: str) -> int:
     """Find closing quote of a t-string, handling nested braces with interpolations.
@@ -629,55 +764,87 @@ def _process_nested_tstrings(stmt: str, cache: dict, idx_list: list) -> str:
     result = []
     i = 0
     while i < len(stmt):
-        # An ordinary (non-t-prefixed) string literal, e.g. `'t"'`, must be
-        # skipped as one whole unit once its opening quote is reached —
-        # otherwise the t-prefix regex below gets applied to its *contents*
-        # too, on the next loop iteration(s), and a value that merely starts
-        # with the two characters "t\"" (a completely ordinary string, not a
-        # t-string) gets misdetected as one. Found via myinterpreter.py's own
-        # `value.startswith('t"')`: `'t"'`'s content ('t' immediately
-        # followed by '"') triggered exactly this false-positive prefix
-        # match, corrupting the literal into a dangling placeholder.
+        # Any quoted string — with or without a prefix (`r"..."`, `f"..."`,
+        # `rb"..."`, a bare `"..."`, etc.) — must be recognized and consumed
+        # as ONE unit right when its opening quote is reached. Any prefix
+        # letters immediately before the quote were already appended to
+        # `result` one character at a time by the plain fallback below (they
+        # aren't distinguishable from ordinary code until we reach the quote
+        # that follows them), so they're removed from `result` here and
+        # folded back into whichever unit — ordinary string or t/f-string —
+        # this turns out to be.
         #
-        # Deliberately NOT _find_tstring_closing_quote here: its brace-depth
-        # tracking exists for real t-string interpolation, where `{`/`}` are
-        # guaranteed balanced — applying that same assumption to an ordinary
-        # string's literal content (e.g. mojo.py's own C-code-snippet string
-        # literals, full of unbalanced `{`/`}` as plain text) scans past the
-        # real closing quote entirely, misreading unrelated later source as
-        # part of this "string" — a real, more severe regression than the
-        # bug being fixed here. A plain string only ever ends at its own
-        # closing quote, so a simple backslash-escape-aware scan is correct
-        # and sufficient.
-        if stmt[i] in ('"', "'") and (i == 0 or stmt[i-1] not in
-                'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'):
+        # This dispatch is deliberately keyed off the QUOTE character (using
+        # a backward scan for any prefix, via `_string_prefix_start`) rather
+        # than off the prefix letter scanning forward for a quote: the
+        # latter (the previous implementation) had no notion of "already
+        # inside a string", so it could misfire on a `t`/`T` letter that was
+        # actually part of another string's own escape sequence (e.g. the
+        # `t` in `r"\t"`'s `\t`), treating the *original* string's own
+        # closing quote as the *opening* quote of a brand-new bogus t-string
+        # and scanning for the next unrelated quote later in the statement.
+        # See bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+        if stmt[i] in ('"', "'"):
             qch = stmt[i]
-            j = i + 1
-            while j < len(stmt):
-                if stmt[j] == '\\' and j + 1 < len(stmt):
-                    j += 2
-                    continue
-                if stmt[j] == qch:
-                    break
-                j += 1
-            if j < len(stmt):
-                result.append(stmt[i:j + 1])
-                i = j + 1
-                continue
-        m = re.match(r'[rRfFbBuU]*[tT]{1}[rRfFbBuU]*', stmt[i:])
-        if m:
-            prefix_end = i + len(m.group())
-            is_prefix = i == 0 or stmt[i-1] not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
-
-            if is_prefix and prefix_end < len(stmt) and stmt[prefix_end] in ('"', "'"):
-                close = _find_tstring_closing_quote(stmt, prefix_end, stmt[prefix_end])
+            pstart = _string_prefix_start(stmt, i)
+            prefix = stmt[pstart:i]
+            # Both t-strings (t"...") and f-strings (f"...") use the same
+            # `{expr}` interpolation syntax, so both need the brace-depth-
+            # aware, quote-reuse-safe closing-quote scan below — an
+            # f-string whose nested `{...}` expression contains a string
+            # literal reusing the SAME quote character as the f-string's
+            # own delimiter (legal since PEP 701 / Python 3.12, e.g.
+            # `f'result: {g('a', 'b')}'`) would otherwise be truncated at
+            # the first reused quote by the plain simple-scan branch below.
+            # See bugs/PARSE_FAIL_fstring_same_quote_reuse.md.
+            needs_brace_aware_scan = any(c in ('t', 'T', 'f', 'F') for c in prefix)
+            if needs_brace_aware_scan:
+                # A real t/f-string prefix: use the brace-depth-aware scan
+                # so nested `{}` interpolations are handled correctly.
+                close = _find_tstring_closing_quote(stmt, i, qch)
                 if close != -1:
-                    ts = stmt[i:close + 1]
+                    if prefix:
+                        del result[-len(prefix):]
+                    ts = stmt[pstart:close + 1]
                     ph = f"__MOJO_STR_{idx_list[0]}__"
                     cache[ph] = ts
                     idx_list[0] += 1
                     result.append(ph)
                     i = close + 1
+                    continue
+                # No closing quote found for this "t-string" reading — fall
+                # through to the plain single-char fallback below, exactly
+                # as before.
+            else:
+                # An ordinary (non-t/f) string literal, e.g. `'t"'` or
+                # `r"\t"`: skip it as one whole unit so its contents (which
+                # may coincidentally look like a t-string prefix, e.g. a
+                # literal `t"` inside, or an escape like `\t` right before
+                # the closing quote) are never re-scanned char-by-char.
+                #
+                # Deliberately NOT _find_tstring_closing_quote here: its
+                # brace-depth tracking exists for real t-string
+                # interpolation, where `{`/`}` are guaranteed balanced —
+                # applying that same assumption to an ordinary string's
+                # literal content (e.g. mojo.py's own C-code-snippet string
+                # literals, full of unbalanced `{`/`}` as plain text) scans
+                # past the real closing quote entirely, misreading unrelated
+                # later source as part of this "string". A plain string
+                # only ever ends at its own closing quote, so a simple
+                # backslash-escape-aware scan is correct and sufficient.
+                j = i + 1
+                while j < len(stmt):
+                    if stmt[j] == '\\' and j + 1 < len(stmt):
+                        j += 2
+                        continue
+                    if stmt[j] == qch:
+                        break
+                    j += 1
+                if j < len(stmt):
+                    if prefix:
+                        del result[-len(prefix):]
+                    result.append(stmt[pstart:j + 1])
+                    i = j + 1
                     continue
         result.append(stmt[i])
         i += 1
@@ -714,8 +881,21 @@ def _strip_inline_comment(s: str) -> str:
     return s
 
 def _split_on_separators(s: str) -> list[str]:
-    """Split on ';' statement separator, respecting quoted strings (including backtick strings)."""
-    parts, buf, in_str = [], [], None
+    """Split on ';' statement separator, respecting quoted strings (including
+    backtick strings) AND bracket/paren/brace nesting — a ';' inside an
+    unmatched `[`/`(`/`{` is never a real statement separator (real Python
+    has no such thing as a semicolon inside an expression at all), so it's
+    left in place for the surrounding bracketed text to consume whole. This
+    matters for a fixed-size-array type-annotation position, `var x:
+    [ElemType; N]` (see mojo_compiler.py's `_parse_type_ann_inner` LBRACKET
+    branch / `_capture_bracketed_text`, and gimple_codegen.py's
+    `_FIXED_ARRAY_ANN_RE`) — without bracket-depth tracking here, the ';'
+    was treated as an ordinary statement separator and silently DROPPED
+    (never even reaching the token stream, unlike a real SEMICOLON token —
+    see py_tokenize's `kind in ("WS", "UNK", "XFER"): continue`), losing the
+    array's size entirely with no way to recover it downstream. See
+    bugs/BUG-2026-008.md (box.3d/game) for the real-world motivating case."""
+    parts, buf, in_str, depth = [], [], None, 0
     i = 0
     while i < len(s):
         c = s[i]
@@ -727,7 +907,11 @@ def _split_on_separators(s: str) -> list[str]:
                 in_str = None
         elif c in ('"', "'", '`'):
             in_str = c; buf.append(c)
-        elif c == _SEP_CHAR:
+        elif c in ('[', '(', '{'):
+            depth += 1; buf.append(c)
+        elif c in (']', ')', '}'):
+            depth = max(0, depth - 1); buf.append(c)
+        elif c == _SEP_CHAR and depth == 0:
             parts.append("".join(buf)); buf = []
         else:
             buf.append(c)
@@ -764,6 +948,23 @@ def py_tokenize(src: str) -> list[Token]:
         n = len(src)
         i = 0
         last = 0
+        # Newlines "owed" to keep later physical-line numbers in sync after
+        # collapsing a multi-line literal to one placeholder token. Flushed
+        # at the next REAL newline actually appended to `out`, not
+        # immediately after the placeholder — emitting them right away
+        # pushed any postfix/binary continuation on the literal's own
+        # closing line (e.g. `.strip()` or `%` right after the closing
+        # `"""`) onto an artificial blank line of its own, which made the
+        # line-based tokenizer end the statement early and left the `.`/`%`
+        # to start a new, primary-less statement (`Unexpected DOT('.')`/
+        # `Unexpected OP('%')` — found via real stdlib code like
+        # `"""...""".strip()` and `"""...""" % (args)`). Deliberately
+        # inlined at both flush points below rather than factored into a
+        # nested closure: a closure-based version was behaviorally
+        # identical but broke `make check-selfhost` (gimple_codegen.py
+        # miscompiling unrelated code elsewhere once this file gained a
+        # nested closure with mutated captured state at this scope depth).
+        pending_pad = 0
         while i < n:
             c = src[i]
             if c == _CMT_CHAR:
@@ -793,28 +994,27 @@ def py_tokenize(src: str) -> list[Token]:
                 # this codegen's `and`/`or` evaluate BOTH operands (no
                 # short-circuit), so the `k > 0` bounds check must be its own
                 # `if`, never ANDed with the index it guards.
-                k = i
-                letters = 0
-                while letters < 2:
-                    if k <= 0:
-                        break
-                    _pfx_c = src[k - 1]
-                    _is_pfx = (_pfx_c == 'f' or _pfx_c == 'F' or _pfx_c == 'r' or _pfx_c == 'R'
-                               or _pfx_c == 'b' or _pfx_c == 'B' or _pfx_c == 'u' or _pfx_c == 'U'
-                               or _pfx_c == 't' or _pfx_c == 'T')
-                    if not _is_pfx:
-                        break
-                    k -= 1
-                    letters += 1
-                prev = src[k - 1] if k > 0 else ''
-                start = k if letters and not (prev.isalnum() or prev == '_') else i
+                #
+                # Shared with _process_nested_tstrings via
+                # `_string_prefix_start` (module-level helper) rather than
+                # duplicated here — see
+                # bugs/PARSE_FAIL_backslash_t_escape_misdetected_as_tstring_prefix.md.
+                start = _string_prefix_start(src, i)
                 quote3 = c * 3
                 if src[i:i + 3] == quote3:
                     j = i + 3
                     while j < n and src[j:j + 3] != quote3:
                         j += 2 if src[j] == '\\' and j + 1 < n else 1
                     end = j + 3 if j < n else n
-                    out.append(src[last:start])
+                    seg = src[last:start]
+                    if pending_pad and '\n' in seg:
+                        nl_idx = seg.index('\n')
+                        out.append(seg[:nl_idx + 1])
+                        out.append('\n' * pending_pad)
+                        pending_pad = 0
+                        out.append(seg[nl_idx + 1:])
+                    else:
+                        out.append(seg)
                     literal = src[start:end]
                     placeholder = f"__MOJO_STR_{string_idx[0]}__"
                     string_cache[placeholder] = literal
@@ -828,8 +1028,10 @@ def py_tokenize(src: str) -> list[Token]:
                     # top-of-file module docstring) reporting a diagnostic
                     # line number dozens of lines before the loop's actual
                     # location, off by roughly the cumulative length of
-                    # every docstring/multi-line string above it.
-                    out.append(placeholder + '\n' * literal.count('\n'))
+                    # every docstring/multi-line string above it. The pad is
+                    # NOT appended here — see `pending_pad`'s comment above.
+                    out.append(placeholder)
+                    pending_pad += literal.count('\n')
                     i = end
                     last = i
                     continue
@@ -846,7 +1048,17 @@ def py_tokenize(src: str) -> list[Token]:
                     i = j + 1 if j < n and src[j] == c else j
                     continue
             i += 1
-        out.append(src[last:i])
+        tail = src[last:i]
+        if pending_pad and '\n' in tail:
+            nl_idx = tail.index('\n')
+            out.append(tail[:nl_idx + 1])
+            out.append('\n' * pending_pad)
+            pending_pad = 0
+            out.append(tail[nl_idx + 1:])
+        else:
+            out.append(tail)
+            if pending_pad:
+                out.append('\n' * pending_pad)
         return ''.join(out)
 
     src = replace_multiline_strings(src)
@@ -872,6 +1084,7 @@ def py_tokenize(src: str) -> list[Token]:
     out: list[Token] = []
     stack = [0]
     paren_depth = 0  # Track (), [], {} nesting to suppress INDENT/DEDENT inside
+    continued_from_prev = False  # last physical line ended in an implicit-continuation token
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
         expanded = line.expandtabs(_INDENT_SIZE)
@@ -884,8 +1097,9 @@ def py_tokenize(src: str) -> list[Token]:
         for stmt_idx, stmt in enumerate(sub_stmts):
             stmt = stmt.strip()
             if not stmt: continue
-            # Only emit INDENT/DEDENT when at paren depth 0
-            if stmt_idx == 0 and paren_depth == 0:
+            # Only emit INDENT/DEDENT when at paren depth 0, and not when this
+            # physical line is itself just the continuation of the previous one.
+            if stmt_idx == 0 and paren_depth == 0 and not continued_from_prev:
                 if indent > stack[-1]:
                     stack.append(indent)
                     out.append(Token("INDENT", "", line=physical_line, col=0))
@@ -910,9 +1124,23 @@ def py_tokenize(src: str) -> list[Token]:
                 if kind in ("LPAREN", "LBRACKET", "LBRACE") or val in ("(", "[", "{"): paren_depth += 1
                 elif kind in ("RPAREN", "RBRACKET", "RBRACE") or val in (")", "]", "}"): paren_depth = max(0, paren_depth - 1)
                 out.append(Token(kind, val, line=physical_line, col=col))
-            # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens)
-            if paren_depth == 0:
+            # Only emit NEWLINE when paren depth is 0 (not inside brackets/parens).
+            # Also suppress it when the last token on the line is one that can only
+            # be followed by more expression (a binary operator, assignment, `->`,
+            # or a low-precedence keyword operator like `and`/`or`/`not`/`in`/`is`)
+            # — real Mojo treats such a line as implicitly continued onto the next
+            # physical line, no enclosing parens required. Deliberately excludes a
+            # trailing `.` — `...` (Ellipsis, a common stub-function body) tokenizes
+            # as three DOTs and must NOT be treated as a continuation.
+            last = out[-1] if out else None
+            implicit_continuation = last is not None and (
+                (last.kind == "OP" and last.value != "^")  # `^` is the postfix transfer sigil, not a binary op
+                or last.kind in ("AUGASSIGN", "ASSIGN", "ARROW")
+                or (last.kind == "KW" and last.value in ("and", "or", "not", "in", "is"))
+            )
+            if paren_depth == 0 and not implicit_continuation:
                 out.append(Token("NEWLINE", "", line=physical_line, col=0))
+            continued_from_prev = paren_depth == 0 and implicit_continuation
     last_line = 0
     if line_nums:
         last_line = line_nums[-1]
@@ -956,6 +1184,17 @@ _KW_PREC = {
     'is': 5,
     'as': 13,
 }
+
+# Precedence level shared by every operator that can participate in a
+# Python-style chained comparison (`a < b <= c != d`): the OP-form operators
+# in _PREC ('==','!=','<','<=','>','>=') and the KW-form ones in _KW_PREC
+# ('in', 'is', plus the two-token 'not in'/'is not' forms). All chain at the
+# SAME precedence in real Python regardless of which of these forms is used
+# — 'not in' is deliberately treated as this same level here (not
+# _KW_PREC['not']'s lower value 4, which only governs the unrelated prefix
+# `not expr` operator) so `a in b not in c` chains correctly.
+_COMPARE_CHAIN_PREC = 5
+_COMPARE_OPS = {'==', '!=', '<', '<=', '>', '>='}
 
 def _synthesize_fieldwise_inits(stmts: list) -> list:
     """Mojo's @fieldwise_init decorator synthesizes a memberwise
@@ -1043,6 +1282,55 @@ _BUILTIN_TRAITS = {
     'KeyElement', 'CollectionElement', 'EqualityComparable', 'Representable',
     'Comparable', 'Indexer', 'Absable', 'Powable', 'Roundable',
 }
+
+def _scan_yield_bearing(node, out_ids):
+    """Walk `node`'s subtree collecting id() of every statement/expression
+    node that has a YieldExpr/YieldFromExpr reachable within it, WITHOUT
+    crossing into a nested FunctionDef/LambdaExpr body (a `yield` there
+    belongs to that inner function's own scope, not this one — matches real
+    Python scoping) or into a Comprehension's element/generators (real
+    Python: `yield` inside a comprehension is a SyntaxError in the general
+    case; simplest correct stance here is to not detect/support it at all).
+
+    Returns True if `node` itself is (or contains) a yield-bearing node, and
+    as a side effect records every such node's id() into `out_ids`.
+    """
+    if node is None:
+        return False
+    if isinstance(node, (YieldExpr, YieldFromExpr)):
+        out_ids.add(id(node))
+        return True
+    if isinstance(node, (FunctionDef, LambdaExpr)):
+        # A `yield` inside a nested function/lambda makes THAT function a
+        # generator, not the enclosing one — don't recurse, don't mark.
+        return False
+    if isinstance(node, Comprehension):
+        # `yield` inside a comprehension body isn't supported/detected here
+        # (see docstring) — don't recurse into it.
+        return False
+    found = False
+    if isinstance(node, list):
+        for item in node:
+            if _scan_yield_bearing(item, out_ids):
+                found = True
+    elif dataclasses.is_dataclass(node):
+        for f in dataclasses.fields(node):
+            if _scan_yield_bearing(getattr(node, f.name), out_ids):
+                found = True
+    if found:
+        out_ids.add(id(node))
+    return found
+
+
+def _detect_generator(body: list):
+    """Given a FunctionDef's own body (list of statements), return
+    (is_generator, yield_bearing_node_ids frozenset-or-None)."""
+    out_ids = set()
+    found = _scan_yield_bearing(body, out_ids)
+    if not found:
+        return False, None
+    return True, frozenset(out_ids)
+
 
 class Parser:
     def __init__(self, tokens: list[Token]):
@@ -1143,6 +1431,171 @@ class Parser:
             return self._advance().value
         raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
 
+    def _capture_opaque_annotation_tail(self) -> str:
+        """Consume the remainder of an arbitrary (non-type) expression that
+        continues past a type-shaped annotation prefix, e.g. the `obj)` in
+        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
+        Python's grammar permits any expression in an annotation position
+        with zero semantic type-checking, and nothing downstream re-parses
+        the annotation string assuming real type syntax (traced in commit
+        6ee8291), so the tail is captured as opaque raw text rather than
+        raised as a SyntaxError.
+
+        Bracket-depth-aware (nested `(`/`[`/`{` don't prematurely trip a
+        terminator check) and stops BEFORE consuming whichever terminator
+        token the various `_parse_type_ann` call sites rely on to know the
+        annotation is done: COMMA/RPAREN for parameter lists, COLON/ASSIGN
+        for return types and var-decls, ARROW, NEWLINE/EOF, INDENT/DEDENT.
+        An unmatched closing `)`/`]`/`}` (depth back to 0) is left for the
+        caller the same way; only a still-open nested bracket's closer is
+        consumed as part of the opaque text."""
+        STOP_KINDS = ("COMMA", "COLON", "ASSIGN", "ARROW", "NEWLINE", "EOF", "INDENT", "DEDENT")
+        depth = 0
+        parts = []
+        while True:
+            t = self._peek()
+            if depth == 0 and t.kind in STOP_KINDS:
+                break
+            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
+                if depth == 0:
+                    break
+                depth -= 1
+                parts.append(self._advance().value)
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
+    def _consume_trailing_annotation_ops(self, name: str) -> str:
+        """After a type-shaped annotation prefix (`name`) is fully parsed,
+        consume any trailing operator that continues the expression:
+        1. PEP 604 union (`|`) / trait intersection (`&`) — real Mojo type
+           syntax, recursively parsing a real nested type annotation as the
+           RHS (pre-existing behavior).
+        2. Any OTHER trailing operator (`<`, `>`, `==`, binary `+`/`-`, etc.)
+           — not real type syntax, but Python's grammar syntactically
+           permits an arbitrary expression in an annotation position (PEP
+           649), so the operator and its RHS are captured as opaque text via
+           `_capture_opaque_annotation_tail` instead of raising. See
+           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
+           deliberately excluded here — it's the optional-type suffix
+           handled by the caller, `_parse_type_ann`."""
+        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
+            op = self._advance().value
+            rhs = self._parse_type_ann()
+            name = name + f" {op} " + rhs
+        if self._peek().kind == "OP" and self._peek().value != "?":
+            op = self._advance().value
+            tail = self._capture_opaque_annotation_tail()
+            name = name + " " + op + (" " + tail if tail else "")
+        return name
+
+    def _capture_bracketed_text(self) -> str:
+        """Consume a balanced `[...]` (tracking nested bracket depth so an
+        inner comma, e.g. `d[a, b]`'s tuple key, is correctly treated as
+        part of the subscript rather than ending the block early) and
+        return its contents — WITHOUT the enclosing brackets — reconstructed
+        as source text by joining consumed tokens' raw values. Every token's
+        `.value` is the exact matched source substring (see the tokenizer's
+        `_TOKEN_RE`, including STRING tokens which keep their quotes), so
+        joining them with spaces reconstructs syntactically valid Mojo
+        source that myinterpreter.py can re-tokenize/re-parse later via its
+        own `py_tokenize`/`Parser` (the same approach already used for
+        f-string field interpolation)."""
+        self._expect("LBRACKET")
+        depth = 1
+        parts = []
+        while depth > 0:
+            t = self._peek()
+            if t.kind == "LBRACKET":
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind == "RBRACKET":
+                depth -= 1
+                self._advance()
+                if depth == 0:
+                    break
+                parts.append("]")
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
+    def _parse_unpack_target(self):
+        """Parse a single unpacking-target element, supporting nested tuples:
+        (a, (b, c)) and a single starred element within a comma-list
+        (`a, *rest`), matching Python's extended-unpacking grammar. The
+        starred form is represented as "*rest" in the comma-joined string
+        target that myinterpreter.py's _bind_comprehension_target consumes.
+
+        A target element may also be a dotted attribute-access expression
+        (`st.lineno`, possibly chained `a.b.c`), e.g. `for st.lineno, line
+        in items:` — real-world code (CPython's configparser.py) mutates an
+        existing object's attribute directly in the loop instead of binding
+        a fresh local. This is kept as literal text ("st.lineno") within
+        the comma-joined string, the same way a starred name is kept as
+        literal text ("*rest"); myinterpreter.py's _bind_comprehension_target
+        recognizes the embedded "." and performs a real attribute SET
+        (reusing _assign_target) instead of a scope.define().
+
+        A target element may also be a subscript expression (`d["k"]`,
+        possibly chained `d[1][0]`), e.g. `for d["k"] in items:` or
+        `with EXPR as targets[1][0]:` (the latter straight from CPython's
+        own `Lib/test/test_with.py`). Same "keep as literal text" scheme:
+        the bracket and its contents are captured verbatim (via
+        `_capture_bracketed_text`) and appended to the target string
+        ("d[\"k\"]"); myinterpreter.py's `_bind_single_target` recognizes
+        the embedded "[" and performs a real subscript SET (again reusing
+        `_assign_target`, via a re-parsed `SubscriptExpr`). NOTE: because a
+        subscript's contents are an arbitrary expression that could itself
+        contain a top-level comma (`d[a, b]`, a tuple key) — which would be
+        ambiguous with this SAME comma used to separate elements of the
+        outer target list — the outer comma-list join above only splits on
+        commas it consumes as its own token stream (safe), but
+        myinterpreter.py's later `str.split(',')` re-parse of the joined
+        target string is NOT bracket-depth-aware. A comma-containing
+        subscript key as a for/with target is therefore not supported; the
+        real-world motivating case (`targets[1][0]`) and this bug's own
+        repro (`d["k"]`) both use comma-free keys and work correctly.
+
+        Shared by `for`-loop targets and `with ... as (a, b):` targets — one
+        representation, one parser, reused everywhere a comma-joined
+        unpacking-target string is needed (per this project's consolidation
+        convention). (Chained-assignment tuple targets use a separate
+        Expr-based TupleExpr representation, not this string form — see
+        _parse_stmt's ASSIGN handling.)"""
+        if self._peek().kind == "LPAREN":
+            self._advance()
+            parts = []
+            while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
+                parts.append(self._parse_unpack_target())
+                if self._peek().kind == "COMMA":
+                    self._advance()
+            self._expect("RPAREN")
+            return "(" + ", ".join(parts) + ")"
+        elif self._peek().kind == "OP" and self._peek().value == "*":
+            self._advance()
+            tok = self._advance()
+            return "*" + tok.value
+        else:
+            # Accept KW tokens (e.g. "fn", "var") as variable names
+            tok = self._advance()
+            name = tok.value
+            # Dotted attribute target: st.lineno, or chained a.b.c
+            while self._peek().kind == "DOT":
+                self._advance()
+                attr_tok = self._advance()
+                name += "." + attr_tok.value
+            # Subscript target: d["k"], or chained d[1][0]
+            while self._peek().kind == "LBRACKET":
+                name += "[" + self._capture_bracketed_text() + "]"
+            return name
+
     def _parse_dotted_name(self) -> str:
         """Consume a dotted name like `asyncio.CancelledError` and return it
         as a single string. Used for exception types in `except` clauses."""
@@ -1208,43 +1661,224 @@ class Parser:
         self._expect("DEDENT")
         return stmts
 
+    def _parse_yield_expr(self):
+        """Parse a `yield`/`yield from` expression — assumes the current
+        token is the NAME('yield') token. `yield` is never a real Python
+        identifier (reserved since Python 2.2; confirmed by grepping
+        CPython's own test suite — the only `yield = ...`-shaped source
+        found there is test_syntax.py/test_generators.py doctests that
+        assert it's a SyntaxError), so no `var`/`await`-style "used as an
+        identifier" disambiguation is needed — every call site below only
+        invokes this where real Python's own grammar also treats `yield` as
+        the keyword, so no ambiguity is possible.
+        """
+        t = self._advance()  # consume 'yield'
+        line, col = t.line, t.col
+        if self._peek().kind == "KW" and self._peek().value == "from":
+            self._advance()
+            val = self._parse_expr(0)
+            return YieldFromExpr(value=val, line=line, col=col)
+        # Bare `yield`: next token can't start an expression.
+        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                "RBRACKET", "RBRACE", "COMMA", "COLON", "SEMICOLON"):
+            return YieldExpr(value=None, line=line, col=col)
+        val = self._parse_expr(0)
+        # Implicit tuple: yield a, b, c — same convention as `return a, b`.
+        if self._peek().kind == "COMMA":
+            elements = [val]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                        "RBRACKET", "RBRACE", "COLON", "SEMICOLON"):
+                    break
+                elements.append(self._parse_expr(0))
+            val = TupleExpr(elements=elements, line=val.line, col=val.col)
+        return YieldExpr(value=val, line=line, col=col)
+
+    def _parse_expr_or_yield(self):
+        """Like `_parse_expr(0)` but also recognizes a leading `yield`/
+        `yield from` — for use ONLY at the specific grammar positions real
+        Python allows a bare (unparenthesized) yield expression: the whole
+        RHS of a simple/chained/annotated/augmented assignment, and a bare
+        expression statement. Every other position (call arguments, `return`
+        value, `if`/`while` conditions, container-literal elements, ...)
+        must keep going through plain `_parse_expr(0)` so `yield` there
+        still requires explicit parens, matching real Python (`f((yield x))`,
+        not `f(yield x)`) — parenthesized grouping itself routes back through
+        this same recognition (see the LPAREN case in `_parse_primary`), so
+        `(yield x)` still works in those positions.
+        """
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "yield":
+            return self._parse_yield_expr()
+        return self._parse_expr(0)
+
     def _parse_stmt(self):
         t = self._peek()
         line, col = t.line, t.col
-        # Handle "yield from expr" — yield is NAME('yield'), from is KW('from')
-        if t.kind == "NAME" and t.value == "yield" and self._peek(1).kind == "KW" and self._peek(1).value == "from":
-            self._advance()  # consume yield
-            self._advance()  # consume from
-            self._parse_expr(0)  # parse the delegated generator expression
-            return ExprStmt(value=IdentExpr(name='yield'), line=line, col=col)
         # `match` is a soft keyword (like Python's own) — only a match
         # statement when followed by a real expression and a top-level `:`
         # before the line ends; otherwise it's an ordinary identifier
         # (`match(x)` a call, `match = 5` an assignment, etc).
         if t.kind == "NAME" and t.value == "match" and self._is_match_stmt():
             return self._parse_match()
+        # `async` is a soft keyword, same story as `match`/`fn`/`struct`/`var`
+        # above: `async` lexes as a plain NAME (not in _KEYWORDS — real
+        # Python has no bare `async` keyword outside `async def`/`async
+        # for`/`async with` either), so it's also a legal ordinary
+        # identifier. Only commit to an async-prefixed parse when the very
+        # next token is one of the three real async-statement openers
+        # (`def`/`fn`, `for`, `with`); otherwise fall through to ordinary
+        # expression/assignment parsing, where `async` reads as a plain
+        # identifier via _parse_primary. This is the UNDECORATED path for
+        # `async def` — the decorated path (`@dec\nasync def f(): ...`) is
+        # handled separately below, in the `@` decorator block, which strips
+        # a leading `async` before dispatching to `def`/`fn`.
+        if t.kind == "NAME" and t.value == "async":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value in ("def", "fn"):
+                self._advance()  # consume 'async'
+                self._advance()  # consume 'def'/'fn'
+                return self._parse_funcdef([], is_async=True)
+            if nxt.kind == "KW" and nxt.value == "for":
+                self._advance()  # consume 'async'
+                stmt = self._parse_for()
+                stmt.is_async = True
+                return stmt
+            if nxt.kind == "KW" and nxt.value == "with":
+                self._advance()  # consume 'async'
+                stmt = self._parse_with()
+                stmt.is_async = True
+                return stmt
+            # else: `async` used as an ordinary identifier — fall through.
         if t.kind == "KW":
             if t.value == "import": return self._parse_import()
             if t.value == "from":   return self._parse_from_import()
             if t.value == 'var':
-                # "var = expr" means 'var' is used as a plain identifier (Python compat)
-                # "var name" or "var name:" is a proper var declaration
-                if self._peek(1).kind == "ASSIGN":
-                    pass  # fall through to expression/assignment handling below
-                else:
+                # `var` is ambiguous, same as `fn`/`struct`: it's both this
+                # dialect's declaration keyword AND a perfectly ordinary
+                # Python identifier (arguably more common as a plain name
+                # than `fn`/`struct`/`enum` ever are). Only commit to
+                # _parse_var_decl() when the shape that follows could
+                # actually BE a declaration. Per _parse_var_decl itself, a
+                # real declaration is `var` followed by either:
+                #   - a name-like token (NAME/KW/backtick-STRING) that then
+                #     becomes the declared name (optionally followed by
+                #     `,` more names, `:` a type annotation, `=` a value,
+                #     or nothing — a bare uninitialized `var x`), or
+                #   - `:` directly, meaning `var` itself is the field name
+                #     being annotated (`var: Type`) — this shape parses
+                #     identically whether `var` is "the keyword declaring a
+                #     field named var" or "the identifier var being
+                #     annotated", so there's no actual ambiguity to resolve
+                #     there.
+                # Anything else — `var.attr` (member access), `var.method()`
+                # (call), `var,` where var is itself one of several plain
+                # tuple-unpack targets (`var, x = ...`), `var == y`,
+                # `var[0]`, `var =`/`var +=` (assignment), bare `var` alone,
+                # etc. — means `var` is being used as an ordinary identifier
+                # here, so fall through to ordinary expression/assignment
+                # parsing (which already accepts KW tokens as identifiers
+                # via _parse_primary).
+                nxt = self._peek(1)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_vardecl = name_like or nxt.kind == "COLON"
+                if looks_like_vardecl:
                     return self._parse_var_decl()
+                # else: fall through to expression/assignment handling below
             if t.value == 'if': return self._parse_if()
             if t.value == 'while': return self._parse_while()
             if t.value == 'for': return self._parse_for()
             if t.value in ("def", "fn"):
-                # fn(  →  variable named "fn" being called; treat as expression
-                # fn =  →  variable named "fn" being assigned; treat as expression
-                if t.value == "fn" and self._peek(1).kind in ("LPAREN", "ASSIGN", "AUGASSIGN", "DOT"):
-                    pass  # fall through to expression statement
+                # `fn` is ambiguous: it's both this dialect's function-def
+                # keyword AND a legal plain identifier in real Python code
+                # (e.g. `fn, lno, func, sinfo = self.findCaller(...)` in
+                # CPython's logging/__init__.py). Only commit to the
+                # function-definition parse when the token shape that
+                # follows could actually BE a function signature: `fn`
+                # immediately followed by a name (the function's name,
+                # which per _parse_funcdef may itself be NAME/KW/backtick)
+                # and then either `(` (no generics) or `[` (generic params
+                # before the `(`). Anything else — `fn,` (tuple-unpacking
+                # target), `fn =`/`fn +=` (assignment), `fn.attr`
+                # (attribute access), `fn == x`, `fn[0]` used as a subscript
+                # target, `fn` alone, etc. — means `fn` is being used as an
+                # ordinary identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                if t.value == "fn":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_funcdef = name_like and nxt2.kind in ("LPAREN", "LBRACKET")
+                    if not looks_like_funcdef:
+                        pass  # fall through to expression statement
+                    else:
+                        self._advance(); return self._parse_funcdef([])
                 else:
                     self._advance(); return self._parse_funcdef([])
-            if t.value in ("struct", "class"): return self._parse_struct()
-            if t.value == "enum": return self._parse_enum()
+            if t.value in ("struct", "class"):
+                # `struct` is ambiguous the same way `fn` is (see the `fn`
+                # carve-out above): it's both this dialect's struct-def
+                # keyword AND a legal plain identifier/module name in real
+                # Python code (e.g. `struct.pack_into(...)` using the
+                # stdlib `struct` module, from CPython's
+                # multiprocessing/shared_memory.py). Real Python has no
+                # `struct` keyword at all, so this collision is real.
+                # `class`, by contrast, IS a hard keyword in real Python —
+                # a variable literally named `class` is invalid Python — so
+                # it has no realistic identifier-collision risk and is left
+                # unconditionally routed to _parse_struct.
+                #
+                # Only commit to the struct-definition parse when the shape
+                # that follows could actually BE one: `struct` immediately
+                # followed by a name-like token (per _parse_struct's name
+                # read via `self._ident()`, struct names may be NAME/KW/
+                # backtick-quoted, just like function names — a struct can
+                # itself be named after another keyword, e.g. `struct
+                # super:`, mirroring CPython's own test_super.py which
+                # defines a class named `super`) and then one of `[`
+                # (struct param block), `(` (base-class list), or `:`
+                # (straight into the body). Anything else — `struct.attr`
+                # (attribute access), `struct(...)` used as a call, `struct
+                # =` (assignment), `struct` alone, etc. — means `struct` is
+                # being used as an ordinary identifier here, so fall through
+                # to ordinary expression/assignment parsing (which accepts
+                # KW tokens as identifiers via _parse_primary).
+                if t.value == "struct":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_structdef = name_like and nxt2.kind in (
+                        "LBRACKET", "LPAREN", "COLON")
+                    if looks_like_structdef:
+                        return self._parse_struct()
+                    # else: fall through to expression statement
+                else:
+                    return self._parse_struct()
+            if t.value == "enum":
+                # `enum` is ambiguous the same way `fn`/`struct` are (see the
+                # carve-outs above): real Python has no `enum` keyword — it's
+                # a common plain identifier/module name (e.g. `import enum`
+                # then `enum = SomeEnum`, or a local var named `enum`). Only
+                # commit to the enum-definition parse when the shape that
+                # follows could actually BE one: `enum` immediately followed
+                # by a name-like token (per _parse_enum's name read) and then
+                # one of `(` (optional base-class list) or `:` (straight into
+                # the body). Anything else — `enum.attr` (attribute access),
+                # `enum(...)` used as a call, `enum =` (assignment), `enum`
+                # alone, etc. — means `enum` is being used as an ordinary
+                # identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                nxt, nxt2 = self._peek(1), self._peek(2)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_enumdef = name_like and nxt2.kind in ("LPAREN", "COLON")
+                if looks_like_enumdef:
+                    return self._parse_enum()
+                # else: fall through to expression statement
             if t.value == "trait": return self._parse_trait()
             if t.value == "try": return self._parse_try()
             if t.value == "with": return self._parse_with()
@@ -1303,14 +1937,14 @@ class Parser:
             decs = []
             while self._peek().kind == "OP" and self._peek().value == "@":
                 self._advance()
-                # str(): Token.value is typed `object`, so without this the
-                # self-hosted codegen infers dec_name as int64_t and the dotted
-                # concat below becomes int64_t + char* (a GCC build2 ICE).
-                dec_name = str(self._expect("NAME").value)
-                # Dotted decorator name: @functools.lru_cache, @a.b.c
-                while self._peek().kind == "DOT":
-                    self._advance()  # consume '.'
-                    dec_name = dec_name + "." + str(self._expect("NAME").value)
+                # Decorator name may be dotted (@functools.lru_cache, @a.b.c)
+                # and each component may lex as a Mojo keyword while still
+                # being an ordinary Python identifier (e.g. `@enum.global_enum`,
+                # `@ref(...)`) — use _parse_dotted_name(), the same
+                # keyword-accepting helper used for `except mod.Error:` and
+                # the earlier `from X import ref` fix, instead of
+                # _expect("NAME") which only accepts a real NAME token.
+                dec_name = self._parse_dotted_name()
                 # Handle decorator with arguments: @decorator(args)
                 if self._peek().kind == "LPAREN":
                     self._advance()  # skip LPAREN
@@ -1335,13 +1969,17 @@ class Parser:
                 return self._parse_trait()
             if kw.kind == "KW" and kw.value == "comptime":
                 return self._parse_comptime()
-            # Handle 'async def' — async is tokenized as NAME not KW
+            # Handle 'async def' — async is tokenized as NAME not KW. Milestone
+            # 3a: build a real is_async=True FunctionDef instead of silently
+            # discarding the `async` token (see AwaitExpr's docstring).
+            is_async = False
             if kw.kind == "NAME" and kw.value == "async":
+                is_async = True
                 self._advance()
                 kw = self._peek()
             if kw.kind == "KW" and kw.value in ("def", "fn"):
                 self._advance()
-                return self._parse_funcdef(decs)
+                return self._parse_funcdef(decs, is_async=is_async)
             # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
             # applied to a `var` declaration: decorators carry no codegen
             # meaning here, so just parse the var decl and drop them.
@@ -1349,38 +1987,78 @@ class Parser:
                 return self._parse_var_decl()
             self._expect("KW", "def or fn")
             return self._parse_funcdef(decs)
-        expr = self._parse_expr(0)
-        # Check for tuple unpacking in assignment (a, b = ...)
-        if self._peek().kind == "COMMA":
-            targets = [expr]
+        expr = self._parse_expr_or_yield()
+        # Collect a comma-separated group starting with `expr` — this is
+        # either a tuple-unpacking target (if followed by `=`) or a bare
+        # comma/tuple expression statement (if not).
+        saw_comma = self._peek().kind == "COMMA"
+        if saw_comma:
+            first_group = [expr]
             while self._peek().kind == "COMMA":
                 self._advance()
                 if self._peek().kind == "ASSIGN": break
-                targets.append(self._parse_expr(0))
-            # Check if this is actually an assignment
-            if self._peek().kind == "ASSIGN":
+                # A trailing comma with nothing meaningful after it (e.g.
+                # `print(1),` as its own statement, or `a, b,` — a plain
+                # expression statement, not a tuple-unpacking target) —
+                # matches the terminator check the chained-assignment RHS
+                # loop below already does. Without this, `expr,` at
+                # statement end tried to parse another expression starting
+                # at NEWLINE/DEDENT/EOF and blew up with "Unexpected
+                # NEWLINE". Leave the comma consumed; first_group already
+                # has everything that came before it.
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                    break
+                first_group.append(self._parse_expr(0))
+        else:
+            first_group = [expr]
+
+        # Chained assignment where ANY link (including the first) may itself
+        # be a comma-separated tuple-unpacking target list, e.g.
+        # `a, b = x = pair` (unpack AND keep the whole value bound to `x`,
+        # matching CPython's difflib.py / platform.py idiom) as well as the
+        # simpler `x = y = expr` and `a, b = expr` cases. Was: the
+        # tuple-target branch (above) and the chained-assignment loop
+        # (formerly below) were mutually exclusive passes, so a tuple target
+        # followed by another `= target` link hit "Unexpected ASSIGN".
+        if self._peek().kind == "ASSIGN":
+            groups = [first_group]
+            while self._peek().kind == "ASSIGN":
                 self._advance()
-                val = self._parse_expr(0)
-                # Check for tuple RHS: a, b = x, y
-                if self._peek().kind == "COMMA":
-                    rhs_elements = [val]
-                    while self._peek().kind == "COMMA":
-                        self._advance()
-                        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
-                            break
-                        rhs_elements.append(self._parse_expr(0))
-                    val = TupleExpr(elements=rhs_elements)
-                tuple_target = TupleExpr(elements=targets)
-                return AssignStmt(target=tuple_target, value=val)
-            # Not an assignment, treat as expression statement with comma operator
-            return ExprStmt(TupleExpr(elements=targets), line=line, col=col)
+                val_expr = self._parse_expr_or_yield()
+                group = [val_expr]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "ASSIGN"):
+                        break
+                    group.append(self._parse_expr(0))
+                groups.append(group)
+            # The last group parsed is the real RHS; every group before it
+            # (starting with `first_group`) is a target in the chain — a
+            # single-element group is a plain target, a multi-element group
+            # is a tuple-unpacking target.
+            def _group_to_expr(g):
+                return g[0] if len(g) == 1 else TupleExpr(elements=g)
+            val = _group_to_expr(groups[-1])
+            targets = [_group_to_expr(g) for g in groups[:-1]]
+            if len(targets) == 1:
+                return AssignStmt(target=targets[0], value=val, line=line, col=col)
+            return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
+
+        if saw_comma:
+            # Not an assignment, treat as expression statement with comma
+            # operator — a 1-element `first_group` here means a single
+            # trailing comma (`EXPR,`), which is still a 1-element tuple
+            # literal in Python, just like `len(first_group) > 1` (`EXPR1,
+            # EXPR2,` etc.) is a multi-element one.
+            return ExprStmt(TupleExpr(elements=first_group), line=line, col=col)
+        expr = first_group[0]
         # Annotated assignment: target: Type [= value]
         if self._peek().kind == "COLON":
             self._advance()
             type_ann = self._parse_type_ann()
             if self._peek().kind == "ASSIGN":
                 self._advance()
-                val = self._parse_expr(0)
+                val = self._parse_expr_or_yield()
                 # `x: Type = value` previously silently discarded the
                 # annotation (AssignStmt has no type_ann field) — harmless
                 # for a local (type gets re-inferred from the value), but a
@@ -1415,32 +2093,11 @@ class Parser:
                 if name:
                     return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
                 return ExprStmt(expr, line=line, col=col)
-        # Assignment / augmented assignment
-        if self._peek().kind == "ASSIGN":
-            self._advance()
-            val = self._parse_expr(0)
-            if self._peek().kind == "ASSIGN":
-                targets = [expr]
-                while True:
-                    if self._peek().kind != "ASSIGN": break
-                    targets.append(val)
-                    self._advance()
-                    val = self._parse_expr(0)
-                return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
-            # Implicit (parenthesis-less) tuple RHS: `__slots__ = 'a', 'b', 'c'`
-            # — a bare comma-separated list on the right of `=` is a tuple.
-            if self._peek().kind == "COMMA":
-                rhs_elements = [val]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
-                        break
-                    rhs_elements.append(self._parse_expr(0))
-                val = TupleExpr(elements=rhs_elements)
-            return AssignStmt(target=expr, value=val, line=line, col=col)
+        # Augmented assignment (`=`/chained-assignment/tuple-unpacking are
+        # all handled uniformly above, before the COLON-annotation check).
         if self._peek().kind == "AUGASSIGN":
             op = self._advance().value
-            val = self._parse_expr(0)
+            val = self._parse_expr_or_yield()
             return AugAssignStmt(target=expr, op=op, value=val, line=line, col=col)
         self._skip_newlines()
         return ExprStmt(expr, line=line, col=col)
@@ -1585,6 +2242,17 @@ class Parser:
         value = None
         if self._peek().kind == "ASSIGN":
             self._advance(); value = self._parse_expr(0)
+            # Implicit (parenthesis-less) tuple RHS: `var name = 'a', 'b', 'c'`
+            # — a bare comma-separated list on the right of `=` is a tuple.
+            # Mirrors the plain-assignment handling in the AssignStmt path above.
+            if self._peek().kind == "COMMA":
+                rhs_elements = [value]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                        break
+                    rhs_elements.append(self._parse_expr(0))
+                value = TupleExpr(elements=rhs_elements)
         return VarDecl(name=name, type_ann=type_ann, value=value)
 
     def _parse_if(self):
@@ -1667,12 +2335,19 @@ class Parser:
         # match time (interpreter/codegen), not specially here — parsing it
         # as a plain expression pattern keeps this parser simple, and lets
         # `_` combine with an or-pattern list the same as any other pattern.
-        patterns = [self._parse_expr(0)]
+        # Patterns are parsed at min_prec=1 (the same trick comprehension
+        # `for`/`if` clauses use below) so a top-level `if` here is left
+        # untouched for the guard-clause check below instead of being
+        # swallowed by _parse_expr's ternary-conditional-expression handling
+        # (`X if COND else Y`), which only fires at min_prec==0. Without
+        # this, `case n if n > 0:` fails trying to parse `if n > 0:` as a
+        # ternary expecting a matching `else`.
+        patterns = [self._parse_expr(1)]
         while self._peek().kind == "COMMA":
             self._advance()
             if self._peek().kind == "COLON" or self._is_kw("if"):
                 break  # trailing comma before guard/colon
-            patterns.append(self._parse_expr(0))
+            patterns.append(self._parse_expr(1))
         guard = None
         if self._is_kw("if"):
             self._advance()
@@ -1695,48 +2370,30 @@ class Parser:
         # bogus convention prefix, then swallowed `in` too (mistaking it
         # for the loop-variable name), leaving the parser expecting `in`
         # but finding the tuple's `(` instead — "Expected KW got LPAREN".
+        # `peek(1) != COMMA` guards the same collision for a plain
+        # tuple-unpack target starting with the identifier `var`/etc.,
+        # e.g. `for var, other_var in pairs:`
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
+        # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
+        # neither existing exclusion), leaving `_parse_unpack_target()` to
+        # start from the comma itself and misparse everything after.
         if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
                 and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
-                and self._peek(1).kind != "COLON"):
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
             self._advance()
 
-        def _parse_for_target():
-            """Parse a for-loop target, supporting nested tuples: (a, (b, c))."""
-            if self._peek().kind == "LPAREN":
+        # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
+        # for a, *rest in ... (single starred element anywhere in the list).
+        # _parse_unpack_target is the shared unpacking-target-element parser
+        # (also used by `with ... as (a, b):`) — see its docstring.
+        target = self._parse_unpack_target()
+        if self._peek().kind == "COMMA":
+            names = [target]
+            while self._peek().kind == "COMMA":
                 self._advance()
-                parts = []
-                while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
-                    parts.append(_parse_for_target())
-                    if self._peek().kind == "COMMA":
-                        self._advance()
-                self._expect("RPAREN")
-                return "(" + ", ".join(parts) + ")"
-            else:
-                tok = self._advance()
-                return tok.value
-
-        # Handle tuple unpacking: for (a, b) in ... or for a, b in ...
-        if self._peek().kind == "LPAREN":
-            target = _parse_for_target()
-            # Handle (a, b), c in ...
-            if self._peek().kind == "COMMA":
-                names = [target]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    names.append(_parse_for_target())
-                target = "(" + ", ".join(names) + ")"
-        else:
-            # Accept KW tokens (e.g. "fn", "var") as variable names
-            tok = self._advance()
-            target = tok.value
-            # Handle bare tuple: for a, b in ...
-            if self._peek().kind == "COMMA":
-                names = [target]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    names.append(_parse_for_target())
-                target = "(" + ", ".join(names) + ")"
-                target = "(" + ", ".join(names) + ")"
+                names.append(self._parse_unpack_target())
+            target = "(" + ", ".join(names) + ")"
         self._expect("KW", "in")
         iterable = self._parse_expr(0)
         # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`
@@ -1758,7 +2415,7 @@ class Parser:
 
     # Ownership/convention keywords preserved in param_convs
     _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned'}
-    def _parse_funcdef(self, decorators=None):
+    def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
         t = self._peek()
@@ -1944,13 +2601,17 @@ class Parser:
             ret = self._parse_type_ann()
         self._expect("COLON")
         body = self._parse_block()
+        is_generator, yield_bearing_node_ids = _detect_generator(body)
         return FunctionDef(name=name, params=params, return_type=ret,
                            body=body, decorators=decorators,
                            param_convs=param_convs,
                            param_has_default=param_has_default,
                            param_defaults=param_defaults,
                            kwonly=kwonly,
-                           comptime_params=comptime_params)
+                           comptime_params=comptime_params,
+                           is_generator=is_generator,
+                           yield_bearing_node_ids=yield_bearing_node_ids,
+                           is_async=is_async)
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
@@ -1959,7 +2620,7 @@ class Parser:
             self._advance()
         else:
             self._expect("KW", "struct")
-        name = self._expect("NAME").value
+        name = self._ident()
         # Parse struct parameter block [x: Type, y: Type = default, ...] as fields
         param_fields = []
         if self._peek().kind == "LBRACKET":
@@ -1989,9 +2650,30 @@ class Parser:
                     nxt = self._peek(1)
                     is_kwarg = nxt.kind in ("ASSIGN", "EQUAL") or (
                         nxt.kind == "OP" and nxt.value == "=")
-                    if not is_kwarg:
-                        bases.append(t.value)
+                    if is_kwarg:
+                        self._advance()
+                        expect_name = False
+                        continue
+                    # A dotted base (`class Foo(module.Bar):`) — walk the
+                    # chain and keep the TRAILING name (the actual class),
+                    # not just the leading module-name token. Capturing
+                    # only the leading token made EVERY dotted base look
+                    # unresolvable downstream (gimple_codegen.py's
+                    # _structs_with_unresolved_base checks each captured
+                    # base name against this compile's own known
+                    # StructDefs — "module" is never one, even when the
+                    # real class "module.Bar" genuinely is, e.g.
+                    # `class _Dialog(commondialog.Dialog):` in
+                    # tkinter/filedialog.py, whose Dialog IS a real,
+                    # compiled struct from the imported commondialog
+                    # module) — see bugs/COMPILE_FAIL_tkinter_filedialog.md.
+                    last_name = t.value
                     self._advance()
+                    while self._peek().kind == "DOT" and self._peek(1).kind == "NAME":
+                        self._advance()  # consume DOT
+                        last_name = self._peek().value
+                        self._advance()  # consume NAME
+                    bases.append(last_name)
                     expect_name = False
                     continue
                 self._advance()
@@ -2022,7 +2704,11 @@ class Parser:
         # expressions, since a member is allowed to shadow a keyword (e.g.
         # `class,`/`enum,` as member names, both seen in the wild).
         self._expect("KW", "enum")
-        name = self._expect("NAME").value
+        # Read the enum's own name via `_ident()` (NAME/KW/backtick), not a
+        # strict NAME-only `_expect`, so an enum can itself be named after
+        # another keyword (e.g. `enum struct:`), mirroring the
+        # `struct super:` fix for `_parse_struct`'s own name read.
+        name = self._ident()
         # Skip an optional Python-style base list: `enum Name(SomeBase):`
         if self._peek().kind == "LPAREN":
             self._advance()
@@ -2131,12 +2817,48 @@ class Parser:
                 exc_type = names
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
-            elif self._peek().kind in ("NAME", "KW") and not self._is_kw("as"):
-                # A single (possibly dotted) exception type, e.g.
-                #   except ValueError:      except asyncio.CancelledError:
-                exc_type = self._parse_dotted_name()
+            elif self._peek().kind != "COLON" and not self._is_kw("as"):
+                # The common case is a single (possibly dotted) exception
+                # type, e.g. `except ValueError:` / `except
+                # asyncio.CancelledError:`. Try that fast path first (it's
+                # stored as a plain string, which the interpreter's and
+                # gimple_codegen's per-type tag dispatch special-case for
+                # speed). But real Python's `except` clause actually takes a
+                # full *expression* — a bare name is just the common
+                # special case of that — evaluated once and checked against
+                # the raised exception. So if what follows the dotted name
+                # isn't the end of the clause (COLON or `as`), it wasn't a
+                # plain dotted name after all (e.g. a function call like
+                # `except get_error_types():`) — rewind and reparse it as a
+                # general expression, using the same "expr but don't
+                # swallow a following `as`" precedence trick _parse_with
+                # uses for `with EXPR as alias:`.
+                #
+                # The dotted-name fast path only makes sense when the type
+                # position actually starts with a NAME/KW token; anything
+                # else (INT/FLOAT/STRING literals, etc. — not unambiguously
+                # "no type here", but not name-shaped either, e.g. a
+                # malformed `except 42:`) has no dotted-name shape to try at
+                # all, so go straight to the general expression parse.
+                if self._peek().kind in ("NAME", "KW"):
+                    saved = self._pos
+                    name = self._parse_dotted_name()
+                    if self._peek().kind == "COLON" or self._is_kw("as"):
+                        exc_type = name
+                    elif self._peek().kind == "COMMA":
+                        exc_type = name
+                        self._advance()
+                        exc_name = self._ident()
+                    else:
+                        self._pos = saved
+                        exc_type = self._parse_expr(_KW_PREC['as'] + 1)
+                else:
+                    exc_type = self._parse_expr(_KW_PREC['as'] + 1)
                 if self._is_kw("as"):
                     self._advance(); exc_name = self._ident()
+                elif self._peek().kind == "COMMA":
+                    self._advance()
+                    exc_name = self._ident()
             self._expect("COLON")
             handlers.append(ExceptHandler(exc_type=exc_type, name=exc_name,
                                            body=self._parse_block()))
@@ -2160,12 +2882,21 @@ class Parser:
         expr = self._parse_expr(with_expr_prec)
         alias = None
         if self._is_kw("as"):
-            self._advance(); alias = self._ident()
+            # alias may be a bare NAME (the common case) or a parenthesized
+            # tuple-unpacking target, `with EXPR as (a, b):` — real Python
+            # requires the parens here (unlike a for-target), since a bare
+            # comma after `as` instead means a SECOND with-item (`with a()
+            # as x, b() as y:`, handled by the COMMA loop below). Reuse the
+            # same unpacking-target-element parser/representation as
+            # for-loop targets (_parse_unpack_target) rather than inventing
+            # a separate with-specific tuple-target parser.
+            self._advance(); alias = self._parse_unpack_target()
         items.append(WithItem(expr=expr, alias=alias))
         while self._peek().kind == "COMMA":
             self._advance(); expr = self._parse_expr(with_expr_prec); alias = None
             if self._is_kw("as"):
-                self._advance(); alias = self._ident()
+                # see the parenthesized-tuple-target note above.
+                self._advance(); alias = self._parse_unpack_target()
             items.append(WithItem(expr=expr, alias=alias))
         self._expect("COLON")
         return WithStmt(items=items, body=self._parse_block())
@@ -2260,8 +2991,19 @@ class Parser:
 
     def _parse_comptime_for(self):
         self._expect("KW","for")
-        # Optional convention keyword (var, ref, ...) before the target
-        if self._peek().kind == "KW" and self._peek().value in self._CONV_KWS:
+        # Optional convention keyword (var, ref, ...) before the target —
+        # same disambiguation as _parse_for's sibling guard just above:
+        # `var`/etc. is also a perfectly ordinary identifier, so only treat
+        # it as a convention prefix when it's genuinely followed by a
+        # separate target, not when it IS the target itself (i.e. peek(1)
+        # is `in`, `:`, or `,`). This site previously had no guard at all —
+        # it unconditionally swallowed any _CONV_KWS token, misparsing
+        # `comptime for var in ...` and `comptime for var, j in ...`
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md).
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
             self._advance()
         # Support tuple targets: comptime for i, j in product(...)
         target = self._ident()
@@ -2367,6 +3109,36 @@ class Parser:
         return DelStmt(targets=targets, line=t.line, col=t.col)
 
     # ── Expressions ──────────────────────────────────────────────────
+    def _at_compare_op(self) -> bool:
+        """True if the current token begins a comparison-chain operator:
+        one of the OP-form comparisons, or the KW-form 'in'/'is', or the
+        two-token 'not in' (only when 'not' is actually followed by 'in' —
+        a bare 'not' is the unrelated prefix operator, handled elsewhere)."""
+        t = self._peek()
+        if t.kind == "OP":
+            return t.value in _COMPARE_OPS
+        if t.kind == "KW":
+            if t.value in ("in", "is"):
+                return True
+            if t.value == "not" and self._peek(1).kind == "KW" and self._peek(1).value == "in":
+                return True
+        return False
+
+    def _consume_compare_op(self) -> str:
+        """Consume and return the canonical operator string for a
+        comparison-chain link. Assumes _at_compare_op() was already checked."""
+        t = self._peek()
+        if t.kind == "OP":
+            return self._advance().value
+        kw = self._advance().value  # 'in', 'is', or 'not' (of 'not in')
+        if kw == "is" and self._is_kw("not"):
+            self._advance()
+            return "is not"
+        if kw == "not":
+            self._advance()  # consume the 'in' that _at_compare_op() confirmed follows
+            return "not in"
+        return kw  # 'in', or plain 'is'
+
     def _parse_expr(self, min_prec: int):
         # Boolean `not` is a low-precedence prefix operator (binds looser than
         # comparison/`in`, tighter than `and`): `not a in b` == `not (a in b)`.
@@ -2379,6 +3151,28 @@ class Parser:
             left = self._parse_unary()
         while True:
             t = self._peek()
+            # Comparison-chain operators (==, !=, <, <=, >, >=, in, is, not
+            # in, is not) all bind at _COMPARE_CHAIN_PREC and, unlike every
+            # other binary operator, DON'T simply nest left-to-right into
+            # BinaryOp(BinaryOp(...), ...) — real Python (and this parser)
+            # treats `a < b < c` as one chained comparison `(a < b) and (b <
+            # c)`, not `(a < b) < c`. A single link (the overwhelmingly
+            # common case, e.g. plain `a < b`) still produces exactly the
+            # same BinaryOp node as before this existed; only an actual
+            # 2+-link chain produces a CompareChain, appended to
+            # incrementally as more links are found.
+            if self._at_compare_op():
+                if _COMPARE_CHAIN_PREC < min_prec: break
+                op = self._consume_compare_op()
+                right = self._parse_expr(_COMPARE_CHAIN_PREC + 1)
+                if isinstance(left, CompareChain):
+                    left.operands.append(right)
+                    left.ops.append(op)
+                elif self._at_compare_op():
+                    left = CompareChain(operands=[left, right], ops=[op])
+                else:
+                    left = BinaryOp(op=op, left=left, right=right)
+                continue
             if t.kind == "OP":
                 prec = _PREC.get(t.value, -1)
                 if prec < min_prec: break
@@ -2392,10 +3186,6 @@ class Parser:
                 prec = _KW_PREC[t.value]
                 if prec < min_prec: break
                 op = self._advance().value
-                if op == "not" and self._is_kw("in"):
-                    self._advance(); op = "not in"
-                elif op == "is" and self._is_kw("not"):
-                    self._advance(); op = "is not"
                 right = self._parse_expr(prec + 1)
                 left = BinaryOp(op=op, left=left, right=right)
             elif t.kind == "KW" and t.value == "if" and min_prec == 0:
@@ -2410,15 +3200,17 @@ class Parser:
 
     def _parse_unary(self):
         t = self._peek()
-        # `await expr` — `await` lexes as a plain NAME (not a keyword). Async
-        # semantics aren't modeled, so unwrap to the awaited expression. Guard
-        # on the next token starting an expression so a variable literally
-        # named `await` (`x = await`, `await.foo`) still reads as an identifier.
+        # `await expr` — `await` lexes as a plain NAME (not a keyword).
+        # Milestone 3a: build a real AwaitExpr node (no execution semantics
+        # yet — see its docstring) instead of Milestone-1-era silently
+        # unwrapping to just the awaited expression. Guard on the next token
+        # starting an expression so a variable literally named `await`
+        # (`x = await`, `await.foo`) still reads as an identifier.
         if (t.kind == "NAME" and t.value == "await"
                 and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
-                    "FLOAT", "LPAREN", "LBRACKET", "LBRACE")):
+                    "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE")):
             self._advance()
-            return self._parse_unary()
+            return AwaitExpr(value=self._parse_unary(), line=t.line, col=t.col)
         if t.kind == "OP" and t.value in ("-", "+", "~"):
             self._advance()
             return UnaryOp(op=t.value, operand=self._parse_unary())
@@ -2587,14 +3379,17 @@ class Parser:
                 args = []
                 keywords = {}
                 while self._peek().kind != "RPAREN":
-                    # Handle dictionary unpacking (**expr)
-                    if self._peek().kind == "OP" and self._peek().value == "**":
-                        self._advance()  # skip **
-                        args.append(self._parse_expr(0))  # parse unpacked kwargs
-                    # Handle unpacking (*expr)
-                    elif self._peek().kind == "OP" and self._peek().value == "*":
-                        self._advance()  # skip *
-                        args.append(self._parse_expr(0))  # parse unpacked value
+                    # Handle unpacking (*expr / **expr). Don't consume the
+                    # star(s) here — let _parse_expr (via _parse_unary) wrap
+                    # the operand in UnaryOp(op='*'/'**', operand=...) so the
+                    # marker survives into the AST. The interpreter's call
+                    # evaluation (myinterpreter.py) detects that wrapper and
+                    # splices the iterable's elements/mapping's items into
+                    # the flat arg/kwargs lists at call time, instead of
+                    # treating the whole expression as one ordinary
+                    # positional argument value.
+                    if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
+                        args.append(self._parse_expr(0))
                     # Handle keyword arguments (name=value) — name can be NAME or KW token
                     elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
                         keyword_name = self._advance().value  # get keyword name
@@ -2738,6 +3533,8 @@ class Parser:
             self._advance(); return IntLiteral(int(t.value, 0), line=line, col=col, raw=t.value)
         if t.kind == "FLOAT":
             self._advance(); return FloatLiteral(float(t.value), line=line, col=col)
+        if t.kind == "IMAG":
+            self._advance(); return ImagLiteral(float(t.value[:-1]), line=line, col=col)
         if t.kind == "KW" and t.value in ("True","False"):
             self._advance()
             return BoolLiteral(t.value == "True", line=line, col=col)
@@ -2766,12 +3563,29 @@ class Parser:
             self._advance()
             # Allow an ownership/convention prefix inside a parenthesized binding
             # target, e.g. tuple unpacking `(var x), (ref y) = ...`.
+            # Disambiguation: real Python has no `var`/`ref`/etc. keyword, so
+            # any of _CONV_KWS is also a perfectly ordinary identifier (e.g. a
+            # parameter named `var`). A genuine parenthesized binding target
+            # is always exactly `(CONV_KW name)` -- the keyword, one name-like
+            # token, then the closing RPAREN -- so also require peek(2) to be
+            # RPAREN before committing to the convention-prefix reading.
+            # Without this, `(var not in lst)` (bugs/PARSE_FAIL_conv_kw_prefix_misfires_on_var_not_in.md)
+            # wrongly swallowed `var` as a bogus prefix (peek(1)=KW('not')
+            # satisfied the old NAME-or-KW check), leaving `not in lst`
+            # dangling and eventually failing with "Expected RPAREN got
+            # NAME('lst')".
             if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
-                    and self._peek(1).kind in ("NAME", "KW")):
+                    and self._peek(1).kind in ("NAME", "KW")
+                    and self._peek(2).kind == "RPAREN"):
                 self._advance()
             if self._peek().kind == "RPAREN":
                 self._advance(); return TupleExpr(elements=[], line=line, col=col)
-            first = self._parse_expr(0)
+            # `_parse_expr_or_yield` (not plain `_parse_expr(0)`): parens are
+            # exactly the grouping real Python requires to use `yield`/
+            # `yield from` as a sub-expression (e.g. a call argument), so
+            # `(yield x)` must be recognized here even though the LPAREN
+            # itself belongs to a call/tuple/grouping, not a statement.
+            first = self._parse_expr_or_yield()
             if self._is_kw("for"):
                 # `_parse_generators` (plural) handles chained clauses:
                 # (x for row in rows for x in row) — a single `for` clause
@@ -2858,6 +3672,16 @@ class Parser:
         self._expect("RBRACKET")
         return ListExpr(elements=elems)
 
+    def _parse_dict_entry(self):
+        """Parse one entry after the first in a `{...}` dict literal: either
+        a `**expr` unpack spread (returned as `(UnaryOp, None)`, mirroring
+        how the first-entry spread case represents it — see
+        `_parse_dict_or_set`) or an ordinary `key: value` pair."""
+        if self._peek().kind == "OP" and self._peek().value == "**":
+            return (self._parse_expr(0), None)
+        k = self._parse_expr(0); self._expect("COLON"); v = self._parse_expr(0)
+        return (k, v)
+
     def _parse_dict_or_set(self):
         self._expect("LBRACE")
         if self._peek().kind == "RBRACE":
@@ -2888,8 +3712,22 @@ class Parser:
             while self._peek().kind == "COMMA":
                 self._advance()
                 if self._peek().kind == "RBRACE": break
-                k = self._parse_expr(0); self._expect("COLON"); v = self._parse_expr(0)
-                pairs.append((k, v))
+                pairs.append(self._parse_dict_entry())
+            self._expect("RBRACE")
+            return DictExpr(pairs=pairs)
+        # Dict-unpack spread as the first entry: `{**a, **b}` (PEP 448). `**`
+        # never carries a COLON (there's no key expression to its left), so
+        # this must be checked before falling through to the set-literal
+        # path below — otherwise `{**a, **b}` gets misclassified as a set of
+        # two `**`-UnaryOp "elements", which then crashes in eval_UnaryOp
+        # instead of building a dict (see
+        # bugs/INTERP_dict_double_star_unpack_runtime.md).
+        if isinstance(first, UnaryOp) and first.op == "**":
+            pairs = [(first, None)]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "RBRACE": break
+                pairs.append(self._parse_dict_entry())
             self._expect("RBRACE")
             return DictExpr(pairs=pairs)
         if self._is_kw("for"):
@@ -3132,7 +3970,14 @@ class Parser:
         # (PEP 484). Strip the quotes and treat the contents as the type name.
         if self._peek().kind == "STRING":
             return prefix + self._strip_string_prefix_and_quotes(self._advance().value)
-        # Handle parenthesized types like () for unit type
+        # Handle parenthesized types like () for unit type, e.g. `y: (1).__class__`
+        # (a parenthesized-expression-shaped annotation, PEP 649-legal but not a
+        # real type). Captured as opaque text and then, same as every other
+        # branch below, falls through to the shared continuation tail (dotted-
+        # name loop / call-parens / subscript loop / trailing-op consumption)
+        # instead of returning immediately — see
+        # bugs/PARSE_FAIL_annotation_paren_then_dot.md for why an early return
+        # here left a trailing `.attr`/`|`/`&` continuation dangling.
         if self._peek().kind == "LPAREN":
             name = prefix + "("
             self._advance()
@@ -3151,7 +3996,7 @@ class Parser:
                 else:
                     name += t.value
             name += ")"
-            return name
+            return self._finish_type_ann_tail(name)
         # Allow KW tokens as type names (e.g., "let", "var", "if")
         t = self._peek()
         if t.kind == "NAME": name = prefix + self._advance().value
@@ -3199,7 +4044,95 @@ class Parser:
                     return prefix + f"def ... -> {return_type}"
                 return prefix + "def"
             name = prefix + kw_value
-        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
+        elif t.kind == "LBRACKET":
+            # An annotation position occupied by a list-literal-shaped thing,
+            # e.g. `var2: [Int, String]` — nonsensical as a real type, but
+            # Python's (and Mojo's) grammar allows an arbitrary expression
+            # here syntactically. Rather than aborting the whole parse, just
+            # consume the balanced `[...]` opaquely (reusing the same
+            # bracket-depth-aware capture used for subscript assignment
+            # targets) and hand back SOME string for the annotation slot.
+            # Nothing downstream gives semantic meaning to an annotation
+            # string it doesn't recognize as a real type name — e.g.
+            # gimple_codegen.py's `_mojo_type`/`_resolve_type` harmlessly
+            # fall through to the int64_t default for unrecognized text —
+            # so this is safe to leave un-type-checked.
+            return self._finish_type_ann_tail(prefix + "[" + self._capture_bracketed_text() + "]")
+        elif t.kind == "LBRACE":
+            # An annotation position occupied by a dict/set-literal-shaped
+            # thing, e.g. `-> {}:` (an empty dict literal used, legally but
+            # nonsensically, as a return type — a real Python grammar
+            # permissiveness case). Same opaque-capture treatment as the
+            # LBRACKET case above.
+            self._advance()  # consume {
+            depth = 1
+            parts = ["{"]
+            while depth > 0:
+                tok = self._advance()
+                if tok.kind == "LBRACE":
+                    depth += 1
+                    parts.append("{")
+                elif tok.kind == "RBRACE":
+                    depth -= 1
+                    if depth > 0: parts.append("}")
+                elif tok.kind == "EOF": break
+                else: parts.append(tok.value)
+            parts.append("}")
+            return self._finish_type_ann_tail(prefix + "".join(parts))
+        elif t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
+            # `...` (Ellipsis) in annotation position, e.g. `g: ...` or
+            # `-> ...`. The tokenizer produces THREE separate DOT tokens for
+            # `...` (there's no single ELLIPSIS token kind) — mirrors
+            # _parse_primary's identical three-DOT lookahead for Ellipsis as
+            # an ordinary expression. Without this case, DOT falls to the
+            # generic catch-all below, which consumes only the first dot and
+            # leaves the other two dangling for the parameter-list parser to
+            # choke on. Annotation text is never semantically type-checked
+            # downstream, so the literal string "..." is a safe, sufficient
+            # representation. Also route through _finish_type_ann_tail
+            # for consistency with every other branch (e.g. `g: ... | None`).
+            # See bugs/PARSE_FAIL_annotation_ellipsis.md.
+            self._advance(); self._advance(); self._advance()
+            return self._finish_type_ann_tail(prefix + "...")
+        else:
+            # Last-resort fallback: some other single token occupies the
+            # annotation position (e.g. a bare operator or literal). Consume
+            # it as opaque raw text rather than aborting the parse — see the
+            # LBRACKET/LBRACE cases above for why this is safe. Then, same as
+            # the NAME/KW path, consume any trailing operator continuing the
+            # expression (e.g. `radd: 1 + a` — a NUMBER-shaped prefix followed
+            # by a binary op; see
+            # bugs/PARSE_FAIL_annotation_leading_literal_trailing_op.md).
+            return self._finish_type_ann_tail(prefix + self._advance().value)
+        return self._finish_type_ann_tail(name)
+
+    def _finish_type_ann_tail(self, name: str) -> str:
+        """Shared continuation tail for `_parse_type_ann_inner`: given an
+        already-captured type-shaped prefix `name` (from ANY of that
+        function's branches — NAME/KW, LPAREN, LBRACKET, LBRACE, the
+        three-DOT ellipsis case, or the single-token catch-all), consume
+        every further continuation the token stream might hold — a dotted
+        `.member` chain, a call-parens application `(...)`, chained
+        `[...]`/`.attr`/`(...)` subscript/call combinations, and finally any
+        trailing PEP 604 union/intersection or other stray operator via
+        `_consume_trailing_annotation_ops` — and return the fully-extended
+        text.
+
+        Every branch of `_parse_type_ann_inner` now routes through here
+        instead of returning its own opaquely-captured text directly. This
+        was added as the fix for the fourth in a chain of annotation-parsing
+        gaps found in one session (see
+        bugs/PARSE_FAIL_annotation_paren_then_dot.md): each earlier fix
+        (6ee8291, 6e6020f, bb28e80, c2933a7) patched exactly one branch to
+        handle exactly one missing continuation shape (a trailing binary
+        op, then specifically `|`/`&`, then LPAREN/LBRACKET/LBRACE routing
+        through the op-continuation helper) — but none of those handled a
+        trailing `.attr` DOT-chain after a non-NAME-shaped prefix, e.g.
+        `y: (1).__class__`. Rather than patch the LPAREN branch a fifth
+        time and leave LBRACKET/LBRACE/ellipsis/catch-all with the same
+        latent gap for a sixth, this single shared tail is now the ONE place
+        that knows how to consume a continuation, and every branch supplies
+        it with its own already-parsed prefix."""
         # Support dotted type names like __mlir_type.i1 or __mlir_type.`backtick_type`
         while self._peek().kind == "DOT":
             self._advance()  # consume dot
@@ -3239,12 +4172,10 @@ class Parser:
                 else:
                     name += "." + self._expect("NAME").value
         if self._peek().kind != "LBRACKET":
-            # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
-            while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
-                op = self._advance().value
-                rhs = self._parse_type_ann()
-                name = name + f" {op} " + rhs
-            return name
+            # Handle PEP 604 union types (X | Y | Z), trait intersections
+            # (X & Y & Z), and any other trailing operator continuing an
+            # arbitrary (non-type) expression in this annotation position.
+            return self._consume_trailing_annotation_ops(name)
         # Consume [TypeArgs] and any chained subscripts, .member accesses, or
         # comptime-call applications, e.g. `_field_types_of[Self.T]()[idx]`.
         parts = [name]
@@ -3288,12 +4219,10 @@ class Parser:
                     else: parts.append(t.value)
                 parts.append("]")
         result = "".join(parts)
-        # Handle PEP 604 union types: X | Y | Z  and trait intersections X & Y & Z
-        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
-            op = self._advance().value
-            rhs = self._parse_type_ann()
-            result = result + f" {op} " + rhs
-        return result
+        # Handle PEP 604 union types (X | Y | Z), trait intersections
+        # (X & Y & Z), and any other trailing operator continuing an
+        # arbitrary (non-type) expression in this annotation position.
+        return self._consume_trailing_annotation_ops(result)
 
 # ── Code generator ─────────────────────────────────────────────────
 def emit_module(stmts: list, indent: int = 0) -> str:
@@ -3303,6 +4232,7 @@ def emit(node, indent: int = 0) -> str:
     pad = "    " * indent
     if isinstance(node,IntLiteral): return str(node.value)
     if isinstance(node,FloatLiteral): return repr(node.value)
+    if isinstance(node,ImagLiteral): return repr(node.value) + "j"
     if isinstance(node,BoolLiteral): return str(node.value)
     if isinstance(node,StringLiteral): return node.value
     if isinstance(node,EllipsisLiteral): return "..."
@@ -3312,6 +4242,11 @@ def emit(node, indent: int = 0) -> str:
         args = ", ".join(emit(a, 0) for a in node.args)
         return f"{f}({args})"
     if isinstance(node,BinaryOp): return f"({emit(node.left, 0)} {node.op} {emit(node.right, 0)})"
+    if isinstance(node,CompareChain):
+        parts = [emit(node.operands[0], 0)]
+        for op, operand in zip(node.ops, node.operands[1:]):
+            parts.append(f"{op} {emit(operand, 0)}")
+        return "(" + " ".join(parts) + ")"
     if isinstance(node,UnaryOp):  return f"({node.op} {emit(node.operand, 0)})"
     if isinstance(node,TernaryExpr): return f"({emit(node.then_val, 0)} if {emit(node.condition, 0)} else {emit(node.else_val, 0)})"
     if isinstance(node,WalrusExpr): return f"({node.name} := {emit(node.value, 0)})"
@@ -3334,7 +4269,15 @@ def emit(node, indent: int = 0) -> str:
             return body
         return f"{emit(node.obj, 0)}[{body}]"
     if isinstance(node,ListExpr): return "[" + ", ".join(emit(e, 0) for e in node.elements) + "]"
-    if isinstance(node,DictExpr): return "{" + ", ".join(f"{emit(k, 0)}: {emit(v, 0)}" for k,v in node.pairs) + "}"
+    if isinstance(node,DictExpr):
+        # A `**expr` unpack spread pair is stored as (UnaryOp(op='**', ...),
+        # None) — see `_parse_dict_or_set`/`_parse_dict_entry` — so it emits
+        # as just the spread itself, not a bogus "(** x): None" pair.
+        def _emit_pair(k, v):
+            if v is None and isinstance(k, UnaryOp) and k.op == "**":
+                return emit(k, 0)
+            return f"{emit(k, 0)}: {emit(v, 0)}"
+        return "{" + ", ".join(_emit_pair(k, v) for k, v in node.pairs) + "}"
     if isinstance(node,SetExpr): return "{" + ", ".join(emit(e, 0) for e in node.elements) + "}"
     if isinstance(node,TupleExpr):
         if not node.elements: return "()"
