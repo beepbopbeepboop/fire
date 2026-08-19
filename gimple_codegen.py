@@ -35217,7 +35217,32 @@ class GimpleGen:
                     if _annot is not None:
                         continue  # respect an explicit annotation
                     _cur = self._inferred_param_types.get(_callee, {}).get(_pname)
-                    if _cur not in (None, 'int', 'int64_t'):
+                    # `MojoList *` is included here alongside the int64_t
+                    # default: `_infer_param_types`'s generic body-usage scan
+                    # (run BEFORE this pass) has no visibility into call-site
+                    # argument types, so a param consumed only via `for x in
+                    # g:` (with no subscript) is guessed `MojoList *` purely
+                    # from `is_iterated` — the same syntactic shape a param
+                    # consuming a generator has. That guess is exactly wrong
+                    # when every real call-site argument we observed here is
+                    # generator-provenanced (`prov is not None`, checked
+                    # above the observation loop this dict is built from),
+                    # which is strictly stronger evidence than the body
+                    # scan's blind guess: it traced the actual value
+                    # flowing in. Found via `consume(g)`/`consume(mk())`
+                    # (bugs/CODEGEN_compiled_generator_not_first_class_
+                    # value.md's composed boundary shapes): `consume`'s
+                    # param `g` was pre-typed `MojoList *` by the body scan,
+                    # this pass's guard then skipped it as "already picked a
+                    # real type", so the caller's real `MojoGenerator *` got
+                    # force-cast to `MojoList *` at the call site and every
+                    # `for x in g:` inside `consume` read the coroutine
+                    # frame's raw bytes through `mojo_list_len`/
+                    # `mojo_list_get_int` as if it were a MojoList struct —
+                    # a silent miscompile (no error, no crash at compile
+                    # time) producing garbage int64 values instead of a hard
+                    # failure.
+                    if _cur not in (None, 'int', 'int64_t', 'MojoList *'):
                         continue  # body evidence already picked a real type
                     self._inferred_param_types.setdefault(_callee, {})[_pname] = 'MojoGenerator *'
                     if len(_keys) == 1 and _keys[0] != '<conflict>':
