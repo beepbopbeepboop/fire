@@ -11,7 +11,95 @@ work end-to-end, confirmed via full compile+run repros (not just "stops
 erroring at compile time"). **The residual gap (caught exception objects,
 e.g. `Lib/pathlib/_os.py`'s `err.filename = ...`) is now ALSO fixed, as of
 2026-08-18** — see "Residual gap FIXED (2026-08-18)" below for the
-narrower, syntactic (not type-keyed) approach used.
+narrower, syntactic (not type-keyed) approach used. **A same-day-of-
+landing regression that silently broke Sub-case C's own `.__name__`
+handling on a `MojoBoundMethod` is now found + fixed, ALSO 2026-08-18**
+— see "Regression found + fixed (2026-08-18): `self.prop.attr` auto-
+invoke ate Sub-case C's `.__name__` again" below.
+
+### Regression found + fixed (2026-08-18): `self.prop.attr` auto-invoke ate Sub-case C's `.__name__` again
+
+The permanent regression test added for Sub-case C,
+`test_gimple_runner.py`'s `gimple_dynamic_attribute_fixed_runtime_struct_
+bound_method`, was found FAILING at the start of this session (confirmed
+directly: `python3 mojo.py build` on the exact repro compiled clean, but
+the binary crashed with `Unhandled exception: AttributeError: __name__`
+instead of printing `read_nonlocal`/`11`; `python3 test_gimple_runner.py`
+showed 17 passed, 1 failed, this test the only failure).
+
+**Root cause, found via `git bisect`** (a real `bisect run` against the
+exact repro, `dfc0bee` — Steps 1-4's own landing commit — as the known-good
+endpoint, current `HEAD` as known-bad): commit `f1d786d` ("Fix self.prop.
+attr chaining off a bound method/@property resolving wrong"), landed the
+SAME DAY as Steps 1-4 but ~18 hours later (`dfc0bee` 02:18, `f1d786d`
+20:37, both 2026-08-07). That commit added an unconditional auto-invoke to
+`_lower_MemberExpr`'s general object-lowering path: whenever the lowered
+receiver's C type is `MojoBoundMethod *`, it now calls
+`mojo_bound_method_call_0` on it FIRST, before any member-name-specific
+handling runs — including the `__name__` special case and the
+`_FIXED_RUNTIME_STRUCT_NAMES` dynamic-dispatch fallback both further down
+the SAME function, making both permanently unreachable for this shape.
+That commit's own comment explicitly asserted "a real, intentional 'read a
+member off the bound-method OBJECT itself' (e.g. `self.method.__name__`)
+isn't supported by this codegen either way" — which was simply wrong
+already at the moment it was written: Sub-case C (this doc, landed hours
+earlier that same day) had already made exactly that case work. The
+session that wrote `f1d786d` was targeting a different, real bug
+(`self.filename.parent`-shaped property chaining, `Lib/zipfile/_path/
+__init__.py`) and had no way to know about the same-day Sub-case C
+landing without re-reading this doc — its own before/after spot-check
+corpus never happened to include a `.__name__`-on-a-closure repro, so nothing
+caught it, and no session since (multiple, per this doc's own commit
+history) happened to touch this exact code path directly enough to notice
+either.
+
+**The fix**: narrowed the auto-invoke's own condition, in
+`_lower_MemberExpr` (`gimple_codegen.py`, the `if ot == 'MojoBoundMethod
+*':` block reached via `else: ot, ov = self.lower_expr(node.obj)`), to
+also require `isinstance(node.obj, MemberExpr)` — i.e., only auto-invoke
+when the `MojoBoundMethod *` value being chained off of was ITSELF just
+produced by a fresh member-access expression (`self.prop.attr`: `node.obj`
+is the inner `MemberExpr` `self.prop`), which is exactly the shape
+`f1d786d`'s own repro and every real-world instance in its commit message
+use. A `MojoBoundMethod *` value already sitting in a plain variable
+(`node.obj` an `IdentExpr`, e.g. `f = make_closure(); f.__name__ = ...`)
+no longer auto-invokes, so it falls through to the `__name__` special case
+/ `_FIXED_RUNTIME_STRUCT_NAMES` dispatch exactly as Steps 1-4 intended.
+This is a real, narrow distinction available in the AST at zero extra
+cost — not a heuristic on member names (which Sub-case C's whole point of
+supporting ARBITRARY dynamic attribute names rules out as a viable
+discriminator).
+
+**Verification**:
+- The exact failing repro (`f = make_closure(); f.__name__ = "read_
+  nonlocal"; print(f.__name__); print(f())`) via `python3 mojo.py build` +
+  run: now prints `read_nonlocal` / `11`, matching the test's expectation.
+- `python3 test_gimple_runner.py`: 18 passed, 0 failed (was 17/1).
+- The commit that introduced the auto-invoke's own target case, re-tested
+  directly (a `self.prop.attr`-shaped repro — a `@property` on a class,
+  read through a chained member access inside another method): still
+  works, byte-for-byte identical output with and without this session's
+  fix (`git stash` before/after comparison) — the narrowing genuinely
+  doesn't regress what `f1d786d` fixed.
+- Sibling repros re-verified: the caught-exception `err.filename = ...`
+  repro from the 2026-08-18 "Residual gap FIXED" section above still
+  prints `somepath` correctly (unaffected — that dispatch path never
+  touches `MojoBoundMethod`). The opaque-object `cls.__slot_names__`-style
+  Sub-case A/B repro (a fresh, not-in-suite variant of this doc's own
+  minimal repro, built as a standalone class-based test rather than reusing
+  the exact suite test) segfaults both BEFORE and AFTER this session's fix
+  (confirmed via `git stash` before/after, byte-for-byte identical crash) —
+  a genuinely pre-existing, unrelated gap in that specific variant shape,
+  not something this session's change touches or should chase; the actual
+  in-suite Sub-case A/B regression test
+  (`gimple_dynamic_attribute_real_storage_and_attributeerror`) passes
+  throughout.
+- Quality gate: `python3 test_gimple.py` — 248 passed, 0 failed.
+  `python3 test_module_cache.py` — 76 passed, 0 failed. `make
+  check-selfhost` — clean. From-scratch stdlib dylib rebuild — clean, 0
+  `skip <module>:` lines. `python3 compile_stdlib.py` (default jobs,
+  full 664-file corpus) — 664/664 passed, 0 unexpected failures (unchanged
+  from baseline).
 
 ### Steps 1-4 implementation notes (2026-08-07)
 

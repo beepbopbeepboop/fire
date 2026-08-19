@@ -9767,7 +9767,31 @@ class GimpleGen:
             # already routes unknown MojoBoundMethod fields through
             # runtime dispatch instead of a hard GCC error. See bugs/
             # COMPILE_FAIL_zipfile__path___init__.md.
-            if ot == 'MojoBoundMethod *':
+            #
+            # REGRESSION (found+fixed 2026-08-18, see bugs/hard/CODEGEN_
+            # dynamic_attribute_on_generic_object.md's dated status
+            # section): the "isn't supported either way" claim above was
+            # wrong the moment it was written — Sub-case C (this same
+            # doc, landed HOURS earlier the same day) already made
+            # `f.__name__`/arbitrary dynamic attributes on a MojoBoundMethod
+            # a real, working feature. This auto-invoke fired unconditionally
+            # on ANY `X.member` where `X` lowers to a MojoBoundMethod *,
+            # including a plain closure VARIABLE (`f = make_closure(); f.
+            # __name__ = ...; print(f.__name__)`) — silently calling the
+            # closure (`mojo_bound_method_call_0`) instead of ever reaching
+            # the `__name__` special case or the `_FIXED_RUNTIME_STRUCT_
+            # NAMES` dispatch further down, both now permanently dead code
+            # for this shape. Fixed by scoping the auto-invoke to its own
+            # actual target shape — chaining a member access directly off a
+            # FRESH property/method lookup (`self.prop.attr`: `node.obj` is
+            # itself a `MemberExpr`) — which is exactly what this fix's own
+            # confirmed repro (`self.filename.parent`) and every real-world
+            # instance in its commit message look like. A bound-method value
+            # already sitting in a plain variable (`node.obj` an `IdentExpr`
+            # or anything else) is left alone, so attribute access directly
+            # on a closure/bound-method OBJECT itself reaches the existing
+            # dynamic-attribute machinery instead of being auto-invoked.
+            if ot == 'MojoBoundMethod *' and isinstance(node.obj, MemberExpr):
                 ret_type = self._bound_method_ret_types.get(ov, 'int64_t')
                 raw_t = self._call_expr('int64_t', 'mojo_bound_method_call_0',
                                          [('MojoBoundMethod *', ov)])
