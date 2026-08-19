@@ -4428,6 +4428,22 @@ class GimpleGen:
         # not final filtered results.
         self._field_scan_var_cache: dict = {}
         self._field_scan_member_cache: dict = {}
+        # Phase 3 (same doc, same pattern): per-function/method memoization
+        # of `_infer_param_types`'s own expensive per-parameter AST scan
+        # (`analyze_param_usage`, gen_module's Pass 1.3 unannotated-parameter
+        # type inference). `all_functions`/`all_structs_for_methods` grow to
+        # O(total transitive tree size) at every nesting level exactly like
+        # `imported_stmts` does, so a function/method object already visited
+        # by an earlier (ancestor or sibling) level was having its ENTIRE
+        # body re-walked from scratch again at every subsequent level —
+        # O(N^2) tree-wide, same shape as the Phase 2 bug. Keyed by
+        # id(func); shared by reference into every temp_gen the same way
+        # `_field_scan_var_cache` is. See `_infer_param_types` for why only
+        # the raw per-parameter USAGE SIGNALS are cached here, not the
+        # final inferred C type (which additionally depends on
+        # `self.struct_field_types`, grown monotonically during
+        # compilation — the same time-dependent-filter trap as Phase 2).
+        self._param_usage_scan_cache: dict = {}
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
@@ -5259,6 +5275,9 @@ class GimpleGen:
                     # _all_transitive_stmts_ordered in __init__).
                     temp_gen._field_scan_var_cache = self._field_scan_var_cache
                     temp_gen._field_scan_member_cache = self._field_scan_member_cache
+                    # share: Phase 3 per-function param-usage-scan cache
+                    # (see its own declaration next to _field_scan_var_cache).
+                    temp_gen._param_usage_scan_cache = self._param_usage_scan_cache
                     temp_gen._extra_search_paths = self._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                     temp_gen.func_return_types = self.func_return_types  # share across gens
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
@@ -7339,8 +7358,31 @@ class GimpleGen:
         # For each parameter without a type annotation, infer from usage
         for pname, ptype in func.params:
             if ptype is None:
-                (fields_accessed, function_calls, is_subscripted, is_string_method,
-                 is_iterated, is_char_compared) = analyze_param_usage(func.body, pname)
+                # Phase 3 (bugs/hard/PERF_nested_module_compile_walk_ast_
+                # quadratic_rescan.md): `analyze_param_usage` is an
+                # expensive recursive body scan and a PURE function of
+                # (func.body, pname) — no `self.*` state read anywhere in
+                # scan_nodes/scan_expr (confirmed by inspection) — so its
+                # raw usage-signal result is memoized here, keyed by
+                # id(func)+pname, shared tree-wide via
+                # `self._param_usage_scan_cache` exactly like
+                # `_field_scan_var_cache` (Phase 2). Only the SIGNALS are
+                # cached, not the final inferred type below, which also
+                # depends on `self.struct_field_types` (grows monotonically
+                # during compilation — the same time-dependent-filter trap
+                # Phase 2 already had to work around) and must therefore
+                # still be recomputed fresh on every call.
+                _pu_key = (id(func), pname)
+                _pu_cached = self._param_usage_scan_cache.get(_pu_key)
+                if _pu_cached is not None:
+                    (fields_accessed, function_calls, is_subscripted, is_string_method,
+                     is_iterated, is_char_compared) = _pu_cached
+                else:
+                    (fields_accessed, function_calls, is_subscripted, is_string_method,
+                     is_iterated, is_char_compared) = analyze_param_usage(func.body, pname)
+                    self._param_usage_scan_cache[_pu_key] = (
+                        fields_accessed, function_calls, is_subscripted, is_string_method,
+                        is_iterated, is_char_compared)
 
                 # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
                 is_polymorphic = any(
