@@ -2740,6 +2740,28 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
     if isinstance(e, SliceExpr):
         return 'char *'  # string slice produces a string
     if isinstance(e, SubscriptExpr):
+        # A declared MojoList*/MojoDict* subject (`d[0]` where `d` is a
+        # known container, not a string) reads via the real runtime getter
+        # (mojo_list_get_int/mojo_dict_get_int -- see _cpp_expr's own
+        # SubscriptExpr case, the single source of truth for the actual
+        # emission this type must agree with) and produces int64_t, NOT a
+        # string -- this narrow model has no per-container element-type
+        # tracking (mirrors the tuple-unpack branch's own `mojo_list_get_
+        # int` "assume int64_t" convention), but it must NOT still default
+        # to the char*-subscript guess below, which is only valid for a
+        # genuine string subject. Without this, a generator that both
+        # reads and yields `d[0]` (`known` here is threaded from
+        # _generator_yield_ctype, which also gets `self._cpp_declared` at
+        # the SEPARATE point _cpp_expr's own read-side fix already
+        # believes `d[0]` is int64_t) had these two independent estimators
+        # DISAGREE -- the promise's `yield_value(char * v)` parameter type
+        # this function drove, fed a genuine int64_t argument by _cpp_
+        # expr's own runtime-getter call, a real g++ type-mismatch error.
+        # See CODEGEN_generator_non_plain_assignment_target_refused.md's
+        # 2026-08-19 update.
+        if known is not None and isinstance(e.obj, IdentExpr) \
+                and known.get(e.obj.name) in ('MojoList *', 'MojoDict *'):
+            return 'int64_t'
         return 'char *'  # string subscript produces a char (string of len 1)
     if isinstance(e, AwaitExpr):
         # Step D (async-awaits-async composition): `await <call to another
@@ -25667,6 +25689,31 @@ class GimpleGen:
         body = ' '.join(lines)
         return f"[&]() -> {ret_ctype} {{ {body} }}()"
 
+    def _cpp_dict_key_expr(self, idx_node, idx_cpp: str) -> str:
+        """Coerce a coroutine-body subscript INDEX expression to a real
+        MojoDict* key (always char *), for the SubscriptExpr read/write
+        branches of _cpp_expr/_cpp_stmt. Mirrors the plain (non-generator)
+        GIMPLE path's own _char_to_cstr convention -- a string index is
+        used directly, an int index is stringified via mojo_str_from_int
+        (a real Int dict key, e.g. `Dict[Int, V]`'s `d[k]`) -- but is a
+        fresh, self-contained implementation rather than calling
+        _char_to_cstr itself: that method is stateful (emits GIMPLE lines
+        via self._new_val/self._emit into the PLAIN path's own emission
+        buffer/temp-numbering), incompatible with this coroutine emitter's
+        separate text-line-list-based .cpp translation (_cpp_expr/_cpp_stmt
+        return plain strings, no shared emission state) -- reusing it here
+        would silently interleave two different emitters' internal state.
+        `mojo_str_from_int` itself is a pure runtime call, safe to use
+        inline in a C++ expression position unlike _char_to_cstr's
+        SSA-temp-based emission style.
+        """
+        self_fields = getattr(self, '_cpp_gen_self_fields', None)
+        ictype = _infer_simple_expr_ctype(
+            idx_node, self._cpp_declared, self_fields, self._async_api)
+        if ictype == 'char *':
+            return idx_cpp
+        return f"mojo_str_from_int((int64_t)({idx_cpp}))"
+
     def _cpp_expr(self, e) -> str:
         if isinstance(e, IntLiteral):
             return str(e.value)
@@ -26356,24 +26403,35 @@ class GimpleGen:
             # Only applies when the SUBJECT is string-ish: a plain identifier,
             # a string literal, or a slice/subscript chain (whose result this
             # emitter always types as char*). A MojoList/MojoDict subscript
-            # (e.g. `h[0]` on a heap local) falls through to the raw C++
-            # `obj[idx]` below — those containers expose operator[] and are
-            # never mistaken for strings here because their object expression
-            # is a bare identifier too... which is ambiguous. The tiebreak:
-            # the runtime's MojoList/MojoDict C++ wrapper types have
-            # operator[] returning int64_t, while a char* only supports
-            # pointer arithmetic — so `(obj)[idx]` on a char* would be the
-            # WRONG lowering. Resolve via the declared type when known: this
-            # emitter's coroutine-body `declared` map is threaded through
-            # `self._cpp_declared` (set by _cpp_stmt before any body
-            # statement's own _cpp_expr calls).
+            # (e.g. `h[0]` on a heap local) falls through to a real runtime-
+            # helper read (mojo_list_get_int/mojo_dict_get_int) below,
+            # mirroring the plain (non-generator) GIMPLE path's own
+            # SubscriptExpr read lowering -- NOT the raw C++ `(obj)[idx]`
+            # this branch used to emit for a declared MojoList*/MojoDict*
+            # object: neither type overloads operator[] anywhere in
+            # mojo_runtime.h (confirmed by grep -- no such overload exists;
+            # the "those containers expose operator[]" claim this comment
+            # used to make was never actually true), so `g++` rejected it
+            # outright the moment a declared-typed container reached this
+            # branch (e.g. `def gen(d): yield d[0]`) -- undiscovered until
+            # now because no earlier real occurrence this doc's passes
+            # fixed happened to hit a DECLARED MojoList*/MojoDict* read
+            # here. Element/value type isn't tracked per-container anywhere
+            # in this narrow scalar-only model (no `_cpp_elem_types`
+            # equivalent), so this defaults to the int64_t-boxed getter --
+            # the SAME simplification the tuple/list-unpack branch's own
+            # `mojo_list_get_int` call above already established as this
+            # model's accepted convention for "unknown list element type".
+            # See CODEGEN_generator_non_plain_assignment_target_refused.md's
+            # 2026-08-19 update.
             if isinstance(e.obj, (IdentExpr, StringLiteral, SubscriptExpr, SliceExpr)):
                 if self._cpp_declared is not None and isinstance(e.obj, IdentExpr) \
                         and self._cpp_declared.get(e.obj.name) == 'MojoList *':
-                    return f"({obj})[{idx}]"
+                    return f"mojo_list_get_int((MojoList *)({obj}), (int64_t)({idx}))"
                 if self._cpp_declared is not None and isinstance(e.obj, IdentExpr) \
                         and self._cpp_declared.get(e.obj.name) == 'MojoDict *':
-                    return f"({obj})[{idx}]"
+                    key_expr = self._cpp_dict_key_expr(e.index, idx)
+                    return f"mojo_dict_get_int((MojoDict *)({obj}), {key_expr})"
                 return f"mojo_cstr_slice((char *)({obj}), {idx}, ({idx}) + 1)"
             # Subscripting a CALL RESULT whose declared return type is a
             # container pointer: `detect_encoding(readline)[0]` where
@@ -26962,11 +27020,57 @@ class GimpleGen:
                         and s.target.obj.name == 'self' and getattr(self, '_cpp_gen_self_struct', None):
                     val = self._cpp_expr(s.value)
                     return [f"{indent}self->{s.target.member} = {val};"]
-                # arr[i] = val  →  arr[i] = val
+                # arr[i] = val / d[k] = val  →  a real runtime-helper write
+                # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
+                # (non-generator) GIMPLE path's own SubscriptExpr-target
+                # lowering (see _gen_stmt_AssignStmt's isinstance(node.
+                # target, SubscriptExpr) branch above in this file) --
+                # NOT a raw C++ `obj[idx] = val`, which was this branch's
+                # ORIGINAL lowering and is actually invalid C++ for a real
+                # MojoList*/MojoDict* target: neither exposes operator[]
+                # anywhere in mojo_runtime.h (confirmed by grep -- no such
+                # overload exists), so `g++` rejected it outright ("no
+                # viable overloaded '='") the moment a declared MojoList*/
+                # MojoDict* identifier actually reached this branch, e.g.
+                # `def gen(d): d[0] = 99`. This was undiscovered because no
+                # real corpus occurrence this doc's earlier passes fixed
+                # happened to hit a DECLARED-typed container here (the
+                # confirmed real occurrences were self-field/tuple-unpack/
+                # sys.attr/slice-assign shapes) -- see CODEGEN_generator_
+                # non_plain_assignment_target_refused.md's 2026-08-19
+                # update. Only handles the two KNOWN declared-type cases
+                # (positive proof, same "no ambiguous default" bar the
+                # full-slice-assign branch below already uses); any other
+                # object type (untracked/int64_t/char*/a real C array
+                # param) falls through to the original raw-subscript
+                # lowering unchanged -- that shape genuinely does compile
+                # (e.g. a fixed-size C array parameter), so it must stay.
                 if isinstance(s.target, SubscriptExpr):
                     obj = self._cpp_expr(s.target.obj)
                     idx = self._cpp_expr(s.target.index)
                     val = self._cpp_expr(s.value)
+                    obj_ct = (self._cpp_declared.get(s.target.obj.name)
+                              if self._cpp_declared is not None
+                              and isinstance(s.target.obj, IdentExpr) else None)
+                    self_fields = getattr(self, '_cpp_gen_self_fields', None)
+                    if obj_ct == 'MojoList *':
+                        vctype = _infer_simple_expr_ctype(
+                            s.value, self._cpp_declared, self_fields, self._async_api)
+                        idx64 = f"(int64_t)({idx})"
+                        if vctype == 'char *':
+                            return [f"{indent}mojo_list_set_str(({obj}), {idx64}, {val});"]
+                        if vctype == 'double':
+                            return [f"{indent}mojo_list_set_double(({obj}), {idx64}, {val});"]
+                        return [f"{indent}mojo_list_set_int(({obj}), {idx64}, (int64_t)({val}));"]
+                    if obj_ct == 'MojoDict *':
+                        key_expr = self._cpp_dict_key_expr(s.target.index, idx)
+                        vctype = _infer_simple_expr_ctype(
+                            s.value, self._cpp_declared, self_fields, self._async_api)
+                        if vctype == 'char *':
+                            return [f"{indent}mojo_dict_set_str(({obj}), {key_expr}, {val});"]
+                        if vctype == 'double':
+                            return [f"{indent}mojo_dict_set_double(({obj}), {key_expr}, {val});"]
+                        return [f"{indent}mojo_dict_set_int(({obj}), {key_expr}, (int64_t)({val}));"]
                     return [f"{indent}{obj}[{idx}] = {val};"]
                 # sys.stderr/stdout/stdin = val (task #150's remaining
                 # non-self-MemberExpr gap, e.g. test_faulthandler.py's

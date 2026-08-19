@@ -1,5 +1,155 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (updated 2026-08-19, subscript READ+WRITE (`d[k]=val`/`arr[i]=val`) was actually BROKEN, not "already supported" as this doc previously believed — FIXED)
+
+Investigated the two sub-shapes the "What a fix needs" section (below)
+explicitly called out as worth keeping distinct: `self.<field> = value`
+and `d[k] = value`.
+
+**`self.<field> = value` — confirmed ALREADY WORKING, end-to-end, not
+just at the eligibility gate.** `_cpp_stmt`'s `AssignStmt` case has
+handled `self.field = val` → `self->field = val;` since an earlier pass
+(see the "PARTIALLY FIXED" status further below — this was found
+"already supported" while implementing task #150, not newly added).
+Re-verified by hand with a real compiled+run repro (a struct generator
+method that reads `self.count`, yields it, writes a NEW value to it,
+then yields it again): built and ran via `mojo.py build`, printed `0`,
+`99`, and `final 99` from the CALLER after the generator was driven to
+exhaustion — the write is genuinely observable, not just syntactically
+accepted. Nothing to fix here.
+
+**`d[k] = value` / `arr[i] = value` (subscript target) — investigated
+and found GENUINELY BROKEN, contradicting this doc's own prior "already
+supported" note** (see the "PARTIALLY FIXED" status below: "`arr[i] =
+val` ... targets were ALREADY supported before this pass"). That note
+was true only insofar as the eligibility gate didn't refuse the shape —
+the actual EMITTED C++ was invalid the moment a real `MojoList *`/
+`MojoDict *`-declared object reached it. Root cause: `_cpp_stmt`'s
+`SubscriptExpr`-target branch lowered to a raw C++ `obj[idx] = val;`,
+and `_cpp_expr`'s `SubscriptExpr` READ case (for a declared MojoList*/
+MojoDict* object) lowered to raw `(obj)[idx]` — both relying on a
+comment's claim that "the runtime's MojoList/MojoDict C++ wrapper types
+have operator[]". **That claim was never true**: `grep -n
+"operator\[\]" mojo_runtime.h gimple_codegen.py` finds no such overload
+anywhere in this codebase — `MojoList`/`MojoDict` are plain C structs
+(`typedef struct {...} MojoList;`) with no C++ subscript operator at
+all. Confirmed by hand: `def gen(d): yield d[0]; d[0] = 99; yield d[0]`
+with `d` inferred as `MojoList *` failed `g++ -std=c++20 -fsyntax-only`
+with "no viable conversion from 'MojoList' to 'char *'" / "no viable
+overloaded '='" — a real compile failure, not a hypothetical one. This
+went undetected by every earlier pass in this doc's history because
+none of the confirmed real occurrences fixed so far (self-field,
+tuple-unpack, sys.stderr, full-slice-assign) actually exercised a
+declared MojoList*/MojoDict* object through a plain single-index
+`SubscriptExpr` read OR write.
+
+**Fixed** by routing both the READ (`_cpp_expr`'s `SubscriptExpr` case)
+and WRITE (`_cpp_stmt`'s `AssignStmt` `SubscriptExpr`-target branch)
+through the real runtime helpers, mirroring the plain (non-generator)
+GIMPLE path's own `mojo_list_set_*`/`mojo_dict_set_*` lowering
+(`_gen_stmt_AssignStmt`'s `SubscriptExpr`-target branch) instead of
+inventing a new convention:
+- `MojoList *` read → `mojo_list_get_int(...)` (this narrow scalar-only
+  model has no per-container element-type tracking anywhere — mirrors
+  the SAME "assume int64_t" simplification the tuple/list-unpack
+  branch's own `mojo_list_get_int` call already established as this
+  model's accepted convention).
+- `MojoList *` write → `mojo_list_set_int/_double/_str`, dispatched on
+  the RHS value's own inferred ctype (`_infer_simple_expr_ctype`).
+- `MojoDict *` read/write → `mojo_dict_get_int`/`mojo_dict_set_int/
+  _double/_str`, with the index coerced to a real `char *` key via a
+  new small helper, `_cpp_dict_key_expr` (a string index used directly,
+  an int index stringified via the pure runtime call
+  `mojo_str_from_int` — mirrors the plain path's `_char_to_cstr`
+  convention for a genuine `Dict[Int, V]` int key, but is a fresh,
+  self-contained implementation: `_char_to_cstr` itself is stateful,
+  emitting GIMPLE lines into the PLAIN path's own SSA-temp-numbered
+  emission buffer, which is incompatible with this coroutine emitter's
+  separate text-line-list-based `.cpp` translation).
+- Any OTHER subscript-target object type (untracked/int64_t/char*/a
+  real fixed-size C array parameter) falls through to the original raw
+  `obj[idx]` lowering unchanged — that shape genuinely does compile
+  (e.g. a real C array), so it must stay; only the two POSITIVELY-known
+  container-pointer cases are redirected, no ambiguous-default guess
+  (same "positive proof required" bar the full-slice-assign fix already
+  established for this file).
+
+**A second, closely-related bug surfaced and was fixed alongside it**:
+the module-level `_infer_simple_expr_ctype`'s `SubscriptExpr` case
+(used both to type a first-assigned local AND, via
+`_generator_yield_ctype`, to decide a generator's overall `co_yield`
+value type) unconditionally returned `'char *'` for ANY subscript,
+including a declared MojoList*/MojoDict* one — now yielding `d[0]`
+correctly produces a real `int64_t`, this function was told it was
+`char *`, so the promise's `yield_value(char * v)` parameter type
+disagreed with `_cpp_expr`'s own runtime-getter call at the actual
+`co_yield` site (a genuine `g++` type-mismatch, "cannot initialize a
+parameter of type 'char *' with an rvalue of type 'int64_t'"). Fixed by
+widening this estimator's `SubscriptExpr` case to check the `known`
+map (the same `declared`/`self._cpp_declared` map `_cpp_expr`'s fix
+consults) and return `'int64_t'` for a declared MojoList*/MojoDict*
+subject, falling back to the original `'char *'` guess only for an
+actual string subscript.
+
+**A separate, PRE-EXISTING, genuinely out-of-scope gap was found but
+NOT fixed**: `_infer_param_types` (the general, non-generator-specific
+usage-based parameter-type inferencer used by BOTH the plain and
+coroutine codegen paths) infers ANY subscripted-but-unannotated
+parameter as `MojoList *`, never `MojoDict *` — it doesn't look at the
+subscript INDEX's type (a string index is unambiguous evidence of a
+dict, not a list) at all. `def gen(d): yield d["a"]; d["a"] = 99` (no
+type annotation on `d`) compiles clean (this fix's own machinery works
+correctly against whatever type `d` is TOLD to be) but crashes at
+runtime with a bus error, because `d` — a real `MojoDict *` at the call
+site — was mistyped `MojoList *` by this shared, general inferencer and
+every list-helper call on it dereferences dict memory as if it were
+list memory. Confirmed this is NOT specific to the generator/coroutine
+path (the exact same `_infer_param_types` machinery feeds the plain
+GIMPLE path too) and NOT introduced by this fix — it pre-dates it and
+reproduces identically on `git stash`. Fixing it is a meaningfully
+bigger, separate step (would need to thread subscript-index-type
+evidence through the general param-usage scanner, a change with a much
+wider blast radius across the whole codegen, not scoped to generator
+bodies) — not attempted here. Worked around in this fix's own
+verification by using an explicit `Dict[String, Int]` annotation, which
+sidesteps the inferencer entirely and confirmed the ACTUAL
+generator-body dict read/write lowering (this fix's real target) is
+correct.
+
+**Verification:** three isolated, hand-verified real `mojo.py build` +
+execution repros (not just `g++ -fsyntax-only`):
+1. Self-field write (Counter struct, `self.count`): prints `0`, `99`,
+   `final 99` — confirms the ALREADY-working self-field write path is
+   still correct.
+2. List write (`def gen(d): yield d[0]; d[0] = 99; yield d[0]`, `d`
+   inferred `MojoList *` from usage): prints `1`, `99`, `final 99`.
+3. Dict write (`def gen(d: Dict[String, Int]): yield d["a"]; d["a"] =
+   99; yield d["a"]`, explicit annotation to sidestep the separate
+   pre-existing param-inference gap above): prints `1`, `99`,
+   `final 99`.
+
+All three show the write's effect observable both from a LATER yield
+in the same generator AND from the caller reading the container after
+the generator is exhausted — genuine in-place mutation, not a
+by-value copy.
+
+Full CLAUDE.md gate run and passed: `test_gimple.py` (248/248),
+`test_module_cache.py` (76/76), `make check-selfhost` clean (`Results:
+1 passed, 0 failed`), from-scratch `libmojostdlib.dylib` rebuild (0
+`skip <module>:` lines), `compile_stdlib.py` default jobs (664/664, 0
+unexpected — unchanged count vs. the prior baseline), plus
+`test_gimple_generator_runner.py` (34/34) and
+`test_gimple_async_runner.py` (38/38) for sibling-regression coverage.
+
+**Still NOT fixed, still correctly refused** (unchanged from the prior
+status below, not attempted this pass — no new evidence changes their
+"genuinely bigger" characterization): non-`self`, non-`sys` `MemberExpr`
+targets (an arbitrary real object's attribute, e.g. `d.field = val`  —
+no representation in this narrow scalar-only model for an arbitrary
+object's backing storage) and bounded/stepped slice-assignment targets
+(`x[a:b] = y`, `x[::2] = y` — needs real element-shifting splice
+support).
+
 ## Status (updated 2026-08-07, gc_inspection.py's `g` FULLY unblocked: Comprehension-RHS list-unpack + `object()` builtin, both FIXED)
 
 **`Lib/test/crashers/gc_inspection.py`'s `g` generator — this doc's
