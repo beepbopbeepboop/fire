@@ -17,6 +17,22 @@ handling on a `MojoBoundMethod` is now found + fixed, ALSO 2026-08-18**
 — see "Regression found + fixed (2026-08-18): `self.prop.attr` auto-
 invoke ate Sub-case C's `.__name__` again" below.
 
+**Not yet closing this doc**: while re-verifying the regression fix above,
+the fixing agent's own report noted in passing that "a standalone
+opaque-object (Sub-case A/B) variant segfaults both before and after this
+fix (pre-existing, unrelated — confirmed via stash diff)". This was NOT
+independently pinned down to a concrete repro — a follow-up manual check
+this same session (`x = get_thing(...)` returning a plain `int64_t`,
+`x.__name__ = "hi"`, `print(x.__name__)`) did NOT reproduce a segfault
+(printed `hi` correctly), so whatever shape the agent actually hit remains
+unidentified. Since Sub-case A/B's own official regression test
+(`gimple_dynamic_attribute_real_storage_and_attributeerror` in
+`test_gimple_runner.py`) passes, this is likely a narrower/different shape
+than a plain opaque `int64_t` receiver — flagged here for whoever next
+touches this area to pin down and reproduce properly (check the git log
+around commit `a05a5c7`'s own session for any surviving scratch repro
+files/notes) before considering this doc closable.
+
 ### Regression found + fixed (2026-08-18): `self.prop.attr` auto-invoke ate Sub-case C's `.__name__` again
 
 The permanent regression test added for Sub-case C,
