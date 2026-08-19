@@ -33893,6 +33893,79 @@ class GimpleGen:
                 else:
                     self.func_param_types[s.name] = [self._param_ctype(pn, pt, s) for pn, pt in s.params] if s.params else []
 
+        # ── Pass 1.3d-ctor: constructor call-site scalar contract, IdentExpr
+        # args (bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_
+        # int64.md). The EARLY pass above (self._ctor_lit_param_types, run
+        # before the struct-field-collection loop that locks in every field's
+        # C type) only sees DIRECT LITERAL constructor arguments
+        # (`Widget("hello")`), because it necessarily runs before
+        # self._inferred_var_types exists — a variable-argument call site
+        # (`s = "hello"; w = Widget(s)`) was invisible to it, leaving the
+        # field wrongly typed int64_t (a raw pointer printed as a decimal
+        # integer). Now that Pass 1.3b (above) has populated
+        # self._inferred_var_types, redo the same observe/apply contract,
+        # reusing `_arg_scalar_type`/`_caller_bodies` (the exact helpers
+        # Pass 1.3d's free-function version just above used) so IdentExpr
+        # arguments contribute real evidence too. This is a RECONCILIATION,
+        # not a reorder of the earlier, already-working pass: it runs before
+        # any C struct typedef / code text has been emitted (typedef
+        # emission is Phase 2, well below in this method), so patching
+        # self.struct_field_types here still lands before that dict is ever
+        # read for codegen — there is no already-emitted C text to fix up.
+        _ctor_scalar_obs: dict[str, dict[str, set]] = {}   # struct -> {pname -> {types}}
+        for caller_name, body in _caller_bodies:
+            calls = []
+            self._calls_in_stmts(body, calls)
+            for call in calls:
+                if not isinstance(call.func, IdentExpr):
+                    continue
+                struct_name = call.func.name
+                pnames = _ctor_init_params.get(struct_name)
+                if not pnames:
+                    continue
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    st = _arg_scalar_type(caller_name, a)
+                    if st:
+                        _ctor_scalar_obs.setdefault(struct_name, {}).setdefault(
+                            pnames[i], set()).add(st)
+
+        for struct_name, pmap in _ctor_scalar_obs.items():
+            _init = _ctor_init_methods.get(struct_name)
+            if not _init:
+                continue
+            _ann = {pn: pt for pn, pt in (_init.params or [])}
+            _init_defaults = getattr(_init, 'param_defaults', {}) or {}
+            for pname, types in pmap.items():
+                if types not in ({'double'}, {'char *'}):
+                    continue                        # not unanimous double / char *
+                if _ann.get(pname) is not None:
+                    continue                        # respect explicit annotation
+                if pname in _init_defaults:
+                    continue                        # respect default-value inference
+                resolved_type = 'double' if types == {'double'} else 'char *'
+                self._ctor_lit_param_types.setdefault(struct_name, {})[pname] = resolved_type
+                # Patch the struct field(s) this param feeds via a direct
+                # `self.field = param` assignment in __init__'s own body —
+                # avoid `next(gen, default)` here for the exact same reason
+                # the neighboring passes' comments already document (a
+                # self-hosted build failed to link with an undefined `_next`
+                # symbol the last time that pattern was used over a freshly-
+                # built generator); use an explicit loop instead.
+                for node in _walk_ast(_init.body):
+                    if not isinstance(node, AssignStmt):
+                        continue
+                    tgt = node.target
+                    if not (isinstance(tgt, MemberExpr) and isinstance(tgt.obj, IdentExpr)
+                            and tgt.obj.name == 'self'):
+                        continue
+                    v = node.value
+                    if isinstance(v, IdentExpr) and v.name == pname:
+                        _fld_types = self.struct_field_types.setdefault(struct_name, {})
+                        if _fld_types.get(tgt.member) in (None, 'int', 'int64_t'):
+                            _fld_types[tgt.member] = resolved_type
+
         # ── Pass 1.3d-gen: compiled-generator eligibility/compile attempt ──
         # Deliberately placed HERE — after the cross-call scalar contract
         # above has fully populated self._inferred_param_types — rather than

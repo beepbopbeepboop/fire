@@ -1,5 +1,125 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
+## Status (2026-08-18 — IdentExpr-argument case FIXED via a later reconciliation pass)
+
+Closed the "Known limitation" gap this doc's 2026-08-09 status left open:
+`s = "hello"; w = Widget(s)` now correctly types `Widget.label` as `char *`
+and the compiled binary prints `hello`/`5`, not a raw pointer integer.
+
+**Investigated both directions the 2026-08-09 status flagged, concretely**:
+traced `gen_module`'s actual pass order and dependency graph rather than
+picking abstractly.
+
+- Option 1 (reorder the early ctor-literal pass to run after
+  `self._inferred_var_types` exists): confirmed NOT safely reorderable
+  without much broader surgery. `self._inferred_var_types` is populated at
+  Pass 1.3b (~gimple_codegen.py:33711), which itself sits **after** the
+  struct-field-collection loop (`_collect_self_assigns`, ~line 32404-32610)
+  that locks in every field's C type — by design, since Pass 1.3b depends on
+  things resolved earlier still (`_inferred_param_types`, struct field
+  types themselves for some inference paths). Moving struct-field-collection
+  to run after Pass 1.3b would risk exactly the kind of broad reordering
+  this doc's own "Risk" section already warns against, for machinery this
+  session did not fully audit end-to-end. Not attempted.
+- Option 2 (a second, later reconciliation pass): this is what was
+  implemented. Confirmed genuinely low-risk because of WHEN it runs: added
+  as a new pass ("Pass 1.3d-ctor", gimple_codegen.py, immediately after
+  Pass 1.3d's free-function cross-call scalar contract, ~line 33896) —
+  after `self._inferred_var_types` exists, but **before any C struct
+  typedef or code text has been emitted** (struct typedef emission is
+  Phase 2, thousands of lines further down, ~line 36662+). So despite the
+  name "reconciliation", this isn't actually patching already-emitted C —
+  `self.struct_field_types` is a plain Python dict that nothing downstream
+  has read yet at this point, so overwriting a stale `int`/`int64_t` entry
+  here is indistinguishable from having gotten it right the first time, as
+  far as every later pass and the actual C emission are concerned.
+
+**What was implemented**: reused the exact same helpers Pass 1.3d's
+free-function version already uses (`_arg_scalar_type`, `_caller_bodies`)
+to scan every `ClassName(...)` call site again, now resolving `IdentExpr`
+arguments via `self._inferred_var_types`/`self._inferred_param_types`
+lookups (not just `StringLiteral`/`FloatLiteral` as the early pass does).
+When a `__init__` parameter's call-site evidence is unanimous (`double` or
+`char *`, exactly the same "not unanimous → leave alone" rule as every
+sibling pass in this file), the corresponding `self.field = param` direct
+assignment(s) in `__init__`'s own body are found via an explicit
+`_walk_ast` loop (no `next(gen, default)` — the already-documented
+self-host `_next`-link-failure gotcha this doc's own history already hit
+once) and `self.struct_field_types[struct][field]` is upgraded from
+`int`/`int64_t`/unset to the resolved type. Also updates
+`self._ctor_lit_param_types` for consistency (harmless — nothing
+downstream re-reads it at this point in `gen_module`).
+
+Handles both direct-literal-assigned variables (`s = "hello"`) and a
+variable whose own type came from a parameter/earlier inference chain —
+confirmed via a real-world-derived repro modeled on `importlib/
+_bootstrap.py`'s `_DummyModuleLock`/`_ModuleLockManager` pattern where the
+constructor argument is itself a parameter of an intermediate function
+(`get_lock(name): return _DummyModuleLock(name)`), not just a bare
+top-level local.
+
+### Verification (2026-08-18)
+
+- **Step 1 baseline confirmation**: re-ran the doc's own `IdentExpr`
+  minimal repro against the unmodified tree first — confirmed clean compile
+  + wrong runtime output (`4306227784` / `6581285` for a fresh run),
+  reproducing this doc's 2026-08-09 findings exactly, before making any
+  change.
+- IdentExpr minimal repro (`s = "hello"; w = Widget(s)`): now prints
+  `hello` / `5` — FIXED.
+- Direct-literal repro (`Widget("hello")`): still prints `hello` / `5` — no
+  regression.
+- Conflicting-call-site repro (`Thing("str")` / `Thing(3.5)`): still
+  compiles and runs cleanly, field still falls back to `int64_t` (no
+  spurious resolution from disagreeing evidence) — the "not unanimous →
+  unresolved" rule holds under the new pass too.
+- Comprehension-sibling repro (`Tools/cases_generator/cwriter.py`-style
+  `self.indents = [i * 4 for i in range(indent + 1)]`): still reads back
+  `0, 4, 8` — no regression (this pass is additive, doesn't touch the
+  `Comprehension` case).
+- Real-world instance (`Lib/importlib/resources/readers.py`'s
+  `NamespaceReader.__init__`): re-checked current status — still fails to
+  build, but for the SAME pre-existing, unrelated reason this doc already
+  documented (`_candidate_paths` is a generator function; no compiled-path
+  generator support). Confirmed this specific instance is additionally NOT
+  reachable by this fix even setting the generator issue aside: its own
+  call site (`importlib/_bootstrap_external.py`: `NamespaceReader(self.
+  _path)`) passes a `MemberExpr` (`self._path`), not a bare `IdentExpr` —
+  outside this fix's scope by design (matches the doc's own original
+  IdentExpr-only target, not scope-crept to arbitrary expressions). Since
+  a full build still isn't possible for the unrelated generator reason, did
+  an isolated check instead: a synthetic repro built directly from
+  `importlib/_bootstrap.py`'s real `_DummyModuleLock`/`_ModuleLockManager`
+  source (self-contained, no generator dependency) confirmed the
+  interpreter and the compiled binary now agree (`importlib.util` / `done`
+  in both), where the field-typing bug this doc describes would previously
+  have shown up as a garbage integer from the compiled path only.
+
+### Full 5-part quality gate (2026-08-18), doc's own fail-fast order
+
+1. `python3 compile_stdlib.py -j8`: **664/664, 0 unexpected** — identical to
+   baseline, checked FIRST per this doc's own "Risk" section reasoning.
+2. `python3 test_gimple.py`: 248/248 passed.
+3. `python3 test_module_cache.py`: 76/76 passed.
+4. `make check-selfhost`: clean (`✓ self-host compiles + links clean`).
+5. From-scratch stdlib dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+   `build_stdlib_dylib.build_stdlib(jobs=8)`): **0 skips**, dylib built.
+
+All five passed cleanly on the first attempt — no revert needed.
+
+### Remaining limitation (unchanged from before, out of scope for this fix)
+
+Only DIRECT `self.field = param` assignments in `__init__`'s own body are
+patched (mirroring `_collect_self_assigns`'s own `IdentExpr` case exactly).
+A field set via a more indirect expression involving the param (e.g.
+`self.field = str(param)` or a conditional branch computing a derived
+value) is untouched by this pass and keeps whatever the original
+struct-field-collection loop already inferred for it — this was never
+part of either this fix's or the doc's original scope. A constructor
+argument that is itself a `MemberExpr`/`CallExpr` (not a bare `IdentExpr`
+or literal) is likewise still unresolved, same as before this fix (see the
+`NamespaceReader` case above).
+
 ## Status (re-verified 2026-08-09 — unchanged, still PARTIALLY FIXED)
 
 Re-ran both minimal repros against current master via `python3 mojo.py
