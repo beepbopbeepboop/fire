@@ -24252,8 +24252,49 @@ class GimpleGen:
         _imp_path0, _imp_src0, _imp_mod0 = self._parsed_import(module)
         if _imp_src0 and re.search(rf'\bstruct\s+{re.escape(nm)}\s*\[', _imp_src0):
             return False
-        fields = {f.name: self._imported_field_ctype(f.type_ann)
-                  for f in sdef.fields if isinstance(f, VarDecl)}
+        # Fixed-size-array fields (`var x: [ElemType; N]`, BUG-2026-008's own
+        # shape) need the SAME "ElemCtype[N]" marker string the own-module
+        # struct-field-registration path produces (see gen_module's
+        # `_FIXED_ARRAY_ANN_RE.match` handling below) — `_imported_field_ctype`
+        # (-> `_resolve_type`) has no idea about this annotation shape and
+        # falls back to a bare scalar (`int64_t`), which the typedef-emission
+        # pass's "don't overwrite an already-registered field" guard then
+        # locks in permanently, silently downgrading the field from a real
+        # embedded struct array to an opaque int64_t (BUG-2026-010,
+        # box.3d/game: `World.blocks: [Block; MAX_BLOCKS]` imported only via
+        # `g_world = engine_create_world()`, never a direct `World(...)`
+        # construction — see _register_imported_structs' own companion fix
+        # for how `World` gets materialized in the first place). Resolved
+        # against the STRUCT'S OWN home module's constants (`_imp_mod0`,
+        # already parsed above), matching `_module_const_int`'s normal
+        # same-module `comptime` scoping.
+        fields = {}
+        for f in sdef.fields:
+            if not isinstance(f, VarDecl):
+                continue
+            _fann = f.type_ann.strip() if isinstance(f.type_ann, str) else ''
+            _farr_m = _FIXED_ARRAY_ANN_RE.match(_fann) if _fann else None
+            if _farr_m:
+                _felem_nm, _fsize_txt = _farr_m.group(1), _farr_m.group(2)
+                _fn_size = (int(_fsize_txt) if _fsize_txt.isdigit()
+                            else self._module_const_int(_fsize_txt, _imp_mod0 or [], None))
+                if _fn_size is not None and _fn_size > 0:
+                    # Materialize the element struct FIRST (if it's one) so
+                    # struct_field_types already has it by the time this
+                    # marker is read back — mirrors the transitive-
+                    # materialization pass below, but must also run here
+                    # since this dict is consulted directly by callers that
+                    # never reach that loop (e.g. the array-index element
+                    # ctype lookup at typedef-emission time).
+                    if (_felem_nm not in self._IMPORTED_STRUCT_SKIP_BASENAMES
+                            and self._materialize_imported_struct(module, _felem_nm, _felem_nm)):
+                        _felem_ct = _felem_nm
+                    else:
+                        _felem_ct = _mojo_type(_felem_nm)
+                    fields[f.name] = f"{_felem_ct}[{_fn_size}]"
+                    self._array_field_sizes.setdefault(local, {})[f.name] = (_felem_ct, _fn_size)
+                    continue
+            fields[f.name] = self._imported_field_ctype(f.type_ann)
         # Carry the struct's real methods along so the signature-registration
         # pass (all_structs_for_methods) resolves their return/param C types
         # and mangled names exactly as it would for an in-file struct (see
@@ -24269,15 +24310,16 @@ class GimpleGen:
             _debug_note(f'cannot resolve method signatures for imported struct {nm}', e)
         self.struct_field_types[local] = fields
         self._imported_struct_names.add(local)
-        self._imported_typedef_structs.append(
-            StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
         _imp_path, _imp_src, _imp_mod = self._parsed_import(module)
         if _imp_path:
             import module_loader as _mlmod
             self._imported_struct_home[local] = _mlmod.module_name_for_path(_imp_path)
-        # Transitively materialize `List[X]`-typed fields whose element `X`
-        # is itself a struct defined in the SAME home `module` (e.g.
-        # `World.blocks: List[Block]`, both defined in engine_world.mojo).
+        # Transitively materialize element structs of TWO field shapes whose
+        # element type is itself a struct defined in the SAME home `module`:
+        #   (1) `List[X]` (e.g. `World.blocks: List[Block]`,
+        #   (2) fixed-size-array `[X; N]` (e.g. `World.blocks: [Block; MAX_BLOCKS]`,
+        #       the BUG-2026-008 shape — see _FIXED_ARRAY_ANN_RE), both defined
+        #       in engine_world.mojo).
         # `_imported_field_ctype`/`_resolve_type` erase `List[Block]` down to
         # the generic `MojoList *` (the runtime has no per-instantiation
         # list type), which loses the element type — without this, a caller
@@ -24296,20 +24338,46 @@ class GimpleGen:
         # block_type`). Scoped to same-module element structs only (the
         # common real-world shape); an element struct defined in yet another,
         # third module would need the field's own annotation to carry that
-        # module's name, which the plain `List[Block]` spelling doesn't.
+        # module's name, which the plain `List[Block]`/`[Block; N]` spelling
+        # doesn't.
+        #
+        # This transitive pass MUST run — and any recursive
+        # `_imported_typedef_structs` append it triggers for the ELEMENT
+        # struct MUST land — before `local`'s (the CONTAINING struct's) own
+        # typedef is appended below. A fixed-size-array field embeds its
+        # element type BY VALUE (`Block blocks[4096];`, not a pointer), so
+        # the generated C typedef for World needs Block's typedef already
+        # emitted earlier in the file — same-module compiles get this for
+        # free from source declaration order (Block is textually declared
+        # before World), but the cross-module materialization path has no
+        # such natural order and must construct it explicitly here.
         for f in sdef.fields:
             if not isinstance(f, VarDecl) or not isinstance(f.type_ann, str):
                 continue
             _ann = f.type_ann.strip()
-            if not (_ann.startswith('List[') and _ann.endswith(']')):
-                continue
-            _elem_name = _ann[len('List['):-1].strip()
+            _elem_name = None
+            _is_list_field = _ann.startswith('List[') and _ann.endswith(']')
+            if _is_list_field:
+                _elem_name = _ann[len('List['):-1].strip()
+            else:
+                _arr_m = _FIXED_ARRAY_ANN_RE.match(_ann)
+                if _arr_m:
+                    _elem_name = _arr_m.group(1).strip()
             if not _elem_name or not _elem_name[0].isupper():
                 continue
             if _elem_name in self._IMPORTED_STRUCT_SKIP_BASENAMES:
                 continue
             if self._materialize_imported_struct(module, _elem_name, _elem_name):
-                self._field_elem_types.setdefault(local, {})[f.name] = f"{_elem_name} *"
+                if _is_list_field:
+                    self._field_elem_types.setdefault(local, {})[f.name] = f"{_elem_name} *"
+                # Fixed-size-array fields need no _field_elem_types entry: the
+                # element type is embedded by value and picked up directly
+                # from struct_field_types at typedef-emission time (gen_module's
+                # `_elem_ct = _elem_nm if _elem_nm in self.struct_field_types
+                # else _mojo_type(_elem_nm)`) — which now finds Block there
+                # because of the ordering guarantee above.
+        self._imported_typedef_structs.append(
+            StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
         return True
 
     def _resolve_sibling_param_ctype(self, module: str, raw_ptype) -> str | None:
@@ -24438,6 +24506,42 @@ class GimpleGen:
         # "genuinely needs real layout" bar the parameter-typed case already
         # applies, just widened to also recognize local-variable typing, not
         # only function-parameter typing.
+        # Name -> home module for every `from X import name [as alias]` in
+        # this file (functions as well as structs) — used just below to
+        # recognize `g_world = engine_create_world()` (BUG-2026-010,
+        # box.3d/game) as needing the SAME real-struct-layout treatment as a
+        # direct `g_world = World()` constructor call: the assignment target
+        # gets a struct via calling an IMPORTED FUNCTION, not the struct's
+        # own constructor.
+        _imported_name_to_module: dict = {}
+        for _ist in stmts:
+            if isinstance(_ist, FromImportStmt) and not getattr(_ist, 'wildcard', False):
+                for _inm, _ialias in _ist.names:
+                    _imported_name_to_module.setdefault(_ialias or _inm, _ist.module)
+
+        def _imported_func_return_struct(fname):
+            """If `fname` is an imported free function whose OWN return-type
+            annotation names a struct defined in that SAME home module,
+            return that struct's bare name (e.g. 'World'). None otherwise.
+            Scoped to same-module only — matches _materialize_imported_
+            struct's existing List[X]/[X; N]-element scoping rationale: a
+            function's return struct living in a THIRD module would need
+            more than this narrow, function-call-site-only resolution."""
+            _fmod = _imported_name_to_module.get(fname)
+            if not _fmod:
+                return None
+            _fpath, _fsrc, _fstmts = self._parsed_import(_fmod)
+            if not _fstmts:
+                return None
+            for _fs in _fstmts:
+                if isinstance(_fs, FunctionDef) and _fs.name == fname and _fs.return_type:
+                    _rt = str(_fs.return_type).strip()
+                    _rbase = _rt.split('[', 1)[0].strip()
+                    if (_rbase and _rbase[0].isupper()
+                            and _rbase not in self._IMPORTED_STRUCT_SKIP_BASENAMES):
+                        return _rbase
+            return None
+
         _locally_constructed: dict = {}
         for _node in _walk_ast(stmts):
             _ctor_name = None
@@ -24454,6 +24558,14 @@ class GimpleGen:
                 _ctor_name = _val.func.name
             if _ctor_name and _target_name:
                 _locally_constructed.setdefault(_ctor_name, set()).add(_target_name)
+                # `_ctor_name` may not be the struct's own constructor at
+                # all, but an imported FUNCTION that returns one (see
+                # _imported_func_return_struct above) — register the target
+                # under the RETURN struct's own name too, so the lookup
+                # below (keyed by the struct's name as imported) finds it.
+                _ret_struct = _imported_func_return_struct(_ctor_name)
+                if _ret_struct:
+                    _locally_constructed.setdefault(_ret_struct, set()).add(_target_name)
 
         for st in stmts:
             if not (isinstance(st, FromImportStmt) and not getattr(st, 'wildcard', False)):
