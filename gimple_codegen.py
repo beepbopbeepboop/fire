@@ -19791,7 +19791,34 @@ class GimpleGen:
         if node.value is None:
             # If function returns non-void, return default value
             if self.func_ret_type and self.func_ret_type != 'void':
-                self._emit(f"  return 0;")
+                ret = self.func_ret_type
+                # A bare `return` (Python's implicit `return None`) inside a
+                # function whose OTHER paths return a real value must still
+                # emit a same-typed placeholder for THIS path — but a bare,
+                # uncast integer literal `return 0;` only actually type-
+                # checks under `-fgimple` when `ret` is plain `int` (the
+                # literal's own default C type) or a pointer type (`0` is
+                # also a valid null-pointer constant there). Any OTHER
+                # declared return type — most commonly `int64_t`, this
+                # codegen's default "boxed scalar" representation used far
+                # more often than plain `int` (see _quick_type's own int64_t
+                # defaults throughout), also `_Bool`/`double`/etc. — left a
+                # bare `int`-typed `0` returned from a differently-typed
+                # function, which GIMPLE (unlike ordinary C) does NOT
+                # implicitly convert: GCC's honest "invalid conversion in
+                # return statement". Real: turtle.py's `TPen.pencolor`/
+                # `.fillcolor`, each with an early bare `return` (`if color
+                # == self._pencolor: return`) alongside another branch
+                # returning `self._color(...)`'s real int64_t-typed value —
+                # the function's own inferred return type is int64_t, so the
+                # bare-return path's naked `return 0;` mismatched.
+                if ret == 'int' or ret.endswith(' *'):
+                    self._emit(f"  return 0;")
+                else:
+                    tmp = self._new_temp(ret)
+                    zero_lit = '0.0' if ret == 'double' else '0'
+                    self._emit(f"  {tmp} = ({ret}){zero_lit};")
+                    self._emit(f"  return {tmp};")
             else:
                 self._emit(_RETURN)
         else:
@@ -32361,7 +32388,55 @@ class GimpleGen:
                     for node in _walk_ast(body):
                         if isinstance(node, AssignStmt):
                             fn = _self_member(node.target)
-                            if fn is not None and fn not in found:
+                            # Was: `fn not in found` (first assignment to a
+                            # given field wins, later ones in the SAME method
+                            # silently ignored). Real bug: turtle.py's
+                            # RawTurtle.__init__ assigns `self.screen` from
+                            # FOUR different branches of one if/elif chain —
+                            # the FIRST in document order is
+                            # `self.screen = canvas` where `canvas` is an
+                            # unannotated, defaulted (`=None`) parameter, so
+                            # `ft` below is the generic 'int64_t' fallback;
+                            # a later, much more specific branch in the very
+                            # same __init__ (`self.screen =
+                            # TurtleScreen(canvas)`, `cn in
+                            # self.struct_field_types` below) would have
+                            # correctly resolved to 'TurtleScreen *', but
+                            # "first wins" never let it compete. The wrongly-
+                            # int64_t-typed `screen` field then made every
+                            # `self.screen.<method>(...)` call site (real:
+                            # RawTurtle._color/_colorstr calling
+                            # `self.screen._color(args)`) unresolvable to a
+                            # real struct method, silently lowered as an
+                            # "int64_t.<method>() stubbed" no-op instead —
+                            # which in turn made `_color`'s OWN inferred
+                            # return type wrong (int64_t instead of the real
+                            # pointer/string type its body actually produces
+                            # via the stub's fallthrough), cascading into
+                            # `-fgimple`'s honest "invalid conversion in
+                            # return statement" for every caller (`pencolor`/
+                            # `fillcolor`) whose forward-declared return type
+                            # was inferred from that wrong `_color` return
+                            # type. Mirrors the EXACT same weak-vs-strong
+                            # upgrade reasoning the cross-method `can_override`
+                            # check below already uses (there: 'int' ->
+                            # pointer, across separate methods) — generalized
+                            # here to also apply WITHIN one method's own
+                            # multiple assignment sites, and to the 'int64_t'
+                            # weak default too (the case that actually fires
+                            # for an unannotated/defaulted parameter, not just
+                            # bare 'int'). Only ever upgrades a generic
+                            # int/int64_t guess to a more specific type —
+                            # never fights two already-specific candidates
+                            # against each other, so a field genuinely
+                            # reassigned different concrete types across
+                            # branches keeps whichever specific type is
+                            # found first, same as before.
+                            _existing_fn_ft = found.get(fn)
+                            if fn is not None and (
+                                    fn not in found
+                                    or (_existing_fn_ft in ('int', 'int64_t')
+                                        and _existing_fn_ft is not None)):
                                 v = node.value
                                 if isinstance(v, IdentExpr):
                                     ft = param_types.get(v.name, 'int64_t')
