@@ -2426,31 +2426,30 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
 def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> bool:
     """Cheap pre-filter for the final step of the async/await codegen
     project: `async def f(): ... yield ... ...` (is_async AND is_generator
-    both true). Deliberately the NARROWEST of all three `*_quick_eligible`
-    filters, mirroring how Milestone B and Step B both started at zero
-    parameters/zero richness before any later step widened scope: no
-    parameters -- RESTORED (see bugs/hard/
-    CODEGEN_async_gen_params_silent_regression.md). Phase 7 (commit 1b736d7) removed
-    this gate and taught `_gen_cpp_async_generator_unit` to emit a real
-    parametrized C++ signature, but never updated this feature's ONLY real
-    consumption path -- `_cpp_async_for_stmt` -- which still hardcodes a
-    bare, argument-less call (`not it.args`) as its one supported shape and
-    has done since before Phase 7. The net effect: a parametrized async
-    generator consumed the ONLY way real Mojo allows (`async for x in
-    f(<args>):`) either (a) if the call omits the required argument(s)
-    entirely, silently proceeds past this gate and this file's
-    `compile_to_gimple_with_cpp` "succeeds", but emits a call to
-    `<base>_impl()` with too few arguments -- invalid C++ that only fails
-    downstream at the g++ stage with a confusing signature-mismatch error,
-    never caught here -- or (b) if the call supplies the correct argument
-    count, `_cpp_async_for_stmt`'s own `not it.args` check refuses it
-    anyway via the generic whole-module fallback. Either way the "params
-    now supported" premise was never actually true end-to-end for the one
-    real consumption path; no positive params+`async for` test exists.
-    Restoring the gate keeps this an honest, single, front-door refusal
-    again instead of an accidental g++-level failure. no `yield from`
-    (delegation composed with async suspension is genuinely new risk this
-    step doesn't take on), `with` still excluded (same reason
+    both true).
+
+    Parameters ARE supported (see bugs/hard/
+    CODEGEN_async_gen_params_silent_regression.md for the full history).
+    Phase 7 (commit 1b736d7) first taught `_gen_cpp_async_generator_unit`
+    to emit a real parametrized C++ signature, but the ONLY real
+    consumption path -- `_cpp_async_for_stmt` (`async for x in f(<args>):`)
+    -- was never updated in that same commit to thread call-site arguments
+    through, so this gate was temporarily restored to `if fn.params: return
+    False` as a safety net (an honest front-door refusal beats letting
+    invalid C++ reach g++, or a same-shape correct call get refused via the
+    generic whole-module fallback). The follow-up fix landed
+    `_cpp_async_for_stmt` support for real positional arguments (threaded
+    into `{base}_impl(...)` exactly like the sibling `AwaitExpr`
+    async-awaits-async composition call site, PLUS an argument-count
+    validation against `api['params']` that sibling site doesn't itself do
+    -- see that method's own docstring), so this gate no longer needs to
+    exclude `fn.params` at all: any real mismatch between a call site's
+    argument count and this generator's own parameter count is now caught
+    by `_cpp_async_for_stmt` itself, with a clear, specific
+    `_UnsupportedAsyncShape` message, not by refusing every parametrized
+    async generator here regardless of how it's actually called. no `yield
+    from` (delegation composed with async suspension is genuinely new risk
+    this step doesn't take on), `with` still excluded (same reason
     `_generator_quick_eligible` excludes it). Every `await` must be one of
     the same recognized shapes `_async_quick_eligible` already accepts
     (asyncio.sleep, a bare call to an already-compiled plain async
@@ -2460,8 +2459,6 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     allowed through (Milestone D's exception machinery, reused verbatim by
     this step's promise -- see `_gen_cpp_async_generator_unit`)."""
     if not (fn.is_async and fn.is_generator):
-        return False
-    if fn.params:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldFromExpr):
@@ -28162,21 +28159,34 @@ class GimpleGen:
         interpreted -- this is the first codegen (of either kind) to
         consume it.
 
-        This narrow step supports exactly one shape: a plain identifier
-        loop target, over a bare, argument-less call to another `async def
-        f(): ... yield ...` this same module compile has ALREADY
-        successfully lowered via `_gen_cpp_async_generator_unit`
+        This step supports a plain identifier loop target, over a call to
+        another `async def f(): ... yield ...` this same module compile has
+        ALREADY successfully lowered via `_gen_cpp_async_generator_unit`
         (`self._async_gen_api` -- same source-order-dependent "callee
         already compiled" constraint `_is_async_call_to_known_fn` documents
-        for plain async-awaits-async composition). Lowers to a `co_await`
-        loop on that generator's own `<base>_AnextAwaiter` (constructed
-        directly from `{impl}().h`, same-translation-unit composition, no
-        `extern "C"` boundary -- see that method's docstring), destroying
-        the generator's coroutine frame exactly once after the loop exits
-        (natural exhaustion OR an early `break` -- both fall through to the
-        same statement after the loop) -- an exception exit destroys the
-        frame itself, inside `<base>_AnextAwaiter::await_resume`, before
-        throwing, so this never double-destroys."""
+        for plain async-awaits-async composition). As of the follow-up fix
+        to bugs/hard/CODEGEN_async_gen_params_silent_regression.md, the
+        call MAY carry real positional arguments -- threaded through to
+        `{base}_impl(...)` exactly like the sibling async-awaits-async
+        composition call site (`_cpp_expr`'s `AwaitExpr` case, `call_args
+        = ', '.join(self._cpp_expr(a) for a in target.args)`), with the
+        supplied argument COUNT validated against `api['params']` first
+        (honest `_UnsupportedAsyncShape` refusal on a mismatch, never
+        invalid C++) -- point (b) from that doc's own "Fix" section, which
+        the sibling AwaitExpr call site does NOT itself do (it only joins
+        whatever args are given); this call site is stricter than its
+        sibling on purpose, matching the doc's "ideally safer" framing.
+        Keyword arguments are still refused (the sibling AwaitExpr shape
+        never supported them either -- `not getattr(target, 'kwargs',
+        None)` there, matched here by the same check). Lowers to a
+        `co_await` loop on that generator's own `<base>_AnextAwaiter`
+        (constructed directly from `{impl}(<args>).h`, same-translation-
+        unit composition, no `extern "C"` boundary -- see that method's
+        docstring), destroying the generator's coroutine frame exactly once
+        after the loop exits (natural exhaustion OR an early `break` -- both
+        fall through to the same statement after the loop) -- an exception
+        exit destroys the frame itself, inside `<base>_AnextAwaiter::
+        await_resume`, before throwing, so this never double-destroys."""
         if not (s.is_async and self._cpp_emit_kind in ('async', 'async_gen')):
             raise _UnsupportedAsyncShape(
                 "a plain (non-`async`) `for` loop is not supported in a "
@@ -28195,21 +28205,34 @@ class GimpleGen:
                 "only a plain identifier `async for` loop target is supported")
         it = s.iterable
         if not (isinstance(it, CallExpr) and isinstance(it.func, IdentExpr)
-                and not it.args and not getattr(it, 'kwargs', None)
+                and not getattr(it, 'kwargs', None)
                 and it.func.name in self._async_gen_api):
             raise _UnsupportedAsyncShape(
-                "`async for` is only supported over a bare, argument-less "
-                "call to another compiled async-generator function this "
-                "module has already compiled (defined earlier in the "
-                "module than this loop)")
+                "`async for` is only supported over a call (with plain "
+                "positional arguments, if any -- no keyword arguments) to "
+                "another compiled async-generator function this module has "
+                "already compiled (defined earlier in the module than this "
+                "loop)")
         api = self._async_gen_api[it.func.name]
         base = api['base']
         value_ctype = api['value_ctype']
+        # See this method's own docstring point (b): validate the call
+        # site's real argument COUNT against the generator's own compiled
+        # parameter list before emitting anything -- an honest refusal here
+        # (never invalid C++ deferred to a downstream g++ failure). Stricter
+        # than the sibling AwaitExpr composition call site on purpose (that
+        # one never checks arg count at all).
+        gen_params = api['params']
+        if len(it.args) != len(gen_params):
+            raise _UnsupportedAsyncShape(
+                f"async generator {it.func.name!r} called with "
+                f"{len(it.args)} argument(s), expected {len(gen_params)}")
+        call_args = ', '.join(self._cpp_expr(a) for a in it.args)
         var = s.target
         handle_var = f"__agen_h_{var}"
         has_var = f"__agen_has_{var}"
         lines = [
-            f"{indent}{base}_handle {handle_var} = {base}_impl ().h;",
+            f"{indent}{base}_handle {handle_var} = {base}_impl ({call_args}).h;",
             f"{indent}for (;;) {{",
             f"{indent}    bool {has_var} = co_await {base}_AnextAwaiter{{{handle_var}}};",
             f"{indent}    if (!{has_var}) break;",

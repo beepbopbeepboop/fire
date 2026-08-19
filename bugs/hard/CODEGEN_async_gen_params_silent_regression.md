@@ -1,15 +1,71 @@
 # HARD BUG: Phase 7's "async generator params" eligibility widening was never wired to the only real consumption path, producing invalid C++ (or an accidental whole-module fallback) instead of an honest front-door refusal
 
-## Status (2026-08-18)
+## Status (2026-08-19) — REAL FIX LANDED
 
-**FIXED** by restoring the pre-Phase-7 eligibility gate (`if fn.params:
-return False` back in `_async_gen_quick_eligible`, `gimple_codegen.py`).
-Found while investigating `test_gimple_async_runner.py`'s 5 newly-failing
+Parametrized async generators consumed via `async for x in f(<args>):` now
+genuinely compile, link, AND RUN, with correct values — not just an honest
+refusal. Implemented exactly what this doc's own original "Fix" section
+described as the real (nontrivial) follow-up:
+
+- `_cpp_async_for_stmt` (`gimple_codegen.py`) now threads the call site's
+  own arguments (`it.args`) into `{base}_impl(...)`, mirroring the sibling
+  async-awaits-async composition call site (`_cpp_expr`'s `AwaitExpr` case,
+  `call_args = ', '.join(self._cpp_expr(a) for a in target.args)`).
+- It ALSO validates the supplied argument count against the async
+  generator's own real parameter count (`self._async_gen_api[fn_name]
+  ['params']`, the `(name, ctype)` list `_gen_cpp_async_generator_unit`
+  registers) before emitting anything, raising a specific
+  `_UnsupportedAsyncShape` (`"async generator 'f' called with N
+  argument(s), expected M"`) on a mismatch — stricter than the sibling
+  `AwaitExpr` call site, which never checks arg count at all (point (b)
+  from the original "Fix" section, done "ideally safer" than the sibling).
+  Confirmed via `MOJO_DEBUG=1`: the specific message IS raised at the
+  point of failure; like every other in-body refusal reason already in
+  this file (e.g. `yield from`, non-call `await`), it then gets folded
+  into the outer, generic "cannot compile module" wrapper by the enclosing
+  async-function compile attempt's own catch-all — this is pre-existing,
+  uniform architecture, not something this fix changed or could bypass
+  without changing that shared catch-all for every other refusal reason
+  too (out of scope here).
+- Keyword arguments at the `async for` call site are still refused (the
+  sibling `AwaitExpr` shape never supported them either).
+- The `if fn.params: return False` safety-net gate in
+  `_async_gen_quick_eligible` has been REMOVED — no longer needed, since
+  `_cpp_async_for_stmt` itself now honestly validates any real argument-
+  count mismatch instead of relying on this quick-filter to exclude every
+  parametrized async generator regardless of how it's actually called.
+
+Verified with three real repros (see `test_gimple_async_runner.py`):
+single-parameter `f(10)` (10 then 11, sums to 21), two-parameter `g(3, 4)`
+(sums to 7), and the wrong-arg-count case `f()` (honestly refused, no
+invalid C++, no silent whole-module fallback misattribution). Full
+`test_gimple_async_runner.py` suite: 38/38 (36 prior + 2 new positive
+tests; the old `async_gen_with_parameters_still_refused` test was renamed
+`async_gen_wrong_arg_count_still_refused` and now asserts a real argument-
+count mismatch, not "has any params at all"). CLAUDE.md's mandatory
+gimple/codegen quality gate re-run clean: `test_gimple.py` (248/248),
+`test_module_cache.py` (76/76), `make check-selfhost` (clean), a from-
+scratch `libmojostdlib.dylib` rebuild (0 `skip <module>:` lines), and
+`compile_stdlib.py` (664/664, 0 unexpected failures) — no regression from
+either quality-gate baseline. All 10 other async/generator-related test
+suites (`test_gimple_generator_runner.py`, `test_async_execution.py`,
+`test_async_parsing.py`, `test_async_runtime_scaffold.py`,
+`test_async_void_return.py`, `test_async_with_lock_guard.py`,
+`test_mutable_async_capture.py`, `test_nested_async_generic.py`,
+`test_taskgroup.py`, `test_dual_cpp_elaboration.py`) also pass clean.
+
+## Status (2026-08-18) — prior safety-net-only fix (superseded above)
+
+Previously **FIXED** (as a safety-net minimum bar, not the real feature)
+by restoring the pre-Phase-7 eligibility gate (`if fn.params: return
+False` back in `_async_gen_quick_eligible`, `gimple_codegen.py`). Found
+while investigating `test_gimple_async_runner.py`'s 5 newly-failing
 `test_async_build_refused`-style tests (see the sibling
 `bugs/hard/CODEGEN_async_value_consuming_call_and_forward_reference_
 capability_gains.md` doc for the OTHER 4 of those 5, which turned out to
 be genuine capability gains, not regressions — this is the one real
-silent-regression among the five).
+silent-regression among the five). This safety-net gate has now been
+removed by the real fix documented above.
 
 ## Symptom
 

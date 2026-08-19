@@ -1082,13 +1082,58 @@ def main():
     print(asyncio.run(main_driver()))
 """, "cannot compile module")
 
-    # 5. Honest refusal: an async generator with parameters is still out of
-    # this step's scope (deliberately parameter-less, matching every other
-    # step's own narrowest-shape-first precedent -- see
-    # `_async_gen_quick_eligible`'s docstring), even though the GCC-15 repro
-    # this step ran found the combined promise safe WITH parameters too.
+    # 5. Real capability gain (bugs/hard/
+    # CODEGEN_async_gen_params_silent_regression.md's own follow-up fix):
+    # a parametrized async generator, consumed via `async for x in f(<real
+    # args>):`, now genuinely compiles, links, and RUNS -- `_cpp_async_for_
+    # stmt` threads the call site's own arguments into `{base}_impl(...)`
+    # exactly like the sibling `AwaitExpr` async-awaits-async composition
+    # call site. `f(10)` should yield 10 then 11 (10 + 11 = 21).
+    test_async_stdout("async_gen_with_parameters", """\
+async def f(n: int):
+    yield n
+    yield n + 1
+
+async def main_driver():
+    total = 0
+    async for x in f(10):
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "21\n")
+
+    # 5b. Multiple parameters thread through correctly too, not just a
+    # single one (3 + 4 = 7).
+    test_async_stdout("async_gen_with_multiple_parameters", """\
+async def g(a: int, b: int):
+    yield a + b
+
+async def main_driver():
+    total = 0
+    async for x in g(3, 4):
+        total = total + x
+    return total
+
+def main():
+    import asyncio
+    print(asyncio.run(main_driver()))
+""", "7\n")
+
+    # 5c. Honest refusal, now specifically about the ARGUMENT COUNT (not
+    # merely "has any params at all", which no longer applies):
+    # `_cpp_async_for_stmt` validates the call site's argument count
+    # against `api['params']` before emitting anything, raising a clear,
+    # specific `_UnsupportedAsyncShape` ("async generator 'f' called with 0
+    # argument(s), expected 1") -- confirmed via MOJO_DEBUG's `_debug_note`
+    # trace at the actual point of refusal; the outer message stays the
+    # same generic "cannot compile module" wrapper every other in-body
+    # refusal reason (e.g. test 4's `yield from`) already surfaces through
+    # this same architecture, not a regression specific to this fix.
     test_async_build_refused(
-        "async_gen_with_parameters_still_refused",
+        "async_gen_wrong_arg_count_still_refused",
         """\
 async def f(n: int):
     yield n
