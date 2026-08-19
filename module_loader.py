@@ -296,21 +296,34 @@ class ModuleLoader:
         """Convert Mojo type annotation to C type.
 
         Examples:
-            'Int' → 'int'
+            'Int' → 'int64_t'
             'Int64' → 'int64_t'
             'Float64' → 'double'
             'Bool' → '_Bool'
+
+        `Int`/`UInt` MUST agree with gimple_codegen.py's own canonical
+        _TYPE_MAP ('Int' -> 'int64_t', 'UInt' -> 'uint64_t' — Mojo's `Int`/
+        `UInt` are the machine word, a newtype over 64-bit __mlir_type.index,
+        per ABI.md). This table independently mirrors that mapping for
+        source-scanned (non-dylib) cross-module imports; a mismatch here
+        doesn't just misdeclare the parameter's C type, it changes the
+        overload-hash suffix gimple_codegen.py's _func_csym computes from the
+        C parameter types, so the extern declaration ends up with a
+        DIFFERENT mangled symbol name than the one the defining module
+        actually emits (e.g. `mojo_double_fa7153` extern vs the real
+        `mojo_double_0c85c9` definition) — an undefined-symbol link error,
+        not just a cosmetic type mismatch.
         """
         mojo_type = mojo_type.strip()
 
         # Mapping of Mojo types to C types
         type_map = {
-            'Int': 'int',
+            'Int': 'int64_t',
             'Int8': 'int8_t',
             'Int16': 'int16_t',
             'Int32': 'int32_t',
             'Int64': 'int64_t',
-            'UInt': 'unsigned int',
+            'UInt': 'uint64_t',
             'UInt8': 'uint8_t',
             'UInt16': 'uint16_t',
             'UInt32': 'uint32_t',
