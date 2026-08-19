@@ -4146,6 +4146,25 @@ class GimpleGen:
         # to code in _toplevel or any other function.
         self._field_elem_types: dict[str, dict[str, str]] = {}
         self._field_dict_val_types: dict[str, dict[str, str]] = {}
+        # Function names whose `func_param_types` entry was set by this
+        # file's own "self-host hardcoded struct tables" block (below, e.g.
+        # `Scope___init__`) and must NOT be silently overwritten by the
+        # later, general per-struct-method signature-inference pass ("Pass
+        # 1.3c: Populate func_param_types for all user functions"), which
+        # runs unconditionally for every struct method and would otherwise
+        # clobber a deliberately-hardcoded entry with its own weaker
+        # inferred guess (e.g. `Scope.__init__`'s unannotated `parent`
+        # param has no type signal from its own trivial `self.parent =
+        # parent` body, so Pass 1.3c always re-infers int64_t, silently
+        # reintroducing the exact "pointer boxed as int64_t losing type
+        # info" bug the hardcode exists to prevent — undetected for years
+        # because a `__GIMPLE`-tagged caller's raw pre-lowered GIMPLE body
+        # bypasses gcc's normal call-argument type checking; only surfaced
+        # once a real, unrelated fix made some caller of `Scope(...)`
+        # legitimately non-`__GIMPLE`. See bugs/hard/CODEGEN_dynamic_
+        # attribute_on_generic_object.md's "Segfault root-caused" section).
+        # Whole-program, not reset per function.
+        self._selfhost_locked_param_types: set = set()
         # Attribute names written as a `char *` (string) value onto an
         # except-as-bound exception object (`err.filename = some_str`) —
         # whole-program, like _field_dict_val_types above, NOT reset per
@@ -4976,6 +4995,24 @@ class GimpleGen:
         self._boxed_mut_locals: dict[str, str] = {}
         self.loop_stack:  list[tuple[str,str]] = []
         self.exc_depth    = 0
+        # Set True by _gen_stmt_TryStmt / the with-__exit__ path in
+        # _gen_stmt_WithStmt whenever THIS function's own body (not a
+        # nested closure's — those get their own _reset_func/flag) emits a
+        # real `setjmp(...)`. Consulted by _gen_struct_method /
+        # _gen_lifted_closure when emitting their C signature: a
+        # `__GIMPLE`-tagged function's body bypasses gcc's normal
+        # frontend gimplification pass, which is what marks a
+        # setjmp-containing function's CFG with the special "returns-
+        # twice" abnormal-edge handling real setjmp/longjmp semantics
+        # require -- confirmed via a hand-reduced, Mojo-independent C
+        # repro that `longjmp` into a `__GIMPLE`-tagged function's
+        # `setjmp` frame reads back all-zero and segfaults. See
+        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+        # "Segfault root-caused" section. gen_func (free functions) has
+        # always deliberately been non-`__GIMPLE` (LENIENT) already, so
+        # this flag only matters for the two `__GIMPLE`-tagged code
+        # paths.
+        self._func_used_setjmp: bool = False
         self.func_ret_type: str             = ''
         self._last_was_terminal: bool       = False
         # Computed once, reused for both the _elem_types and _dict_val_types
@@ -13454,6 +13491,83 @@ class GimpleGen:
         # Unknown method on char* — stub
         return self._stub_result('int', '0', f'TODO: char*.{method}')
 
+    def _repack_method_call_spread_args(self, mangled: str, struct_name: str,
+                                         method: str, call_args: list,
+                                         arg_pairs: list) -> list:
+        """Fix up `obj.method(fixed_arg, *args, **kwargs)` when `method`'s
+        own declared signature is `(self, fixed_param, *args, **kwargs)`.
+
+        `_lower_named_call` (free functions) already has an equivalent fix
+        for the pure-forwarding shape `f(*a, **k)` — `_lower_UnaryOp`
+        passes an already-packed `MojoList *`/`MojoDict *` straight
+        through for a spread, which is exactly the right shape when the
+        ONLY call-site args are spreads. But `_lower_struct_method_call`'s
+        generic arg-building (`[self.lower_expr(a) for a in node.args]`)
+        never had the analogous fix — that file's own comment on
+        `_func_kwargs_slot` explicitly says so ("never fires for struct
+        methods, a separate call-lowering path, out of scope") — so a
+        MIXED call site with a real fixed positional arg (that doesn't
+        correspond to one of the callee's own fixed params) followed by a
+        `*args`/`**kwargs` spread produced one raw C argument per AST arg
+        (arity/type mismatch against the callee's real, packed signature)
+        instead of merging the extra leading arg into the vararg list.
+        Real instance: `BoundMethod.__call__` (myinterpreter.py) calling
+        `f(self.interpreter, self.instance, *args, **kwargs)` where `f` is
+        a `MojoFunction` whose own `__call__(self, interpreter, *args,
+        **kwargs)` has exactly ONE real fixed param (`interpreter`) — see
+        bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+        "Segfault root-caused" section. Invisible under a `__GIMPLE`-
+        tagged caller (raw GIMPLE bypasses gcc's normal call-argument
+        arity/type checking); surfaced once the caller genuinely lost
+        `__GIMPLE` for an unrelated, correct reason.
+
+        A complete no-op unless `_func_kwargs_slot` has an entry for this
+        exact method (never populated for ordinary struct methods today —
+        only explicitly hardcoded self-host entries, e.g.
+        `MojoFunction___call__` — so this can't affect any other call
+        site), keeping the blast radius to exactly the shape it exists
+        to fix.
+        """
+        kw_i = self._func_kwargs_slot.get(
+            mangled, self._func_kwargs_slot.get(f"{struct_name}_{method}", -1))
+        if kw_i < 0:
+            return arg_pairs
+        has_spread = any(isinstance(a, UnaryOp) and a.op in ('*', '**') for a in call_args)
+        if not has_spread:
+            return arg_pairs
+        has_vararg = self._func_kwargs_has_vararg.get(
+            mangled, self._func_kwargs_has_vararg.get(f"{struct_name}_{method}", True))
+        # kw_i counts `self` at index 0 and the vararg (`*args`, collapsed
+        # to one MojoList* slot) immediately before it -- so the real
+        # number of ordinary fixed params AFTER self is kw_i - 2 (or
+        # kw_i - 1 when there's no `*args`, just `**kwargs` directly).
+        n_fixed = max(0, kw_i - (2 if has_vararg else 1))
+        if len(arg_pairs) <= n_fixed:
+            return arg_pairs  # already the right shape (e.g. f(*a, **k))
+        fixed_pairs = arg_pairs[:n_fixed]
+        rest_args = call_args[n_fixed:]
+        rest_pairs = arg_pairs[n_fixed:]
+        dict_pair = None
+        if has_vararg:
+            lst = self._new_val('MojoList *', "mojo_list_new ()")
+            for a_node, (a_t, a_v) in zip(rest_args, rest_pairs):
+                if isinstance(a_node, UnaryOp) and a_node.op == '*':
+                    self._emit(f"  mojo_list_extend ({lst}, {a_v});")
+                elif isinstance(a_node, UnaryOp) and a_node.op == '**':
+                    dict_pair = (a_t, a_v)
+                else:
+                    av = self._coerce_to_type(a_t, 'int64_t', a_v)
+                    self._emit(f"  mojo_list_append_int ({lst}, {av});")
+            fixed_pairs.append(('MojoList *', lst))
+        else:
+            for a_node, (a_t, a_v) in zip(rest_args, rest_pairs):
+                if isinstance(a_node, UnaryOp) and a_node.op == '**':
+                    dict_pair = (a_t, a_v)
+        if dict_pair is None:
+            dict_pair = ('MojoDict *', self._pack_kwargs_dict({}))
+        fixed_pairs.append(dict_pair)
+        return fixed_pairs
+
     def _lower_struct_method_call(self, ov: str, ot: str, method: str, node) -> tuple:
         """Lower struct/class method calls: obj.method(args) → StructName_method(self, args)."""
         func = node.func
@@ -13545,6 +13659,8 @@ class GimpleGen:
             arg_pairs = self._build_call_args_for_candidate(_chosen_method, node.args, node.kwargs)
         else:
             arg_pairs = [self.lower_expr(a) for a in node.args]
+            arg_pairs = self._repack_method_call_spread_args(
+                mangled, struct_name, method, node.args, arg_pairs)
         full_param_list = self.func_param_types.get(mangled,
             self.func_param_types.get(f"{struct_name}_{method}{_method_overload_suffix}", []))
         if not is_class_ref and full_param_list and full_param_list[0] != f"{struct_name} *":
@@ -15777,13 +15893,27 @@ class GimpleGen:
         lifted   = self.current_func_name
         env_var  = self._env_param
         ret_type = self.func_ret_type or self.func_return_types.get(lifted, 'int64_t')
-        arg_vals = [self.lower_expr(a)[1] for a in node.args]
+        # Route through _emit_call/_call_expr (like _lower_closure_call's
+        # sibling-closure-call path just below) so each argument is coerced
+        # to the callee's DECLARED param type instead of passed as whatever
+        # raw C type happened to fall out of lower_expr. This was always a
+        # real gap here (never applied, unlike every other call-emission
+        # path in this file) — previously invisible only because a
+        # `__GIMPLE`-tagged lifted closure's raw pre-lowered GIMPLE body
+        # bypasses gcc's normal call-argument type checking; a recursive
+        # closure whose own body also contains try/except (and therefore
+        # must drop `__GIMPLE`, see _reset_func's `_func_used_setjmp`
+        # comment) gets compiled by the ordinary strict C frontend instead,
+        # which correctly flags a mismatched arg (e.g. int64_t passed where
+        # a struct pointer is declared) as a hard error. See
+        # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md.
+        arg_pairs = [self.lower_expr(a) for a in node.args]
+        env_type = self.func_param_types.get(lifted, ['void *'])[0]
+        full_arg_pairs = [(env_type, env_var)] + arg_pairs
         fname_c  = _safe_name(lifted)
-        all_args = ', '.join([env_var] + arg_vals)
         if ret_type == 'void':
-            self._emit(f'  {fname_c} ({all_args});')
-            return 'int', self._new_val('int', '0')
-        return ret_type, self._new_val(ret_type, f'{fname_c} ({all_args})')
+            return self._void_call(fname_c, full_arg_pairs)
+        return ret_type, self._call_expr(ret_type, fname_c, full_arg_pairs)
 
     def _lower_outer_closure_call(self, fname_raw: str, ci, node: CallExpr) -> tuple[str, str]:
         """Call an outer function's nested closure from inside a lambda body.
@@ -20661,14 +20791,20 @@ class GimpleGen:
             if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
                 self._lower_builtin_list(node.value)
                 return
-            # Recursive call from inner function to itself
+            # Recursive call from inner function to itself. Bare-statement
+            # twin of _lower_recursive_self_call — routed through
+            # _emit_call (like the sibling-closure-call branch just below)
+            # so arguments get coerced to the callee's declared param
+            # types instead of passed raw. See _lower_recursive_self_call's
+            # own comment for why this was a real, previously-invisible gap.
             if raw_name == self._inner_func_name and self._env_param:
                 lifted   = self.current_func_name
                 env_var  = self._env_param
-                arg_vals = [self.lower_expr(a)[1] for a in node.value.args]
-                all_args = ', '.join([env_var] + arg_vals)
+                arg_pairs = [self.lower_expr(a) for a in node.value.args]
+                env_type = self.func_param_types.get(lifted, ['void *'])[0]
+                full_arg_pairs = [(env_type, env_var)] + arg_pairs
                 fname_c  = _safe_name(lifted)
-                self._emit(f"  {fname_c} ({all_args});")
+                self._emit_call('void', '', fname_c, full_arg_pairs)
                 return
             # Check closure call (nested function defined in this scope)
             if raw_name in self._closure_envs:
@@ -21094,6 +21230,8 @@ class GimpleGen:
         restore_c_name = None
         was_except_as_char = False
         added_except_as = False
+        had_var_type = False
+        restore_var_type = None
         bind_name = self._handler_bind_name(handler)
         if bind_name:
             # Exception handlers are typed as pointers to exception objects.
@@ -21136,7 +21274,37 @@ class GimpleGen:
             # this handler's body to the fresh temp, and is restored after so
             # an unrelated same-named binding elsewhere in the function is
             # unaffected.
-            self.var_types.setdefault(bind_name, exc_ctype)
+            # FORCE (not setdefault) bind_name's var_types entry to
+            # exc_ctype for the extent of this handler's body, saving/
+            # restoring exactly like `_c_names`/`had_c_name`/
+            # `restore_c_name` just below. `setdefault` was wrong: if
+            # `bind_name` (commonly `e`) was already used earlier in this
+            # SAME function for an unrelated, differently-typed local (e.g.
+            # a plain assignment `e, self._inject_exc = self._inject_exc,
+            # None` above this try/except -- see
+            # _ThreadedGenerator._resume, myinterpreter.py), `var_types
+            # [bind_name]` already existed (typically `int64_t`, the
+            # generic boxed default) and setdefault left it untouched.
+            # `_c_names` already correctly redirects every REFERENCE inside
+            # this handler's body to the fresh, correctly-typed `bound`
+            # temp below, but `lower_expr(IdentExpr(bind_name))` reports
+            # its TYPE from `var_types`, not from the C variable it
+            # resolves to -- so a caller like `_emit_call` computing
+            # argument-coercion casts saw the STALE `int64_t` type tag
+            # paired with the correctly-cast `char *`-typed C value, read
+            # `ptype == atype` (both nominally `int64_t`) as "no coercion
+            # needed", and silently passed the raw pointer bits where the
+            # callee's own declared `int64_t` parameter expected a real
+            # int64_t -- invisible under a `__GIMPLE`-tagged caller (raw
+            # GIMPLE bypasses gcc's normal call-argument type checking),
+            # exposed as a hard "-Wint-conversion" error only once the
+            # calling method genuinely lost `__GIMPLE` for an unrelated,
+            # correct reason (containing its own real `setjmp`). See
+            # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
+            # "Segfault root-caused" section for the full mechanism.
+            had_var_type = bind_name in self.var_types
+            restore_var_type = self.var_types.get(bind_name)
+            self.var_types[bind_name] = exc_ctype
             had_c_name = bind_name in self._c_names
             restore_c_name = self._c_names.get(bind_name)
 
@@ -21161,10 +21329,20 @@ class GimpleGen:
                 self._c_names[bind_name] = restore_c_name
             else:
                 del self._c_names[bind_name]
+            if had_var_type:
+                self.var_types[bind_name] = restore_var_type
+            else:
+                del self.var_types[bind_name]
             if added_except_as:
                 self._except_as_names.discard(bind_name)
 
     def _gen_stmt_TryStmt(self, node):
+        # See _reset_func's own comment on `_func_used_setjmp` -- this
+        # function's body is about to emit a real `setjmp`, so whichever
+        # enclosing `__GIMPLE`-tagged emitter (_gen_struct_method /
+        # _gen_lifted_closure) is generating this statement must drop
+        # `__GIMPLE` from its signature.
+        self._func_used_setjmp = True
         sj_ret = self._new_temp('int')
         cond_t = self._new_temp('_Bool')
         bb_try   = self._new_bb()
@@ -21499,6 +21677,10 @@ class GimpleGen:
             for _, _, sn in contexts)
 
         if has_exit:
+            # See _reset_func's own comment on `_func_used_setjmp` -- same
+            # setjmp/__GIMPLE hazard as _gen_stmt_TryStmt, here for a
+            # `with`-block whose context manager has a real `__exit__`.
+            self._func_used_setjmp = True
             sj_ret = self._new_temp('int')
             cond_t = self._new_temp('_Bool')
             bb_try   = self._new_bb()
@@ -23210,8 +23392,13 @@ class GimpleGen:
         for stmt in node.body:
             self.gen_stmt(stmt)
 
+        # See _reset_func's own comment on `_func_used_setjmp` /
+        # _gen_struct_method's identical handling just above -- a lifted
+        # closure whose OWN body emitted a real setjmp must not be tagged
+        # `__GIMPLE` either, for the same reason.
+        _sig_kw = '' if self._func_used_setjmp else '__GIMPLE '
         lines = [
-            f"{ret_type} __GIMPLE {ci.lifted_name} ({params_str})",
+            f"{ret_type} {_sig_kw}{ci.lifted_name} ({params_str})",
             "{",
             *self.decls,
             *self.body_lines,
@@ -25447,8 +25634,17 @@ class GimpleGen:
         param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]
         self.func_param_types[mangled] = param_ctypes_only
 
+        # See _reset_func's own comment on `_func_used_setjmp`: a method
+        # whose body emitted a real `setjmp` (try/except, or a `with`
+        # using `__exit__`) must NOT be tagged `__GIMPLE` -- gcc -fgimple
+        # never gives such a body's setjmp the "returns-twice" CFG
+        # treatment a later `longjmp` needs, causing an unconditional
+        # runtime segfault. Fall back to gen_func's existing LENIENT
+        # (non-`__GIMPLE`) path for exactly those bodies; every other
+        # method keeps `__GIMPLE` unchanged.
+        _sig_kw = '' if self._func_used_setjmp else '__GIMPLE '
         lines = [
-            f"{ret_type} __GIMPLE {mangled} ({params_str})",
+            f"{ret_type} {_sig_kw}{mangled} ({params_str})",
             "{",
             *self.decls,
             *self.body_lines,
@@ -32130,6 +32326,22 @@ class GimpleGen:
             self.func_param_types['Scope_get']    = ['Scope *', 'char *']
             self.func_param_types['Scope_set']    = ['Scope *', 'char *', 'int']
             self.func_param_types['Scope___init__'] = ['Scope *', 'Scope *']
+            # Lock these four against Pass 1.3c's later unconditional
+            # overwrite -- see `_selfhost_locked_param_types`'s own comment
+            # (__init__) for why this is necessary, not just defensive.
+            self._selfhost_locked_param_types.update((
+                'Scope_define', 'Scope_get', 'Scope_set', 'Scope___init__',
+            ))
+            # `MojoFunction.__call__(self, interpreter, *args, **kwargs)`:
+            # register its kwargs slot so `_repack_method_call_spread_args`
+            # (see that method's own docstring) can fix up
+            # `BoundMethod.__call__`'s `f(self.interpreter, self.instance,
+            # *args, **kwargs)` -- a mixed fixed-arg + spread call into this
+            # exact signature shape, previously mis-packed (arity mismatch
+            # against the real 4-param C signature). Index 3: self=0,
+            # interpreter=1, args(vararg, one MojoList* slot)=2, kwargs=3.
+            self._func_kwargs_slot['MojoFunction___call__'] = 3
+            self._func_kwargs_has_vararg['MojoFunction___call__'] = True
 
             # Pre-populate AST node struct fields
             self.struct_field_types['CallExpr'] = {
@@ -34191,6 +34403,11 @@ class GimpleGen:
             if isinstance(s, StructDef):
                 for m in s.methods:
                     method_full_name = f"{s.name}_{m.name}"
+                    # Don't clobber a deliberately-hardcoded entry (see
+                    # `_selfhost_locked_param_types`'s own comment) with
+                    # this pass's own weaker signature inference.
+                    if method_full_name in self._selfhost_locked_param_types:
+                        continue
                     if m.params and any(pn.startswith('*') for pn, _ in m.params):
                         self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, s.name)
                     else:

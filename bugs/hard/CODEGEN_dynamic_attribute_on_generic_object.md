@@ -2,6 +2,23 @@
 
 ## Status
 
+**FIXED 2026-08-19** — the setjmp/`__GIMPLE` segfault (see "Segfault
+root-caused" below) is now genuinely resolved: `_gen_struct_method`/
+`_gen_lifted_closure` conditionally drop `__GIMPLE` for exactly the
+method/closure bodies that emit a real `setjmp` (tracked via a new
+per-function flag, `GimpleGen._func_used_setjmp`, set by
+`_gen_stmt_TryStmt` and the `with`-`__exit__` path in `_gen_stmt_WithStmt`,
+reset in `_reset_func`), reusing `gen_func`'s existing non-`__GIMPLE`
+LENIENT path. This is the SAME fix a previous session attempted and
+reverted (see "Segfault root-caused" below for that session's own
+writeup) — this session re-attempted it and, instead of reverting on the
+first `make check-selfhost` regression, root-caused and fixed the THREE
+underlying pre-existing bugs the conditional drop exposed. See "Fix
+landed (2026-08-19): three root-caused self-host regressions, all
+independently narrow" immediately below "Segfault root-caused" for the
+full mechanism of each and the fix. Steps 0/1-4/Residual-gap sections
+below are all still accurate and unaffected by this session's change.
+
 **Step 0 implemented and verified 2026-08-06** (see "Step 0" below for
 what landed). **Steps 1-4 implemented and verified 2026-08-07** (see
 "Steps 1-4 implementation notes" below) — real per-object dynamic-
@@ -269,6 +286,231 @@ no production code changed" applies here, since the code diff is empty):
 - All previously-confirmed-working real-world verification-table instances
   are untouched (no code changed) and remain valid as documented in their
   own original sessions.
+
+### Fix landed (2026-08-19): three root-caused self-host regressions, all independently narrow
+
+Re-implemented the SAME conditional-`__GIMPLE`-dropping fix the previous
+session (above) attempted and reverted. `make check-selfhost` broke again,
+in the same two places that session found PLUS one it never reached (it
+stopped after finding the first two). All three were root-caused to
+concrete, narrow, pre-existing bugs — none structural — and fixed. The
+common thread: every one of these bugs has ALWAYS existed in
+`gimple_codegen.py`; every one was silently tolerated because a
+`__GIMPLE`-tagged function's body is raw, already-lowered GIMPLE fed
+straight to gcc's `-fgimple` internal IPA-pass-testing frontend, which
+skips the ordinary C frontend's semantic checks (call-argument arity/type
+checking in particular) that a ordinary, non-`__GIMPLE` C function gets.
+Once a method/closure genuinely (and correctly) drops `__GIMPLE` for
+containing a real `setjmp`, gcc's normal frontend runs on it for the
+first time ever, and every argument-passing bug already lurking in that
+function's own call sites — through no fault of the `__GIMPLE` change
+itself — turns from a silent miscompile into a hard compile error (or,
+for regression 3, was ALSO a silent miscompile, just one nobody had
+exercised at runtime before).
+
+**Regression 1 — `_register_link_imports`'s `scan` recursive self-call
+(the previous session's finding #1)**: `gcc -fgimple`'s own error:
+`passing argument 2 of 'GimpleGen__register_link_imports_scan' makes
+pointer from integer without a cast`, at `gimple_codegen.py`'s own
+`scan(stmt.body)` call site (the `elif isinstance(stmt, FunctionDef):
+scan(stmt.body)` branch). Root cause: `_gen_stmt_ExprStmt`'s "Recursive
+call from inner function to itself" branch (the bare-statement,
+value-discarding twin of `_lower_recursive_self_call`) NEVER applied
+call-argument type coercion — it manually built `all_args = ', '.join(...)`
+from raw `lower_expr(a)[1]` VALUES only, discarding each argument's TYPE
+entirely, instead of routing through `_emit_call` (which every other
+call-emission path in this file — sibling-closure calls, outer-closure
+calls, ordinary function calls — already does, specifically to cast a
+mismatched argument to the callee's declared parameter type). This is
+why `scan(stmt.body)` (where `stmt.body`'s attribute-dispatch read
+returns a raw `int64_t`) never got cast to the callee's real `MojoList *`
+parameter — a real, narrow, pre-existing gap in exactly ONE call-emission
+path, invisible until `scan` (itself containing its own real
+`try`/`except`, correctly triggering the `__GIMPLE` drop) was compiled by
+the strict frontend for the first time. **Fixed** in two places — the
+statement-context branch just described AND its expression-context twin,
+`_lower_recursive_self_call` (used when a recursive self-call's return
+value IS consumed, e.g. `return scan(...)`), which had the exact same
+gap — by rebuilding each to gather `(ctype, value)` pairs via
+`self.lower_expr(a)` (not just the value) and routing the final call
+through `_emit_call`/`_call_expr`/`_void_call`, mirroring
+`_lower_closure_call`'s already-correct sibling-closure-call pattern
+exactly (including how it derives the env-pointer's own C type from
+`func_param_types[lifted][0]`).
+
+**Regression 2 — `Scope.__init__`'s own call sites (the previous
+session's finding #2, but NOT actually about `Scope.__init__`'s own
+compilation)**: `gcc -fgimple`'s error: `passing argument 2 of
+'Scope___init__' makes integer from pointer without a cast`, at
+`MojoFunction._invoke`'s `func_scope = Scope(parent=self.closure_scope)`.
+The previous session's writeup guessed this was about "some other method
+earlier in the compile losing `__GIMPLE`... perturbing shared
+cross-function type-inference state" without pinning down which method
+or what state — it's `_invoke` itself: `_invoke` contains its own real
+`try`/`except` later in its body (`except ReturnValue as ret:`), so it
+correctly drops `__GIMPLE` too, and gcc's strict frontend is now parsing
+this call for the first time. The real bug: `gimple_codegen.py` already
+has a small, deliberate self-host-only hardcode block (`_is_selfhost_file`
+gate) registering `func_param_types['Scope___init__'] = ['Scope *', 'Scope
+*']` (because `Scope.__init__`'s own `parent` param has zero type signal
+from its trivial `self.parent = parent` body — `_param_ctype` always
+re-infers `int64_t` for it) — but a LATER, unconditional pre-pass ("Pass
+1.3c: Populate func_param_types for all user functions", added after this
+hardcode block, explicitly to fix a DIFFERENT ordering bug) blindly
+overwrites `func_param_types[method_full_name]` for every single struct
+method, silently clobbering the earlier hardcode with its own weaker
+`int64_t` re-inference — even though the sibling, EARLIER "Pass 1b" already
+had the correct discipline for this exact hazard (`if mangled not in
+self.func_param_types: self.func_param_types[mangled] = ctypes`, with an
+explicit comment "Don't overwrite hardcoded entries"), Pass 1.3c never
+inherited it. `Scope.__init__`'s OWN definition-signature emission (in
+`_gen_struct_method`, which DOES consult `func_param_types` first for
+unannotated params) inherited the clobbered wrong value too, so caller
+and callee agreed with each other on the WRONG type the whole time — an
+internally-consistent-but-wrong signature, invisible under `__GIMPLE`'s
+lax call-argument checking, exposed only once a caller lost `__GIMPLE`.
+**Fixed**: a new whole-program (not per-function-reset) set,
+`GimpleGen._selfhost_locked_param_types`, populated alongside the
+existing `Scope_*` hardcode entries; Pass 1.3c's struct-method loop now
+skips (does not overwrite) any `method_full_name` present in that lock
+set, restoring the hardcode's intended authority. Scoped to exactly the
+four pre-existing hardcoded entries (`Scope_define`/`Scope_get`/
+`Scope_set`/`Scope___init__`) — every other struct method's Pass-1.3c
+inference is completely unaffected.
+
+**Regression 3 — `_ThreadedGenerator._resume`'s `self._prime_inject(e)`
+(NEW, not found by the previous session — it stopped after the first
+two)**: `gcc -fgimple`'s error: `passing argument 2 of
+'_ThreadedGenerator__prime_inject' makes integer from pointer without a
+cast`. `_resume` (myinterpreter.py) correctly drops `__GIMPLE` too (it has
+two `except BaseException as e:` blocks). Traced with a temporary debug
+print in `_emit_call` (confirmed then removed): the call's own
+`arg_pairs` for `e` reported type `int64_t`, NOT `char *`, even though
+the actual C temp backing `e` (`_t43 = (char *) _t42;`, from
+`_emit_except_handler`'s exception-object retrieval) really is `char *` —
+so `_emit_call`'s coercion logic correctly saw "types already match,
+nothing to cast" and passed the raw pointer bits straight through as a
+bare `int64_t`. Root cause, in `_emit_except_handler`
+(`gimple_codegen.py`): `self.var_types.setdefault(bind_name, exc_ctype)`
+used `setdefault`, not a forced assignment — if `bind_name` (here `e`)
+was ALREADY a key in `var_types` from an EARLIER, unrelated assignment
+elsewhere in the SAME function (`_resume`'s own try body has `e,
+self._inject_exc = self._inject_exc, None` a few lines above the
+`except` block, which types `e` as `int64_t` first), the `setdefault`
+silently kept that STALE type for the rest of the handler's body — even
+though `_c_names[bind_name]` (the mechanism that redirects every ACTUAL
+reference to `e` inside the handler body to a fresh, correctly `char
+*`-typed temp) was already being correctly save/restored right below it,
+in the exact same function, for the exact same collision hazard. The
+type-tag half of the fix existed for one hazard (redeclaration/dominance)
+but not the other (stale semantic type). Confirmed generically
+reproducible outside the self-hosted file set too (a hand-written repro:
+a class with a method containing `e, foo = ...` then later `except
+BaseException as e: self.helper(e)`), so this was never self-host-only —
+just never triggered anywhere `__GIMPLE`'s lax checking wasn't already
+absorbing it. **Fixed**: `var_types[bind_name]` is now unconditionally
+SET (not `setdefault`) to `exc_ctype` for the handler's body, saved and
+restored exactly like the adjacent `_c_names`/`had_c_name`/
+`restore_c_name` dance already does for the same class of hazard.
+
+**A fourth issue found and fixed in the same pass, arguably a second half
+of regression 3's investigation**: after fixing regressions 1-2, a THIRD
+error remained: `too many arguments to function 'MojoFunction___call__';
+expected 4, have 5`, at `BoundMethod.__call__`'s `f(self.interpreter,
+self.instance, *args, **kwargs)` (`f` is a `MojoFunction`, whose own
+`__call__(self, interpreter, *args, **kwargs)` this call resolves to via
+the `obj(args) -> obj.__call__(args)` rewrite in `_lower_named_call`).
+`_lower_named_call` (free functions) already has real, working logic for
+exactly this "fixed args + spread" shape (`_call_has_spread` detection +
+`_func_kwargs_slot`-driven packing) — but its own comment says outright
+"`_func_kwargs_slot` is only populated for genuine user free functions...
+so this never fires for struct methods (a separate call-lowering path,
+out of scope here)". `_lower_struct_method_call`'s generic arg-building
+(`arg_pairs = [self.lower_expr(a) for a in node.args]`, used for the
+`__call__` rewrite since `MojoFunction` has no overloads) had no
+equivalent at all — each AST arg (two literal exprs, then a `UnaryOp('*',
+args)` spread, then a `UnaryOp('**', kwargs)` spread) became exactly one
+raw C argument, instead of merging the excess literal arg into the
+spread's own vararg list. **Fixed narrowly**, mirroring the free-function
+precedent's scoping discipline exactly: a new helper,
+`_repack_method_call_spread_args`, is a complete no-op unless
+`_func_kwargs_slot` has an entry for the target mangled method name — and
+the ONLY entry that exists is a new, explicit self-host-only hardcode,
+`_func_kwargs_slot['MojoFunction___call__'] = 3` /
+`_func_kwargs_has_vararg['MojoFunction___call__'] = True`, so this cannot
+affect any other struct-method call site in the compiler (blast radius
+identical in spirit to the `Scope_*` hardcodes above). When triggered, it
+splits `arg_pairs`/`call_args` at the callee's real fixed-param boundary,
+builds a fresh `MojoList *` via `mojo_list_new`/`mojo_list_append_int`/
+`mojo_list_extend` for the excess leading literal args plus the spread's
+own elements, and reuses the spread `**kwargs` pair directly (or an empty
+packed dict if none) — the same shape `_lower_named_call`'s existing
+packing already produces for the free-function case.
+
+**Verification**:
+- The original repro (`Slot.helper()`-shaped, a struct method with
+  `try`/`except`) via `python3 mojo.py build` + run: prints `caught` /
+  `done`, exit 0 (previously: `Segmentation fault: 11`, zero output).
+- Six more hand-written repros, each compiled AND RUN via `python3
+  mojo.py build`, all correct output, no crash:
+  1. A lifted closure (nested `def`, not a method) with internal
+     `try`/`except`, called from `main()` — `10` / `caught neg` / `-1`.
+  2. A `with`-block inside a method whose context manager has a real
+     `__exit__` — `enter` / `inside` / `exit` / `done`.
+  3. The doc's OWN combined case (Sub-case A/B dynamic attribute set
+     INSIDE a method's `try`/`except`, `Slot.__set_name__`-shaped,
+     restructured as real method calls) — 2 attribute writes then a
+     `len()` read confirms real per-object storage across calls, matches
+     Steps 1-4's own already-verified semantics, and (the actual point of
+     this repro) no crash.
+  4. Nested `try`/`except` inside a single method (inner `ZeroDivisionError`
+     handler, outer `ValueError` handler) — `20` / `value error` / `-2`.
+  5. A method containing `try`/`except` that ALSO calls itself
+     recursively (`self.count_down(n - 1)` inside the `try`) — `3` / `2` /
+     `1` / `finished`.
+  6. A lifted closure containing `try`/`except` that ALSO calls itself
+     recursively (mirroring `_register_link_imports`'s own `scan`) —
+     confirmed both the crash is gone AND the previously-buggy recursive-
+     call argument passing (regression 1's own root cause) now works
+     correctly end to end, not just compiles.
+- Two PRE-EXISTING, unrelated bugs surfaced incidentally while building
+  repro 6 and are explicitly OUT OF SCOPE for this fix (neither is a
+  `__GIMPLE`/setjmp issue, confirmed via `git stash` — both reproduce
+  identically on the untouched tree): (a) an unannotated single-param
+  top-level closure used with comparison/arithmetic (`count <= 0`, `count
+  - 1`) sometimes infers `char *` instead of `int64_t` for the param —
+  previously a hard `-fgimple` compile error ("type mismatch in
+  'pointer_diff_expr'") that blocked the build outright; after this
+  session's fix the SAME wrong inference instead silently compiles
+  (ordinary C tolerates `char * - int` as pointer arithmetic) and
+  segfaults at runtime — strictly a change in HOW the pre-existing bug
+  manifests (loud compile failure -> silent runtime crash), not a new
+  bug, and not something this session's change causes (confirmed: giving
+  the closure's param an explicit `: int` annotation sidesteps the
+  inference gap entirely and the repro runs correctly). (b) a top-level
+  function whose only statement is a call to a nested closure that
+  returns `None` produces a nonzero, garbage process exit code (e.g.
+  `184`) even with no `try`/`except`/`__GIMPLE` involvement at all
+  (confirmed on the untouched tree) — an unrelated, pre-existing
+  return-value/exit-code propagation gap. Neither is fixed here; both are
+  worth their own separate bug reports if they matter to a future
+  session.
+- Quality gate: `python3 test_gimple.py` — 248 passed, 0 failed.
+  `python3 test_module_cache.py` — 76 passed, 0 failed. `python3
+  test_gimple_runner.py` — 18 passed, 0 failed (the only suite that
+  actually EXECUTES compiled output, including both of this doc's own
+  permanent dynamic-attribute regression tests). `make check-selfhost` —
+  clean, confirmed via BOTH the cached `checked_run.py` path and a fresh,
+  non-cached direct `python3 test_selfhost.py` run. From-scratch stdlib
+  dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+  `build_stdlib_dylib.build_stdlib()`, default job count) — clean, 0
+  `skip <module>:` lines. `python3 compile_stdlib.py` (default jobs, full
+  664-file corpus) — 664/664 passed, 0 unexpected failures, unchanged
+  from baseline. Real-world file re-check: `Lib/pathlib/_os.py` (one of
+  this doc's own confirmed real-world instances, has a class-method-level
+  `except OSError as err:` block) via `gimple_codegen.compile_to_gimple
+  (..., do_imports=True)` + `gcc -fgimple -fsyntax-only` — 0 errors of any
+  kind, unchanged from the 2026-08-18 baseline.
 
 ### Regression found + fixed (2026-08-18): `self.prop.attr` auto-invoke ate Sub-case C's `.__name__` again
 
