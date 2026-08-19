@@ -17,7 +17,21 @@ handling on a `MojoBoundMethod` is now found + fixed, ALSO 2026-08-18**
 — see "Regression found + fixed (2026-08-18): `self.prop.attr` auto-
 invoke ate Sub-case C's `.__name__` again" below.
 
-**Not yet closing this doc**: while re-verifying the regression fix above,
+**Segfault pinned down 2026-08-19 — real bug, root cause identified, NOT
+actually about dynamic attributes or opaque objects at all**: the vague
+mention below turned out to be real and reproducible, but its true cause is
+a much broader, pre-existing gcc-toolchain-level bug this doc's own Sub-case
+A/B repro happens to trigger only because its OWN canonical shape
+(`Slot.__set_name__`) is a **method** — see "Segfault root-caused: setjmp/
+longjmp inside a `__GIMPLE`-tagged function" below for the full
+investigation, why the fix attempted this session was reverted (real,
+demonstrated regression risk elsewhere in self-hosting), and what's left
+for a future session. Not closing this doc yet — the underlying bug is
+real and unfixed, just precisely characterized now instead of vague.
+
+<details><summary>Original vague note (superseded by the section below, kept for history)</summary>
+
+Not yet closing this doc: while re-verifying the regression fix above,
 the fixing agent's own report noted in passing that "a standalone
 opaque-object (Sub-case A/B) variant segfaults both before and after this
 fix (pre-existing, unrelated — confirmed via stash diff)". This was NOT
@@ -32,6 +46,229 @@ than a plain opaque `int64_t` receiver — flagged here for whoever next
 touches this area to pin down and reproduce properly (check the git log
 around commit `a05a5c7`'s own session for any surviving scratch repro
 files/notes) before considering this doc closable.
+
+</details>
+
+### Segfault root-caused (2026-08-19): setjmp/longjmp inside a `__GIMPLE`-tagged function
+
+**The repro, finally pinned down**: NOT about opaque objects, dynamic
+attributes, or any of the hypotheses this doc's own task list anticipated
+(by-value copies, NULL receivers, GC/reuse, recursive structures, scale).
+It's simply: **a `try`/`except` (or a `with` block whose context manager
+has `__exit__`) inside a struct METHOD segfaults**, unconditionally,
+regardless of whether any dynamic attribute is involved at all:
+
+```python
+class Slot:
+    def helper(self):
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            print("caught")
+
+def main():
+    s = Slot()
+    s.helper()
+    print("done")
+```
+
+`python3 mojo.py build` on this compiles clean and **segfaults on run**
+(`Segmentation fault: 11`, zero output — not even `"caught"` prints). The
+byte-identical body as a plain top-level FUNCTION instead of a method —
+
+```python
+def helper():
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        print("caught")
+
+def main():
+    helper()
+    print("done")
+```
+
+— compiles and runs correctly (`caught` / `done`). This is exactly why the
+doc's own canonical Sub-case A/B repro (`Slot.__set_name__`, always
+written as a *method* in every real-world confirmed instance —
+`cls.__slot_names__`, `self.__hardroot`, etc.) segfaults while the
+OFFICIAL regression test in `test_gimple_runner.py`
+(`gimple_dynamic_attribute_real_storage_and_attributeerror`, whose
+`get_or_init(cls)` is a plain top-level FUNCTION, not a method) and the
+earlier session's own manual check (`get_thing()`'s result, also not a
+method) both pass: **every previously-verified "working" instance of this
+bug's own fix happens to use a free function; the doc's own minimal repro
+and every real-world confirmed file instance use a method.** Confirmed
+directly: `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s own
+minimal repro (`Slot.__set_name__`, restructured as a real callable
+`s.__set_name__(f, "a")` / `s.__set_name__(f, "b")` sequence) segfaults via
+`python3 mojo.py build` + run; the identical logic lowered into a plain
+function instead of a method does not.
+
+**Root cause, precisely identified**: `gimple_codegen.py`'s
+`_gen_struct_method` (struct/class methods) and `_gen_lifted_closure`
+(lambda-lifted closures) unconditionally emit their C function signature
+with the `__GIMPLE` keyword (`gcc -fgimple`'s "trust this body is already
+lowered GIMPLE, skip normal C-frontend gimplification" marker) — this is
+long-standing, pre-existing, and intentional (`gen_func`, the top-level
+free-function path, has ALWAYS deliberately been the LENIENT, non-
+`__GIMPLE`-tagged path instead — see its own pre-existing "LENIENT" comment
+near the `.wait()` pending-exception fix). `_gen_stmt_TryStmt` and the
+`with`-as-context-manager-with-`__exit__` path both lower to a real
+`setjmp(_mojo_exc_stack[...])`/`mojo_raise()`→`longjmp(...)` pair
+(`runtime/mojo_runtime.c`'s exception machinery, unrelated to this bug's
+own dynamic-attribute work). **Calling `setjmp` from inside a function fed
+to gcc as raw, already-lowered `__GIMPLE` reliably segfaults on the later
+`longjmp`** — confirmed with a hand-reduced, entirely Mojo-independent C
+repro (no dynamic attributes, no Mojo codegen involved at all):
+
+```c
+#include <stdio.h>
+#include <setjmp.h>
+jmp_buf buf;
+void __GIMPLE gtest(void) {
+  int a;
+bb_2:
+  a = setjmp(buf);
+  if (a) goto bb_4; else goto bb_3;
+bb_3:
+  longjmp(buf, 1);
+bb_4:
+  printf("gimple caught\n");
+  return;
+}
+int main(void) { gtest(); return 0; }
+```
+
+`gcc-mp-15 -fgimple isolate.c -o isolate && ./isolate` segfaults inside
+`_longjmp` (confirmed via `lldb`: `EXC_BAD_ACCESS` inside
+`libsystem_platform.dylib`'s `_longjmp`, called from `mojo_raise` /
+`mojo_raise_attribute_error` in the Mojo-specific case). Memory-inspected
+via `lldb` (`x/40gx &_mojo_exc_stack`): the jmp_buf slot `setjmp` supposedly
+wrote into reads back as **all zero** at the moment `mojo_raise` attempts
+the `longjmp` into it — i.e. the raw-`__GIMPLE`-fed function's `setjmp`
+call never actually took effect the way a normally-gimplified C function's
+would. This matches `-fgimple`'s own documented purpose (GCC's internal
+IPA-pass testing harness, not a general-purpose production C subset): raw
+GIMPLE input bypasses the normal C frontend's gimplification pass, which is
+what marks a setjmp-containing function's CFG with the special
+"returns-twice" abnormal-edge handling real setjmp semantics require
+(disabling the optimizations that would otherwise clobber the
+stack/register state a later `longjmp` needs restored). This is a
+toolchain-level limitation, not a Mojo-specific logic bug — it affects
+`gcc-mp-15 -fgimple` on this machine regardless of what Mojo source
+produced the `__GIMPLE`-tagged C.
+
+Confirmed via BOTH the real `mojo.py build` CLI (dylib-linked) path AND
+`test_gimple_runner.py`'s own static-link style (`gcc -fgimple client.c
+runtime/mojo_runtime.c`) — ruling out an earlier suspicion that this might
+be a dylib/shared-library boundary issue (e.g. a `-fcommon` tentative-
+definition split between the client and a separately-linked runtime
+dylib): it is not link-mode-dependent at all, it reproduces identically
+either way, confirming the bug is purely about `__GIMPLE`-tagging, not
+linking.
+
+**Fix attempted this session, REVERTED — real regression risk, not landed**:
+tracked whether a function's own body actually emitted a `setjmp` (a new
+per-function flag, `GimpleGen._func_used_setjmp`, set by
+`_gen_stmt_TryStmt` and the `with`-exit path, reset in `_reset_func`), and
+conditionally dropped the `__GIMPLE` tag for exactly those method/closure
+bodies — mirroring `gen_func`'s own already-working lenient path. This DID
+fix both the hand-reduced C repro's Mojo-shaped analogue and the doc's own
+`Slot.__set_name__`-shaped repro end to end via `python3 mojo.py build`
+(verified: correct output, no crash), and `test_gimple.py` (248/248),
+`test_gimple_runner.py` (18/18), and `test_module_cache.py` (76/76) all
+stayed green. **However `make check-selfhost` (the MANDATORY gate for any
+`gimple_codegen.py` change) broke**: two SEPARATE, unrelated self-hosted
+compile failures surfaced, neither involving dynamic attributes or even
+directly involving a setjmp-affected function:
+1. Applying the drop to lifted closures (`_gen_lifted_closure`) broke
+   `gimple_codegen.py`'s own `_register_link_imports`'s nested `scan(stmts)`
+   closure — its RECURSIVE SELF-CALLS (`scan(stmt.body)`) started failing
+   with "makes pointer from integer without a cast" once `scan` itself lost
+   `__GIMPLE` (its SIBLING nested closure `_exports`, defined earlier in the
+   same enclosing method, genuinely does contain `try`/`except`, correctly
+   triggering the flag for `_exports` itself — but something about a
+   recursive closure's own self-call lowering behaves differently once
+   emitted non-`__GIMPLE`, a separate, narrower call-lowering gap this
+   session didn't have scope to isolate further).
+2. Reverting JUST the closure change (keeping ONLY `_gen_struct_method`'s
+   drop) surfaced a SECOND, different failure: `myinterpreter.py`'s
+   `Scope.__init__` — a method with **no try/except in its own body at
+   all** — started getting a "makes integer from pointer without a cast"
+   at ITS OWN call sites elsewhere in the self-hosted compile. Since
+   `Scope.__init__`'s own `__GIMPLE`-tag decision is unaffected by the
+   fix (nothing in its own body sets `_func_used_setjmp`), this points to
+   some other method EARLIER in the same compile losing `__GIMPLE`
+   (correctly, for a genuine try/except) and something about THAT
+   perturbing shared/cross-function type-inference state
+   (`func_param_types`/forward-declaration generation) in a way this
+   session did not get to the bottom of. **Verified via a direct control
+   test** (forcing the `_gen_struct_method` drop back to a no-op while
+   leaving all the new tracking/instrumentation code in place, otherwise
+   byte-identical): `make check-selfhost` passes clean — proving the
+   regression is genuinely caused by the conditional `__GIMPLE`-dropping
+   logic itself, not incidental to some unrelated line-count/hash
+   sensitivity in this large file.
+
+Two alternative fixes were also explored and rejected:
+- **`__builtin_setjmp`/`__builtin_longjmp`** (GCC intrinsics specifically
+  meant to work without full frontend gimplification): fails to LINK under
+  `-fgimple` on this machine/target (`undefined symbols:
+  ___builtin_longjmp`, `___builtin_setjmp_setup` — arm64 `-fgimple`
+  apparently never lowers these to real code, it just leaves literal calls
+  to internal GCC helper symbols that don't exist as real library
+  functions). Confirmed via the same kind of hand-reduced, Mojo-independent
+  C repro used above.
+- **Indirecting through an ordinary (non-`__GIMPLE`) runtime helper
+  function** that does the `setjmp` internally, called via a normal
+  function call from the `__GIMPLE` body (`_t1 = mojo_try_push();`)
+  instead of inlining `setjmp` directly: unreliable, not a real fix —
+  a minimal repro without debug `printf`s silently failed to unwind at all
+  (execution fell through past the `longjmp` as if it were a no-op,
+  continuing normally instead of returning to the catch point — WRONG
+  output, not a crash, arguably worse: a silent miscompile); the
+  byte-identical repro WITH debug `printf`s added crashed instead. Both
+  outcomes point to genuinely undefined/fragile behavior for this
+  indirection shape, not a dependable fix.
+
+**Net result this session**: all code changes were reverted (working tree
+is byte-identical to master's `1fe4eed`, verified via `git diff` producing
+no output) rather than landing a fix with demonstrated regression risk to
+`make check-selfhost` — per this project's own quality-gate rule, a change
+that breaks self-hosting is not a landable fix regardless of how well it
+fixes the target repro. **The segfault remains real, reproducible, and
+UNFIXED** — this is now a precisely-characterized, separate, and
+significantly BROADER bug than "dynamic attributes on generic objects"
+(it affects ANY method or closure containing `try`/`except`/`with`-cleanup,
+independent of dynamic attributes entirely) that deserves its own
+dedicated follow-up session, ideally with more time to either (a) isolate
+and fix the recursive-closure-self-call and cross-function-type-inference
+regressions the naive fix surfaced, or (b) find a genuinely reliable way to
+make `setjmp`/`longjmp` (or an equivalent non-local control-transfer
+primitive) safe inside a `__GIMPLE`-tagged function on this toolchain.
+
+**Verification performed this session** (no production code changes
+landed, so the full mandatory 5-part gate was not re-run — per this
+project's own documented exception, "if you only investigated and found
+nothing [i.e. shipped no fix], a lighter sanity check is sufficient since
+no production code changed" applies here, since the code diff is empty):
+- `python3 test_gimple.py`: 248 passed, 0 failed (unchanged from baseline).
+- `python3 test_gimple_runner.py`: 18 passed, 0 failed, INCLUDING both of
+  this doc's own dynamic-attribute regression tests
+  (`gimple_dynamic_attribute_real_storage_and_attributeerror`,
+  `gimple_dynamic_attribute_fixed_runtime_struct_bound_method`) — both
+  still pass because, as established above, neither uses a method, only
+  free functions.
+- `python3 test_module_cache.py`: 76 passed, 0 failed.
+- The segfault itself re-confirmed reproducible on the final, fully-
+  reverted tree (`git diff` empty against `1fe4eed`) immediately before
+  writing this section, via both the doc's own restructured minimal
+  repro and the free-standing `Slot.helper()`-shaped repro above, each via
+  a fresh `python3 mojo.py build` + run.
+- All previously-confirmed-working real-world verification-table instances
+  are untouched (no code changed) and remain valid as documented in their
+  own original sessions.
 
 ### Regression found + fixed (2026-08-18): `self.prop.attr` auto-invoke ate Sub-case C's `.__name__` again
 
