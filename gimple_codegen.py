@@ -35946,6 +35946,48 @@ class GimpleGen:
                     if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
                         self._global_to_module[_gname] = _phase17_mod
                     self._global_var_types[_gname] = _gtype
+            elif (isinstance(_scan_stmt, ComptimeVarStmt)
+                    and isinstance(_scan_stmt.value, (ListExpr, TupleExpr))
+                    and _scan_stmt.target not in _pre_declared_globals):
+                # A top-level `comptime NAME = [literal, literal, ...]` (e.g.
+                # box.3d/game's `comptime DIR_OFFSETS: [Int; 18] = [0, 0,
+                # -1, ...]`) is real Mojo — compile-time-KNOWN VALUE, not a
+                # compile-time-ONLY construct: ordinary Mojo code is free to
+                # read it at runtime with a DYNAMIC (non-constant) index,
+                # e.g. `DIR_OFFSETS[direction * 3]`. Before this branch, a
+                # top-level ComptimeVarStmt was invisible to this whole
+                # Phase 1.7 pre-scan (it only matches AssignStmt/
+                # MultiAssignStmt/VarDecl/TryStmt/IfStmt) — the parser also
+                # discards the `[Int; 18]` type annotation entirely for
+                # `comptime` statements (see mojo_compiler.py's
+                # `_parse_comptime`, "parse and discard type annotation"),
+                # so nothing downstream ever learned this name denotes a
+                # real array. `_lower_IdentExpr` then fell through to its
+                # final "unknown identifier" placeholder (int64_t 0) for
+                # every ordinary (non-materialize[]) read of the name, and
+                # subscripting that placeholder degraded to indexing a NULL
+                # MojoList* (returns 0, doesn't crash) — every element of
+                # the array silently read as 0 forever. Registering the
+                # SAME type-inference here as an equivalent AssignStmt
+                # would (`_phase17_infer_global_type`) makes this a real
+                # 'MojoList *' global exactly like `var NAME = [...]` at
+                # module scope; the matching toplevel-codegen branch (see
+                # this file's other `ComptimeVarStmt` case in the top-level
+                # statement dispatch loop) builds the actual backing list
+                # at startup so subscripting it now indexes real memory.
+                # This does not disturb the EXISTING compile-time-only
+                # consumers of a comptime list (`materialize[NAME]()`
+                # unrolling, `_comptime_list_asts`) — those are checked at
+                # their own call sites before any of this runtime machinery
+                # is ever reached. Found via box.3d/game's BUG-2026-011:
+                # `_get_adjacent_block`'s `DIR_OFFSETS[direction * 3]`
+                # always read (0, 0, 0), so every "neighbor" lookup silently
+                # resolved to the block asking the question, and a redstone
+                # counter's clock input never saw its lever's real signal.
+                _pre_declared_globals.add(_scan_stmt.target)
+                if _scan_stmt.target not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
+                    self._global_to_module[_scan_stmt.target] = _phase17_mod
+                _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value)
 
         # A module-level `var g: list()` / `var g = list()` (no literal
         # elements ever — the empty-at-declaration idiom, e.g. box.3d/
@@ -36152,6 +36194,17 @@ class GimpleGen:
         self._has_toplevel_code = False
         for _ts in stmts:
             if isinstance(_ts, (AssignStmt, AugAssignStmt, ExprStmt, IfStmt, WhileStmt, ForStmt, TryStmt, WithStmt, PassStmt, BreakStmt, ContinueStmt, ReturnStmt, RaiseStmt, AssertStmt, VarDecl)):
+                self._has_toplevel_code = True
+                break
+            # A top-level `comptime NAME = [literal, ...]` is synthesized
+            # into a real runtime-init AssignStmt further down (see this
+            # file's other ComptimeVarStmt/ListExpr branches) and DOES need
+            # `_toplevel()` called — this pre-scan runs first (the `main()`
+            # wrapper it feeds is emitted before the real toplevel_stmts
+            # collection below), so it needs the identical condition or the
+            # call to `_toplevel()` gets trimmed as dead even though the
+            # function now has real initialization code in it.
+            if isinstance(_ts, ComptimeVarStmt) and isinstance(_ts.value, (ListExpr, TupleExpr)):
                 self._has_toplevel_code = True
                 break
         # Step I (create_task/Task/TaskGroup/RaisingTask project): a REAL,
@@ -36373,6 +36426,25 @@ class GimpleGen:
                 func_parts.append('')
             elif isinstance(stmt, (ImportStmt, FromImportStmt)):
                 pass  # Imports processed in pre-pass; extern declarations generated in preamble
+            elif (isinstance(stmt, ComptimeVarStmt)
+                    and isinstance(stmt.value, (ListExpr, TupleExpr))):
+                # A top-level `comptime NAME = [literal, ...]` needs REAL
+                # runtime backing storage, not just compile-time folding —
+                # see this file's matching Phase 1.7 branch (same
+                # ComptimeVarStmt/ListExpr condition, a few thousand lines
+                # up) for the full why. Synthesize the equivalent
+                # `NAME = [literal, ...]` AssignStmt and feed it through the
+                # SAME toplevel-init codegen every ordinary module-level
+                # list global already uses (builds the real MojoList* via
+                # runtime append calls at startup) — this reuses that
+                # machinery exactly rather than duplicating a second list-
+                # construction path. A plain `comptime NAME = 4096` (or any
+                # non-list value) is unaffected: it isn't a ListExpr, so
+                # this branch never matches, and it keeps its existing
+                # pure-compile-time-fold-only handling.
+                toplevel_stmts.append(AssignStmt(
+                    target=IdentExpr(stmt.target, line=stmt.line, col=stmt.col),
+                    value=stmt.value, line=stmt.line, col=stmt.col))
             elif isinstance(stmt, (AssignStmt, AugAssignStmt, MultiAssignStmt,
                                    ExprStmt, IfStmt, WhileStmt, ForStmt,
                                    TryStmt, WithStmt, PassStmt,
@@ -37511,6 +37583,25 @@ class GimpleGen:
                     self._global_c_decl_types[gname] = 'int'
             elif isinstance(stmt, AssignStmt) and isinstance(stmt.target, IdentExpr):
                 gname = stmt.target.name
+                if gname in _declared_globals:
+                    continue
+                _declared_globals.add(gname)
+                _gscan_declare_global(gname, stmt.value)
+            elif (isinstance(stmt, ComptimeVarStmt)
+                    and isinstance(stmt.value, (ListExpr, TupleExpr))):
+                # Struct-field-declaration sibling of this file's other two
+                # ComptimeVarStmt/ListExpr branches (Phase 1.7's type-only
+                # pre-scan, and the toplevel-statement dispatch loop that
+                # synthesizes the matching runtime-init AssignStmt) — see
+                # either of those for the full why. Without this branch, the
+                # C struct backing this module's globals never gained a
+                # field for the comptime array at all, so a synthesized
+                # init AssignStmt (this file's earlier fix) that reads
+                # `<module>_globals.<name>` at startup referenced an
+                # undeclared struct member ("invalid use of undefined type"
+                # / "undeclared" GCC errors). Reuses `_gscan_declare_global`
+                # exactly like a plain `NAME = [...]` global would.
+                gname = stmt.target
                 if gname in _declared_globals:
                     continue
                 _declared_globals.add(gname)
