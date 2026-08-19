@@ -130,6 +130,47 @@ def test_async_build_refused(name: str, mojo_src: str, expected_substr: str):
     _FAIL += 1
 
 
+def test_async_value_consumption_is_lazy(name: str, mojo_src: str, forbidden_marker_line: str):
+    """Verifies a VALUE-CONSUMING reference to a compiled async function call
+    (`x = f()`, `print(f())`, an `await`-driven call whose body itself
+    hasn't awaited yet, ...) now correctly matches real Python/this
+    project's own interpreter semantics: calling an async function NEVER
+    runs its body immediately -- it only produces a not-yet-started
+    coroutine object (see commit f5d9021's `_lower_call` change, which
+    replaced the OLD honest "consumed as a value" whole-module refusal
+    9a3a62b had put in place for the eager-execution bug -- see
+    bugs/CODEGEN_compiled_async_eager_execution_semantic_mismatch.md --
+    with a real, lazy `MojoAsync *` handle construction instead of ever
+    reviving eager execution). `mojo.py run` (the interpreter) on the exact
+    same source independently confirms this is the right shape: it prints
+    `<myinterpreter.MojoCoroutine object at 0x...>`, never the awaited
+    value -- the compiled path's own printed representation is a bare
+    pointer decimal (no repr-string formatting for MojoAsync* implemented
+    yet), a real but separate, purely cosmetic gap, NOT a semantic one.
+
+    `forbidden_marker_line` is a source-distinguishing literal (e.g. a
+    large sentinel int printed as f's OWN first statement) that must NOT
+    appear anywhere in the real compiled program's stdout if the body
+    genuinely never ran -- mirrors bare_async_call_never_runs_body's/
+    multiple_bare_async_calls_never_run_bodies's identical side-effect-
+    observation technique just above, extended to the value-consuming
+    shapes those two tests don't cover."""
+    global _PASS, _FAIL
+    try:
+        exe = _build_async_program(mojo_src)
+        out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+        if forbidden_marker_line in out:
+            print(f"FAIL  {name}: async function body ran (found {forbidden_marker_line!r} "
+                  f"in stdout {out!r}) -- value-consuming call must stay lazy")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def test_async_stdout_timed(name: str, mojo_src: str, expected_stdout: str,
                              min_seconds: float, max_seconds: float):
     """Step C's own rigor bar, mirroring test_async_runtime_scaffold.py's
@@ -436,26 +477,43 @@ def main():
 """, "")
 
     # The bug's exact repro, through the REAL dual-output build path (not
-    # just compile_to_gimple as in test_gimple.py) -- must be refused, not
-    # silently compiled into the old eager-execution shape.
-    test_async_build_refused("value_consuming_assignment_refused_at_real_build", """\
+    # just compile_to_gimple as in test_gimple.py) -- USED to require an
+    # honest whole-module refusal (9a3a62b), because Step B's first cut
+    # fused construct+schedule+run+read+destroy into ONE expression's
+    # lowering for ANY value-consuming call, silently running the body
+    # immediately (a real semantic bug: real Python never runs an async
+    # function's body just from calling it). Commit f5d9021 later replaced
+    # that refusal with a real, lazy `MojoAsync *` handle construction
+    # instead (matching real Python's "calling an async fn returns a
+    # not-yet-started coroutine object" and this project's own
+    # interpreter's MojoCoroutine) -- a genuine capability gain, not a
+    # revival of the eager-execution bug: independently verified via
+    # `mojo.py run` on this exact source (prints
+    # `<myinterpreter.MojoCoroutine object at 0x...>`, never `42`) AND via
+    # the side-effect check below (f's own `print(999999)` must never
+    # appear in the compiled program's stdout -- proving the body still
+    # genuinely never runs, exactly like the bare-discarded-call shape
+    # above). See test_async_value_consumption_is_lazy's docstring.
+    test_async_value_consumption_is_lazy("value_consuming_assignment_lazily_constructs_and_never_runs_body", """\
 async def f():
+    print(999999)
     return 42
 
 def main():
     x = f()
-    print(x)
-""", "consumed as a value")
+    print(2)
+""", "999999")
 
-    # Same bug, argument-position shape (`print(f())`, no intermediate
-    # assignment) -- confirms the refusal isn't assignment-specific.
-    test_async_build_refused("value_consuming_print_arg_refused_at_real_build", """\
+    # Same shape, argument-position (`print(f())`, no intermediate
+    # assignment) -- confirms laziness isn't assignment-specific either.
+    test_async_value_consumption_is_lazy("value_consuming_print_arg_lazily_constructs_and_never_runs_body", """\
 async def f():
+    print(999999)
     return 42
 
 def main():
     print(f())
-""", "consumed as a value")
+""", "999999")
 
     # ── Step C (compiled-path async/await codegen project): real `await`
     # on a real timer, driven via an explicit `asyncio.run(...)` top-level
@@ -533,23 +591,25 @@ def main():
     print(result)
 """, "10\n", min_seconds=0.045, max_seconds=1.0)
 
-    # `x = f()` (no `asyncio.run`) must STILL be honestly refused through
-    # the real dual-output build path -- re-verifying Step B's bug fix
-    # (9a3a62b) is unregressed by Step C's changes, now with a body that
-    # actually contains a real `await` too (not just the old zero-
-    # suspension-point shape), through the SAME real build entry point the
-    # rest of this file uses.
-    test_async_build_refused("bare_assignment_with_real_await_still_refused", """\
+    # `x = f()` (no `asyncio.run`) with a body that contains a real `await`
+    # too (not just the old zero-suspension-point shape) -- same legitimate
+    # capability gain as the two tests above (f5d9021), re-verified here
+    # with a real `await` inside f's body: `x` still just binds the lazily-
+    # constructed, not-yet-scheduled coroutine handle -- f's body (proven
+    # via its own `print(999999)` side effect) never runs, so the real
+    # `await asyncio.sleep(...)` inside it never fires either.
+    test_async_value_consumption_is_lazy("bare_assignment_with_real_await_lazily_constructs_and_never_runs_body", """\
 import asyncio
 
 async def f():
+    print(999999)
     await asyncio.sleep(0.01)
     return 42
 
 def main():
     x = f()
-    print(x)
-""", "consumed as a value")
+    print(2)
+""", "999999")
 
     # ── Step D (compiled-path async/await codegen project): async-awaits-
     # async composition -- one compiled coroutine awaiting ANOTHER's real
@@ -667,21 +727,38 @@ def main():
     test_composition_stable_across_repeated_runs()
 
     # `await` on a forward reference (the callee is defined AFTER the
-    # caller in source order) must still be honestly refused through the
-    # real build path -- gen_module's async pre-pass is a single forward
-    # pass (see _is_async_call_to_known_fn's docstring), so this is not a
-    # guessed/dangling C++ reference, just an out-of-scope shape.
-    test_async_build_refused("await_forward_reference_still_refused", """\
+    # caller in source order) -- USED to be honestly refused (gen_module's
+    # async pre-pass over top-level `stmts` compiles callees before callers
+    # in ONE single forward pass, so a caller compiled before its later-
+    # defined callee can't yet resolve it). gen_module now runs a genuine
+    # SECOND pass (see the "Second pass for async functions NOT in top-
+    # level stmts" loop and its sibling for async generators) that retries
+    # any function left uncompiled after pass 1 against the now-larger
+    # self._async_api -- so `f` (which failed pass 1's eligibility check
+    # because `g` wasn't compiled yet) succeeds on pass 2, once `g` (defined
+    # later in source, but compiled earlier in pass 1's iteration since pass
+    # 1 still walks ALL of `stmts` in order before pass 2 starts) is
+    # already known. This is a genuine capability gain, not a guessed/
+    # dangling C++ reference -- verified below with a REAL `await
+    # asyncio.sleep(...)` inside the forward-referenced callee `g` (proving
+    # actual suspend/resume through the real callee, not some accidental
+    # zero-op path) and a correctness-bearing return value threaded through
+    # TWO stack frames (`g` returns 99, `f` returns `g()+1` = 100).
+    test_async_stdout_timed("await_forward_reference_now_supported_via_second_pass", """\
+import asyncio
+
 async def f():
     x = await g()
-    return x
+    return x + 1
 
 async def g():
-    return 1
+    await asyncio.sleep(0.05)
+    return 99
 
 def main():
-    f()
-""", "async function")
+    result = asyncio.run(f())
+    print(result)
+""", "100\n", min_seconds=0.045, max_seconds=1.0)
 
     # `await` on an arbitrary non-call, non-sleep expression must still be
     # honestly refused through the real build path.

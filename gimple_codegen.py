@@ -2429,21 +2429,39 @@ def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) ->
     both true). Deliberately the NARROWEST of all three `*_quick_eligible`
     filters, mirroring how Milestone B and Step B both started at zero
     parameters/zero richness before any later step widened scope: no
-    parameters (see `_gen_cpp_async_generator_unit`'s own docstring for why
-    -- the hand-written GCC-15 repro found this combination safe even WITH
-    parameters, but there's no need to widen past this step's one target
-    shape to close out the project), no `yield from` (delegation composed
-    with async suspension is genuinely new risk this step doesn't take on),
-    `with` still excluded (same reason `_generator_quick_eligible` excludes
-    it). Every `await` must be one of the same recognized shapes
-    `_async_quick_eligible` already accepts (asyncio.sleep, a bare call to
-    an already-compiled plain async function, asyncio.sock_recv) -- an
-    async generator awaiting ANOTHER async generator is out of scope this
-    step (composed `async for`-of-`async for` isn't this step's target
-    shape); try/except/raise ARE allowed through (Milestone D's exception
-    machinery, reused verbatim by this step's promise -- see
-    `_gen_cpp_async_generator_unit`)."""
+    parameters -- RESTORED (see bugs/hard/
+    CODEGEN_async_gen_params_silent_regression.md). Phase 7 (commit 1b736d7) removed
+    this gate and taught `_gen_cpp_async_generator_unit` to emit a real
+    parametrized C++ signature, but never updated this feature's ONLY real
+    consumption path -- `_cpp_async_for_stmt` -- which still hardcodes a
+    bare, argument-less call (`not it.args`) as its one supported shape and
+    has done since before Phase 7. The net effect: a parametrized async
+    generator consumed the ONLY way real Mojo allows (`async for x in
+    f(<args>):`) either (a) if the call omits the required argument(s)
+    entirely, silently proceeds past this gate and this file's
+    `compile_to_gimple_with_cpp` "succeeds", but emits a call to
+    `<base>_impl()` with too few arguments -- invalid C++ that only fails
+    downstream at the g++ stage with a confusing signature-mismatch error,
+    never caught here -- or (b) if the call supplies the correct argument
+    count, `_cpp_async_for_stmt`'s own `not it.args` check refuses it
+    anyway via the generic whole-module fallback. Either way the "params
+    now supported" premise was never actually true end-to-end for the one
+    real consumption path; no positive params+`async for` test exists.
+    Restoring the gate keeps this an honest, single, front-door refusal
+    again instead of an accidental g++-level failure. no `yield from`
+    (delegation composed with async suspension is genuinely new risk this
+    step doesn't take on), `with` still excluded (same reason
+    `_generator_quick_eligible` excludes it). Every `await` must be one of
+    the same recognized shapes `_async_quick_eligible` already accepts
+    (asyncio.sleep, a bare call to an already-compiled plain async
+    function, asyncio.sock_recv) -- an async generator awaiting ANOTHER
+    async generator is out of scope this step (composed `async for`-of-
+    `async for` isn't this step's target shape); try/except/raise ARE
+    allowed through (Milestone D's exception machinery, reused verbatim by
+    this step's promise -- see `_gen_cpp_async_generator_unit`)."""
     if not (fn.is_async and fn.is_generator):
+        return False
+    if fn.params:
         return False
     for n in _walk_ast(fn.body):
         if isinstance(n, YieldFromExpr):
