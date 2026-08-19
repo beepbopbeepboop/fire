@@ -197,7 +197,18 @@ def test_dispatch_solver_phase_b():
         'Interpreter_execute_ExprStmt': 'int',
     }
 
-    solver = DispatchSolver(struct_field_types, func_return_types)
+    # This test's `myinterp_test` source is a deliberate, self-contained
+    # repro of THIS COMPILER'S OWN self-hosted `Interpreter.execute`
+    # getattr-as-vtable-dispatch idiom (see the module docstring above) —
+    # exactly the pattern `DispatchSolver.allow_assume_all_methods` exists
+    # to recognize (gimple_codegen.py, gated to self-hosting compiles only
+    # since commit 02b14c5, to avoid misfiring on ordinary
+    # `getattr(self, attr)` delegation elsewhere — see
+    # bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md).
+    # This test constructs `DispatchSolver` directly rather than going
+    # through `GimpleGen.gen_module`'s path-based self-host detection, so it
+    # opts into the same behavior explicitly here instead.
+    solver = DispatchSolver(struct_field_types, func_return_types, allow_assume_all_methods=True)
     solver.analyze(stmts)
 
     # Check that dispatch tables were planned

@@ -1,5 +1,126 @@
 # HARD BUG: the self-hosting `getattr(self, x)`-dispatch-table heuristic mis-fires on ordinary stdlib code, emitting invalid C
 
+## 2026-08-19: 02b14c5's own gate was too narrow, broke `test_dispatch_phase_b.py`/`test_dispatch_phase_c.py` — fixed by having the TESTS opt in, not by widening the production gate
+
+The 2026-08-18 fix directly below (gating the "assume all methods"
+fallback behind `DispatchSolver.allow_assume_all_methods`, set only when
+`_is_selfhost_file`'s path-based check is true) turned out to be a real
+regression against a *different* legitimate caller: `test_dispatch_phase_
+b.py`'s `test_dispatch_solver_phase_b()` and `test_dispatch_phase_c.py`'s
+five tests all construct a standalone `myinterp_test`/`multi_pattern_test`
+source string containing the exact same `Interpreter.execute`-style
+`getattr(self, x)`-as-vtable-dispatch idiom this whole mechanism exists
+for — but as an in-memory test fixture, not one of this repo's own `.py`
+files on disk, so `_is_selfhost_file` (which only ever looks at
+`self._current_filename`'s path) was always False for them, and the
+fallback that used to fire unconditionally (pre-02b14c5) silently stopped
+firing. Confirmed via bisection: `gimple_codegen.py` checked out from
+02b14c5~1 passes both tests; current (post-02b14c5) HEAD fails both with
+"Should have planned at least one dispatch table" / "Should have planned
+dispatch tables".
+
+**First fix attempt (tried, then reverted — documented for anyone who
+re-derives it)**: per this doc's own "option 2" below, widen the
+production gate to also allow the fallback whenever the `getattr(self,
+x)` RESULT is actually CALLED somewhere in the same function body
+(`getattr(self, x)(...)` inline, or `m = getattr(self, x); ...; m(...)`
+split across statements) — a signal independent of file path, checked via
+two small new helpers (`_walk_assign_targets` + per-body `called_ids`/
+`called_names` sets) in `_find_patterns_in_body`/`_analyze_getattr_
+pattern`. This DID make both tests pass, and did NOT reintroduce the
+original `_LazyModule` symptom (`return getattr(self, attr)` — a bare
+return, never called, so `is_called` stays False for it, confirmed via
+`gimple_codegen.compile_linked(...)`: still 0 `dispatch_t` occurrences).
+
+However, a full `python3 mojo.py build .../Lib/ftplib.py` comparison
+(before vs. after, diffing the sorted set of `error: '<name>' undeclared`
+symbols) showed the widened gate reopened the doc's OWN "residual risk"
+paragraph in a very concrete way: ordinary visitor-pattern code that
+happens to store the `getattr` result in a local before calling it —
+e.g. `Lib/ast.py`'s `NodeVisitor.visit`/`NodeTransformer.visit`
+(`method = 'visit_' + node.__class__.__name__; visitor = getattr(self,
+method, self.generic_visit); return visitor(node)`), `Lib/reprlib.py`'s
+`Repr.repr1`, and `Lib/datetime.py`'s `timezone`/`tzinfo` dunder-heavy
+structs — is *structurally identical* to the self-hosted `Interpreter.
+execute` idiom under the `is_called` test: both assign the getattr result
+to a plain local and both call that local later in the same body. Widening
+the gate on `is_called` alone newly registered ALL of `NodeVisitor`'s /
+`Repr`'s / `timezone`'s methods as dispatch-table callees under their
+UNQUALIFIED names, which — since these structs live in non-root,
+transitively-imported modules — hit exactly the still-open "option 3"
+qualification gap this doc's 2026-08-10 entry already flagged
+(`gimple_codegen.py`'s callee registry uses the plain `f"{stmt.name}_
+{method.name}"` name, not the module-qualified one). Concretely: the
+before/after diff of `ftplib.py`'s undeclared-identifier symptom set grew
+from 30 to 56 entries, with `NodeVisitor_visit`, `NodeTransformer_
+generic_visit`, `Repr_repr_dict`, `timezone___repr__`, `tzinfo_dst`, etc.
+newly appearing — a real regression, so this approach was reverted in
+full (`git checkout -- gimple_codegen.py`) rather than shipped. It
+confirms the doc's own risk note ("a case where the heuristic mis-fires
+AND the self type happens to resolve to something plausible-but-wrong is
+still possible in principle") is not just theoretical: `is_called` alone
+is not a sufficiently narrow signal — ordinary delegate-with-a-fallback
+patterns very commonly DO call the result, they just don't need a whole
+struct's method set registered as callees to do it.
+
+**Actual fix landed**: leave `gimple_codegen.py`'s production gate
+completely untouched (still purely path-based, `_is_selfhost_file`-only,
+exactly as 02b14c5 left it), and instead have the two test files opt in
+explicitly, the way a real self-hosting compile would:
+- `test_dispatch_phase_b.py` constructs `DispatchSolver` directly, so it
+  now passes `allow_assume_all_methods=True` at the call site — it's
+  deliberately testing the self-hosted dispatch idiom, so asking for that
+  behavior by name is honest, not a workaround.
+- `test_dispatch_phase_c.py` goes through `GimpleGen.gen_module`, whose
+  self-host gate is path-based on `self._current_filename`; a new
+  `_make_selfhost_gen(**kwargs)` helper constructs the `GimpleGen` and
+  sets `gen._current_filename = gimple_codegen.__file__` (a real path
+  under this repo's own `_SELFHOST_DIR`) before `gen_module` runs, then
+  all five call sites use it instead of calling `GimpleGen(...)` directly.
+
+This is strictly narrower and lower-risk than either gating option this
+doc previously considered: zero lines of `gimple_codegen.py` changed at
+all, so there is no way this could reopen the `_LazyModule`/`ftplib.py`
+symptoms — confirmed by re-running both repros unchanged (`git diff
+gimple_codegen.py` is empty for this session). Both `test_dispatch_phase_
+b.py` and `test_dispatch_phase_c.py` pass again.
+
+Verification performed:
+- `python3 test_dispatch_phase_b.py` / `python3 test_dispatch_phase_c.py`
+  — both fully pass (previously "Should have planned at least one
+  dispatch table" / "Should have planned dispatch tables" failures).
+- `python3 test_dispatch_myinterpreter.py`, `test_dispatch_solver.py`,
+  `test_dispatch_promotions.py` — all pass, unchanged (these already
+  either construct `DispatchSolver()` with the `allow_assume_all_methods`
+  default of `False`, matching current production behavior exactly, or
+  don't exercise this code path at all).
+- `gimple_codegen.compile_linked(...)` on `Lib/importlib/util.py` — still
+  0 `dispatch_t` occurrences for `_LazyModule` (unaffected, since
+  `gimple_codegen.py` itself has zero diff this session).
+- `python3 mojo.py build .../Lib/ftplib.py` — before/after diff of the
+  sorted `error: '<name>' undeclared` symbol set is empty (identical both
+  times, as expected with no production-code change); confirms neither
+  the original `Popen__close_pipe_fds`/`calendar.Month`/`Day` symptom nor
+  the `NodeVisitor`/`Repr`/`timezone` regression from the reverted
+  attempt above are present.
+- `python3 test_gimple.py` — 248 passed, 0 failed.
+- `python3 test_module_cache.py` — 76 passed, 0 failed.
+- `make check-selfhost` — clean (1 passed, 0 failed; "self-host compiles
+  + links clean").
+- From-scratch `libmojostdlib.dylib` rebuild
+  (`build_stdlib_dylib.build_stdlib()`, default job count) — exit 0, 0
+  `skip <module>:` lines.
+- `python3 compile_stdlib.py` (default jobs) — 664/664 passed, 0
+  unexpected failures (one run hit a transient, unrelated
+  `BrokenProcessPool` from the OS process pool; a clean immediate retry
+  passed 664/664 — not a code issue).
+
+Committed. This doc stays open for the same unchanged reason as before:
+the underlying "option 3" module-qualification gap in the fallback's
+callee-registration is still real and still has no fix, it's just still
+without a live repro in the *shipped* code path (the near-miss above was
+in a reverted, never-shipped attempt).
+
 ## Fixed 2026-08-18: root cause (the over-eager "assume all methods" fallback) gated off for non-self-host compiles
 
 Implemented **option 1** from "What a real fix needs" below, in full:
