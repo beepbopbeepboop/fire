@@ -7843,7 +7843,44 @@ class GimpleGen:
 
         return inferred
 
-    def _declare_var(self, name: str, ctype: str, elem: str | None = None):
+    def _declare_var(self, name: str, ctype: str, elem: str | None = None, force: bool = False):
+        """Register a C-level declaration for Python local `name`.
+
+        Default (force=False): first-decl-wins — if `name` was already
+        declared (e.g. the SAME loop-variable name reused across two
+        separate sibling `for` loops with different element types), this
+        is a deliberate no-op; later reads keep coercing to the FIRST
+        declared type. Load-bearing; do not change.
+
+        force=True is for the one case that needs the OPPOSITE behavior:
+        a `for` loop whose target name self-shadows its own iterable
+        (`for tail in tail:`) — by the time `_declare_var(var, elem)` runs
+        for the loop target, `var` is already registered (as the
+        iterable's own type) from BEFORE the loop even started, so the
+        default no-op guard would leave the stale type/declaration in
+        place. force=True mints a genuinely fresh, non-colliding C
+        identifier for `name`, records the rename in `self._c_names` (so
+        `_lower_IdentExpr`'s `_c_names.get(name, name)` picks it up for
+        every subsequent read/write of `name` in the loop body), and
+        overrides `self.var_types[name]`/`self._elem_types[name]` to the
+        new, correct type — never touching the OLD declaration (still
+        valid C, just no longer reachable under `name`).
+        """
+        if force and name in self.var_types:
+            self.temp_counter += 1
+            import re as _re
+            safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
+            if safe and safe[0].isdigit():
+                safe = '_' + safe
+            c_name = f"_shadow{self.temp_counter}_{safe}"
+            self._c_names[name] = c_name
+            self.decls.append(f"  {ctype} {c_name};")
+            self.var_types[name] = ctype
+            if elem is not None:
+                self._elem_types[name] = elem
+            else:
+                self._elem_types.pop(name, None)
+            return
         if name not in self.var_types:
             # Strip backtick-quoted Mojo identifiers (e.g. `6bit` → _6bit)
             if name.startswith('`') and name.endswith('`') and len(name) > 2:
@@ -22975,17 +23012,67 @@ class GimpleGen:
         # Check if this is an int64_t-stored pointer (from method call returning pointer)
         it_type = self._get_actual_type(it_type, it_val)
 
+        # Self-shadowing loop target: `for tail in tail:` — the loop's OWN
+        # target variable has the same name as the list/dict/etc it iterates.
+        # Only possible when the iterable is a bare IdentExpr whose lowered
+        # value IS the raw variable name with no copy (`_lower_IdentExpr`'s
+        # plain-read case: `cname = self._c_names.get(name, name)` — a
+        # computed/literal iterable expression can't collide this way).
+        # Without special-casing this, two things break together:
+        #   1. `_gen_for_list`/etc reuse the SAME C identifier for both the
+        #      iterable's own list-pointer value and the loop's per-iteration
+        #      element — every `mojo_list_len`/`mojo_list_get_int` call after
+        #      the 1st iteration reads back an already-overwritten value.
+        #   2. `_declare_var`'s deliberate first-decl-wins guard (protects
+        #      the common "same loop-var name reused across separate sibling
+        #      loops" case) leaves the loop target's C variable declared
+        #      under the ITERABLE's stale type for the rest of the loop body.
+        # Fix: snapshot the iterable's value into a fresh, stable temp BEFORE
+        # the loop starts (decouples the list-pointer reads from whatever the
+        # loop target's C variable gets overwritten with), and force a fresh,
+        # non-colliding C declaration for the loop target (see
+        # `_declare_var(force=True)`).
+        target_names = (self._split_top_level_comma(var[1:-1])
+                         if isinstance(var, str) and var.startswith('(') and var.endswith(')')
+                         else [var])
+        shadow_name = None
+        if (isinstance(it, IdentExpr) and it.name in target_names
+                and it_val == self._c_names.get(it.name, it.name)):
+            shadow_name = it.name
+            orig_name = it.name
+            # Snapshot using the C name's ACTUAL declared type (which may be
+            # 'int64_t' if the container is boxed-pointer-stored — e.g. it
+            # came out of a method call earlier), not the semantic `it_type`
+            # ('MojoList *' etc). Every `_gen_for_*` below already knows how
+            # to cast an int64_t-boxed pointer back to the real container
+            # type at the point of use (`if it_val in self.var_types and
+            # self.var_types[it_val] == 'int64_t': ... cast ...`); assigning
+            # straight into a same-typed temp here keeps that existing
+            # boxed-pointer path working unchanged, and avoids emitting an
+            # invalid pointer-from-integer assignment with no cast.
+            snapshot_ctype = self.var_types.get(orig_name, it_type)
+            it_val = self._new_val(snapshot_ctype, it_val)
+            # Carry over container metadata (element type, boxed-pointer
+            # actual type, dict value type, nested-list element type) from
+            # the original name to the fresh snapshot temp, so downstream
+            # `_elem_of`/`_get_actual_type`/etc lookups (keyed by C
+            # value/name) still resolve correctly for the snapshot.
+            for _meta in (self._elem_types, self._actual_types,
+                          self._dict_val_types, self._nested_elem_types):
+                if orig_name in _meta:
+                    _meta[it_val] = _meta[orig_name]
+
         try:
             if it_type == 'MojoList *':
-                self._gen_for_list(var, it_val, node.body)
+                self._gen_for_list(var, it_val, node.body, shadow_name=shadow_name)
             elif it_type == 'MojoStr *':
-                self._gen_for_str(var, it_val, node.body)
+                self._gen_for_str(var, it_val, node.body, shadow_name=shadow_name)
             elif it_type == 'char *':
                 self._gen_for_cstr(var, it_val, node.body)
             elif it_type == 'MojoDict *':
-                self._gen_for_dict(var, it_val, node.body)
+                self._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name)
             elif it_type == 'MojoSet *':
-                self._gen_for_set(var, it_val, node.body)
+                self._gen_for_set(var, it_val, node.body, shadow_name=shadow_name)
             elif it_type == 'MojoGenerator *':
                 # Milestone B: `for x in <supported generator call>():` —
                 # checked before the generic user-struct __iter__ protocol
@@ -23029,7 +23116,7 @@ class GimpleGen:
                 has_next = f"{base}___has_next__"
                 nxt      = f"{base}___next__"
                 if has_next in self.func_return_types or nxt in self.func_return_types:
-                    self._gen_for_struct_iter(var, it_type, it_val, node.body)
+                    self._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
                 else:
                     _debug_note('for loop dropped (no iterator protocol)', it_type)
                     self._emit_unsupported_iter(it_type, node)
@@ -23270,7 +23357,7 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
-    def _gen_for_list(self, var: str, it_val: str, body: list):
+    def _gen_for_list(self, var: str, it_val: str, body: list, shadow_name: str | None = None):
         # Handle tuple unpacking: for (a, b) in list_of_tuples:
         is_tuple = var.startswith('(') and var.endswith(')')
         elem = None if is_tuple else self._elem_of(it_val)
@@ -23278,10 +23365,10 @@ class GimpleGen:
             inner = var[1:-1].strip()
             var_names = [v.strip() for v in inner.split(',')]
             for vn in var_names:
-                self._declare_var(vn, 'int64_t')
+                self._declare_var(vn, 'int64_t', force=(vn == shadow_name))
         else:
             var_names = None
-            self._declare_var(var, elem)
+            self._declare_var(var, elem, force=(var == shadow_name))
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int64_t')
         idx_t = self._new_temp('int64_t')
@@ -23422,8 +23509,8 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
-    def _gen_for_str(self, var: str, it_val: str, body: list):
-        self._declare_var(var, 'char')
+    def _gen_for_str(self, var: str, it_val: str, body: list, shadow_name: str | None = None):
+        self._declare_var(var, 'char', force=(var == shadow_name))
         len64 = self._new_temp('int64_t')
         len_t = self._new_temp('int64_t')
         idx_t = self._new_temp('int64_t')
@@ -23510,7 +23597,7 @@ class GimpleGen:
         self._emit(f"  goto {bb_cond};")
         self._emit_label(bb_after)
 
-    def _gen_for_dict(self, var: str, it_val: str, body: list):
+    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None = None):
         """for k in dict — iterates over keys as char *."""
         # Handle tuple target like '(name, alias)' — declare each name separately
         is_tuple = var.startswith('(') and var.endswith(')')
@@ -23526,9 +23613,9 @@ class GimpleGen:
             # function-pointer slot read as a string and `func(...)` compile to
             # a bogus direct call.
             for i, vn in enumerate(var_names):
-                self._declare_var(vn, 'char *' if i == 0 else 'int64_t')
+                self._declare_var(vn, 'char *' if i == 0 else 'int64_t', force=(vn == shadow_name))
         else:
-            self._declare_var(var, 'char *')
+            self._declare_var(var, 'char *', force=(var == shadow_name))
         # If it_val is int64_t (boxed pointer), cast to MojoDict *
         if it_val in self.var_types and self.var_types[it_val] == 'int64_t':
             dict_ptr = self._new_val('MojoDict *', f"(MojoDict *){it_val}")
@@ -23594,9 +23681,9 @@ class GimpleGen:
         self._emit_label(bb_after)
         self._emit(f"  mojo_dict_iter_free ({iter_t});")
 
-    def _gen_for_set(self, var: str, it_val: str, body: list):
+    def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None = None):
         """for x in set — iterates over int64_t values (int set assumed)."""
-        self._declare_var(var, 'int64_t')
+        self._declare_var(var, 'int64_t', force=(var == shadow_name))
         # If it_val is int64_t (boxed pointer), cast to MojoSet * (matches dict path)
         if it_val in self.var_types and self.var_types[it_val] == 'int64_t':
             set_ptr = self._new_val('MojoSet *', f"(MojoSet *){it_val}")
@@ -23996,7 +24083,7 @@ class GimpleGen:
         self._emit("  mojo_raise ();")
 
     def _gen_for_struct_iter(self, var: str, struct_type: str,
-                              obj_val: str, body: list):
+                              obj_val: str, body: list, shadow_name: str | None = None):
         """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
         base = _struct_name_of(struct_type)
 
@@ -24015,7 +24102,7 @@ class GimpleGen:
         has_next_fn = f"{iter_base}___has_next__"
         next_fn     = f"{iter_base}___next__"
         elem_type   = self.func_return_types.get(next_fn, 'int64_t')
-        self._declare_var(var, elem_type)
+        self._declare_var(var, elem_type, force=(var == shadow_name))
 
         bb_cond  = self._new_bb(); bb_body  = self._new_bb()
         bb_post  = self._new_bb(); bb_after = self._new_bb()
