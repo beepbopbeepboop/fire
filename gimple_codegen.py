@@ -4697,6 +4697,34 @@ class GimpleGen:
         # `compile_program`/`_build`, which reads this via `compile_
         # linked`'s return tuple.
         self._link_needs_cxx: bool = False
+        # Shared (by-reference, single-element-list) mirror of `_link_needs_
+        # cxx` -- see `_compile_imported_module`'s sharing block, which
+        # threads THIS SAME list object down through every nested temp_gen
+        # a do_imports=True recursion spins up (parser.py -> parsing.py ->
+        # lexer.py, etc.). `_link_needs_cxx` itself is a plain per-instance
+        # bool: setting it on a deeply-nested temp_gen (e.g. the one
+        # actually compiling lexer.py, several `_compile_imported_module`
+        # levels below the link_imports=True ROOT `compile_linked` reads
+        # from) never reached the root's own attribute, so a coroutine unit
+        # discovered only that deep silently never flipped the root's
+        # `needs_cxx` -- confirmed by the SAME repro this list was added to
+        # fix (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's lexer.py/
+        # tokenize()): the root's own top-level `import lexer as lx` never
+        # appears in parser.py itself, only transitively (parsing.py's own
+        # `import lexer as lx`, itself reached through parser.py's `from
+        # parsing import (...)`), so by the time lexer.py's own generator is
+        # discovered, `self` several frames down is a `do_imports=True`-only
+        # (not `link_imports=True`) temp_gen -- exactly the case a plain
+        # per-instance bool can't bridge. A single-element list is the
+        # standard Python idiom for a primitive value multiple objects need
+        # to share and mutate in place (a bare bool re-assignment always
+        # rebinds the local attribute instead of mutating shared state).
+        # `compile_linked` ORs this into its own `needs_cxx` alongside the
+        # plain `_link_needs_cxx` attribute (kept for the existing call
+        # sites, unchanged) rather than replacing it, so a shallow (root-
+        # level) `_link_needs_cxx = True` write keeps working exactly as
+        # before even though it doesn't ALSO reach through this list.
+        self._link_needs_cxx_box: list = [False]
         # Modules imported (for a plain, non-generic struct) in link mode that
         # couldn't be resolved via imports.py's MOJO_PATH-based dylib resolver
         # or module_loader's std/test-only loader — e.g. an ordinary sibling
@@ -5336,6 +5364,61 @@ class GimpleGen:
                 return p
         return None
 
+    def _compile_link_inline_cpp_unit(self, cpp_code: str):
+        """Compile a transitively-imported module's own self-contained
+        `generated_cpp` (a plain, non-generic top-level generator/async
+        function's C++20 coroutine translation unit -- see
+        `_compile_imported_module`'s call site, link mode's `_link_inline_
+        modules` fallback) to a CAS-cached object with g++, and return its
+        path (or None on any failure -- link-mode's own convention: never
+        let a companion-object build failure abort the whole compile, the
+        caller already checks for None).
+
+        Mirrors driver.py's `_build_client_cpp_object` (the root module's
+        OWN companion .cpp) and monomorphize.instantiate's identical per-
+        instantiation cpp build (an elaborated generic's own coroutine
+        unit) -- same "compile this self-contained generated_cpp text to
+        an object" operation, a third call site for it rather than a
+        fourth independent reimplementation (CLAUDE.md: consolidate, don't
+        duplicate) -- kept as its own small method (not literally imported
+        from driver.py) only because driver.py imports FROM gimple_codegen.
+        py already (compile_linked), so the reverse import would be
+        circular; the CAS key scheme, flags, and g++ invocation are
+        deliberately identical to driver.py's version so the two draw from
+        (and populate) the exact same CAS entries for byte-identical cpp
+        text."""
+        try:
+            import cas
+            import subprocess
+            import tempfile
+            from build_config import find_gxx
+        except Exception as e:
+            _debug_note('cannot compile link-mode inline-module cpp unit '
+                        '(import failure)', e)
+            return None
+        try:
+            gxx = find_gxx()
+            runtime_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'runtime')
+            cpp_flags = ('-std=c++20', '-fPIC', f'-I{runtime_dir}')
+            key = cas.module_key(cpp_code, [], gxx, cpp_flags)
+
+            def _build_fn():
+                wd = tempfile.mkdtemp(prefix='mojo_linkmod_cpp_')
+                cf = os.path.join(wd, 'link_inline_module.cpp')
+                of = os.path.join(wd, 'link_inline_module.o')
+                with open(cf, 'w') as f:
+                    f.write(cpp_code)
+                subprocess.run([gxx, *cpp_flags, '-c', '-o', of, cf], check=True,
+                               capture_output=True)
+                with open(of, 'rb') as f:
+                    return f.read()
+
+            obj, _hit = cas.get_or_build(key, '.o', _build_fn)
+            return obj
+        except Exception as e:
+            _debug_note('failed to compile link-mode inline-module cpp unit', e)
+            return None
+
     def _compile_imported_module(self, module_name: str) -> tuple:
         """Find and compile an imported .mojo/.py module, extracting type
         information.
@@ -5460,7 +5543,105 @@ class GimpleGen:
                     temp_gen._async_api = self._async_api
                     temp_gen._generator_api = self._generator_api
                     temp_gen._generator_method_api = self._generator_method_api
+                    # share: link mode's own link-line accumulators
+                    # (dylibs/objects the final `mojo.py build` link step
+                    # needs — see compile_linked's own docstring) must be
+                    # visible to and mutated by EVERY nested temp_gen this
+                    # do_imports=True recursion spins up, not just the one
+                    # `self` happens to be at this particular nesting level
+                    # — a `_link_inline_modules`-fallback-compiled sibling
+                    # module (parsing.py) can itself `import` a further
+                    # sibling (lexer.py) that only THIS deeper temp_gen ever
+                    # sees; without sharing, anything that deeper temp_gen
+                    # adds to its own (fresh, per-instance) `_link_objects`/
+                    # `_link_needs_cxx_box` is invisible to the link_imports
+                    # =True ROOT `compile_linked` ultimately reads from (see
+                    # `_link_needs_cxx_box`'s own declaration for the fuller
+                    # story, and this method's own cpp-unit-compile call
+                    # site below for the concrete case that surfaced this —
+                    # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+                    # `_link_dylibs` shared for the identical reason (a
+                    # nested import's own further imports recording a
+                    # dylib). Harmless, unread dead data for a do_imports=
+                    # True-only (non-link) root build — nothing outside
+                    # `compile_linked` (always `link_imports=True`) ever
+                    # reads these three.
+                    temp_gen._link_objects = self._link_objects
+                    temp_gen._link_dylibs = self._link_dylibs
+                    temp_gen._link_needs_cxx_box = self._link_needs_cxx_box
                     code = temp_gen.gen_module(stmts)
+
+                    # Link mode's 4th coroutine-code source: a PLAIN (non-
+                    # generic) top-level generator/async function defined in
+                    # a transitively-imported SIBLING module (possibly
+                    # several `_compile_imported_module` levels deep — e.g.
+                    # parser.py -> parsing.py -> lexer.py, where `lexer` is
+                    # only ever reached via parsing.py's own `import lexer`,
+                    # not directly by the link_imports=True ROOT). compile_
+                    # linked's own docstring only ever documented 3 sources
+                    # of coroutine code to link (the root module's own
+                    # gen.generated_cpp, an elaborated generic's monomorphize
+                    # .instantiate cpp_object, dylib-resident stdlib
+                    # generators); this module's own `temp_gen.gen_module
+                    # (stmts)` call just above ALREADY independently computed
+                    # the correct self-contained C++ coroutine translation
+                    # unit for e.g. lexer.py's `tokenize()`
+                    # (temp_gen.generated_cpp, populated by the identical
+                    # "if self._generator_cpp_units:" preamble-assembly step
+                    # the root gen's own gen_module uses) -- it was simply
+                    # discarded here, returning only (code, stmts). That is
+                    # why parser.py's `.c` side always correctly REFERENCED
+                    # `_mojogen_lexer_tokenize_start/_resume/_value/_destroy`
+                    # (`_generator_api` is shared by reference with `self`,
+                    # a few lines up, so the call site sees the right
+                    # module-qualified base name -- `_func_qualifier` derives
+                    # it from temp_gen's own `module_name`, the SAME value
+                    # used to build the base name inside temp_gen.
+                    # generated_cpp itself, so the two sides always agree)
+                    # but nothing ever compiled or LINKED IN the actual
+                    # definition -- an undefined-symbol link failure, not a
+                    # compile error (see bugs/COMPILE_FAIL_Tools_cases_
+                    # generator_parser.md).
+                    #
+                    # Compile it into its own self-contained CAS-cached
+                    # object here, exactly like an elaborated generic's own
+                    # cpp_object (monomorphize.instantiate) gets compiled
+                    # and added onto the link line (_ensure_generic_struct /
+                    # _emit_generic_instantiation, above) -- same idea, a 4th
+                    # call site for it. `temp_gen.generated_cpp` is fully
+                    # self-contained (its own boilerplate/typedefs/extern
+                    # decls, assembled from temp_gen's own state), so
+                    # compiling it as its own separate translation unit
+                    # needs no merging with the root's own generated_cpp or
+                    # any other inline module's -- avoids the double-
+                    # compile/duplicate-symbol hazard a shared-TU merge
+                    # would risk.
+                    #
+                    # NOT gated on self.link_imports: `self` here can be an
+                    # intermediate do_imports=True-only temp_gen (compiling
+                    # parsing.py) rather than the link_imports=True ROOT —
+                    # `_link_objects`/`_link_needs_cxx_box`, shared by
+                    # reference all the way down from the root (see the
+                    # sharing block just above), are what actually carry
+                    # this to `compile_linked`, not the LOCAL truth of
+                    # `self.link_imports`/`self.do_imports` at whichever
+                    # nesting level happens to do the work. Unconditional,
+                    # mirroring `_ensure_generic_struct`/`_emit_generic_
+                    # instantiation`'s identical no-gating convention for
+                    # the exact same `_link_objects`/`_link_needs_cxx`
+                    # pair — a do_imports=True-only (non-link) ROOT build
+                    # never reads any of these back (see their own
+                    # declarations), so this is a harmless no-op there,
+                    # same as the existing generic-instantiation sites
+                    # already are for that pipeline.
+                    if temp_gen.generated_cpp:
+                        _link_mod_cpp_obj = self._compile_link_inline_cpp_unit(
+                            temp_gen.generated_cpp)
+                        if (_link_mod_cpp_obj is not None
+                                and _link_mod_cpp_obj not in self._link_objects):
+                            self._link_objects.append(_link_mod_cpp_obj)
+                            self._link_needs_cxx = True
+                            self._link_needs_cxx_box[0] = True
 
                     # Store parsed stmts for this module so parent gens can access them
                     self._module_stmts[module_name] = stmts
@@ -40714,7 +40895,13 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     if filename:
         gen._record_sys_path_inserts(mojo_src, os.path.dirname(os.path.abspath(filename)))
     code = gen.gen_module(stmts)
-    needs_cxx = gen._link_needs_cxx or bool(gen.generated_cpp)
+    # `gen._link_needs_cxx_box[0]`: a coroutine unit discovered several
+    # `_compile_imported_module` levels deep (a do_imports=True-only nested
+    # temp_gen, not `gen` itself) sets this shared box rather than `gen`'s
+    # own `_link_needs_cxx` attribute directly — see the box's own
+    # declaration and `_compile_imported_module`'s matching write site for
+    # the full reasoning (bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    needs_cxx = gen._link_needs_cxx or gen._link_needs_cxx_box[0] or bool(gen.generated_cpp)
     return (code,
             list(dict.fromkeys(gen._link_dylibs)),
             list(dict.fromkeys(gen._link_objects)),
