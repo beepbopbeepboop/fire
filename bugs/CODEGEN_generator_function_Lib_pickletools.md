@@ -1,5 +1,43 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-20, two of three stacked gaps CLOSED — one remains)
+
+`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` is now fixed
+for the shape this file needs: `gimple_codegen.py` gained a real
+callable-value declared-type category for the coroutine (`.cpp`)
+codegen (`_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'`), a
+`LambdaExpr` case in `_cpp_expr` that emits a native, capturing C++
+lambda for a zero-argument lambda literal, and a bound-method-as-VALUE
+case in the same `MemberExpr` handling (`self.<method>` and
+`<struct-pointer local>.<method>`, not immediately called) that wraps
+the method's already-known mangled C symbol in an equivalent capturing
+lambda — both convertible to the one declared type, and callable at
+the use site as a plain `name()` with no separate call-site change
+needed (`std::function::operator()`). This closes stacked gaps 1 (the
+opaque-callable-value category) and (most of) gap 2's mechanism from
+the 2026-08-11 update below — re-verified directly against
+`_genops`'s own two-line, two-branch shape.
+
+Re-verified via `MOJO_DEBUG=1` + a direct `compile_to_gimple_with_cpp`
+call against the real `Lib/pickletools.py`: the `LambdaExpr` refusal is
+GONE. `_genops` now fails for a DIFFERENT, single remaining reason —
+stacked gap 3 from the 2026-08-11 update, unchanged and NOT attempted
+here (out of this task's scope):
+```
+[gimple_codegen] generator '_genops' not eligible for C++ coroutine
+path, falling back to honest refusal: _genops: every `yield` must
+carry a value, and all values must agree on one scalar type
+(int64_t/double/_Bool)
+```
+`_genops` yields both a 3-tuple (`yield opcode, arg, pos`) and a
+4-tuple (`yield opcode, arg, pos, getpos()`) at two call sites in the
+same body — the tuple-valued/varying-arity-yield structural gap,
+entirely independent of `LambdaExpr`/bound-methods. This file's `mojo.py
+build` therefore still fails end-to-end; doc kept open (not deleted —
+see `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`'s own
+2026-08-20 update for why THAT doc's LambdaExpr-specific scope IS
+closed even though this file as a whole is not yet unblocked).
+
 ## Status (updated 2026-08-11, real fix attempted — found genuinely stacked, not narrow)
 
 Re-verified against current master via a real `python3 mojo.py build
