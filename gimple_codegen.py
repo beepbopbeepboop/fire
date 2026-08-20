@@ -2902,7 +2902,8 @@ def _walk_own_body(node):
 def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None = None,
                                         self_fields: dict | None = None,
                                         async_api: dict | None = None,
-                                        closure_api: dict | None = None) -> tuple[bool, list | None]:
+                                        closure_api: dict | None = None,
+                                        generator_api: dict | None = None) -> tuple[bool, list | None]:
     """Companion to `_generator_yield_ctype` for the tuple-valued-yield
     case (`yield a, b` / `yield a, b, c`): computes the unified per-SLOT
     C++ element type list every tuple-yield site in `fn`'s own body must
@@ -2942,15 +2943,44 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None = Non
     `_infer_simple_expr_ctype` has no case for): a slot this function
     can't precisely type still gets a usable, consistent int64_t
     convention rather than aborting the whole tuple-yield feature over
-    one unresolvable element."""
+    one unresolvable element.
+
+    `generator_api` (self._generator_api, threaded through the same way
+    `_generator_yield_ctype`'s own `generator_api` param is) lets a
+    `yield from <call>` SITE contribute its delegate's own already-
+    resolved slot shape when that delegate is itself a tuple-yielding
+    compiled generator — e.g. `def outer(): yield from inner()` where
+    `inner()` tuple-yields: `outer`'s own body has no DIRECT `yield a,
+    b`, so without this it would (wrongly) come back `(False, None)` —
+    "not a tuple yielder at all" — even though every value `outer`
+    actually produces at runtime IS one of `inner`'s boxed tuples
+    (`_generator_yield_ctype`'s OWN `_yield_from_delegate_ctype` call
+    already resolves `outer`'s overall promise value type to `inner`'s
+    'MojoList *' via this exact mechanism — this function just needed
+    the same propagation for the per-slot metadata a consumer's `for a,
+    b in outer():` needs to unpack it). A self-recursive `yield from
+    <this-same-function>(...)` site is skipped here for the identical
+    reason `_generator_yield_ctype` skips it (see that function's own
+    YieldFromExpr branch): `fn` hasn't registered itself into
+    `generator_api` yet, and a self-recursive site contributes no
+    independent shape opinion of its own anyway."""
     found = False
     slots: list | None = None
     for n in _walk_own_body(fn.body):
-        if not (isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr)):
+        if isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr):
+            site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t'
+                    for el in n.value.elements]
+        elif (isinstance(n, YieldFromExpr) and generator_api is not None
+                and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
+                and n.value.func.name != fn.name):
+            delegate_api = generator_api.get(n.value.func.name)
+            delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
+            if delegate_slots is None:
+                continue
+            site = list(delegate_slots)
+        else:
             continue
         found = True
-        site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t'
-                for el in n.value.elements]
         if slots is None:
             slots = site
         elif len(slots) != len(site):
@@ -29471,7 +29501,8 @@ class GimpleGen:
             # every other unsupported shape gets here, even though
             # _generator_yield_ctype itself came back non-None.
             has_tuple_yield, tuple_slot_ctypes = _generator_tuple_yield_slot_ctypes(
-                fn, declared, self_fields, self._async_api)
+                fn, declared, self_fields, self._async_api,
+                generator_api=self._generator_api)
             if has_tuple_yield and tuple_slot_ctypes is None:
                 value_ctype = None
             self._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
@@ -31066,7 +31097,8 @@ class GimpleGen:
             # the full rationale — same tuple-yield slot-type resolution,
             # reused verbatim for the async-generator (`async for`) case.
             has_tuple_yield, tuple_slot_ctypes = _generator_tuple_yield_slot_ctypes(
-                fn, declared, None, self._async_api)
+                fn, declared, None, self._async_api,
+                generator_api=self._generator_api)
             if has_tuple_yield and tuple_slot_ctypes is None:
                 value_ctype = None
             self._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
