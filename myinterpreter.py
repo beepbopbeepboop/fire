@@ -3453,10 +3453,25 @@ class Interpreter:
             else:
                 self._bind_dotted_import(module, mod)
             return
-        try:
-            mod = importlib.import_module(module)
-        except ModuleNotFoundError:
-            return
+        # No sibling .mojo module and no real Python module: let
+        # ModuleNotFoundError propagate as a real exception (it's a real
+        # Python BaseException subclass — see execute_TryStmt /
+        # _matches_exc_type, which already handle these natively) instead of
+        # silently swallowing it. A bare `import mod` with no surrounding
+        # try/except was never going to work anyway (nothing would be bound
+        # under `mod`, so the next reference dies with a confusing "name
+        # 'mod' is not defined"); propagating here lets the *actual* failure
+        # surface directly, and lets an enclosing `except ImportError:` /
+        # `except ModuleNotFoundError:` in the interpreted program's own
+        # source catch and handle it, matching real Python/Mojo semantics
+        # (e.g. `try: import ujson as json \n except ImportError: import
+        # json`). Swallowing here used to be intentional (commit
+        # fc7bb14ab): at the time, ModuleNotFoundError was the *only* signal
+        # that a name was actually a sibling .mojo module — there was no
+        # _load_mojo_sibling_module yet. That's now handled explicitly
+        # above, so by the time we reach the real importlib call, a
+        # ModuleNotFoundError here always means a genuinely missing module.
+        mod = importlib.import_module(module)
         if alias:
             self.scope.define(alias, mod)
         else:
@@ -3516,10 +3531,13 @@ class Interpreter:
             # source obviously meant).
             mod = self._load_mojo_sibling_module(node.module)
             if mod is None:
-                try:
-                    mod = importlib.import_module(node.module)
-                except ModuleNotFoundError:
-                    return None
+                # See _bind_one_import: don't swallow ModuleNotFoundError —
+                # let it propagate as a real exception so an enclosing
+                # `except ImportError:` in the interpreted program (the
+                # extremely common `try: from _fast import * \n except
+                # ImportError: from _pure import *` idiom) actually fires,
+                # instead of the try silently continuing with nothing bound.
+                mod = importlib.import_module(node.module)
         if node.wildcard:
             names = getattr(mod, '__all__', None)
             if names is None:
