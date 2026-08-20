@@ -4,6 +4,87 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-08-20): the documented link-time gap (4th coroutine-code
+## source) is FIXED at the mechanism level. `parser.py` itself is STILL
+## blocked end-to-end, now by a DIFFERENT, earlier (compile-time, not
+## link-time), apparently-regressed blocker — see below.
+
+**The fix.** `gimple_codegen.py`'s `_compile_imported_module` (the
+routine link mode's `_link_inline_modules` fallback AND the plain
+`do_imports=True` Phase 0 pass both call to compile a transitively-
+imported sibling module) now also captures that module's own
+`temp_gen.generated_cpp` — the self-contained C++20 coroutine
+translation unit `temp_gen.gen_module(stmts)` already independently
+computes for a plain top-level generator/async function defined in that
+module (e.g. `lexer.py`'s `tokenize()`) — and compiles it to its own
+CAS-cached object via the new `_compile_link_inline_cpp_unit` method
+(mirrors `driver.py`'s `_build_client_cpp_object` / `monomorphize.
+instantiate`'s identical per-instantiation cpp build: same operation, a
+third call site for it). The object is appended onto `_link_objects`
+and its need for a C++-aware final link is recorded — both now SHARED
+BY REFERENCE down through every nested `_compile_imported_module`
+temp_gen (`_link_objects`, `_link_dylibs`, and a new single-element-list
+`_link_needs_cxx_box`, alongside the already-shared `_generator_api`),
+not just the outermost `link_imports=True` root's own instance. This
+last part mattered concretely for this file's own real import chain:
+`lexer` is never imported directly by `parser.py` or even by
+`parsing.py`'s `from parsing import (...)` — it's `parsing.py`'s OWN
+`import lexer as lx`, discovered only from INSIDE the nested,
+`do_imports=True`-only (not `link_imports=True`) temp_gen that compiles
+`parsing.py`. A per-instance `self.link_imports` gate (the first,
+narrower version of this fix) missed that case entirely; sharing the
+accumulators by reference down the whole nested-temp_gen chain (the
+same convention already used for `_generator_api`/`_imported_struct_
+home`/etc.) fixes it generally, at any nesting depth.
+
+**Verification of the fix itself:** a minimal, hand-built two-file
+repro (`gensib.mojo`: `def make_items(n: Int): ... yield i * 10`;
+`mainmod.mojo`: `from gensib import make_items` / `for it in
+make_items(5): print(it)`) — confirmed to fail with the exact
+documented symptom (`__mojogen_gensib_make_items_start/_resume/_value/
+_destroy` undefined at link time) on unmodified master, and to link AND
+run correctly (`0/10/20/30/40`) with this fix applied. Also confirmed,
+via a pristine-HEAD side-by-side (symlinked source tree, HEAD's own
+`gimple_codegen.py`) `compile_linked()` call directly against
+`parser.py`, that the exact behavior described below (client `.c`
+compile fails before ever reaching the link stage) is unchanged from
+before this fix — i.e. this fix strictly adds the missing coroutine-
+object capture/link and changes nothing else observable.
+
+**`parser.py` itself, still blocked — different blocker, pre-existing.**
+Confirmed via a direct `gimple_codegen.compile_linked()` call (bypassing
+`mojo.py build`'s silent fallback to the separate, unrelated `build_
+executable` inline pipeline — see below) that `parser.py`'s own client
+`.c` currently fails to even gcc-compile, well before the link stage
+this fix addresses:
+```
+/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py:48:10: error: 'Parser' undeclared (first use in this function)
+/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py:55:3: error: unknown type name 'Parser'
+```
+i.e. the `Parser` struct's own C typedef is entirely missing from the
+compiled output (not merely a wrong-guessed field type — the earlier,
+narrower class of bug the 2026-08-09 entry below describes as fixed).
+Reproduced identically on a pristine, unmodified master checkout (no
+changes from this session or any other), so this is a genuine pre-
+existing/regressed blocker independent of this fix — not investigated
+or fixed here (out of this task's scope; flagged honestly rather than
+glossed over, per this repo's own stated convention). Because of this,
+`mojo.py build .../parser.py`'s end-to-end behavior is UNCHANGED by
+this fix: `driver.compile_program`/`compile_linked` still throws before
+producing a binary (swallowed by `mojo.py`'s own `except Exception: rc
+= None`), so the build silently falls back to `build_executable` (a
+separate, independent inline pipeline, NOT `compile_linked` — the one
+this task's fix targets), whose own separate linking logic still fails
+with the same `__mojogen_lexer_tokenize_*` undefined-symbol error as
+before. This doc is kept open (not deleted) — see the new blocker above
+— rather than falsely closed.
+
+`bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md`/`_analyzer.md`/
+`_parsing.md` (same directory, same `lexer.py`/`parsing.py` dependency
+chain) were checked: all three still fail earlier than the link stage
+(cwriter.py's own GCC ICE / struct-field-typing gaps), so this fix does
+not change their status either — not updated.
+
 ## Status (2026-08-09): both prior blockers (cwriter.py's ICE, and this
 ## file's own struct-field-type corruption) are FIXED. Now blocked on a
 ## separate, structural, newly-exposed link-time gap.
