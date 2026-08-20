@@ -1,5 +1,97 @@
 # CODEGEN_generator_function: Lib/test/test_support.py
 
+## Status (updated 2026-08-19)
+
+The 2026-08-09 status below classified this doc's ONE own-file error
+(`TESTFN = os_helper.TESTFN`, line 26 — `from test.support import
+os_helper` binding a real SUBMODULE FILE, then a module-level global
+read off it) as "real, confirmed, but NOT narrow enough to safely fix
+in this pass" and flagged it for a dedicated pass. That pass happened.
+
+**Fixed.** `_gen_stmt_FromImportStmt` (gimple_codegen.py) now
+distinguishes `from PKG import NAME` where `NAME` is a real submodule
+FILE from `NAME` being an ordinary symbol defined inside `PKG`'s own
+source (`_from_import_name_is_submodule`, reusing `_parsed_import` and
+a new `_submodule_source_path`/`_module_candidate_paths` — the same
+search-path resolution `_compile_imported_module` already used, just
+factored out so an existence check doesn't need a full compile). When
+`NAME` is a submodule, it's registered as a genuine module marker
+(mirroring `_gen_stmt_ImportStmt`'s shape) instead of an ordinary
+function/class symbol. The identical check was also added to the
+TOP-LEVEL "Process imports" pre-pass (`gen_module`'s `_register_sym`
+closure and its module-load-failure fallback) — top-level `from X
+import Y` statements are skipped entirely by the function-body
+statement-lowering path (`gen_module`'s Phase 2a explicitly `pass`es
+on `FromImportStmt`), so the fix needed both a function-body-scoped
+and a module-scoped registration site. A matching case was added to
+`_lower_MemberExpr` (reads the submodule's real global directly via
+the existing `_{module}_globals.<field>` struct-field mechanism,
+keyed by `_global_to_module`/`_global_var_types` — the same machinery
+a bare imported-symbol global read already used) and to BOTH of this
+codegen's independent global-type-inference tables (`_phase17_value_
+type`, Phase 1.7's pre-scan, and `_gscan_declare_global`, the later
+pass that actually emits the struct-field C type and — being later —
+would otherwise silently overwrite Phase 1.7's correct inference back
+to a bogus default) so `TESTFN`'s OWN declared type resolves to the
+real `char *` instead of defaulting to `int64_t` and boxing/unboxing
+the pointer incorrectly.
+
+Verified via a real isolated `do_imports=True` build, compiled and
+RUN end-to-end (gcc-mp-15, not just `-fsyntax-only`): a package with
+`from pkg import submod` then `submod.SOME_VALUE` used inside `main()`
+now runs and prints the real value (was previously a NULL-pointer
+runtime dispatch). A closer, exact structural mirror of THIS file's
+own shape (`from test.support import os_helper` then a MODULE-LEVEL
+`X = os_helper.TESTFN` read at top level, matching this doc's own
+line-26 repro) also compiles and runs correctly end-to-end, printing
+the real string, PROVIDED the outer global's own name doesn't
+collide with a same-named global already claimed by a DIFFERENT
+transitively-compiled module — see caveat below.
+
+Direct re-verification against the real corpus: a `gcc -fsyntax-only`
+pass over this exact file's own `do_imports=True` output no longer
+shows ANY error at `test_support.py:26` (or anywhere else in
+`test_support.py` itself). The remaining 9 errors are ALL still
+inside the separately-tracked, transitively-imported `test/support/`
+package (`__init__.py`/`import_helper.py`'s own unrelated bugs) —
+exactly the "common cross-file blocker flagged elsewhere" the
+2026-08-09 note already carved out as out of scope for this doc.
+**This doc's own file-scoped bug is closed; the file as a whole is
+still blocked by that separate package's own errors, unrelated to
+generators or this fix.**
+
+**One real caveat found and left open (out of scope for this fix,
+architecturally separate):** `_global_to_module` is a single,
+whole-transitive-closure-shared, first-writer-wins dict keyed by BARE
+global name (documented at length at its own declaration) — if the
+ROOT module and a transitively-imported submodule both happen to
+define a module-level global with the IDENTICAL bare name (which
+`TESTFN = os_helper.TESTFN` invites by construction — it deliberately
+re-exports the submodule's `TESTFN` under the SAME name), the
+submodule's own `TESTFN` claims ownership first (compiled earlier, in
+Phase 0), and the root's later same-named global's later BARE reads
+(e.g. `print(TESTFN)` elsewhere in the file) can silently resolve to
+the wrong module's globals-struct field, or the placeholder. Confirmed
+via an exact-name reproduction of this doc's own shape: a bare-name
+collision between the root's own `TESTFN` and `os_helper`'s `TESTFN`
+reproduces a (different, pre-existing) silent-wrong-value bug
+unrelated to the submodule-marker gap this pass fixed — this exists
+independent of submodule imports entirely (any two modules with a
+same-named global collide the same way) and was NOT introduced by
+this fix. Not investigated further here; flagged for a separate, dedicated pass
+on `_global_to_module`'s bare-name-only ownership model. This doc's
+own real `test_support.py` line 26 itself (`TESTFN = os_helper.
+TESTFN`) resolves correctly regardless — that specific read goes
+through `_lower_MemberExpr`'s member-access path, which doesn't
+depend on `_global_to_module` ownership at all — but the file DOES
+also re-read the bare name `TESTFN` later, inside several test
+methods (e.g. line 107 `open(TESTFN, ...)`), which WOULD go through
+the collision-prone bare-identifier path; not confirmed end-to-end
+either way since the file as a whole still can't build far enough to
+test this (blocked by the separate `test/support/` package errors
+above) — flagged, not verified, for whoever picks up the
+`_global_to_module` ownership-model pass.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (98e5aa3) with a real `MOJO_DEBUG=1

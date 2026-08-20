@@ -5196,10 +5196,17 @@ class GimpleGen:
                 if p not in self._extra_search_paths:
                     self._extra_search_paths.append(p)
 
-    def _compile_imported_module(self, module_name: str) -> tuple:
-        """Find and compile an imported .mojo module, extracting type information.
-
-        Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+    def _module_candidate_paths(self, module_name: str) -> list:
+        """Ordered candidate source-file paths for `module_name` (dotted or
+        bare) — exactly the search-path/extension/dotted-package resolution
+        logic `_compile_imported_module` uses to locate a `.py`/`.mojo`
+        file, factored out so a caller that only needs to know WHETHER a
+        module resolves to a real file (not compile it) reuses the exact
+        same rules instead of re-implementing its own path-probing (see
+        `_submodule_source_path`, used by `_gen_stmt_FromImportStmt` to
+        distinguish a `from PKG import NAME` submodule from an ordinary
+        symbol defined inside PKG's own source). Returns candidates in
+        priority order; does not check existence — callers do that.
         """
         # Get the directory where gimple_codegen.py is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -5314,6 +5321,28 @@ class GimpleGen:
             except Exception as e:
                 _debug_note(f'stdlib path resolution failed for {module_name!r}', e)
 
+        return mojo_paths
+
+    def _submodule_source_path(self, module_name: str) -> str | None:
+        """First existing file for dotted `module_name` on the same search
+        path `_compile_imported_module` uses (`_module_candidate_paths`,
+        reused rather than re-implemented) — checks EXISTENCE only, does
+        not compile/parse anything. Used by `_gen_stmt_FromImportStmt` to
+        tell whether `from PKG import NAME` binds a real submodule FILE
+        (`PKG/NAME.py` or `PKG/NAME/__init__.py`) as opposed to an ordinary
+        symbol defined inside PKG's own source."""
+        for p in self._module_candidate_paths(module_name):
+            if os.path.exists(p):
+                return p
+        return None
+
+    def _compile_imported_module(self, module_name: str) -> tuple:
+        """Find and compile an imported .mojo/.py module, extracting type
+        information.
+
+        Returns (code: str, stmts: list) where stmts are parsed statements from the module.
+        """
+        mojo_paths = self._module_candidate_paths(module_name)
         for path in mojo_paths:
             if os.path.exists(path):
                 _abspath = os.path.abspath(path)
@@ -9693,6 +9722,59 @@ class GimpleGen:
                 static_name = f'_funcptr_{csym}'
                 t = self._new_val('void *', f'{static_name}')
                 return 'void *', t
+
+            # `submod.GLOBAL` — a plain module-level global/constant read
+            # off a real SUBMODULE marker (`from PKG import submod`, see
+            # `_gen_stmt_FromImportStmt`'s submodule branch, or a plain
+            # `import submod`). `self.imported_symbols[module_name]
+            # ['module']` is the submodule's own full dotted name;
+            # `_global_to_module`/`_global_var_types` (populated when
+            # do_imports=True's Phase 0 inline-compiles that exact
+            # submodule — see `_compile_imported_module`'s `module_name=
+            # module_name` temp_gen, and gen_module's "Phase 1.7 pre-scan"/
+            # "Module-level globals" passes) record which module really
+            # OWNS a given global name and its real C type. Mirrors
+            # `_lower_IdentExpr`'s identical bare-name global-read branch
+            # (used when the import binds a plain symbol instead of a
+            # submodule) — same field-access shape, same `_{module}_
+            # globals.<field>` struct this codegen already emits in its
+            # preamble for cross-module global access. Only fires when the
+            # global's OWNER module is EXACTLY the module `module_name` is
+            # bound to, so an unrelated same-named global defined in some
+            # OTHER transitively-compiled module never misfires here (see
+            # `_lower_IdentExpr`'s own "shared, whole-tree-scoped dicts"
+            # caveat — identical reasoning applies to this member-access
+            # form). Without this, `os_helper.TESTFN` (from `from test.
+            # support import os_helper`) fell through to the fully-dynamic
+            # `_mojo_dispatch_getattr` runtime dispatch on the module
+            # marker's `(int64_t)0` placeholder — a NULL-pointer read, not
+            # the real global value (see bugs/CODEGEN_generator_function_
+            # Lib_test_test_support.md's 2026-08-09 root-cause).
+            _bound_mod = self.imported_symbols.get(module_name, {}).get('module') \
+                if module_name in self.imported_symbols else None
+            if (_bound_mod and node.member in self._global_var_types
+                    and getattr(self, '_global_to_module', {}).get(node.member) == _bound_mod):
+                gtype = self._global_var_types[node.member]
+                ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
+                t = self._new_temp(ctype)
+                if node.member in self._actual_types and self._actual_types[node.member].endswith(' *'):
+                    self._actual_types[t] = self._actual_types[node.member]
+                else:
+                    self._actual_types[t] = gtype
+                if node.member in self._dict_val_types:
+                    self._dict_val_types[t] = self._dict_val_types[node.member]
+                if node.member in self._elem_types:
+                    self._elem_types[t] = self._elem_types[node.member]
+                c_decl_type = self._global_c_decl_types.get(node.member, ctype)
+                safe_module = _c_field_name(_bound_mod) if _bound_mod else "root"
+                field_ref = f"_{safe_module}_globals.{_c_field_name(node.member)}"
+                if ctype == 'int64_t' and c_decl_type.endswith(' *'):
+                    raw_ptr = self._new_val(c_decl_type, f'{field_ref}')
+                    vp = self._new_val('void *', f'(void *){raw_ptr}')
+                    self._emit(f'  {t} = (int64_t){vp};')
+                else:
+                    self._emit(f'  {t} = {field_ref};')
+                return ctype, t
 
             # __mlir_attr.`literal` — a typed MLIR attribute used as a value
             # (integer constants like `0 : index`).  Lower to the constant.
@@ -21887,6 +21969,64 @@ class GimpleGen:
                 self._emit(f"  {self._cname(local_name)} = (int64_t)0;  /* module marker */")
 
 
+    def _from_import_name_is_submodule(self, module: str, name: str) -> bool:
+        """True when `from module import name` binds a real SUBMODULE FILE
+        (`module/name.py` or `module/name/__init__.py`), as opposed to an
+        ordinary symbol (function/class/global) defined inside `module`'s
+        own source — e.g. `from test.support import os_helper`, where
+        `os_helper` names the file `test/support/os_helper.py`, not a name
+        looked up inside `test/support/__init__.py` (see bugs/CODEGEN_
+        generator_function_Lib_test_test_support.md's 2026-08-09 root-
+        cause). A real top-level def/class/global-assignment for `name`
+        inside `module`'s own parsed body always wins FIRST — mirrors
+        CPython, where an attribute `__init__.py` actually sets on the
+        package object (a function, class, or plain assignment) shadows
+        the submodule-autoimport binding of the same name — so this only
+        probes the filesystem once no such symbol is found. Uses
+        `_parsed_import` (the same cached parse `_find_imported_struct`/
+        `_find_generic_source` already use) and `_submodule_source_path`
+        (the same search-path resolution `_compile_imported_module` uses)
+        rather than inventing new resolution logic."""
+        _path, _src, _stmts = self._parsed_import(module)
+        if _stmts:
+            for s in _stmts:
+                if isinstance(s, (FunctionDef, StructDef)) and s.name == name:
+                    return False
+                if isinstance(s, VarDecl) and s.name == name:
+                    return False
+                if isinstance(s, AssignStmt) and isinstance(s.target, IdentExpr) \
+                        and s.target.name == name:
+                    return False
+                if isinstance(s, MultiAssignStmt):
+                    for _t in s.targets:
+                        if isinstance(_t, IdentExpr) and _t.name == name:
+                            return False
+                # Real, common idiom: `module`'s own `__init__` RE-EXPORTS
+                # `name` by importing it from one of ITS OWN submodules —
+                # e.g. `std/memory/__init__.mojo` has `from .alloc import
+                # alloc` (the free FUNCTION `alloc`, re-exported under the
+                # same bare name as the submodule FILE `std/memory/
+                # alloc.mojo` that defines it). Without this check, `from
+                # std.memory import alloc` misclassified `alloc` as THE
+                # SUBMODULE (the bare filesystem probe below finds `std/
+                # memory/alloc.mojo` and, having no other evidence,
+                # concludes "submodule") instead of the re-exported
+                # function — confirmed via a real regression this exact
+                # case caused (`dict.mojo`'s `_ensure_capacity` calling
+                # `alloc(...)` as a bare function lost its extern
+                # declaration entirely, "implicit declaration of function
+                # 'alloc'"). Mirrors real Python: `__init__.py` executing
+                # `from .alloc import alloc` REBINDS the package's `alloc`
+                # attribute to the function, overwriting whatever the
+                # submodule auto-import step bound it to first — an
+                # explicit later rebinding always wins, exactly like the
+                # def/class/assignment cases above.
+                if (isinstance(s, FromImportStmt) and not getattr(s, 'wildcard', False)):
+                    for _rn, _ra in s.names:
+                        if (_ra if _ra else _rn) == name:
+                            return False
+        return self._submodule_source_path(f"{module}.{name}") is not None
+
     def _gen_stmt_FromImportStmt(self, node):
         # from module import name1, name2, ...
         # Per-lexical-scope import tracking: this statement executes in the
@@ -21905,6 +22045,40 @@ class GimpleGen:
                     _scope[alias if alias else name] = _scope_qual
         for name, alias in node.names:
             symbol_name = alias if alias else name
+            # `from PKG import SUBMOD` where SUBMOD names a real submodule
+            # FILE (PKG/SUBMOD.py or PKG/SUBMOD/__init__.py), not a symbol
+            # defined inside PKG's own source — register it exactly like
+            # a plain `import PKG.SUBMOD as SUBMOD` would (_gen_stmt_
+            # ImportStmt, just below): a genuine module marker (an int64_t
+            # local declared and assigned 0), not a func/class symbol
+            # entry. Without this, `_lower_MemberExpr` never recognizes
+            # SUBMOD as a module at all — `SUBMOD.some_global` silently
+            # fell through to the fully-dynamic runtime getattr dispatch on
+            # an unresolved-identifier NULL placeholder instead of reading
+            # the real cross-module global (see bugs/CODEGEN_generator_
+            # function_Lib_test_test_support.md's 2026-08-09 root-cause:
+            # `TESTFN = os_helper.TESTFN` via `from test.support import
+            # os_helper`). A CALL through the member (`os_helper.foo(...)`)
+            # is unaffected either way — that already goes through the
+            # separate, already-working `_lower_call` member-call path.
+            if not getattr(node, 'wildcard', False) \
+                    and self._from_import_name_is_submodule(node.module, name):
+                _sub_mod = f"{node.module}.{name}"
+                if not (isinstance(self.imported_symbols.get(symbol_name), dict)
+                        and 'signature' in self.imported_symbols[symbol_name]):
+                    self.imported_symbols[symbol_name] = {
+                        'module': _sub_mod,
+                        'return_type': 'unknown',
+                    }
+                if symbol_name not in self.var_types:
+                    self._declare_var(symbol_name, 'int64_t')
+                    # See _gen_stmt_ImportStmt's identical marker-assignment
+                    # comment: route through _cname so the assignment
+                    # targets the same (possibly C-keyword-renamed) local
+                    # _declare_var just declared.
+                    self._emit(f"  {self._cname(symbol_name)} = (int64_t)0;  "
+                               f"/* module marker (from-import submodule) */")
+                continue
             # Use known signature if available. Default to 'int64_t' (NOT
             # 'int') for unknown symbols — this must match the fallback
             # return type every other unknown-callee path in this file
@@ -33524,6 +33698,35 @@ class GimpleGen:
                     def _register_sym(sym_name, orig_name, sym_info):
                         if sym_name in self.struct_field_types:
                             return
+                        # `from PKG import NAME` where NAME is a real
+                        # SUBMODULE FILE (`PKG/NAME.py`/`PKG/NAME/
+                        # __init__.py`), not a symbol defined inside PKG's
+                        # own source — this is the TOP-LEVEL (module-scope)
+                        # twin of `_gen_stmt_FromImportStmt`'s identical
+                        # submodule check (see `_from_import_name_is_
+                        # submodule`'s docstring and bugs/CODEGEN_
+                        # generator_function_Lib_test_test_support.md's
+                        # 2026-08-09 root-cause: `TESTFN = os_helper.
+                        # TESTFN` via a MODULE-LEVEL `from test.support
+                        # import os_helper` never reaches the function-
+                        # body statement-lowering path at all — gen_module
+                        # skips top-level FromImportStmts there entirely
+                        # and processes them here instead). Register a
+                        # genuine module marker (mirrors `_gen_stmt_
+                        # ImportStmt`'s function-body registration shape)
+                        # BEFORE the `sym_info`-empty fallback below, which
+                        # would otherwise mark it `_unresolved_import_
+                        # aliases` — losing the submodule's real dotted
+                        # identity, and with it any chance of
+                        # `_lower_MemberExpr`'s cross-module-global-read
+                        # branch resolving `os_helper.TESTFN` to the real
+                        # value instead of a NULL-pointer runtime dispatch.
+                        if not s.wildcard and self._from_import_name_is_submodule(s.module, orig_name):
+                            self.imported_symbols[sym_name] = {
+                                'module': f"{s.module}.{orig_name}",
+                                'return_type': 'unknown',
+                            }
+                            return
                         if _sib_qualifier and not sym_info:
                             # The sibling FILE resolved, but this particular
                             # imported name wasn't found among its fn/def
@@ -33882,6 +34085,22 @@ class GimpleGen:
                     if not s.wildcard:
                         for _fb_name, _fb_alias in s.names:
                             _fb_sym = _fb_alias if _fb_alias else _fb_name
+                            # `s.module` itself didn't resolve as a package
+                            # this compiler tracks, but `_fb_name` may still
+                            # independently resolve as a real submodule FILE
+                            # on the search path (`_submodule_source_path`
+                            # does its own probing, not dependent on `s.
+                            # module` having parsed) — same submodule-marker
+                            # registration as the `exports is not None`
+                            # branch above, so a module-attribute read off
+                            # it (`submod.GLOBAL`) still resolves instead of
+                            # being marked permanently unresolved.
+                            if self._from_import_name_is_submodule(s.module, _fb_name):
+                                self.imported_symbols[_fb_sym] = {
+                                    'module': f"{s.module}.{_fb_name}",
+                                    'return_type': 'unknown',
+                                }
+                                continue
                             self._unresolved_import_aliases.add(_fb_sym)
 
         # Register user function return types (from current + imported modules)
@@ -36208,6 +36427,41 @@ class GimpleGen:
                     return 'MojoList *'
                 else:
                     return 'int64_t'
+            elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)
+                    and _value.obj.name in self.imported_symbols):
+                # `X = submod.GLOBAL` — a module-level global initialized
+                # from a cross-module attribute read off a real submodule
+                # marker (see `_gen_stmt_FromImportStmt`'s and the top-
+                # level "Process imports" pre-pass's submodule-marker
+                # registration, and `_lower_MemberExpr`'s matching
+                # cross-module-global-read branch). The generic `_quick_
+                # type` fallback below has no notion of this shape at all
+                # and always defaults it to `int64_t` — harmless for a
+                # genuinely-int64_t submodule global, but WRONG for e.g. a
+                # `char *` one (real case: `Lib/test/test_support.py`'s
+                # `TESTFN = os_helper.TESTFN`): the outer global then gets
+                # declared `int64_t` while `_lower_MemberExpr` correctly
+                # reads back the real `char *` value and boxes it into that
+                # `int64_t` slot — a later bare read of the outer global
+                # (e.g. `print(TESTFN)`) has no way to know it's actually a
+                # boxed pointer and prints the raw address as a number
+                # instead of dereferencing it as a string. Resolve the
+                # submodule's OWN already-known global type directly (Phase
+                # 0 has already fully compiled that submodule via
+                # `_compile_imported_module` and populated `_global_var_
+                # types`/`_global_to_module` for it, by the time THIS
+                # module's own Phase 1.7 scan runs) instead of guessing.
+                _mx_mod = self.imported_symbols[_value.obj.name].get('module')
+                if (_mx_mod and _value.member in self._global_var_types
+                        and getattr(self, '_global_to_module', {}).get(_value.member) == _mx_mod):
+                    _mx_t = self._global_var_types[_value.member]
+                    if _mx_t.endswith(' *'):
+                        return _mx_t
+                    elif _mx_t == '_Bool':
+                        return 'int'
+                    else:
+                        return 'int64_t'
+                return 'int64_t'
             else:
                 qt = self._quick_type(_value) or 'int64_t'
                 if qt.endswith(' *'):
@@ -37990,6 +38244,35 @@ class GimpleGen:
                     global_decls.append(f"int64_t {gname};  /* MojoList * */")
                     self._global_var_types[gname] = 'MojoList *'
                     self._global_c_decl_types[gname] = 'int64_t'
+                else:
+                    global_decls.append(f"int64_t {gname};")
+                    self._global_var_types[gname] = 'int64_t'
+                    self._global_c_decl_types[gname] = 'int64_t'
+            elif (isinstance(value, MemberExpr) and isinstance(value.obj, IdentExpr)
+                    and value.obj.name in self.imported_symbols
+                    and self.imported_symbols[value.obj.name].get('module')
+                    and value.member in self._global_var_types
+                    and getattr(self, '_global_to_module', {}).get(value.member)
+                        == self.imported_symbols[value.obj.name].get('module')):
+                # `X = submod.GLOBAL` — mirrors the identical MemberExpr
+                # case added to `_phase17_value_type` above (see that
+                # branch's docstring for the full why: without this, THIS
+                # later pass — which actually determines the struct field
+                # text and unconditionally overwrites whatever Phase 1.7
+                # already inferred, since it runs AFTER Phase 1.7 — would
+                # silently downgrade a correctly-inferred `char *` back to
+                # `int64_t`, reintroducing the exact same "print(TESTFN)
+                # shows a raw pointer address" bug Phase 1.7's fix alone
+                # doesn't prevent).
+                _mx_t = self._global_var_types[value.member]
+                if _mx_t.endswith(' *'):
+                    global_decls.append(f"{_mx_t} {gname};")
+                    self._global_var_types[gname] = _mx_t
+                    self._global_c_decl_types[gname] = _mx_t
+                elif _mx_t == '_Bool':
+                    global_decls.append(f"int {gname};")
+                    self._global_var_types[gname] = 'int'
+                    self._global_c_decl_types[gname] = 'int'
                 else:
                     global_decls.append(f"int64_t {gname};")
                     self._global_var_types[gname] = 'int64_t'
