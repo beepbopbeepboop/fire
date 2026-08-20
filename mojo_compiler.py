@@ -1132,9 +1132,32 @@ def py_tokenize(src: str) -> list[Token]:
             # physical line, no enclosing parens required. Deliberately excludes a
             # trailing `.` — `...` (Ellipsis, a common stub-function body) tokenizes
             # as three DOTs and must NOT be treated as a continuation.
+            #
+            # Also unconditionally excludes a trailing `*`: it can only appear as
+            # the multiplication operator or as the wildcard marker of
+            # `from MODULE import *` / `import *`. Real Python's own grammar never
+            # allows a bare trailing `*` to start an implicit continuation anyway
+            # (this "no-backslash-needed" feature is entirely this project's own
+            # addition, not part of Python — real Python requires an explicit `\`
+            # or enclosing parens for a line-ending `*` to continue). Nothing in
+            # this codebase's own corpus (.mojo sources, test suites) relies on
+            # `x = a *\n    b`-shaped continuation, so there's no real caller to
+            # preserve narrowly. Treating `*` as ending a statement here fixes the
+            # much more common and much worse case: `from X import *` (or bare
+            # `import *`) — whose trailing `*` is a wildcard-import marker, not an
+            # operator awaiting a right-hand operand — was being misread as a
+            # continuation, silently swallowing the NEWLINE (and therefore the
+            # DEDENT tracking) between it and whatever statement follows. That is
+            # a real, silent semantic miscompile for the extremely common
+            # `try: from _fast import * / except ImportError: from _slow import *`
+            # idiom (e.g. CPython's own Lib/datetime.py): the dropped NEWLINE/DEDENT
+            # meant the parser never recognized the following `except` as starting
+            # a handler, so `except ImportError:` was misparsed as bare statements
+            # and the TryStmt ended up with handlers=[] — the except clause never
+            # actually caught anything.
             last = out[-1] if out else None
             implicit_continuation = last is not None and (
-                (last.kind == "OP" and last.value != "^")  # `^` is the postfix transfer sigil, not a binary op
+                (last.kind == "OP" and last.value != "^" and last.value != "*")  # `^` transfer sigil, `*` wildcard/mul — see above
                 or last.kind in ("AUGASSIGN", "ASSIGN", "ARROW")
                 or (last.kind == "KW" and last.value in ("and", "or", "not", "in", "is"))
             )
