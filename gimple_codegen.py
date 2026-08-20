@@ -25883,18 +25883,60 @@ class GimpleGen:
         if (_cur_file and _cur_file.endswith('.py')
                 and (_cur_abs == _SELFHOST_DIR or _cur_abs.startswith(_SELFHOST_DIR + '/'))):
             return ''
+        # A struct genuinely DECLARED in the file currently being compiled
+        # (gen_module's _local_struct_names, set once per GimpleGen instance
+        # from that instance's own top-level stmts) always wins THIS
+        # instance's own qualifier, checked BEFORE the shared, whole-
+        # program `_imported_struct_home` registry below. `_imported_struct_
+        # home` is keyed purely on bare struct name and shared across every
+        # nested temp_gen in the whole transitive closure — when a locally-
+        # defined class happens to share a bare name with an unrelated (or,
+        # as here, a genuine base-class) struct some OTHER module in the
+        # closure legitimately registered there, checking it first
+        # mislabels THIS module's own struct as belonging to that OTHER
+        # module, qualifying its methods with the WRONG (foreign) prefix.
+        # Concrete real-world repro: `Lib/mailbox.py` defines its own
+        # `class Message(email.message.Message):` — both classes are
+        # legitimately named "Message" (a genuine subclass relationship,
+        # not a coincidence), and `_merge_struct_inheritance` correctly
+        # splices the base's own (shared, by-reference) FunctionDef method
+        # objects into mailbox.py's derived struct's own `.methods` list so
+        # each concrete struct gets its own callable copies (no C++ vtable
+        # here). But with the OLD priority order, mailbox.py's own "Message"
+        # struct-method-emission loop looked up `_imported_struct_home
+        # ['Message'] == 'email.message'` (registered when Phase 0 compiled
+        # the REAL imported email.message.Message) and reused THAT
+        # qualifier for its own struct too — emitting EVERY one of
+        # mailbox.py's own Message methods (both genuinely inherited ones
+        # and its own locally-overridden ones like `__init__`) under the
+        # exact same C symbols
+        # (`email_message_Message___str__`/`___init__`/...) the real
+        # email.message.Message module already emits once for itself,
+        # producing ~45 GCC "redefinition of ..." errors in the SAME
+        # translation unit (see bugs/CODEGEN_generator_function_Lib_
+        # mailbox.md / bugs/hard/CODEGEN_same_bare_name_struct_collision_
+        # across_modules.md). Reordering only changes behavior for this
+        # exact ambiguous case (name present in BOTH _local_struct_names
+        # AND _imported_struct_home simultaneously) — the overwhelmingly
+        # common case where only one of the two is true is completely
+        # unaffected, since a struct's OWN compiling temp_gen registers
+        # ITS OWN `module_name` into `_imported_struct_home` under the same
+        # value `_local_struct_names`-based qualification would produce
+        # anyway (see `_compile_imported_module`'s Phase 0 registration),
+        # so the two branches agree whenever there's no real collision.
+        if struct_name in getattr(self, '_local_struct_names', ()):
+            return _sanitize_qualifier(self.module_name) or ''
+        # Only apply an IMPORTED module's qualifier to a struct genuinely
+        # reached via `from X import Struct` and registered into
+        # _imported_struct_home (or the dylib-reflection-only case) — never
+        # as a guess for a name this compile doesn't recognize as either
+        # local or (registered-)imported. An imported struct _register_
+        # imported_structs' narrow registration gate missed must stay
+        # unqualified (the historical, safe behavior) rather than get
+        # mislabeled as belonging to this module.
         home = getattr(self, '_imported_struct_home', None)
         if home and struct_name in home:
             return _sanitize_qualifier(home[struct_name])
-        # Only apply THIS module's own qualifier to a struct genuinely
-        # declared in this file's own top-level stmts (see gen_module's
-        # _local_struct_names) — never as a guess for a name this compile
-        # doesn't recognize as either local or (registered-)imported. An
-        # imported struct _register_imported_structs' narrow registration
-        # gate missed must stay unqualified (the historical, safe behavior)
-        # rather than get mislabeled as belonging to this module.
-        if struct_name in getattr(self, '_local_struct_names', ()):
-            return _sanitize_qualifier(self.module_name) or ''
         return ''
 
     def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str) -> str:

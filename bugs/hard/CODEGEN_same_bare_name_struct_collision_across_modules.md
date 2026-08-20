@@ -1,5 +1,70 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+## Partial fix (2026-08-20 — the STRUCT-METHOD-SYMBOL-QUALIFIER piece of this mechanism is fixed; the general struct FIELD-TABLE/TYPE-IDENTITY plan below remains open/unattempted)
+
+Investigating the live `Lib/mailbox.py` instance from the 2026-08-11
+entry just below (`class Message(email.message.Message):`, bare-name-
+identical to its real imported base) found and fixed the specific
+sub-mechanism responsible for the `redefinition of 'email_message_
+Message___str__'`-shaped symptom: `_struct_method_qualifier`
+(gimple_codegen.py ~line 25808) checked the shared, whole-program
+`_imported_struct_home` registry (keyed purely by bare struct name)
+BEFORE checking whether the struct currently being emitted is
+genuinely locally declared in the file currently being compiled
+(`_local_struct_names`) — so a struct that IS locally defined but
+happens to share a bare name with an unrelated (or, as in mailbox.py's
+case, a genuine base-class) struct registered elsewhere in the closure
+got ALL its methods wrongly qualified with the OTHER module's prefix,
+producing duplicate/colliding C symbols with that other module's own
+real emissions. Fixed by reordering: local declaration now always wins
+this instance's own qualifier over the shared import registry. This
+only changes behavior for the narrow case where a bare name is present
+in BOTH `_local_struct_names` and `_imported_struct_home`
+simultaneously — every other struct's qualification (the overwhelming
+majority) is unaffected, since a struct's own compiling temp_gen
+registers into `_imported_struct_home` under the same value the local
+branch would already produce, so the two branches always agreed absent
+a genuine collision.
+
+**This is a narrower, much lower-risk fix than the general plan this
+doc lays out below** (which additionally covers struct FIELD-TABLE/
+TYPE-IDENTITY qualification, `_struct_name_owner`'s field-registration
+collision handling, and the free-function `func_return_types` bare-key
+analog called out in the 2026-08-11 entry) — none of that broader,
+"moderate-to-high risk" work was attempted here. Concretely: two real,
+UNRELATED classes sharing a bare name (the tkinter `Dialog` repro this
+doc originally documents) still corrupt each other exactly as before if
+BOTH are locally-defined structs with no import relationship at all (this
+fix only helps the "one side is genuinely imported, the other is local"
+shape) — the minimal 2-file `Dialog`/`Dialog` repro described below was
+NOT re-tested against this fix and is not expected to be affected by it.
+
+Verified via real rebuilds: `Lib/mailbox.py`'s `email_message_Message_*`
+redefinitions (0, was 48), `Lib/typing.py`'s `_collections_abc__
+CallableGenericAlias___repr__`/`___reduce__` redefinitions (0, was 2,
+same mechanism — `typing.py`'s own `_CallableGenericAlias` bare-name-
+collides with `_collections_abc.py`'s unrelated class of the same name),
+`Lib/socket.py`'s dominant "'X' undeclared here" collision-pattern error
+count (13, was 370) all confirmed fixed/improved. The two originally-
+confirmed real-world triggers (`Lib/tkinter/filedialog.py`, `Lib/
+tkinter/simpledialog.py`) still build clean (unaffected either way,
+since they go through link mode, not this inline-path mechanism). Full
+quality gate (`test_gimple.py` 248/248, `test_module_cache.py` 76/76,
+`make check-selfhost`, from-scratch stdlib dylib rebuild 0 skipped
+before/after via a separate `git worktree add` baseline, `compile_
+stdlib.py -j8` 664/664) all pass, no regression.
+
+The general fix this doc's own plan calls for (struct field-table
+qualification, propagating a value's resolved identity through later
+field accesses, Phase 2a using each struct's own qualified field table)
+remains genuinely unattempted — still assessed as moderate-to-high risk,
+still a real, broader gap. Not deprioritized-as-unreachable anymore
+though: this session's fix demonstrates the narrower method-symbol slice
+of the mechanism WAS reachable and fixable at acceptable risk; whoever
+picks up the remaining field-identity work should re-assess reachability
+given `mojo.py build`'s inline fallback is evidently exercised more often
+in practice than the "structurally unreachable" framing below assumed.
+
 ## Cross-reference (2026-08-11 — live counter-example found to the "unreachable via primary path" claim, PLUS the same mechanism confirmed for free functions, not just structs)
 
 Investigating `bugs/CODEGEN_generator_function_Lib_mailbox.md` (a

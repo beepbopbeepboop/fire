@@ -1,5 +1,32 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (updated 2026-08-20): `_CallableGenericAlias` redefinition FIXED, file still fails on unrelated errors
+
+The `redefinition of '_collections_abc__CallableGenericAlias___repr__'`/
+`___reduce__` pair noted below (and the related `conflicting types for
+'..___getitem__'`/`'_CallableGenericAlias' has no member named
+'__parameters__'/'__module__'`) is now fixed — same root cause and same
+fix as `bugs/CODEGEN_generator_function_Lib_mailbox.md`'s 2026-08-20
+entry: `_struct_method_qualifier` (gimple_codegen.py ~line 25808) wrongly
+preferred the shared, whole-program `_imported_struct_home` registry
+over a struct's own genuine local declaration. `Lib/typing.py` defines
+its own `class _CallableGenericAlias(_NotIterable, _GenericAlias,
+_root=True):` (line 1615), bare-name-identical to `Lib/_collections_
+abc.py`'s completely unrelated `class _CallableGenericAlias
+(GenericAlias):` — the exact same bare-name-collision shape as
+mailbox.py's `Message`, just an accidental same-name collision rather
+than a real subclass relationship. Fixed by the same qualifier-priority
+reorder (see that doc / the code comment at the fix site for full
+detail).
+
+Verified via a fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/typing.py`: the `_collections_abc__CallableGenericAlias` redefinition
+errors are gone (was present). **typing.py still does not build** — 223
+errors remain, dominated by the already-tracked, separate `Lib/
+contextlib.py` cascade (`bugs/COMPILE_FAIL_Lib_contextlib_request_for_
+member_module_in_something_not_a_structure_or_union.md`) and other
+unrelated issues; none struct-collision-shaped. Doc kept open.
+
 ## Status (re-verified 2026-08-09)
 
 Fresh from-scratch `python3 mojo.py build /Users/mrs/net/Python-3.14.6/

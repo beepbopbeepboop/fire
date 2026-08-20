@@ -1,5 +1,62 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-20 — bug #2 (`email_message_Message_*` redefinition) FIXED; file still blocked by other, unrelated errors)
+
+Root-caused and fixed bug #2 from the 2026-08-11 entry below (the
+`redefinition of 'email_message_Message___str__'` cluster, ~45 sibling
+methods). The 2026-08-11 entry's own guess ("an inherited-method stub
+emitted under the base class's own qualified symbol name") was exactly
+right, traced to its precise mechanism in
+`gimple_codegen.py`'s `_struct_method_qualifier`
+(~line 25808): `mailbox.py` defines its own `class Message(email.
+message.Message):` — a genuine subclass, bare-named identically to its
+real imported base. `_merge_struct_inheritance` correctly splices the
+base's own method objects (by reference) into mailbox.py's derived
+struct's `.methods` so each concrete struct gets its own callable
+copies (no C++ vtable in this codegen). But `_struct_method_qualifier`
+checked the shared, whole-program `_imported_struct_home` registry
+(keyed purely by bare struct name, registered when Phase 0 compiled
+the REAL `email.message.Message`) BEFORE checking whether the struct
+being emitted right now is genuinely LOCALLY declared in the file
+currently being compiled (`_local_struct_names`) — so mailbox.py's own
+"Message" struct's methods (both the spliced-in inherited ones AND its
+own locally-overridden ones like `__init__`) all got wrongly qualified
+as `email_message_*`, colliding with the base module's own genuine
+emissions.
+
+Fixed by reordering the two checks: a struct genuinely declared in the
+CURRENTLY-compiling module's own top-level stmts now always wins that
+module's own qualifier, checked before falling back to the shared
+imported-struct registry. This only changes behavior for the narrow,
+genuinely-ambiguous case (a bare name present in BOTH sets at once);
+every other struct's qualification is unchanged (see the code comment
+at that call site for the full reasoning and additional real-world
+instance found: `Lib/typing.py`'s own `_CallableGenericAlias`, bare-name
+identical to `Lib/_collections_abc.py`'s unrelated class of the same
+name, hit the exact same mechanism and is now also fixed).
+
+Verified via a fresh `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/mailbox.py`: zero
+`email_message_Message_*`/`email_message_*` redefinition errors (was
+48). **mailbox.py still does not build** — 11 errors of its own plus
+many more in transitively-compiled files (`argparse.py` 40,
+`codecs.py` 36, `email/message.py` 35, `email/generator.py` 22,
+`typing.py` 16, `inspect.py` 14, `enum.py` 10, `posixpath.py` 9,
+`os.py` 9, ...), none of them struct-collision-shaped anymore — a
+completely different, much larger grab-bag of independent pre-existing
+bugs, not investigated further here (out of scope for this fix). Doc
+kept open.
+
+Full quality gate: `test_gimple.py` 248/248, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+0 skipped (baseline via a separate `git worktree add` checkout at the
+pre-fix commit: also 0 skipped), `compile_stdlib.py -j8` 664/664 clean
+— all pass, no regression. Spot-checked
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`'s
+own two real-world triggers (`Lib/tkinter/filedialog.py`,
+`Lib/tkinter/simpledialog.py`) still build clean (unaffected, as
+expected — they go through link mode, not this inline-path mechanism).
+
 ## Status (updated 2026-08-11 — RECLASSIFIED: generator/tuple-yield concern now fully FIXED; file blocked by 3 unrelated, pre-existing structural bugs, none generator-related)
 
 Re-verified against current master via a fresh

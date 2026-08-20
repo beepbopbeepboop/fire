@@ -1,5 +1,39 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (updated 2026-08-20): task #141's struct-method-qualifier mechanism (the dominant blocker class) FIXED, file still fails overall
+
+The 2026-08-09 status below identified "task #141 cross-module
+bare-name collisions" (`bugs/hard/CODEGEN_same_bare_name_struct_
+collision_across_modules.md`) as ~57% (370/650) of this file's error
+lines. Investigating a live, concrete instance of that mechanism via
+`Lib/mailbox.py` (`bugs/CODEGEN_generator_function_Lib_mailbox.md`'s
+2026-08-20 entry) found and fixed the specific piece of it responsible
+for STRUCT-METHOD symbol misqualification: `_struct_method_qualifier`
+(gimple_codegen.py ~line 25808) wrongly preferred the shared,
+whole-program `_imported_struct_home` registry over a struct's own
+genuine local declaration whenever a bare struct name collided between
+a locally-defined struct and a same-named struct registered elsewhere
+in the transitive closure. Fixed by checking local declaration first
+(see that doc / the code comment at the fix site for full detail and
+the general risk assessment — this is a narrower, lower-risk fix than
+task #141's own doc's general "qualify struct FIELD tables too" plan,
+which remains unattempted and out of scope here).
+
+Re-verified via a fresh `python3 mojo.py build
+/Users/mrs/net/Python-3.14.6/Lib/socket.py`: error count dropped from
+650 to 201, and the "'X' undeclared here ... did you mean 'Y_X'"
+collision pattern dropped from 370 to 13 occurrences. **socket.py
+still does not build** — the remaining 201 errors are the same
+independent grab-bag already catalogued below (`enum.py`'s struct/dict
+`%` operator, `argparse.py`'s `_kw_default` member access,
+`operator.py`'s `partial`/lambda lowering, etc.), none of them
+struct-collision-shaped anymore. Doc kept open; task #141's own doc
+updated separately with this cross-reference.
+
+Full quality gate re-run clean (see `bugs/CODEGEN_generator_function_
+Lib_mailbox.md`'s 2026-08-20 entry for the complete gate results —
+same fix, same verification pass).
+
 ## Status (updated 2026-08-18): `perror` sub-blocker fixed, file still fails overall
 
 One item from the "~280 other errors" grab-bag listed in the
