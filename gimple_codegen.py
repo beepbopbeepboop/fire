@@ -2678,6 +2678,19 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if e.func.name in ('len', 'ord'):
             return 'int64_t'
         if known is not None and e.func.name in known:
+            # A call through a declared CALLABLE-VALUE local (`getpos()`,
+            # where `getpos`'s own storage type is `_CPP_CALLABLE_CTYPE` —
+            # see that constant's docstring) always RETURNS int64_t (its
+            # fixed signature), never the callable's own storage type —
+            # unlike the general case just below, where `known[name]`
+            # doubles as "this name is a callable local; its call result
+            # has this SAME scalar type" (the tokenize.py `encode =
+            # detect_encoding` idiom, where the boxed-function-pointer
+            # local's own int64_t storage type and its call's real
+            # (also-int64_t) result happen to coincide). Checked first so
+            # that coincidence doesn't misfire for the callable category.
+            if known[e.func.name] == _CPP_CALLABLE_CTYPE:
+                return 'int64_t'
             return known[e.func.name]
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         # Module-attribute call type inference: os.path.join → char* (the
@@ -2769,6 +2782,41 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # (e.g. `x = await inner()`) — see _await_call_ctype's docstring.
         return _await_call_ctype(e, async_api, closure_api)
     return None
+
+
+# The coroutine-body ("C++20 generator") codegen's ONE declared-type
+# category for a CALLABLE value -- a local first assigned a zero-argument
+# `lambda` literal or a bound-method-as-VALUE read (`self.<method>` /
+# `<struct-pointer local>.<method>`, not immediately called), later invoked
+# as a plain `name()`. See bugs/hard/CODEGEN_generator_lambda_expr_
+# unsupported.md's own "(1)(2)(3)" minimal-design list -- this is (1).
+#
+# `std::function<int64_t()>`, not `MojoBoundMethod *` (the ordinary
+# non-coroutine GIMPLE path's own bound-method-as-value representation,
+# `_lower_bound_method_value`/mojo_runtime.h): a real capturing C++ lambda
+# (what `_cpp_expr`'s LambdaExpr case below emits) has an ANONYMOUS,
+# uniquely-generated closure type that can only be held as `auto` -- not
+# storable in a variable DECLARED ahead of its initializer, which is how
+# every local in this coroutine model is declared (`Type name; ... name =
+# value;`, needed because Python allows reassigning a name to a
+# differently-shaped value across control-flow branches -- see
+# `_genops`'s own `getpos = data.tell` / `getpos = lambda: None` in the
+# hard-bug doc). `std::function<...>` is a real, nameable type a native
+# C++ lambda implicitly converts INTO, so it can be declared up front like
+# every other scalar ctype here, and — since this coroutine codegen
+# already unconditionally `#include <functional>` (gen_module's .cpp
+# preamble) — needs no new preamble plumbing either.
+#
+# Fixed to a zero-argument, int64_t-returning signature: the two confirmed
+# real occurrences (`pickletools.py`'s `getpos = data.tell` / `= lambda:
+# None`, called as `getpos()`; `fsutil.py`'s `get_files = lambda *a, **k:
+# ...`, blocked by the SEPARATE `*`/`**`-forwarding gap regardless — see
+# bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md) only
+# ever need a 0-arg callable returning a scalar. Not generalized to
+# arbitrary arity/return type without a second real occurrence to justify
+# it (this project's own "recurs >= 2 times" bar for generalizing a narrow
+# fix — see CLAUDE.md).
+_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
 
 
 def _c_to_cpp_scalar_type(ctype: str) -> str:
@@ -4557,6 +4605,7 @@ class GimpleGen:
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
+        self._struct_method_names: dict[str, set[str]] = {}  # struct name -> {real method names}, see its own population site's docstring
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._classmethod_names: set[str] = set()     # mangled `Struct_method` names of REAL classmethods
         # (explicit @classmethod, plus the two dunders Python treats as
@@ -25980,6 +26029,41 @@ class GimpleGen:
                 return sn
         return None
 
+    def _cpp_is_callable_value_expr(self, node) -> bool:
+        """True for a coroutine-body expression this codegen's one
+        callable-value declared-type category (`_CPP_CALLABLE_CTYPE`) can
+        represent: a zero-argument `lambda` literal, or a bound-method-as-
+        VALUE read (`self.<method>` / `<struct-pointer local>.<method>`,
+        NOT immediately called) off a struct whose methods this compile
+        already knows how to dispatch through. Used by `_cpp_stmt`'s
+        AssignStmt case to give a first-assigned local the right declared
+        type — mirrors (and must stay in sync with) `_cpp_expr`'s own
+        LambdaExpr/MemberExpr cases, the single source of truth for the
+        actual VALUE emission this type just needs to agree with. See
+        bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md."""
+        if isinstance(node, LambdaExpr):
+            return not node.params
+        if isinstance(node, MemberExpr):
+            # `_struct_method_names` (real method names straight off the
+            # struct's own AST) is the sole authoritative signal — NOT
+            # "absent from struct_field_types" (see `_cpp_expr`'s matching
+            # `self.<method>` case for why that alone isn't proof: this
+            # file's dynamic-attribute pre-pass synthesizes phantom field
+            # entries for unrecognized member reads too, including a real
+            # method read as a value like this one). A struct field can't
+            # legitimately share a name with one of its own methods, so
+            # this check alone — with no field-absence requirement — is
+            # both necessary and sufficient, matching `_cpp_expr`'s own
+            # method-name-checked-first ordering.
+            struct_name = getattr(self, '_cpp_gen_self_struct', None)
+            if struct_name and isinstance(node.obj, IdentExpr) and node.obj.name == 'self':
+                return node.member in self._struct_method_names.get(struct_name, ())
+            if isinstance(node.obj, IdentExpr):
+                ptr_struct = self._cpp_struct_ptr_local(node.obj.name)
+                if ptr_struct:
+                    return node.member in self._struct_method_names.get(ptr_struct, ())
+        return False
+
     _cpp_kwfwd_counter: int = 0
 
     def _cpp_try_kwargs_forward_call(self, e):
@@ -26198,10 +26282,50 @@ class GimpleGen:
             # raise below, unchanged.
             struct_name = getattr(self, '_cpp_gen_self_struct', None)
             if struct_name and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
-                ft = self.struct_field_types.get(struct_name, {}).get(e.member)
-                if ft in ('int64_t', 'double', '_Bool', 'char *'):
+                # `self.<method>` read WITHOUT an immediate call -- a
+                # bound-method-as-VALUE reference (pickletools.py's
+                # `getpos = data.tell` idiom, `self.<method>` variant --
+                # see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
+                # md). Checked FIRST, ahead of the field lookup just below:
+                # `struct_field_types[struct_name]` can't be trusted to
+                # prove "not a method" on its own —
+                # `_scan_body_for_local_field_access` (this file's dynamic-
+                # attribute pre-pass) synthesizes a phantom `'int'`-typed
+                # FIELD entry for any `<struct local>.<unrecognized member>`
+                # read found ANYWHERE in the module (a real method read as
+                # a value, like this one, is exactly such an "unrecognized
+                # member" read), so a real method's name can end up in
+                # struct_field_types too. `_struct_method_names` (real
+                # method names straight from the struct's own AST) is the
+                # actual authoritative signal, so it's asked first — a
+                # struct field can't legitimately share a name with one of
+                # its own methods anyway. When `e.member` IS a real method
+                # -- mirroring this same file's OWN `self.method(...)`
+                # CALL-site convention just below (`_cpp_self_struct`
+                # branch of the CallExpr/MemberExpr case: trust the source,
+                # dispatch through the method's real mangled C symbol) --
+                # wrap that SAME statically-known symbol in a capturing C++
+                # lambda convertible to this coroutine model's one
+                # callable-value category (`_CPP_CALLABLE_CTYPE`). A real
+                # call through the resulting value is an ordinary `name()`
+                # — the existing bare-name CallExpr fallback already emits
+                # exactly that, and `std::function` supports `operator()`
+                # natively, so no separate call-site case is needed.
+                if e.member in self._struct_method_names.get(struct_name, ()):
+                    _sym = self._struct_method_csym(struct_name, e.member, '')
+                    self._cpp_struct_method_refs.add((struct_name, e.member))
+                    return (f"(({_CPP_CALLABLE_CTYPE})"
+                            f"([&]() -> int64_t {{ return {_sym}(self); }}))")
+                _self_fields = self.struct_field_types.get(struct_name, {})
+                if e.member in _self_fields:
+                    ft = _self_fields[e.member]
+                    if ft in ('int64_t', 'double', '_Bool', 'char *'):
+                        return f"self->{e.member}"
+                    # Unknown-shaped field: emit as self->member (C++ struct pointer access)
                     return f"self->{e.member}"
-                # Unknown field: emit as self->member (C++ struct pointer access)
+                # Anything else (neither a field nor a real method — a
+                # genuine not-yet-synthesized dynamic attribute) falls
+                # through unchanged to the original best-effort raw access.
                 return f"self->{e.member}"
             # Two-level `self.<field1>.<field2>` chain (imaplib.py's
             # `Idler.burst`: `self._imap.sock`, where `_imap` is itself a
@@ -26248,9 +26372,66 @@ class GimpleGen:
             # (a module-object field like os.path, a scalar local with no
             # real struct type) keeps the existing `.` form unchanged.
             obj_expr = self._cpp_expr(e.obj) if not isinstance(e.obj, IdentExpr) else e.obj.name
-            if isinstance(e.obj, IdentExpr) and self._cpp_struct_ptr_local(e.obj.name):
-                return f"{obj_expr}->{e.member}"
+            if isinstance(e.obj, IdentExpr):
+                _ptr_struct = self._cpp_struct_ptr_local(e.obj.name)
+                if _ptr_struct:
+                    # Bound-method-as-VALUE off a struct-pointer local/
+                    # param, not immediately called — same rationale
+                    # (`_struct_method_names` checked FIRST, ahead of the
+                    # field lookup — see the `self.<method>` case above's
+                    # comment for why "absent from struct_field_types"
+                    # alone isn't proof) and mechanism as the
+                    # `self.<method>` case above (this is its non-self
+                    # twin).
+                    if e.member in self._struct_method_names.get(_ptr_struct, ()):
+                        _sym = self._struct_method_csym(_ptr_struct, e.member, '')
+                        self._cpp_struct_method_refs.add((_ptr_struct, e.member))
+                        return (f"(({_CPP_CALLABLE_CTYPE})"
+                                f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))")
+                    return f"{obj_expr}->{e.member}"
             return f"{obj_expr}.{e.member}"
+        if isinstance(e, LambdaExpr):
+            # A `lambda` used as a VALUE inside a generator body (e.g.
+            # pickletools.py's `_genops`: `getpos = lambda: None`, the
+            # sibling branch of `getpos = data.tell` above) — see
+            # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+            # Lowered as a genuine, capturing native C++ lambda (this
+            # coroutine codegen targets real C++20, unlike the plain
+            # GIMPLE path's `_lower_LambdaExpr`, whose much heavier
+            # "lift to a top-level C function + explicit env struct"
+            # machinery exists only because -fgimple can't take the
+            # address of a stack local at all — a constraint that simply
+            # doesn't apply here) — implicitly convertible to this
+            # model's one callable-value declared type
+            # (`_CPP_CALLABLE_CTYPE`, see its own docstring).
+            #
+            # `[&]` (capture everything by reference): every local this
+            # coroutine body can see lives in the coroutine's own
+            # heap-allocated frame (not an ordinary stack frame that could
+            # go out of scope while the callable value is still held), so
+            # a reference capture stays valid for as long as the
+            # coroutine itself does — exactly the lifetime the callable
+            # value needs (it may be invoked after further `co_await`/
+            # `co_yield` suspension points, e.g. `_genops`' own
+            # `pos = getpos()` on the very next loop iteration).
+            #
+            # Only the zero-Python-argument shape the confirmed corpus
+            # needs is supported (matches `_CPP_CALLABLE_CTYPE`'s fixed
+            # signature) — a lambda with parameters (e.g. fsutil.py's
+            # `lambda *a, **k: _walk(*a, walk=_files, **k)`) is refused
+            # honestly rather than guessing a signature; that occurrence
+            # is additionally blocked by the separate, deliberately
+            # unfixed bugs/hard/CODEGEN_args_kwargs_signature_assumed_
+            # forwarding_only.md gap regardless.
+            if e.params:
+                raise _UnsupportedGeneratorShape(
+                    "a `lambda` with parameters is not supported as a "
+                    "value inside a compiled generator/coroutine body "
+                    "(only a zero-argument lambda, e.g. `lambda: None`, "
+                    "is supported)")
+            _body = self._cpp_expr(e.body)
+            return (f"(({_CPP_CALLABLE_CTYPE})"
+                    f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
         if isinstance(e, UnaryOp):
             op = {'not': '!'}.get(e.op, e.op)
             return f"({op}{self._cpp_expr(e.operand)})"
@@ -27645,6 +27826,16 @@ class GimpleGen:
                 if (isinstance(s.value, CallExpr) and isinstance(s.value.func, IdentExpr)
                         and s.value.func.name in self._cpp_ctor_struct_names):
                     ctype = f"{s.value.func.name} *"
+                elif self._cpp_is_callable_value_expr(s.value):
+                    # A zero-arg `lambda` / bound-method-as-value RHS (see
+                    # `_cpp_is_callable_value_expr`'s docstring) — give the
+                    # local this coroutine model's one callable-value
+                    # declared type instead of letting it fall through
+                    # `_infer_simple_expr_ctype` (which has no notion of
+                    # either shape) to the int64_t default below, which
+                    # would mismatch the real `std::function<...>`-
+                    # convertible value `_cpp_expr` actually emits for it.
+                    ctype = _CPP_CALLABLE_CTYPE
                 else:
                     ctype = _infer_simple_expr_ctype(
                         s.value, declared, getattr(self, '_cpp_gen_self_fields', None),
@@ -34377,6 +34568,24 @@ class GimpleGen:
             for s in all_structs_for_methods:
                 if isinstance(s, StructDef):
                     for m in s.methods:
+                        # Real method names, straight from the struct's own
+                        # AST -- the ONE authoritative "is `x` a method (not
+                        # a field)" signal for this struct. Needed because
+                        # `struct_field_types[name]` alone can't be trusted
+                        # for that question: `_scan_body_for_local_field_
+                        # access` (this same pre-pass, below) synthesizes a
+                        # phantom `'int'`-typed FIELD entry for ANY
+                        # `<known-struct local>.<unrecognized member>` read
+                        # found anywhere in the module (dynamic-attribute
+                        # support) -- including a bound-method-as-VALUE read
+                        # like `getpos = self.tell`/`data.tell` (see
+                        # bugs/hard/CODEGEN_generator_lambda_expr_
+                        # unsupported.md), which would otherwise get
+                        # mistaken for a genuine field the moment that scan
+                        # runs (it always does, unconditionally, for every
+                        # module). Consulted by `_cpp_expr`'s/`_cpp_stmt`'s
+                        # coroutine-body bound-method-as-value handling.
+                        self._struct_method_names.setdefault(s.name, set()).add(m.name)
                         if m.name == '__init__':
                             self._struct_has_init.add(s.name)
                             # Record __init__ param names (excl self) so a

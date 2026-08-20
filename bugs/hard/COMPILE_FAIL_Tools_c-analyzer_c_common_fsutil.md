@@ -1,5 +1,39 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (updated 2026-08-20, LambdaExpr blocker narrowed, NOT closed for this file)
+
+`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` has been fixed
+for a ZERO-ARGUMENT `lambda` literal / a bound-method-as-VALUE read off
+a struct whose real methods are statically known (see that doc's own
+2026-08-20 update for the mechanism — a `std::function<int64_t()>`
+declared-type category, a native-capturing-C++-lambda `LambdaExpr`
+case, and a bound-method case reusing the struct's already-known
+mangled method symbol). `iter_files`'s own occurrence does NOT qualify:
+```python
+get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))
+```
+is a lambda WITH parameters (`*a, **k`), which the fix deliberately
+does not attempt — its one declared-type category has a fixed
+zero-argument signature (this project's real corpus, both confirmed
+`CODEGEN_generator_lambda_expr_unsupported.md` occurrences, only ever
+needed 0-arg callables; a `*args`/`**kwargs`-forwarding lambda would
+also need the separate, deliberately-unfixed `bugs/hard/CODEGEN_args_
+kwargs_signature_assumed_forwarding_only.md` gap even if a parameterized
+lambda itself were supported). Re-verified directly via `MOJO_DEBUG=1` +
+`compile_to_gimple_with_cpp`: `iter_files` is still refused, now with a
+more precise message confirming exactly this:
+```
+[gimple_codegen] generator 'iter_files' not eligible for C++ coroutine
+path, falling back to honest refusal: a `lambda` with parameters is not
+supported as a value inside a compiled generator/coroutine body (only a
+zero-argument lambda, e.g. `lambda: None`, is supported)
+```
+`process_filenames`'s separate tuple-valued-yield blocker (below) is
+unaffected/unchanged. Net: this file remains blocked by the same two
+structural gaps as the 2026-08-09 update — LambdaExpr support is now
+real for one shape but not the shape THIS file needs, and tuple-valued
+yield is untouched.
+
 ## Status (updated 2026-08-09, re-verified: TWO blockers now, both known structural gaps)
 
 Re-verified fresh via `MOJO_DEBUG=1 python3 mojo.py build`. `iter_files`

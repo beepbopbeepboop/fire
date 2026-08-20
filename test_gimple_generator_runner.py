@@ -842,6 +842,67 @@ def main():
         print(x)
 """, "0\n-1\n2\n")
 
+    # LambdaExpr-as-value / bound-method-as-value in a compiled generator
+    # body (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) —
+    # mirrors pickletools.py's `_genops` shape EXACTLY: the same local
+    # (`getpos`) is assigned a zero-arg `lambda` on one branch and a
+    # bound-method VALUE (`self.tell`, not immediately called) on the
+    # other, then invoked as a plain `getpos()`. The `self`-method variant.
+    test_generator_stdout("generator_lambda_and_self_bound_method_as_value", """\
+class Ticker:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def tell(self):
+        return self.value
+
+    def run(self, use_lambda: Int):
+        if use_lambda:
+            getpos = lambda: 42
+        else:
+            getpos = self.tell
+        pos = getpos()
+        yield pos
+
+def main():
+    tk = Ticker(7)
+    for x in tk.run(1):
+        print(x)
+    for x in tk.run(0):
+        print(x)
+""", "42\n7\n")
+
+    # Same shape, but the bound method is read off a struct-pointer
+    # PARAMETER rather than `self` — the closer match to `_genops`' own
+    # `getpos = data.tell` (where `data` is a generator PARAMETER, not the
+    # enclosing struct), just with a statically-known struct type (`data`'s
+    # real class in pickletools.py is a dynamically-typed io.BytesIO/file
+    # object this narrow scalar-body model can't resolve at all — a
+    # SEPARATE, honestly-unfixed gap; see that bug doc's own status notes).
+    test_generator_stdout("generator_lambda_and_param_bound_method_as_value", """\
+class Ticker:
+    def __init__(self, start: Int):
+        self.value = start
+
+    def tell(self):
+        return self.value
+
+def gen(tk: Ticker, use_lambda: Int):
+    if use_lambda:
+        getpos = lambda: 99
+    else:
+        getpos = tk.tell
+    pos = getpos()
+    yield pos
+
+def main():
+    tk = Ticker(11)
+    for x in gen(tk, 1):
+        print(x)
+    for x in gen(tk, 0):
+        print(x)
+""", "99\n11\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

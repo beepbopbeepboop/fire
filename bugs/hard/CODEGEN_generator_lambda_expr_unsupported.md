@@ -1,5 +1,97 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (updated 2026-08-20, FIXED for zero-argument lambdas / bound-method values — one shape still open)
+
+Implemented this doc's own minimal design (the "(1)(2)(3)" list at the
+bottom): `gimple_codegen.py` gained
+
+1. A new declared-type category for a callable value inside the
+   coroutine (`.cpp`) codegen: `_CPP_CALLABLE_CTYPE = 'std::function<
+   int64_t()>'` — a real, nameable C++ type (unlike a raw lambda's
+   anonymous closure type), fixed to a zero-argument, int64_t-returning
+   signature since neither confirmed occurrence ever needs more (see
+   that constant's own docstring for the full rationale, including why
+   `std::function` was chosen over the ordinary GIMPLE path's
+   `MojoBoundMethod *` bound-method representation).
+2. `_cpp_expr`'s new `LambdaExpr` case: a zero-argument `lambda` literal
+   lowers to a native, CAPTURING C++ lambda (`[&]() -> int64_t { return
+   ...; }`, `[&]` since every local in this coroutine model lives in the
+   coroutine's own heap-allocated frame, not an ordinary stack frame —
+   safe for as long as the callable value itself is held), implicitly
+   convertible to `_CPP_CALLABLE_CTYPE`. A lambda WITH parameters is
+   refused honestly (not attempted — see "still open" below).
+3. Call-site dispatch needed NO new code: a declared local of type
+   `_CPP_CALLABLE_CTYPE` already falls through to `_cpp_expr`'s existing
+   bare-name `CallExpr` fallback (`name(args)`), and `std::function`
+   supports `operator()` natively. The one real fix needed alongside
+   this was in `_infer_simple_expr_ctype`'s CallExpr/IdentExpr branch,
+   which conflated "a callable local's own storage type" with "that
+   call's RESULT type" (previously harmless, since both happened to be
+   `int64_t` for the one pre-existing callable-local idiom it handled) —
+   now special-cased so a call through a `_CPP_CALLABLE_CTYPE` local
+   always infers `int64_t`, not the callable's own storage type.
+4. A bound-method-as-VALUE read (`self.<method>` / `<struct-pointer
+   local>.<method>`, NOT immediately called) added to `_cpp_expr`'s
+   `MemberExpr` handling: bridges into the coroutine model's EXISTING
+   struct-method-call machinery (the method's already-known mangled C
+   symbol, via `_struct_method_csym` — the same one `self.method(...)`/
+   `<struct-pointer local>.method(...)` CALL sites already use), wrapped
+   in a capturing C++ lambda convertible to the same declared type,
+   rather than inventing a second runtime representation. Required a
+   new `self._struct_method_names: dict[str, set[str]]` (struct name ->
+   real method names, straight from each struct's own AST, populated
+   alongside the existing `_struct_has_init` pass) as the authoritative
+   "is this member a method" signal — `struct_field_types` alone can't
+   be trusted for that question, because this file's OWN dynamic-
+   attribute pre-pass (`_scan_body_for_local_field_access`) synthesizes
+   a phantom `'int'`-typed FIELD entry for any `<known-struct local>.
+   <unrecognized member>` read found anywhere in the module, which
+   would otherwise misclassify a real bound-method-as-value read (e.g.
+   `getpos = self.tell`) as a field access.
+
+Verified: two new real end-to-end compile+link+RUN repros in
+`test_gimple_generator_runner.py` (`generator_lambda_and_self_bound_
+method_as_value`, `generator_lambda_and_param_bound_method_as_value`),
+both mirroring `_genops`'s exact two-branch/same-local shape (a
+zero-arg lambda on one branch, a bound-method value on the other,
+called via `getpos()`) — one with the bound method read off `self`
+inside a generator METHOD, one off a struct-pointer generator
+PARAMETER. Both pass. `python3 test_gimple.py` (248/248),
+`python3 test_module_cache.py` (76/76), and `make check-selfhost` all
+stay green; a from-scratch stdlib dylib rebuild shows 0 skips before
+and after (unchanged, already clean).
+
+Confirmed real occurrence #1 (`Lib/pickletools.py`'s `_genops`) no
+longer hits ANY `LambdaExpr`/bound-method refusal — `MOJO_DEBUG=1` +
+`compile_to_gimple_with_cpp` against the real file shows the
+`LambdaExpr` refusal is gone; `_genops` now fails for a completely
+different, independent reason (a tuple-valued `yield`, tracked
+separately — see `bugs/CODEGEN_generator_function_Lib_pickletools.md`'s
+own 2026-08-20 update). This doc's OWN scope (the `LambdaExpr` gap
+itself) is fully closed for occurrence #1.
+
+**Still open** — NOT closed for confirmed occurrence #2
+(`Tools/c-analyzer/c_common/fsutil.py`'s `iter_files`):
+```python
+get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))
+```
+is a lambda WITH parameters (`*a, **k`), which this fix's `_CPP_
+CALLABLE_CTYPE` category deliberately does not attempt (fixed 0-arg
+signature only — neither confirmed occurrence needed more, and this
+project's own convention is not to generalize past what the real
+corpus needs). Re-verified: `iter_files` is still refused, now with a
+precise "lambda with parameters" message instead of the old generic
+"unsupported expression" one. Even if a parameterized-lambda shape
+were added, this specific occurrence would likely still need the
+separate, deliberately unfixed `bugs/hard/CODEGEN_args_kwargs_
+signature_assumed_forwarding_only.md` gap too (unchanged from this
+doc's original assessment below). Doc kept open — NOT deleted, since
+the LambdaExpr gap is closed for one of its two confirmed occurrences,
+not both. A future session adding parameterized-lambda support (a
+second, still-narrower callable-value category, or generalizing `_CPP_
+CALLABLE_CTYPE` itself) would close this doc for occurrence #2 too,
+modulo the separate args/kwargs-forwarding gap.
+
 ## Status (added 2026-08-07, investigated, NOT attempted — feature-sized)
 
 This doc was referenced (as a dangling cross-reference — "referenced
