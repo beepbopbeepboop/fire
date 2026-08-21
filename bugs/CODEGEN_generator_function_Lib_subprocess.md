@@ -1,5 +1,112 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (updated 2026-08-20, later same session — found + fixed the REAL mechanism behind the reported `Popen__on_error_fd_closer` undeclared-symbol error; a third, distinct code path from both entries below)
+
+The 2026-08-20 entry immediately below this one investigated the same
+reported error shape and could not reproduce it via a real `mojo.py
+build`/absolute-path `compile_to_gimple` call — correctly, as far as it
+went. But the report's suggested repro (`compile_to_gimple(...,
+filename='subprocess.py')`, a **relative** filename) turned out to be
+the accidental key to reproducing it for real: a relative filename
+resolves (via `os.path.abspath`) to `<cwd>/subprocess.py`, and running
+that repro from this repo's own root makes `_is_selfhost_file` (the
+path-based self-hosting gate, `gimple_codegen.py` ~line 33210)
+incorrectly evaluate `True` — enabling `DispatchSolver`'s
+`allow_assume_all_methods` fallback (meant ONLY for this compiler's own
+`Interpreter.execute`-style `getattr(self, f'execute_{...}')` dispatch
+idiom) for an ordinary stdlib file it was never meant to fire for. That
+mislabeling is itself just a testing artifact (a real `mojo.py build`
+or `compile_stdlib.py`-style invocation always passes an absolute path
+to the real file location, so `_is_selfhost_file` is correctly `False`
+for `subprocess.py` in every real build path — confirmed: an isolated
+`compile_to_gimple(..., do_imports=False, filename=<abs path>)` and a
+real `python3 mojo.py build .../Lib/subprocess.py` both produce zero
+`popen_fds_dispatch`/`on_error_fd_closer`-undeclared output).
+
+**But the underlying codegen gap the mislabeling exposed is real and
+distinct from both other entries in this doc**: `DispatchSolver.
+_plan_dispatch_tables` (`gimple_codegen.py` ~line 1018), when
+`allow_assume_all_methods` fires, sweeps every method of the enclosing
+struct (except `__init__`/`execute`) into a planned `FUNC_POINTER`
+dispatch-table struct literal — including, in this repro, `Popen.
+_on_error_fd_closer`, a real `@contextlib.contextmanager`-decorated
+GENERATOR method (subprocess.py:1327). `DispatchTable.emit_table_init`
+then unconditionally emits `._on_error_fd_closer = (void (*)(Popen
+*self))Popen__on_error_fd_closer,` — a struct-initializer field
+referencing the bare, unmangled `Popen__on_error_fd_closer` C symbol as
+a function-pointer VALUE. But a generator method's only real emitted
+callable surface is its `<base>_start/_resume/_value/_destroy`
+coroutine API (`_gen_cpp_generator_unit`); `gen_module`'s Phase 2a
+never emits an ordinary `Popen__on_error_fd_closer` C function for it
+at all — hence "undeclared here (not in a function)" at `-fgimple`
+compile time. This is the SAME root problem as `bugs/CODEGEN_
+generator_function_Lib_glob.md`'s Bug 1 (`_lower_bound_method_value`'s
+fix for `f = self.gen_method`), but in a DIFFERENT code path: a whole-
+program dispatch-table/vtable initializer, not a single bound-method-
+value reference site.
+
+**Fix** (`gimple_codegen.py`): `DispatchSolver.__init__` now accepts a
+`generator_method_api` dict (the caller passes `GimpleGen`'s own
+`self._generator_method_api`, keyed `(struct_name, method_name)` —
+reusing the EXACT registry `_lower_bound_method_value` already
+consults, per this project's "consolidate duplicates" convention rather
+than reimplementing the detection). `_plan_dispatch_tables` now checks,
+for each callee about to be added to a planned table, whether
+`(owner_struct, method_name) in self.generator_method_api`, and if so
+`continue`s past it — dropping just that one callee from the table
+(same shape as the existing `_self_type_unresolved: continue` a few
+lines below, whose own comment already establishes this pattern is
+safe: this whole dispatch-table-inference machinery is a heuristic, and
+— confirmed while tracing this — the table it builds is never actually
+consulted at any real call site in the compiled output (`self.
+_dispatch_tables`/`get_dispatch_tables()` are only read by the typedef-
+emission and table-init-emission passes, never by `emit_dispatch_call`
+or any call-site lowering), so omitting an entry changes no compiled
+program behavior, only the emitted (dead) struct literal's shape.
+`self._dispatch_solver = DispatchSolver(...)` (gen_module, ~line 36815)
+now passes `generator_method_api=self._generator_method_api` — this
+runs well after Milestone C step 3's generator-method-detection pass
+(~line 36195-36265), so the registry is fully populated by the time
+`DispatchSolver.analyze` runs.
+
+**Verification**:
+1. The `filename='subprocess.py'` (relative-path, `_is_selfhost_file`-
+   triggering) repro: before the fix, `popen_fds_dispatch_t`'s table
+   init referenced the undeclared `Popen__on_error_fd_closer` symbol,
+   confirmed via `gcc-mp-15 -fgimple -fsyntax-only` producing the exact
+   reported "undeclared here (not in a function)" error. After the fix,
+   the field is cleanly absent from both the typedef and the table
+   init (both come from the same `DispatchTable.methods`/`struct_
+   fields`, populated together by `add_method`) — `gcc-mp-15 -fgimple
+   -fsyntax-only` now passes with zero errors.
+2. Real corpus: `Lib/subprocess.py` was never blocked by this bug in
+   any real build path to begin with (per the entry below); a fresh
+   `mojo.py build .../Lib/subprocess.py` continues to fail for its own
+   real, already-documented, unrelated reasons (`bugs/hard/CODEGEN_
+   generator_function_symbol_not_module_qualified.md`'s `threading.py`
+   bare-name `walk` collision) — this fix changes nothing about that
+   file's overall build status, as expected.
+3. Regression (ordinary, non-generator case of the SAME dispatch-table
+   mechanism): constructed a synthetic self-hosted-path repro (a struct
+   with two ordinary methods, one generator method, and a `getattr(self,
+   method_name)` dispatch method feeding `allow_assume_all_methods`).
+   After the fix: the planned table/typedef still correctly includes
+   both ordinary methods with their correct signatures; only the
+   generator method is dropped; `gcc-mp-15 -fgimple -fsyntax-only`
+   passes clean. The ordinary case (this compiler's own real use of
+   this mechanism — `Interpreter.execute`'s dispatch idiom in
+   `myinterpreter.py`) is unaffected: `Interpreter` has no generator
+   methods, so this fix is a no-op for it, and `make check-selfhost`
+   stays green.
+4. Quality gate: `test_gimple.py` 248/248, `test_module_cache.py`
+   76/76, `make check-selfhost` clean, and a from-scratch stdlib dylib
+   rebuild produced a byte-identical build log to an unmodified-master
+   baseline build (0 `skip <module>:` lines in both, same 160 lines of
+   output, `diff` clean) — no regression.
+
+Not deleting this doc — `subprocess.py`'s own real blocker (below,
+unaffected by this fix) remains open.
+
 ## Status (updated 2026-08-20 — investigated a specifically-reported `Popen__on_error_fd_closer` undeclared-symbol error; could NOT reproduce against current master; found a real, different, related gap instead)
 
 Investigated a reported error of this exact shape (paired with, and

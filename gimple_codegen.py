@@ -676,9 +676,25 @@ class DispatchSolver:
     """
 
     def __init__(self, struct_field_types: dict, func_return_types: dict,
-                 allow_assume_all_methods: bool = False):
+                 allow_assume_all_methods: bool = False,
+                 generator_method_api: dict | None = None):
         self.struct_field_types = struct_field_types
         self.func_return_types = func_return_types
+        # (struct_name, method_name) -> api dict for every struct method
+        # compiled as a real C++20 coroutine generator (GimpleGen's own
+        # `self._generator_method_api`, Milestone C step 3 — see that
+        # attribute's declaration for the full mechanism). A generator
+        # method's only real callable surface is its `<base>_start/_resume/
+        # _value/_destroy` coroutine API; there is no ordinary
+        # `struct_method_csym`-mangled C function for it at all (gen_module's
+        # Phase 2a skips emitting one). `_plan_dispatch_tables` consults this
+        # to drop such a callee from a planned FUNC_POINTER dispatch table
+        # rather than emitting a struct-initializer field referencing that
+        # never-emitted plain symbol — same detection `_lower_bound_method_
+        # value` already uses for the analogous bare-value-reference case
+        # (`f = self.gen_method`); see that method's own docstring and
+        # bugs/CODEGEN_generator_function_Lib_subprocess.md.
+        self.generator_method_api = generator_method_api or {}
         # Gate for the "assume all methods might be called" fallback in
         # _analyze_getattr_pattern (see that method's own comment and
         # bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md).
@@ -1077,6 +1093,28 @@ class DispatchSolver:
                     # Extract method name from full name
                     # E.g., "Interpreter_execute_Module" → "execute_Module"
                     method_name = self._extract_method_name(callee)
+
+                    # Refuse to add a compiled GENERATOR method to a
+                    # FUNC_POINTER dispatch table (see `generator_method_api`'s
+                    # own docstring on __init__ for the full mechanism/why).
+                    # Emitting it would produce a struct-initializer field
+                    # referencing the bare, unmangled `<Struct>_<method>` C
+                    # symbol as a function-pointer VALUE — but a generator
+                    # method's only real emitted callable surface is its
+                    # `<base>_start/_resume/_value/_destroy` coroutine API,
+                    # so that symbol is never defined, producing a hard GCC
+                    # "'<Struct>_<method>' undeclared here (not in a
+                    # function)" failure at `-fgimple` compile time. Same
+                    # detection/skip-shape as the `_self_type_unresolved`
+                    # continue just below this loop: dropping just this one
+                    # callee from the table is safe (this whole dispatch-
+                    # table-inference machinery is itself a heuristic, and
+                    # this table is never actually consulted at any real
+                    # call site — see get_dispatch_tables' callers — so
+                    # omitting an entry changes no compiled behavior).
+                    _owner_struct = _callee_to_struct.get(callee, '')
+                    if (_owner_struct, method_name) in self.generator_method_api:
+                        continue
 
                     # Infer C signature from function return type and parameter types
                     return_type = self.func_return_types.get(callee, 'int64_t')
@@ -36776,7 +36814,8 @@ class GimpleGen:
         if self.emit_struct_defs:  # Only main module does dispatch solving
             self._dispatch_solver = DispatchSolver(
                 self.struct_field_types, self.func_return_types,
-                allow_assume_all_methods=_is_selfhost_file)
+                allow_assume_all_methods=_is_selfhost_file,
+                generator_method_api=self._generator_method_api)
             all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
             self._dispatch_solver.analyze(all_stmts_for_dispatch)
             self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
