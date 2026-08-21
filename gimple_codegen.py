@@ -25240,6 +25240,22 @@ class GimpleGen:
         # already parsed above), matching `_module_const_int`'s normal
         # same-module `comptime` scoping.
         fields = {}
+        # Register the (still-empty) fields dict under `local` BEFORE
+        # resolving any field's own ctype below, and mutate this same dict
+        # object in place as fields are resolved (instead of building a
+        # temporary dict and assigning it to struct_field_types only at the
+        # end, as this function used to). This is what makes the recursive
+        # bare-struct-field materialization a few lines down cycle-safe: two
+        # structs whose fields reference each other (`struct A: b: B` /
+        # `struct B: a: A`), or a struct referencing itself indirectly,
+        # terminate because the SECOND recursive call's own
+        # "if local in self.struct_field_types: return True" guard at the
+        # top of this function now fires immediately (finding this same,
+        # still-filling-in dict already present) instead of recursing
+        # forever — `_resolve_type`'s callers only need the KEY's presence
+        # to emit a pointer type (`f"{ann} *"`), not a fully-populated dict,
+        # so an in-progress registration is already good enough for them.
+        self.struct_field_types[local] = fields
         for f in sdef.fields:
             if not isinstance(f, VarDecl):
                 continue
@@ -25265,6 +25281,33 @@ class GimpleGen:
                     fields[f.name] = f"{_felem_ct}[{_fn_size}]"
                     self._array_field_sizes.setdefault(local, {})[f.name] = (_felem_ct, _fn_size)
                     continue
+            # A field whose annotation is a BARE capitalized name (no `[`,
+            # no leading `*`, e.g. `inner: Inner` — as opposed to the
+            # List[X]/[X; N] shapes already handled above/below) that names
+            # a real struct defined in the SAME home `module` needs that
+            # struct materialized too, BEFORE resolving this field's own
+            # ctype — otherwise `_imported_field_ctype`
+            # (-> `_resolve_type`) finds it absent from struct_field_types
+            # and silently falls back to the generic `int64_t` default
+            # (root cause of the cross-module nested-struct-field crash:
+            # `Outer.inner: Inner` got typed `int64_t` in an IMPORTING
+            # module whenever nothing else had separately materialized
+            # `Inner` first, producing a DIFFERENT C layout for `Outer`
+            # than the struct's own DEFINING module compiles — any code
+            # that then did `.inner.val` fell through to the fully-dynamic
+            # `_mojo_dispatch_getattr` runtime path on what it treated as
+            # an opaque pointer, i.e. a real `AttributeError`/segfault, not
+            # just a missed optimization). Mirrors the List[X]/[X; N]
+            # transitive-materialization pass below, but must ALSO run
+            # here (not only there) because THIS field's own ctype string
+            # — resolved right below via `_imported_field_ctype` — is what
+            # actually goes into `fields[f.name]`; running the equivalent
+            # logic only in the later pass would be too late to affect it.
+            if (_fann and _fann[0].isupper() and '[' not in _fann
+                    and '.' not in _fann and _fann not in self.struct_field_types
+                    and _fann not in self._IMPORTED_STRUCT_SKIP_BASENAMES
+                    and _TYPE_MAP.get(_fann) is None):
+                self._materialize_imported_struct(module, _fann, _fann)
             fields[f.name] = self._imported_field_ctype(f.type_ann)
         # Carry the struct's real methods along so the signature-registration
         # pass (all_structs_for_methods) resolves their return/param C types
@@ -25279,6 +25322,14 @@ class GimpleGen:
             _methods_for_reg = sdef.methods
         except Exception as e:
             _debug_note(f'cannot resolve method signatures for imported struct {nm}', e)
+        # `fields` was already registered under `local` (same dict object,
+        # mutated in place as each field was resolved above) before this
+        # function started resolving individual field ctypes, specifically
+        # so bare-struct-typed-field recursion could see itself mid-
+        # registration and terminate cycles — see the comment at this
+        # function's `fields = {}` site. Left assigned again here is
+        # redundant (same object, same key) but documents that `fields` is
+        # now considered complete.
         self.struct_field_types[local] = fields
         self._imported_struct_names.add(local)
         _imp_path, _imp_src, _imp_mod = self._parsed_import(module)
