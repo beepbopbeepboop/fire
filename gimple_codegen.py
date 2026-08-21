@@ -38505,7 +38505,34 @@ class GimpleGen:
                     # against it always reads a stale/garbage first field.
                     parts.append(f"  int64_t __mojo_type_id;")
                     if fields:
-                        for field_name, field_type in sorted(fields.items()):
+                        # Iterate in DICT INSERTION order, not sorted() —
+                        # every population site for struct_field_types[name]
+                        # (the main s.fields walk after _merge_struct_
+                        # inheritance around gen_module's Phase 1, the
+                        # reflected-dylib layout-descriptor parse in
+                        # _register_reflected_struct, elaborate_generic_
+                        # struct's field list, and _materialize_imported_
+                        # struct's own sdef.fields walk) inserts fields in
+                        # real declaration/merge order — base fields first,
+                        # own fields after — specifically so a subclass
+                        # pointer cast to its base type (`(Base *)self`, the
+                        # unbound-instance-method call shape) sees identical
+                        # field offsets to a real Base struct, C-struct-
+                        # inheritance style (no vtable in this codegen).
+                        # sorted() here silently alphabetized every such
+                        # struct's fields instead, corrupting that layout
+                        # compatibility for any subclass that adds its own
+                        # field(s) on top of an inherited base (confirmed via
+                        # bugs/hard/CODEGEN_struct_typedef_alphabetical_field
+                        # _order_breaks_inheritance_layout.md's repro — a
+                        # base method invoked through the cast wrote into the
+                        # wrong field entirely, a silent data corruption, not
+                        # a crash). Section 2 below (the AST-`StructDef.
+                        # fields`-driven typedef path) already walks fields
+                        # in this same real order; this makes Section 1
+                        # agree instead of maintaining a second, independently
+                        # -wrong ordering rule.
+                        for field_name, field_type in fields.items():
                             # field_type arrives boxed as int64_t (tuple-unpacked
                             # from dict.items()); an f-string interpolation of it
                             # would lower to mojo_str_from_int (its pointer value
