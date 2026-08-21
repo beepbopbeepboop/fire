@@ -10708,7 +10708,47 @@ class GimpleGen:
         mangled symbol; anything else falls back to _struct_method_csym's
         own unsuffixed-name convention (matches its behavior for any other
         caller that has no candidate list to resolve against).
+
+        Refuses (RuntimeError, the established "fall back to interpreting
+        this module from source" convention — see e.g. the AwaitExpr
+        RuntimeError a few hundred lines up) when `method` is itself a
+        compiled GENERATOR method (registered in
+        self._generator_method_api, Milestone C step 3): a generator
+        method's real callable surface is 4 separate extern "C" functions,
+        `<base>_start/_resume/_value/_destroy` (see
+        _gen_cpp_generator_unit's docstring) — there is no ordinary
+        `struct_method_csym`-mangled C function for it at all (gen_module's
+        Phase 2a skips emitting one, see the `_supported_generator_methods`
+        check there). Before this check, this method computed `mangled`
+        via `_struct_method_csym` exactly as if it named an ordinary
+        method, and unconditionally emitted `static void * _funcptr_
+        {mangled} = (void *){mangled};` (via `_funcptr_builtins_needed`)
+        referencing that never-emitted symbol -- a hard, confusing GCC
+        "'<mangled>' undeclared here (not in a function)" failure at
+        `-fgimple` compile time instead of a clean, honest refusal here.
+        Real-world case: Lib/glob.py's `_GlobberBase.selector` does
+        `return self.select_exists` (glob.py:399), a bare reference to
+        the generator method `select_exists` (glob.py:534, itself `yield`s
+        directly) as a plain VALUE, not a call — see
+        bugs/CODEGEN_generator_function_Lib_glob.md. Even setting the
+        undeclared-symbol crash aside, a `MojoBoundMethod*`'s own calling
+        convention (`mojo_bound_method_call_N`, ONE call returning a
+        single `int64_t`) has no way to represent "returns an iterable
+        generator" at all -- correctly supporting this shape needs a new
+        bound-method-value variant carrying the 4-function coroutine API
+        through to a later call site, not just a declaration fix; out of
+        scope for this narrow refusal.
         """
+        if (struct_name, method) in self._generator_method_api:
+            raise RuntimeError(
+                f"cannot compile module: `self.{method}` on struct "
+                f"{struct_name!r} is a compiled GENERATOR method "
+                "referenced as a plain value (not called here) -- a "
+                "generator method's real callable surface is its "
+                "`<base>_start/_resume/_value/_destroy` C++ coroutine "
+                "API, which a MojoBoundMethod* (single-call, scalar-"
+                "return) value can't represent -- falling back to "
+                "interpreting this module from source instead")
         candidates = self._struct_method_signatures.get((struct_name, method))
         overload_id = ''
         if candidates and len(candidates) == 1:
