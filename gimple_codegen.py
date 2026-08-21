@@ -8187,7 +8187,10 @@ class GimpleGen:
             fname: str
             fname = node.func.name
             _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *'}
-            if fname in _BUILTIN_CTORS:
+            # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
+            # below — `set`/`dict`/`list` are ordinary identifiers a module
+            # could shadow with its own top-level def/import.
+            if fname in _BUILTIN_CTORS and not self._locally_binds_name(fname):
                 return _BUILTIN_CTORS[fname]
             # Scalar builtins, matching the lowering (float()->double, etc.). Without
             # these, [float(i), ...] infers an int element type and nested float
@@ -15681,7 +15684,15 @@ class GimpleGen:
             return self._lower_strided(node, store=False)
         if fname_raw == 'strided_store' and len(node.args) >= 2:
             return self._lower_strided(node, store=True)
-        if fname_raw == 'len'             and node.args:            return self._lower_builtin_len(node)
+        # `_locally_binds_name` gate: `len` is an ordinary identifier a
+        # module could shadow with its own top-level def — same class of
+        # gate as `open`/`filter`/`any`/`all` elsewhere in this file (no
+        # confirmed real-world stdlib instance found for `len` specifically,
+        # but the gate is a single cheap lookup and keeps this dispatch
+        # consistent with every other BUILTIN_VALUE_MAP-adjacent name).
+        if (fname_raw == 'len' and node.args
+                and not self._locally_binds_name('len')):
+            return self._lower_builtin_len(node)
         # ord()/chr() had NO real lowering at all — any call fell through to
         # a declared-but-never-defined variadic stub (`int64_t ord(...);`),
         # an undefined symbol at link time. Found via regex_compile.py's own
@@ -15710,13 +15721,29 @@ class GimpleGen:
         if (fname_raw in ('all', 'any') and len(node.args) == 1
                 and not self._locally_binds_name(fname_raw)):
             return self._lower_builtin_all_any(fname_raw, node)
-        if fname_raw == 'dir':                                       return self._lower_builtin_dir(node)
-        if fname_raw == 'sorted'          and node.args:            return self._lower_builtin_sorted(node)
-        if fname_raw == 'zip'             and len(node.args) > 2:  return self._lower_builtin_zip_n(node)
+        # `_locally_binds_name` gates below: `dir`/`sorted`/`zip`/`set`/
+        # `frozenset`/`dict`/`list`/`tuple` are all ordinary identifiers a
+        # module could shadow with its own top-level def/import — same class
+        # of gate as `open`/`filter`/`any`/`all`/`len` elsewhere in this
+        # file. `__import__` is left unguarded: it is not a plausible name
+        # for real Python source to redefine as an ordinary function.
+        if fname_raw == 'dir' and not self._locally_binds_name('dir'):
+            return self._lower_builtin_dir(node)
+        if (fname_raw == 'sorted' and node.args
+                and not self._locally_binds_name('sorted')):
+            return self._lower_builtin_sorted(node)
+        if (fname_raw == 'zip' and len(node.args) > 2
+                and not self._locally_binds_name('zip')):
+            return self._lower_builtin_zip_n(node)
         if fname_raw == '__import__':                                return self._lower_builtin_import(node)
-        if fname_raw in ('set', 'frozenset'):                        return self._lower_builtin_set(node)
-        if fname_raw == 'dict':                                      return self._lower_builtin_dict(node)
-        if fname_raw in ('list', 'tuple') and len(node.args) <= 1:  return self._lower_builtin_list(node)
+        if (fname_raw in ('set', 'frozenset')
+                and not self._locally_binds_name(fname_raw)):
+            return self._lower_builtin_set(node)
+        if fname_raw == 'dict' and not self._locally_binds_name('dict'):
+            return self._lower_builtin_dict(node)
+        if (fname_raw in ('list', 'tuple') and len(node.args) <= 1
+                and not self._locally_binds_name(fname_raw)):
+            return self._lower_builtin_list(node)
         if fname_raw == 'open'            and not self._locally_binds_name('open'):
             return self._lower_builtin_open(node)
         if fname_raw == 'Self':                                      return self._lower_self_ctor(node)
@@ -15748,7 +15775,14 @@ class GimpleGen:
         # and %-formatting already use; this just routes the bare builtin
         # through it too. (char*/unknown-pointer args still reach mojo_str via
         # _stringify_value's fallthrough, unchanged.)
-        if fname_raw == 'str' and len(node.args) == 1:
+        # `_locally_binds_name` gate: `str` is an ordinary identifier a
+        # module can shadow with its own top-level def (e.g. Lib/locale.py's
+        # own `def str(val):`) — confirmed via a real shadowing repro
+        # (without this gate the call was routed to `mojo_str_from_int`
+        # instead of the user's own function). Same class of bug/fix as the
+        # `open`/`filter`/`enumerate` gates elsewhere in this file.
+        if (fname_raw == 'str' and len(node.args) == 1
+                and not self._locally_binds_name('str')):
             et, ev = self.lower_expr(node.args[0])
             # A bare True/False literal lowers with ctype 'int' (not '_Bool' —
             # _lower_BoolLiteral does this deliberately; other sites depend on
@@ -15770,7 +15804,8 @@ class GimpleGen:
         # `str(label, "ascii")` and encodings/punycode.py's `str(text[:pos],
         # "ascii", errors)`. `encoding`/`errors` are still evaluated (for
         # any side effects a real decode call would have), just discarded.
-        if fname_raw == 'str' and len(node.args) in (2, 3):
+        if (fname_raw == 'str' and len(node.args) in (2, 3)
+                and not self._locally_binds_name('str')):
             et, ev = self.lower_expr(node.args[0])
             for _extra in node.args[1:]:
                 self.lower_expr(_extra)
@@ -15809,7 +15844,8 @@ class GimpleGen:
         # rather than always routing through the generic opaque-value
         # fallback (mojo_hash, which can't tell a small int from a real
         # string apart from a raw int64_t without a static type hint).
-        if fname_raw == 'hash' and len(node.args) == 1:
+        if (fname_raw == 'hash' and len(node.args) == 1
+                and not self._locally_binds_name('hash')):
             ht, hv = self.lower_expr(node.args[0])
             if ht in ('int', 'int64_t', '_Bool'):
                 return 'int64_t', self._to_int64(ht, hv)
@@ -15829,7 +15865,8 @@ class GimpleGen:
         # _elem_types" pattern for repr(). Found via Tools/lockbench/
         # lockbench.py's `sum(values)`/`sum(x**2 for x in values)` on a
         # list of floats.
-        if fname_raw == 'sum' and len(node.args) == 1:
+        if (fname_raw == 'sum' and len(node.args) == 1
+                and not self._locally_binds_name('sum')):
             at, av = self.lower_expr(node.args[0])
             if self._elem_types.get(av) == 'double':
                 acast = av if at == 'void *' else self._new_val('void *', f'(void *){av}')
@@ -15843,7 +15880,15 @@ class GimpleGen:
             'enumerate': ('void *',  'mojo_enumerate'),
             'hasattr':   ('int',     'mojo_hasattr'),
         }
-        if fname_raw in _SIMPLE_BUILTINS and node.args:
+        # `_locally_binds_name` gate: `enumerate`/`hasattr`/`str` are all
+        # ordinary identifiers a module can shadow with its own top-level def
+        # (e.g. Lib/threading.py's `def enumerate():`). Without this, a
+        # locally-defined `enumerate` was routed straight to the builtin
+        # `mojo_enumerate` runtime helper instead of the user's own function
+        # (confirmed via a real shadowing repro — same class of bug as the
+        # `open`/`filter` gates elsewhere in this file).
+        if (fname_raw in _SIMPLE_BUILTINS and node.args
+                and not self._locally_binds_name(fname_raw)):
             rt, fn = _SIMPLE_BUILTINS[fname_raw]
             pairs = [self.lower_expr(a) for a in node.args]
             return rt, self._call_expr(rt, fn, pairs)
@@ -16883,8 +16928,39 @@ class GimpleGen:
 
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         """Final dispatch for user-defined and C stdlib functions."""
+        # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
+        # filter, enumerate, str, len, sorted, ...) are all ordinary
+        # identifiers a module can legally shadow with its own top-level
+        # def/import (e.g. Lib/fnmatch.py's `def filter(names, pat):`,
+        # Lib/tokenize.py's `def open(filename):`). Every per-branch early
+        # return above this point in `_lower_call` already special-cases the
+        # handful of names it recognizes structurally (some gated on this
+        # same check, some not — see each one's own comment), but ANY
+        # BUILTIN_VALUE_MAP name that falls all the way through to this
+        # final, generic dispatch (either because it has no dedicated early
+        # branch at all — `filter`/`map`/`print`/`range`/`max`/`min`/... — or
+        # because its own early branch's gate correctly declined to intercept
+        # a locally-bound name and let it fall through) must NOT be re-routed
+        # to the builtin runtime symbol here: `self.BUILTIN_VALUE_MAP.get(
+        # fname_raw, self._func_csym(fname_raw))`'s `.get()` unconditionally
+        # preferred the map entry whenever `fname_raw` was a key, completely
+        # ignoring whether THIS module shadows it — e.g. `open`'s own
+        # dedicated early-return gate (a few hundred lines up) correctly
+        # skips `_lower_builtin_open` when shadowed, but the call then fell
+        # through everything else unmatched and landed HERE, where `'open' in
+        # BUILTIN_VALUE_MAP` won regardless, still emitting a call to
+        # `mojo_open_file` instead of the user's own `_func_csym('open')`
+        # symbol (confirmed via a real shadowing repro: `fn open(x: Int) ->
+        # Int: ...` compiled to `mojo_open_0c85c9` but every call site still
+        # read `mojo_open_file(...)`). `_func_csym` already produces the
+        # exact right symbol for a shadowing definition (same `_safe_name` +
+        # overload-suffix scheme the definition itself used), so route
+        # straight to it, bypassing BUILTIN_VALUE_MAP entirely, whenever this
+        # module locally binds the name.
+        if fname_raw in self.BUILTIN_VALUE_MAP and self._locally_binds_name(fname_raw):
+            fname = self._func_csym(fname_raw)
         # C reserved function renaming
-        if (fname_raw in _C_RESERVED_FUNCS and fname_raw not in self.func_return_types
+        elif (fname_raw in _C_RESERVED_FUNCS and fname_raw not in self.func_return_types
                 and fname_raw not in _FORCE_RENAME_RESERVED
                 and fname_raw not in self.imported_symbols):
             fname = self.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
@@ -27260,18 +27336,30 @@ class GimpleGen:
                 # bare undeclared C++ calls (a real failure: pprint.py's
                 # `len(object)`, argparse.py's `range(...)`, zipapp.py's
                 # `str(...)`, subprocess.py's `hasattr(...)`).
-                if fname == 'len' and len(e.args) == 1:
+                # `_locally_binds_name` gate: same builtin-shadowing class of
+                # bug as the ordinary GIMPLE `_lower_call` path's `open`/
+                # `filter`/`any`/`all`/`len`/`str` gates above — a module can
+                # define its own top-level `len`/`str`/`repr`/`hasattr`, and
+                # this generator-body scalar emitter must not misroute a call
+                # to one of those local functions to the fixed runtime
+                # helper. Falls through to the ordinary module-level-function-
+                # call handling further down when shadowed.
+                if (fname == 'len' and len(e.args) == 1
+                        and not self._locally_binds_name('len')):
                     # mojo_len takes the boxed int64_t representation of a
                     # container/string pointer — exactly what this emitter's
                     # locals hold.
                     return f"mojo_len((int64_t)({args[0]}))"
-                if fname == 'str' and len(e.args) == 1:
+                if (fname == 'str' and len(e.args) == 1
+                        and not self._locally_binds_name('str')):
                     return f"mojo_str((void *)({args[0]}))"
-                if fname == 'repr' and len(e.args) == 1:
+                if (fname == 'repr' and len(e.args) == 1
+                        and not self._locally_binds_name('repr')):
                     return f"mojo_repr_str((char *)({args[0]}))"
-                if fname == 'hasattr' and len(e.args) == 2:
+                if (fname == 'hasattr' and len(e.args) == 2
+                        and not self._locally_binds_name('hasattr')):
                     return f"mojo_hasattr((int)({args[0]}), {args[1]})"
-                if fname == 'getattr':
+                if fname == 'getattr' and not self._locally_binds_name('getattr'):
                     # `getattr(obj, name_expr)` — dynamic, runtime-string-
                     # keyed attribute lookup (save_env.py's `resource_info`:
                     # `getattr(self, get_name)`, where `get_name` is a
@@ -27299,7 +27387,7 @@ class GimpleGen:
                         "name is not supported in a compiled generator/"
                         "coroutine body (no runtime attribute-reflection "
                         "table exists in this codegen)")
-                if fname == 'range':
+                if fname == 'range' and not self._locally_binds_name('range'):
                     # range(stop) / range(start, stop) / range(start, stop,
                     # step) → the runtime's range object (iterated by the
                     # same `for (auto x : ...)` range-for the emitter already
@@ -27316,7 +27404,7 @@ class GimpleGen:
                     # GIMPLE path uses (type ids are the boxed __mojo_type_id
                     # of a struct pointer or a literal 0/1/2... tag).
                     return f"(({args[0]}) != 0)"
-                if fname == 'enumerate':
+                if fname == 'enumerate' and not self._locally_binds_name('enumerate'):
                     # enumerate(iterable) → pair each element with its index.
                     # Emit the underlying iterable; the consumer's loop
                     # unpacks (i, x) via the existing tuple-unpack path.
