@@ -1,5 +1,94 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-20 — a NEW blocker found+fixed: bound-value reference to a generator method crashed with an undeclared-symbol GCC error)
+
+Re-verified against current master (`f0bdc29`). A fresh full build
+(`python3 mojo.py build .../Lib/glob.py`, transitive `do_imports=True`)
+now surfaces a *different* first blocker than the 2026-08-10 entry
+below documented (that entry's `translate_584a43` arity bug and the
+`_join_abb124` return-type bug are apparently both still latent further
+down the file, but never reached — this new bug fires earlier):
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/fnmatch.py:3631:61: error: '_GlobberBase_select_exists' undeclared here (not in a function); did you mean '_GlobberBase_lexists'?
+```
+(the `fnmatch.py` attribution is a `#line`-directive artifact of the
+whole-program `do_imports=True` concatenation, same caveat this doc's
+own history already documents elsewhere — the real offending statement
+is `_GlobberBase.selector`'s `return self.select_exists`, glob.py:399.)
+
+**Root cause**: `select_exists` (glob.py:534, `def select_exists(self,
+path, exists=False): ... yield path`) is itself a real generator
+method, compiled via the C++20-coroutine path (Milestone C step 3,
+`self._generator_method_api`) — its actual callable surface is 4
+`extern "C"` functions, `_mojogen_GlobberBase_select_exists_start/
+_resume/_value/_destroy` (see `_gen_cpp_generator_unit`'s docstring).
+`selector`'s `return self.select_exists` is a bare bound-METHOD
+reference used as a plain VALUE (not called) — lowered by
+`_lower_bound_method_value` (gimple_codegen.py), which — before this
+fix — treated EVERY method the same way regardless of whether it was a
+generator: it computed `mangled = self._struct_method_csym(struct_name,
+method, overload_id)` (`'_GlobberBase_select_exists'`) and
+unconditionally emitted a `static void * _funcptr_{mangled} = (void
+*){mangled};` referencing that name as if it were an ordinary compiled
+C function. Since `select_exists` compiles via the coroutine path
+instead, gen_module's Phase 2a skips emitting any ordinary function
+named `_GlobberBase_select_exists` at all (see the `_supported_
+generator_methods` skip-check there) — so the `_funcptr_...` static's
+own initializer referenced a symbol that plain never exists, producing
+GCC's "undeclared here (not in a function)" at `-fgimple` compile time.
+This is a generic `gimple_codegen.py` bug (the same mechanism would fire
+for ANY bare `self.<generator_method>` value-reference in any file),
+not glob.py-specific.
+
+**Fix**: `_lower_bound_method_value` now checks `(struct_name, method)
+in self._generator_method_api` up front and refuses cleanly with a
+`RuntimeError` (the project's established "fall back to interpreting
+this module from source" convention, matching e.g. the `AwaitExpr`
+refusal a few hundred lines up in the same file) instead of emitting
+the broken forward reference. This is NOT a full fix for the underlying
+shape — a `MojoBoundMethod*`'s calling convention
+(`mojo_bound_method_call_N`: one call, one scalar `int64_t` return) has
+no way to represent "returns an iterable generator" at all; correctly
+supporting `return self.<generator_method>` followed by a later
+`for x in selector(...)` call would need a NEW bound-method-value
+variant that carries the 4-function coroutine API through to the call
+site — a real feature addition, out of scope for this narrow refusal.
+Declined here deliberately (feature-sized, not a bug fix).
+
+Verified: isolated compile
+(`compile_to_gimple(open('glob.py').read(), do_imports=False,
+filename=...)`) previously reached `_lower_bound_method_value` and
+returned a `'char *'`/temp pair that later produced GCC's undeclared-
+symbol error when fed through `gcc-mp-15 -fgimple -fsyntax-only`; now
+raises a clear, immediate
+`RuntimeError: cannot compile module: 'self.select_exists' on struct
+'_GlobberBase' is a compiled GENERATOR method referenced as a plain
+value ...` from Python, with ZERO generated C referencing the
+undeclared symbol. A real `mojo.py build` of glob.py confirms the exact
+GCC "'_GlobberBase_select_exists' undeclared" error is gone (0
+occurrences in a fresh build log; the build still fails, now via the
+honest `RuntimeError` instead). The existing `bound_method_as_value`
+regression test in `test_gimple.py` (an ordinary, non-generator bound
+method used as a value, then called) still passes — confirms the
+ordinary case is unaffected by the new generator-method guard.
+
+Full mandatory gate (CLAUDE.md) re-run after this fix:
+- `python3 test_gimple.py`: 248 passed, 0 failed
+- `python3 test_module_cache.py`: 76 passed, 0 failed
+- `make check-selfhost`: clean (mojo.py compiling its own source)
+- From-scratch `build/libmojostdlib.dylib` rebuild: 0 `skip <module>:` lines
+- `python3 compile_stdlib.py`: 664/664 passed, 0 unexpected
+
+**glob.py itself still does not build.** The `translate_584a43`
+keyword-arg-arity gap (line 354, described below, part of the already-
+tracked `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_
+modules.md` architectural family) is still open and unfixed — not
+reached by this pass's fresh build (the `select_exists` bug above fired
+first and is fatal to the whole `do_imports=True` compile), so it
+couldn't be independently re-confirmed this pass, but nothing in this
+fix touches that code path.
+
 ## Status (updated 2026-08-10, later same day — 2 of 3 remaining blockers FIXED; 1 precisely diagnosed, not fixed)
 
 Re-verified against current master. Two real, previously-undiagnosed
