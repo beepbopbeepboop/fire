@@ -17406,10 +17406,44 @@ class GimpleGen:
         kw = dict(kwargs or [])
         if chosen.get('has_varargs'):
             pre_n = chosen['pre_star_count']
-            out = [self.lower_expr(a) for a in args[:pre_n]]
+            param_names = chosen['param_names']
+            # Pre-star params bind positionally first (an actual call-site
+            # positional arg wins), then by keyword name, then their real
+            # default. The old code only ever consulted `args[:pre_n]` —
+            # real Python allows a pre-star param to be passed by KEYWORD
+            # too (`def __init__(self, x=None, *args, **kwargs)` called as
+            # `f(x=1)`), and when it was, this loop produced NO entry for
+            # it at all (not even a placeholder), desyncing the whole
+            # trailing arg list by one slot and dropping the value outright
+            # — e.g. Lib/calendar.py's `_CLIDemoCalendar(highlight_day=today)`
+            # against `def __init__(self, highlight_day=None, *args,
+            # **kwargs)` silently lost `today` and emitted one argument too
+            # few ("too few arguments ... expected 4, have 3").
+            out = []
+            for _i in range(pre_n):
+                if _i < len(args):
+                    out.append(self.lower_expr(args[_i]))
+                    continue
+                _pname = param_names[_i] if _i < len(param_names) else None
+                if _pname is not None and _pname in kw:
+                    out.append(self.lower_expr(kw.pop(_pname)))
+                    continue
+                _dflt = (defaults or {}).get(_pname) if _pname else None
+                out.append(self._default_expr_to_pair(_dflt))
             out.append(self._lower_varargs_pack(args[pre_n:]))
-            for pname in chosen['param_names'][pre_n:]:
-                out.append(self.lower_expr(kw[pname]) if pname in kw else ('int', '0'))
+            # Post-star params are necessarily keyword-only (Python/Mojo
+            # syntax). A `**kwargs` slot among them is a real MojoDict*
+            # param — pack every keyword arg left unconsumed by the
+            # pre-star binding above and by other named post-star params
+            # into it (mirrors the non-varargs branch below), instead of
+            # always leaving it null.
+            for pname in param_names[pre_n:]:
+                if pname.startswith('**'):
+                    continue
+                out.append(self.lower_expr(kw.pop(pname)) if pname in kw else ('int', '0'))
+            if any(pn.startswith('**') for pn in param_names[pre_n:]):
+                out.append(('MojoDict *', self._pack_kwargs_dict(
+                    {_kn: self.lower_expr(_kv) for _kn, _kv in kw.items()})))
             return out
         out = [self.lower_expr(a) for a in args]
         # A `**kwargs` parameter is a concrete `MojoDict *` (see

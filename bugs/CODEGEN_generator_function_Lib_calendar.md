@@ -1,5 +1,115 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-20 — `_CLIDemoCalendar___init__` "too few arguments" arity bug FIXED; file still blocked by other, separate, already-documented gaps)
+
+**Fixed**: `cal = _CLIDemoCalendar(highlight_day=today)` (line 904) produced
+`error: too few arguments to function '_CLIDemoCalendar___init__'; expected
+4, have 3` (isolated `compile_to_gimple(..., do_imports=False)` +
+`gcc -fgimple -fsyntax-only`). `_CLIDemoCalendar.__init__(self,
+highlight_day=None, *args, **kwargs)` is a LOCALLY-defined `__init__` (not
+inherited — an earlier read of the task that assumed inheritance was
+wrong), called with a single KEYWORD argument and no positional args at
+all, against a `*args`/`**kwargs`-taking signature.
+
+Root cause, in `gimple_codegen.py`'s `_build_call_args_for_candidate`
+(struct-constructor/method overload-call arg builder, used by
+`_lower_struct_constructor` via `_resolve_overload`'s chosen candidate):
+the `chosen.get('has_varargs')` branch (constructor/method has a `*args`
+pack param) built the params BEFORE the pack ("pre-star" params) with
+`out = [self.lower_expr(a) for a in args[:pre_n]]` — POSITIONAL args
+ONLY, never consulting the call's keyword arguments or the params' real
+defaults at all. Real Python allows a pre-star param to be passed by
+keyword too (`def f(x=None, *args, **kwargs)` called as `f(x=1)` is
+completely ordinary Python) — when it was, this loop produced **no
+entry whatsoever** for that param (not even a placeholder `0`), silently
+dropping the value and shrinking the whole trailing arg list by one slot
+system-wide, not just miscoercing it. For `_CLIDemoCalendar(highlight_day=
+today)`: `pre_n=1` (`highlight_day` is the one pre-star param), `args=[]`
+(no positional args — the call is keyword-only), so the pre-star loop
+appended nothing at all; `today` was never emitted anywhere, and the
+final call was `(self, <empty-args-pack>, <kwargs-slot>)` — 3 arguments
+against the real 4-argument C signature `(self, highlight_day, args,
+kwargs)`. (Separately, and fixed in the same pass: the post-star loop's
+`**kwargs` slot handling in that same branch only ever checked whether
+the literal string `'**kwargs'` was a key of the call's keyword-arg dict
+— never true, since call sites use their real keyword names, not that
+sentinel — so any keyword args that didn't bind to a named parameter
+were silently dropped instead of being packed into the real `**kwargs`
+dict the non-varargs sibling branch already does via `_pack_kwargs_dict`.)
+
+Fix: the pre-star loop now tries, per param, (1) the positional arg at
+that index if the call supplied one, else (2) the call's keyword
+argument by that param's real name (popped from the working `kw` dict so
+it isn't double-counted later), else (3) the param's real declared
+default via the existing `_default_expr_to_pair` helper (already used
+elsewhere in this file for the identical "pad a call that omitted a
+defaulted trailing param" pattern — reused here rather than
+re-implementing the same literal-default-to-C-pair logic a third time).
+The post-star loop's `**kwargs` handling was fixed to match the
+non-varargs branch: after pre-star and named post-star params consume
+their matching keyword args (via `.pop`), any keyword args still left
+unconsumed in `kw` are packed into a real `MojoDict *` via
+`_pack_kwargs_dict` for the `**kwargs` slot, instead of always leaving it
+null.
+
+**Verification**:
+- Isolated compile of the real `Lib/calendar.py` (`compile_to_gimple(...,
+  do_imports=False)` + `gcc -fgimple -fsyntax-only -I runtime`): the
+  `_CLIDemoCalendar___init__` arity error is gone; the file now produces
+  **zero** gcc errors on this isolated-compile path (previously this one
+  error was the only one surfaced at this compile mode — the many other
+  errors this doc documents below only show up in the whole-program
+  `do_imports=True` build, which pulls in the huge transitive import
+  closure; not re-attempted here, out of scope for this narrow fix).
+- Minimal standalone repro, compiled AND RUN end-to-end (`driver.
+  compile_program`, real `gcc -fgimple` compile + link against the real
+  stdlib dylib + execute the binary, not just a syntax check): a base
+  struct `ZQBaseA.__init__(self, x=100, y=200, *args, **kwargs)`, a
+  subclass `ZQSubA(ZQBaseA)` with **no `__init__` of its own** (genuinely
+  inherited, matching this bug's original triggering shape) —
+  `ZQSubA(x=42)` produced `a=42, b=200, c=0` (the keyword-bound pre-star
+  param got its real value, the other pre-star param and the ordinary
+  field both kept their real declared/hardcoded defaults) and `ZQSubA()`
+  produced `a=100, b=200` (both real defaults, not zeroed) — confirmed
+  ALL fields correct, not just "compiles". (A DIFFERENT repro shape where
+  the SUBCLASS itself declares a brand-new field — e.g. `self.d = 999` —
+  hit a separate, PRE-EXISTING, unrelated struct-layout bug: the
+  generated C `struct` for such a subclass reorders/mistypes the
+  inherited fields relative to the base struct's own layout, e.g. `int64_t
+  a` becoming a 4-byte `int a` and the base's `c` field vanishing
+  entirely, corrupting any `(Base *)self`-cast write. Confirmed
+  bit-for-bit identical on the unpatched baseline tree — NOT a regression
+  from this fix, not investigated further here, out of scope for this
+  narrow arity fix. Real `calendar.py`'s own `_CLIDemoCalendar` struct
+  shows the same symptom, e.g. phantom `int setfirstweekday`/`int
+  formatyearpage` fields from an unrelated dynamic-attribute scan.)
+
+**Quality gate** (CLAUDE.md mandatory gate): `python3 test_gimple.py`
+(248 passed, 0 failed), `python3 test_module_cache.py` (76 passed, 0
+failed), `make check-selfhost` (clean: "self-host compiles + links clean
+(mojo.py compiling mojo.py)", 1 passed / 0 failed). From-scratch stdlib
+dylib rebuild (`rm -f build/libmojostdlib.dylib` +
+`build_stdlib_dylib.build_stdlib(jobs=8)`), compared against a baseline
+rebuild on the pre-fix tree (baseline captured by checking out
+`gimple_codegen.py` at the pre-fix commit `f0bdc29` in-place inside this
+same worktree, building, then restoring the fixed file — NOT `git
+stash`, per this session's explicit instruction to avoid the shared
+`refs/stash` given other agents may be concurrently active in this
+repo's object store): **0 skip lines before, 0 skip lines after**. Also
+ran `python3 compile_stdlib.py -j8` before/after: **664/664 passed, 0
+failed, both before and after** (this repo's own stdlib corpus doesn't
+happen to exercise the specific "keyword-only call against a
+pre-star-named param on a `*args`-taking struct `__init__`" shape this
+bug required, so no count change either way — expected, not a red flag,
+given the fix is a strict superset of the old behavior for every other
+shape).
+
+**calendar.py as a whole still does not build** (whole-program
+`do_imports=True`) — the remaining blockers are exactly the ones already
+documented below (the separate generator/enumerate/itertools gaps), plus
+the pre-existing unrelated struct-inheritance-layout bug noted above for
+subclasses that add their own new fields. Doc kept open.
+
 ## Status (updated 2026-08-18, later same day — `itermonthdays4`'s NESTED-tuple-`enumerate` target FIXED; file still blocked by the other, separate, already-documented gaps)
 
 **Fixed**: `itermonthdays4`'s `for i, (y, m, d) in
