@@ -5580,6 +5580,21 @@ class GimpleGen:
                     temp_gen._param_usage_scan_cache = self._param_usage_scan_cache
                     temp_gen._extra_search_paths = self._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                     temp_gen.func_return_types = self.func_return_types  # share across gens
+                    # share: `self._compiled_modules`-based dedup (line above,
+                    # `_compiled_modules`) means a module can be Pass1b-scanned
+                    # exactly ONCE, in whichever temp_gen happens to compile it
+                    # first — a later sibling/ancestor module that also imports
+                    # the same (already-compiled, dedup-skipped) class and calls
+                    # one of its @staticmethod/@classmethod methods would find
+                    # the mangled name in the (correctly, globally-shared)
+                    # `func_return_types` above but NOT in a fresh, per-temp_gen
+                    # `_static_methods`/`_classmethod_names` — silently
+                    # mis-classifying a real static/classmethod call at the
+                    # call-site gate in `_lower_call` (~line 13020). Must be
+                    # shared the same way `func_return_types` is, not left to
+                    # each temp_gen's own disposable copy.
+                    temp_gen._static_methods = self._static_methods
+                    temp_gen._classmethod_names = self._classmethod_names
                     temp_gen._sub_toplevels = self._sub_toplevels  # share the ordered list of sub-toplevels
                     temp_gen._module_globals = self._module_globals  # share module globals tracking
                     temp_gen._module_global_inits = self._module_global_inits  # share global inits
@@ -13060,11 +13075,31 @@ class GimpleGen:
             # call arity matches the definition.
             for _kn, _kexpr in (getattr(node, 'kwargs', None) or []):
                 actual_args.append(self.lower_expr(_kexpr))
-            # @staticmethod methods take no implicit cls arg
-            if bare_mangled in self._static_methods:
-                arg_pairs = actual_args
-            else:
+            # Only a REAL classmethod (`self._classmethod_names`, populated
+            # from an explicit `@classmethod` decorator or the two dunders
+            # Python makes implicit classmethods) gets the class-ref value
+            # implicitly prepended as `cls`. This call-site shape
+            # (`IdentExpr(ClassName).method(args)`) also covers the common
+            # unbound-instance-method idiom used for pre-`super()`
+            # cooperative-inheritance dispatch — e.g.
+            # `Mailbox.__init__(self, path, factory, create)` (real code,
+            # Lib/mailbox.py:634) or `IPv4Address.__eq__(self, other)` (real
+            # code, Lib/ipaddress.py:1435) — where `method` is an ORDINARY
+            # instance method and the caller is REQUIRED by Python semantics
+            # to already pass `self` explicitly as `actual_args[0]`.
+            # Unconditionally prepending `(ot, ov)` for every non-static
+            # method (the historical behavior) double-counted `self` in that
+            # case, producing a call with one extra argument ("too many
+            # arguments to function ..."). `self._static_methods` no longer
+            # needs an explicit branch here: a real staticmethod is never in
+            # `_classmethod_names` either (the two sets are populated by
+            # mutually-exclusive checks — see their construction beside
+            # Pass 1b), so it already falls into the `else` (no-prepend)
+            # branch, same end result as before for that case.
+            if bare_mangled in self._classmethod_names:
                 arg_pairs = [(ot, ov)] + actual_args
+            else:
+                arg_pairs = actual_args
             # A call that omits a trailing DEFAULTED parameter (e.g.
             # `P.call(func)` where `P.call(func, args=None)`) must still pass
             # the full arity — P_call's C signature expects every param. Fill
