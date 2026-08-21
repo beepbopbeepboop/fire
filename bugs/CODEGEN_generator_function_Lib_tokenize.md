@@ -1,5 +1,117 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (updated 2026-08-20)
+
+The `any` half of the "`any`/`perror` name collisions" blocker (the
+`perror` half was fixed 2026-08-18, see below) is now ALSO FIXED. Three
+separate root causes, all found and fixed in `gimple_codegen.py` /
+`runtime/mojo_runtime.{h,c}`:
+
+1. **Call-site dispatch had no shadowing gate.** `tokenize.py` defines
+   its own top-level `def any(*choices): return group(*choices) + '*'`
+   (line 61), called with exactly 1 argument at line 68
+   (`Ignore = Whitespace + any(r'\\\r?\n' + Whitespace) + maybe(Comment)`).
+   The `fname_raw in ('all', 'any') and len(node.args) == 1` dispatch
+   check (`_lower_named_call`, just above the pre-existing `open` gate)
+   routed this straight to the builtin `_lower_builtin_all_any` instead
+   of the user's own function — exactly the same class of bug already
+   fixed for `open` (see the `_locally_binds_name` mechanism). Fixed by
+   adding the identical `and not self._locally_binds_name(fname_raw)`
+   gate to the `all`/`any` dispatch check.
+
+2. **`_quick_type`'s return-type heuristic had the same gap.** The
+   `_BUILTIN_SCALARS` table (`isinstance`/`all`/`any` → `_Bool`) used
+   during return-type inference had no shadowing check either — a call
+   to the LOCAL `any` (which really returns `char *`) quick-typed to
+   `_Bool`, so `Whitespace + any(...) + maybe(...)`'s `+` joined
+   `char *` with `_Bool`, producing the reported line-124 "invalid use
+   of void expression". Fixed with the same `_locally_binds_name` gate.
+
+3. **The actual C-level symbol collision**: `runtime/mojo_runtime.h`/
+   `.c` declared and defined a genuinely dead, unreferenced `int any(void
+   *iterable)` — grep-confirmed nothing in this codebase ever calls it
+   (the real `any()`/`all()` builtin dispatch has always gone through
+   `mojo_list_any`/`mojo_list_all` instead, per `_lower_builtin_all_any`).
+   Being unprefixed (unlike every other runtime export, which uses the
+   `mojo_` prefix precisely to avoid this), it collided at the C level
+   with `tokenize.py`'s own compiled `any` function: since `any(*choices)`
+   is variadic, its overload-mangling suffix is empty (`_overload_suffix`
+   returns `''` for a `...`-shaped signature) and it's referenced from
+   within its own module (empty qualifier too), so `_func_csym('any')`
+   legitimately collapses to the literal bare name `any` — directly
+   colliding with the runtime's dead declaration/definition
+   ("conflicting types for 'any'; have 'char *(MojoList *)'"). Removed
+   the dead runtime symbol entirely (both the `mojo_runtime.h` decl and
+   the `mojo_runtime.c` definition) rather than re-guarding it, since it
+   was never called by anything.
+
+   A 4th, related fix was needed to get a fully clean isolated compile:
+   `_lower_UnaryOp`'s spread-detection (`*iterable` in a call/list
+   context) only recognized `MojoList *`/`MojoDict *`/`MojoSet *` as
+   spread-pass-through types, not the generic `void *` that
+   `map()`/`filter()`/`zip()` return in C (`mojo_map`: `void
+   *mojo_map(void *func, void *iterable) { return iterable; }`). Real:
+   `Special = group(*map(re.escape, sorted(EXACT_TOKEN_TYPES,
+   reverse=True)))` (line 124) — `*map(...)` fell through to the
+   "pointer dereference" branch, emitting a literal `*_t211` on a
+   `void *` value (always invalid C, never a case a real dereference
+   could have produced valid output for regardless of the cast applied
+   afterward — this was dead/broken for every caller). Fixed by adding
+   `'void *'` to the recognized spread-pass-through types.
+
+   **NOT fixed, found but out of scope**: even after all 4 fixes,
+   `group(*map(...))`'s SEMANTICS are still wrong — `_emit_call`'s
+   general `param_types[-1] == '...'` vararg-packing (and the sibling
+   `_pack_vararg_trailing_params`) unconditionally treats every element
+   of `arg_pairs` as a scalar to `mojo_list_append_int`-pack into a
+   fresh list, with no awareness that a single already-`MojoList *`/
+   `void *`-typed spread argument should be passed through AS the
+   vararg list, not wrapped as one more element of a new one. Confirmed
+   with an isolated repro
+   (`def group(*choices): ...; group(*parts)` where `parts` is a real
+   list) — `parts` gets appended as a single raw-pointer-cast-to-int64
+   element into a brand new list, which `group` then receives instead
+   of its real elements. Also confirmed a second, distinct instance of
+   the SAME missing-type-awareness bug: a literal (non-spread) call
+   like `any("cat")` into a `*choices`-vararg function packs the `char
+   *` argument via `mojo_list_append_int` unconditionally, corrupting
+   it (verified end-to-end: `print(any("cat"))` printed the string's
+   raw pointer value as a decimal number, not `"(cat)"`). Both are
+   pre-existing (present before this session's fixes; the void* passthrough
+   fix above only stopped a REAL COMPILE ERROR, it didn't touch this
+   packing logic) and orthogonal to the `any`/`all` builtin-shadowing
+   class of bug this pass targeted — general vararg-argument packing
+   ignoring the real per-argument C type is a much bigger, riskier
+   change spanning every `*args`-taking function call in the codebase,
+   not attempted here. Not yet filed as its own doc.
+
+Verification:
+- Isolated `Lib/tokenize.py` compile (`compile_to_gimple` +
+  `gcc-mp-15 -fgimple -fsyntax-only`): all 3 originally-reported errors
+  (`any`×2, line-124 void-expression) are gone — 0 errors.
+- Real `mojo.py build` of the real
+  `/Users/mrs/net/Python-3.14.6/Lib/tokenize.py`: 0 `any`/`perror`/
+  line-124-class errors remain for `tokenize.py` itself. One unrelated,
+  already-documented `tokenize.py`-own error remains (the `__author__ =
+  'Ka-Ping Yee <ping@lfw.org>'` pointer-from-integer assignment noted in
+  the 2026-08-09 status below), plus the already-documented, unrelated
+  cascading failures in transitively-imported files (`codecs.py` 47,
+  `argparse.py` 33, `typing.py` 16, `inspect.py` 12, `enum.py` 10,
+  `posixpath.py` 9, `os.py` 9, ...). The file does NOT build fully clean
+  end-to-end yet — doc kept open, not deleted.
+- Regression repro (real `mojo.py build` + run, not just isolated
+  compile): a module defining its own non-vararg `def any(x): return x
+  + x` called as `any("cat")` correctly prints `catcat` (was previously
+  misrouted to the builtin stub). A module NOT shadowing `any`/`all`
+  still gets correct builtin behavior: `any([True, False])` → `1`
+  (True), `any([False, False])` → `0` (False).
+- Quality gate: `test_gimple.py` 248/248, `test_module_cache.py` 76/76,
+  `make check-selfhost` pass (unchanged). A from-scratch
+  `build_stdlib_dylib.build_stdlib()` rebuild: 0 skipped modules both
+  before (baseline worktree at 476050f) and after — no regression.
+  `compile_stdlib.py -j8`: 664/664 passed, 0 unexpected, matching the
+  documented baseline — no regression.
+
 ## Status (updated 2026-08-18)
 
 The `perror` half of the "`any`/`perror` name collisions" blocker

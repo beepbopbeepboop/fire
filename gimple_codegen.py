@@ -8212,7 +8212,20 @@ class GimpleGen:
                                 # type (see bugs/hard/CODEGEN_comprehension_
                                 # return_type_defaults_int64.md's follow-up note).
                                 'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
-            if fname in _BUILTIN_SCALARS:
+            # `all`/`any`/`isinstance` (and in principle any other name in
+            # this table) are ordinary identifiers a module can legally
+            # shadow with its own top-level def — e.g. tokenize.py's own
+            # `def any(*choices): return group(*choices) + '*'`, called as
+            # `any(pattern)` inside `Ignore = Whitespace + any(...) +
+            # maybe(...)`. Without this gate, a call to the LOCAL `any`
+            # quick-typed to `_Bool` (the builtin's return type) instead of
+            # the real `char *`, so the surrounding `+` joined 'char *' with
+            # '_Bool' and produced a bogus type ("invalid use of void
+            # expression" downstream) instead of the correct 'char *'.
+            # Mirrors the `open` builtin-shadowing gate at this class's
+            # `_lower_builtin_all_any` call site — same `_locally_binds_name`
+            # mechanism, see its docstring.
+            if fname in _BUILTIN_SCALARS and not self._locally_binds_name(fname):
                 return _BUILTIN_SCALARS[fname]
             if fname in self.struct_field_types:
                 return f'{fname} *'
@@ -9759,8 +9772,24 @@ class GimpleGen:
         # "**some_int64_var" (GCC: "invalid type argument of unary '*'") —
         # found via self-hosting myinterpreter.py's own
         # `SimpleNamespace(**_build_testing_shims(self))` call.
+        # `void *` also needs the spread pass-through, not just the three
+        # named container types: map()/filter()/zip() are lowered to
+        # mojo_map/mojo_filter/mojo_zip, whose C return type is a generic
+        # `void *` (mojo_map: `void *mojo_map(void *func, void *iterable) {
+        # return iterable; }` — a lazy passthrough of whatever
+        # MojoList*/MojoDict*/MojoSet* it was given, just type-erased to
+        # void* in C). Real: tokenize.py's `Special = group(*map(re.escape,
+        # sorted(EXACT_TOKEN_TYPES, reverse=True)))` — `*map(...)` fell
+        # through to the "Pointer dereference" branch below since 'void *'
+        # wasn't in the recognized set, emitting a literal `*_t211` on a
+        # void* value — always invalid C ("invalid use of void expression"),
+        # never a case genuine dereference code could have produced a valid
+        # program from (dereferencing `void *` is never legal C regardless
+        # of the elem_type it's cast to afterward), so this was dead/broken
+        # for every caller, not just this one.
         if node.op == '**' or (node.op == '*' and (
-                ot in ('MojoList *', 'MojoDict *', 'MojoSet *') or not ot.endswith(' *'))):
+                ot in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *')
+                or not ot.endswith(' *'))):
             return ot, ov
         # Pointer dereference * on a known pointer type
         if node.op == '*':
@@ -15670,7 +15699,17 @@ class GimpleGen:
             av64 = av if at == 'int64_t' else self._new_val('int64_t', f'(int64_t){av}')
             return 'char *', self._call_expr('char *', 'mojo_chr', [('int64_t', av64)])
         if fname_raw == 'isinstance'      and len(node.args) == 2:  return self._lower_builtin_isinstance(node)
-        if fname_raw in ('all', 'any')    and len(node.args) == 1:  return self._lower_builtin_all_any(fname_raw, node)
+        # `_locally_binds_name` gate: a module can define its OWN top-level
+        # `any`/`all` (e.g. tokenize.py's `def any(*choices): return
+        # group(*choices) + '*'`, called with exactly 1 arg at
+        # `Ignore = Whitespace + any(r'\\\r?\n' + Whitespace) + maybe(...)`).
+        # Without this gate, that call was misrouted to the builtin
+        # all-args-truthy/any-args-truthy runtime helper instead of the
+        # user's own function — same class of bug as the `open` gate just
+        # below, and the same fix.
+        if (fname_raw in ('all', 'any') and len(node.args) == 1
+                and not self._locally_binds_name(fname_raw)):
+            return self._lower_builtin_all_any(fname_raw, node)
         if fname_raw == 'dir':                                       return self._lower_builtin_dir(node)
         if fname_raw == 'sorted'          and node.args:            return self._lower_builtin_sorted(node)
         if fname_raw == 'zip'             and len(node.args) > 2:  return self._lower_builtin_zip_n(node)

@@ -3266,12 +3266,6 @@ int int_import_module(int importlib_obj, char *module_name) {
     return 0;
 }
 
-/* Python builtin any() function */
-int any(void *iterable) {
-    (void)iterable;
-    return 0;
-}
-
 /* ── Regex substitution with callback ──────────────────────────────────── */
 /* Implements re.sub(pattern, callback, src) for POSIX ERE.
  * callback(env, matched_str) → replacement string.

@@ -665,10 +665,20 @@ int int_analyze(int obj);                       /* Analyze function */
 /* Import function (not used in C, but may be called) */
 int int_import_module(int importlib_obj, char *module_name);  /* _python_import wrapper */
 
-/* Python builtin any() function — suppressed in stdlib mode */
-#ifndef __MOJO_STDLIB_MODE__
-int any(void *iterable);                        /* Python any() builtin */
-#endif
+/* NOTE: there used to be a bare `int any(void *iterable);` declaration here
+ * ("Python builtin any() function"). It was dead: gimple_codegen.py's real
+ * any()/all() dispatch (_lower_builtin_all_any) has always emitted
+ * mojo_list_any/mojo_list_all instead, never a bare `any` call — grep
+ * confirms no caller anywhere in this codebase ever referenced this bare
+ * symbol. Worse, being unprefixed (unlike every other runtime export,
+ * which uses the mojo_ prefix precisely to avoid this) it collided at the
+ * C level with any genuinely compiled Mojo module that defines its OWN
+ * top-level `any` function whose overload-mangled C symbol happens to
+ * collapse to the literal bare name (e.g. a variadic `def any(*choices):`,
+ * which gets no overload suffix — see _overload_suffix/`_func_csym`) —
+ * "conflicting types for 'any'" (real repro: Lib/tokenize.py's own
+ * `def any(*choices): return group(*choices) + '*'`). Removed rather than
+ * re-guarded, since it was never called by anything in the first place. */
 
 /* Python builtin exception classes and types */
 /* Exception defined by generated code, not here */
