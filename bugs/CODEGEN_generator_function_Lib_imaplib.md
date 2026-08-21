@@ -1,5 +1,103 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-20 — a THIRD, distinct occurrence of the dispatch-table "bare unmangled symbol" failure mode FIXED, unrelated to generators)
+
+Investigated a fresh report of 8 "undeclared here (not in a function)"
+GCC errors, reproduced via `compile_to_gimple(open(.../imaplib.py).read(),
+do_imports=False, filename='imaplib.py')`:
+
+```
+imaplib.py:1352:41: error: 'IMAP4_close' undeclared here (not in a function); did you mean 'IMAP4_store'?
+imaplib.py:1374:67: error: 'IMAP4_open' undeclared here (not in a function); did you mean 'IMAP4_login'?
+imaplib.py:1377:46: error: 'IMAP4_read' undeclared here (not in a function); did you mean 'IMAP4_thread'?
+imaplib.py:1380:74: error: 'IMAP4_rename' undeclared here (not in a function); did you mean 'IMAP4_enable'?
+imaplib.py:1427:55: error: 'IMAP4_stream_close' undeclared here (not in a function); did you mean 'IMAP4_stream_store'?
+imaplib.py:1449:81: error: 'IMAP4_stream_open' undeclared here (not in a function); did you mean 'IMAP4_stream_send'?
+imaplib.py:1452:61: error: 'IMAP4_stream_read' undeclared here (not in a function); did you mean 'IMAP4_stream_send'?
+imaplib.py:1455:88: error: 'IMAP4_stream_rename' undeclared here (not in a function); did you mean 'IMAP4_stream_enable'?
+```
+
+Same "testing artifact" trigger already documented in
+`bugs/CODEGEN_generator_function_Lib_subprocess.md`'s 2026-08-20 entry:
+a **relative** `filename='imaplib.py'` resolves via `os.path.abspath`
+to `<cwd>/imaplib.py`, and running this repro from the repo's own root
+makes `_is_selfhost_file` incorrectly evaluate `True`, enabling
+`DispatchSolver`'s `allow_assume_all_methods` fallback for `IMAP4`
+(which has a `__getattr__(self, attr): return getattr(self,
+attr.lower())` — matching the "obj is self" shape, not the inferable
+`f'{prefix}_{x}'` shape, so it falls into the "assume all methods"
+branch). A real `mojo.py build`/absolute-path `compile_to_gimple` call
+never sets `_is_selfhost_file` for `imaplib.py` and produces none of
+these 8 errors — confirmed both before and after this fix by diffing
+the generated C for `compile_to_gimple(src, do_imports=False,
+filename='/Users/mrs/net/Python-3.14.6/Lib/imaplib.py')` (byte-
+identical, no dispatch table involved either way).
+
+**But — same as the subprocess.py case — the underlying codegen gap is
+real and distinct**, not just a trigger artifact: `IMAP4.close`/
+`.open`/`.read`/`.rename` (and their `IMAP4_stream` overrides) are
+each real, ordinary (non-generator) methods that DO get compiled to a
+real, callable, plain C function — just not under the bare
+`IMAP4_close` name the dispatch table's struct initializer references.
+`close`/`open`/`read`/`rename` are all libc/system symbols in
+`gimple_codegen.py`'s `_C_RESERVED_FUNCS` (a Mojo function definition
+with one of these names must not shadow the real libc symbol, so
+`_safe_name()` mangles both the definition AND its C symbol to
+`mojo_<name>` — e.g. the true emitted symbol is `IMAP4_mojo_close`,
+confirmed via `grep IMAP4_mojo_close` on the generated C). But
+`DispatchSolver._analyze_call_graph`'s `self.struct_methods` registry
+(the source of every dispatch-table callee string) builds its "full
+name" via plain string concatenation (`f"{stmt.name}_{method.name}"`),
+never applying `_safe_name`'s reserved-symbol mangling — so the
+dispatch table ends up referencing the bare, never-emitted
+`IMAP4_close` instead of the real `IMAP4_mojo_close`. This is a
+different mechanism from the just-fixed (same day, commit `50fa13a`)
+generator-method case — there the plain symbol is never emitted AT ALL
+(only the `<base>_start/_resume/_value/_destroy` coroutine API exists);
+here the plain symbol IS emitted, just under a different (mangled)
+name — but it produces the identical GCC "undeclared here (not in a
+function)" failure shape.
+
+**Fix** (`gimple_codegen.py`, `DispatchSolver._plan_dispatch_tables`):
+added a sibling `continue` next to the existing generator-method skip,
+gated on `_real_method_name in _C_RESERVED_FUNCS` (`_real_method_name`
+recovered via a new `_callee_to_method` reverse-lookup off
+`self.struct_methods`, mirroring the existing `_callee_to_struct`
+reverse-lookup already used just above for the same "don't naively
+string-split the callee name" reason — `_extract_method_name`'s naive
+first-underscore split silently returns the WRONG method name whenever
+the owning struct's name itself contains an underscore, e.g. splitting
+`"IMAP4_stream_close"` on the first `_` yields `"stream_close"`, not
+`"close"`, which would have made the `IMAP4_stream` half of this fix a
+no-op without the reverse lookup). Kept as a genuinely SEPARATE check
+from `generator_method_api` rather than folding both into one shared
+"is this symbol really registered anywhere" lookup: at the point
+`_plan_dispatch_tables` runs (Phase 1.5, before any struct method body
+is ever codegen'd), `func_return_types`/`func_param_types` are NOT yet
+populated for ordinary local struct methods, so a registry-membership
+check would false-positive-drop nearly every legitimate entry still
+correctly destined for the table. `_C_RESERVED_FUNCS` membership is a
+pure syntactic property of the method's own name — decidable with zero
+ordering dependency — which is exactly why it stays a small sibling
+check rather than a shared lookup helper.
+
+Verified: all 8 reported errors are gone from the isolated repro;
+`grep IMAP4_close\|IMAP4_open\|IMAP4_read\|IMAP4_rename` on the fixed
+output shows zero "undeclared" hits under `gcc -fgimple -fsyntax-only`;
+the real absolute-path build (`compile_to_gimple(...,
+filename='/Users/.../imaplib.py')`) is byte-identical before/after (no
+dispatch table involved, confirming zero real-world behavior change);
+the subprocess.py generator-method regression check
+(`compile_to_gimple(..., filename='subprocess.py')`, same self-host-
+trigger repro shape) still compiles with zero undeclared-symbol errors,
+confirming this fix didn't regress commit `50fa13a`'s fix;
+`test_gimple.py` 248/248, `test_module_cache.py` 76/76, `make
+check-selfhost` clean, and a from-scratch stdlib dylib rebuild shows 0
+skip lines (same as the unmodified baseline). imaplib.py itself still
+does not build end-to-end (unrelated blockers documented below/in the
+2026-08-18 entry) — this fix only removes these 8 specific errors from
+the picture.
+
 ## Status (updated 2026-08-18 — blocker (a) below, the `socket___enter__`/`socket___exit__` "undeclared here" symbol clash, is FIXED)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/imaplib.py`

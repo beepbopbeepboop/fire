@@ -1064,10 +1064,23 @@ class DispatchSolver:
         # when a callee's inferred self type resolves empty") — this is
         # that fix, plus resolving the struct name correctly instead of
         # just skipping known-derivable cases.
+        # Same registry, reversed to recover the real (unmangled, exactly as
+        # written in the source) Python method name too — needed because
+        # `_extract_method_name` below derives its name by naively splitting
+        # the callee string on the FIRST underscore, which silently returns
+        # the wrong (too-long) suffix whenever the owning struct's own name
+        # contains an underscore (e.g. `IMAP4_stream`: splitting
+        # "IMAP4_stream_close" on the first '_' yields "stream_close", not
+        # "close"). That's harmless for the field's own C name (any unique
+        # valid identifier works there), but the `_C_RESERVED_FUNCS` lookup
+        # below needs the TRUE bare method name to correctly recognize
+        # e.g. `IMAP4_stream.close` as the reserved name `close`.
         _callee_to_struct: dict = {}
+        _callee_to_method: dict = {}
         for _sname, _smethods in self.struct_methods.items():
             for _mname, _full in _smethods.items():
                 _callee_to_struct[_full] = _sname
+                _callee_to_method[_full] = _mname
 
         for pattern_id, pattern in self.dispatch_patterns.items():
             if not pattern.possible_callees:
@@ -1114,6 +1127,45 @@ class DispatchSolver:
                     # omitting an entry changes no compiled behavior).
                     _owner_struct = _callee_to_struct.get(callee, '')
                     if (_owner_struct, method_name) in self.generator_method_api:
+                        continue
+
+                    # SIBLING skip, same "bare callee string doesn't match the
+                    # real emitted symbol" failure mode as the generator skip
+                    # just above, but a DIFFERENT mechanism: `callee` here was
+                    # built by plain string concatenation
+                    # (`f"{struct_name}_{method_name}"`, see
+                    # `_analyze_call_graph`'s `self.struct_methods`
+                    # population), which never applies `_safe_name`'s
+                    # libc/system-symbol-collision mangling. A method whose
+                    # bare Python name is one of `_C_RESERVED_FUNCS` (e.g.
+                    # `close`/`open`/`read`/`rename` — real libc symbols this
+                    # codegen must not let a Mojo function definition shadow)
+                    # IS actually compiled to a real, callable, plain C
+                    # function — just under `mojo_<name>` (e.g.
+                    # `IMAP4_mojo_close`, from `_struct_method_csym`'s own
+                    # `_safe_name(method_name)` call), never under the bare
+                    # `<Struct>_<method>` name this table would reference.
+                    # Emitting `.close = (...)IMAP4_close` therefore hits the
+                    # identical "undeclared here (not in a function)" GCC
+                    # error as the generator case, for an unrelated reason —
+                    # found via Lib/imaplib.py's `IMAP4.close/open/read/
+                    # rename` (bugs/CODEGEN_generator_function_Lib_imaplib.md).
+                    # Deliberately a SEPARATE check rather than folding into
+                    # one "is this symbol really registered" lookup: at this
+                    # point in the pipeline (Phase 1.5, before struct method
+                    # bodies are ever codegen'd — see this class's own
+                    # `analyze()` call site in gen_module) `func_return_types`/
+                    # `func_param_types` are NOT yet populated for ordinary
+                    # local struct methods, so a registry-membership check
+                    # would false-positive-drop nearly every legitimate
+                    # ordinary method in the table. `_C_RESERVED_FUNCS`
+                    # membership is a pure syntactic property of the method's
+                    # own name, decidable with no ordering dependency at all
+                    # — same reasoning that keeps this a sibling check next to
+                    # the generator one instead of a shared "look it up"
+                    # helper.
+                    _real_method_name = _callee_to_method.get(callee, method_name)
+                    if _real_method_name in _C_RESERVED_FUNCS:
                         continue
 
                     # Infer C signature from function return type and parameter types
