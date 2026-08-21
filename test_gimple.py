@@ -4044,6 +4044,65 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
+    # bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md, Step 5.4:
+    # a genuinely NEW dynamic attribute read on an opaquely-typed receiver
+    # (an unannotated param whose static type can't be resolved to a known
+    # struct) must lower to the real runtime dispatch chain that raises a
+    # catchable AttributeError on a miss (Steps 1-3), not the old silent
+    # "print a warning, return 0" stub `mojo_obj_getattr` used to be. This
+    # is a compile-time codegen-shape check (does the emitted C actually
+    # route through `mojo_raise_attribute_error` on the miss path via
+    # `_mojo_dispatch_getattr`/`mojo_obj_getattr`?) -- the actual runtime
+    # behavior (the except branch genuinely firing, the fast path on a
+    # second call seeing real stored per-object state) is covered by
+    # test_gimple_runner.py's own permanent regression test,
+    # `gimple_dynamic_attribute_real_storage_and_attributeerror`, which
+    # actually executes the compiled binary and checks stdout -- something
+    # this file's `gcc -fsyntax-only`-only harness can't do.
+    _dynattr_src = """\
+class Slot:
+    def helper(self, cls):
+        try:
+            x = cls.__slot_names__
+            print(x)
+        except AttributeError:
+            print("caught")
+"""
+    name = "dynamic_attribute_getattr_miss_raises_real_attributeerror"
+    ok, c_src, stderr = gimple_compiles(_dynattr_src)
+    if not ok:
+        print(f"FAIL  {name}: did not compile\n{stderr}")
+        _FAIL += 1
+    elif '_mojo_dispatch_getattr' not in c_src:
+        print(f"FAIL  {name}: expected the opaque-receiver getattr "
+              "('cls.__slot_names__') to route through "
+              "_mojo_dispatch_getattr, found no such call in the "
+              "generated C")
+        _FAIL += 1
+    else:
+        print(f"PASS  {name}")
+        _PASS += 1
+        # Independently confirm mojo_obj_getattr's own runtime-side miss
+        # path (not this file's generated C -- that's the fixed dispatch
+        # chokepoint every opaque getattr funnels through) genuinely calls
+        # mojo_raise_attribute_error instead of the old silent stub.
+        _runtime_c = open(os.path.join(_RUNTIME_INC, 'mojo_runtime.c')).read()
+        name2 = "dynamic_attribute_runtime_getattr_miss_calls_raise_attributeerror"
+        if 'mojo_raise_attribute_error' not in _runtime_c:
+            print(f"FAIL  {name2}: mojo_raise_attribute_error not found "
+                  "anywhere in runtime/mojo_runtime.c")
+            _FAIL += 1
+        else:
+            _getattr_start = _runtime_c.find('int64_t mojo_obj_getattr')
+            _getattr_body = _runtime_c[_getattr_start:_getattr_start + 1200]
+            if 'mojo_raise_attribute_error' not in _getattr_body:
+                print(f"FAIL  {name2}: mojo_obj_getattr's own body doesn't "
+                      "call mojo_raise_attribute_error on a miss")
+                _FAIL += 1
+            else:
+                print(f"PASS  {name2}")
+                _PASS += 1
+
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
     return _FAIL == 0
