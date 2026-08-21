@@ -2830,6 +2830,14 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # char* string).
         if e.func.name in ('len', 'ord'):
             return 'int64_t'
+        # `sorted(iterable, ...)` always returns a real list (a `MojoList
+        # *` in this codegen's own container representation), regardless of
+        # the iterable's own type or an accompanying `key=`/`reverse=`
+        # kwarg — see the matching `_cpp_expr` CallExpr/'sorted' case's new
+        # inline-sort codegen below, added alongside the 1-arg-lambda `key=`
+        # support (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+        if e.func.name == 'sorted' and e.args:
+            return 'MojoList *'
         if known is not None and e.func.name in known:
             # A call through a declared CALLABLE-VALUE local (`getpos()`,
             # where `getpos`'s own storage type is `_CPP_CALLABLE_CTYPE` —
@@ -3013,6 +3021,32 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
 # fix — see CLAUDE.md).
 _CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'
 
+# A SIBLING declared-type category, for a single-parameter callable value —
+# the same reasoning as `_CPP_CALLABLE_CTYPE` above (a real, nameable C++
+# type a native capturing lambda implicitly converts into), fixed to a
+# single int64_t (boxed) parameter for the same "matches this codegen's own
+# boxed-value convention, no real per-arg type inference needed" reason
+# `_CPP_CALLABLE_CTYPE` itself already documents. Kept as a SEPARATE named
+# constant rather than generalizing `_CPP_CALLABLE_CTYPE` into a single
+# arity-parametrized helper: the 0-arg category has exactly one real
+# consumer shape (a bound-method/no-arg-lambda VALUE, called later as a
+# plain `name()`) and the 1-arg category has a different one (a `key=`
+# sort-comparator callable, invoked from newly-added inline `sorted()`
+# codegen, never stored in a `declared`-map local in the one confirmed
+# occurrence that needs it) — a single generalized constant would need
+# every one of `_CPP_CALLABLE_CTYPE`'s existing consumers (the
+# `_infer_simple_expr_ctype`/`_cpp_is_callable_value_expr` call-result-type
+# special-casing) to also thread an arity/signature through, for no shape
+# either confirmed occurrence actually needs today — consistent with this
+# project's own "don't generalize past what the real corpus needs" bar
+# (see `_CPP_CALLABLE_CTYPE`'s own docstring). A real second 1-arg
+# consumer shape showing up later would be the trigger to reassess.
+# Added for `Lib/enum.py`'s `Flag._iter_member_by_def_`:
+# `sorted(cls._iter_member_by_value_(value), key=lambda m: m._sort_order_)`
+# — see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's
+# "single-parameter lambda" follow-up.
+_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
+
 
 def _c_to_cpp_scalar_type(ctype: str) -> str:
     """'_Bool' is a valid C99 type but NOT a valid C++ type name (`bool` is)
@@ -3075,6 +3109,32 @@ def _yield_from_delegate_ctype(n: 'YieldFromExpr', generator_api: dict | None) -
             and call.func.name == 'range' and not call.kwargs
             and len(call.args) in (1, 2, 3)):
         return 'int64_t'
+    # yield from sorted(<inner>, key=..., reverse=...): the emitted sort
+    # codegen (`_cpp_expr`'s CallExpr/'sorted' case) ALWAYS materializes
+    # its result as an int64_t-payload MojoList (`mojo_list_append_int`,
+    # even for a struct-pointer element — the same "store a struct pointer
+    # as a boxed int64_t, cast back on read" convention this codegen
+    # already uses everywhere else, e.g. the `for x in self.<field>:`
+    # struct-pointer-element loop case), so its OWN contributed type is
+    # never char* — regardless of what the INNER iterable's element type
+    # actually is. Recurse into the inner iterable using this same
+    # dispatch (so `yield from sorted(range(...), key=...)` still
+    # correctly contributes int64_t, `yield from sorted(<known-generator-
+    # call>(...), key=...)` still contributes that generator's own real
+    # value_ctype, etc.) — falling back to int64_t, NOT the generic
+    # char* default below, when the inner iterable's type genuinely can't
+    # be determined, since int64_t is what THIS list is actually storing
+    # either way. Without this case, `yield from sorted(...)` fell into
+    # the generic "char*" default and `_cpp_yield_from`'s consumer read
+    # every element back via `mojo_list_get_str` on what's actually an
+    # int64_t (or boxed-struct-pointer) payload — a real, confirmed
+    # segfault (garbage char* dereference), not just a wrong-value bug.
+    if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+            and call.func.name == 'sorted' and call.args):
+        _inner = call.args[0]
+        _inner_yf = YieldFromExpr(value=_inner) if not isinstance(_inner, YieldFromExpr) else _inner
+        _inner_ctype = _yield_from_delegate_ctype(_inner_yf, generator_api)
+        return _inner_ctype if _inner_ctype not in (None, 'char *') else 'int64_t'
     if generator_api is None:
         return None
     # yield from over a known compiled generator call: use its value type
@@ -4260,6 +4320,22 @@ class GimpleGen:
         # can distinguish a char* string subscript (→ mojo_cstr_slice) from
         # a MojoList*/MojoDict* container subscript (→ raw `obj[idx]`).
         self._cpp_declared: dict | None = None
+        # Transient hint for `_cpp_expr`'s LambdaExpr case: when a
+        # single-parameter lambda is being lowered as a `sorted(iterable,
+        # key=...)` call's `key=` argument (see the CallExpr/`sorted`
+        # handling below) and the iterable's element type is statically
+        # known to be a struct pointer (e.g. `self.<field>` of a
+        # `list[Struct]`-typed field, via `_field_elem_types`), this carries
+        # that struct-pointer ctype so the lambda's own parameter can be
+        # declared with the REAL struct type instead of the generic
+        # `int64_t` fallback -- letting `m.<field>` member reads inside the
+        # lambda body resolve through the ordinary struct-field lowering
+        # rather than refusing. Set immediately before lowering the
+        # LambdaExpr argument, consumed (and cleared) by the LambdaExpr case
+        # itself; None everywhere else, giving every other 1-arg lambda
+        # (parameter type genuinely unknown/scalar) the safe `int64_t`
+        # default. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+        self._cpp_pending_lambda_param_ctype: str | None = None
         # Per-coroutine (generator/async) list of declarations hoisted to that
         # unit's function scope. Filled by the AssignStmt handler in
         # `_cpp_stmt` whenever a local is first-assigned; emitted at the top
@@ -27295,20 +27371,58 @@ class GimpleGen:
             # `co_yield` suspension points, e.g. `_genops`' own
             # `pos = getpos()` on the very next loop iteration).
             #
-            # Only the zero-Python-argument shape the confirmed corpus
-            # needs is supported (matches `_CPP_CALLABLE_CTYPE`'s fixed
-            # signature) — a lambda with parameters (e.g. fsutil.py's
-            # `lambda *a, **k: _walk(*a, walk=_files, **k)`) is refused
-            # honestly rather than guessing a signature; that occurrence
-            # is additionally blocked by the separate, deliberately
-            # unfixed bugs/hard/CODEGEN_args_kwargs_signature_assumed_
-            # forwarding_only.md gap regardless.
-            if e.params:
+            # The zero-Python-argument shape (`_CPP_CALLABLE_CTYPE`) and a
+            # SINGLE plain parameter, no `*`/`**`/default (`_CPP_CALLABLE_
+            # CTYPE_1ARG` — added for enum.py's `key=lambda m: m._sort_
+            # order_`, a `sorted(..., key=...)` comparator) are the only
+            # shapes supported — anything wider (2+ params, or a `*a`/`**k`
+            # forwarding param like fsutil.py's `lambda *a, **k: _walk(*a,
+            # walk=_files, **k)`) is refused honestly rather than guessing a
+            # signature; the fsutil.py occurrence is additionally blocked by
+            # the separate, deliberately unfixed bugs/hard/CODEGEN_args_
+            # kwargs_signature_assumed_forwarding_only.md gap regardless.
+            if len(e.params) > 1 or (e.params and (
+                    e.params[0][0].startswith('*') or e.params[0][1] is not None)):
                 raise _UnsupportedGeneratorShape(
-                    "a `lambda` with parameters is not supported as a "
-                    "value inside a compiled generator/coroutine body "
-                    "(only a zero-argument lambda, e.g. `lambda: None`, "
-                    "is supported)")
+                    "a `lambda` with more than one parameter, a `*`/`**`"
+                    "-forwarding parameter, or a parameter default is not "
+                    "supported as a value inside a compiled generator/"
+                    "coroutine body (only a zero-argument lambda or a "
+                    "single plain-parameter lambda, e.g. `lambda: None` / "
+                    "`lambda x: x`, is supported)")
+            if e.params:
+                _pname = e.params[0][0]
+                _hint = self._cpp_pending_lambda_param_ctype
+                self._cpp_pending_lambda_param_ctype = None
+                _pctype = _hint if _hint is not None else 'int64_t'
+                _declared_here = self._cpp_declared
+                _had_prev = _declared_here is not None and _pname in _declared_here
+                _prev = _declared_here.get(_pname) if _had_prev else None
+                if _declared_here is not None:
+                    _declared_here[_pname] = _pctype
+                try:
+                    _body = self._cpp_expr(e.body)
+                finally:
+                    if _declared_here is not None:
+                        if _had_prev:
+                            _declared_here[_pname] = _prev
+                        else:
+                            del _declared_here[_pname]
+                # The C++ lambda's own parameter is always `int64_t` (the
+                # boxed value `std::function<int64_t(int64_t)>` actually
+                # passes) -- a real struct-pointer ctype `_pctype` (from the
+                # `sorted(..., key=...)` call site below, when the
+                # iterable's element type is statically known) is recovered
+                # by an immediate cast into a same-named local shadowing the
+                # boxed parameter, so `_cpp_expr(e.body)` above's ordinary
+                # `<name>.<field>` struct-field lowering (which resolved
+                # `_pname`'s ctype via `self._cpp_declared` set above) sees
+                # a real, correctly-typed local.
+                _boxed = f"{_pname}__boxed"
+                _cast = f"{_pctype} {_pname} = ({_pctype})({_boxed});"
+                return (f"(({_CPP_CALLABLE_CTYPE_1ARG})"
+                        f"([&](int64_t {_boxed}) -> int64_t "
+                        f"{{ {_cast} return (int64_t)({_body}); }}))")
             _body = self._cpp_expr(e.body)
             return (f"(({_CPP_CALLABLE_CTYPE})"
                     f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
@@ -27831,6 +27945,133 @@ class GimpleGen:
                         _sym = self._struct_method_csym(_next_struct, '__next__', '')
                         self._cpp_struct_method_refs.add((_next_struct, '__next__'))
                         return f"{_sym}({args[0]})"
+                if (fname == 'sorted' and e.args
+                        and not self._locally_binds_name('sorted')):
+                    # `sorted(iterable)` / `sorted(iterable, key=..., reverse=
+                    # ...)` -- previously entirely unhandled in this
+                    # coroutine-body emitter (fell through to the generic
+                    # bare-name-call fallback below, which drops `key=`/
+                    # `reverse=` kwargs ENTIRELY and emits a literal,
+                    # undeclared C++ `sorted(...)` call -- a hard compile
+                    # failure, not just a missed feature). Added alongside
+                    # the 1-arg-lambda `key=` support (`_CPP_CALLABLE_
+                    # CTYPE_1ARG`) for enum.py's `Flag._iter_member_by_
+                    # def_`: `sorted(cls._iter_member_by_value_(value),
+                    # key=lambda m: m._sort_order_)` -- see bugs/hard/
+                    # CODEGEN_generator_lambda_expr_unsupported.md.
+                    #
+                    # Only a `MojoList *`-typed iterable is supported here
+                    # (the confirmed real shape); a `MojoSet *`/`MojoDict *`
+                    # iterable falls through to the plain no-key runtime
+                    # helpers this codegen already has (mirroring the
+                    # ordinary GIMPLE path's own `_lower_builtin_sorted`),
+                    # but combined with `key=` is refused honestly -- no
+                    # int64_t-payload sort over those containers' different
+                    # struct layouts is safe to assume here (same reasoning
+                    # `_lower_builtin_sorted`'s own MojoSet-vs-MojoList
+                    # dispatch comment gives).
+                    _iter_node = e.args[0]
+                    _iter_ctype = None
+                    _elem_ctype = None
+                    _sorted_self_struct = getattr(self, '_cpp_gen_self_struct', None)
+                    if isinstance(_iter_node, IdentExpr) and self._cpp_declared is not None:
+                        _iter_ctype = self._cpp_declared.get(_iter_node.name)
+                    elif (isinstance(_iter_node, MemberExpr)
+                            and isinstance(_iter_node.obj, IdentExpr)
+                            and _iter_node.obj.name == 'self'
+                            and _sorted_self_struct):
+                        _iter_ctype = self.struct_field_types.get(
+                            _sorted_self_struct, {}).get(_iter_node.member)
+                        if _iter_ctype == 'MojoList *':
+                            _elem_ctype = self._field_elem_types.get(
+                                _sorted_self_struct, {}).get(_iter_node.member)
+                    _key_node = None
+                    _reverse = False
+                    for _kwn, _kwv in e.kwargs:
+                        if _kwn == 'key':
+                            _key_node = _kwv
+                        elif _kwn == 'reverse':
+                            if not isinstance(_kwv, BoolLiteral):
+                                raise _UnsupportedGeneratorShape(
+                                    "sorted(..., reverse=...) is only "
+                                    "supported with a literal True/False "
+                                    "in a compiled generator/coroutine body")
+                            _reverse = _kwv.value
+                        else:
+                            raise _UnsupportedGeneratorShape(
+                                f"sorted(..., {_kwn}=...) is not supported "
+                                "in a compiled generator/coroutine body")
+                    if _key_node is None:
+                        # No `key=` -- the plain runtime-helper dispatch
+                        # this coroutine body already had NO version of at
+                        # all (unlike the ordinary GIMPLE path's own
+                        # `_lower_builtin_sorted`); mirror that function's
+                        # container-type dispatch (mojo_set_sorted /
+                        # mojo_dict_sorted_keys / mojo_list_sorted_str /
+                        # mojo_sorted) so a keyless `sorted(...)` in a
+                        # generator body works at all, not just the `key=`
+                        # shape this fix specifically targets.
+                        if _iter_ctype == 'MojoSet *':
+                            _fn = 'mojo_set_sorted'
+                        elif _iter_ctype == 'MojoDict *':
+                            _fn = 'mojo_dict_sorted_keys'
+                        elif _elem_ctype == 'char *':
+                            _fn = 'mojo_list_sorted_str'
+                        else:
+                            _fn = 'mojo_sorted'
+                        _res = f"{_fn}((void *)({args[0]}))"
+                        if _reverse:
+                            _res = f"mojo_reversed((void *)({_res}))"
+                        return f"(MojoList *)({_res})"
+                    if _iter_ctype not in ('MojoList *', None):
+                        raise _UnsupportedGeneratorShape(
+                            "sorted(..., key=...) is only supported for a "
+                            "list-typed iterable in a compiled generator/"
+                            "coroutine body")
+                    # KNOWN GAP, not fixed here: `_field_elem_types[struct_name]`
+                    # is populated by a LATER pass than generator-method-body
+                    # codegen (confirmed by direct inspection: querying it here
+                    # for a real `self.<field>: list[Struct]` case returns
+                    # nothing, even though the SAME lookup after the whole
+                    # module finishes compiling has the right answer) -- so
+                    # `_elem_ctype` is currently always None for this shape in
+                    # practice, and the lambda parameter falls back to plain
+                    # int64_t. That's a SAFE degradation, not a silent
+                    # miscompile: a `key=lambda m: m.<field>` body then fails
+                    # loudly with a real g++ "request for member in non-class
+                    # type" compile error (m stays int64_t) instead of
+                    # producing wrong output, consistent with this codegen's
+                    # "refuse rather than guess" convention elsewhere. Fixing
+                    # this for real needs `_field_elem_types` populated before
+                    # generator bodies compile (a pass-ordering change to
+                    # gen_module, out of scope for this pass — the SEGFAULT
+                    # this session's fix targets is independent of this gap
+                    # and already fully resolved: it affects EVERY sorted()+
+                    # key= generator regardless of element type, this hint is
+                    # only for the narrower "read a struct field on the sort
+                    # key parameter" refinement).
+                    if _elem_ctype is not None and _elem_ctype.endswith(' *') \
+                            and _elem_ctype[:-2] in self.struct_field_types:
+                        self._cpp_pending_lambda_param_ctype = _elem_ctype
+                    _key_val = self._cpp_expr(_key_node)
+                    self._cpp_pending_lambda_param_ctype = None
+                    _cmp = (f"_mg_key(_mg_b) < _mg_key(_mg_a)" if _reverse
+                            else f"_mg_key(_mg_a) < _mg_key(_mg_b)")
+                    return (
+                        f"[&]() -> MojoList * {{ "
+                        f"MojoList *_mg_in = (MojoList *)({args[0]}); "
+                        f"int64_t _mg_n = mojo_list_len(_mg_in); "
+                        f"std::vector<int64_t> _mg_v(_mg_n); "
+                        f"for (int64_t _mg_i = 0; _mg_i < _mg_n; _mg_i++) "
+                        f"_mg_v[_mg_i] = mojo_list_get_int(_mg_in, _mg_i); "
+                        f"{_CPP_CALLABLE_CTYPE_1ARG} _mg_key = {_key_val}; "
+                        f"std::stable_sort(_mg_v.begin(), _mg_v.end(), "
+                        f"[&](int64_t _mg_a, int64_t _mg_b) {{ "
+                        f"return {_cmp}; }}); "
+                        f"MojoList *_mg_out = mojo_list_new(); "
+                        f"for (int64_t _mg_e : _mg_v) "
+                        f"mojo_list_append_int(_mg_out, _mg_e); "
+                        f"return _mg_out; }}()")
                 if fname == 'callable' and len(e.args) == 1:
                     # This scalar coroutine-body model has no runtime type
                     # tag to genuinely check "is this value callable" for
@@ -29775,6 +30016,46 @@ class GimpleGen:
                 # local name.
                 _self_field_itname = None
                 _self_field_elem_ctype = None
+                _pre_lines: list[str] = []
+                # `for x in sorted(<self.field-or-declared-list>, key=...):`
+                # -- `_cpp_expr` above already lowered the WHOLE `sorted(...)`
+                # call into `iter_expr` (a self-invoking C++ lambda building
+                # a fresh `MojoList *`, see the CallExpr/'sorted' case), but
+                # using that expression text directly as `_itname` below
+                # (referenced from BOTH `mojo_list_len` and
+                # `mojo_list_get_int`, each re-evaluated every loop
+                # iteration) would re-run the ENTIRE sort -- reallocating a
+                # new list and re-invoking the `key=` callable O(n log n)
+                # times -- on every single element read, an O(n^2 log n)
+                # blowup and a fresh MojoList leak per iteration. Evaluate
+                # it exactly ONCE into a cached local before the loop
+                # instead, then treat that cached local exactly like the
+                # existing bare-identifier/self-field cases below. The
+                # element type is the WRAPPED iterable's own (sorting
+                # reorders, never changes, element type) -- resolved via the
+                # same `self.<field>` + `_field_elem_types` lookup the plain
+                # `for x in self.<field>:` case just above already uses,
+                # since a `self.<field>` iterable is the one real corpus
+                # shape (`Lib/enum.py`-style `key=lambda m: m.<field>`, see
+                # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+                if (isinstance(s.iterable, CallExpr)
+                        and isinstance(s.iterable.func, IdentExpr)
+                        and s.iterable.func.name == 'sorted' and s.iterable.args
+                        and not self._locally_binds_name('sorted')):
+                    _sorted_inner = s.iterable.args[0]
+                    if (isinstance(_sorted_inner, MemberExpr)
+                            and isinstance(_sorted_inner.obj, IdentExpr)
+                            and _sorted_inner.obj.name == 'self'
+                            and getattr(self, '_cpp_gen_self_struct', None)):
+                        _sw_ft = self.struct_field_types.get(
+                            self._cpp_gen_self_struct, {}).get(_sorted_inner.member)
+                        if _sw_ft not in ('int64_t', 'double', '_Bool', 'char *'):
+                            _self_field_elem_ctype = self._field_elem_types.get(
+                                self._cpp_gen_self_struct, {}).get(_sorted_inner.member)
+                    _cached = self._cpp_fresh_name("_mg_sorted")
+                    _pre_lines.append(
+                        f"{indent}MojoList *{_cached} = (MojoList *)({iter_expr});")
+                    _self_field_itname = _cached
                 if (isinstance(s.iterable, MemberExpr)
                         and isinstance(s.iterable.obj, IdentExpr)
                         and s.iterable.obj.name == 'self'
@@ -29804,7 +30085,27 @@ class GimpleGen:
                         or _self_field_itname is not None):
                     _itname = _self_field_itname if _self_field_itname is not None else s.iterable.name
                     _ctr = self._cpp_fresh_name("_mg_i")
-                    lines = []
+                    lines = list(_pre_lines)
+                    # A known struct-pointer element type (e.g. `Thing *`,
+                    # from `_field_elem_types` -- the `self.<field>: list
+                    # [Struct]` case, and now also its `sorted(self.<field>,
+                    # key=...)` wrapper just above) needs the loop variable
+                    # declared with that REAL pointer type, cast out of the
+                    # boxed-int64_t element read, so a later `target.<field>`
+                    # read inside the loop body resolves through the
+                    # ordinary struct-field lowering (`_cpp_struct_ptr_local`
+                    # only recognizes a declared type ending in ' *') instead
+                    # of emitting `target->member` on a plain int64_t (an
+                    # invalid-C++ "not a structure or union" error) --
+                    # previously EVERY struct-pointer-list element loop
+                    # variable was declared int64_t regardless, so this also
+                    # closes that same gap for a plain (non-sorted)
+                    # `for x in self.<field>:` over a `list[Struct]` field.
+                    _elem_struct_ctype = None
+                    if (isinstance(_self_field_elem_ctype, str)
+                            and _self_field_elem_ctype.endswith(' *')
+                            and _self_field_elem_ctype[:-2] in self.struct_field_types):
+                        _elem_struct_ctype = _self_field_elem_ctype
                     if _self_field_elem_ctype == 'char *':
                         if not target_was_declared:
                             lines.append(f"{indent}char *{target};")
@@ -29813,6 +30114,14 @@ class GimpleGen:
                                      f"{_ctr}++) {{")
                         lines.append(f"{indent}    {target} = "
                                      f"mojo_list_get_str((MojoList *)({_itname}), {_ctr});")
+                    elif _elem_struct_ctype is not None:
+                        if not target_was_declared:
+                            lines.append(f"{indent}{_elem_struct_ctype}{target};")
+                        lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                     f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                     f"{_ctr}++) {{")
+                        lines.append(f"{indent}    {target} = ({_elem_struct_ctype})"
+                                     f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
                     else:
                         if not target_was_declared:
                             lines.append(f"{indent}int64_t {target};")
@@ -29821,7 +30130,12 @@ class GimpleGen:
                                      f"{_ctr}++) {{")
                         lines.append(f"{indent}    {target} = "
                                      f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
-                    declared[target] = 'char *' if _self_field_elem_ctype == 'char *' else 'int64_t'
+                    if _self_field_elem_ctype == 'char *':
+                        declared[target] = 'char *'
+                    elif _elem_struct_ctype is not None:
+                        declared[target] = _elem_struct_ctype
+                    else:
+                        declared[target] = 'int64_t'
                     for inner in s.body:
                         lines.extend(self._cpp_stmt(inner, declared, indent + '    '))
                     lines.append(f"{indent}}}")
@@ -30437,6 +30751,33 @@ class GimpleGen:
                 f"{indent}    co_yield {ctr};",
                 f"{indent}}}",
             ]
+        # `yield from sorted(<inner>, key=..., reverse=...)`: `_cpp_expr`'s
+        # CallExpr/'sorted' case already lowers the WHOLE `sorted(...)`
+        # expression to a self-invoking C++ lambda returning a real
+        # `MojoList *` — but that list's elements are ALWAYS stored via
+        # `mojo_list_append_int` (this codegen's own "store a struct
+        # pointer as a boxed int64_t, cast on read" convention, same as
+        # every other MojoList of struct-pointer/scalar elements
+        # elsewhere in this file), never as strings — so this needs the
+        # same `mojo_list_get_int`-based drive loop the `range()` case
+        # just above uses, not the generic "plain collection, assume
+        # char*" fallback below. Mirrors `_yield_from_delegate_ctype`'s
+        # matching `sorted(...)` type-inference case (this file, ~line
+        # 3108) so both sides agree: that function's int64_t default for
+        # this shape only stays correct if the elements are actually read
+        # back as int64_t here too. Without this case, `mojo_list_get_str`
+        # dereferenced the int64_t payload bits as a `char *` — a real,
+        # confirmed segfault, not just a wrong-value bug. See
+        # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+        if (isinstance(call, CallExpr) and isinstance(call.func, IdentExpr)
+                and call.func.name == 'sorted' and call.args
+                and not self._locally_binds_name('sorted')):
+            result_var = self._cpp_fresh_name("_yf_sorted")
+            coll_expr = self._cpp_expr(call)
+            return [f"{indent}auto {result_var} = (MojoList *)({coll_expr});",
+                    f"{indent}for (int64_t _i = 0; _i < mojo_list_len({result_var}); _i++) {{",
+                    f"{indent}    co_yield mojo_list_get_int({result_var}, _i);",
+                    f"{indent}}}"]
         # `yield from <expr>` where the value is a plain collection (any
         # non-generator-call expression — a method chain, a bare name, etc.):
         # iterate the MojoList* result with an indexed loop, co_yield-ing
@@ -41528,6 +41869,8 @@ class GimpleGen:
                 '#include <cmath>',
                 '#include <exception>',
                 '#include <functional>',
+                '#include <vector>',
+                '#include <algorithm>',
                 '#include <mojo_runtime.h>',
                 '',
                 'extern "C" { typedef struct MojoGenerator MojoGenerator; }',

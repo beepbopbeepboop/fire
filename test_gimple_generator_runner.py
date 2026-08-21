@@ -1059,6 +1059,32 @@ def main():
         print(x)
 """, "42\n")
 
+    # `yield from sorted(<iterable>, key=lambda x: ...)` — a single-
+    # parameter lambda passed directly as a `key=` call argument (not
+    # assigned to a local first, unlike `generator_lambda_and_*_bound_
+    # method_as_value` above). Real target: Lib/enum.py's
+    # `Flag._iter_member_by_def_`: `yield from sorted(cls._iter_member_
+    # by_value_(value), key=lambda m: m._sort_order_)` — see
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's
+    # "single-parameter lambda" follow-up. This is also the regression
+    # test for a real, confirmed SEGFAULT this same session found and
+    # fixed: the promise/consumer-side type inference for `yield from
+    # sorted(...)` previously defaulted to char* (the generic "unknown
+    # collection" fallback), so the sort's own int64_t-payload MojoList
+    # got read back via `mojo_list_get_str` — a garbage pointer
+    # dereference — regardless of element type, not just the struct-
+    # pointer-element shape. Asserts DESCENDING order (`-m` key) to
+    # confirm the comparator is genuinely being invoked per-element, not
+    # just passing the list through unsorted.
+    test_generator_stdout("generator_sorted_key_lambda_scalar", """\
+def gen(xs: list):
+    yield from sorted(xs, key=lambda m: -m)
+
+def main():
+    for x in gen([3, 1, 2]):
+        print(x)
+""", "3\n2\n1\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

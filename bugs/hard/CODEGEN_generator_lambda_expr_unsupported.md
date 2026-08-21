@@ -1,5 +1,100 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (updated 2026-08-21 — single-parameter lambda / `sorted(..., key=...)` FIXED; found+fixed a real SEGFAULT along the way; one narrower sub-gap still open)
+
+Extended the 2026-08-20 zero-argument-lambda mechanism (below) to a
+SINGLE plain parameter (`_CPP_CALLABLE_CTYPE_1ARG =
+'std::function<int64_t(int64_t)>'`, a sibling constant kept separate
+per that constant's own docstring — the two categories have genuinely
+different consumer shapes, not just different arities), and implemented
+real `sorted(iterable, key=..., reverse=...)` support in the coroutine
+body emitter (`_cpp_expr`'s new CallExpr/`'sorted'` case) — previously
+totally unhandled there (fell through to the generic bare-name-call
+fallback, which drops `key=`/`reverse=` kwargs entirely and emits a
+literal undeclared C++ `sorted(...)` call). Motivated by `Lib/enum.py`'s
+`Flag._iter_member_by_def_`: `yield from sorted(cls._iter_member_by_
+value_(value), key=lambda m: m._sort_order_)`.
+
+`_cpp_expr`'s `LambdaExpr` case now accepts a lambda with 0 params
+(unchanged) or exactly 1 plain param (no `*`/`**`, no default) — wider
+shapes (2+ params, `*a`/`**k` forwarding, defaults) still refused
+honestly, same as before.
+
+**A real, confirmed SEGFAULT was found and fixed in the same pass** (not
+present in the original zero-arg-only work — this is new, specific to
+the `yield from sorted(...)` consumption path): `_yield_from_delegate_
+ctype` (the promise/yield-type inferencer) had no `sorted(...)` case, so
+`yield from sorted(...)`'s contributed type fell to the generic "unknown
+collection -> char*" default — but the sort codegen ALWAYS stores its
+result via `mojo_list_append_int` (an int64_t payload, matching this
+codegen's existing "box a struct pointer as int64_t, cast on read"
+convention used everywhere else), never as strings. `_cpp_yield_from`'s
+matching generic "plain collection" consumer fallback then read every
+element back via `mojo_list_get_str` — dereferencing an int64_t bit
+pattern as a `char *`. Confirmed via a real end-to-end compile+link+run
+repro (`generator_sorted_key_lambda_scalar` in
+`test_gimple_generator_runner.py`): **segfaults (SIGSEGV) on unfixed
+code**, runs correctly and prints the correct descending-sorted output
+on fixed code. Fixed with matching cases in both `_yield_from_delegate_
+ctype` (recurses into the inner iterable's own type, defaulting to
+int64_t rather than char* when undetermined — since int64_t is what
+this list is actually storing either way) and `_cpp_yield_from` (a
+dedicated `sorted(...)` drive loop reading via `mojo_list_get_int`,
+mirroring the existing `range(...)` case's own pattern, instead of
+falling into the generic char*-assuming fallback).
+
+**Verification**: `generator_sorted_key_lambda_scalar` (new,
+`test_gimple_generator_runner.py`) — a plain `yield from sorted(xs,
+key=lambda m: -m)` — compiles, links, RUNS, and produces the correct
+descending order; all 41 pre-existing generator-runner tests
+(zero-arg-lambda, bound-method-value, struct-ptr-yield, cls-redirect,
+etc.) still pass unchanged (42/42 total). Real corpus: `Lib/enum.py`'s
+`Flag._iter_member_by_value_`/`_iter_member_by_def_` remain refused —
+but CONFIRMED (via `MOJO_DEBUG=1`) this is exclusively the SEPARATE,
+already-documented `cls`-attribute-redirect eligibility gate
+(`_flag_mask_`/`_value2member_map_` are set via `EnumMeta`'s dynamic
+metaclass machinery, never as literal class-body assignments — see this
+file's own 2026-08-21 companion note in
+`bugs/CODEGEN_generator_function_Lib_enum.md`) firing BEFORE the
+generator body is ever lowered far enough to reach the lambda/sorted
+machinery this fix adds — so enum.py's own build status is genuinely
+unaffected by this fix either way, confirmed, not assumed. A corpus
+sweep (`grep -rl "sorted(.*key=" Lib/*.py`) found `_strptime.py`,
+`pprint.py`, `pyclbr.py`, `tarfile.py` all still compile clean
+(unaffected — none of their `sorted(..., key=...)` call sites are
+inside a compiled generator body); `heapq.py`'s `merge` generator is
+refused for a separate, unrelated reason.
+
+**Still open** — a narrower sub-gap found while implementing this: when
+the sort's `key=` lambda parameter's real element type is a struct
+pointer (e.g. `self.<field>: list[Struct]`, so `m.<field>` inside the
+lambda body needs `m` typed as the real struct pointer, not int64_t),
+the hint mechanism added to thread that type through
+(`self._cpp_pending_lambda_param_ctype`) currently never fires in
+practice: it depends on `self._field_elem_types[struct_name]` being
+populated by the time a generator METHOD's body is compiled, but that
+registry is actually populated by a LATER pass (confirmed by direct
+inspection — the same lookup after the whole module finishes compiling
+has the right answer, but returns nothing at generator-body-codegen
+time). This is a SAFE degradation, not a silent miscompile: the lambda
+parameter falls back to plain int64_t, and a body that then tries
+`m.<field>` fails loudly with a real g++ "request for member in
+non-class type" compile error, consistent with this codegen's
+"refuse rather than guess" convention — not the segfault class of bug
+above (which affected EVERY `sorted()+key=` generator regardless of
+element type and is now fully fixed). Fixing this properly needs
+`_field_elem_types` populated before generator-method bodies compile —
+a pass-ordering change to `gen_module`, out of scope for this pass. No
+confirmed real-corpus occurrence of this narrower shape exists today
+(enum.py's own real target doesn't reach it either, per above) — flagged
+for whoever next revisits this file's pass ordering, not urgent.
+
+Doc kept open — the LambdaExpr/`sorted(key=...)` mechanism itself is now
+complete for 0- and 1-plain-parameter shapes (matching every confirmed
+real-corpus need found so far), but occurrence #2 (fsutil.py's `lambda
+*a, **k`, below) and the struct-pointer-key-field sub-gap just above
+both remain open.
+
 ## Status (updated 2026-08-20, FIXED for zero-argument lambdas / bound-method values — one shape still open)
 
 Implemented this doc's own minimal design (the "(1)(2)(3)" list at the
