@@ -2686,10 +2686,44 @@ def _local_literal_ctype(value) -> str | None:
     return None
 
 
+def _receiver_key(e) -> str | None:
+    """Stable string identity for a "receiver" sub-expression whose STORED
+    per-name type info (`dict_val_types`, below) was recorded under that
+    same identity — a bare local/param name (`d`), or `self.<field>`
+    (`self.d`). Anything else (a nested attribute chain, a subscript, a
+    call result used as a receiver, ...) has no such stored identity and
+    returns None — used by `_infer_simple_expr_ctype`'s dict-`.get()`
+    struct-pointer-yield case (below) to look a receiver up in
+    `dict_val_types` the exact same way `self.<field>` reads are already
+    looked up in `self_fields`, not a new convention."""
+    if isinstance(e, IdentExpr):
+        return e.name
+    if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
+        return 'self.' + e.member
+    return None
+
+
+def _is_known_struct_ptr_ctype(ctype, known_structs) -> bool:
+    """True iff `ctype` is a real pointer-to-a-known-struct C type (e.g.
+    'Flag *') rather than one of this file's scalar/container ctypes or an
+    arbitrary/unvalidated pointer-ish string — `known_structs` (a set of
+    struct names this compile actually has a layout for, e.g.
+    `self.struct_field_types.keys()`) is the single source of truth this
+    checks against, mirroring `_gen_cpp_generator_unit`'s own identical
+    `ctype.endswith(' *') and ctype[:-2] in self.struct_field_types` check
+    for a struct-typed generator PARAMETER — reused here rather than
+    re-deriving a second notion of "is this really a struct pointer"."""
+    return (known_structs is not None and isinstance(ctype, str)
+            and ctype.endswith(' *') and ctype[:-2] in known_structs)
+
+
 def _infer_simple_expr_ctype(e, known: dict | None = None,
                               self_fields: dict | None = None,
                               async_api: dict | None = None,
-                              closure_api: dict | None = None) -> str | None:
+                              closure_api: dict | None = None,
+                              known_structs: frozenset | None = None,
+                              dict_val_types: dict | None = None,
+                              method_return_types: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -2704,11 +2738,27 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
     module-level global), a `self.<field>` attribute read (generator
     METHODS only — `self_fields`, non-None exactly when this is a generator
     method, is a name -> ctype map of the enclosing struct's OWN fields;
-    resolves to None, not a guess, for a field whose real type isn't scalar,
-    and for a bare `self` with no `.field` at all — self is never itself a
-    scalar value, unlike an ordinary parameter/local, so it must NOT fall
-    through to the int64_t default below), or +-*/ arithmetic/unary ops over
-    those."""
+    resolves to None, not a guess, for a field whose real type isn't scalar
+    or a known struct pointer, and for a bare `self` with no `.field` at all
+    — self is never itself a scalar value, unlike an ordinary
+    parameter/local, so it must NOT fall through to the int64_t default
+    below), or +-*/ arithmetic/unary ops over those.
+
+    `known_structs`/`dict_val_types`/`method_return_types` (all optional,
+    default None — every EXISTING caller that doesn't pass them keeps this
+    function's original scalar-only behavior unchanged) widen this beyond
+    pure scalars to also recognize a real STRUCT POINTER value, the same
+    "this generator yields/returns a genuine pointer, not a scalar" category
+    a bare struct-typed parameter/local already gets via `known` — see the
+    CallExpr/MemberExpr branch below for the two shapes this covers: a dict
+    `.get()` call whose stored value type (`dict_val_types`) is a known
+    struct pointer, and an arbitrary struct METHOD call chain whose return
+    type (`method_return_types` — this file's own existing
+    `self.func_return_types`, keyed `f"{struct_name}_{method_name}"` exactly
+    like every other compiled struct-method call site already resolves it)
+    is one. Reuses this codegen's ALREADY-established per-struct dict-value-
+    type/method-return-type registries rather than inventing new tracking —
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update."""
     if isinstance(e, IntLiteral):
         return 'int64_t'
     if isinstance(e, FloatLiteral):
@@ -2721,7 +2771,11 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if self_fields is None:
             return None
         ft = self_fields.get(e.member)
-        return ft if ft in ('int64_t', 'double', '_Bool', 'char *') else None
+        if ft in ('int64_t', 'double', '_Bool', 'char *'):
+            return ft
+        if _is_known_struct_ptr_ctype(ft, known_structs):
+            return ft
+        return None
     if isinstance(e, IdentExpr):
         if e.name in ('None', 'True', 'False'):
             return 'int64_t'
@@ -2820,6 +2874,48 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # emitted a raw, invalid C++ `+` instead of `mojo_str_cat`.
         if e.func.member == 'replace' and len(e.args) == 2:
             return 'char *'
+        # `<dict>.get(key)` / `<dict>.get(key, default)` where `<dict>` is a
+        # bare local/param or `self.<field>` whose STORED dict value type
+        # (`dict_val_types` — the enclosing struct's per-field dict-value-
+        # type registry, `self._field_dict_val_types`, threaded through
+        # exactly like `self_fields` already is, NOT a fresh tracking
+        # mechanism) is a known struct pointer. Real: Lib/enum.py's
+        # `Flag._iter_member_by_value_`: `cls._value2member_map_.get(val)`
+        # returns a `Flag *` (an enum-member reference), not a scalar — see
+        # CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update for the
+        # full root-cause history (this was previously silently defaulting
+        # to int64_t, a genuine miscompile risk this recognizes instead of
+        # guessing).
+        if e.func.member == 'get' and len(e.args) in (1, 2) and dict_val_types is not None:
+            key = _receiver_key(e.func.obj)
+            if key is not None and key in dict_val_types:
+                vt = dict_val_types[key]
+                if vt in ('int64_t', 'double', '_Bool', 'char *'):
+                    return vt
+                if _is_known_struct_ptr_ctype(vt, known_structs):
+                    return vt
+        # General case: an arbitrary `<receiver>.<method>(...)` call where
+        # `<receiver>` itself resolves (recursively, via this SAME function
+        # — a bare struct-typed local/param via `known`, or a `self.<field>`
+        # struct-pointer field via the branch above) to a known struct
+        # pointer type. Its return type is resolved via
+        # `method_return_types` — this file's OWN existing
+        # `self.func_return_types`, keyed `f"{struct_name}_{method_name}"`
+        # exactly like every other compiled struct-method CALL site already
+        # resolves it (see e.g. the ordinary CallExpr/MemberExpr lowering's
+        # identical `f'{struct_name}_{method}' in self.func_return_types`
+        # lookup) — reused here, not a second/parallel resolution scheme.
+        if (method_return_types is not None and not getattr(e, 'kwargs', None)
+                and e.func.member != 'get'):
+            recv_ctype = _infer_simple_expr_ctype(
+                e.func.obj, known, self_fields, async_api, closure_api,
+                known_structs, dict_val_types, method_return_types)
+            if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
+                rt = method_return_types.get(f"{recv_ctype[:-2]}_{e.func.member}")
+                if rt in ('int64_t', 'double', '_Bool', 'char *'):
+                    return rt
+                if _is_known_struct_ptr_ctype(rt, known_structs):
+                    return rt
     if isinstance(e, Comprehension):
         # A list/dict/set comprehension used as a plain local's RHS
         # (`items = [x for x in ... ]`, as opposed to the already-handled
@@ -3140,7 +3236,10 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             generator_api: dict | None = None,
                             self_fields: dict | None = None,
                             async_api: dict | None = None,
-                            closure_api: dict | None = None) -> str | None:
+                            closure_api: dict | None = None,
+                            known_structs: frozenset | None = None,
+                            dict_val_types: dict | None = None,
+                            method_return_types: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -3161,7 +3260,12 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
     slot) since the two dicts serve genuinely different node shapes
     (YieldFromExpr vs. AwaitExpr) that can never both appear in the same
     function body (a generator can't `await`, an async function can't
-    `yield` — see gen_module's combined-refusal category)."""
+    `yield` — see gen_module's combined-refusal category). `known_structs`/
+    `dict_val_types`/`method_return_types` (struct-pointer-yield support —
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update) are
+    threaded straight through to every `_infer_simple_expr_ctype` call
+    below unchanged — see that function's own docstring for what each
+    widens."""
     ctype = None
     # Walk only this function's own body — do NOT descend into nested
     # FunctionDef/LambdaExpr bodies (a nested def's `return <value>` is its
@@ -3218,7 +3322,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                     return None
                 t = 'MojoList *'
             else:
-                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
+                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
+                                             known_structs, dict_val_types, method_return_types)
                 if t is None:
                     t = 'int64_t'  # default when type can't be inferred
             if ctype is None:
@@ -3275,7 +3380,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             # only actually fires while translating an async function.
             if n.value is None:
                 continue
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
+                                             known_structs, dict_val_types, method_return_types)
             if t is None:
                 return None
             if ctype is None:
@@ -4203,6 +4309,20 @@ class GimpleGen:
         # layout typedef visible too, so gen_module's typedef-emission
         # loop treats this set the same as `_cpp_param_struct_names`.
         self._cpp_ctor_struct_names: set[str] = set()
+        # Struct names a compiled generator/async unit's own PROMISE VALUE
+        # TYPE resolves to (struct-pointer-yield support — see
+        # _infer_simple_expr_ctype's docstring): e.g. `def gen(self): yield
+        # self.map.get(k)` where `map`'s dict value type is `Flag *` needs
+        # `Flag`'s layout typedef visible in THIS unit's .cpp text even
+        # though `Flag` is never `self`, a parameter, or constructed inline
+        # here — just the promise's `current_value`/`yield_value`/`{base}_
+        # value` return type. Same typedef-visibility need as
+        # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
+        # by the YIELDED value's type instead of a parameter/constructor —
+        # merged into the same typedef-emission loop (gen_module) rather
+        # than a separate one. See CODEGEN_generator_function_Lib_enum.md's
+        # 2026-08-20 update.
+        self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
@@ -27412,6 +27532,49 @@ class GimpleGen:
                     _a1 = self._cpp_expr(e.args[1])
                     return (f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
                             f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))")
+                # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
+                # dict method call on a local/self-field this narrow body
+                # model already knows is `MojoDict *`, which (like `.replace`
+                # just above) the generic `{obj}.{member}(...)` fallback
+                # can't handle (MojoDict is an opaque C struct pointer with
+                # no real C++ member functions — g++ rejected the raw
+                # `self->map.get(k)` this fallback used to emit outright).
+                # Routes through the SAME mojo_dict_get_int/_double/_str
+                # runtime helpers the ordinary (non-generator) GIMPLE path's
+                # own dict `.get()`/`d[k]` lowering already uses (see
+                # _lower_call's/_lower_subscript's identical three-way
+                # dispatch) — reused, not a fresh mechanism. The dict's
+                # VALUE ctype comes from the SAME `self._field_dict_val_
+                # types` registry `_infer_simple_expr_ctype`'s struct-
+                # pointer-yield support (below) already resolves it from —
+                # a struct-pointer value type is read back via
+                # mojo_dict_get_int (pointers are stored as int64_t in this
+                # dict representation, same convention _pack_kwargs_dict's
+                # own docstring documents for "ints, doubles, pointers") and
+                # cast back to the real pointer type. Real: Lib/enum.py's
+                # `Flag._iter_member_by_value_`: `cls._value2member_map_.
+                # get(val)` returns a `Flag *`. See
+                # CODEGEN_generator_function_Lib_enum.md's 2026-08-20
+                # update.
+                if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
+                        and len(e.args) in (1, 2)):
+                    _dict_val_ct = None
+                    if (isinstance(e.func.obj, MemberExpr)
+                            and isinstance(e.func.obj.obj, IdentExpr)
+                            and e.func.obj.obj.name == 'self' and _cpp_self_struct):
+                        _dict_val_ct = self._field_dict_val_types.get(
+                            _cpp_self_struct, {}).get(e.func.obj.member)
+                    _obj_expr = self._cpp_expr(e.func.obj)
+                    _key_expr = self._cpp_dict_key_expr(e.args[0], self._cpp_expr(e.args[0]))
+                    if _dict_val_ct == 'char *':
+                        return f"mojo_dict_get_str((MojoDict *)({_obj_expr}), {_key_expr})"
+                    if _dict_val_ct == 'double':
+                        return f"mojo_dict_get_double((MojoDict *)({_obj_expr}), {_key_expr})"
+                    if (isinstance(_dict_val_ct, str) and _dict_val_ct.endswith(' *')
+                            and _dict_val_ct[:-2] in self.struct_field_types):
+                        return (f"({_dict_val_ct})mojo_dict_get_int("
+                                f"(MojoDict *)({_obj_expr}), {_key_expr})")
+                    return f"mojo_dict_get_int((MojoDict *)({_obj_expr}), {_key_expr})"
                 obj = self._cpp_expr(e.func.obj)
                 args = ', '.join(self._cpp_expr(a) for a in e.args)
                 return f"{obj}.{e.func.member}({args})"
@@ -30567,7 +30730,28 @@ class GimpleGen:
             body_lines: list[str] = []
             for s in fn.body:
                 body_lines.extend(self._cpp_stmt(s, declared, '    '))
-            value_ctype = _generator_yield_ctype(fn, declared, self._generator_api, self_fields)
+            # Struct-pointer-yield support: `known_structs` (every struct
+            # this compile has a real layout for) validates a "T *" ctype
+            # actually names one; `_dict_val_types` maps `self.<field>` (for
+            # a generator METHOD only — struct_name is None for a free
+            # function, so this stays empty there, exactly like
+            # `self_fields` itself does) to that field's dict VALUE ctype,
+            # reusing `self._field_dict_val_types` (already populated
+            # whole-program by ordinary struct-assignment analysis, not
+            # freshly computed here) rather than inventing new tracking;
+            # `self.func_return_types` (already the single source of truth
+            # every ordinary compiled struct-method CALL site resolves a
+            # method's return type through) doubles as `method_return_types`
+            # for a struct-returning method-call chain. See
+            # _infer_simple_expr_ctype's docstring for the full picture.
+            _known_structs = frozenset(self.struct_field_types.keys())
+            _dict_val_types = ({f"self.{_fld}": _vt for _fld, _vt in
+                                 self._field_dict_val_types.get(struct_name, {}).items()}
+                                if struct_name is not None else {})
+            value_ctype = _generator_yield_ctype(
+                fn, declared, self._generator_api, self_fields,
+                known_structs=_known_structs, dict_val_types=_dict_val_types,
+                method_return_types=self.func_return_types)
             # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
             # (just above) only decided the OVERALL promise value type
             # ('MojoList *' for a tuple yield, same as any plain list-
@@ -30600,6 +30784,9 @@ class GimpleGen:
             raise _UnsupportedGeneratorShape(
                 f"{fn.name}: every `yield` must carry a value, and all "
                 "values must agree on one scalar type (int64_t/double/_Bool)")
+        if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                and value_ctype[:-2] in self.struct_field_types):
+            self._cpp_value_struct_names.add(value_ctype[:-2])
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
@@ -31152,9 +31339,19 @@ class GimpleGen:
                 for _cak, _cav in self._async_closure_api.items():
                     if _cak[0] == enclosing_scope:
                         _closure_api_scoped[_cak[1]] = _cav
+            # Struct-pointer-return support (mirrors _gen_cpp_generator_
+            # unit's identical widening — see that call site's own comment
+            # and _infer_simple_expr_ctype's docstring): an async function
+            # has no `self_fields` (never struct-scoped here), so only the
+            # struct-typed-PARAMETER + struct-method-call-chain shape
+            # applies (`known_structs`/`method_return_types`); no
+            # `dict_val_types` (nothing to key it from with self_fields=
+            # None).
             value_ctype = _generator_yield_ctype(
                 fn, declared, generator_api=None, self_fields=None,
-                async_api=self._async_api, closure_api=_closure_api_scoped)
+                async_api=self._async_api, closure_api=_closure_api_scoped,
+                known_structs=frozenset(self.struct_field_types.keys()),
+                method_return_types=self.func_return_types)
             # Step I: an async function whose body NEVER reaches an
             # ordinary `return <expr>` at all (real Mojo's own idiom for an
             # always-raising helper, e.g. `async def failing_async() raises
@@ -31220,6 +31417,9 @@ class GimpleGen:
                     f"{fn.name}: every `return` must carry a scalar value "
                     "(int64_t/double/_Bool), and all of them must agree on "
                     "one consistent type")
+        if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                and value_ctype[:-2] in self.struct_field_types):
+            self._cpp_value_struct_names.add(value_ctype[:-2])
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
@@ -32169,9 +32369,17 @@ class GimpleGen:
             body_lines: list[str] = []
             for s in fn.body:
                 body_lines.extend(self._cpp_stmt(s, declared, '    '))
+            # Struct-pointer-yield support — mirrors _gen_cpp_generator_
+            # unit's/_gen_cpp_async_unit's identical widening (see their own
+            # comments): async generator methods aren't struct-scoped here
+            # either (self_fields=None, same as _gen_cpp_async_unit), so
+            # only the struct-typed-parameter + struct-method-call-chain
+            # shape applies.
             value_ctype = _generator_yield_ctype(
                 fn, declared, generator_api=self._generator_api,
-                self_fields=None, async_api=self._async_api)
+                self_fields=None, async_api=self._async_api,
+                known_structs=frozenset(self.struct_field_types.keys()),
+                method_return_types=self.func_return_types)
             # See _gen_cpp_generator_unit's identical companion call for
             # the full rationale — same tuple-yield slot-type resolution,
             # reused verbatim for the async-generator (`async for`) case.
@@ -32190,6 +32398,9 @@ class GimpleGen:
                 f"{fn.name}: every `yield <value>` must carry a scalar "
                 "value (int64_t/double/_Bool), and all of them must agree "
                 "on one consistent type")
+        if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                and value_ctype[:-2] in self.struct_field_types):
+            self._cpp_value_struct_names.add(value_ctype[:-2])
 
         promise, handle_t, task, impl = (
             f"{base}_promise", f"{base}_handle", f"{base}_Task", f"{base}_impl")
@@ -34165,6 +34376,30 @@ class GimpleGen:
                                     # Direct: List[T] → List * (override MojoList *)
                                     ft = f'{_outer_base} *'
                             self.struct_field_types[s.name][f_name] = ft
+                            # Seed `self._field_dict_val_types` from this
+                            # field's OWN declared annotation (`var x: dict[K,
+                            # V]`) at this same early pre-pass, using the
+                            # SAME `_annotation_dict_val_type` helper the
+                            # ordinary per-statement AssignStmt lowering later
+                            # uses for its own (lazier) seeding -- reused, not
+                            # duplicated. Needed so a compiled GENERATOR
+                            # METHOD's `self.<dict-field>.get(key)` (struct-
+                            # pointer-yield support, see
+                            # _infer_simple_expr_ctype's docstring) can see
+                            # the field's real dict value type: generator
+                            # methods are translated in gen_module's
+                            # "Milestone C step 3" pass, which runs BEFORE
+                            # the ordinary per-statement body-compile loop
+                            # that populates `_field_dict_val_types` lazily
+                            # (from an ANNOTATED `self.x: dict[K, V] = ...`
+                            # assignment inside `__init__`'s own body) — a
+                            # class-body-declared field's annotation is
+                            # already sitting right here, so there is no
+                            # reason to wait for that later pass to see it
+                            # for THIS shape.
+                            _dv_early = self._annotation_dict_val_type(field.type_ann)
+                            if _dv_early is not None:
+                                self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
 
                 # Always scan ALL methods for self.x = ... to build complete field list.
                 # Uses the generic _walk_ast walker (module-level, above) rather than
@@ -41162,7 +41397,7 @@ class GimpleGen:
                 cpp_parts.append('};')
                 cpp_parts.append('')
             if (self._supported_generator_methods or self._cpp_param_struct_names
-                    or self._cpp_ctor_struct_names):
+                    or self._cpp_ctor_struct_names or self._cpp_value_struct_names):
                 # Milestone C step 3: every struct a compiled generator
                 # METHOD in this module binds `self` to needs its C layout
                 # visible here too (for `self->field` access and for the
@@ -41210,6 +41445,9 @@ class GimpleGen:
                 for _gm_sname4 in self._cpp_ctor_struct_names:
                     if _gm_sname4 not in _gm_struct_names_seen:
                         _gm_struct_names_seen.append(_gm_sname4)
+                for _gm_sname5 in self._cpp_value_struct_names:
+                    if _gm_sname5 not in _gm_struct_names_seen:
+                        _gm_struct_names_seen.append(_gm_sname5)
                 # Transitive closure over struct-pointer-typed FIELDS: a
                 # struct pulled in above (test_doctest.py's `TestHook`) can
                 # itself have a field typed as ANOTHER struct pointer

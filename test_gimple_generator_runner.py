@@ -903,6 +903,94 @@ def main():
         print(x)
 """, "99\n11\n")
 
+    # Struct-pointer-yield support (2026-08-20): a generator YIELDING a real
+    # struct pointer value, not just accepting one as a parameter. Bare
+    # struct-typed-parameter yield already worked before this change (see
+    # `_infer_simple_expr_ctype`'s `known` map) — this confirms it as a
+    # regression guard now that the same type-inference function also
+    # widens IdentExpr/self.field/CallExpr cases.
+    test_generator_stdout("struct_ptr_bare_param_yield", """\
+class Ticker:
+    def __init__(self, start: Int):
+        self.value = start
+
+def gen(tk: Ticker):
+    yield tk
+
+def main():
+    t = Ticker(5)
+    for x in gen(t):
+        print(x.value)
+""", "5\n")
+
+    # `self.<dict-field>.get(key)` yielding a struct-pointer VALUE read out
+    # of a `dict[K, StructType]`-typed field — the confirmed real-world
+    # shape (Lib/enum.py's `Flag._iter_member_by_value_`:
+    # `cls._value2member_map_.get(val)`, a `Flag *`), reduced to a `self`-
+    # based (non-classmethod) generator method here since the `cls`-access
+    # gap itself is a separate, still out-of-scope limitation (see
+    # CODEGEN_generator_function_Lib_enum.md). Exercises: struct-pointer
+    # yield-type inference via `_field_dict_val_types` (seeded early, from
+    # the field's own `var map: dict[Int, Flag]` declaration, so it's
+    # available in time for generator-method translation), the promise/
+    # `co_yield`/consumer-side plumbing (unchanged, already generic), the
+    # real `mojo_dict_get_int`-based `.get()` codegen this change ALSO
+    # added to `_cpp_expr` (the raw `obj.get(k)` C++ fallback it replaces
+    # doesn't compile against an opaque `MojoDict *`), and the struct-
+    # typedef-visibility widening (`_cpp_value_struct_names`) for a struct
+    # that's reachable ONLY via the yielded value's type, not via `self`, a
+    # parameter, or a constructor call.
+    test_generator_stdout("struct_ptr_dict_get_yield", """\
+class Flag:
+    def __init__(self, val: Int):
+        self.val = val
+
+class Container:
+    var map: dict[Int, Flag]
+
+    def __init__(self):
+        self.map = {}
+
+    def add(self, k: Int, f: Flag):
+        self.map[k] = f
+
+    def gen(self, k: Int):
+        yield self.map.get(k)
+
+def main():
+    c = Container()
+    f = Flag(42)
+    c.add(1, f)
+    for x in c.gen(1):
+        print(x.val)
+""", "42\n")
+
+    # General case: a struct-typed receiver's own METHOD call chain
+    # returning ANOTHER struct pointer, yielded directly — not just the
+    # `.get()` shape above. Exercises `method_return_types` (this file's
+    # existing `self.func_return_types`, reused rather than re-derived) in
+    # `_infer_simple_expr_ctype`'s CallExpr/MemberExpr branch.
+    test_generator_stdout("struct_ptr_method_chain_yield", """\
+class Inner:
+    def __init__(self, v: Int):
+        self.v = v
+
+class Outer:
+    def __init__(self, v: Int):
+        self.inner = Inner(v)
+
+    def get_inner(self):
+        return self.inner
+
+def gen(o: Outer):
+    yield o.get_inner()
+
+def main():
+    o = Outer(99)
+    for x in gen(o):
+        print(x.v)
+""", "99\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
