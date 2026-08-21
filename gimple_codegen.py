@@ -18482,12 +18482,25 @@ class GimpleGen:
             cond_op = '<'
             _, stop_v = self.lower_expr(args[0])
         elif len(args) == 2:
-            _, start_v = self.lower_expr(args[0])
+            start_t, start_v = self.lower_expr(args[0])
             _, stop_v  = self.lower_expr(args[1])
+            # `start_v` (unlike `stop_v`, only ever used in a comparison,
+            # which undergoes GIMPLE's usual arithmetic conversion) feeds a
+            # DIRECT `{target} = {start_v};` assignment below into an
+            # int64_t-declared target -- the exact same bare-literal-into-
+            # int64_t shape the 1-arg branch's comment above documents
+            # ("non-trivial conversion in 'integer_cst'"), but that fix was
+            # only ever applied to the 1-arg branch's own hardcoded
+            # `(int64_t)0`, not here. A literal/`int`-typed 2-arg start
+            # (`range(0, len(cl))`) hit the identical GCC error this branch
+            # was never covered for. Materialize as a real int64_t temp,
+            # mirroring `one64`/the 1-arg branch's own `start_v` construction.
+            if start_t != 'int64_t':
+                start_v = self._new_val('int64_t', f"(int64_t){start_v}")
             step_v = self._new_val('int64_t', '(int64_t)1')
             cond_op = '<'
         elif len(args) == 3:
-            _, start_v = self.lower_expr(args[0])
+            start_t, start_v = self.lower_expr(args[0])
             _, stop_v  = self.lower_expr(args[1])
             se = args[2]
             if isinstance(se, IntLiteral) and se.value < 0:
@@ -18498,7 +18511,21 @@ class GimpleGen:
                 cond_op = '<'
             else:
                 cond_op = '<'; dynamic_step = True
-            _, step_v = self.lower_expr(se)
+            step_t, step_v = self.lower_expr(se)
+            # Same bare-literal-into-int64_t gap as the 2-arg branch above,
+            # for BOTH `start_v` (direct `{target} = {start_v};` assignment)
+            # and `step_v` (direct `{target} + {step_v}` addition feeding
+            # another int64_t-typed temp below, `st`) -- a 3-arg
+            # `range(0, len(cl), 2)` (turtle.py's `TurtleScreenBase.
+            # _pointlist`: `[(cl[i], -cl[i+1]) for i in range(0, len(cl),
+            # 2)]`) hit both: "non-trivial conversion in 'integer_cst'" on
+            # `i = 0;` and "type mismatch in binary expression" on the
+            # increment. `dynamic_step`'s own comparisons (`{t_sp} = {step_v}
+            # > 0;`) are fine uncast, same reasoning as `stop_v` above.
+            if start_t != 'int64_t':
+                start_v = self._new_val('int64_t', f"(int64_t){start_v}")
+            if step_t != 'int64_t':
+                step_v = self._new_val('int64_t', f"(int64_t){step_v}")
         else:
             return
 
@@ -33996,7 +34023,51 @@ class GimpleGen:
                     _collect_self_reads(method.body, read_fields)
                     for fn, ft in read_fields.items():
                         if fn not in self.struct_field_types[s.name]:
-                            self.struct_field_types[s.name][fn] = ft
+                            # Before falling back to the generic 'int'
+                            # read-only default, check whether a base class
+                            # already resolved this field to something more
+                            # specific. A field ASSIGNED only inside a base
+                            # class's `__init__` (`TurtleScreenBase.__init__`:
+                            # `self.cv = cv`) is invisible to this class's own
+                            # `_collect_self_assigns` scan whenever the
+                            # subclass overrides `__init__` itself (even if
+                            # that override's only job is calling
+                            # `Base.__init__(self, cv)` — `_merge_struct_
+                            # inheritance` excludes an overridden method from
+                            # `s.methods` entirely, by design, so the base
+                            # method's own self-assignment is never walked
+                            # for THIS class). The field is still read all
+                            # over the subclass's own methods
+                            # (`self.cv.coords(...)`/`self.cv.config(...)`),
+                            # so `_collect_self_reads` finds it and, absent
+                            # this check, always guesses the generic 'int'
+                            # boxed-object fallback — even when the base
+                            # class already pinned it to a real, specific
+                            # type (here 'int64_t', from the unannotated
+                            # `cv` constructor param). A mixed 'int' (this
+                            # class's struct field) vs 'int64_t' (the actual
+                            # value stored through it, e.g. via another
+                            # subclass that DOES scan the base assignment)
+                            # cross-struct-instance type split is exactly the
+                            # shape GCC's `-fgimple` rejects as "non-trivial
+                            # conversion"/"type mismatch in binary
+                            # expression" once two differently-typed
+                            # monomorphized copies of a shared method
+                            # (`_pointlist`, common to `TurtleScreenBase`/
+                            # `TurtleScreen`/`_Screen`) exist side by side.
+                            # Mirrors the identical base-lookup pattern the
+                            # VarDecl-completion pass above already uses
+                            # (same MRO-order walk over `s.bases`) — only
+                            # ever upgrades a generic guess to a more
+                            # specific inherited type, never overrides an
+                            # already-specific local finding.
+                            _base_ft = None
+                            for _base_name in (getattr(s, 'bases', None) or []):
+                                _cand = self.struct_field_types.get(_base_name, {}).get(fn)
+                                if _cand is not None:
+                                    _base_ft = _cand
+                                    break
+                            self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                             if fn not in already:
                                 s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
                                 already.add(fn)
