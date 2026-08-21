@@ -991,6 +991,74 @@ def main():
         print(x.v)
 """, "99\n")
 
+    # `cls.<attr>` class-attribute redirect + `cls.<attr>.get(...)` dict
+    # lookup inside a compiled @classmethod generator — the exact
+    # Lib/enum.py `Flag._iter_member_by_value_` shape (`for val in
+    # _iter_bits_lsb(value & cls._flag_mask_): yield cls._value2member_map_.
+    # get(val)`), reduced to its two load-bearing pieces: a bare `cls.<attr>`
+    # read (`cls._flag_mask_`-equivalent, used inline rather than yielded)
+    # and a `cls.<dict-attr>.get(key)` yield whose value type is a real
+    # struct pointer (`cls._value2member_map_.get(val)`-equivalent). Called
+    # via an INSTANCE (`r.gen(k)`, mirroring enum.py's own real call site,
+    # `self._iter_member_(self._value_)`) — invoking a @classmethod
+    # generator via the CLASS NAME directly (`Registry.gen(k)`) hits a
+    # separate, pre-existing call-site gap in the ordinary (non-generator)
+    # GIMPLE path (routing a class-name method call to the generator-start
+    # API), out of this fix's scope (see bugs/CODEGEN_generator_function_
+    # Lib_enum.md's 2026-08-21 update). See that same doc's update for the
+    # full root-cause.
+    test_generator_stdout("cls_class_attr_dict_get_yield", """\
+class Flag:
+    def __init__(self, val: Int):
+        self.val = val
+
+class Registry:
+    _value_map: dict[Int, Flag] = {}
+    _mask: Int = 3
+
+    def __init__(self):
+        self._value_map[1] = Flag(42)
+        self._value_map[2] = Flag(43)
+
+    @classmethod
+    def gen(cls, k: Int):
+        m = cls._mask
+        if k <= m:
+            yield cls._value_map.get(k)
+
+def main():
+    r = Registry()
+    for x in r.gen(1):
+        print(x.val)
+    for x in r.gen(2):
+        print(x.val)
+""", "42\n43\n")
+
+    # `cls.method(...)` call inside a compiled @classmethod generator —
+    # resolved purely by NAME (the enclosing struct's own real compiled
+    # classmethod), mirroring the `self.method(...)` call case's own
+    # mechanism. See bugs/CODEGEN_generator_function_Lib_enum.md's
+    # 2026-08-21 update, point (2). Also called via an instance, for the
+    # same call-site-gap reason noted above.
+    test_generator_stdout("cls_classmethod_call_in_generator", """\
+class Helper:
+    def __init__(self):
+        self.dummy = 0
+
+    @classmethod
+    def double(cls, n: Int):
+        return n * 2
+
+    @classmethod
+    def gen(cls, n: Int):
+        yield cls.double(n)
+
+def main():
+    h = Helper()
+    for x in h.gen(21):
+        print(x)
+""", "42\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

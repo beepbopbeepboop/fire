@@ -2700,6 +2700,15 @@ def _receiver_key(e) -> str | None:
         return e.name
     if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and e.obj.name == 'self':
         return 'self.' + e.member
+    if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and e.obj.name == 'cls':
+        # `cls.<class-attr>` — the class-level analogue of `self.<field>`
+        # just above, for a @classmethod generator (e.g. Lib/enum.py's
+        # `Flag._iter_member_by_value_`: `cls._value2member_map_.get(val)`).
+        # See `_gen_cpp_generator_unit`'s `_dict_val_types` construction,
+        # which seeds a matching `'cls.' + attr` key from
+        # `self._class_attrs`/`self._global_dict_val_types` for exactly
+        # this receiver shape.
+        return 'cls.' + e.member
     return None
 
 
@@ -4270,6 +4279,23 @@ class GimpleGen:
         # for globals; bare function names for functions.
         self._cpp_module_global_refs: set[tuple[str, str]] = set()
         self._cpp_module_func_refs: set[str] = set()
+        # Class-level-attribute globals (the `self._class_attrs[struct][
+        # attr] -> mangled global` redirect target) read via `cls.<attr>`
+        # from a compiled @classmethod generator body (`_cpp_expr`'s
+        # MemberExpr `cls.<attr>` case) — the SAME "this .cpp TU is
+        # compiled standalone, so it needs its own extern declaration for
+        # any C symbol defined in the .c/.ci side" story as `_cpp_module_
+        # global_refs` above, just for a class attribute instead of a
+        # plain module global. Holds the mangled global NAME (each one is
+        # already globally unique — `_classattr_{struct}__{attr}` — so a
+        # flat set of names is enough, no (module, name) pairing needed).
+        self._cpp_class_attr_refs: set[str] = set()
+        # struct name -> set of that struct's OWN method names that are
+        # generators (`FunctionDef.is_generator`). See its own population
+        # site's docstring (the "Collect class-level attributes" pre-pass)
+        # for why this is needed as a SEPARATE registry from `self.
+        # _classmethod_names`/`self.func_return_types`.
+        self._struct_generator_method_names: dict[str, set[str]] = {}
         # Struct methods called from a compiled generator/async body on
         # EITHER `self` or a non-self struct-pointer-typed local/parameter
         # (see bugs/hard/CODEGEN_generator_struct_typed_param_refused.md).
@@ -27149,6 +27175,38 @@ class GimpleGen:
                 # genuine not-yet-synthesized dynamic attribute) falls
                 # through unchanged to the original best-effort raw access.
                 return f"self->{e.member}"
+            # `cls.<attr>` — the class-level (not instance) analogue of
+            # `self.<field>` just above, for a @classmethod generator (see
+            # the classmethod-generator eligibility check, ~line 30536,
+            # which conventionally names this parameter `cls`). `cls`
+            # itself is only ever an opaque, never-dereferenced int64_t
+            # placeholder in this codegen — there is no real object behind
+            # it (see that same eligibility check's own comment), so
+            # (unlike `self`) there is no `cls->member` struct-field-
+            # pointer form to fall back to. Only the SAME class-attribute-
+            # global redirect the ordinary (non-coroutine) GIMPLE path's
+            # own `_lower_MemberExpr` already uses for `self.<class-level-
+            # attr>`/`ClassName.attr` reads (`self._class_attrs[struct_
+            # name][attr] -> mangled global variable`, see that method's
+            # "Class-level attribute (not an instance field)" branch) is
+            # supported here — anything else (a genuine instance field,
+            # which `cls` structurally cannot have; an unrecognized name)
+            # must refuse rather than silently emit `cls->member` (invalid
+            # C++ on a scalar int64_t) or `cls.member` (equally invalid).
+            # See bugs/CODEGEN_generator_function_Lib_enum.md's 2026-08-21
+            # update for the motivating `cls._flag_mask_`/`cls.
+            # _value2member_map_` shapes (Flag._iter_member_by_value_).
+            if struct_name and isinstance(e.obj, IdentExpr) and e.obj.name == 'cls':
+                _cls_gname = self._class_attrs.get(struct_name, {}).get(e.member)
+                if _cls_gname is not None:
+                    self._cpp_class_attr_refs.add(_cls_gname)
+                    return _cls_gname
+                raise _UnsupportedGeneratorShape(
+                    f"cls.{e.member}: only a class-level attribute assigned "
+                    "in the enclosing class's own body is supported for "
+                    "`cls.<attr>` reads in a compiled generator/coroutine "
+                    "body (no class-level attribute/method access exists "
+                    "for any other shape)")
             # Two-level `self.<field1>.<field2>` chain (imaplib.py's
             # `Idler.burst`: `self._imap.sock`, where `_imap` is itself a
             # struct-pointer-typed field). This narrow model's own struct-
@@ -27478,6 +27536,55 @@ class GimpleGen:
                     _sym = self._struct_method_csym(_cpp_self_struct, e.func.member, '')
                     self._cpp_struct_method_refs.add((_cpp_self_struct, e.func.member))
                     return f"{_sym}(self{', ' + args if args else ''})"
+                # `cls.method(...)` inside a @classmethod generator — the
+                # SAME name-only resolution mechanism the ordinary
+                # (non-coroutine) GIMPLE path's own CallExpr/MemberExpr
+                # lowering already uses for `cls.method(...)` (see that
+                # method's own "cls.method(...) inside a @classmethod"
+                # comment): resolved purely by NAME via `_cpp_gen_self_
+                # struct` (the enclosing struct, known statically the same
+                # way the classmethod eligibility check derives it) plus
+                # `self._classmethod_names`/`func_return_types` — no real
+                # runtime `cls` VALUE is ever needed, mirroring the `self.
+                # method(...)` case immediately above. Only a genuine
+                # compiled classmethod/static/ordinary method of the
+                # enclosing struct is accepted; a call to another compiled
+                # GENERATOR method via `cls` (e.g. Lib/enum.py's Flag.
+                # _iter_member_by_def_: `cls._iter_member_by_value_(value)`)
+                # is deliberately NOT handled here — that needs its own
+                # coroutine-construction call convention (mirroring the
+                # ordinary path's `_generator_method_api`/`_gm_api`
+                # handling), which this fix does not add — refuse honestly
+                # instead of emitting a call to a symbol that was never
+                # compiled as an ordinary C function. See bugs/CODEGEN_
+                # generator_function_Lib_enum.md's 2026-08-21 update.
+                if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'cls' \
+                        and _cpp_self_struct:
+                    _cls_method = e.func.member
+                    _cls_mangled = f"{_cpp_self_struct}_{_cls_method}"
+                    # Exclude another compiled GENERATOR method (a real
+                    # `@classmethod` generator is ALSO in `_classmethod_
+                    # names`, which alone would wrongly accept this shape
+                    # and then call a symbol that was never compiled as an
+                    # ordinary C function — see this branch's own comment
+                    # above and `_cls_refs_supported`'s identical guard).
+                    if (_cls_method not in self._struct_generator_method_names.get(
+                            _cpp_self_struct, ())
+                            and (_cls_mangled in self._classmethod_names
+                                 or _cls_mangled in self.func_return_types)):
+                        args = ', '.join(self._cpp_expr(a) for a in e.args)
+                        _sym = self._struct_method_csym(_cpp_self_struct, _cls_method, '')
+                        self._cpp_struct_method_refs.add((_cpp_self_struct, _cls_method))
+                        return f"{_sym}(cls{', ' + args if args else ''})"
+                    raise _UnsupportedGeneratorShape(
+                        f"cls.{_cls_method}(...): only a call to a real "
+                        "compiled classmethod/static method of the "
+                        "enclosing class is supported for `cls.<method>"
+                        "(...)` calls in a compiled generator/coroutine "
+                        "body (not e.g. a call to another compiled "
+                        "generator method, which needs separate "
+                        "coroutine-construction handling this fix does "
+                        "not add)")
                 if isinstance(e.func.obj, IdentExpr):
                     _obj_struct = self._cpp_struct_ptr_local(e.func.obj.name)
                     if _obj_struct:
@@ -27525,6 +27632,21 @@ class GimpleGen:
                         and e.func.obj.obj.name == 'self' and _cpp_self_struct):
                     _str_obj_ctype = self.struct_field_types.get(
                         _cpp_self_struct, {}).get(e.func.obj.member)
+                elif (isinstance(e.func.obj, MemberExpr)
+                        and isinstance(e.func.obj.obj, IdentExpr)
+                        and e.func.obj.obj.name == 'cls' and _cpp_self_struct):
+                    # `cls.<class-attr>.get(...)` — the class-level analogue
+                    # of `self.<field>.get(...)` just above (e.g. Lib/
+                    # enum.py's `Flag._iter_member_by_value_`: `cls.
+                    # _value2member_map_.get(val)`). `cls.<attr>` has no
+                    # instance-field form (see the MemberExpr case's own
+                    # `cls.<attr>` branch), only the class-attribute-global
+                    # redirect, so the receiver's ctype comes from THAT
+                    # global's registered type instead of struct_field_types.
+                    _cls_gname = self._class_attrs.get(
+                        _cpp_self_struct, {}).get(e.func.obj.member)
+                    if _cls_gname is not None:
+                        _str_obj_ctype = self._global_var_types.get(_cls_gname)
                 if (_str_obj_ctype == 'char *' and e.func.member == 'replace'
                         and len(e.args) == 2):
                     _obj_expr = self._cpp_expr(e.func.obj)
@@ -27564,6 +27686,18 @@ class GimpleGen:
                             and e.func.obj.obj.name == 'self' and _cpp_self_struct):
                         _dict_val_ct = self._field_dict_val_types.get(
                             _cpp_self_struct, {}).get(e.func.obj.member)
+                    elif (isinstance(e.func.obj, MemberExpr)
+                            and isinstance(e.func.obj.obj, IdentExpr)
+                            and e.func.obj.obj.name == 'cls' and _cpp_self_struct):
+                        # `cls.<class-attr dict>.get(...)`'s VALUE ctype —
+                        # the class-level-global sibling of
+                        # `_field_dict_val_types` above, keyed by the
+                        # mangled global name (see `_class_attrs`'s own
+                        # docstring for that naming).
+                        _cls_gname = self._class_attrs.get(
+                            _cpp_self_struct, {}).get(e.func.obj.member)
+                        if _cls_gname is not None:
+                            _dict_val_ct = self._global_dict_val_types.get(_cls_gname)
                     _obj_expr = self._cpp_expr(e.func.obj)
                     _key_expr = self._cpp_dict_key_expr(e.args[0], self._cpp_expr(e.args[0]))
                     if _dict_val_ct == 'char *':
@@ -30436,6 +30570,74 @@ class GimpleGen:
             f"{indent}}}",
         ]
 
+    def _cls_refs_supported(self, body, struct_name: str) -> bool:
+        """True iff EVERY `cls` reference found anywhere in a @classmethod
+        generator's body is one of the two shapes `_cpp_expr`'s MemberExpr/
+        CallExpr `cls.<...>` handling actually supports:
+          - `cls.<attr>` where `<attr>` is a real class-level attribute
+            assigned in the enclosing class's own body (`self._class_attrs`
+            — the same class-attribute-global redirect the ordinary,
+            non-coroutine GIMPLE path already uses for `self.<class-attr>`/
+            `ClassName.attr` reads).
+          - `cls.<method>(...)` where `<method>` is a real compiled
+            classmethod/static/ordinary method of the enclosing struct
+            (`self._classmethod_names`/`self.func_return_types`) — NOT a
+            call to another compiled GENERATOR method, which needs its own
+            coroutine-construction call convention this fix does not add.
+        False for ANYTHING else — a bare `cls` used as a plain value (`x =
+        cls`, `f(cls)`), an unrecognized `cls.<attr>` name, or a `cls.
+        <method>(...)` call that doesn't resolve to a real compiled
+        function — keeping this pre-check exactly as conservative as the
+        ORIGINAL blanket "any cls reference in the body -> refuse" check
+        for every shape this fix doesn't add real support for, so nothing
+        new ever reaches `_cpp_expr`'s MemberExpr "non-self member access"
+        fallback (which would emit invalid C++ on `cls`'s opaque int64_t
+        placeholder) or silently reads that placeholder as if it were a
+        real value.
+
+        Walked in two passes rather than one, since a single `IdentExpr`
+        node can only be recognized as "supported" from its PARENT
+        (MemberExpr/CallExpr) context — the first pass collects the
+        `id()` of every `cls` IdentExpr that appears as the receiver of a
+        supported access shape; the second pass then requires EVERY `cls`
+        IdentExpr anywhere in the body to be one of those, by identity
+        (not by name/position), so a `cls` reference that happens to look
+        like a supported receiver's `.obj` but is a DIFFERENT AST node
+        (impossible in practice, since each occurrence in source is its
+        own node, but kept identity-based rather than shape-based to
+        avoid ever under-counting) is never missed.
+
+        See gimple_codegen.py's classmethod-generator eligibility check
+        (this method's only caller) and bugs/CODEGEN_generator_function_
+        Lib_enum.md's 2026-08-21 update for the motivating Lib/enum.py
+        `Flag._iter_member_by_value_`/`_iter_member_by_def_` shapes.
+        """
+        class_attrs = self._class_attrs.get(struct_name, {})
+        supported_ids: set = set()
+        for n in _walk_ast(body):
+            if (isinstance(n, MemberExpr) and isinstance(n.obj, IdentExpr)
+                    and n.obj.name == 'cls' and n.member in class_attrs):
+                supported_ids.add(id(n.obj))
+            elif (isinstance(n, CallExpr) and isinstance(n.func, MemberExpr)
+                    and isinstance(n.func.obj, IdentExpr) and n.func.obj.name == 'cls'):
+                mangled = f"{struct_name}_{n.func.member}"
+                # Exclude a call to another compiled GENERATOR method
+                # (`self._struct_generator_method_names` — a real
+                # `@classmethod` generator, like Lib/enum.py's `Flag.
+                # _iter_member_by_value_`, is ALSO in `_classmethod_names`,
+                # which alone would wrongly mark this shape "supported"):
+                # that needs its own coroutine-construction call
+                # convention this fix does not add (see this method's own
+                # docstring).
+                if (n.func.member not in self._struct_generator_method_names.get(struct_name, ())
+                        and (mangled in self._classmethod_names
+                             or mangled in self.func_return_types)):
+                    supported_ids.add(id(n.func.obj))
+        for n in _walk_ast(body):
+            if isinstance(n, IdentExpr) and n.name == 'cls' and id(n) not in supported_ids:
+                return False
+        return True
+
     def _gen_cpp_generator_unit(self, fn: FunctionDef,
                                  struct_name: str | None = None) -> tuple[str, str, str, list]:
         """Translate ONE supported generator FunctionDef into a
@@ -30539,36 +30741,47 @@ class GimpleGen:
                 # path already uses for `cls.method(...)` resolution — see
                 # this file's CallExpr lowering, "`cls.method(...)` inside a
                 # @classmethod"). Unlike `self`, `cls` names the CLASS
-                # object, not an instance — this codegen has no class-level
-                # attribute/method-call story (self.<field> reads are the
-                # only attribute access _cpp_expr's MemberExpr case
-                # supports, and that's instance-scoped via
-                # struct_field_types), so a classmethod generator body that
-                # actually TOUCHES `cls` (bare, or `cls.x`, or `cls.m(...)`)
-                # must refuse here rather than let a bare `cls` int64_t
-                # placeholder reach _cpp_expr's MemberExpr "non-self member
-                # access" fallback, which would emit invalid C++ (member
-                # access on a scalar) and fail at the g++ compile stage
-                # instead of gracefully falling back to interpreting this
-                # function from source. Confirmed real-world case (see the
+                # object, not an instance — there is no real object behind
+                # it in this codegen (see `param_ctypes.append(('cls', ...))`
+                # below), so a classmethod generator body that touches `cls`
+                # must be checked shape-by-shape: `_cls_refs_supported`
+                # allows the two shapes `_cpp_expr`'s MemberExpr/CallExpr
+                # `cls.<...>` handling actually supports (a class-level-
+                # attribute read via the `self._class_attrs` global
+                # redirect; a call to a real compiled classmethod/static
+                # method of the enclosing struct) and refuses anything else
+                # — a bare `cls` used as a plain value, or a `cls.<attr>`/
+                # `cls.<method>(...)` shape neither of those cover — exactly
+                # as conservatively as the original blanket "any cls
+                # reference -> refuse" check did for every unsupported
+                # shape, so nothing can reach _cpp_expr's MemberExpr
+                # "non-self member access" fallback (invalid C++ on a
+                # scalar) or silently read the placeholder as a real value.
+                # See bugs/CODEGEN_generator_function_Lib_enum.md's
+                # 2026-08-21 update for the motivating Lib/enum.py
+                # `Flag._iter_member_by_value_` shape (previously refused
+                # unconditionally here — see the
                 # CODEGEN_generator_classmethod_first_param_must_be_self.md
-                # hard-bug doc) never references `cls` in its body at all,
-                # so this is not merely a theoretical carve-out.
-                if any(isinstance(n, IdentExpr) and n.name == 'cls'
-                       for n in _walk_ast(fn.body)):
+                # hard-bug doc for that original, narrower carve-out).
+                if not self._cls_refs_supported(fn.body, struct_name):
                     raise _UnsupportedGeneratorShape(
                         f"{fn.name}: a @classmethod generator that "
-                        "references `cls` in its body is not supported "
-                        "(no class-level attribute/method access exists "
-                        "yet for compiled generators)")
-                # `cls` is provably unused in the body (checked just above)
-                # -- an opaque, never-read int64_t placeholder keeps the
-                # emitted C++ signature's parameter COUNT/POSITION correct
-                # (call sites already pass the receiver positionally — see
-                # the method-call CallExpr lowering's `all_args = [(ot, ov)]
-                # + arg_pairs`, which doesn't care what this parameter's
-                # name or real value is) without inventing any new
-                # class-object representation.
+                        "references `cls` in its body in an unsupported "
+                        "way is not supported (only a class-level-"
+                        "attribute read, or a call to a real compiled "
+                        "classmethod/static method of the enclosing "
+                        "class, are supported for `cls.<...>` access in a "
+                        "compiled generator)")
+                # `cls` itself is only ever an opaque, never-dereferenced
+                # int64_t placeholder -- every supported access above is
+                # resolved purely by NAME (via `struct_name`), never by
+                # reading `cls`'s own runtime value -- so this placeholder
+                # keeps the emitted C++ signature's parameter COUNT/
+                # POSITION correct (call sites already pass the receiver
+                # positionally — see the method-call CallExpr lowering's
+                # `all_args = [(ot, ov)] + arg_pairs`, which doesn't care
+                # what this parameter's name or real value is) without
+                # inventing any new class-object representation.
                 param_ctypes.append(('cls', 'int64_t'))
             else:
                 # Mirrors _gen_struct_method's own convention exactly (see that
@@ -30748,6 +30961,18 @@ class GimpleGen:
             _dict_val_types = ({f"self.{_fld}": _vt for _fld, _vt in
                                  self._field_dict_val_types.get(struct_name, {}).items()}
                                 if struct_name is not None else {})
+            # `cls.<class-attr>` sibling of the `self.<field>` seeding just
+            # above — same "receiver key -> dict VALUE ctype" shape
+            # `_receiver_key`'s `cls.` branch expects, sourced from
+            # `self._class_attrs`/`self._global_dict_val_types` (the class-
+            # level-global analogue of `_field_dict_val_types`) instead of
+            # a per-instance field. Real: Lib/enum.py's `Flag.
+            # _iter_member_by_value_`: `cls._value2member_map_.get(val)`.
+            if struct_name is not None:
+                for _aname, _gname in self._class_attrs.get(struct_name, {}).items():
+                    _vt = self._global_dict_val_types.get(_gname)
+                    if _vt is not None:
+                        _dict_val_types[f"cls.{_aname}"] = _vt
             value_ctype = _generator_yield_ctype(
                 fn, declared, self._generator_api, self_fields,
                 known_structs=_known_structs, dict_val_types=_dict_val_types,
@@ -34231,6 +34456,25 @@ class GimpleGen:
                                     break
                             self.struct_field_types[s.name][field.name] = (
                                 _inherited_ft if _inherited_ft is not None else s.name + ' *')
+                # Record which of this struct's OWN methods are generators
+                # (`FunctionDef.is_generator`) — used by `_cls_refs_supported`/
+                # `_cpp_expr`'s `cls.<method>(...)` call handling to refuse a
+                # call to another compiled GENERATOR method via `cls` (that
+                # needs its own coroutine-construction call convention this
+                # fix does not add — see those two call sites' own comments)
+                # even when the method's mangled name also happens to be a
+                # real `@classmethod` (`self._classmethod_names` is populated
+                # purely from the decorator, independent of whether the
+                # method is ALSO a generator — Lib/enum.py's `Flag.
+                # _iter_member_by_value_` is exactly both at once). Populated
+                # here (not derived on demand from `self._classmethod_names`/
+                # `self.func_return_types`, neither of which distinguishes
+                # "compiled as an ordinary function" from "compiled as a
+                # coroutine") since this same loop already has `s.methods`
+                # in scope for every struct. See bugs/CODEGEN_generator_
+                # function_Lib_enum.md's 2026-08-21 update.
+                self._struct_generator_method_names.setdefault(s.name, set()).update(
+                    m.name for m in s.methods if getattr(m, 'is_generator', False))
                 # Collect class-level attributes (non-self, non-method assignments at class body)
                 self._class_attrs[s.name] = {}
                 for field in s.fields:
@@ -34294,6 +34538,40 @@ class GimpleGen:
                                 self._global_var_types[mangled] = 'int64_t'
                             else:
                                 self._global_var_types[mangled] = 'int64_t'
+                            # Seed `self._global_dict_val_types` from this
+                            # class-body attribute's OWN declared annotation
+                            # (`_X: dict[K, V] = {...}`), mirroring the
+                            # struct-field pre-pass's identical eager seed
+                            # of `_field_dict_val_types` a little further
+                            # down in this same method (see that seed's own
+                            # docstring for the full "generator methods are
+                            # translated before the lazy per-statement pass"
+                            # rationale — the class-level-global sibling has
+                            # the exact same timing problem). Needed so a
+                            # `cls.<dict-class-attr>.get(key)` read inside a
+                            # compiled @classmethod generator (see this
+                            # file's `_cpp_expr` MemberExpr/CallExpr `cls.
+                            # <attr>` handling) can resolve the dict's real
+                            # VALUE type instead of defaulting to int64_t.
+                            # A dict literal WITH pairs already gets this
+                            # from Phase 1.7's `_phase17_infer_global_type`
+                            # (`_global_dict_val_types[_gname] = _vt`, from
+                            # the pairs' own values) — but that only fires
+                            # for a NON-EMPTY literal; an empty `{}` (the
+                            # common class-attr-declared-then-populated-
+                            # elsewhere idiom, e.g. `_value2member_map_:
+                            # dict[Any, Flag] = {}`) needs the annotation
+                            # instead, exactly like the struct-field case.
+                            # Deliberately a SEPARATE, independent statement
+                            # (not nested inside the ctype if/elif/else
+                            # chain just above) so it can never change that
+                            # chain's own control flow for a class attr with
+                            # no annotation, or perturb `struct_field_types`
+                            # for a non-container-valued attribute.
+                            if field.type_ann is not None:
+                                _dv_cls_early = self._annotation_dict_val_type(field.type_ann)
+                                if _dv_cls_early is not None:
+                                    self._global_dict_val_types[mangled] = _dv_cls_early
                 # Explicit field declarations. A dataclass field with a
                 # default (`x: Type = default`, the normal shape for every
                 # trailing/optional field — e.g. `decorators: list =
@@ -41575,6 +41853,36 @@ class GimpleGen:
                 # symbol, ABI-identical to the .ci side's own extern).
                 for _vfn in sorted(self._cpp_module_variadic_func_refs):
                     cpp_parts.append(f'extern "C" int64_t {_vfn} (...);')
+                cpp_parts.append('')
+            if self._cpp_class_attr_refs:
+                # Class-level-attribute globals read via `cls.<attr>` in a
+                # compiled @classmethod generator body (`_cpp_expr`'s
+                # MemberExpr `cls.<attr>` case / `self._cpp_class_attr_
+                # refs`) — declared extern here for the SAME "standalone
+                # .cpp TU" reason as the module-global refs just above:
+                # the real C variable is DEFINED once in the .c/.ci side
+                # (`_gen_toplevel`'s "Global variable declarations" pass,
+                # which seeds every `self._class_attrs[...]` mangled name
+                # into `self._global_var_types` at Phase-1-ish time — see
+                # that class-attr-collection pre-pass's own comment), never
+                # in this .cpp TU. Uses the SAME real (non-int64_t-boxed)
+                # pointer-ish C type that pass gives a container-valued
+                # class attribute (`MojoDict *`/`MojoList *`/`MojoSet *`/
+                # `char *`) — `self._global_var_types` (not `_global_c_
+                # decl_types`, which is only ever populated for OTHER
+                # kinds of globals, never for this mangled `_classattr_`
+                # name) is already that class attr's authoritative
+                # declared type; a class attr this codegen doesn't
+                # recognize as a container/scalar type defaults to
+                # `int64_t`, matching the .c side's own identical default
+                # for an unrecognized global.
+                cpp_parts.append('/* Extern declarations for class-level')
+                cpp_parts.append('   attribute globals (`cls.<attr>`) read by this')
+                cpp_parts.append('   module\'s compiled generator bodies. */')
+                for _cattr_gname in sorted(self._cpp_class_attr_refs):
+                    _cattr_ctype = self._global_var_types.get(_cattr_gname, 'int64_t')
+                    _cattr_ctype = _cattr_ctype.replace('_Bool', 'bool')
+                    cpp_parts.append(f'extern {_cattr_ctype} {_cattr_gname};')
                 cpp_parts.append('')
             if self._cpp_struct_method_refs:
                 # Struct methods called from a compiled generator/async body

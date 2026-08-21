@@ -1,5 +1,184 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-21 — `cls`-attribute-redirect IMPLEMENTED; enum.py's OWN refusal still stands, for an honest reason)
+
+The 2026-08-10 note's own real-fix-attempt (points (1)+(2): `cls.method(...)`
+calls resolved purely by name via `_classmethod_names`/`func_return_types`;
+`cls.<attr>` bare reads redirected through `self._class_attrs[struct_name]
+[attr] -> mangled global`, the exact same mechanism `self.<class-attr>`
+reads already use) is now IMPLEMENTED, now that the 2026-08-20 update above
+closed the yield-type gap that previously made landing (1)+(2) alone unsafe.
+
+**What was implemented**, all in `gimple_codegen.py`:
+1. `_cpp_expr`'s MemberExpr case gained a `cls.<attr>` branch (mirroring
+   the existing `self.<field>` branch just above it): redirects to
+   `self._class_attrs[struct_name][attr]`'s mangled global when `<attr>`
+   is a real class-body-declared attribute, else raises
+   `_UnsupportedGeneratorShape` (there is no `cls-><attr>` struct-pointer
+   form to fall back to — `cls` is only ever an opaque, never-dereferenced
+   `int64_t` placeholder in this codegen, never a real object).
+2. `_cpp_expr`'s CallExpr/MemberExpr case gained a `cls.<method>(...)`
+   branch (mirroring the existing `self.<method>(...)` branch): resolves
+   purely by NAME via `_cpp_gen_self_struct` (the enclosing struct) plus
+   `self._classmethod_names`/`self.func_return_types` — no real runtime
+   `cls` value needed, exactly like the ordinary (non-coroutine) path's
+   own `cls.method(...)` resolution. Explicitly EXCLUDES a call to another
+   compiled GENERATOR method (see point 4 below) — that needs its own
+   coroutine-construction call convention (mirroring the ordinary path's
+   `_generator_method_api`/`_gm_api` handling) this fix does not add.
+3. The dict-`.get()` call lowering (`<dict>.get(key)`) and the yield-type
+   inferencer's matching `dict_val_types`/`_receiver_key` machinery were
+   both widened to recognize `cls.<dict-attr>.get(key)` as a THIRD
+   receiver shape alongside the existing bare-local and `self.<field>`
+   ones — sourced from a new class-level-global sibling of `self._field_
+   dict_val_types` (`self._global_dict_val_types`, eagerly seeded from a
+   class attribute's own `_X: dict[K, V] = ...` annotation, mirroring the
+   2026-08-20 update's identical instance-field seed) so `cls._value2
+   member_map_.get(val)`'s real struct-pointer VALUE type is resolved
+   instead of silently defaulting to `int64_t`.
+4. **A real gap found and closed while wiring this up**: `self.
+   _classmethod_names` is populated purely from the `@classmethod`
+   decorator, independent of whether the method is ALSO a generator — a
+   real `@classmethod` GENERATOR (Lib/enum.py's `Flag._iter_member_by_
+   value_` is exactly both at once) is IN `_classmethod_names`. Without a
+   separate check, `cls._iter_member_by_value_(value)` (inside `_iter_
+   member_by_def_`) was wrongly accepted by BOTH the eligibility gate and
+   `_cpp_expr`'s new call-handling as "a call to a real compiled
+   classmethod" and lowered to a call to `_struct_method_csym(...)` — a
+   symbol that was NEVER compiled (generator methods are skipped from
+   ordinary C-function compilation entirely; see gen_module's Phase 2a
+   skip for `_supported_generator_methods`). Worse: this ALSO silently
+   exposed a genuinely separate, pre-existing gap — `_cpp_expr`'s generic
+   bare-function-call fallback (the one `sorted(...)` falls through to,
+   since there is no dedicated `sorted()` case in the coroutine-body
+   emitter) only ever lowers `e.args`, never `e.kwargs` — so `_iter_
+   member_by_def_`'s `sorted(cls._iter_member_by_value_(value), key=lambda
+   m: m._sort_order_)` would have silently DROPPED the `key=` kwarg
+   entirely, meaning the `lambda m: m._sort_order_`'s own "a lambda with
+   parameters is not supported" refusal (`_cpp_expr`'s LambdaExpr case)
+   was NEVER EVEN REACHED — `_iter_member_by_def_` was accepted as
+   eligible with ZERO refusal lines logged for it, a genuine SILENT
+   MISCOMPILE (unsorted output) that would have shipped clean. Fixed by
+   adding `self._struct_generator_method_names` (struct name -> set of
+   that struct's own generator method names, from `FunctionDef.
+   is_generator`, populated once per struct in the same early pre-pass
+   that already populates `self._class_attrs`) and excluding any `cls.
+   <method>(...)` call whose target is in that set from BOTH the
+   eligibility gate (`_cls_refs_supported`) and `_cpp_expr`'s call
+   lowering — `_iter_member_by_def_` is refused again, for the correct,
+   pre-existing reason (a `LambdaExpr` used as a call argument — see
+   `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`), not silently
+   accepted. The kwargs-dropped-entirely gap in the generic call fallback
+   itself is real and NOT fixed here (still `e.args`-only) — it's simply
+   no longer reachable through this specific `cls`-based path, since the
+   generator-method exclusion refuses the call one level up, before the
+   dropped-kwargs codepath is ever reached for this shape. A general fix
+   (refusing ANY unrecognized kwarg on that fallback, or lowering it
+   properly) is out of this fix's scope; flagged here in case a future
+   session hits the same exposure through a different call shape.
+5. The classmethod/`cls`-generator eligibility gate (`gimple_codegen.py`,
+   ~line 30536, `bugs/hard/CODEGEN_generator_classmethod_first_param_
+   must_be_self.md`'s original carve-out) was relaxed from a blanket "any
+   `cls` reference anywhere in the body -> refuse" AST scan to a new
+   `_cls_refs_supported` helper: walks the body, marks each `cls.<attr>`/
+   `cls.<method>(...)` occurrence "supported" using the EXACT SAME rules
+   `_cpp_expr` itself now applies (points 1/2/4 above), then requires
+   EVERY `cls` `IdentExpr` in the body (by AST-node identity, not by
+   name/shape) to be one of those marked occurrences — a bare `cls` used
+   as a plain value, or any `cls.<attr>`/`cls.<method>(...)` shape neither
+   of those rules cover, still refuses, exactly as conservatively as the
+   original blanket check did for every shape this fix doesn't add real
+   support for.
+
+**Verification — isolated repro, real compile+link+RUN (not just
+`-fsyntax-only`).** Two new tests in `test_gimple_generator_runner.py`,
+both asserting on actual stdout:
+- `cls_class_attr_dict_get_yield`: a `@classmethod` generator (`Registry.
+  gen(cls, k)`) reading a bare class-level attribute (`cls._mask`) and
+  yielding a `cls.<dict-attr>.get(k)` result whose value type is a real
+  struct pointer (`Flag *`) — the literal shape this task targeted,
+  mirroring `Flag._iter_member_by_value_`. (The class-body dict attribute
+  is populated via `self._value_map[k] = ...` in `__init__` rather than a
+  literal-with-pairs initializer — a SEPARATE, pre-existing gap this fix
+  did not touch: class-body `dict`/`list`-valued attribute LITERALS with
+  actual pairs/elements are never populated into the runtime container at
+  all, only `MojoSet` literals are — see `gen_module`'s "Class-level
+  attribute globals" pass, the `elif ctype == 'MojoDict *': ... mojo_dict_
+  new()` branch with no populate-from-literal-pairs loop, unlike the
+  `MojoSet *` branch just above it. Confirmed via a direct repro before
+  routing around it in the test; not fixed here, out of this task's
+  scope, not documented as its own bug report since it's narrow and this
+  note already root-causes it.)
+- `cls_classmethod_call_in_generator`: a `@classmethod` generator calling
+  another real (non-generator) `@classmethod` of the same struct via
+  `cls.double(n)`.
+
+Both called via an INSTANCE (`r.gen(k)`), not the class name directly
+(`Registry.gen(k)`) — invoking a `@classmethod` generator via the class
+name hits a separate, pre-existing call-site gap in the ordinary
+(non-generator) GIMPLE path (the ordinary `ClassName.method(...)` call
+lowering doesn't check whether `method` is a compiled generator needing
+the `_start`/coroutine-construction API instead of an ordinary function
+call — confirmed via a direct repro: `gcc -fgimple` failed with `implicit
+declaration of function 'Registry_gen'`), unrelated to `cls`-attribute
+access inside the body and out of this task's scope.
+
+Both pass; all 39 pre-existing generator-runner tests still pass (41
+total); `test_gimple.py` (250/250), `test_module_cache.py` (76/76),
+`make check-selfhost` all green; a from-scratch stdlib dylib rebuild in
+this worktree and an independent baseline worktree (checked out at
+`5c1140f`, this fix's parent commit) both show 0 `skip <module>:` lines
+(no regression).
+
+**enum.py's own status, re-verified — both methods STILL refused, now for
+verified-correct reasons.** `MOJO_DEBUG=1 python3 mojo.py build
+.../Lib/enum.py`:
+```
+generator method Flag.'_iter_member_by_value_' not eligible ...: a @classmethod generator that references `cls` in its body in an unsupported way is not supported (only a class-level-attribute read, or a call to a real compiled classmethod/static method of the enclosing class, are supported for `cls.<...>` access in a compiled generator)
+generator method Flag.'_iter_member_by_def_' not eligible ...: [same message]
+generator method IntFlag.'_iter_member_by_value_' not eligible ...: [same message]
+generator method IntFlag.'_iter_member_by_def_' not eligible ...: [same message]
+Error building: cannot compile module: function(s) _iter_member_by_def_, _iter_member_by_value_ (generator function(s), contain a `yield`/`yield from`) — ... falling back to interpreting this module from source instead
+```
+- `_iter_member_by_value_`: STILL refused, but the ROOT CAUSE is now
+  different from before this fix (previously: blanket "any cls reference"
+  refusal). Now: `cls._flag_mask_`/`cls._value2member_map_` genuinely
+  don't qualify for the new redirect, because they are NOT literal
+  class-body `AssignStmt`s inside `Flag`'s own source (`self._class_attrs
+  ['Flag']` is empty of them) — real CPython `enum.py` sets both
+  dynamically, from `EnumMeta.__new__`'s metaclass machinery
+  (`classdict['_flag_mask_'] = 0`/`classdict['_value2member_map_'] = {}`
+  building the class's `__dict__` BEFORE the class object even exists,
+  then `enum_class._flag_mask_ |= value` mutating it afterward on the
+  already-constructed class) — never as `_flag_mask_ = 0`/`_value2
+  member_map_ = {}` text sitting directly in `class Flag(...): ...`'s own
+  body. This is a GENUINELY different, and considerably harder, problem
+  than the one this task's own isolated repro (and the 2026-08-10 note's
+  original analysis) targeted — it would need this codegen to somehow
+  model attributes assigned through a dynamic metaclass `__new__`/
+  `__init_subclass__` pipeline as if they were ordinary class-body
+  declarations, which is a much bigger, separate, feature-sized gap. Not
+  attempted; not this task's scope.
+- `_iter_member_by_def_`: STILL refused, and for TWO independent reasons
+  now, same as before this fix: (a) its own `cls._iter_member_by_value_
+  (value)` call is a call to a GENERATOR method via `cls`, which point 4
+  above explicitly excludes (needs coroutine-construction handling this
+  fix does not add); (b) even setting (a) aside, `key=lambda m: m._sort_
+  order_` is a `LambdaExpr` used as a call argument
+  (`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`, closed only
+  for the "lambda assigned to a local" shape, not "lambda passed as a
+  call argument"). Point 4's fix above specifically closed the SILENT
+  version of this refusal (where it would have compiled with the sort key
+  silently dropped) back to an HONEST one.
+
+So: the `cls`-attribute-redirect mechanism this task set out to implement
+is real, implemented, and verified working end-to-end on the shape it
+targets (a genuine class-body-declared attribute) — it just doesn't
+happen to cover enum.py's OWN specific attributes, which are populated
+through a different, dynamic-metaclass mechanism this codegen has no
+model for at all. `enum.py` itself remains unbuilt via the compiled path
+(still falls back to interpreting it from source, correctly and safely).
+
 ## Status (updated 2026-08-20 — struct-pointer-yield gap CLOSED; enum.py's OWN refusal unchanged)
 
 The 2026-08-10 note below (option (b): "actually widen the coroutine
