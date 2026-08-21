@@ -1,5 +1,85 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-20 — unbound-instance-method arity bug FIXED; file still blocked by 2 other, unrelated errors)
+
+Root-caused and fixed the `too many arguments to function
+'Mailbox___init__'; expected 4, have 5` (line 634) and `too many
+arguments to function '_ProxyFile__read'; expected 3, have 4` (line
+2126) errors — both real instances of the pre-`super()` cooperative-
+inheritance idiom `BaseClassName.method(self, other_args...)`
+(`Mailbox.__init__(self, path, factory, create)` /
+`_ProxyFile._read(self, size, read_method)`), an ORDINARY (non-static,
+non-classmethod) instance method called unbound-style with `self`
+passed explicitly by the caller.
+
+`gimple_codegen.py`'s `_lower_call` "Class/static method call" gate
+(`IdentExpr(ClassName).method(args)`, ~line 13020) only distinguished
+`@staticmethod` (no implicit arg) from everything else (always prepend
+the class-ref value as an implicit first arg) — correct for a real
+`@classmethod` call, but wrong for this unbound-instance-method idiom,
+which double-counted `self` (caller already passed it) on top of the
+wrongly-prepended class-ref value. Fixed by gating the prepend on
+`self._classmethod_names` (real classmethods only — explicit
+`@classmethod` or the two dunders Python makes implicit classmethods)
+instead of `not in self._static_methods`; a static method still falls
+through to the same no-prepend `else` branch as before (the two sets
+are populated by mutually-exclusive checks).
+
+Also fixed a related, latent cross-module sharing gap found while
+verifying this: `_static_methods`/`_classmethod_names` were never
+propagated into `_compile_imported_module`'s nested `temp_gen`
+instances (unlike `func_return_types`, which IS shared there) — so a
+class dedup'd-away by `self._compiled_modules` (compiled once, while
+processing an earlier sibling/ancestor module) would leave a LATER
+importing module's own local `_classmethod_names` empty for that
+class's methods, even though the (correctly, globally-shared)
+`func_return_types` still finds the mangled symbol and fires this call
+site. Before this session's fix, that silently defaulted to "prepend"
+(happened to be right for classmethods, wrong for statics via the same
+dedup path); after gating on `_classmethod_names`, an un-shared, empty
+set would have wrongly flipped to "never prepend" for a real cross-
+module-deduped classmethod call — a NEW regression this fix would have
+introduced without also sharing the two sets. Fixed by adding
+`temp_gen._static_methods = self._static_methods` /
+`temp_gen._classmethod_names = self._classmethod_names` alongside the
+existing `func_return_types` sharing line.
+
+Verified via isolated `compile_to_gimple(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only`: A/B'd against the pre-fix code (via
+a temporary `git checkout --` of just `gimple_codegen.py` in this same
+worktree, restored after) — mailbox.py's own distinct errors went from
+4 (2 target arity errors + 2 unrelated: `mailbox.py:32` int/pointer
+mismatch, `mailbox.py:404` `cte` not callable) down to 2 (the same 2
+unrelated ones, confirmed still present and NOT touched by this fix).
+Also verified via a real `mojo.py build` whole-program run (not just
+isolated compile) — same result, 4 -> 2 own-file errors, `grep -c
+"too many arguments\|too few arguments"` for `Mailbox___init__`/
+`_ProxyFile__read` specifically: zero after, matching before.
+
+Also verified the fix generalizes and doesn't regress the real
+classmethod idiom: isolated `Base.classmethod_name(args)` repro
+compiles AND runs end-to-end with the correct result (`Base.double_of(5)`
+-> `10`), and an unbound-`self`-cast base-`__init__` repro
+(`Derived.__init__` calling `Base.__init__(self, v)`) compiles and
+runs with the correct field value read back afterward (`Derived(7).val`
+-> `7`, when Derived adds no fields of its own — see the SEPARATE bug
+this verification surfaced, `bugs/hard/
+CODEGEN_struct_typedef_alphabetical_field_order_breaks_inheritance_
+layout.md`, for a case where Derived DOES add its own fields).
+
+mailbox.py **still does not build** — the same 2 non-generator,
+non-arity errors from the 2026-08-11 entry below remain (`mailbox.py:32`
+int/pointer mismatch and the `cte` "not a function or function
+pointer" at line 404), plus errors in transitively-compiled files.
+Not investigated here (out of scope for this fix). Doc kept open.
+
+Full mandatory gate (CLAUDE.md): `test_gimple.py` 248/248 (unchanged),
+`test_module_cache.py` 76/76 (unchanged), `make check-selfhost` clean,
+from-scratch stdlib dylib rebuild 0 skipped both before and after (A/B
+via a separate `git worktree add` checkout at the pre-fix commit, not
+`git stash`), `compile_stdlib.py -j8` 664/664 clean both before and
+after — no regression anywhere.
+
 ## Status (updated 2026-08-20 — bug #2 (`email_message_Message_*` redefinition) FIXED; file still blocked by other, unrelated errors)
 
 Root-caused and fixed bug #2 from the 2026-08-11 entry below (the

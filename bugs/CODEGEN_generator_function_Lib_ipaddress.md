@@ -1,5 +1,55 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-20 — unbound-instance-method arity bug FIXED; isolated compile of ipaddress.py's OWN code now fully clean; whole-program build still blocked by unrelated transitively-imported-file errors)
+
+Root-caused and fixed 4 real `too many arguments` errors, all the same
+unbound-instance-method idiom: `IPv4Address.__eq__(self, other)` /
+`IPv4Address.__lt__(self, other)` / `IPv6Address.__eq__(self, other)` /
+`IPv6Address.__lt__(self, other)` (lines 1435, 1447, 2221, 2233) — a
+pre-`super()` cooperative-inheritance call to an ORDINARY (non-static,
+non-classmethod) instance method with `self` passed explicitly by the
+caller. `gimple_codegen.py`'s `_lower_call` "Class/static method call"
+gate (~line 13020) previously prepended the class-ref value as an
+implicit first arg for every non-`@staticmethod` method — correct for
+a real `@classmethod`, wrong here (double-counts `self`). Fixed by
+gating the prepend on `self._classmethod_names` (real classmethods
+only) instead of `not in self._static_methods`; see
+`bugs/CODEGEN_generator_function_Lib_mailbox.md`'s 2026-08-20 entry for
+the full root-cause writeup, the same fix, and a related cross-module
+`_classmethod_names`/`_static_methods` sharing gap also fixed alongside
+it (not ipaddress.py-specific, but relevant since this file's own
+`IPv4Address`/`IPv6Address` classes are typically imported by other
+modules in a whole-program build).
+
+Verified via isolated `compile_to_gimple(do_imports=False)` +
+`gcc-mp-15 -fgimple -fsyntax-only`, A/B'd against the pre-fix code (a
+temporary `git checkout --` of `gimple_codegen.py` in this same
+worktree, restored after): all 4 named errors present before, zero
+after — **the isolated compile of ipaddress.py's own code is now
+completely clean** (zero errors, only benign pre-existing
+`-Wshift-count-overflow` warnings on 64-bit IPv6 int shifts, unrelated
+to this fix). This also means the two "separate, deeper pre-existing
+gaps" ((a) `next(it)` on a plain iterator, (b) `summarize_address_range`
+unannotated-param typing) recorded in the 2026-08-11 entry below no
+longer reproduce — apparently fixed by other work on this codebase
+since then; not independently re-investigated here, just honestly
+noted as no longer blocking during this session's re-verification.
+
+**ipaddress.py's own code has zero errors, but the file still does not
+achieve a full `mojo.py build` end-to-end** — the whole-program,
+`do_imports=True` build still fails, entirely on errors in
+transitively-imported files (`operator.py`, `_collections_abc.py`,
+etc.), none attributable to ipaddress.py's own source anywhere in the
+log. Not investigated further here (genuinely out of scope for this
+fix). Doc kept open — not deleted, since the file still doesn't build
+end-to-end via the CLI.
+
+Full mandatory gate (CLAUDE.md): `test_gimple.py` 248/248,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skipped before and after (A/B via a separate
+`git worktree add` checkout, not `git stash`), `compile_stdlib.py -j8`
+664/664 clean before and after — no regression.
+
 ## Status (updated 2026-08-11 — MultiAssignStmt declaration gap FIXED; 2 separate, deeper pre-existing gaps confirmed blocking, neither fixed)
 
 Re-verified the exact blocker the 2026-08-10 entry below left open:
