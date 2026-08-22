@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gimple_codegen.py — Analysis &amp; Refactoring Plan</title>
+<style>
+ body{font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1a1a1a}
+ h1{border-bottom:3px solid #333;padding-bottom:.3rem}
+ h2{margin-top:2.2rem;border-bottom:1px solid #ccc;padding-bottom:.2rem}
+ h3{margin-top:1.4rem}
+ table{border-collapse:collapse;width:100%;margin:.8rem 0}
+ th,td{border:1px solid #bbb;padding:.35rem .55rem;text-align:left;vertical-align:top;font-size:.92em}
+ th{background:#f0f0f0}
+ code,pre{font-family:Menlo,Consolas,monospace;background:#f6f6f6;border-radius:3px}
+ code{padding:.05rem .3rem}
+ pre{padding:.6rem;overflow-x:auto;font-size:.85em;line-height:1.4}
+ .sev1{color:#b00020;font-weight:700}
+ .sev2{color:#b45f06;font-weight:700}
+ .sev3{color:#555;font-weight:700}
+ .ok{color:#0a7a0a;font-weight:700}
+ li{margin:.25rem 0}
+ .tag{display:inline-block;background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 .4rem;font-size:.8em;margin-right:.3rem}
+</style>
+</head>
+<body>
+
+<h1><code>gimple_codegen.py</code> — Analysis &amp; Refactoring Plan</h1>
+<p><strong>Date:</strong> 2026-08-21 · <strong>Target:</strong> split the monolith into files under 4,000 lines without behavior change.</p>
+
+<h2>1. Executive summary</h2>
+<p>
+<code>gimple_codegen.py</code> is a <strong>42,612-line</strong> single module containing one dominant class,
+<code>GimpleGen</code> (lines 4147–42348, ~38,200 lines, <strong>474 methods</strong>), plus ten support classes
+and the public <code>compile_*</code> entry points. Half the code lives in just 15 oversized methods;
+40% of all lines are comments. The file implements <em>two complete lowering backends</em> — the
+<code>-fgimple</code> C emitter and a plain-C++ fallback (including C++20-coroutine generator/async units) —
+inside the same class, sharing mutable state through ~150 instance attributes and several module-level globals.
+</p>
+<p>The plan below splits it into <strong>15 focused modules</strong> (each well under 4k lines) behind a
+thin, signature-compatible <code>gimple_codegen.py</code> facade, using mixin composition so all existing
+call sites and tests keep working unchanged.</p>
+
+<h2>2. Metrics snapshot</h2>
+<table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Total lines</td><td>42,612 (comment lines: 16,920 ≈ 40%)</td></tr>
+<tr><td><code>GimpleGen</code> class</td><td>lines 4147–42348 · 474 methods</td></tr>
+<tr><td>Largest method</td><td><code>gen_module</code>: <strong>9,210 lines</strong> (≈20 sequential phases)</td></tr>
+<tr><td><code>GimpleGen.__init__</code></td><td>1,066 lines initializing ~150 feature-specific attributes</td></tr>
+<tr><td>Methods &gt; 400 lines</td><td>15 methods = 21,566 lines (≈ half the file)</td></tr>
+<tr><td>Broad <code>except Exception:</code></td><td>27 (several silently <code>pass</code>)</td></tr>
+<tr><td>Top-level classes</td><td>12 (<code>TypeLattice</code>, <code>EscapeAnalyzer</code>, <code>LayoutSolver</code>, <code>DispatchTable</code>/<code>DispatchPattern</code>/<code>DispatchSolver</code>, <code>FunctionCompilability</code>, <code>TypePromotionSolver</code>, <code>ClosureInfo</code>, <code>GimpleGen</code>, 2 exception types)</td></tr>
+<tr><td>Parallel backends</td><td>2 (<code>_lower_* / _gen_stmt_* / _gen_for_*</code> C emitter; <code>_cpp_* / _gen_cpp_*_unit</code> C++ emitter)</td></tr>
+</table>
+
+<h2>3. Bugs &amp; correctness risks (ranked)</h2>
+
+<h3><span class="sev1">B1</span> <code>compile_linked</code> leaks cross-compile global dedup state</h3>
+<p><span class="tag">confirmed</span><span class="tag">bug</span></p>
+<p><code>compile_to_gimple</code> (gimple_codegen.py:42475–42476) and <code>compile_to_gimple_with_cpp</code>
+(:42509–42510) both clear the module-global sets <code>_emitted_unresolved_stub_syms</code> /
+<code>_emitted_type_name</code> at entry, with an explicit comment explaining this prevents stale
+“already emitted” markers leaking between unrelated compiles in one process
+(<code>build_stdlib_dylib.py</code> / <code>compile_stdlib.py</code> compile many modules per process).</p>
+<p><code>compile_linked</code> (:42555–42612) does <strong>not</strong> clear them. Any stub-suppression
+state populated by an earlier inline-mode compile suppresses emission in every subsequent link-mode
+compile in the same process → potential missing declarations / silent drift. Fix: clear both sets at
+entry (or better, move the state onto the instance / a compilation-context object — see A2).</p>
+
+<h3><span class="sev2">B2</span> Set used as a boolean flag</h3>
+<p><code>_emitted_type_name</code> is a <code>set</code> whose only payload is <code>.add(True)</code>
+(:2172, :39731–39732, :41709) — a one-shot “already emitted” bool masquerading as a set alongside a real
+dedup set. Fragile and confusing; replace with a plain bool (it is private; only internal uses found).</p>
+
+<h3><span class="sev2">B3</span> Five copies of the compile pipeline have already drifted</h3>
+<p><code>compile_to_gimple</code>, <code>compile_to_gimple_with_cpp</code>,
+<code>compile_to_gimple_linked</code>/<code>compile_linked</code>, and <code>compile_to_c</code> each
+hand-roll tokenize → parse → rewrite → construct <code>GimpleGen</code> → seed guards →
+<code>gen_module</code>. The drift is not hypothetical: BUG-2026-032 exists precisely because link mode
+was missing the <code>sys.path.insert</code> pre-scan the inline modes had
+(:42590–42599). Consolidate into one internal driver with mode switches.</p>
+
+<h3><span class="sev2">B4</span> Cross-instance side channels via shared mutable boxes</h3>
+<p><code>_link_needs_cxx_box: list = [False]</code> (:5088) is threaded through nested
+<code>GimpleGen</code> instances so deeply-nested import compiles can signal “needs C++ at link time”
+to the root (:5947, :6020, :42601–42607). Works, but it is undebuggable implicit coupling. Replace with
+an explicit compilation-context object passed down deliberately.</p>
+
+<h3><span class="sev2">B5</span> Module-level mutable globals ⇒ reentrancy hazards</h3>
+<p><code>_emitted_unresolved_stub_syms</code>, <code>_emitted_type_name</code> (:2165–2172),
+<code>_compile_cache</code> (:42366) are process-global and mutated during compiles. Single-threaded use
+is currently safe only because entry points happen to clear them; any nested/parallel use breaks silently.
+Fold into per-compilation context (see §6).</p>
+
+<h3><span class="sev2">B6</span> Two independently-maintained lowering backends</h3>
+<p>The <code>_cpp_*</code> C++ fallback reimplements statement/expression semantics already implemented by
+<code>_lower_*</code>/<code>_gen_stmt_*</code> (name mangling, coercions, truthiness, iteration). Every
+semantic fix must be applied twice; divergence bugs are structural, not accidental. Short term: document
+the shared-decision points and add parity assertions where cheap. Long term: extract shared semantic
+helpers consumed by both (see §6, M13/M14).</p>
+
+<h3><span class="sev3">B7</span> Path-based special-casing baked into codegen</h3>
+<p>“Self-host detection is PATH-BASED only” (:34060–34074) plus hardcoded phantom field tables
+(<code>Span</code>/<code>StringSlice</code> fat-pointer seeding, :34042–34058) keyed to compiling this
+repo’s own files. Any external project with same-named structs relies on the gating working forever.
+Isolate these behind one clearly-marked compatibility-shim module/function so the policy is testable.</p>
+
+<h3><span class="sev3">B8</span> 27 broad <code>except Exception:</code> swallows</h3>
+<p>Silent fallbacks (e.g. :6261, :14895, :23570) can mask real codegen defects as “stub emitted”.
+Not individually wrong — the stopgap-fallback design is deliberate — but each should either narrow the
+exception or carry a machine-readable reason so regressions surface in the stdlib-build skip audit
+(CLAUDE.md gate #2).</p>
+
+<h3><span class="sev3">B9</span> <code>id()</code>-keyed memo caches</h3>
+<p>The Phase 2/3 perf caches (:4865–4910) key on <code>id(node)</code>. Safe today only because the AST
+outlives one compile; fragile under any future caching across compiles or AST rebuilding. Flag with
+assertions/comments; consider keying on a node-index assigned during rewrite.</p>
+
+<h2>4. Code cleanups (non-behavioral)</h2>
+<ul>
+<li><strong>C1 — Comment diet:</strong> 16.9k comment lines, many 20-line essays attached to individual
+attributes (:4206–4332 et al.). Move rationale/design narrative into docstrings or
+<code>doc/</code>; leave one-line intent comments at sites. Est. −8–12k lines of noise.</li>
+<li><strong>C2 — Dead/one-off scaffolding:</strong> e.g. <code>_emitted_type_name.add(True)</code> flag-set
+(B2), TODO-comment constants block (:4131–4140) that exist only to centralize strings — fine, but
+adjacent near-duplicate constants (<code>_COMMENT_RANGE_UNEXPECTED</code> vs <code>..._UNEXPECTED2</code>)
+should merge.</li>
+<li><strong>C3 — Nested-helper sprawl inside giant methods:</strong> <code>gen_module</code> alone defines
+many inner closures (<code>_collect_global_stmts</code>, <code>_is_foreign_main</code>, …) that are
+effectively private passes; hoisting them to methods/functions is prerequisite to decomposing it.</li>
+<li><strong>C4 — Duplication between <code>gen_func</code> and <code>_gen_struct_method</code></strong>
+(overload suffixing, param ctypes, forward-decl sync) — consolidate once visible in separate modules.</li>
+<li><strong>C5 — The nine <code>_gen_for_*</code> loop variants</strong> share label/temp bookkeeping
+shapes; factor a common loop-emission skeleton with per-iterable hooks (after split; do not mix with moves).</li>
+<li><strong>C6 — <code>resolve</code> false alarm, documented:</strong> the apparent 2,260-line
+<code>resolve</code> is actually the nested closure inside <code>_merge_struct_inheritance</code>
+(:1808–1823+); no duplicate-method bug exists at class level (verified programmatically).</li>
+</ul>
+
+<h2>5. Compatibility contract (must not break)</h2>
+<p>External importers (verified by grep across the repo, excluding <code>dead/</code>, <code>stage*/</code>):</p>
+<table>
+<tr><th>Symbol</th><th>Imported by</th></tr>
+<tr><td><code>GimpleGen</code></td><td>comptime, mojo, myinterpreter, elaborate, reflect, monomorphize, build_module, build_stdlib_dylib, driver, check_benchmarks_types, analyze_benchmarks_types, test_* (incl. attribute access like <code>gimple_codegen._TYPE_MAP</code>)</td></tr>
+<tr><td><code>DispatchSolver</code>, <code>DispatchTable</code>, <code>DispatchPattern</code>, <code>FunctionCompilability</code>, <code>TypePromotionSolver</code></td><td>test_dispatch_*, type-system tooling</td></tr>
+<tr><td><code>compile_to_gimple</code> <em>(exact 3-arg ABI — self-hosted bootstrap forward-declares it)</em>, <code>compile_to_gimple_cached</code>, <code>compile_to_gimple_linked</code>, <code>compile_linked</code>, <code>compile_to_gimple_with_cpp</code>, <code>compile_to_c</code>, <code>module_may_have_supported_generator</code></td><td>mojo.py, driver.py, build_mojo_cli.py, build_module.py, build_stdlib_dylib.py, jit/arm64.py, mojo_compiler.py, myinterpreter.py, scripts/*, test_*</td></tr>
+<tr><td><code>_mojo_type</code>, <code>_safe_name</code>, <code>_c_escape</code>, <code>_TYPE_MAP</code></td><td>elaborate.py, reflect.py, module_loader.py, comptime.py, test_module_cache.py, test_gimple.py</td></tr>
+<tr><td><code>FromImportStmt</code> <em>(AST node re-export)</em></td><td>build_stdlib_dylib.py</td></tr>
+</table>
+<p><strong>Consequence:</strong> the facade must keep re-exporting everything above, and because tests also
+poke attributes dynamically (<code>import gimple_codegen; gimple_codegen.X</code>), the facade gets an
+explicit re-export list <em>plus</em> a module-level <code>__getattr__</code> fallback delegating to the
+implementation modules.</p>
+<p><strong>Hard constraint:</strong> <code>compile_to_gimple(mojo_src, do_imports, filename) -&gt; str</code>
+signature is pinned by the bootstrap; <code>generated_cpp</code> rides on the instance by design — keep
+that mechanism until a coordinated ABI change.</p>
+
+<h2>6. Target architecture</h2>
+<p>All new files live flat in the repo root (no package — keeps the self-host/source-compilation
+assumptions intact). Dependency direction is strictly downward; nothing imports
+<code>gimple_codegen</code> except external callers.</p>
+
+<pre>                    ┌────────────────────────────┐
+                    │  gimple_codegen.py (facade)│  &lt;400 lines: re-exports + __getattr__
+                    │  + compile_* entry points  │  (pinned ABI lives here)
+                    └─────────────┬──────────────┘
+             ┌────────────────────┼───────────────────────────┐
+             ▼                    ▼                           ▼
+   gimple_module_gen        GimpleGen assembly          gimple_entry pipeline helper
+   (gen_module phases)      (class GimpleGen(Core,…    (internal, deduped — B3)
+                             mixins composed here)
+             ▲                    ▲
+             │        ┌───────────┴────────────┬──────────────────┐
+   gimple_imports         gimple_gen_core       gimple_gen_stmts   gimple_gen_funcs
+   (import/link mach.)    (__init__ state, emit (statements,      (gen_func, struct
+                           infra, coercion,     handlers,          methods, overload
+                           scans, const-fold)   for-family)        naming, params)
+                                      │
+                 ┌────────────────────┼──────────────────────┐
+        gimple_gen_exprs    gimple_gen_calls        gimple_gen_methods
+        (literals, strings, (_lower_call, builtins, (_lower_method_call +
+         member, binary,     generics, ctor/       dict/list/set/file/
+         compare, subscript, varargs family)      str/pointer/struct
+         comprehension)                            method families)
+                                      │
+                 ┌────────────────────┴───────────────┐
+        gimple_cpp_core                gimple_cpp_async
+        (_cpp_expr/_cpp_stmt/          (generator + async unit
+         for/try/with/match)            generators, task resolve)
+                                      │
+             ┌────────────────────────┼────────────────────────┐
+     gimple_ctypes              gimple_solvers            gimple_exprtypes
+     (TypeLattice, TYPE_MAP,    (Escape/Layout/Dispatch   (free-function ctype
+      _mojo_type, escape/       Compilability/Promotion   inference, yield-type
+      fmt/name utilities)       solvers, ClosureInfo)     inference, eligibility)
+    </pre>
+
+<h3>Module map with source line ranges (current file)</h3>
+<table>
+<tr><th>#</th><th>New file</th><th>Est. lines</th><th>Moved from (approx. current lines)</th></tr>
+<tr><td>M1</td><td><code>gimple_ctypes.py</code></td><td>~1,300</td><td>109–265 TypeLattice; 1915–2205 (<code>_mojo_type</code>…<code>demangle_overload</code>); 2062–2092 ctype/fmt utils; 3686–3941 (<code>_safe_name</code>, <code>_c_escape</code>, field-name utils); 2287 <code>_safe_field</code></td></tr>
+<tr><td>M2</td><td><code>gimple_solvers.py</code></td><td>~1,700</td><td>266–520 EscapeAnalyzer+LayoutSolver (+290–331 helpers); 489–1384 DispatchTable/Pattern/Solver; 1388–1535 FunctionCompilability; 1539–1643+ TypePromotionSolver; 4081–4102 ClosureInfo</td></tr>
+<tr><td>M3</td><td><code>gimple_exprtypes.py</code></td><td>~1,900</td><td>2320–2566 shape exceptions + quick-eligibility; 2567–3204 (<code>_infer_simple_expr_ctype</code>, await/receiver, <code>_yield_from_delegate_ctype</code>); 3205–3685 yield/tuple-slot ctypes, struct-id utils, <code>_used_idents_deep</code></td></tr>
+<tr><td>M4</td><td><code>gimple_gen_core.py</code></td><td>~2,600</td><td>GimpleGen.__init__ state (4203–5269); emit/temp/coerce infra (~6680–7780 region methods <code>_emit/_new_temp/_cname/_coerce/_resolve_type…</code>); scan/prepass memo caches (7877–10230 incl. <code>_quick_type</code>, <code>_infer_param_types</code>); const-fold family; 4125–4146 comment constants</td></tr>
+<tr><td>M5</td><td><code>gimple_gen_exprs.py</code></td><td>~3,200</td><td>10300–12438 (<code>_lower_MemberExpr</code> 803, binaries, compares, <code>in</code>/percent-format); 18518–19990 literals/dict/set/tuple/comprehensions + <code>_compr_*</code>; <code>lower_expr</code> dispatcher</td></tr>
+<tr><td>M6</td><td><code>gimple_gen_calls.py</code></td><td>~3,600</td><td>15332–18880 (<code>_lower_call</code> 1056, builtin family, generics elaboration, ctor family, fnptr/closure/recursive calls, default/varargs packing); 18189+ subscript/slice stays here (calls-shaped)</td></tr>
+<tr><td>M7</td><td><code>gimple_gen_methods.py</code></td><td>~2,900</td><td>12439–15331 (<code>_lower_method_call</code> 1376 + dict/list/set/pointer/file/str method families + repack + <code>_lower_struct_method_call</code> 342)</td></tr>
+<tr><td>M8</td><td><code>gimple_gen_stmts.py</code></td><td>~3,100</td><td>19990–22269 (<code>gen_stmt</code> + VarDecl/Assign/AugAssign/If/While/Match/Try+handlers/With/Del/Raise/Assert/Break/Continue/Return/ExprStmt); 23700–24550 <code>_gen_for_*</code> family + lifted closures + generator-tuple unpack</td></tr>
+<tr><td>M9</td><td><code>gimple_gen_funcs.py</code></td><td>~2,500</td><td>22270–23699 (<code>_gen_stmt_FunctionDef</code>, import scopes, qualifier/csym mangling); 24551–26490 (<code>gen_func</code> toplevel glue, <code>gen_struct_method</code>, imported struct materialization)</td></tr>
+<tr><td>M10</td><td><code>gimple_cpp_core.py</code></td><td>~3,000</td><td>26491–30980 (<code>_cpp_expr</code> 1325, <code>_cpp_stmt</code> 799, for/async-for/raise/match/try/with/yield-from, kwargs-forward, walrus hoist, fresh names, declared-type lookups)</td></tr>
+<tr><td>M11</td><td><code>gimple_cpp_async.py</code></td><td>~1,700</td><td>30982–33054 (<code>_gen_cpp_generator_unit</code> 518, <code>_gen_cpp_async_unit</code> 669, async-generator unit, task resolution, nested async compile, nested-closure captures)</td></tr>
+<tr><td>M12</td><td><code>gimple_imports.py</code></td><td>~2,300</td><td>4300–6679 import/link machinery (<code>_compile_imported_module</code>, <code>_register_link_imports</code>, extern emission, relative resolution, sys.path pre-scan, link boxes)</td></tr>
+<tr><td>M13</td><td><code>gimple_module_gen.py</code></td><td>~3,800</td><td>33056–42347 <code>gen_module</code> decomposed into ~20 phase functions (phase map to be written during decomposition; phases become module-level functions taking a context, or methods on a dedicated mixin)</td></tr>
+<tr><td>M14</td><td><code>gimple_codegen.py</code> (facade)</td><td>&lt;400</td><td>Public API re-exports + <code>__getattr__</code> fallback + <code>class GimpleGen(M4Core, M5…M11 mixins)</code> assembly + all five <code>compile_*</code> entry points rewritten onto one shared internal driver (fixes B3) + CAS/cache tail (42362–42612)</td></tr>
+<tr><td colspan="4">Sum ≈ 33–34k effective lines after C1 comment-diet lands in moved regions (moves are verbatim first; comment trimming is a separate later pass).</td></tr>
+</table>
+
+<h2>7. Execution plan</h2>
+
+<h3>Wave 1 — parallel extraction (this session)</h3>
+<p>Ten agents work in isolated <code>git worktree</code>s on branches <code>refactor/&lt;name&gt;</code>.
+<strong>Agents only CREATE new module files; nobody edits <code>gimple_codegen.py</code>.</strong> Each
+returns a machine-readable manifest (<code>refactor_manifest.json</code>) listing moved top-level
+defs/classes and any unresolved-name notes. Because every agent starts from identical HEAD and touches
+disjoint new files, there are zero conflicts. Moves are <strong>verbatim</strong>: no logic edits, no
+renames, no comment rewriting.</p>
+
+<table>
+<tr><th>Agent</th><th>Branch</th><th>Produces</th><th>Source region</th></tr>
+<tr><td>A0</td><td>(main tree, read-only)</td><td><code>BASELINE.md</code>: test_gimple / test_module_cache / check-selfhost results + stdlib dylib <code>skip &lt;module&gt;:</code> list &amp; count</td><td>runs the four CLAUDE.md gates pristine</td></tr>
+<tr><td>A1</td><td><code>refactor/bugfix-entrypoints</code></td><td>Patch spec for B1/B2 (clear sets in <code>compile_linked</code>; de-set-ify <code>_emitted_type_name</code>) + regression test file <code>test_refactor_bugs.py</code></td><td>42348–42612, 2165–2172, 39731, 41709</td></tr>
+<tr><td>A2</td><td><code>refactor/entry-driver</code></td><td><code>gimple_entry_driver.py</code>: single internal pipeline (tokenize/parse/rewrite/seed/clear) parameterized by mode; spec showing all five entry points mapped onto it byte-identically</td><td>42348–42612</td></tr>
+<tr><td>A3</td><td><code>refactor/ctypes</code></td><td><code>gimple_ctypes.py</code> (importable immediately)</td><td>M1 ranges</td></tr>
+<tr><td>A4</td><td><code>refactor/solvers</code></td><td><code>gimple_solvers.py</code></td><td>M2 ranges</td></tr>
+<tr><td>A5</td><td><code>refactor/exprtypes</code></td><td><code>gimple_exprtypes.py</code></td><td>M3 ranges</td></tr>
+<tr><td>A6</td><td><code>refactor/cpp-path</code></td><td><code>gimple_cpp_core.py</code> + <code>gimple_cpp_async.py</code> (as <code>CppCoreMixin</code> / <code>CppAsyncMixin</code>)</td><td>M10/M11 ranges</td></tr>
+<tr><td>A7</td><td><code>refactor/stmts-funcs</code></td><td><code>gimple_gen_stmts.py</code> + <code>gimple_gen_funcs.py</code> (<code>GenStmtsMixin</code> / <code>GenFuncsMixin</code>)</td><td>M8/M9 ranges</td></tr>
+<tr><td>A8</td><td><code>refactor/calls</code></td><td><code>gimple_gen_calls.py</code> (<code>GenCallsMixin</code>)</td><td>M6 range</td></tr>
+<tr><td>A9</td><td><code>refactor/methods</code></td><td><code>gimple_gen_methods.py</code> (<code>GenMethodsMixin</code>)</td><td>M7 range</td></tr>
+</table>
+
+<h3>Wave 2 — sequential integration (next session, ordered)</h3>
+<ol>
+<li>Apply A1 bug fixes + regression test → run gates.</li>
+<li>Land leaf modules M1–M3; delete moved regions from <code>gimple_codegen.py</code>; facade re-exports;
+    run all four gates; compare dylib skip-count against <code>BASELINE.md</code>.</li>
+<li>Land mixins M4 core first (state/infra), then M5–M9 one at a time (gates between each),
+    assembling <code>GimpleGen</code> progressively.</li>
+<li>Land M10/M11 (C++ path), M12 imports; finally decompose <code>gen_module</code> into M13 phases
+    (highest-risk step, smallest moves, gates between phase batches).</li>
+<li>Rewrite entry points onto A2’s shared driver; final gate battery + skip-count comparison;
+    update CLAUDE.md notes.</li>
+</ol>
+<p>Remaining Wave-2 extraction not yet assigned to an agent: <code>gimple_gen_exprs.py</code> (M5) — its
+region interleaves with calls/methods boundaries and will be carved after M6/M7 land, using the real
+post-move file. Also the C1 comment-diet pass and B4/B5 context-object introduction, deliberately sequenced
+after structure stabilizes.</p>
+
+<h3>Verification gates (every landing step, per CLAUDE.md)</h3>
+<pre>python3 test_gimple.py
+python3 test_module_cache.py
+make check-selfhost
+rm -f build/libmojostdlib.dylib
+python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib(jobs=8)"
+# then: diff 'skip &lt;module&gt;:' lines vs BASELINE.md — count must NOT increase</pre>
+<p>A green <code>test_gimple</code>+<code>check-selfhost</code> is explicitly <em>insufficient</em>;
+the stdlib dylib rebuild is the breadth test.</p>
+
+<h3>Milestone gate: <code>make bootstrap</code></h3>
+<p><code>make bootstrap</code> (<code>verify</code> + <code>validate-all</code>) is the strongest
+end-to-end validation available and must pass at each Wave-2 <strong>milestone</strong> (it is too
+expensive for per-step runs):</p>
+<ul>
+<li><code>stage1</code>: the Python compiler (<code>mojo.py --dump</code>) compiles every
+<code>.mojo</code> file plus the core <code>.py</code> sources (mojo.py, mojo_compiler.py,
+myinterpreter.py, module_loader.py, …) into <code>stage1/</code>; gimple_codegen itself is exercised
+via mojo.py's transitive closure.</li>
+<li><code>stage2</code>/<code>stage3</code>: the <em>compiled</em> compiler re-dumps the same set.</li>
+<li><code>verify</code> diffs .ci/.tok/.ast/.pyi across all three stages;
+<code>validate-all</code> re-checks per-file via <code>bootstrap-validate.mojo</code>.</li>
+</ul>
+<p>This matters doubly for this refactor: <code>gimple_codegen.py</code> compiles <em>itself</em>, so any
+behavioral drift in its output immediately surfaces as stage mismatches instead of lurking.
+Note <code>make preflight</code> hard-requires a single-file <code>gimple_codegen.py</code> — the facade
+layout satisfies this; a package-directory layout would not.</p>
+
+<h2>8. Wave-1 results (landed on branches)</h2>
+<p>All ten agents' deliverables are committed on <code>refactor/*</code> branches off <code>436cc16</code>;
+nothing on <code>master</code> changed yet. New modules contain <strong>byte-verbatim</strong> moves
+(method openings diff-verified against source); manifests in each worktree root.</p>
+<table>
+<tr><th>Branch</th><th>Files</th><th>Lines</th><th>Moves</th><th>Status</th></tr>
+<tr><td><code>refactor/solvers</code></td><td><code>gimple_solvers.py</code></td><td>1,431</td><td>8 solver classes + 3 helpers</td><td class="ok">importable; 1 unresolved (<code>_C_RESERVED_FUNCS</code>)</td></tr>
+<tr><td><code>refactor/exprtypes</code></td><td><code>gimple_exprtypes.py</code></td><td>1,413</td><td>25 fns + 2 exc classes + 5 constants</td><td class="ok">importable</td></tr>
+<tr><td><code>refactor/methods</code></td><td><code>gimple_gen_methods.py</code></td><td>2,256</td><td>12 methods (GenMethodsMixin)</td><td class="ok">py_compile OK</td></tr>
+<tr><td><code>refactor/calls</code></td><td><code>gimple_gen_calls.py</code></td><td>3,330</td><td>40 methods (GenCallsMixin)</td><td class="ok">py_compile OK</td></tr>
+<tr><td><code>refactor/stmts-funcs</code></td><td><code>gimple_gen_stmts.py</code> / <code>gimple_gen_loops.py</code> / <code>gimple_gen_funcs.py</code></td><td>2,862 / 1,656 / 2,586</td><td>94 methods (3 mixins)</td><td class="ok">loops file split out to honor &lt;4k rule</td></tr>
+<tr><td><code>refactor/tail</code></td><td>gimple_codegen.py edits + <code>test_refactor_bugs.py</code> + <code>tools/equiv_check.py</code></td><td>+42/-91 net</td><td>B1+B2 fixed; five entries → <code>_run_pipeline</code></td><td class="ok">29/29 byte-identical; test_gimple 250/250</td></tr>
+</table>
+<p><strong>Note:</strong> <code>_C_RESERVED_FUNCS</code> was picked up by two agents (solvers + exprtypes
+ranges); integration must keep exactly one definition. BASELINE.md gate capture did not complete —
+run the four gates fresh at integration start.</p>
+
+<h3>Wave-2 queue (sequential, gates between steps)</h3>
+<ol>
+<li>Capture BASELINE.md on pristine master; cherry-pick <code>refactor/tail</code>; run gates.</li>
+<li>Extract remaining leaf/core regions: M1 ctypes, M4 core/state, M5 exprs, M10/M11 cpp path, M12 imports.</li>
+<li>Delete moved regions from <code>gimple_codegen.py</code>, assemble mixins into
+<code>GimpleGen</code>, add facade re-exports + <code>__getattr__</code>.</li>
+<li>Dedupe <code>_C_RESERVED_FUNCS</code>; trim import blocks; run full gate battery incl.
+stdlib-dylib skip-count comparison vs baseline.</li>
+<li>M13: decompose <code>gen_module</code> phase-by-phase (smallest batches last).</li>
+<li><strong>At each milestone:</strong> <code>make bootstrap</code> (verify + validate-all) in addition
+to the per-step gates — see the milestone-gate section above.</li>
+</ol>
+
+<h2>9. Risk register</h2>
+<table>
+<tr><th>Risk</th><th>Mitigation</th></tr>
+<tr><td>Hidden dynamic attribute access on <code>GimpleGen</code>/<code>gimple_codegen</code> not in the re-export list</td><td>Facade <code>__getattr__</code> delegates to implementation modules; grep-audit tests for <code>gimple_codegen.&lt;attr&gt;</code> patterns before each landing</td></tr>
+<tr><td>Self-hosted compiler consumes this file’s own source</td><td>No package conversion; facade stays a plain single file; <code>make check-selfhost</code> in every gate batch</td></tr>
+<tr><td>Pinned <code>compile_to_gimple</code> 3-arg ABI</td><td>Entry-point rewrite preserves signatures exactly; regression-tested via selfhost run</td></tr>
+<tr><td>Module-level global clearing order changes behavior (B1 fix)</td><td>A1 ships test proving second link-mode compile emits identical text to first</td></tr>
+<tr><td>Mixin MRO surprises</td><td>Mixins are siblings sharing no overridden names (verified: no class-level duplicates exist); composition order fixed in facade; <code>gen_stmt</code> dispatch stays single-owner</td></tr>
+<tr><td>Verbatim moves drift during integration</td><td>Integration diffs each moved region against manifest line-ranges; any non-verbatim hunk requires explicit justification</td></tr>
+</table>
+
+</body>
+</html>

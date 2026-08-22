@@ -200,31 +200,6 @@ class TypeLattice:
         return '%d'
 
 
-# ---------------------------------------------------------------------------
-# EscapeAnalyzer — conservative escape analysis for struct locals
-# ---------------------------------------------------------------------------
-
-# Standalone functions for escape analysis (to avoid object method transpilation issues)
-def _find_idents(node) -> set:
-    """Recursively find all identifiers in an AST node."""
-    if isinstance(node, IdentExpr):           return {node.name}
-    if isinstance(node, BinaryOp):            return _find_idents(node.left) | _find_idents(node.right)
-    if isinstance(node, CompareChain):
-        r = set()
-        for o in node.operands: r |= _find_idents(o)
-        return r
-    if isinstance(node, UnaryOp):             return _find_idents(node.operand)
-    if isinstance(node, CallExpr):
-        r = set()
-        for a in node.args: r |= _find_idents(a)
-        return r
-    if isinstance(node, MemberExpr):          return _find_idents(node.obj)
-    if isinstance(node, SubscriptExpr):       return _find_idents(node.obj) | _find_idents(node.index)
-    if isinstance(node, TernaryExpr):
-        return (_find_idents(node.condition) | _find_idents(node.then_val) | _find_idents(node.else_val))
-    return set()
-
-
 _TYPE_MAP: dict[str | None, str] = {
     'Int':    'int64_t',
     'Int8':   'int8_t',
