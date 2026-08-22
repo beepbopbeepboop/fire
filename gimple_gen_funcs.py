@@ -669,12 +669,12 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
         gen.gen_stmt(s)
     gen._emit(f"  goto {bb_merge};")
     # elif chains
-    for elif_cond, elif_body in elifs:
+    for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
         gen._emit_label(bb_false)
         elif_tt, elif_cv = gen.lower_expr(elif_cond)
         elif_cv = gen._ensure_bool_cond(elif_tt, elif_cv)
         bb_elif_true = gen._new_bb()
-        if elifs.index((elif_cond, elif_body)) < len(elifs) - 1 or has_else:
+        if _elif_idx < len(elifs) - 1 or has_else:
             bb_false = gen._new_bb()
         else:
             bb_false = bb_merge
