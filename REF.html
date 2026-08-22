@@ -314,6 +314,54 @@ stdlib-dylib skip-count comparison vs baseline.</li>
 to the per-step gates — see the milestone-gate section above.</li>
 </ol>
 
+<h2>8b. Wave-2 status — leaf modules landed; mixin wiring parked</h2>
+
+<h3>Landed on master (all gates green)</h3>
+<table>
+<tr><th>Gate</th><th>Baseline</th><th>After</th></tr>
+<tr><td>test_gimple</td><td>250/250</td><td class="ok">250/250</td></tr>
+<tr><td>test_module_cache</td><td>76/76</td><td class="ok">76/76</td></tr>
+<tr><td>check-selfhost</td><td>PASS</td><td class="ok">PASS</td></tr>
+<tr><td>stdlib dylib <code>skip</code> count</td><td>0</td><td class="ok">0</td></tr>
+<tr><td>make bootstrap</td><td>—</td><td class="ok">PASS — all stage outputs match</td></tr>
+</table>
+<p>Landed: tail fixes B1/B2, <code>_run_pipeline</code> entry unification, and three leaf modules —
+<code>gimple_ctypes.py</code>, <code>gimple_solvers.py</code>, <code>gimple_exprtypes.py</code> — with
+moved defs deleted from <code>gimple_codegen.py</code>, qualified access internally
+(<code>import gimple_ctypes</code> + <code>gimple_ctypes._mojo_type</code>), PEP 562
+<code>__getattr__</code> re-exports for external consumers.</p>
+
+<h3>Binding constraints discovered (apply to ALL future extraction)</h3>
+<ol>
+<li>The self-host closure inlines each imported module's defs once per import edge: a def must have
+exactly one physical home across gimple_* files.</li>
+<li>Plain cross-module function imports dedupe correctly (<code>load_module</code> precedent);
+the problem is exclusively <em>methods under inheritance</em>.</li>
+<li><code>checked_run</code> caches gate results keyed only on listed --extra files — always pass new
+leaf files as --extra or use --no-cache while iterating.</li>
+<li>Path-based selfhost gating: absolute vs relative entry filenames change emitted code; gates use
+absolute paths.</li>
+</ol>
+
+<h3>Mixin wiring — blocked, WIP on <code>refactor/mixin-wiring-wip</code></h3>
+<p>The five Wave-1 mixins plus extracted core/exprs were wired and Python-green (250/76), but selfhost
+failed at link: the compiled closure resolves <code>self.method()</code> by the lexically-enclosing
+class prefix (<code>_GenCallsMixin__emit</code>) without walking declared base classes. All seven
+groups form one mutually-recursive strongly-connected component, so no file partition satisfies
+per-file static resolution.</p>
+
+<h3>Path forward</h3>
+<ol>
+<li><strong>Preferred — function extraction:</strong> convert lowering families to module-level
+functions taking <code>gen</code> as first parameter (<code>self.x → gen.x</code> mechanical rewrite),
+thin delegating methods left on GimpleGen; land one family at a time behind gates. Bypasses method
+symbol resolution entirely — imports already proven safe.</li>
+<li>Alternative — compiler fix: resolve inherited-method calls to the defining class's symbol.
+Unblocks true mixins but touches struct-inheritance semantics for user code; higher risk.</li>
+<li>Fallback — accept single-file GimpleGen body (~27k lines); keep only non-class extractions
+(already landed).</li>
+</ol>
+
 <h2>9. Risk register</h2>
 <table>
 <tr><th>Risk</th><th>Mitigation</th></tr>
