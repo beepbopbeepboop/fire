@@ -581,6 +581,43 @@ def _dict_val_of(gen, name: str) -> str:
     return gen._dict_val_types.get(name, 'int64_t')
 
 
+def _scalar_arg_is_addressable_local(gen, aval) -> bool:
+    """BUG-2026-016's discriminator for _emit_call's scalar->pointer
+    coercion: True iff `aval` is a bare identifier that is positively
+    known to be a declared LOCAL (or parameter/temp -- anything with a C
+    declaration in this function body, which `var_types` tracks for
+    exactly those) and is NOT tracked as an opaque pointer handle.
+
+    The conservative exclusions are load-bearing:
+      * `_actual_types` -- set precisely when codegen knows an
+        int64_t-typed name really holds a struct/container pointer;
+        such handles must keep the legacy by-value pass-through.
+      * `_global_var_types` -- globals are excluded entirely: an
+        int64_t global is the one place "holds a real FFI pointer"
+        is common (the legacy branch's own cited case), and aliasing
+        writes into a caller's global on behalf of an out-param was
+        never the old behavior.
+    Everything else reaching the coercion branch with a pointer-typed
+    parameter is a genuine value argument -- today silently reinterpreted
+    as an address (a near-NULL store -> segfault), per BUG-2026-016."""
+    if not isinstance(aval, str):
+        return False
+    if aval in gen._actual_types or aval in gen._global_var_types:
+        return False
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', aval) is None:
+        return False
+    # Codegen temps are excluded on purpose: a temp is where an arbitrary
+    # EXPRESSION's value landed (a call result, a folded constant -- e.g.
+    # std/collections/list.mojo's `__iter__` passing a null UnsafePointer
+    # for `src` lowered to `_t10 = 0`, which must keep reaching the
+    # callee AS NULL, not as the address of the dead temp). Only a name
+    # that came straight from SOURCE -- a declared local/parameter the
+    # user explicitly wrote as the out-param argument -- gets aliased.
+    if re.fullmatch(r'_t\d+', aval) is not None:
+        return False
+    return aval in gen.var_types
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
@@ -749,18 +786,69 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list)
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
-            # If parameter expects pointer and we have int/int64_t, cast through void*
-            # This handles cases where int64_t is an opaque pointer (e.g., from globals)
-            ip3 = gen._new_temp('int64_t')
-            pp = gen._new_temp(ptype)
-            if actual_atype == 'int64_t' or atype == 'int64_t':
-                # GIMPLE: can't redundantly cast int64_t to int64_t when source is global
-                aval_local = gen._ensure_local('int64_t', aval)
-                gen._emit(f'  {ip3} = {aval_local};')
+            # Parameter expects a pointer; the lowered argument is a plain
+            # scalar-typed value. TWO unrelated situations reach this one
+            # branch, and they need OPPOSITE handling (BUG-2026-016,
+            # box.3d/game):
+            #
+            # (1) The argument names a real, declared local/temp of THIS
+            #     function holding a genuine VALUE (e.g.
+            #     `hopper_get_input(h, hin_id, hin_count)` where
+            #     `hin_id: UInt64 = 0`): the old code reinterpreted the
+            #     value's bits as a pointer (`(uint64_t *)_t2` from the
+            #     value 0 -> NULL) and the callee's first store through it
+            #     segfaulted. Auto-materialize the argument's ADDRESS
+            #     instead (the bug report's option (a)): pass `&hin_id`
+            #     so the callee's writes through the out-param land in
+            #     the caller's own variable -- true aliasing/write-back,
+            #     which is exactly what an out-parameter call means. A
+            #     non-lvalue argument (call result temp, expression)
+            #     gets the same treatment harmlessly: its temp is
+            #     addressable memory, so the callee writes into a
+            #     discarded temporary instead of crashing ("an
+            #     addressable temporary", per the same report).
+            # (2) The argument is an OPAQUE HANDLE boxed in an int64_t
+            #     that genuinely must be passed through by value -- the
+            #     convention this branch was written for (its comment
+            #     cites globals). Those keep today's cast-through
+            #     behavior unchanged: handles tracked by _actual_types,
+            #     anything living in a global (_global_var_types -- the
+            #     cited case, and the one place "int64_t holding a real
+            #     FFI pointer" is common), any name we can't positively
+            #     identify as a declared local, AND every parameter whose
+            #     C type isn't pointer-to-numeric-scalar. That last
+            #     exclusion is load-bearing: `char *` parameters are
+            #     overwhelmingly STRING parameters in this dialect, and an
+            #     int64_t-typed local holding a string handle passed to
+            #     one must keep the by-value handle pass-through
+            #     (confirmed via make check-selfhost: auto-addressing
+            #     those regressed mojo.py's own self-compilation with
+            #     dozens of GIMPLE errors). Pointer-to-numeric-scalar
+            #     (`*UInt64` -> 'uint64_t *', `*Int64` -> 'int64_t *',
+            #     ...) is exactly the raw-pointer OUT-parameter spelling
+            #     this dialect's FFI/helper surface uses (_mojo_type's
+            #     own `*T` mapping), and the only shape BUG-2026-016
+            #     reported.
+            if (gen._scalar_arg_is_addressable_local(aval)
+                    and gimple_ctypes._elem_type(ptype) in gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS
+                    and aval in getattr(gen, '_scalar_annotated_locals', ())):
+                _ap = gen._new_val(f'{atype} *', f'&{aval}')
+                pp = gen._new_temp(ptype)
+                gen._emit(f'  {pp} = ({ptype}){_ap};')
+                coerced_args.append(pp)
             else:
-                gen._emit(f'  {ip3} = (int64_t){aval};')
-            gen._emit(f'  {pp} = ({ptype}){ip3};')
-            coerced_args.append(pp)
+                # If parameter expects pointer and we have int/int64_t, cast through void*
+                # This handles cases where int64_t is an opaque pointer (e.g., from globals)
+                ip3 = gen._new_temp('int64_t')
+                pp = gen._new_temp(ptype)
+                if actual_atype == 'int64_t' or atype == 'int64_t':
+                    # GIMPLE: can't redundantly cast int64_t to int64_t when source is global
+                    aval_local = gen._ensure_local('int64_t', aval)
+                    gen._emit(f'  {ip3} = {aval_local};')
+                else:
+                    gen._emit(f'  {ip3} = (int64_t){aval};')
+                gen._emit(f'  {pp} = ({ptype}){ip3};')
+                coerced_args.append(pp)
         elif ptype == 'int64_t' and atype.endswith(' *'):
             # pointer passed where int64_t expected — cast via int64_t
             ip = gen._new_val('int64_t', f'(int64_t){aval}')

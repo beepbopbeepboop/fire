@@ -1058,6 +1058,28 @@ def _func_csym(gen, bare_name: str) -> str:
 
 def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._reset_func(node.body, node.params)
+    # BUG-2026-016's allow-list: locals whose DECLARATION carries an
+    # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
+    # variable can never legitimately hold a pointer, so when one is
+    # passed to a pointer-to-scalar parameter it must mean out-param
+    # aliasing -- take its address. The complement is exactly why this
+    # allow-list exists: UNANNOTATED locals initialized from
+    # pointer-returning calls (`var ptr = data.unsafe_ptr()`,
+    # std/hashlib/_ahash.mojo; `var mbar = stack_allocation[...]`,
+    # gpu/elementwise.mojo) routinely hold REAL addresses in int64_t
+    # storage, and auto-addressing those corrupts the call (confirmed:
+    # both stdlib modules regressed to GCC errors without this gate).
+    gen._scalar_annotated_locals = set()
+    for _dn in gimple_exprtypes._walk_ast(node.body):
+        if isinstance(_dn, gimple_ctypes.VarDecl) and getattr(_dn, 'type_ann', None):
+            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
+                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+                gen._scalar_annotated_locals.add(_dn.name)
+        elif (isinstance(_dn, gimple_ctypes.AssignStmt) and isinstance(_dn.target, gimple_ctypes.IdentExpr)
+                and getattr(_dn, 'type_ann', None)):
+            if gimple_ctypes._TYPE_MAP.get(str(_dn.type_ann).strip()) in (
+                    gimple_ctypes._PTR_OUT_PARAM_SCALAR_ELEMS | {'char'}):
+                gen._scalar_annotated_locals.add(_dn.target.name)
     # Per-lexical-scope import tracking: this function body is its own
     # scope — push a fresh frame and pre-record every `from X import ...`
     # directly in the body so a bare-name call site resolves to the module
@@ -1466,7 +1488,28 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
         return False
     sdef = gen._find_imported_struct(module, nm)
     if sdef is None:
-        return False
+        # Not defined directly in `module` itself -- chase `module`'s own
+        # import statements transitively for the struct's REAL defining
+        # module (BUG-2026-014/015: an importing module's reference to a
+        # struct routinely crosses TWO hops -- `game_ffi.mojo` imports
+        # `engine_view_slot` from `engine_world.mojo`, whose return type
+        # `ItemSlot` is defined in `base/items.mojo` -- and every step
+        # scoped to the immediate module gave up to the opaque int64_t
+        # default, leaving caller-side field access on the dynamic
+        # `_mojo_dispatch_getattr` path -> AttributeError/segfault).
+        # Rebind `module` so EVERY downstream consumer below -- the
+        # per-field ctype resolution (whose bare-name recursion passes
+        # `module` on), the comptime-constant lookups against the home
+        # module's AST, the List[X]/[X; N] element-struct transitive
+        # pass, and the `_imported_struct_home` symbol qualification --
+        # resolves against the struct's true home by construction.
+        _home = gen._find_struct_home_module(module, nm)
+        if _home is None or _home == module:
+            return False
+        sdef = gen._find_imported_struct(_home, nm)
+        if sdef is None:
+            return False
+        module = _home
     # `_imported_generic_structs` (checked above) is only reliable once
     # `_register_imported_generic_structs` has actually run — which
     # happens AFTER `_register_imported_structs` in gen_module's own
@@ -1898,6 +1941,51 @@ def _find_imported_struct(gen, module: str, name: str):
     for s in mod:
         if isinstance(s, gimple_ctypes.StructDef) and s.name == name:
             return s
+    return None
+
+
+def _find_struct_home_module(gen, module: str, name: str, depth: int = 0) -> str | None:
+    """The module ref whose own source DIRECTLY defines `struct {name}`,
+    starting from `module` and following its `from X import ...`
+    statements transitively (re-export chains -- BUG-2026-014/015,
+    box.3d/game: `game_ffi.mojo` imports `engine_view_slot` from
+    `engine_world`, whose return annotation names `ItemSlot`, but
+    ItemSlot is DEFINED in `base.items`; every prior resolution step
+    looked only in the immediate module and gave up with the opaque
+    int64_t default).
+
+    Returns a module-ref string usable with `_parsed_import`/
+    `_materialize_imported_struct` (each hop's own `from X import`
+    target -- relative spellings are absolutized against the importing
+    module via `_abs_module`, mirroring `_find_generic_source`). None
+    if no reachable module defines the struct (an honest "not found",
+    never a guess). Memoized per (module, name); the memo doubles as
+    the cycle guard for re-export loops."""
+    if depth > 5 or not module:
+        return None
+    key = (module, name)
+    if key in gen._struct_home_cache:
+        return gen._struct_home_cache[key]
+    # Mark in-progress BEFORE recursing so an import cycle terminates
+    # (a re-export loop A->B->A must not recurse forever).
+    gen._struct_home_cache[key] = None
+    if gen._find_imported_struct(module, name) is not None:
+        gen._struct_home_cache[key] = module
+        return module
+    _path, _src, stmts = gen._parsed_import(module)
+    if not stmts:
+        return None
+    for st in stmts:
+        if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
+            continue
+        for nm, alias in st.names:
+            if (alias or nm) != name:
+                continue
+            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
+            r = gen._find_struct_home_module(sub, name, depth + 1)
+            if r:
+                gen._struct_home_cache[key] = r
+                return r
     return None
 
 

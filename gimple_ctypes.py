@@ -521,6 +521,19 @@ def _mojo_type(ann: str | type | None) -> str:
 def _result_type(t1: str, t2: str) -> str:
     return TypeLattice.join(t1, t2)
 
+# Element ctypes a pointer parameter may point at for _emit_call's
+# BUG-2026-016 auto-address coercion to fire. Deliberately EXCLUDES 'char'
+# (string parameters — an int64_t local holding a string handle must keep the
+# legacy by-value pass-through; see the call-site comment) and every struct /
+# container pointer type (opaque-handle territory). This is exactly the set
+# _mojo_type produces for raw-pointer OUT-parameter annotations `*T` where T
+# is numeric/boolean (`*UInt64` -> 'uint64_t *', `*Float64` -> 'double *', …).
+_PTR_OUT_PARAM_SCALAR_ELEMS = frozenset({
+    'int8_t', 'uint8_t', 'int16_t', 'uint16_t', 'int32_t', 'uint32_t',
+    'int64_t', 'uint64_t', 'int', 'unsigned', 'long', 'size_t',
+    'float', 'double', '_Bool',
+})
+
 def _elem_type(ptr_type: str) -> str:
     """Strip one level of pointer to get element type."""
     if ptr_type.endswith(' *'):

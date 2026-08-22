@@ -1264,6 +1264,8 @@ class GimpleGen:
         self._regex_progs: dict[str, dict] = {}      # pattern source → regex_compile.compile_pattern(...) result
         self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
         self._find_generic_visited: set = set()      # (module, name, kind) already visited by _find_generic_source (breaks import cycles)
+        self._scalar_annotated_locals: set = set()   # per-function allow-list for _emit_call's BUG-2026-016 auto-address coercion (reseeded by gen_func)
+        self._struct_home_cache: dict = {}           # (module, name) -> defining-module ref | None, memo for _find_struct_home_module (breaks re-export cycles)
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
@@ -4151,6 +4153,18 @@ class GimpleGen:
         for s in all_struct_defs:
             if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
                 self._struct_name_owner[s.name] = id(s)
+        # Pre-create every owned struct's field dict BEFORE any field is
+        # resolved below (same register-before-resolve convention
+        # _materialize_imported_struct established for cycle safety in
+        # 3fc4073). Without this, a field annotation naming a struct defined
+        # LATER in the same file (`struct C: d: D` with D textually after C)
+        # saw no entry yet and fell to the opaque int64_t default -- while
+        # the same shape across module boundaries already worked via
+        # _materialize_imported_struct's own recursion.
+        for s in all_struct_defs:
+            if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) == id(s):
+                if s.name not in self.struct_field_types:
+                    self.struct_field_types[s.name] = {}
         for s in all_struct_defs:
             if isinstance(s, StructDef):
                 if self._struct_name_owner.get(s.name) != id(s):
@@ -4350,6 +4364,60 @@ class GimpleGen:
                         # Don't overwrite hardcoded entries (e.g. BinaryOp.op)
                         if f_name not in self.struct_field_types[s.name]:
                             ft = _mojo_type(field.type_ann)
+                            # BUG-2026-014 (box.3d/game): a bare capitalized
+                            # annotation naming a struct this compile already
+                            # knows (`hopper: Hopper` in the struct's own home
+                            # module, Hopper imported and materialized by
+                            # _register_imported_structs -- or a same-file
+                            # struct, forward reference included via the
+                            # pre-registration pass above) must resolve to a
+                            # real `Hopper *` field, not _mojo_type's opaque
+                            # int64_t default. The stateless default made the
+                            # DEFINING module's own typedef collapse nested
+                            # machine-component fields to scalars, so every
+                            # later `b.hopper.input_count` -- here AND in every
+                            # importing module -- fell through to the dynamic
+                            # `_mojo_dispatch_getattr` path (the reported
+                            # `AttributeError: input_count`). This mirrors
+                            # exactly what the cross-module twin of this code
+                            # (_materialize_imported_struct's per-field
+                            # resolution via _imported_field_ctype ->
+                            # _resolve_type) already does; kept inline rather
+                            # than switching this site to _resolve_type
+                            # wholesale so every OTHER unresolved-annotation
+                            # default stays byte-identical.
+                            _fann_s = str(field.type_ann).strip() if field.type_ann else ''
+                            if (_fann_s and _fann_s[0].isupper() and '[' not in _fann_s
+                                    and '.' not in _fann_s and '*' not in _fann_s
+                                    and _fann_s not in self._IMPORTED_STRUCT_SKIP_BASENAMES
+                                    and _TYPE_MAP.get(_fann_s) is None):
+                                if _fann_s in self.struct_field_types:
+                                    ft = f"{_fann_s} *"
+                                else:
+                                    # Not registered yet -- materialize it from
+                                    # THIS FILE's own imports on demand (same
+                                    # lookup _register_imported_structs uses,
+                                    # which doesn't fire here because its gates
+                                    # key on param-types/ctor-calls, not
+                                    # field-type usage). Mirrors the per-field
+                                    # bare-name recursion
+                                    # _materialize_imported_struct itself does
+                                    # for ITS fields, applied one level up to a
+                                    # locally-defined struct's fields.
+                                    for _ist in stmts:
+                                        if not (isinstance(_ist, FromImportStmt)
+                                                and not getattr(_ist, 'wildcard', False)):
+                                            continue
+                                        for _inm, _ialias in _ist.names:
+                                            if (_ialias or _inm) != _fann_s:
+                                                continue
+                                            if self._materialize_imported_struct(
+                                                    _ist.module, _inm, _fann_s):
+                                                ft = f"{_fann_s} *"
+                                            break
+                                        else:
+                                            continue
+                                        break
                             # Fixed-size-array field: `var x: [ElemType; N]`.
                             # See _FIXED_ARRAY_ANN_RE's own comment and
                             # bugs/BUG-2026-008.md (box.3d/game) — `ft` here
@@ -5245,7 +5313,28 @@ class GimpleGen:
                                     for cp in (sym_info.get('c_parameters') or [])
                                 ]
                         if _sib_qualifier and sym_info:
-                            self._note_own_func_home(sym_name, _sib_qualifier)
+                            # Mode-dependent qualifier: must match how the
+                            # DEFINING module's symbols are actually named in
+                            # THIS pipeline. In do_imports=True (--jit/build)
+                            # the sibling is inlined by
+                            # _compile_imported_module with GimpleGen.
+                            # module_name == the dotted import string
+                            # verbatim, tier-1-sanitized ('pkg.util' ->
+                            # 'pkg_util'); module_name_for_path's basename
+                            # fallback ('util') only matches the per-file
+                            # dylib pipeline (build_stdlib_dylib derives each
+                            # module name from its file path), so keep it for
+                            # do_imports=False. Registering the wrong one
+                            # made every `from pkg.util import f` program
+                            # fail to link under --jit/build with an
+                            # implicit-declaration error (call sites emitted
+                            # util_f_0c85c9 vs definition pkg_util_f_0c85c9).
+                            if self.do_imports:
+                                _qual = (s.module.replace('.', '_')
+                                         .replace('-', '_'))
+                            else:
+                                _qual = _sib_qualifier
+                            self._note_own_func_home(sym_name, _qual)
                     try:
                         if not s.names:
                             # Wildcard import: register all exported symbols
@@ -11894,6 +11983,8 @@ class GimpleGen:
         return gfn._register_imported_structs(self, stmts)
     def _find_imported_struct(self, module: str, name: str):
         return gfn._find_imported_struct(self, module, name)
+    def _find_struct_home_module(self, module: str, name: str, depth: int = 0) -> str | None:
+        return gfn._find_struct_home_module(self, module, name, depth=depth)
     def _resolve_test_relative_module(self, module: str) -> str | None:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
@@ -12312,6 +12403,8 @@ class GimpleGen:
         return grsl._void_call(self, fname, arg_pairs)
     def _emit_label(self, label: str, freq_hint: str=''):
         return grsl._emit_label(self, label, freq_hint)
+    def _scalar_arg_is_addressable_local(self, aval) -> bool:
+        return ginf._scalar_arg_is_addressable_local(self, aval)
     def _strided_data_ptr(self, pt: str, pv: str) -> str:
         return grsl._strided_data_ptr(self, pt, pv)
     def _safe_coerce_emit(self, src: str, dst: str, val: str, lhs: str) -> None:
