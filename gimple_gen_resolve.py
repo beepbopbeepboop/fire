@@ -1574,16 +1574,88 @@ def _collect_return_elems(gen, stmts, acc) -> None:
             gen._collect_return_elems(node.body, acc)
 
 
-def _infer_return_elem_type(gen, body) -> str | None:
+KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}
+
+
+def _infer_return_elem_type(gen, body, func_def=None) -> str | None:
     """Infer the container ELEMENT type a function returns, or None when it
-    returns no statically-identifiable container. See _quick_container_elem."""
+    returns no statically-identifiable container. See _quick_container_elem.
+
+    HERMETIC: runs against a snapshot of the shared type-scratch maps
+    (var_types/_elem_types/_dict_val_types/_actual_types) so scanning one
+    function's body can neither poison nor be poisoned by the scratch left
+    behind by the previously-scanned function in Pass 2c's whole-program
+    loop. Before this was hermetic, whatever function happened to be
+    scanned just before (module processing order varies with the closure
+    import graph) leaked its var_types into this scan and mis-typed unrelated
+    callees' tuple returns as int64_t (comptime.py's `ret, params =
+    _signature(...)` unpacked params as int64_t -> mojo_strlen(int))."""
+    # CLEAN-SLATE scan: derive every fact from THIS body alone. Ambient
+    # var_types/_elem_types carry other functions' locals (often common
+    # names like 'params'/'ret' typed int64_t), which poisoned tuple-return
+    # element inference depending on module processing order.
+    _saved = (gen.var_types, gen._elem_types, gen._dict_val_types,
+              gen._actual_types, getattr(gen, '_prepass_struct', None))
+    gen.var_types = {}
+    # Seed with facts that are TRUE regardless of processing order: this
+    # function's own annotated params, every registered cross-function
+    # return type (imported externs + Pass-2a inferred), and the fixed
+    # return types of leaf helpers exported by gimple_ctypes.
+    if func_def is not None:
+        for pname, ptype in (func_def.params or []):
+            gen.var_types[pname] = (gimple_ctypes._mojo_type(ptype)
+                                    if ptype else 'int64_t')
+    for k, v in gen.func_return_types.items():
+        gen.var_types.setdefault(k, v)
+    for k, v in KNOWN_LEAF_RETS.items():
+        gen.var_types.setdefault(k, v)
+    gen._elem_types = dict(_saved[1])   # container elem types stay visible
+    gen._dict_val_types = {}
+    gen._actual_types = dict(_saved[3])
     gen._prepass_local_elems = {}
-    gen._collect_local_container_elems(body)
-    acc = []
-    gen._collect_return_elems(body, acc)
-    if not acc:
-        return None
-    return gimple_ctypes.TypeLattice.join_all(acc)
+    # Scalar assignment seeding: `ret = _mojo_type(...)` — record the
+    # callee's registered return type for simple Ident targets so the
+    # ReturnStmt element walk can type non-container locals. Container
+    # locals are handled by _collect_local_container_elems above.
+    def _seed_scalar_assigns(nodes):
+        for nd in nodes:
+            if isinstance(nd, gimple_ctypes.AssignStmt) \
+                    and isinstance(nd.target, gimple_ctypes.IdentExpr) \
+                    and isinstance(nd.value, gimple_ctypes.CallExpr):
+                callee = getattr(nd.value.func, 'name', None)
+                if callee and nd.target.name not in gen.var_types:
+                    rt = gen.func_return_types.get(callee)
+                    if rt is None and callee in ('_mojo_type', '_c_escape', '_safe_name'):
+                        rt = 'char *'
+                    if rt:
+                        gen.var_types[nd.target.name] = rt
+            elif isinstance(nd, gimple_ctypes.IfStmt):
+                _seed_scalar_assigns(nd.then_body)
+                for _, eb in (getattr(nd, 'elifs', None) or []):
+                    _seed_scalar_assigns(eb)
+                if nd.else_body:
+                    _seed_scalar_assigns(nd.else_body)
+            elif isinstance(nd, (gimple_ctypes.ForStmt, gimple_ctypes.WhileStmt)):
+                _seed_scalar_assigns(nd.body)
+            elif isinstance(nd, gimple_ctypes.TryStmt):
+                _seed_scalar_assigns(nd.body)
+                for h in nd.handlers:
+                    _seed_scalar_assigns(h.body)
+            elif isinstance(nd, gimple_ctypes.WithStmt):
+                _seed_scalar_assigns(nd.body)
+
+    try:
+        _seed_scalar_assigns(body)
+        gen._collect_local_container_elems(body)
+        acc = []
+        gen._collect_return_elems(body, acc)
+        if not acc:
+            return None
+        return gimple_ctypes.TypeLattice.join_all(acc)
+    finally:
+        gen.var_types, gen._elem_types, gen._dict_val_types, \
+            gen._actual_types, _ps = _saved
+        gen._prepass_struct = _ps
 
 
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:

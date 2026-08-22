@@ -39,14 +39,21 @@ _CTYPES = {
 }
 
 
-def _comptime_signature(src: str, fn_name: str):
-    """(ret_ctype, [param_ctypes]) for fn_name, via the ABI type mapping."""
+def _comptime_sig_ret(src: str, fn_name: str) -> str:
+    """Return ctype for fn_name via the ABI type mapping."""
     from gimple_codegen import _mojo_type
     for s in Parser(py_tokenize(src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == fn_name:
-            ret = _mojo_type(s.return_type) if s.return_type else 'void'
-            params = [_mojo_type(t) for _, t in s.params]
-            return ret, params
+            return _mojo_type(s.return_type) if s.return_type else 'void'
+    raise ValueError(f"comptime: function {fn_name!r} not found")
+
+
+def _comptime_sig_params(src: str, fn_name: str) -> list:
+    """Param ctypes for fn_name via the ABI type mapping."""
+    from gimple_codegen import _mojo_type
+    for s in Parser(py_tokenize(src)).parse_module():
+        if isinstance(s, FunctionDef) and s.name == fn_name:
+            return [_mojo_type(t) for _, t in s.params]
     raise ValueError(f"comptime: function {fn_name!r} not found")
 
 
@@ -81,7 +88,8 @@ def evaluate(src: str, fn_name: str, args, gcc: str = None):
     """Compile (once, cached) and CALL a comptime function at compile time.
     Returns the function's result, computed by executing real machine code."""
     gcc = gcc or find_gcc()
-    ret, params = _comptime_signature(src, fn_name)
+    ret = _comptime_sig_ret(src, fn_name)
+    params = _comptime_sig_params(src, fn_name)
     dylib = _build_dylib(src, fn_name, gcc)
 
     # Only scalar param types can be marshaled across the dlopen call. Raise a

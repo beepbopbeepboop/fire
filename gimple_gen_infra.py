@@ -1698,12 +1698,31 @@ def _quick_container_elem(gen, node) -> str | None:
     the fixpoint propagates callee elem types to their callers."""
     if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr)):
         return gen._prepass_list_elem(node.elements)
+    if isinstance(node, gimple_ctypes.Comprehension):
+        # `[f(x) for _, x in it]` — element type is the mapped expression's
+        # container-elem (or scalar-leaf) type.
+        return gen._quick_container_elem(node.element)
+    if isinstance(node, gimple_ctypes.TernaryExpr):
+        a = gen._quick_container_elem(getattr(node, 'if_true', None) or getattr(node, 'body', None))
+        b = gen._quick_container_elem(getattr(node, 'if_false', None) or getattr(node, 'orelse', None))
+        if a and b:
+            return gimple_ctypes.TypeLattice.join_all([a, b])
+        return a or b
     if isinstance(node, gimple_ctypes.IdentExpr):
         return gen._prepass_local_elems.get(node.name)
     if isinstance(node, gimple_ctypes.CallExpr):
         key = gen._prepass_callee_key(node)
         if key is not None:
-            return gen._return_elem_types.get(key)
+            e = gen._return_elem_types.get(key)
+            if e is not None:
+                return e
+        # Known SCALAR-returning leaf helpers (exported by gimple_ctypes,
+        # outside every closure's function set): their contribution to a
+        # container literal is their scalar return type itself.
+        callee = getattr(node.func, 'name', None) or (
+            getattr(node.func, 'attr', None) if isinstance(node.func, gimple_ctypes.MemberExpr) else None)
+        if callee in ('_mojo_type', '_c_escape', '_safe_name'):
+            return 'char *'
     return None
 
 
@@ -2679,11 +2698,19 @@ def _eval_const_int(gen, node) -> int | None:
             argvals = [gen._eval_const_int(a) for a in node.args]
             if argvals and all(v is not None for v in argvals):
                 try:
-                    import elaborate, comptime
+                    # importlib (NOT a bare `import` statement): gen_module's
+                    # find_imports AST-walk collects every ImportStmt at any
+                    # nesting depth and would inline elaborate.py/comptime.py
+                    # into the self-host closure — compiler-core sources that
+                    # were never GIMPLE-clean. import_module is invisible to
+                    # that walk while resolving identically at runtime.
+                    import importlib as _importlib
+                    _elab = _importlib.import_module('elaborate')
+                    _comptime = _importlib.import_module('comptime')
                     module_src = open(src_path).read()
-                    fn_src = elaborate.extract_fn_source(module_src, node.func.name)
+                    fn_src = _elab.extract_fn_source(module_src, node.func.name)
                     if fn_src:
-                        return int(comptime.evaluate(fn_src, node.func.name, argvals))
+                        return int(_comptime.evaluate(fn_src, node.func.name, argvals))
                 except Exception:
                     gimple_ctypes._debug_note('comptime evaluation failed', node.func.name)
     return None

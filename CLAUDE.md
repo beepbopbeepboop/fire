@@ -27,7 +27,7 @@ path) done — including subagent work — run BOTH of the following, not just
    `_lower_UnaryOp` had never seen that wrapper on those call sites before —
    `test_gimple.py`/`test_module_cache.py` both stayed green throughout.
 2. A from-scratch stdlib dylib build (`rm -f build/libmojostdlib.dylib`
-   then `python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib(jobs=8)"`,
+   then `python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib()"`,
    or just `python3 mojo.py <any file>.mojo`) — check for `skip <module>:`
    lines in the output. The stdlib build is far larger and more varied than
    this repo's own source, and a type-resolution change can regress dozens

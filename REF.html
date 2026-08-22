@@ -261,7 +261,7 @@ after structure stabilizes.</p>
 python3 test_module_cache.py
 make check-selfhost
 rm -f build/libmojostdlib.dylib
-python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib(jobs=8)"
+python3 -c "import build_stdlib_dylib as bsd; bsd.build_stdlib()"
 # then: diff 'skip &lt;module&gt;:' lines vs BASELINE.md — count must NOT increase</pre>
 <p>A green <code>test_gimple</code>+<code>check-selfhost</code> is explicitly <em>insufficient</em>;
 the stdlib dylib rebuild is the breadth test.</p>

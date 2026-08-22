@@ -2036,8 +2036,9 @@ def _compile_nested_async_functions(gen, outer_fn: gimple_ctypes.FunctionDef,
         # eligibility check below: a bare `await task` (pre-rewrite)
         # or a keyword-argument await target (pre-normalization) would
         # otherwise make an eligible function look ineligible.
-        n.body = gen._inline_single_use_task_composition(n.body)
-        gen._normalize_await_kwargs(n.body)
+        _nb = gen._inline_single_use_task_composition(gen._get_fn_body(n))
+        gen._normalize_await_kwargs(_nb)
+        gen._set_fn_body(n, _nb)
         # A nested async def with its OWN comptime bracket parameter(s)
         # (test_asyncrt.mojo's/test_nested_async_generic.py's exact
         # shape: `async def test_asyncrt_add[lhs: Int](rhs: Int) ->

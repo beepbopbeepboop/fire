@@ -5639,6 +5639,7 @@ class GimpleGen:
             if not _changed:
                 break
 
+
         #   Pass 2c: infer container RETURN ELEMENT types to a fixpoint, so a
         #   call site emitted before the callee's own body (the common
         #   self-host order — lower_expr dispatches to the _lower_* helpers
@@ -5651,7 +5652,7 @@ class GimpleGen:
             for s in all_functions:
                 if _is_foreign_main(s) or not isinstance(s, FunctionDef):
                     continue
-                _ret_elem = self._infer_return_elem_type(s.body)
+                _ret_elem = self._infer_return_elem_type(s.body, func_def=s)
                 if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                     self._return_elem_types[s.name] = _ret_elem
                     _c_changed = True
@@ -11968,6 +11969,14 @@ class GimpleGen:
     def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_struct_iter(self, var, struct_type, obj_val, body, shadow_name)
 
+    # ---- nested-AST accessors (keep attribute traffic on GimpleGen itself
+    # so the self-host closure types these reads/writes in the monolith-era
+    # context; see refactor/batch3-wip notes) ----
+    def _get_fn_body(self, fn):
+        return fn.body
+    def _set_fn_body(self, fn, body) -> None:
+        fn.body = body
+
     # ---- delegates: gimple_gen_stmts.py ----
     def gen_stmt(self, node):
         return gst.gen_stmt(self, node)
@@ -12321,8 +12330,8 @@ class GimpleGen:
         return grsl._collect_local_container_elems(self, stmts)
     def _collect_return_elems(self, stmts, acc) -> None:
         return grsl._collect_return_elems(self, stmts, acc)
-    def _infer_return_elem_type(self, body) -> str | None:
-        return grsl._infer_return_elem_type(self, body)
+    def _infer_return_elem_type(self, body, func_def=None) -> str | None:
+        return grsl._infer_return_elem_type(self, body, func_def=func_def)
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):
