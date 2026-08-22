@@ -36,6 +36,7 @@ BUILTIN = set(dir(builtins)) | {'__file__'}
 def local_names(fn):
     a = fn.args
     loc = {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs}
+    loc |= {x.arg for x in ast.walk(fn) if isinstance(x, ast.arg)}
     if a.vararg:
         loc.add(a.vararg.arg)
     if a.kwarg:
@@ -45,6 +46,10 @@ def local_names(fn):
             loc.add(x.id)
         elif isinstance(x, (ast.FunctionDef, ast.ClassDef)):
             loc.add(x.name)
+        elif isinstance(x, ast.Import):
+            loc.update(a.asname or a.name.split('.')[0] for a in x.names)
+        elif isinstance(x, ast.ImportFrom):
+            loc.update(a.asname or a.name for a in x.names)
         elif isinstance(x, ast.ExceptHandler) and x.name:
             loc.add(x.name)
         elif isinstance(x, ast.Global):
@@ -58,7 +63,8 @@ def local_names(fn):
 
 def main():
     names = set(sys.argv[2:])
-    orig = subprocess.run(['git', 'show', 'HEAD:gimple_codegen.py'],
+    ref = os.environ.get('EXTRACT_REF', 'HEAD')
+    orig = subprocess.run(['git', 'show', f'{ref}:gimple_codegen.py'],
                           capture_output=True, text=True).stdout
     L0 = orig.split('\n')
     tree = ast.parse(orig)
@@ -79,11 +85,13 @@ def main():
         body = '\n'.join(ln[4:] if ln.startswith('    ') else ln
                          for ln in L0[s:e])
         fn = ast.parse(body).body[0]
+        has_self = bool(fn.args.args) and fn.args.args[0].arg == 'self'
         taken = local_names(fn) - {'self'}
         pname = next((c for c in ('gen', '_g', '_gc', '_gctx') if c not in taken), '_gctx')
-        fn.args.args[0].arg = pname
-        ren = [(x.lineno, x.col_offset, x.end_col_offset) for x in ast.walk(fn)
-               if isinstance(x, ast.Name) and x.id == 'self']
+        if has_self:
+            fn.args.args[0].arg = pname
+        ren = ([(x.lineno, x.col_offset, x.end_col_offset) for x in ast.walk(fn)
+                if isinstance(x, ast.Name) and x.id == 'self'] if has_self else [])
         bl = body.split('\n')
         for ln, c0, c1 in sorted(ren, key=lambda t: (-t[0], -t[1])):
             line = bl[ln-1]
@@ -126,7 +134,8 @@ def main():
         sigtxt = ast.unparse(ast.Module(body=[d], type_ignores=[]))
         sig = sigtxt[:sigtxt.rindex(':')]
         a = node.args
-        parts = ['self'] + [p.arg for p in (a.posonlyargs + a.args)[1:]]
+        parts = (['self'] + [p.arg for p in (a.posonlyargs + a.args)[1:]]) if has_self \
+            else [p.arg for p in (a.posonlyargs + a.args)]
         parts += [f'{dd.arg}={dd.arg}' for dd in a.kwonlyargs]
         if a.vararg:
             parts.append(f'*{a.vararg.arg}')

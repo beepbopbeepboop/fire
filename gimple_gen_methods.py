@@ -21,6 +21,83 @@ import gimple_solvers
 import gimple_exprtypes
 import gimple_codegen
 
+def _lower_bound_method_value(gen, struct_name: str, method: str,
+                               self_type: str, self_val: str) -> tuple[str, str]:
+    """Lower a method referenced as a plain value (not called at this
+    site): `f = self.b`, `readline.set_completer(self.complete)`.
+
+    Produces a `MojoBoundMethod *` (runtime/mojo_runtime.h) pairing the
+    method's real C function pointer with the already-lowered `self`
+    receiver, reusing the same static-void*-var mechanism `_lower_
+    IdentExpr` already uses to take the address of a free function used
+    as a value (GIMPLE forbids `&func_name` as an rvalue) — see the
+    `func_return_types`/`BUILTIN_VALUE_MAP` branches above. A later call
+    through the resulting value (`f(...)`) is lowered by
+    _lower_bound_method_call, which re-supplies `self` as the method's
+    implicit first argument.
+
+    No call-site args exist yet at a bare-reference site, so overload
+    resolution can't pick among candidates by arity/type — only the
+    unambiguous case (a single overload) is resolved to its exact
+    mangled symbol; anything else falls back to _struct_method_csym's
+    own unsuffixed-name convention (matches its behavior for any other
+    caller that has no candidate list to resolve against).
+
+    Refuses (RuntimeError, the established "fall back to interpreting
+    this module from source" convention — see e.g. the AwaitExpr
+    RuntimeError a few hundred lines up) when `method` is itself a
+    compiled GENERATOR method (registered in
+    self._generator_method_api, Milestone C step 3): a generator
+    method's real callable surface is 4 separate extern "C" functions,
+    `<base>_start/_resume/_value/_destroy` (see
+    _gen_cpp_generator_unit's docstring) — there is no ordinary
+    `struct_method_csym`-mangled C function for it at all (gen_module's
+    Phase 2a skips emitting one, see the `_supported_generator_methods`
+    check there). Before this check, this method computed `mangled`
+    via `_struct_method_csym` exactly as if it named an ordinary
+    method, and unconditionally emitted `static void * _funcptr_
+    {mangled} = (void *){mangled};` (via `_funcptr_builtins_needed`)
+    referencing that never-emitted symbol -- a hard, confusing GCC
+    "'<mangled>' undeclared here (not in a function)" failure at
+    `-fgimple` compile time instead of a clean, honest refusal here.
+    Real-world case: Lib/glob.py's `_GlobberBase.selector` does
+    `return self.select_exists` (glob.py:399), a bare reference to
+    the generator method `select_exists` (glob.py:534, itself `yield`s
+    directly) as a plain VALUE, not a call — see
+    bugs/CODEGEN_generator_function_Lib_glob.md. Even setting the
+    undeclared-symbol crash aside, a `MojoBoundMethod*`'s own calling
+    convention (`mojo_bound_method_call_N`, ONE call returning a
+    single `int64_t`) has no way to represent "returns an iterable
+    generator" at all -- correctly supporting this shape needs a new
+    bound-method-value variant carrying the 4-function coroutine API
+    through to a later call site, not just a declaration fix; out of
+    scope for this narrow refusal.
+    """
+    if (struct_name, method) in gen._generator_method_api:
+        raise RuntimeError(
+            f"cannot compile module: `self.{method}` on struct "
+            f"{struct_name!r} is a compiled GENERATOR method "
+            "referenced as a plain value (not called here) -- a "
+            "generator method's real callable surface is its "
+            "`<base>_start/_resume/_value/_destroy` C++ coroutine "
+            "API, which a MojoBoundMethod* (single-call, scalar-"
+            "return) value can't represent -- falling back to "
+            "interpreting this module from source instead")
+    candidates = gen._struct_method_signatures.get((struct_name, method))
+    overload_id = ''
+    if candidates and len(candidates) == 1:
+        overload_id = candidates[0].get('overload_id', '') or ''
+    mangled = gen._struct_method_csym(struct_name, method, overload_id)
+    ret_type = gen.func_return_types.get(
+        mangled, gen.func_return_types.get(f"{struct_name}_{method}", 'int64_t'))
+    gen._funcptr_builtins_needed.add(mangled)
+    static_name = f'_funcptr_{mangled}'
+    fn_ptr = gen._new_val('void *', static_name)
+    self_void = self_val if self_type == 'void *' else gen._new_val('void *', f'(void *){self_val}')
+    t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
+                         [('void *', fn_ptr), ('void *', self_void)])
+    gen._bound_method_ret_types[t] = ret_type
+    return 'MojoBoundMethod *', t
 
 def _lower_bound_method_value(gen, struct_name: str, method: str,
                                self_type: str, self_val: str) -> tuple[str, str]:
