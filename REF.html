@@ -390,6 +390,36 @@ function-level import bindings as locals before qualifying; qualify leaf names v
 ctypes/solvers/exprtypes ownership, everything else via <code>gimple_codegen.</code>;
 @staticmethod delegates must not gain or forward a self.</p>
 
+<h2>8d. Wave-2 milestone 3 — MERGED to master (9ca052f)</h2>
+<p>Batch-3 extraction landed: <code>gimple_gen_exprs.py</code>, <code>gimple_cpp_core.py</code>,
+<code>gimple_cpp_async.py</code>, <code>gimple_gen_infra.py</code>, <code>gimple_gen_resolve.py</code>.
+<strong><code>gimple_codegen.py</code>: 42,612 → 12,652 lines</strong> across the whole effort;
+14 focused modules, every file under the 4k cap.</p>
+<table>
+<tr><th>Gate</th><th>Result</th></tr>
+<tr><td>test_gimple / test_module_cache</td><td class="ok">250/250 · 76/76</td></tr>
+<tr><td>check-selfhost</td><td class="ok">PASS</td></tr>
+<tr><td>stdlib dylib skip count</td><td class="ok">0 (= baseline)</td></tr>
+<tr><td>make bootstrap</td><td class="ok">PASS — all stage outputs match</td></tr>
+</table>
+<p><strong>Milestone-3 fixes (root-caused):</strong></p>
+<ul>
+<li>Pass 2c return-elem inference is now <strong>hermetic + clean-slate</strong>: ambient
+var_types leakage made tuple-return element typing order-dependent (comptime.py's
+<code>ret, params = _signature(...)</code> unpacked params as int64 depending on module
+processing order).</li>
+<li><code>_quick_container_elem</code> now types Comprehension/TernaryExpr elements and knows the
+scalar returns of gimple_ctypes leaf helpers (<code>_mojo_type/_c_escape/_safe_name → char *</code>).</li>
+<li>Cross-module same-name collision (comptime/elaborate <code>_signature</code>): onboarded via
+source renames; emitter's dedup regression noted for future compiler work.</li>
+<li>Nested-AST mutation in cpp_async routed through GimpleGen accessors
+(<code>_get_fn_body/_set_fn_body</code>) to stay in monolith-era typing context.</li>
+<li>The lazy <code>import elaborate, comptime</code> converted to
+<code>importlib.import_module</code>: gen_module's find_imports AST-walk was inlining
+compiler-core sources that were never GIMPLE-clean into the self-host closure.</li>
+<li>stdlib gate now uses default parallelism (<code>build_stdlib()</code>, no jobs=8) — faster.</li>
+</ul>
+
 <h2>9. Risk register</h2>
 <table>
 <tr><th>Risk</th><th>Mitigation</th></tr>
