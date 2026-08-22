@@ -124,6 +124,15 @@ def main():
         final = re.sub(r'^(def \w+)\(self,', '\\1(' + pname + ',', final, count=1, flags=re.M)
         final = re.sub(r'^(def \w+)\(self\)', r'\1(gen)', final, count=1, flags=re.M)
         ast.parse(final)
+        # Post-fix: compiled List.index(tuple) arg mismatch in comptime-elif
+        # (see git history "enumerate rewrite in comptime-elif").
+        final = final.replace(
+            "if elifs.index((elif_cond, elif_body)) < len(elifs) - 1 or has_else:",
+            "if _elif_idx < len(elifs) - 1 or has_else:")
+        final = final.replace(
+            "for elif_cond, elif_body in elifs:",
+            "for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):")
+        ast.parse(final)
         funcs.append(final)
 
         args = copy.deepcopy(node.args)
