@@ -39,7 +39,7 @@ _CTYPES = {
 }
 
 
-def _signature(src: str, fn_name: str):
+def _comptime_signature(src: str, fn_name: str):
     """(ret_ctype, [param_ctypes]) for fn_name, via the ABI type mapping."""
     from gimple_codegen import _mojo_type
     for s in Parser(py_tokenize(src)).parse_module():
@@ -81,7 +81,7 @@ def evaluate(src: str, fn_name: str, args, gcc: str = None):
     """Compile (once, cached) and CALL a comptime function at compile time.
     Returns the function's result, computed by executing real machine code."""
     gcc = gcc or find_gcc()
-    ret, params = _signature(src, fn_name)
+    ret, params = _comptime_signature(src, fn_name)
     dylib = _build_dylib(src, fn_name, gcc)
 
     # Only scalar param types can be marshaled across the dlopen call. Raise a

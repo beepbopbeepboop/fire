@@ -355,7 +355,7 @@ def _struct_layout(concrete_src: str, name: str):
     return [], []
 
 
-def _signature(concrete_src: str, name: str):
+def _elab_signature(concrete_src: str, name: str):
     """(ret_ctype, [param_ctypes]) of the monomorphized function, via the ABI map."""
     for s in Parser(py_tokenize(concrete_src)).parse_module():
         if isinstance(s, FunctionDef) and s.name == name:
@@ -403,7 +403,7 @@ class Elaborator:
 
         mangled, obj, _hit, cpp_obj = mm.instantiate(tmpl, targs, gcc=self.gcc)
         _, concrete = mm.monomorphize_source(tmpl, targs)
-        ret, ptypes = _signature(concrete, mangled)
+        ret, ptypes = _elab_signature(concrete, mangled)
         return {'symbol': mangled, 'object': obj, 'cpp_object': cpp_obj,
                 'ret': ret, 'params': ptypes}
 
