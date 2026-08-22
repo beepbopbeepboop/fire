@@ -42348,14 +42348,56 @@ class GimpleGen:
         return '\n'.join(kept)
 
 
+def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
+                  link_mode: bool = False):
+    """Shared driver behind every public compile_* entry point.
+
+    One place owns the per-compile setup so the wrappers cannot drift apart
+    again (BUG-2026-032 was exactly such drift between inline and link
+    modes): reset cross-file dedup state, tokenize -> parse -> AST-rewrite,
+    construct GimpleGen with the right mode flags, seed the self-import
+    guard, honor sys.path.insert pre-scans, run gen_module. Returns
+    (c_code, gen) so callers can read companion artifacts off the instance
+    (generated_cpp, _link_dylibs, ...).
+    """
+    # One call here = one independent output artifact (this project's own
+    # transitive-closure dumps included - the whole multi-file closure is one
+    # call). Reset cross-file dedup state so it can't leak stale "already
+    # emitted" markers between unrelated compiles that happen to share this
+    # process (e.g. compile_stdlib.py compiling many independent modules),
+    # while still deduping correctly *within* one call across every nested
+    # GimpleGen instance recursive import-inlining creates. Now applied in
+    # ALL modes — link mode historically skipped this (REF.html B1).
+    _emitted_unresolved_stub_syms.clear()
+    global _emitted_type_name_emitted  # B2: plain-bool reset
+    _emitted_type_name_emitted = False
+    tokens = py_tokenize(mojo_src)
+    stmts = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
+    gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
+    gen._current_filename = filename
+    # Seed the self-import guard with the ROOT file's own identity — see
+    # `_compiling_file_paths`'s declaration for why this is needed (a bare
+    # import elsewhere in this file that happens to share this file's own
+    # basename, e.g. `Lib/importlib/abc.py`'s `import abc`, must not resolve
+    # back to this same file and get compiled a second time).
+    if filename:
+        gen._compiling_file_paths.add(os.path.abspath(filename))
+    # Honor sys.path.insert(...) pre-scans in every mode: inline modes only
+    # did this under do_imports, link mode only when a filename was given —
+    # the drift that caused BUG-2026-032. The None base-dir argument matches
+    # the inline-mode no-filename shape and is supported.
+    if do_imports or link_mode:
+        gen._record_sys_path_inserts(
+            mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
+    return gen.gen_module(stmts), gen
+
+
 def compile_to_c(mojo_src: str) -> str:
     """Parse Mojo source and return C code WITHOUT __GIMPLE annotations.
 
     Useful for execution tests where __GIMPLE restrictions don't apply.
     """
-    tokens = py_tokenize(mojo_src)
-    stmts = ast_rewriter.rewrite(Parser(tokens).parse_module())
-    c_code = GimpleGen().gen_module(stmts)
+    c_code, _gen = _run_pipeline(mojo_src)
 
     # Strip __GIMPLE annotations for executability
     c_code = c_code.replace(' __GIMPLE ', ' ')
@@ -42475,25 +42517,7 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     # process (e.g. compile_stdlib.py compiling many independent modules),
     # while still deduping correctly *within* one call across every nested
     # GimpleGen instance recursive import-inlining creates.
-    _emitted_unresolved_stub_syms.clear()
-    global _emitted_type_name_emitted  # B2: was `_emitted_type_name.clear()`
-    _emitted_type_name_emitted = False
-    tokens = py_tokenize(mojo_src)
-    _parsed = Parser(tokens).with_filename(filename).parse_module()
-    stmts  = ast_rewriter.rewrite(_parsed)
-    gen = GimpleGen(do_imports=do_imports)
-    gen._current_filename = filename
-    # Seed the self-import guard with the ROOT file's own identity — see
-    # `_compiling_file_paths`'s declaration for why this is needed (a bare
-    # import elsewhere in this file that happens to share this file's own
-    # basename, e.g. `Lib/importlib/abc.py`'s `import abc`, must not resolve
-    # back to this same file and get compiled a second time).
-    if filename:
-        gen._compiling_file_paths.add(os.path.abspath(filename))
-    if do_imports:
-        gen._record_sys_path_inserts(
-            mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
-    result = gen.gen_module(stmts)
+    result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename)
     return result
 
 
@@ -42510,22 +42534,7 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     by build paths that already checked (via a cheap pre-scan, no full
     compile) that this module actually contains a supported generator, so
     the extra work only happens on the rare module that needs it."""
-    _emitted_unresolved_stub_syms.clear()
-    global _emitted_type_name_emitted  # B2: was `_emitted_type_name.clear()`
-    _emitted_type_name_emitted = False
-    tokens = py_tokenize(mojo_src)
-    stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
-    gen = GimpleGen(do_imports=do_imports)
-    gen._current_filename = filename
-    # Seed the self-import guard with the ROOT file's own identity — see
-    # `_compiling_file_paths`'s declaration and compile_to_gimple's matching
-    # seed just above for the full reasoning.
-    if filename:
-        gen._compiling_file_paths.add(os.path.abspath(filename))
-    if do_imports:
-        gen._record_sys_path_inserts(
-            mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else None)
-    c_code = gen.gen_module(stmts)
+    c_code, gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename)
     return c_code, gen.generated_cpp
 
 
@@ -42581,35 +42590,7 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     fall back to a completely different, simpler inline pipeline
     (`mojo.py`'s own `build_executable`, which already had this handling)
     whenever `driver.compile_program` fails, masking the gap."""
-    # B1 fix: clear cross-file dedup state exactly like the inline-mode entry
-    # points do — it must not leak stale "already emitted" markers between
-    # unrelated compiles sharing this process (e.g. compile_stdlib.py
-    # compiling many independent modules in link mode).
-    _emitted_unresolved_stub_syms.clear()
-    global _emitted_type_name_emitted  # B2: bool reset (was missing entirely)
-    _emitted_type_name_emitted = False
-    tokens = py_tokenize(mojo_src)
-    stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
-    gen = GimpleGen(link_imports=True)
-    gen._current_filename = filename
-    # Seed the self-import guard with the ROOT file's own identity — see
-    # `_compiling_file_paths`'s declaration and compile_to_gimple's matching
-    # seed for the full reasoning (link mode's own `_link_inline_modules`
-    # fallback recursion goes through the exact same `_compile_imported_
-    # module` path, so it needs the same guard).
-    if filename:
-        gen._compiling_file_paths.add(os.path.abspath(filename))
-    # compile_to_gimple_cached's do_imports=True path already does this for
-    # the root file being compiled — link mode never did, so a
-    # sys.path.insert(...) in the *main* file itself (not a nested import)
-    # was only ever honored for imports resolved from inside an already-
-    # inlined module, never for the root's own imports. See
-    # BUG-2026-032: transpiler.mojo's own top-level `import sys` +
-    # function-body `sys.path.insert(...)` to reach cpp_parser/'s sibling
-    # modules one directory up from cpp_parser/transpiler/.
-    if filename:
-        gen._record_sys_path_inserts(mojo_src, os.path.dirname(os.path.abspath(filename)))
-    code = gen.gen_module(stmts)
+    code, gen = _run_pipeline(mojo_src, filename=filename, link_mode=True)
     # `gen._link_needs_cxx_box[0]`: a coroutine unit discovered several
     # `_compile_imported_module` levels deep (a do_imports=True-only nested
     # temp_gen, not `gen` itself) sets this shared box rather than `gen`'s
