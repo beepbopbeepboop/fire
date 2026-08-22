@@ -362,6 +362,34 @@ Unblocks true mixins but touches struct-inheritance semantics for user code; hig
 (already landed).</li>
 </ol>
 
+<h2>8c. Wave-2 milestone 2 — function-extraction architecture LANDED</h2>
+<p>Five lowering families extracted as module-level functions taking <code>gen</code> first
+(thin delegating methods kept on GimpleGen so every <code>self.x(...)</code> site and the public
+instance surface are unchanged):</p>
+<table>
+<tr><th>Module</th><th>Lines</th><th>Functions</th></tr>
+<tr><td><code>gimple_gen_methods.py</code></td><td>2,340</td><td>12 (receiver-method dispatch)</td></tr>
+<tr><td><code>gimple_gen_calls.py</code></td><td>6,521 ⚠ over 4k — split next session</td><td>40</td></tr>
+<tr><td><code>gimple_gen_stmts.py</code></td><td>3,425</td><td>29</td></tr>
+<tr><td><code>gimple_gen_loops.py</code></td><td>2,155</td><td>21</td></tr>
+<tr><td><code>gimple_gen_funcs.py</code></td><td>2,870</td><td>43</td></tr>
+</table>
+<p><code>gimple_codegen.py</code>: 42,612 → <strong>26,893 lines</strong>. Extractor:
+<code>tools/extract_family.py</code> (EXTRACT_REF env pins source commit).</p>
+<table>
+<tr><th>Gate</th><th>Result</th></tr>
+<tr><td>test_gimple / test_module_cache</td><td class="ok">250/250 · 76/76</td></tr>
+<tr><td>check-selfhost</td><td class="ok">PASS</td></tr>
+<tr><td>stdlib dylib skip count</td><td class="ok">0 (= baseline)</td></tr>
+<tr><td>make bootstrap</td><td class="ok">PASS — all stage outputs match</td></tr>
+</table>
+<p><strong>Extractor invariants learned (codified in tools/extract_family.py):</strong>
+rename the first param only when originally named <code>self</code>; pick a collision-free
+ctx name (<code>gen/_g/_gc/_gctx</code>) against pre-existing locals; collect nested-def params and
+function-level import bindings as locals before qualifying; qualify leaf names via
+ctypes/solvers/exprtypes ownership, everything else via <code>gimple_codegen.</code>;
+@staticmethod delegates must not gain or forward a self.</p>
+
 <h2>9. Risk register</h2>
 <table>
 <tr><th>Risk</th><th>Mitigation</th></tr>
