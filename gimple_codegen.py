@@ -2169,7 +2169,9 @@ _emitted_unresolved_stub_syms: set[str] = set()
 # when several modules' bodies call `type(x).__name__` (gimple_codegen,
 # myinterpreter, ...). Cleared per compile_to_gimple call like
 # _emitted_unresolved_stub_syms.
-_emitted_type_name: set = set()
+# BUG-fix B2: was a set used purely as a boolean flag (`.add(True)`); it is
+# now a plain bool with identical reset points (every public compile_* entry).
+_emitted_type_name_emitted: bool = False
 def _method_overload_id(param_types: tuple, struct_name: str = '', method_name: str = '') -> str:
     """Generate a short stable hash ID for a method overload from its param types.
 
@@ -39728,8 +39730,9 @@ class GimpleGen:
         # interpreter's execute_{TypeName}. See the __name__ member-expr
         # handling in _lower_MemberExpr (the "<type>" stub made every compiled
         # statement emit `/* TODO: <type> */`).
-        if self._needs_type_name_table and not _emitted_type_name:
-            _emitted_type_name.add(True)
+        global _emitted_type_name_emitted
+        if self._needs_type_name_table and not _emitted_type_name_emitted:
+            _emitted_type_name_emitted = True
             parts.append("static char * _mojo_type_name (int64_t tag)")
             parts.append("{")
             # struct_field_types alone is NOT enough: the compiled binary's
@@ -41706,7 +41709,7 @@ class GimpleGen:
         parts.append("static char * _mojo_repr_list (MojoList *);")
         parts.append("static char * _mojo_repr_dict (MojoDict *);")
         parts.append("static char * _mojo_generic_elem_repr (int64_t);")
-        if _emitted_type_name:
+        if _emitted_type_name_emitted:
             parts.append("static char * _mojo_type_name (int64_t);")
         parts.append('')
 
@@ -42473,7 +42476,8 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     # while still deduping correctly *within* one call across every nested
     # GimpleGen instance recursive import-inlining creates.
     _emitted_unresolved_stub_syms.clear()
-    _emitted_type_name.clear()
+    global _emitted_type_name_emitted  # B2: was `_emitted_type_name.clear()`
+    _emitted_type_name_emitted = False
     tokens = py_tokenize(mojo_src)
     _parsed = Parser(tokens).with_filename(filename).parse_module()
     stmts  = ast_rewriter.rewrite(_parsed)
@@ -42507,7 +42511,8 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     compile) that this module actually contains a supported generator, so
     the extra work only happens on the rare module that needs it."""
     _emitted_unresolved_stub_syms.clear()
-    _emitted_type_name.clear()
+    global _emitted_type_name_emitted  # B2: was `_emitted_type_name.clear()`
+    _emitted_type_name_emitted = False
     tokens = py_tokenize(mojo_src)
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(do_imports=do_imports)
@@ -42576,6 +42581,13 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     fall back to a completely different, simpler inline pipeline
     (`mojo.py`'s own `build_executable`, which already had this handling)
     whenever `driver.compile_program` fails, masking the gap."""
+    # B1 fix: clear cross-file dedup state exactly like the inline-mode entry
+    # points do — it must not leak stale "already emitted" markers between
+    # unrelated compiles sharing this process (e.g. compile_stdlib.py
+    # compiling many independent modules in link mode).
+    _emitted_unresolved_stub_syms.clear()
+    global _emitted_type_name_emitted  # B2: bool reset (was missing entirely)
+    _emitted_type_name_emitted = False
     tokens = py_tokenize(mojo_src)
     stmts  = ast_rewriter.rewrite(Parser(tokens).with_filename(filename).parse_module())
     gen = GimpleGen(link_imports=True)
