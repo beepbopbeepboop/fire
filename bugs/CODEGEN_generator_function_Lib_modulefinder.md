@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-23 — re-verified; scan_opcodes refusal unchanged, 3-gap analysis stands)
+
+Isolated compile reproduces the identical honest refusal for `scan_opcodes`.
+This session's three generic generator-codegen fixes (enumerate-over-
+generator delegation; struct-method default-arg padding; list/dict/set
+literal locals + append in coroutine bodies) deliberately do NOT touch any
+of the three stacked gaps the 2026-08-11 entry documented: nested-tuple
+element boxing with VARIABLE inner arity, consumer-through-local-variable
+(`scanner = self.scan_opcodes`), and tag-discriminated unpack arity. The
+literal-local fix is worth noting as ADJACENT progress — it removes the
+"no list accumulator representation at all" obstacle for OTHER generators —
+but scan_opcodes' dynamic-shape yields remain genuinely unrepresentable in
+the fixed-arity promise-slot model. Documented-not-fixed stands; doc kept
+open.
+
+
 ## Status (updated 2026-08-11 — re-verified still refused; deepened root-cause to 3 independent, stacked gaps, real fix attempt not made — genuinely out of narrow-fix scope)
 
 Re-verified against current master: `python3 mojo.py build

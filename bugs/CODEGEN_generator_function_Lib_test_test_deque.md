@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_deque.py
 
+## Status (updated 2026-08-23 — FIXED)
+
+`python3 mojo.py build Lib/test/test_deque.py` now completes end-to-end
+(EXIT=0). Fixes that got it there, beyond the shared support/__init__.py
+unblocking recorded on sibling docs: (a) comprehension range()-stop
+bounds materialized as int64_t temps ('mismatching comparison operand
+types' at lines 50/579/590/834); (b) nested tuple for-targets
+(seq_tests.py WindowsCleanup-style `(a, (b, c))` unpacking) split
+bracket-aware; (c) bare `SubclassWithKwargs(newarg=1)` constructor
+statement routed through the real struct-constructor lowering; (d)
+`raise SyntaxError` recognized (SyntaxError added to builtin exception
+names); (e) funcptr slots referencing compiled generators now point at
+their `_start` constructor (seq_tests.py iterfunc undefined-symbol).
+The file's own generators show zero refusals. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-11)
 
 Re-verified against current master (post this session's generator-body

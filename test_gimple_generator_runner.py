@@ -1085,6 +1085,133 @@ def main():
         print(x)
 """, "3\n2\n1\n")
 
+    # `for i, d in enumerate(<call to another compiled generator>, start):`
+    # inside a generator body — a GENERATOR CALL as enumerate's OWN first
+    # argument (flat 2-name target), composed with the sub-generator drive
+    # loop and its index tracking. Real target: Lib/calendar.py's
+    # `Calendar.itermonthdays2` (`for i, d in
+    # enumerate(self.itermonthdays(year, month), self.firstweekday):`) —
+    # previously `_cpp_expr` lowered the generator call through the wrong
+    # ordinary extern "C" stub (void-returning), producing g++'s "void
+    # value not ignored as it ought to be". The free-function callee shape
+    # exercises the same delegation machinery through its other branch.
+    test_generator_stdout("enumerate_generator_method_arg_start", """\
+class Cal:
+    def __init__(self):
+        self.firstweekday = 2
+
+    def iterdays(self, n):
+        yield from range(1, n + 1)
+
+    def iterdaynum(self, n):
+        for i, d in enumerate(self.iterdays(n), self.firstweekday):
+            yield d, i % 7
+
+def main():
+    c = Cal()
+    for d, wd in c.iterdaynum(4):
+        print(d, wd)
+""", "1 2\n2 3\n3 4\n4 5\n")
+
+    test_generator_stdout("enumerate_generator_free_fn_arg_start", """\
+def days(n):
+    yield from range(1, n + 1)
+
+def numbered(n, start):
+    for i, d in enumerate(days(n), start):
+        yield d * 100 + i
+
+def main():
+    for v in numbered(3, 10):
+        print(v)
+""", "110\n211\n312\n")
+
+    # `self.<method>()` inside a generator body OMITTING a defaulted
+    # trailing parameter (`def scaled(self, mult=2)` called as
+    # `self.scaled()`). Real target: Lib/mailbox.py's
+    # `_singlefileMailbox.iterkeys` doing `self._lookup()` on
+    # `def _lookup(self, key=None)` and `_ProxyFile.__iter__` doing
+    # `self.readline()` on `def readline(self, size=None)` — previously
+    # the coroutine-body call lowering emitted only the given arguments
+    # ("too few arguments to function '_singlefileMailbox__lookup'").
+    # The ordinary (non-coroutine) method-call path already padded short
+    # calls; the three coroutine-body struct-method call branches now run
+    # through the same arity/defaults padding.
+    test_generator_stdout("generator_self_method_defaulted_arg", """\
+class Box:
+    def __init__(self):
+        self.base = 100
+
+    def scaled(self, mult=2):
+        return self.base * mult
+
+    def gen(self):
+        yield self.scaled()
+        yield self.scaled(5)
+
+def main():
+    b = Box()
+    for v in b.gen():
+        print(v)
+""", "200\n500\n")
+
+    # `lines = []` + `lines.append(v)` + iteration/subscript/len over the
+    # local list inside a generator body — the single most common
+    # accumulator idiom in real stdlib generators (ftplib.py's mlsd and
+    # many others). Previously the literal lowered to raw C++ brace-init
+    # text assigned to an int64_t-declared local ("request for member
+    # 'append' in 'lines', which is of non-class type 'int64_t'"); now a
+    # real MojoList* with element-type tracking driving the accessors.
+    test_generator_stdout("generator_list_literal_local_append_iterate", """\
+def gen(n):
+    acc = []
+    acc.append(1)
+    acc.append(2 * n)
+    yield len(acc)
+    yield acc[1]
+    total = 0
+    for v in acc:
+        total = total + v
+    yield total
+
+def main():
+    for v in gen(10):
+        print(v)
+""", "2\n20\n21\n")
+
+    test_generator_stdout("generator_str_list_local_roundtrip", """\
+def gen():
+    lines = []
+    lines.append("alpha")
+    lines.append("beta")
+    for s in lines:
+        yield s
+    yield lines[0]
+
+def main():
+    for v in gen():
+        print(v)
+""", "alpha\nbeta\nalpha\n")
+
+    # `entry = {}` + string-keyed writes + reads keyed by a loop variable
+    # over a string-literal tuple (the tuple-range-for's `auto` target must
+    # be tracked as char* or the dict key gets garbage-stringified through
+    # mojo_str_from_int).
+    test_generator_stdout("generator_dict_local_string_keys", """\
+def dgen():
+    entry = {}
+    entry["alpha"] = 1
+    entry["beta"] = 2
+    s = 0
+    for k in ("alpha", "beta"):
+        s = s + entry[k]
+    yield s
+
+def main():
+    for v in dgen():
+        print(v)
+""", "3\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

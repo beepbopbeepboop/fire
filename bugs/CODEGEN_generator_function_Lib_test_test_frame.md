@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (updated 2026-08-23 — STILL-OPEN)
+
+Unchanged from the 2026-08-18 investigation: the compiled path has NO
+runtime integer division-by-zero trapping anywhere (plain GIMPLE and
+coroutine paths alike), so `try: 1/0 except ZeroDivisionError` cannot
+work; on arm64 SDIV-by-zero silently yields 0. A legitimate standalone
+feature project per the recommendation below; nothing attempted.
+(Adjacent enablers that DID land elsewhere this session — scalar-local
+attribute stubs, zero-iteration stubbed-iterable loops — do not affect
+this file's constant-folded `1/0` shape.) Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (investigated further 2026-08-18, still structural — not attempted)
 
 Investigated whether the ORDINARY (non-generator, plain-GIMPLE) compiled

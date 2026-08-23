@@ -310,6 +310,43 @@ def _gen_stmt_FromImportStmt(gen, node):
                 else:
                     _fi_home = _fi_qual
                 gen._note_own_func_home(symbol_name, _fi_home)
+                # BUG-2026-024: record the home module's own parameter
+                # ctypes for THIS binding, exactly like the top-level
+                # Process-imports loop's snapshot beside its
+                # _note_own_func_home call. Function-body-scoped aliased
+                # imports (`from mod.thaumic_tinkerer.eldritch_table import
+                # add_essentia as et_add_ess` inside a test function) used
+                # to leave _imported_home_param_types empty for the name,
+                # so the call site's suffix fell through to the shared
+                # bare-name slot and came up EMPTY (suffix-less symbol vs
+                # the definition's suffixed one — implicit declaration).
+                # Same "TYPE NAME" -> ctype transform as the top-level
+                # site's c_parameters mirroring. Preferred source is the
+                # DEFINING module's own FunctionDef resolved through THIS
+                # gen's _signature_ctypes — the exact resolver the
+                # definition side uses — because export-table c_parameters
+                # can carry placeholder ctypes for struct params the
+                # export pass didn't have registered (add_essentia's
+                # EldritchTable * exported as int64_t hashed a different
+                # suffix than the same function's own definition). Falls
+                # back to c_parameters when the AST isn't resolvable.
+                _fi_pts = None
+                try:
+                    for _fs in (gen._parsed_import(node.module)[2] or []):
+                        if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
+                            _fi_pts = gen._signature_ctypes(_fs.params, _fs)
+                            break
+                except Exception:
+                    _fi_pts = None
+                if not _fi_pts:
+                    _fi_cps = _fi_info.get('c_parameters')
+                    if _fi_cps:
+                        _fi_pts = [
+                            ' '.join(cp.split()[:-1]) if len(cp.split()) > 1 else cp
+                            for cp in _fi_cps
+                        ]
+                if _fi_pts:
+                    gen._imported_home_param_types[(_fi_home, symbol_name)] = list(_fi_pts)
             # Param defaults too — same gap as the top-level loop had
             # before its own BUG-2026-020 fix.
             try:
@@ -740,6 +777,82 @@ def _local_def_pts(gen, bare_name: str):
     return pts
 
 
+def _imported_def_pts(gen, bare_name: str):
+    """BUG-2026-024 helper: the parameter ctypes recorded for `bare_name` by
+    its HOME module at FromImportStmt registration time
+    (_imported_home_param_types, keyed (sanitized_home_qualifier, name)),
+    or None when nothing was recorded.
+
+    This is the suffix-half twin of _func_qualifier: that function decides
+    WHICH module's `bare_name` a reference means (walking the same tiers in
+    the same order — lexical scope stack innermost-first, then this unit's
+    own flat import registrations, then the shared first-claim fallback);
+    THIS function then supplies THAT module's signature for the mangled
+    symbol's overload hash. Reading the shared func_param_types[bare] slot
+    instead is exactly what drifted: sibling modules' inline compiles keep
+    re-registering their own same-named defs into that one bare-name key,
+    so an importer whose two homonyms come from different modules hashed
+    whichever module compiled last (mod.computer.computer_case.get_energy
+    vs mod.computer.network.get_energy -> call sites emitted
+    computer_case_get_energy_77b31a against definition ..._0ed997).
+
+    Never raises: an _AMBIGUOUS_FUNC_HOME entry resolves to None here so
+    the caller falls through to the shared-slot tier; the authoritative
+    refusal for genuinely ambiguous references stays in _func_qualifier,
+    which every _func_csym call runs anyway."""
+    store = getattr(gen, '_imported_home_param_types', None)
+    if not store:
+        return None
+
+    def _sanitize(q):
+        return q.replace('.', '_').replace('-', '_') if q else q
+
+    # Tier order deliberately mirrors _func_qualifier (scope stack, then
+    # _own_imported_func_home, then shared _imported_func_home) so both
+    # halves of one mangled symbol resolve the same binding.
+    candidate_quals = []
+    scopes = getattr(gen, '_import_scope_stack', None)
+    if scopes:
+        for frame in reversed(scopes):
+            if bare_name in frame:
+                candidate_quals.append(frame[bare_name])
+                break
+    if not candidate_quals:
+        own_home = getattr(gen, '_own_imported_func_home', None)
+        if own_home and bare_name in own_home:
+            q = own_home[bare_name]
+            if q != gimple_codegen._AMBIGUOUS_FUNC_HOME:
+                candidate_quals.append(q)
+    if not candidate_quals:
+        shared_home = getattr(gen, '_imported_func_home', None)
+        if shared_home and bare_name in shared_home:
+            candidate_quals.append(shared_home[bare_name])
+    for q in candidate_quals:
+        pts = store.get((_sanitize(q), bare_name))
+        if pts is not None:
+            return pts
+    return None
+
+
+def _effective_param_types(gen, bare_name: str):
+    """The parameter ctypes a reference to `bare_name` in THIS compile unit
+    must honor — the single source of truth for BOTH halves of a mangled
+    free-function symbol: `_overload_suffix` hashes this list, and
+    _func_csym's mangled-key mirror feeds it to _emit_call's argument
+    coercion. Tier order:
+    1. _local_def_pts — this unit defines the name (BUG-2026-019).
+    2. _imported_def_pts — an imported name's home-module signature,
+       recorded at FromImportStmt registration (BUG-2026-024).
+    3. shared func_param_types[bare] — legacy fallback; permanently
+       oscillates when same-named siblings exist, so tiers 1/2 exist."""
+    pts = _local_def_pts(gen, bare_name)
+    if pts is None:
+        pts = _imported_def_pts(gen, bare_name)
+    if pts is None:
+        pts = gen.func_param_types.get(bare_name)
+    return pts
+
+
 def _overload_suffix(gen, bare_name: str) -> str:
     # BUG-2026-019 (box.3d/game mod families): prefer THIS compile unit's own
     # definition of `bare_name` over the shared whole-program registry. In a
@@ -754,10 +867,7 @@ def _overload_suffix(gen, bare_name: str) -> str:
     # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
     # The qualifier tier already disambiguates the NAME; this gives the
     # SUFFIX the same per-module truth.
-    pts = _local_def_pts(gen, bare_name)
-    if pts is None:
-        pts = gen.func_param_types.get(bare_name)
-    return gen.overload_suffix_for(pts)
+    return gen.overload_suffix_for(_effective_param_types(gen, bare_name))
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
@@ -1190,16 +1300,15 @@ def _func_csym(gen, bare_name: str) -> str:
     # earlier ones, never less.
     if mangled != base:
         # Mirror from the SAME effective param types _overload_suffix just
-        # used (this unit's own definition when it has one, shared registry
-        # otherwise — BUG-2026-019). Mirroring the raw bare-name slot here
-        # instead would key _emit_call's argument coercion by the mangled
-        # symbol while filling that key with ANOTHER module's homonym
-        # signature whenever the shared slot is mid-oscillation: exactly the
-        # `(Tuff *)t` wrong-struct cast at tuff_bricks.mojo's own internal
-        # can_craft call.
-        _eff_pts = _local_def_pts(gen, bare_name)
-        if _eff_pts is None:
-            _eff_pts = gen.func_param_types.get(bare_name)
+        # used (this unit's own definition when it has one, the home
+        # module's registration-time signature for an imported name —
+        # BUG-2026-024 — shared registry otherwise — BUG-2026-019). All
+        # three tiers MUST match _overload_suffix's exactly: this mirror is
+        # what _emit_call keys its argument coercion by, so any disagreement
+        # between the two halves emits call symbols whose suffix says one
+        # module while the casts say another (the `(ComputerNetwork *)c`
+        # argument at test_computer_mod.mojo's get_energy(c) call sites).
+        _eff_pts = _effective_param_types(gen, bare_name)
         if _eff_pts is not None:
             gen.func_param_types[mangled] = _eff_pts
         if bare_name in gen.func_return_types:
@@ -1858,6 +1967,35 @@ def _materialize_imported_struct(gen, module: str, nm: str, local: str) -> bool:
             # `_elem_ct = _elem_nm if _elem_nm in self.struct_field_types
             # else _mojo_type(_elem_nm)`) — which now finds Block there
             # because of the ordering guarantee above.
+    # Scalar/container element types for imported-struct LIST fields
+    # (`variables: List[String]`, `variable_values: List[Int]` — box.3d/
+    # game's ComputerCase). The transitive pass above only covers
+    # UPPERCASE struct-element lists; a scalar-element list's importer-
+    # side _field_elem_types entry was never seeded at all (the nested
+    # temp_gen that compiled the defining module seeded ITS OWN instance
+    # via gen_module's StructDef pass, but this map is per-instance and
+    # not shared), so an importer read like `c.variables[i]` fell back to
+    # int64_t and returned raw boxed handles instead of strings.
+    # Annotation-derived static truth — mirrors the seeding just added to
+    # gen_module's local StructDef pass (see its BUG-2026-023 comment).
+    for f in sdef.fields:
+        if not isinstance(f, gimple_ctypes.VarDecl) or not isinstance(f.type_ann, str):
+            continue
+        if fields.get(f.name) != 'MojoList *':
+            continue
+        _ann2 = f.type_ann.strip()
+        if not (_ann2.startswith('List[') and _ann2.endswith(']')):
+            continue
+        _inner2 = gimple_ctypes._split_top_level_commas(
+            _ann2[len('List['):-1].strip())
+        if not _inner2:
+            continue
+        try:
+            _et2 = gen._resolve_type(_inner2[0].strip())
+        except Exception:
+            _et2 = None
+        if _et2 and _et2 != 'int64_t':
+            gen._field_elem_types.setdefault(local, {})[f.name] = _et2
     gen._imported_typedef_structs.append(
         gimple_ctypes.StructDef(name=local, fields=sdef.fields, methods=_methods_for_reg))
     return True

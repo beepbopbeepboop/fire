@@ -118,6 +118,28 @@ def gen_module_impl(self, stmts):
             self._c_kw_struct_renames[_s.name] = _safe
             _s.name = _safe
     self._local_struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
+    # Overloaded / duplicated top-level functions (same name, multiple defs)
+    # can't all be emitted as distinct C symbols. Two genuinely different
+    # situations hide behind that one description, with OPPOSITE correct
+    # handling (BUG-2026-021):
+    #
+    # - GENUINE OVERLOADS — same name, DIFFERENT parameter signatures
+    #   (`can_craft(t: Tuff, ...)` vs `can_craft(t: TuffBricks, ...)` in two
+    #   copies of a mod family). Still dropped entirely here: the elaborator
+    #   selects and instantiates the right overload per call site (slice 4),
+    #   so no single C definition exists to emit.
+    # - REDEFINITIONS — identical signature, e.g. test suites whose tail was
+    #   accidentally pasted twice (`def main():` twice). myinterpreter.py's
+    #   module dict binding means the INTERPRETER silently runs the LAST
+    #   definition; stripping every copy here instead left the program with
+    #   no `main` at all — entry-point synthesis fell back to an empty
+    #   `_gimple_main { return 0; }` and the whole --jit run exited 0 with
+    #   zero output. Keep exactly the LAST copy (interpreter semantics).
+    #
+    # dup_def_signature_key is the shared classifier (reflect.
+    # collect_exports_src uses it too, so the reflection table advertises
+    # exactly the one survivor this pass keeps). One filter at the top keeps
+    # every downstream loop collision-free. No-op otherwise.
     _dup_defs: dict = {}
     for _s in stmts:
         if isinstance(_s, FunctionDef):
@@ -133,6 +155,17 @@ def gen_module_impl(self, stmts):
     if _dup_drop_ids:
         stmts = [s for s in stmts if id(s) not in _dup_drop_ids]
     # BUG-2026-019 seeding: THIS compile unit's own surviving top-level
+    # FunctionDefs by bare name, plus the memo _local_def_pts fills lazily.
+    # A same-named free function defined by several sibling modules of one
+    # import closure gets its C symbol suffix AND its call-site argument
+    # coercion from THIS map first (_overload_suffix/_func_csym), never from
+    # the shared func_param_types[bare] slot those siblings' registration
+    # passes overwrite once per module — the off-by-one-sibling wrong-struct
+    # cast (`Tuff *` passed where tuff_bricks.mojo's own can_craft wanted
+    # `TuffBricks *`). Resolved LAZILY (empty memo here): struct-typed
+    # parameter annotations need the struct registration passes further down
+    # gen_module to have run before _signature_ctypes can resolve them, and
+    # the first suffix computation happens during body emission, long after.
     self._local_def_nodes = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
     self._local_def_param_types: dict = {}
 
@@ -1007,6 +1040,35 @@ def gen_module_impl(self, stmts):
                         _dv_early = self._annotation_dict_val_type(field.type_ann)
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
+                        # BUG-2026-023 residual (box.3d/game's
+                        # ComputerCase.variables: List[String]): seed
+                        # `_field_elem_types` from this field's OWN declared
+                        # annotation too, exactly mirroring `_dv_early`
+                        # above for dict value types. The only previous
+                        # seeding path was `.append()` call sites tracked
+                        # through `self.`-prefixed field owners
+                        # (_lower_list_method's _struct_field_owners
+                        # branch), so a List[...] field appended through a
+                        # NON-self parameter name (`c.variables.append(..)`
+                        # inside a free function taking `c: ComputerCase`)
+                        # never recorded its element type — a later
+                        # `c.variables[i]` read then fell back to int64_t
+                        # and yielded raw boxed handles instead of strings
+                        # ("set_variable(x,10)" then "get_variable(x)"
+                        # returning 0 across test_computer_mod). The
+                        # annotation is static truth available right here;
+                        # only non-default element types need recording
+                        # (int64_t is what every fallback already assumes).
+                        if (ft == 'MojoList *' and field.type_ann
+                                and '[' in str(field.type_ann)):
+                            _li = gimple_ctypes._split_top_level_commas(
+                                str(field.type_ann).split('[', 1)[1].rstrip(']').strip())
+                            if _li:
+                                _et = self._resolve_type(_li[0].strip())
+                                if _et and _et not in ('int64_t', 'MojoList *'):
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
+                                elif _et == 'MojoList *':
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
 
             def _self_member(expr):
                 """MemberExpr's `.member` name iff its object is bare `self`."""
@@ -1301,6 +1363,43 @@ def gen_module_impl(self, stmts):
                                      .replace('-', '_'))
                         else:
                             _qual = _sib_qualifier
+                        # BUG-2026-024: snapshot THIS import's param ctypes
+                        # under (home_qualifier, as_referenced_name) BEFORE
+                        # anything else can overwrite the shared bare-name
+                        # slot — a later sibling module's inline compile
+                        # registers its own same-named function into
+                        # func_param_types[bare] (mod.computer.network's
+                        # get_energy(n: ComputerNetwork) clobbering
+                        # mod.computer.computer_case's get_energy(c:
+                        # ComputerCase) after this line wrote the Case
+                        # shape), and _overload_suffix's shared-slot tier
+                        # then hashes the WRONG sibling for every one of
+                        # this module's call sites. The snapshot is keyed by
+                        # home module, so same-named siblings land under
+                        # different keys and nothing oscillates; lookup goes
+                        # through _imported_def_pts, which walks the SAME
+                        # tier order _func_qualifier uses, so the qualifier
+                        # half and suffix half of one mangled symbol always
+                        # mean the same binding. Preferred source is the
+                        # defining module's own FunctionDef resolved via
+                        # THIS gen's _signature_ctypes (the definition
+                        # side's exact resolver — export-table c_parameters
+                        # can carry int64_t placeholders for struct params,
+                        # which hashed a DIFFERENT suffix than the
+                        # definition); falls back to the already-populated
+                        # slot.
+                        try:
+                            _pts_snap = None
+                            for _fs in (self._parsed_import(s.module)[2] or []):
+                                if isinstance(_fs, FunctionDef) and _fs.name == name:
+                                    _pts_snap = self._signature_ctypes(_fs.params, _fs)
+                                    break
+                        except Exception:
+                            _pts_snap = None
+                        if not _pts_snap:
+                            _pts_snap = self.func_param_types.get(sym_name)
+                        if _pts_snap is not None:
+                            self._imported_home_param_types[(_qual, sym_name)] = list(_pts_snap)
                         self._note_own_func_home(sym_name, _qual)
                 try:
                     if not s.names:
@@ -1406,6 +1505,58 @@ def gen_module_impl(self, stmts):
     for s in stmts:
         if isinstance(s, FunctionDef) and s.name in _own_top_level_func_names:
             _scan_func_body_for_self_attr(s.name, s.body)
+
+    def _scan_module_level_for_func_attrs(body):
+        """`f.attr = value` written at MODULE level (not inside `f`'s own
+        body) — e.g. Lib/test/support/__init__.py's
+        `print_warning.orig_stderr = sys.stderr`, a statement directly in
+        the module body AFTER the def. The per-function scans above only
+        ever looked at each function's OWN body, so such writes were never
+        registered into `_func_attrs`: the write fell through to dynamic
+        setattr on the boxed function pointer, and the matching read
+        (`stream = print_warning.orig_stderr`) fell through to "call the
+        bare function name then runtime-getattr the result" — emitting an
+        undeclared, un-mangled C symbol ("implicit declaration of function
+        'print_warning'"). One walk over the module-level statement tree,
+        NOT entering FunctionDef bodies (those are covered by the
+        per-function scans above), registering every hit whose target name
+        is one of this module's own top-level functions."""
+        _stack = list(body)
+        while _stack:
+            _fstmt = _stack.pop(0)
+            if isinstance(_fstmt, (FunctionDef, ImportStmt, FromImportStmt)):
+                continue
+            if (isinstance(_fstmt, AssignStmt)
+                    and isinstance(_fstmt.target, MemberExpr)
+                    and isinstance(_fstmt.target.obj, IdentExpr)
+                    and _fstmt.target.obj.name in _own_top_level_func_names):
+                fname = _fstmt.target.obj.name
+                attr = _fstmt.target.member
+                self._func_attrs.setdefault(fname, {})
+                if attr not in self._func_attrs[fname]:
+                    mangled = f"_funcattr_{fname}__{attr}"
+                    self._func_attrs[fname][attr] = mangled
+                    self._global_var_types.setdefault(mangled, 'int64_t')
+                    self._global_c_decl_types.setdefault(mangled, 'int64_t')
+            elif isinstance(_fstmt, IfStmt):
+                _stack.extend(_fstmt.then_body)
+                for _, _eb in _fstmt.elifs:
+                    _stack.extend(_eb)
+                if _fstmt.else_body:
+                    _stack.extend(_fstmt.else_body)
+            elif isinstance(_fstmt, (WhileStmt, ForStmt)):
+                _stack.extend(_fstmt.body)
+            elif isinstance(_fstmt, TryStmt):
+                _stack.extend(_fstmt.body)
+                for _h in (_fstmt.handlers or []):
+                    _stack.extend(_h.body)
+                if _fstmt.else_body:
+                    _stack.extend(_fstmt.else_body)
+                if _fstmt.finally_body:
+                    _stack.extend(_fstmt.finally_body)
+
+    if _own_top_level_func_names:
+        _scan_module_level_for_func_attrs(stmts)
 
     all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                 + self._imported_typedef_structs)
@@ -1631,6 +1782,32 @@ def gen_module_impl(self, stmts):
                         else:
                             param_ctypes.append(self._param_ctype(pname, ptype, m))
                     self.func_param_types[method_full_name] = param_ctypes
+                # Struct-METHOD parameter defaults, keyed by the same bare
+                # mangled name func_param_types just used — the coroutine-
+                # body (.cpp) emitter's own `self.<method>(...)`/`cls.<method>(
+                # ...)`/`<struct-ptr-local>.<method>(...)` call lowering reads
+                # this via the SAME bare-or-qualified lookup convention
+                # `_func_param_defaults.get(fsym) or .get(fname_raw)` already
+                # established for free functions (gimple_cpp_core.py's
+                # `_cpp_try_kwargs_forward_call`). Without it, an omitted
+                # defaulted trailing argument (`mailbox.py`'s
+                # `_singlefileMailbox.iterkeys` calling `self._lookup()` on
+                # `def _lookup(self, key=None)`) produced a call with fewer C
+                # arguments than the callee's real signature ("too few
+                # arguments to function '_singlefileMailbox__lookup'").
+                # Mirrors the free-function registration at ~line 1351:
+                # `param_defaults` holds ONLY the params that have one,
+                # starting at the first defaulted position (BUG-2026-020's
+                # finding), so consumers index from
+                # `len(expected) - len(defaults)`. Vararg/`**kwargs`-taking
+                # methods are skipped — their flat positional model doesn't
+                # apply (same exclusion `_signature_ctypes`' branch above
+                # already makes).
+                if not (m.params and any(pn.startswith('*') for pn, _ in m.params)):
+                    _m_dflts = getattr(m, 'param_defaults', None) or {}
+                    if _m_dflts:
+                        self._func_param_defaults.setdefault(method_full_name,
+                                                             [(pn, dv) for pn, dv in _m_dflts.items()])
 
     for s in all_structs_for_methods:
         if not (isinstance(s, StructDef) and s.name == 'GimpleGen'):
@@ -2162,7 +2339,22 @@ def gen_module_impl(self, stmts):
             for _fn_name in _gen_only + _async_only + _async_gen:
                 _csym = self._func_csym(_fn_name)
                 _g = _stub_guard_name(_csym)
-                _stub = f'#ifndef {_g}\n#define {_g}\nint64_t {_csym} (...);\n#endif'
+                # A WEAK DEFINITION, not a bare declaration: the skipped
+                # generator/async function has no ordinary C definition
+                # anywhere in this compile, so any plain call site that
+                # reaches it (`find_name_in_mro` calling the skipped
+                # `iter_name_in_mro` generator) would satisfy -fgimple's
+                # name check against a decl-only stub and then fail at
+                # LINK ("symbol(s) not found"). Mirrors
+                # _lower_named_call's own identical weak-stub reasoning
+                # for never-defined names: an actual call prints an
+                # honest "unavailable in compiled mode" diagnostic and
+                # returns 0 instead of breaking the whole build.
+                _stub = (f'#ifndef {_g}\n#define {_g}\n'
+                         f'__attribute__((weak)) int64_t {_csym} (...) '
+                         f'{{ mojo_print ((char *)"{_fn_name}: unavailable in compiled mode '
+                         f'(unsupported generator/async function skipped)"); '
+                         f'return (int64_t)0; }}\n#endif')
                 if _stub not in self._elaborated_externs:
                     self._elaborated_externs.append(_stub)
                 self._unsupported_generator_names.add(_fn_name)
@@ -3212,6 +3404,27 @@ def gen_module_impl(self, stmts):
             self.func_param_types[fn.name] = param_ctypes
 
     has_toplevel_code = len(toplevel_stmts) > 0
+    # Reconcile toplevel global C types with LATE-resolved callee return
+    # types before the toplevel body is generated. The early global scans
+    # freeze an unannotated-call RHS (`protect_ident = ident(protect)`) at
+    # int64_t because func_return_types isn't populated yet; by now every
+    # function's return type IS final (the gen_func loop above completed),
+    # so an int64_t-frozen global whose callee returns a pointer would
+    # otherwise be stored through `_safe_coerce_emit` as a boxed int64 into
+    # a globals-struct FIELD the later assembly correctly declares as the
+    # real pointer type — "assignment to 'MojoList *' from 'int64_t'"
+    # (test_sys_setprofile.py:415). Only ever WIDENS int->pointer; never
+    # downgrades an already-correct pointer entry.
+    for _rs in stmts:
+        if (isinstance(_rs, AssignStmt) and isinstance(_rs.target, IdentExpr)
+                and isinstance(_rs.value, CallExpr)
+                and isinstance(_rs.value.func, IdentExpr)):
+            _gn = _rs.target.name
+            if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
+                _crt = self.func_return_types.get(_rs.value.func.name, '')
+                if isinstance(_crt, str) and _crt.endswith(' *'):
+                    self._global_c_decl_types[_gn] = _crt
+                    self._global_var_types[_gn] = _crt
     if has_toplevel_code:
         toplevel_func = self._gen_toplevel(toplevel_stmts)
         func_parts.append(toplevel_func)
@@ -4673,10 +4886,28 @@ def gen_module_impl(self, stmts):
 
     if self._funcptr_builtins_needed:
         _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
+        # A SUPPORTED compiled generator has no ordinary C definition
+        # under its bare csym (only its `<base>_start/_resume/_value/
+        # _destroy` coroutine API), so a plain `(void *)<csym>`
+        # initializer referenced an undefined symbol ("symbol(s) not
+        # found" at link — test/seq_tests.py's `iterfunc`, itself a
+        # generator, collected into a callable table alongside ordinary
+        # functions). Point such slots at `<base>_start` instead: real
+        # Python's "calling a generator FUNCTION constructs the
+        # generator object without running its body", which is exactly
+        # what `_start` does.
+        def _funcptr_target(c_name):
+            for _gfn, _gapi in self._generator_api.items():
+                try:
+                    if self._func_csym(_gfn) == c_name:
+                        return f"{_gapi['base']}_start"
+                except Exception:
+                    continue
+            return c_name
         if _new_names:
             for c_name in _new_names:
                 if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
-                    parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
+                    parts.append(f"static void * _funcptr_{c_name} = (void *){_funcptr_target(c_name)};")
                 self._emitted_funcptr_builtins.add(c_name)
             parts.append('')
 

@@ -158,6 +158,9 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_list_set_int':          'void',
     'mojo_list_set_double':       'void',
     'mojo_list_set_str':          'void',
+    'mojo_list_insert_int':       'void',
+    'mojo_list_insert_double':    'void',
+    'mojo_list_insert_str':       'void',
     'mojo_list_slice':            'MojoList *',
     'mojo_list_concat':           'MojoList *',
     # dict
@@ -699,6 +702,15 @@ class GimpleGen:
         # coroutine-body compile. See `_gen_cpp_generator_unit` /
         # `_gen_cpp_async_unit` for init/clear.
         self._cpp_func_scope_decls: list[str] | None = None
+        # Per-coroutine-unit element ctype of LIST locals built by
+        # `xs = [...]` literal assignment + `xs.append(v)` calls in a
+        # compiled generator body (gimple_cpp_core.py's AssignStmt
+        # container branch + `.append` call case, which write it; the
+        # for-over-list indexed loop and SubscriptExpr read sites read
+        # it to pick mojo_list_get_str/_double/_int). Keyed by local
+        # name; init/cleared per coroutine unit alongside
+        # _cpp_func_scope_decls.
+        self._cpp_list_local_elem_types: dict[str, str] = {}
         # Module-level symbols (globals + functions) referenced by compiled
         # generator/async bodies, so the .cpp preamble can declare them
         # extern (a generator body calling tokenize.py's `detect_encoding`
@@ -1598,6 +1610,27 @@ class GimpleGen:
         # compile has its own scope stack), exactly like
         # _own_imported_func_home.
         self._import_scope_stack: list = []
+        # (sanitized_home_qualifier, as_referenced_name) -> [ctype, ...]:
+        # the parameter ctypes a name's HOME MODULE says it has, snapshotted
+        # at FromImportStmt registration time (gimple_module_gen's
+        # _register_sym path, right beside the matching
+        # _note_own_func_home call). BUG-2026-024: the SHARED
+        # func_param_types[bare] slot this used to be read from is
+        # overwritten once per sibling module whose inline compile
+        # registers a same-named function of its own
+        # (mod.computer.computer_case.get_energy(c: ComputerCase) vs
+        # mod.computer.network.get_energy(n: ComputerNetwork), one import
+        # aliased, one not), so an importer's call sites hashed whichever
+        # sibling registered LAST and emitted call symbols whose overload
+        # suffix matched no definition ("implicit declaration of function
+        # ..._77b31a; did you mean ..._0ed997?"). Keying by home module
+        # makes same-named siblings land under different keys — nothing to
+        # fight over. Lookup goes through gimple_gen_funcs._imported_def_pts,
+        # which mirrors _func_qualifier's tier order (scope stack, then
+        # _own_imported_func_home, then the shared _imported_func_home) so
+        # the suffix and the qualifier halves of one mangled symbol can
+        # never disagree about which entry they mean.
+        self._imported_home_param_types: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
@@ -1644,6 +1677,13 @@ class GimpleGen:
         'StopAsyncIteration', 'GeneratorExit', 'SystemExit',
         'ArithmeticError', 'LookupError', 'OSError', 'IOError',
         'UnicodeDecodeError', 'UnicodeEncodeError', 'AssertionError',
+        # A standard Python builtin exception, missing from this table:
+        # `raise SyntaxError` (test_deque.py's own `fail()` generator)
+        # was NOT recognized as an exception class at all — the ordinary
+        # path emitted "ct param or undeclared: SyntaxError" and the
+        # coroutine path emitted the raw name as a C++ expression
+        # ("'SyntaxError' was not declared in this scope").
+        'SyntaxError',
     })
 
     # Known runtime function signatures: fname -> (ret_type, [arg_types])
@@ -1845,7 +1885,16 @@ class GimpleGen:
                                            'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
         'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
-        'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
+        # Matches runtime/mojo_runtime.h's own declaration exactly
+        # (`int mojo_getattr(int obj, char *attr)` — the honest
+        # always-return-0 stub). The old entry here claimed
+        # ('int64_t', ['void *', 'char *']), so every call site coerced
+        # its object argument to `void *` and passed it to a function
+        # whose real first parameter is `int` — "passing argument 1 of
+        # 'mojo_getattr' makes integer from pointer without a cast"
+        # (Lib/test/support/__init__.py's bare-statement
+        # `getattr(object_to_patch, attr_name)`).
+        'mojo_getattr':          ('int',        ['int', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_delattr':          ('void',      ['void *', 'char *']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),

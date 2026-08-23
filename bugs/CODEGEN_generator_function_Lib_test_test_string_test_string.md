@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-23 — STILL-OPEN)
+
+Re-ran the repro: identical whole-module fallback naming `parse` with no
+per-function eligibility note. Root cause analysis below CONFIRMED and
+UNCHANGED: BarFormatter is defined inside test_override_parse's body and
+never reaches struct registration. Related-but-distinct parser work this
+session (class-body CONDITIONAL method hoisting) does not cover function-
+body-nested classes. Feature-sized, not attempted. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-09, root cause now FULLY CONFIRMED)
 
 Re-verified against current master (fast-forwarded to `e5daa1d`) —

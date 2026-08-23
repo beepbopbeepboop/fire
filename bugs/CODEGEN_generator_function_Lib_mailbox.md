@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-23 — BOTH remaining "too few arguments" errors FIXED (struct-method default-arg padding); own-file .cpp down to 1 error, the unannotated-field family)
+
+**Fixed**: `_mojogen__singlefileMailbox_iterkeys_impl` emitting
+`_singlefileMailbox__lookup(self)` ("too few arguments... expected 2,
+have 1") and `_mojogen__ProxyFile___iter___impl` emitting
+`_ProxyFile_readline(self)` — both are `self.<method>()` calls OMITTING a
+defaulted trailing parameter (`def _lookup(self, key=None)`, `def
+readline(self, size=None)`) inside a compiled generator body. The
+coroutine-body struct-method call branches (`self.`/`cls.`/
+`<struct-ptr-local>.`) emitted given arguments verbatim; they now share a
+padding helper (arity from `func_param_types` incl. the receiver slot,
+real declared defaults via `_default_expr_to_pair` — registered per bare
+mangled key by gen_module's method pre-pass — falling back to the None/0
+box exactly like the ordinary path's own padding loop). Commit: `8efc157`.
+Verified end-to-end with a compiled-and-run repro
+(`generator_self_method_defaulted_arg`: `self.scaled()` → default 2 ×100 =
+200, `self.scaled(5)` → 500).
+
+Also improved incidentally by the same session's list-literal work: this
+doc's old `lines = []`-style accumulators inside generator bodies now get
+real MojoList* locals.
+
+**mailbox.py's own .cpp is down to ONE error**: line 240
+`self->_toc.keys()` — `_toc` is typed int64_t because `__init__` assigns
+it dynamically (`self._toc = None` then `{}`) with no annotation: the
+SAME unannotated-init-param/field hard-bug family tracked elsewhere, not
+a generator-machinery bug. Plus the usual transitively-imported-file
+errors in the whole-program build. Not attempted here.
+
+Full mandatory gate (CLAUDE.md): test_gimple.py 250/250,
+test_module_cache.py 76/76, make check-selfhost clean, from-scratch
+stdlib dylib rebuild 0 skip lines before and after.
+
+
 ## Status (updated 2026-08-20 — unbound-instance-method arity bug FIXED; file still blocked by 2 other, unrelated errors)
 
 Root-caused and fixed the `too many arguments to function
