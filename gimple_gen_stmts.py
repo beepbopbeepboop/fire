@@ -1892,6 +1892,19 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in ('strided_load', 'strided_store') and node.value.args:
             gen._lower_strided(node.value, store=(raw_name == 'strided_store'))
             return
+        # A bare, value-discarding STRUCT-CONSTRUCTOR call
+        # (`SubclassWithKwargs(newarg=1)` standing alone — test_deque.py's
+        # TestSubclassWithKwargs). The generic call-building path below
+        # has no constructor knowledge: it emitted the raw struct NAME as
+        # if it were an ordinary function (`SubclassWithKwargs ();`), a
+        # hard GIMPLE parse error ("expected expression before
+        # 'SubclassWithKwargs'") since the name resolves to the struct
+        # TYPE, not any function. Route through lower_expr so the value-
+        # CONSUMING constructor path (_lower_struct_constructor, which
+        # already handles kwargs) lowers it, discarding the instance.
+        if raw_name in gen.struct_field_types:
+            gen.lower_expr(node.value)
+            return
         # A bare, value-discarding `len(x)` statement (e.g. the
         # `try: len(t) except TypeError: ...` type-probe idiom —
         # see Tools/unicode/gencodec.py's hexrepr()). Without this,
@@ -2080,8 +2093,21 @@ def _gen_stmt_ExprStmt(gen, node):
             if (raw_name in gimple_ctypes._C_RESERVED_FUNCS
                     and raw_name not in gen.func_return_types
                     and raw_name not in gimple_ctypes._FORCE_RENAME_RESERVED
-                    and raw_name not in gen.imported_symbols):
-                fname = gen.BUILTIN_VALUE_MAP.get(raw_name, raw_name)
+                    and (raw_name not in gen.imported_symbols
+                         or raw_name in gen._unresolved_import_aliases)):
+                if raw_name in gen._unresolved_import_aliases:
+                    # Statement-level twin of _lower_named_call's identical
+                    # unresolved-alias branch: a relative/external import this
+                    # compile could never resolve (`from .os_helper import
+                    # unlink`) must bind its call site to the SAME weak-stub
+                    # symbol (`_func_csym` → `mojo_unlink`) the preamble's
+                    # stub pass emitted — not the raw reserved name, which
+                    # silently retargeted libc's undeclared same-named
+                    # function ("implicit declaration of function 'unlink'",
+                    # a hard error).
+                    fname = gen._func_csym(raw_name)
+                else:
+                    fname = gen.BUILTIN_VALUE_MAP.get(raw_name, raw_name)
             else:
                 # _func_csym applies the overload suffix to match the definition.
                 fname = gen.BUILTIN_VALUE_MAP.get(raw_name, gen._func_csym(raw_name))
