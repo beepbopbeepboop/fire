@@ -1024,7 +1024,14 @@ def _gen_stmt_AssignStmt(gen, node):
                             else:
                                 gimple_ctypes._debug_note('struct subscript write dropped',
                                             f'{elem_t}[...] = {vtype}')
-                                gen._emit(f"  /* TODO: struct subscript write [{elem_t}] skipped */")
+                                raise RuntimeError(
+                                    f"cannot compile module: `{elem_t}[...] = ...` "
+                                    f"subscript store on user-defined struct "
+                                    f"{elem_t!r} (no `__setitem__` method and "
+                                    "no backing container field) — this codegen "
+                                    "can't represent it as compiled C without "
+                                    "silently dropping the store; falling back "
+                                    "to interpreting this module from source instead")
                         else:
                             gen._ptr_helpers_needed.add(elem_t)
                             idx64 = gen._new_val('int64_t', f"(int64_t){idx_v}")
@@ -1284,6 +1291,27 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 gen._emit(f"  *{addr} = {v_cast};")
         else:
             if not gen._emit_struct_subscript_write(obj_v, ot, idx_v, v, vtype):
+                # A KNOWN USER struct with no `__setitem__` and no _data
+                # container field has no correct lowering for a subscript
+                # store — the instance is not an array. The raw C emit
+                # below is only valid for a genuine raw-pointer/array
+                # lvalue; on a struct pointer it silently wrote garbage
+                # (or, once loop slots stopped being blanket-int64_t,
+                # became GCC's "array subscript is not an integer" —
+                # real: Counter.__iadd__'s `self[elem] += count`, whose
+                # class subclasses builtin dict but registers neither
+                # dunder here). Refuse honestly so gen_module falls back
+                # to interpreting this module from source.
+                _w_sn = gimple_exprtypes._struct_name_of(ot)
+                if ot.endswith(' *') and _w_sn in gen.struct_field_types:
+                    raise RuntimeError(
+                        f"cannot compile module: `{_w_sn}[...] = ...` "
+                        f"subscript store on user-defined struct {_w_sn!r} "
+                        "(no `__setitem__` method and no backing container "
+                        "field) — this codegen can't represent it as "
+                        "compiled C without emitting silently wrong code; "
+                        "falling back to interpreting this module from "
+                        "source instead")
                 gen._emit(f"  {obj_v}[{idx_v}] = {v};")
     else:
         pass  # complex aug-assign target: no-op
