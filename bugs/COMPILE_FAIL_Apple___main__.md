@@ -4,6 +4,43 @@ Source file: `/Users/mrs/net/Python-3.14.6/Apple/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23, wt09 fix/stdlib-mods `2daa41e` — ALL FOUR GIMPLE-stage errors FIXED at root cause; file still fails later, in the generator-body emitter — PARTIAL)
+
+The residual listed below (4x `invalid operands to binary / (have
+'char *' and 'int64_t')` at lines 548/661/712/789) is fixed by two
+root-cause changes:
+
+1. **`for slice_name, slice_parts in HOSTS[platform].items():` unpack
+   targets** (`__main__.py:532`, the line-548 error): `_gen_for_list`
+   pre-declared EVERY tuple-unpacking loop target as plain `int64_t`
+   BEFORE its own per-slot analysis ran — and `_declare_var` is
+   deliberately first-decl-wins, so the dict-items key slot was
+   permanently boxed even though the analysis knew it was `char *`.
+   Fixed by resolving per-slot element types (dict-items → char* key +
+   dict-value-type value; `_tuple_slot_types` for heterogeneous tuple-
+   literal lists) BEFORE declaring, via a new shared helper
+   `_tuple_unpack_slot_elems` (gimple_gen_loops.py).
+
+2. **`CROSS_BUILD_DIR / <boxed>` path joins** (lines 661/712/789):
+   these RHS values are dynamic-getattr results (`context.platform`) /
+   unannotated locals that lower to untracked int64_t. The `/` lowering
+   already dispatched on an int64_t-boxed LHS but required exactly
+   `char *` on the RHS. Since real Python `str / <non-path>` raises
+   TypeError, a genuinely-char*-LHS `/` can only ever be a path join —
+   coercing a boxed int64_t RHS through its pointer bits there is
+   semantics-preserving, while numeric division (always non-char* LHS)
+   never reaches that branch. Fixed in `_lower_binary_tail`.
+
+With both landed, the ENTIRE GIMPLE (.ci) stage of this ~800-line file
+compiles clean. **The build still fails**, now further along, inside the
+C++20-coroutine translation of the module's generators
+(`__main___gen.cpp`): `"=" * (70 - len(text))` (string repetition with a
+computed count) has no lowering in the coroutine-body expression emitter
+`_cpp_expr`, and neither does `print(...)` ("'print' was not declared in
+this scope") — the SAME documented "_cpp_expr is narrower than the
+ordinary compiled path" structural theme as zipfile/_path and pathlib.
+Feature-sized; not attempted here.
+
 ## Status (updated 2026-08-06)
 
 Re-ran; the original ~650-line GCC warning dump below is STALE (the

@@ -2,6 +2,25 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
+## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — same 5-generator remainder, one now DERIVED)
+
+Re-ran the repro fresh. The refusal list is exactly 5 generators:
+`un_incr_digits_tuple`, `all_unary`, `unary_optarg`, `binary_optarg`,
+`ternary_optarg`. This matches the 2026-08-10 analysis below with one
+clarification: `all_unary`'s refusal is DERIVED, not independent —
+MOJO_DEBUG shows it is refused because its `for ... in
+un_incr_digits_tuple(...)` consumes a generator this compile could not
+itself translate (the "consumed generator must be defined earlier AND
+supported" rule), so the true remaining causes are the SAME four as
+documented below: varying-arity tuple yields (`unary_optarg`,
+`binary_optarg`, `ternary_optarg`) and the scalar/tuple mixed-yield
+generator (`un_incr_digits_tuple`). Both remain squarely outside the
+landed fixed-arity fix's documented scope boundary: padding shorter
+yield tuples to a common arity would change observable tuple lengths at
+the consumer (unsound), and a scalar yield and a tuple yield can never
+share one promise value representation under the current design.
+Still DOCUMENTED-NOT-FIXED; no code changes this pass.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED for fixed-arity tuples; 10 of the 14 refused generators now compile; 4 remain refused for well-understood, in-scope reasons)
 
 Implemented real tuple-valued-`yield` support this session (see

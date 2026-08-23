@@ -4,6 +4,20 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — unchanged)
+
+Re-ran the repro fresh; identical failure shape to the 2026-08-09
+analysis below: the module-level generator `_ancestry` still fails in
+the coroutine-body emitter with `request for member 'rstrip' in 'path',
+which is of non-class type 'int64_t'` (now joined by `'posixpath' was
+not declared in this scope`, same function). Both remain the documented
+generator-body `_cpp_expr` structural gaps (no string-method dispatch,
+no module-attribute-call dispatch in the coroutine emitter) plus the
+param-type-inference gap (no literal call site for `_ancestry(path)`
+anywhere). Not attempted this pass either — adding real method/module-
+call dispatch to the coroutine body emitter is feature-sized work in
+the same out-of-scope area.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (`3d36ccd`) via `python3 mojo.py

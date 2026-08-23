@@ -2,6 +2,31 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
+## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — DOCUMENTED-NOT-FIXED, assessment reconfirmed)
+
+Re-ran the repro (same `dbpickle.py:80:3: error: cannot convert to a
+pointer type` at the `DBUnpickler(file, conn).load()` call) and
+re-confirmed the gap is unchanged: still zero references to
+`BytesIO`/`StringIO`/`Pickler`/`Unpickler` anywhere in gimple_codegen.py
+or the runtime. The two missing features are assessed as NOT tractable
+for a single-session fix, concretely:
+
+1. **io.BytesIO** — needs a real growable byte-buffer runtime type with
+   the read/write/seek/getvalue protocol and codegen wiring (a new
+   fixed-layout struct + `_KNOWN_SIGS` entries + method dispatch),
+   comparable in scope to the existing sqlite3 binding cited below.
+2. **pickle.Pickler/Unpickler** — this example's entire purpose is the
+   CUSTOM-SUBCLASS protocol (`class DBPickler(pickle.Pickler)` overriding
+   `persistent_id`, consumed by `persistent_load`), so stubbing is not an
+   option: it needs a real pickler engine whose dispatch honors user
+   subclass overrides — a full feature, not a shim.
+
+A minimal BytesIO-only shim would let the file compile but produce
+silently-wrong output (the pickle stream would be garbage), which this
+project's conventions explicitly forbid. Marking DOCUMENTED-NOT-FIXED;
+worth revisiting only if a higher-value stdlib file independently needs
+the same subsystem.
+
 ## Status (re-verified 2026-08-09, still open)
 
 Root-caused; NOT fixed — requires implementing two substantial missing

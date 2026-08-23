@@ -2,6 +2,43 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
+## Status (updated 2026-08-23, wt09 fix/stdlib-mods `de9b885` — GIMPLE stage now passes; PARTIAL progress, file still doesn't build)
+
+Root-caused the then-current blocker (6x GCC `type mismatch in binary
+expression`, `int = int64_t + int64_t`, all pointing at
+`PurePath.anchor`'s `return self.drive + self.root`) and FIXED it at its
+own level:
+
+`PurePath.drive`/`.root` are `@property` getters whose statically
+inferred C return type is plain `int` (their `self._drv`/`self._root`
+fields get typed `int` by `_collect_self_assigns`' MultiAssignStmt case,
+gimple_module_gen.py — `self._drv, self._root, self._tail_cached =
+self._parse_path(...)` types every target `'int'` without consulting the
+value). At emission, `self.drive` lowers to a deferred MojoBoundMethod*
+that the BinaryOp path auto-invokes via `mojo_bound_method_call_0` (an
+int64_t-valued call) — but the auto-invoke sites CLAIMED the recorded
+static type (`'int'`) for the operand while handing callers the raw
+int64_t temp. The enclosing add therefore emitted `int _t10 = int64_t +
+int64_t`, which `-fgimple` rejects outright.
+
+Fix (gimple_gen_methods.py `_auto_invoke_bound_method_value`, replacing
+three identical copies in _lower_MemberExpr's chained-member path,
+_lower_binary's operand path, and _lower_subscript): when the inferred
+return type is anything other than int64_t, materialize a correctly-
+typed temp with an explicit cast before claiming that type. With this,
+the ENTIRE GIMPLE (.ci) stage of pathlib compiles clean.
+
+**The file still does not build** — it now reaches the further C++
+generator stage (`__init___gen.cpp`) and fails there on the SAME
+coroutine-emitter gaps the 2026-08-10 status below already documented:
+`'os' was not declared in this scope` inside `walk`'s body, plus new
+sibling instances surfaced by the progress (a `self->Path::parser` field
+read typed `int` used as `.sep` receiver, an f-string/char* vs int64_t
+conflict for `path_str`). Those are all in the coroutine-body `_cpp_expr`
+emitter (no module-call dispatch, no string-method dispatch) plus the
+same field-under-widening family above feeding generator bodies — not
+re-attempted here; the tuple-yield fix below remains landed and intact.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
 
 Implemented real tuple-valued-`yield` support this session (see

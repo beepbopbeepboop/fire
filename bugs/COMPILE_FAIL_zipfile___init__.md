@@ -4,6 +4,28 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — unchanged in substance)
+
+Re-ran the repro fresh. Same four issue groups as the 2026-08-09
+analysis below, none fixed this pass either:
+
+```
+error: assignment to '_Extra *' from 'int64_t' ... makes pointer from
+       integer without a cast          (_Extra.strip, line 228)
+error: non-trivial conversion in 'integer_cst'   (x2, FileHeader ~547-548)
+error: passing argument 2/3 of 'ZipFile_mojo_open'/'PyZipFile_mojo_open'
+       makes integer from pointer without a cast  (~1666/1690/1699, pwd)
+```
+
+Assessment reconfirmed for each: (1) `_Extra.strip`'s `cls.split(data)`
+call site vs. the classmethod-generator machinery that per the write-up
+below took three incidents to stabilize — deliberately untouched;
+(2) FileHeader's compress_size/file_size locals under-widened from the
+`int`-typed struct fields (themselves narrowed from literal-`0` init) —
+a shared field-typing-machinery change, not narrow; (3) the `pwd=None`
+caller/callee signature disagreement — same unannotated-param family.
+Still open; no code changes made this pass.
+
 ## Status (updated 2026-08-09)
 
 Re-ran fresh; error set has SHIFTED since the previous write-up (some

@@ -4,6 +4,21 @@ Source file: `/Users/mrs/net/Python-3.14.6/Android/android.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — DOCUMENTED-NOT-FIXED)
+
+Re-ran the repro; byte-for-byte the same honest refusal as the 2026-08-09
+verification below (10 async functions + 1 async generator refused
+before any per-function eligibility attempt, because their `await`
+shapes — `asyncio.create_subprocess_exec(...)`, `process.communicate()`,
+`process.wait()`, `stream.readexactly(...)`, a local `wait_for` helper —
+are all outside `_async_quick_eligible`'s whitelist). Confirmed again:
+this is NOT warnings-only; it is a hard module-level refusal, and the
+missing feature is a real async-subprocess/stream I/O composition layer
+(process spawn with pipes wired into the compiled async runtime), which
+is feature-sized work in the tracked async-codegen project (#95-135) —
+not attempted this pass. Everything else in the file is warnings only
+(unused-variable noise); no GCC errors remain behind the refusal.
+
 ## Status (updated 2026-08-06)
 
 Re-ran; the original ~880-line GCC warning dump below is STALE (it was

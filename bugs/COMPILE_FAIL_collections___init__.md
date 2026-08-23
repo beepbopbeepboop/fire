@@ -2,6 +2,55 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
 
+## Status (updated 2026-08-23, wt09 fix/stdlib-mods `945af88` — UserDict error FIXED; Counter blocked by builtin-dict subclassing, now refused honestly)
+
+Two of the three 2026-08-06 issues below are gone (other agents'
+sessions), and this pass fixed/clarified the remainder:
+
+- Issue #1 (`_tuplegetter` redefinition) and issue #2 (the three
+  dynamic-attribute instances) no longer reproduce — the build gets well
+  past them.
+
+- **Issue #3's `Counter` errors at lines 944/957 (`__iadd__`/`__isub__`,
+  `self[elem] += count`) are now precisely understood and honestly
+  refused instead of miscompiled.** Root cause chain: `class
+  Counter(dict)` subclasses a BUILTIN type — the compiled `struct
+  Counter` is `{int64 __mojo_type_id; int values; int items; int get;}`
+  (its METHODS `values`/`items`/`get` even got misregistered as int
+  FIELDS by the self-attr scan): there is NO backing MojoDict storage at
+  all, `Counter.__init__` never allocates one, and Counter registers
+  neither `__getitem__` nor `__setitem__`. So `self[elem] += count` has
+  no correct compiled lowering whatsoever — the read degraded to an
+  opaque `(int64_t)self` handle (struct-subscript fallback,
+  gimple_gen_calls.py) and the write emitted raw C `self[elem] = ...`
+  against a non-array struct pointer. Real dict-subclass support
+  (backing store allocation in `__init__`, inherited container-protocol
+  dispatch) is the feature-sized gap this doc already flagged in 2026-
+  08-06's issue #3; NOT implemented here.
+
+  What DID change this pass (commit `1f26bb1` + `945af88`): subscript
+  read/write on user structs that DO define `__getitem__`/`__setitem__`
+  now dispatches to those real methods (fixing the third error class —
+  see next bullet), and subscript stores on user structs with NEITHER a
+  registered dunder NOR a `_data` backing field now raise the codegen's
+  established honest module-refusal ("cannot compile module:
+  `Counter[...] = ...` subscript store on user-defined struct 'Counter'
+  ... falling back to interpreting this module from source") instead of
+  silently dropping the store or emitting invalid C. The whole-program
+  build still fails as a unit (exit 1), but with a precise diagnosis
+  naming the exact unsupported construct.
+
+- **The 2026-08-10 blocker (`UserDict.get`'s `return self[key]`, GCC
+  "invalid types in nop conversion") is FIXED** by the same `__getitem__`
+  dispatch: `obj[key]` on a user struct whose class registers the dunder
+  now calls the struct's own compiled `UserDict___getitem__` instead of
+  treating the instance as an array container (`UserDict.data` was being
+  indexed as an array of MojoDict headers — wrong semantics AND a hard
+  `-fgimple` error at any struct-valued element). Write side
+  (`obj[key] = v` → `__setitem__`) handled symmetrically, including the
+  augmented-assignment shape. Verified value-correct via an isolated
+  compile-and-run repro with typed params.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a separate, pre-existing gap now blocks)
 
 Implemented real tuple-valued-`yield` support this session (see
