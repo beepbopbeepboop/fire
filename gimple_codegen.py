@@ -3373,18 +3373,16 @@ _compile_cache: dict = {}  # key -> str  (in-process L1 for compile_to_gimple_ca
 _IMPORT_LINE_RE = re.compile(r'^\s*(?:from|import)\s+([.\w]+)', re.MULTILINE)
 
 
-def _dep_sources_digest(mojo_src: str, filename: str) -> str:
-    """Digest of every non-stdlib source this compile can read: the transitive
-    import closure of sibling modules resolved next to the entry file — both
-    .mojo and .py (mojo.py's own bootstrap dumps inline .py siblings like
-    myinterpreter.py). Mirrors how codegen finds them (imports.resolve_source,
-    then _resolve_test_relative_module's walk up the entry file's ancestors).
+def _dep_sources_texts(mojo_src: str, filename: str) -> dict:
+    """The transitive import closure of sibling modules resolved next to the
+    entry file, as {abs_path: source_text} — both .mojo and .py (mojo.py's
+    own bootstrap dumps inline .py siblings like myinterpreter.py). Mirrors
+    how codegen finds them (imports.resolve_source, then
+    _resolve_test_relative_module's walk up the entry file's ancestors).
     Stdlib sources are skipped: cas.stdlib_fingerprint() already covers every
     stdlib file, and re-hashing the reachable stdlib per compile would turn a
     cheap scan into a closure walk. Best-effort by design: an import the scan
-    can't resolve contributes nothing (codegen skips it too), and hashing a
-    file codegen never opens only over-invalidates, never goes stale."""
-    import cas
+    can't resolve contributes nothing (codegen skips it too)."""
     import imports as _imp
     try:
         from module_loader import STDLIB_PATH
@@ -3430,9 +3428,18 @@ def _dep_sources_digest(mojo_src: str, filename: str) -> str:
             _scan(text, os.path.dirname(path))
 
     _scan(mojo_src, os.path.dirname(os.path.abspath(filename)) if filename else '')
-    if not seen:
+    return seen
+
+
+def _dep_sources_digest(mojo_src: str, filename: str) -> str:
+    """Digest of every non-stdlib source this compile can read (see
+    _dep_sources_texts for what's in the set). Hashing a file codegen never
+    opens only over-invalidates, never goes stale."""
+    texts = _dep_sources_texts(mojo_src, filename)
+    if not texts:
         return ''
-    return cas._hash(*(f'{p}\0{seen[p]}' for p in sorted(seen)))
+    import cas
+    return cas._hash(*(f'{p}\0{texts[p]}' for p in sorted(texts)))
 
 
 def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
@@ -3482,7 +3489,8 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
 
 
 def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
-                                filename: str = "") -> tuple[str, str]:
+                                filename: str = "",
+                                link_objects_out: list = None) -> tuple[str, str]:
     """Like compile_to_gimple, but ALSO returns the companion .cpp text
     (Milestone B's C++20-coroutine translation of this module's supported
     generator function(s), '' if there are none). A separate entry point
@@ -3493,13 +3501,28 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     additive. NOT CAS-cached (unlike compile_to_gimple_cached) — only called
     by build paths that already checked (via a cheap pre-scan, no full
     compile) that this module actually contains a supported generator, so
-    the extra work only happens on the rare module that needs it."""
+    the extra work only happens on the rare module that needs it.
+
+    `link_objects_out`: optional list the caller owns; when given, it is
+    extended with the CAS object paths `_compile_imported_module` built for
+    TRANSITIVELY-IMPORTED sibling modules' own top-level coroutine units
+    (the 4th coroutine-code source — see its call site in gimple_gen_
+    resolve.py and bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
+    `compile_linked` returns the same paths to driver.compile_program for
+    the link-mode pipeline; this out-param gives the inline (do_imports=
+    True) build_executable pipeline access to them too, so a root module
+    whose OWN generated_cpp is empty but whose imported siblings define
+    generators still gets those definitions onto the link line. Every path
+    is a C++-compiled object, so a consumer must treat their presence like
+    a non-empty companion .cpp for final-link-driver selection."""
     c_code, gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename)
+    if link_objects_out is not None:
+        link_objects_out.extend(dict.fromkeys(gen._link_objects))
     return c_code, gen.generated_cpp
 
 
-def module_may_have_supported_generator(mojo_src: str) -> bool:
-    """Cheap, purely-textual pre-scan: does this source even MENTION `yield`
+def module_may_have_supported_generator(mojo_src: str, filename: str = "") -> bool:
+    """Cheap, purely-textual pre-scan: does this compile even MENTION `yield`
     or `async def` outside a string/comment? Used by build_executable/
     build_stdlib_dylib.py to decide whether a module is worth routing
     through the uncached compile_to_gimple_with_cpp at all (the
@@ -3515,8 +3538,26 @@ def module_may_have_supported_generator(mojo_src: str) -> bool:
     it has exactly one call site (mojo.py's build_executable) and its
     return value's MEANING ("routing through compile_to_gimple_with_cpp is
     worth trying") hasn't changed, only the set of source shapes that can
-    make that true."""
-    return 'yield' in mojo_src or 'async def' in mojo_src
+    make that true.
+
+    With a `filename`, the scan also covers the entry file's transitive
+    LOCAL-sibling import closure (the same set _dep_sources_texts resolves,
+    stdlib excluded) — the do_imports=True inline pipeline compiles those
+    siblings' code too, so a root file with no `yield` of its own whose
+    imported sibling defines a plain top-level generator (parser.py ->
+    parsing.py -> lexer.py's tokenize()) must not be screened out of the
+    coroutine-capable path: its .c side still references the sibling's
+    __mojogen_<mod>_<fn>_* symbols, which only that path's capture ever
+    links. Without a filename the behavior is exactly the old root-only
+    scan (no closure to walk for a bare-source caller)."""
+    if 'yield' in mojo_src or 'async def' in mojo_src:
+        return True
+    if not filename:
+        return False
+    for text in _dep_sources_texts(mojo_src, filename).values():
+        if 'yield' in text or 'async def' in text:
+            return True
+    return False
 
 
 def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:

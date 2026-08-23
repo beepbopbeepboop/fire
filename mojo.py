@@ -310,9 +310,11 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
         # generator (module mentions `yield` but it's an unsupported shape,
         # or a false-positive textual match) — same single-.o build below.
         cpp_code = ''
-        if gimple_codegen.module_may_have_supported_generator(src):
+        sibling_cpp_objs = []
+        if gimple_codegen.module_may_have_supported_generator(src, filename=input_file):
             c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
-                src, do_imports=True, filename=input_file)
+                src, do_imports=True, filename=input_file,
+                link_objects_out=sibling_cpp_objs)
         else:
             c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
@@ -396,6 +398,24 @@ def build_executable(input_file, src, output=None, opt_flag=None, debug_flag=Non
                     print(f"Async runtime compilation failed: {result.stderr}", file=sys.stderr)
                     return False
                 extra_objs.append(async_rt_o)
+
+        # The 4th coroutine-code source (see
+        # _compile_imported_module's capture in gimple_gen_resolve.py):
+        # transitively-imported sibling modules' own top-level generator/
+        # async functions. Their coroutine units were already compiled to
+        # CAS-cached objects during generation above; the client .o's .c
+        # side references their __mojogen_<mod>_<fn>_* symbols, so without
+        # linking them the build dies with undefined symbols exactly as if
+        # no companion unit existed (bugs/
+        # COMPILE_FAIL_Tools_cases_generator_parser.md — lexer.py's
+        # tokenize(), reached only through parsing.py's own `import lexer`,
+        # never by this root module). Each is a g++-compiled object, so
+        # their presence requires a C++-aware final link for the same
+        # reason a non-empty companion .cpp does above.
+        for sibling_obj in sibling_cpp_objs:
+            if sibling_obj not in extra_objs:
+                extra_objs.append(sibling_obj)
+                cxx_link = True
 
         # Link executable with CPython runtime
         exe_file = output if output else basename
