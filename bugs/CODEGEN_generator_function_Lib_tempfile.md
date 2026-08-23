@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified; own-code set down to the 3 chained-getattr errors)
+
+Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3). The
+`TMP_MAX`-family and textwrap fixes below hold; the remaining
+tempfile.py-own error set is exactly the 3 `request for member 'name'
+in something not a structure or union` lines (609/668/703, the
+`getattr(getattr(file, 'buffer', file), 'raw', raw).name = ...`
+chained-getattr type-inference gap noted on 2026-08-09 — same deferred
+family as `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`).
+`_TemporaryFileWrapper.__iter__` still compiles cleanly through the
+coroutine path. The transitive `operator.py:270 non-trivial conversion`
+blocker documented on 2026-08-11 is unchanged. Doc stays open.
+
 ## Status (updated 2026-08-11)
 
 Re-verified against current master with a fresh real rebuild. Still

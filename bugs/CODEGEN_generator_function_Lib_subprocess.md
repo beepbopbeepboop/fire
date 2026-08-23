@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
+
+Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3) via a real
+`python3 mojo.py build .../Lib/subprocess.py`: **0 errors attributed to
+subprocess.py's own source**, and no "not eligible" refusal for any of its
+generators (`_on_error_fd_closer` included — it compiles through the
+coroutine path). The build still fails on the transitively-imported
+cascade (`codecs.py`/`argparse.py` dominant this pass). subprocess.py's own
+real, already-documented blocker remains `bugs/hard/
+CODEGEN_generator_function_symbol_not_module_qualified.md`'s threading/os
+bare-name generator-symbol collision, deliberately deferred per that doc.
+Classification unchanged: NOT a generator-codegen-cluster failure.
+
 ## Status (updated 2026-08-20, later same session — found + fixed the REAL mechanism behind the reported `Popen__on_error_fd_closer` undeclared-symbol error; a third, distinct code path from both entries below)
 
 The 2026-08-20 entry immediately below this one investigated the same

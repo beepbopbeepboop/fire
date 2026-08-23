@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — tokenize.py's own error count now ZERO)
+
+The last tokenize.py-own error (`23:28 assignment to 'char *' from
+'int64_t'` on `__author__ = 'Ka-Ping Yee <ping@lfw.org>'`, noted in the
+2026-08-09 entry below) is FIXED — and it was NOT a dunder/string-literal
+bug: root cause is the same shared-flat-`_global_var_types`
+cross-contamination documented for tarfile.py's `ENCODING` (see that
+doc's 2026-08-23 entry). `io.py`'s and `inspect.py`'s own `__author__`
+globals (both transitively imported by tokenize.py) overwrite the shared
+bare-name entry between tokenize's Phase 1.7 scan and its own assignment
+emission, so the string literal got coerced to the wrong type. Fixed by
+the new per-instance `_own_global_var_types` overlay +
+`_global_dst_ctype` (commit 65706f3); verified via a real
+`mojo.py build .../Lib/tokenize.py`: **0 errors attributed to
+tokenize.py's own source**. The build still fails end-to-end solely on
+the already-documented transitive cascade (`codecs.py` 12× "expected
+expression before int64_t", `argparse.py` %-dict cluster,
+`enum.py`, ...), so the doc stays open per convention.
+
+Quality gate: `test_gimple.py` 250/250, `test_module_cache.py` 76/76,
+`make check-selfhost` clean, stdlib dylib rebuild 0 skips.
+
 ## Status (updated 2026-08-20)
 
 The `any` half of the "`any`/`perror` name collisions" blocker (the

@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the last generator gap (varying-arity tuple yields) FIXED; `_genops` now compiles; file still blocked by transitive-only errors)
+
+Stacked gap 3 from the 2026-08-11/08-20 entries below is now closed:
+`_generator_tuple_yield_slot_ctypes` no longer refuses differing element
+COUNTS across tuple-yield sites. It unifies to the LONGEST site's shape
+(pad shorter sites' slot lists with the longer site's tail types,
+first-contributing-site-wins per tail position), and the producer side
+(`_cpp_yield_tuple`) boxes every site out to the unified arity using a
+pre-body-emission slot pass stashed on the gen (`_cpp_pending_tuple_slots`,
+set in `_gen_cpp_generator_unit` before body emission since the post-emission
+slot computation runs too late to influence emission) — so every
+`co_yield`'d list carries exactly the unified arity and consumer-side
+per-slot accessor reads stay in bounds. `(True, None)` now means only an
+irreconcilable per-slot TYPE disagreement. Commit f7cf084.
+
+Verified against this file's real `_genops`: the 3-tuple site
+(`yield opcode, arg, pos`) now boxes `[opcode, arg, pos, 0]` and the
+gated 4-tuple site is unchanged; both eligibility passes unify to 4 slots.
+Isolated `compile_to_gimple_with_cpp(do_imports=False)` on pickletools.py:
+compiles clean, `_genops` emitted through the coroutine path (previously
+the hard refusal). A real `python3 mojo.py build .../Lib/pickletools.py`
+now shows **0 errors attributed to pickletools.py's own source** — the
+build still exits non-zero solely on the already-documented transitive
+cascade (`codecs.py`, `argparse.py`, `enum.py`; e.g. argparse's
+`invalid operands to binary %` ×12 / `trunc_mod_expr` ×10 clusters).
+Doc kept open per convention (file doesn't build end-to-end), but every
+generator-codegen gap this doc was tracking is now closed.
+
+Quality gate for the change: `test_gimple.py` 250/250, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+0 `skip <module>` lines (same as baseline).
+
 ## Status (updated 2026-08-20, two of three stacked gaps CLOSED — one remains)
 
 `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` is now fixed

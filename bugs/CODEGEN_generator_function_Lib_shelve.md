@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
+
+Re-verified against current HEAD via a real `python3 mojo.py build
+.../Lib/shelve.py`: **0 errors attributed to shelve.py's own source**
+(its `Shelf.__iter__` generator still compiles cleanly through the
+coroutine path, zero signal of any problem). The build still fails
+entirely on the transitively-imported cascade — `codecs.py`/`argparse.py`
+dominant this pass, plus `enum.py`/`typing.py`/... — none of it in
+shelve.py's own code, none of it generator-shaped. Classification
+unchanged: NOT a generator-codegen-cluster failure; doc stays open only
+because the file's full transitive build doesn't yet exit clean.
+
 ## Status (updated 2026-08-11, re-verified — still correctly out of scope for this cluster)
 
 Re-verified against current master via a real `python3 mojo.py build

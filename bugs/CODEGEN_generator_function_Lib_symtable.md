@@ -1,5 +1,15 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
+
+Re-verified against current HEAD via a real `python3 mojo.py build
+.../Lib/symtable.py`: **0 errors attributed to symtable.py's own source**
+(both of the 2026-08-11 fixes below still hold; its own generator
+`yield flagname` remains clean). The build still fails on the transitive
+cascade only — `enum.py`/`codecs.py`/`argparse.py`/`pickle.py`/... this
+pass. Classification unchanged: NOT a generator-codegen-cluster failure;
+doc stays open per convention.
+
 ## Status (updated 2026-08-11, symtable.py's own 2 errors FIXED)
 
 Both of symtable.py's own real errors (the 2026-08-07/09 passes below)

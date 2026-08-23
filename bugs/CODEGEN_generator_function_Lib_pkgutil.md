@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged; correctly NOT fixed)
+
+Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3) via a real
+`python3 mojo.py build .../Lib/pkgutil.py`: **0 errors attributed to
+pkgutil.py's own source**, and the build still fails on `walk_packages` +
+`iter_importers` exactly as this doc's 2026-08-11 analysis predicts.
+`walk_packages`'s current refusal reason is now the predicted NEXT gap in
+that analysis — `for ... in iter_modules(...)` "does not consume a
+generator this compile has itself already translated" (the consumption-of-
+a-non-compiled-generator shape) — with the remaining stacked gaps (nested
+closure with mutable default, `__import__`, `sys.modules[...]`, 3-arg
+getattr, reassigned-param self-recursion) still queued behind it.
+`iter_importers` refuses on its own documented shape (`getattr(obj, name)`
+with a non-static attribute name). All other refusals in the build log
+name generators in OTHER transitively-imported modules. The 2026-08-11
+"feature-sized, do not force" classification stands unchanged.
+
 ## Status (updated 2026-08-11, real fix attempted on `walk_packages` — confirmed genuinely stacked, not narrow)
 
 Re-verified against current master via a real `python3 mojo.py build
