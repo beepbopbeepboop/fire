@@ -15,6 +15,7 @@ import re
 import hashlib
 from mojo_compiler import py_tokenize, Parser, FunctionDef, StructDef
 from gimple_codegen import _mojo_type, _safe_name, GimpleGen
+from gimple_gen_funcs import dup_def_signature_key
 
 # Free functions whose C symbol the codegen does NOT overload-mangle (must match
 # GimpleGen._NO_OVERLOAD_MANGLE).
@@ -139,8 +140,29 @@ def collect_exports(stmts, module_prefix: str = '') -> list:
     file-local, that module's reflection entry would silently resolve to the
     FIRST module's implementation instead of its own."""
     struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
+    # BUG-2026-021 parity: when a module REDEFINES a top-level function
+    # (same name, identical signature — the duplicated-tail shape), gen_module's
+    # duplicate-def pre-pass emits exactly ONE C definition (the LAST copy,
+    # interpreter last-wins semantics). Advertise exactly one entry too — keep
+    # the last copy here — so the reflection table never lists two rows for a
+    # symbol with a single definition behind it. Genuine overloads (different
+    # signatures) are dropped by collect_exports_src's `skip` filter below,
+    # exactly like before. dup_def_signature_key is THE shared classifier —
+    # both sides must classify a duplicated name identically or the table and
+    # the dylib disagree about which names have real symbols.
+    _dup_defs: dict = {}
+    for _s in stmts:
+        if isinstance(_s, FunctionDef):
+            _dup_defs.setdefault(_s.name, []).append(_s)
+    _dup_drop_ids: set = set()
+    for _dup_list in _dup_defs.values():
+        if len(_dup_list) >= 2 and \
+                len({dup_def_signature_key(_d) for _d in _dup_list}) == 1:
+            _dup_drop_ids.update(id(_d) for _d in _dup_list[:-1])
     exports = []
     for s in stmts:
+        if id(s) in _dup_drop_ids:
+            continue
         if isinstance(s, FunctionDef) and not s.name.startswith('_'):
             exports.append({
                 'name': s.name,
@@ -218,16 +240,32 @@ def collect_exports_src(src: str, module_prefix: str = '') -> list:
     generic |= set(re.findall(r'\bstruct\s+(\w+)\s*\[', src))
     # Overloaded names (same name, multiple non-generic defs) aren't a single
     # concrete symbol either — they're selected + instantiated per call site.
-    counts = {}
-    for n in re.findall(r'\b(?:fn|def)\s+(\w+)\s*\(', src):
-        counts[n] = counts.get(n, 0) + 1
-    overloaded = {n for n, c in counts.items() if c > 1}
+    # BUG-2026-021: computed from the PARSED top-level FunctionDefs with the
+    # SAME dup_def_signature_key rule gen_module's duplicate-def pre-pass
+    # uses, not a raw def-count regex. The old count treated an accidental
+    # duplicated tail (`def main():` twice — identical signature, codegen now
+    # keeps the last copy and really emits it) as an overload and dropped the
+    # name from the table entirely — zero advertised entries behind a symbol
+    # that DID exist. The regex also over-matched same-named METHODS of
+    # unrelated structs (a free `add` plus two structs' `add` methods read as
+    # "overloaded"), silently un-advertising perfectly concrete free
+    # functions. Top-level scope here matches the pre-pass's exactly.
+    _parsed = Parser(py_tokenize(src)).parse_module()
+    _dup_defs: dict = {}
+    for _s in _parsed:
+        if isinstance(_s, FunctionDef):
+            _dup_defs.setdefault(_s.name, []).append(_s)
+    overloaded = set()
+    for _name, _defs in _dup_defs.items():
+        if len(_defs) >= 2 and \
+                len({dup_def_signature_key(_d) for _d in _defs}) != 1:
+            overloaded.add(_name)
     skip = generic | overloaded
     # An export's base name is the symbol before any `.` (a method export is
     # `Struct.method`); skip a generic struct's TYPE entry *and* all its METHOD
     # entries — the parser drops `[T]`, so `collect_exports` cannot tell they are
     # parametric on its own.
-    return [e for e in collect_exports(Parser(py_tokenize(src)).parse_module(), module_prefix)
+    return [e for e in collect_exports(_parsed, module_prefix)
             if e['name'].split('.', 1)[0] not in skip
             and e['name'].split('.', 1)[0] not in _CLIB_SYMS]
 

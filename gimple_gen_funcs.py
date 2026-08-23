@@ -690,6 +690,31 @@ def overload_suffix_for(c_param_types) -> str:
     return f'_{h}'
 
 
+def dup_def_signature_key(fn) -> tuple:
+    """Signature-identity key for deciding whether two same-named top-level
+    FunctionDefs are genuine OVERLOADS of each other or a REDEFINITION
+    (BUG-2026-021). Shared by gen_module's duplicate-def pre-pass and
+    reflect.collect_exports_src so both sides classify a duplicated name
+    identically — codegen decides which single definition survives, and the
+    reflection table must advertise exactly that survivor, never zero entries
+    (which stranded the entry point behind an empty `_gimple_main`) and never
+    two competing ones.
+
+    Key = per-parameter (star-prefix, annotation text, has-default) plus the
+    comptime bracket-param list. Deliberately EXCLUDED, matching
+    myinterpreter.py's last-def-wins binding semantics: the parameter NAME
+    (a rename doesn't change the interpreter's binding, and call sites never
+    saw two live choices), the return type (Mojo overloads can't be selected
+    by return type alone, so differing returns still mean "same call shape,
+    last def wins"), decorators, and body."""
+    key = []
+    for pname, ptype in (getattr(fn, 'params', None) or []):
+        star = '**' if pname.startswith('**') else ('*' if pname.startswith('*') else '')
+        has_dflt = bool((getattr(fn, 'param_has_default', None) or {}).get(pname.lstrip('*')))
+        key.append((star, ptype, has_dflt))
+    return (tuple(key), tuple(getattr(fn, 'comptime_params', None) or ()))
+
+
 def _local_def_pts(gen, bare_name: str):
     """BUG-2026-019 helper: THIS compile unit's own ctypes for `bare_name`,
     resolved lazily from the module's own FunctionDef node (see gen_module's
