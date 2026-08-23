@@ -624,6 +624,17 @@ class GimpleGen:
         # non-tuple-yielding or type-unresolvable generator; cleared in
         # each unit's `finally` alongside the other per-compile state.
         self._cpp_pending_tuple_slots: list | None = None
+        # THIS instance's own Phase 1.7 conclusions for its OWN top-level
+        # globals (bare name -> semantic ctype), recorded at write time
+        # alongside the whole-program-shared _global_var_types entry. The
+        # shared flat dict is keyed by bare name alone, so any
+        # later-processed module declaring the same bare name overwrites
+        # it (io.py/inspect.py/tokenize.py's `__author__`, token.py/
+        # tarfile.py's `ENCODING`) — an assignment emitted after that
+        # overwrite would coerce its RHS to ANOTHER module's type.
+        # Consumers use `_global_dst_ctype`, which trusts this overlay for
+        # scalar conclusions and falls back to the shared dicts otherwise.
+        self._own_global_var_types: dict = {}
         # cpp_text fragments from _gen_cpp_generator_unit, one per supported
         # generator, concatenated into self.generated_cpp at the end of
         # gen_module once the common preamble is known.
@@ -2683,6 +2694,34 @@ class GimpleGen:
         return gfn._collect_body_import_bindings(self, node_list, scope)
     def _func_qualifier(self, bare_name: str) -> str:
         return gfn._func_qualifier(self, bare_name)
+    def _global_dst_ctype(self, name: str) -> str:
+        """The destination C type for an assignment to a bare-name module
+        global — the same lookup the four global-assignment emission sites
+        in gimple_gen_stmts.py used to inline as
+        `_global_c_decl_types.get(name, _global_var_types[name])`, plus one
+        override: when THIS instance's own Phase 1.7 scan concluded a SCALAR
+        type for this name (recorded in `_own_global_var_types` at write
+        time), trust it over both shared dicts. The shared dicts are keyed
+        by bare name across every module compiled together, so a
+        later-scanned module declaring the same bare name (tokenize.py vs
+        io.py/inspect.py's `__author__`, tarfile.py vs token.py's
+        `ENCODING`) would otherwise make this module's own assignment
+        coerce its RHS to the OTHER module's type (the observed "assignment
+        to 'char *' from 'int64_t'" family). Two things keep prior behavior
+        otherwise intact: a genuine POINTER entry in `_global_c_decl_types`
+        (e.g. the `_EARLY_DISPATCH_DICTS`/`_EARLY_DISPATCH_SETS` overrides
+        for this compiler's own dispatch tables) still wins unconditionally,
+        and a CONTAINER-typed own conclusion still defers to
+        `_global_c_decl_types`'s int64_t boxing exactly as before."""
+        own = self._own_global_var_types.get(name)
+        if own is not None:
+            cdecl = self._global_c_decl_types.get(name)
+            if cdecl is not None and cdecl.endswith(' *'):
+                return cdecl
+            if own in ('int64_t', 'double', '_Bool', 'char *'):
+                return own
+            return cdecl if cdecl is not None else own
+        return self._global_c_decl_types.get(name, self._global_var_types.get(name, 'int64_t'))
     def _locally_binds_name(self, bare_name: str) -> bool:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
