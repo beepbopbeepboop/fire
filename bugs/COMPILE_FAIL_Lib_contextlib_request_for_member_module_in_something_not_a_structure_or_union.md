@@ -1,5 +1,19 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-23, triage pass)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+contextlib.py`: fails identically — the same hard `RuntimeError`
+naming the same 11 async functions (`__aenter__` x3, `__aexit__` x4,
+`_exit_wrapper`, `aclose`, `enter_async_context`, `inner`) with the
+same "no suspend/resume state-machine transform" message, raised from
+gen_module's async-function eligibility check before any codegen.
+Unchanged assessment: extending the C++20 coroutine codegen to
+non-scalar `__aenter__` returns and `*args`/`**kwargs` `__aexit__`
+params is a genuine large feature (boxing/type-erasure for non-scalar
+coroutine values + variadic coroutine-frame parameters).
+DOCUMENTED-NOT-FIXED.
+
 ## Status (re-verified 2026-08-09, fresh against current master post-merge)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`
