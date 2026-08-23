@@ -1670,6 +1670,31 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
 
 def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
     """Lower MojoList * method calls."""
+    # list.insert(i, v) (BUG-2026-023 residual, box.3d/game's
+    # FileSystem.current_dir_path): previously UNHANDLED — the unknown-method
+    # fallback silently dropped the whole call, so `path_parts.insert(0,
+    # name)` never stored anything and every built path stayed "/". Lower to
+    # the runtime's typed insert helpers; element type comes from the same
+    # _elem_of tracking every other list method uses.
+    if method == 'insert' and len(args) >= 2:
+        it, iv_ = gen.lower_expr(args[0])
+        at, av = gen.lower_expr(args[1])
+        idx64 = gen._new_val('int64_t', f"(int64_t) {iv_}")
+        elem = gen._elem_of(ov)
+        suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+        if suf == 'str':
+            _, av_s = gen._char_to_cstr(at, av)
+            gen._emit_call('void', '', 'mojo_list_insert_str',
+                           [('MojoList *', ov), ('int64_t', idx64), ('char *', av_s)])
+        elif suf == 'double':
+            dv = gen._new_val('double', f"(double){av}" if at != 'double' else av)
+            gen._emit_call('void', '', 'mojo_list_insert_double',
+                           [('MojoList *', ov), ('int64_t', idx64), ('double', dv)])
+        else:
+            nv = gen._to_int64(at, av)
+            gen._emit_call('void', '', 'mojo_list_insert_int',
+                           [('MojoList *', ov), ('int64_t', idx64), ('int64_t', nv)])
+        return 'int', gen._new_val('int', '0')
     if method == 'append' and args:
         at, av = gen.lower_expr(args[0])
         # A real Python `str[i]` result is itself a 1-character STRING

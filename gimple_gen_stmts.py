@@ -286,6 +286,22 @@ def _gen_stmt_VarDecl(gen, node):
         # docstring / `self._taskgroup_var_api`'s own docstring).
         if actual_dst == 'MojoList *' and v in gen._taskgroup_var_api:
             gen._taskgroup_var_api[node.name] = gen._taskgroup_var_api[v]
+        # BUG-2026-023 residual: annotated `parts: List[String] = ...` with
+        # an INITIALIZER takes this branch (not the else-branch below), so
+        # seed the element type from the annotation here too — otherwise a
+        # list filled via insert()/index-stores reads back as raw int64_t
+        # handles (same gap as the no-initializer path's seeding below).
+        if actual_dst == 'MojoList *' and isinstance(node.type_ann, str) \
+                and '[' in node.type_ann and not node.type_ann.startswith('['):
+            _li = gimple_ctypes._split_top_level_commas(
+                node.type_ann.split('[', 1)[1].rstrip(']').strip())
+            if _li:
+                try:
+                    _et = gen._resolve_type(_li[0].strip())
+                except Exception:
+                    _et = None
+                if _et and _et != 'int64_t' and node.name not in gen._elem_types:
+                    gen._elem_types[node.name] = _et
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
@@ -293,6 +309,24 @@ def _gen_stmt_VarDecl(gen, node):
         _dv = gen._annotation_dict_val_type(node.type_ann)
         if _dv is not None:
             gen._dict_val_types[node.name] = _dv
+        # BUG-2026-023 residual (box.3d/game's FileSystem.current_dir_path):
+        # seed the ELEMENT type of an explicitly-annotated List[T] local from
+        # its own annotation, mirroring `_dv` above for dicts. Without this,
+        # a `parts: List[String]` that is only ever filled via
+        # insert()/index-stores (no .append for _scan_container_elems to
+        # learn from) read back through mojo_list_get_int — every element
+        # came back as a raw pointer handle printed as a decimal blob.
+        if ctype == 'MojoList *' and isinstance(node.type_ann, str) \
+                and '[' in node.type_ann and not node.type_ann.startswith('['):
+            _li = gimple_ctypes._split_top_level_commas(
+                node.type_ann.split('[', 1)[1].rstrip(']').strip())
+            if _li:
+                try:
+                    _et = gen._resolve_type(_li[0].strip())
+                except Exception:
+                    _et = None
+                if _et and _et != 'int64_t':
+                    gen._elem_types[node.name] = _et
         # `var x: list()` / `var x: dict()` / `var x: set()` -- a bare
         # call-shaped annotation with NO initializer (see _mojo_type's
         # matching "()"-suffix branch for the full story: this project's
@@ -655,6 +689,24 @@ def _gen_stmt_AssignStmt(gen, node):
             if ctype in ('int', 'int64_t') and vtype not in ('int', 'int64_t') and vtype.endswith('*'):
                 ctype = vtype
             gen._declare_var(tname, ctype)
+            # BUG-2026-023 residual (box.3d/game FileSystem.current_dir_path):
+            # the rewriter turns `parts: List[String] = ...` into an
+            # AssignStmt carrying type_ann (this file's VarDecl handler never
+            # sees body declarations). Seed the list ELEMENT type from that
+            # annotation so insert()/index-stores + later subscript reads
+            # dispatch on the real element instead of int64_t handles.
+            _ann_as = getattr(node, 'type_ann', None)
+            if ctype == 'MojoList *' and isinstance(_ann_as, str) \
+                    and '[' in _ann_as and not _ann_as.startswith('['):
+                _li = gimple_ctypes._split_top_level_commas(
+                    _ann_as.split('[', 1)[1].rstrip(']').strip())
+                if _li:
+                    try:
+                        _et = gen._resolve_type(_li[0].strip())
+                    except Exception:
+                        _et = None
+                    if _et and _et != 'int64_t':
+                        gen._elem_types[tname] = _et
         # A heap-boxed mutable capture: _write_dest returns `*name` (the
         # deref, pointee-typed lvalue), so the coercion target must be
         # the POINTEE ctype, not the box pointer ctype — otherwise the

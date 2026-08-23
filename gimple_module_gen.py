@@ -118,6 +118,28 @@ def gen_module_impl(self, stmts):
             self._c_kw_struct_renames[_s.name] = _safe
             _s.name = _safe
     self._local_struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
+    # Overloaded / duplicated top-level functions (same name, multiple defs)
+    # can't all be emitted as distinct C symbols. Two genuinely different
+    # situations hide behind that one description, with OPPOSITE correct
+    # handling (BUG-2026-021):
+    #
+    # - GENUINE OVERLOADS — same name, DIFFERENT parameter signatures
+    #   (`can_craft(t: Tuff, ...)` vs `can_craft(t: TuffBricks, ...)` in two
+    #   copies of a mod family). Still dropped entirely here: the elaborator
+    #   selects and instantiates the right overload per call site (slice 4),
+    #   so no single C definition exists to emit.
+    # - REDEFINITIONS — identical signature, e.g. test suites whose tail was
+    #   accidentally pasted twice (`def main():` twice). myinterpreter.py's
+    #   module dict binding means the INTERPRETER silently runs the LAST
+    #   definition; stripping every copy here instead left the program with
+    #   no `main` at all — entry-point synthesis fell back to an empty
+    #   `_gimple_main { return 0; }` and the whole --jit run exited 0 with
+    #   zero output. Keep exactly the LAST copy (interpreter semantics).
+    #
+    # dup_def_signature_key is the shared classifier (reflect.
+    # collect_exports_src uses it too, so the reflection table advertises
+    # exactly the one survivor this pass keeps). One filter at the top keeps
+    # every downstream loop collision-free. No-op otherwise.
     _dup_defs: dict = {}
     for _s in stmts:
         if isinstance(_s, FunctionDef):
@@ -133,6 +155,17 @@ def gen_module_impl(self, stmts):
     if _dup_drop_ids:
         stmts = [s for s in stmts if id(s) not in _dup_drop_ids]
     # BUG-2026-019 seeding: THIS compile unit's own surviving top-level
+    # FunctionDefs by bare name, plus the memo _local_def_pts fills lazily.
+    # A same-named free function defined by several sibling modules of one
+    # import closure gets its C symbol suffix AND its call-site argument
+    # coercion from THIS map first (_overload_suffix/_func_csym), never from
+    # the shared func_param_types[bare] slot those siblings' registration
+    # passes overwrite once per module — the off-by-one-sibling wrong-struct
+    # cast (`Tuff *` passed where tuff_bricks.mojo's own can_craft wanted
+    # `TuffBricks *`). Resolved LAZILY (empty memo here): struct-typed
+    # parameter annotations need the struct registration passes further down
+    # gen_module to have run before _signature_ctypes can resolve them, and
+    # the first suffix computation happens during body emission, long after.
     self._local_def_nodes = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
     self._local_def_param_types: dict = {}
 
@@ -1007,6 +1040,35 @@ def gen_module_impl(self, stmts):
                         _dv_early = self._annotation_dict_val_type(field.type_ann)
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
+                        # BUG-2026-023 residual (box.3d/game's
+                        # ComputerCase.variables: List[String]): seed
+                        # `_field_elem_types` from this field's OWN declared
+                        # annotation too, exactly mirroring `_dv_early`
+                        # above for dict value types. The only previous
+                        # seeding path was `.append()` call sites tracked
+                        # through `self.`-prefixed field owners
+                        # (_lower_list_method's _struct_field_owners
+                        # branch), so a List[...] field appended through a
+                        # NON-self parameter name (`c.variables.append(..)`
+                        # inside a free function taking `c: ComputerCase`)
+                        # never recorded its element type — a later
+                        # `c.variables[i]` read then fell back to int64_t
+                        # and yielded raw boxed handles instead of strings
+                        # ("set_variable(x,10)" then "get_variable(x)"
+                        # returning 0 across test_computer_mod). The
+                        # annotation is static truth available right here;
+                        # only non-default element types need recording
+                        # (int64_t is what every fallback already assumes).
+                        if (ft == 'MojoList *' and field.type_ann
+                                and '[' in str(field.type_ann)):
+                            _li = gimple_ctypes._split_top_level_commas(
+                                str(field.type_ann).split('[', 1)[1].rstrip(']').strip())
+                            if _li:
+                                _et = self._resolve_type(_li[0].strip())
+                                if _et and _et not in ('int64_t', 'MojoList *'):
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
+                                elif _et == 'MojoList *':
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
 
             def _self_member(expr):
                 """MemberExpr's `.member` name iff its object is bare `self`."""
@@ -1301,6 +1363,43 @@ def gen_module_impl(self, stmts):
                                      .replace('-', '_'))
                         else:
                             _qual = _sib_qualifier
+                        # BUG-2026-024: snapshot THIS import's param ctypes
+                        # under (home_qualifier, as_referenced_name) BEFORE
+                        # anything else can overwrite the shared bare-name
+                        # slot — a later sibling module's inline compile
+                        # registers its own same-named function into
+                        # func_param_types[bare] (mod.computer.network's
+                        # get_energy(n: ComputerNetwork) clobbering
+                        # mod.computer.computer_case's get_energy(c:
+                        # ComputerCase) after this line wrote the Case
+                        # shape), and _overload_suffix's shared-slot tier
+                        # then hashes the WRONG sibling for every one of
+                        # this module's call sites. The snapshot is keyed by
+                        # home module, so same-named siblings land under
+                        # different keys and nothing oscillates; lookup goes
+                        # through _imported_def_pts, which walks the SAME
+                        # tier order _func_qualifier uses, so the qualifier
+                        # half and suffix half of one mangled symbol always
+                        # mean the same binding. Preferred source is the
+                        # defining module's own FunctionDef resolved via
+                        # THIS gen's _signature_ctypes (the definition
+                        # side's exact resolver — export-table c_parameters
+                        # can carry int64_t placeholders for struct params,
+                        # which hashed a DIFFERENT suffix than the
+                        # definition); falls back to the already-populated
+                        # slot.
+                        try:
+                            _pts_snap = None
+                            for _fs in (self._parsed_import(s.module)[2] or []):
+                                if isinstance(_fs, FunctionDef) and _fs.name == name:
+                                    _pts_snap = self._signature_ctypes(_fs.params, _fs)
+                                    break
+                        except Exception:
+                            _pts_snap = None
+                        if not _pts_snap:
+                            _pts_snap = self.func_param_types.get(sym_name)
+                        if _pts_snap is not None:
+                            self._imported_home_param_types[(_qual, sym_name)] = list(_pts_snap)
                         self._note_own_func_home(sym_name, _qual)
                 try:
                     if not s.names:
