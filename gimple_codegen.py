@@ -1634,6 +1634,13 @@ class GimpleGen:
         'StopAsyncIteration', 'GeneratorExit', 'SystemExit',
         'ArithmeticError', 'LookupError', 'OSError', 'IOError',
         'UnicodeDecodeError', 'UnicodeEncodeError', 'AssertionError',
+        # A standard Python builtin exception, missing from this table:
+        # `raise SyntaxError` (test_deque.py's own `fail()` generator)
+        # was NOT recognized as an exception class at all — the ordinary
+        # path emitted "ct param or undeclared: SyntaxError" and the
+        # coroutine path emitted the raw name as a C++ expression
+        # ("'SyntaxError' was not declared in this scope").
+        'SyntaxError',
     })
 
     # Known runtime function signatures: fname -> (ret_type, [arg_types])
@@ -1835,7 +1842,16 @@ class GimpleGen:
                                            'int64_t *', 'int64_t *', 'int64_t *', 'int64_t *']),
         'mojo_regex_lastgroup':  ('char *', ['const char * *', 'int', 'int64_t *']),
         'mojo_regex_substr':     ('char *', ['char *', 'int64_t', 'int64_t']),
-        'mojo_getattr':          ('int64_t',   ['void *', 'char *']),
+        # Matches runtime/mojo_runtime.h's own declaration exactly
+        # (`int mojo_getattr(int obj, char *attr)` — the honest
+        # always-return-0 stub). The old entry here claimed
+        # ('int64_t', ['void *', 'char *']), so every call site coerced
+        # its object argument to `void *` and passed it to a function
+        # whose real first parameter is `int` — "passing argument 1 of
+        # 'mojo_getattr' makes integer from pointer without a cast"
+        # (Lib/test/support/__init__.py's bare-statement
+        # `getattr(object_to_patch, attr_name)`).
+        'mojo_getattr':          ('int',        ['int', 'char *']),
         'mojo_setattr':          ('void',      ['void *', 'char *', 'int64_t']),
         'mojo_delattr':          ('void',      ['void *', 'char *']),
         'mojo_re_sub_fn':        ('char *',    ['char *', 'void *', 'void *', 'char *']),
