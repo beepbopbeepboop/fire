@@ -1126,6 +1126,35 @@ def main():
         print(v)
 """, "110\n211\n312\n")
 
+    # `self.<method>()` inside a generator body OMITTING a defaulted
+    # trailing parameter (`def scaled(self, mult=2)` called as
+    # `self.scaled()`). Real target: Lib/mailbox.py's
+    # `_singlefileMailbox.iterkeys` doing `self._lookup()` on
+    # `def _lookup(self, key=None)` and `_ProxyFile.__iter__` doing
+    # `self.readline()` on `def readline(self, size=None)` — previously
+    # the coroutine-body call lowering emitted only the given arguments
+    # ("too few arguments to function '_singlefileMailbox__lookup'").
+    # The ordinary (non-coroutine) method-call path already padded short
+    # calls; the three coroutine-body struct-method call branches now run
+    # through the same arity/defaults padding.
+    test_generator_stdout("generator_self_method_defaulted_arg", """\
+class Box:
+    def __init__(self):
+        self.base = 100
+
+    def scaled(self, mult=2):
+        return self.base * mult
+
+    def gen(self):
+        yield self.scaled()
+        yield self.scaled(5)
+
+def main():
+    b = Box()
+    for v in b.gen():
+        print(v)
+""", "200\n500\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

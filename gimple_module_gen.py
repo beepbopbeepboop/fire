@@ -1628,6 +1628,32 @@ def gen_module_impl(self, stmts):
                         else:
                             param_ctypes.append(self._param_ctype(pname, ptype, m))
                     self.func_param_types[method_full_name] = param_ctypes
+                # Struct-METHOD parameter defaults, keyed by the same bare
+                # mangled name func_param_types just used — the coroutine-
+                # body (.cpp) emitter's own `self.<method>(...)`/`cls.<method>(
+                # ...)`/`<struct-ptr-local>.<method>(...)` call lowering reads
+                # this via the SAME bare-or-qualified lookup convention
+                # `_func_param_defaults.get(fsym) or .get(fname_raw)` already
+                # established for free functions (gimple_cpp_core.py's
+                # `_cpp_try_kwargs_forward_call`). Without it, an omitted
+                # defaulted trailing argument (`mailbox.py`'s
+                # `_singlefileMailbox.iterkeys` calling `self._lookup()` on
+                # `def _lookup(self, key=None)`) produced a call with fewer C
+                # arguments than the callee's real signature ("too few
+                # arguments to function '_singlefileMailbox__lookup'").
+                # Mirrors the free-function registration at ~line 1351:
+                # `param_defaults` holds ONLY the params that have one,
+                # starting at the first defaulted position (BUG-2026-020's
+                # finding), so consumers index from
+                # `len(expected) - len(defaults)`. Vararg/`**kwargs`-taking
+                # methods are skipped — their flat positional model doesn't
+                # apply (same exclusion `_signature_ctypes`' branch above
+                # already makes).
+                if not (m.params and any(pn.startswith('*') for pn, _ in m.params)):
+                    _m_dflts = getattr(m, 'param_defaults', None) or {}
+                    if _m_dflts:
+                        self._func_param_defaults.setdefault(method_full_name,
+                                                             [(pn, dv) for pn, dv in _m_dflts.items()])
 
     for s in all_structs_for_methods:
         if not (isinstance(s, StructDef) and s.name == 'GimpleGen'):

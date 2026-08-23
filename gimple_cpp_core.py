@@ -133,6 +133,52 @@ def _cpp_in_link(gen, a: str, a_node, b: str, b_node, negate: bool) -> str:
     return f"({res})"
 
 
+def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
+                                     args: list) -> list:
+    """Pad a coroutine-body struct-method call's argument list out to the
+    callee method's real arity (`args` EXCLUDES the receiver — the caller
+    re-prepends it when composing the final call text). The ordinary
+    (non-coroutine) GIMPLE path's `_lower_struct_method_call` already pads
+    a short call to `expected_non_self`; this emitter's three struct-method
+    call branches (`self.<method>(...)`, `cls.<method>(...)`,
+    `<struct-ptr-local>.<method>(...)`) previously emitted the given
+    arguments verbatim, so an omitted defaulted trailing argument
+    (mailbox.py's `_singlefileMailbox.iterkeys` calling `self._lookup()` on
+    `def _lookup(self, key=None)`) produced a C call with fewer arguments
+    than the callee's real signature — g++'s "too few arguments to
+    function '<mangled>'".
+
+    Arity comes from `func_param_types` under the qualified-or-bare mangled
+    key — the SAME registry the ordinary path reads (its entries include
+    the receiver as slot 0, hence the +1 below). Trailing gaps are filled
+    with each param's real declared default via the existing
+    `_default_expr_to_pair` helper (registered per bare mangled key by
+    gen_module's method pre-pass), falling back to a literal 0 — this
+    runtime's None/absent box — exactly like the ordinary path's own
+    padding loop. A vararg ('...' sentinel) signature is left unpadded
+    (unknown arity); kwargs are not modeled here (the coroutine emitter's
+    CallExpr handling never produced them for these branches).
+    """
+    expected = gen.func_param_types.get(sym) or gen.func_param_types.get(bare)
+    if not expected or len(expected) == 0 or '...' in expected:
+        return args
+    expected_non_self = len(expected) - 1
+    if len(args) >= expected_non_self:
+        return args
+    dflts = gen._func_param_defaults.get(sym) or gen._func_param_defaults.get(bare) or []
+    first_dflt = expected_non_self - len(dflts)
+    out = list(args)
+    while len(out) < expected_non_self:
+        pos = len(out)
+        dv = dflts[pos - first_dflt][1] if (dflts and 0 <= pos - first_dflt < len(dflts)) else None
+        if dv is None:
+            out.append('0')
+        else:
+            _dt, dval = gen._default_expr_to_pair(dv)
+            out.append(dval)
+    return out
+
+
 def _cpp_try_kwargs_forward_call(gen, e):
     """Real runtime-lookup-based `**kwargs` forwarding for a compiled
     generator/coroutine body call `f(pos..., **kwargs_var)`, where `f`
@@ -765,10 +811,14 @@ def _cpp_expr(gen, e) -> str:
             _cpp_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
                     and _cpp_self_struct:
-                args = ', '.join(gen._cpp_expr(a) for a in e.args)
+                args = [gen._cpp_expr(a) for a in e.args]
                 _sym = gen._struct_method_csym(_cpp_self_struct, e.func.member, '')
                 gen._cpp_struct_method_refs.add((_cpp_self_struct, e.func.member))
-                return f"{_sym}(self{', ' + args if args else ''})"
+                args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_cpp_self_struct}_{gimple_ctypes._safe_name(e.func.member)}",
+                    args)
+                return f"{_sym}(self{', ' + ', '.join(args) if args else ''})"
             # `cls.method(...)` inside a @classmethod generator — the
             # SAME name-only resolution mechanism the ordinary
             # (non-coroutine) GIMPLE path's own CallExpr/MemberExpr
@@ -805,10 +855,14 @@ def _cpp_expr(gen, e) -> str:
                         _cpp_self_struct, ())
                         and (_cls_mangled in gen._classmethod_names
                              or _cls_mangled in gen.func_return_types)):
-                    args = ', '.join(gen._cpp_expr(a) for a in e.args)
+                    args = [gen._cpp_expr(a) for a in e.args]
                     _sym = gen._struct_method_csym(_cpp_self_struct, _cls_method, '')
                     gen._cpp_struct_method_refs.add((_cpp_self_struct, _cls_method))
-                    return f"{_sym}(cls{', ' + args if args else ''})"
+                    args = _cpp_pad_struct_method_call_args(
+                        gen, _sym,
+                        f"{_cpp_self_struct}_{gimple_ctypes._safe_name(_cls_method)}",
+                        args)
+                    return f"{_sym}(cls{', ' + ', '.join(args) if args else ''})"
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"cls.{_cls_method}(...): only a call to a real "
                     "compiled classmethod/static method of the "
@@ -821,10 +875,14 @@ def _cpp_expr(gen, e) -> str:
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr):
                 _obj_struct = gen._cpp_struct_ptr_local(e.func.obj.name)
                 if _obj_struct:
-                    args = ', '.join(gen._cpp_expr(a) for a in e.args)
+                    args = [gen._cpp_expr(a) for a in e.args]
                     _sym = gen._struct_method_csym(_obj_struct, e.func.member, '')
                     gen._cpp_struct_method_refs.add((_obj_struct, e.func.member))
-                    return f"{_sym}({e.func.obj.name}{', ' + args if args else ''})"
+                    args = _cpp_pad_struct_method_call_args(
+                        gen, _sym,
+                        f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
+                        args)
+                    return f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})"
             # A member call on a MODULE-GLOBAL object whose member isn't a
             # statically-known function (os.py's `sys.audit(...)`,
             # compileall.py's `os.fspath(...)`, mimetypes.py's
