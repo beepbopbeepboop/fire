@@ -61,13 +61,22 @@ ABI_VERSION = "2"
 # bumping, and (unlike the git SHA) it catches *uncommitted* edits during dev.
 # Keep this list complete: anything that changes generated C / objects belongs
 # here. The version (below) is the safety net if something is missing.
+#
+# The gimple_* family is auto-discovered (glob) rather than enumerated: the
+# 2026-08 refactor split gimple_codegen.py into a dozen sibling modules, and
+# forgetting to add a new one here silently served stale cached output for
+# every edit to it (filed as BUG-2026-022 candidate by the box.3d/game AI).
+# Auto-discovery makes "new compiler source file" self-registering.
 _COMPILER_SOURCES = [
-    'gimple_codegen.py', 'mlir.py', 'module_loader.py', 'ast_rewriter.py',
+    'mlir.py', 'module_loader.py', 'ast_rewriter.py',
     'generated_dispatch.py', 'mojo_compiler.py',
     'elaborate.py', 'monomorphize.py', 'comptime.py',
     'imports.py', 'reflect.py', 'build_stdlib_dylib.py',
     'version.py', 'build_config.py',
 ]
+import glob as _glob
+for _p in sorted(_glob.glob(os.path.join(HERE, 'gimple_*.py'))):
+    _COMPILER_SOURCES.append(os.path.basename(_p))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link

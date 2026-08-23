@@ -1,5 +1,22 @@
 # Project Conventions
 
+## Git safety — NEVER discard work with `git checkout`
+`git checkout -- <file>` (and `git restore <file>`) permanently destroys
+uncommitted changes with no recovery. This has already destroyed ~10 hours of
+work in this project. Rules:
+
+- Do NOT use `git checkout <path>` / `git restore <path>` to "reset" a file
+  unless you are certain every uncommitted change in it is regenerable
+  (e.g. produced by a script you can re-run) AND you have re-read the diff
+  immediately beforehand (`git diff <path>`).
+- When iterating on generated files, prefer `git stash push -- <paths>`
+  (recoverable via `git stash pop`) over checkout, or have the generating
+  tool write to the file only after all validation passes.
+- `git checkout <branch>` is safe for committed state; the hazard is
+  path-scoped checkout/restore against uncommitted edits.
+- Before ANY checkout, run `git status --short` and eyeball what would be
+  discarded.
+
 ## Code Quality
 - Never pick the simple/quick fix. Always pick the production-quality approach.
 - Consolidate duplicates rather than maintaining parallel implementations.
