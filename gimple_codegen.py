@@ -816,6 +816,13 @@ class GimpleGen:
         # fspath) and the set of names needing a variadic extern in the .cpp.
         self._cpp_module_fn_names: set[str] = set()
         self._cpp_module_variadic_func_refs: set[str] = set()
+        # Per-function refusal reason recorded whenever a generator/async
+        # unit compile attempt raises _UnsupportedGeneratorShape (keyed by
+        # the function's Python name, first reason wins). Surfaced in
+        # gen_module's strict-mode whole-module refusal so `mojo.py build`
+        # failures name the actual unsupported shape instead of only the
+        # generic category list (previously visible only under MOJO_DEBUG).
+        self._cpp_refusal_reasons: dict[str, str] = {}
         # Module-level global names collected by the lightweight pre-scan
         # before the generator compile loop (Pass 1.3d-gen) — populated
         # BEFORE _global_var_types (Phase 1.7), which runs later.

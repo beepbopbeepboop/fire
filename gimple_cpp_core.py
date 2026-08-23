@@ -1630,7 +1630,42 @@ def _cpp_expr(gen, e) -> str:
                     and fname in gen._cpp_module_fn_names):
                 gen._cpp_module_variadic_func_refs.add(fname)
                 return f"{fname}({', '.join(args)})"
-            return f"{fname}({', '.join(args)})"
+            # A call through a DECLARED callable-value local (`getpos()`
+            # after `getpos = lambda: None` / `getpos = data.tell`) — the
+            # one callee shape whose bare-name emission is valid C++
+            # (`std::function` supports `operator()`), so it must stay
+            # here rather than move under the refusal below. Same
+            # C/C++-keyword rename agreement as every other read of a
+            # renamed name (see _cpp_kw_param_renames).
+            if (gen._cpp_declared is not None
+                    and gen._cpp_declared.get(fname) in (
+                        gimple_ctypes._CPP_CALLABLE_CTYPE,
+                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
+                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                return f"{cpp_fname}({', '.join(args)})"
+            # Everything else reaching this point would be emitted as a
+            # bare, undeclared C++ identifier call — which g++ always
+            # rejects ("'X' was not declared in this scope") or, worse,
+            # silently binds to an unrelated global. Real shapes that
+            # land here: a nested `def` local to the generator body
+            # (importlib/metadata/__init__.py's `quoted_marker(section)`
+            # / `url_req_space(req)` inside
+            # Distribution._convert_egg_info_reqs_to_simple_reqs — this
+            # scalar coroutine-body model has no closure-compilation),
+            # Python builtins with no coroutine-body lowering (map/filter
+            # in Sectioned.read), and foreign-module struct constructors
+            # (`Pair(name, value)` — Pair lives in
+            # importlib.metadata._collections, so it isn't in THIS
+            # module's struct_field_types and the ctor branch above
+            # can't fire). Refuse honestly so gen_module falls back to
+            # its documented source-interpretation path instead of
+            # emitting broken .cpp.
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"a call to unresolved callee '{fname}(...)' is not "
+                "supported in a compiled generator/coroutine body (not "
+                "a builtin this emitter supports, a known module-level/"
+                "imported function, a same-module struct constructor, or "
+                "a declared callable-value local)")
         if isinstance(e.func, gimple_ctypes.CallExpr):
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
