@@ -1,5 +1,17 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-23 — re-verified; honest refusal for `self.select_exists` as a plain value unchanged)
+
+Isolated compile reproduces the exact `RuntimeError: cannot compile module:
+'self.select_exists' on struct '_GlobberBase' is a compiled GENERATOR
+method referenced as a plain value (not called)` refusal the 2026-08-20
+entry landed — zero generated C references the undeclared symbol, exactly
+as designed. This session's three generic generator-codegen fixes don't
+touch the bound-generator-value calling-convention feature gap behind it.
+The `translate_584a43` kwarg-arity architectural issue (same-bare-name
+collision family) also remains as documented. No change.
+
+
 ## Status (updated 2026-08-20 — a NEW blocker found+fixed: bound-value reference to a generator method crashed with an undeclared-symbol GCC error)
 
 Re-verified against current master (`f0bdc29`). A fresh full build

@@ -890,9 +890,14 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     is_tuple = var.startswith('(') and var.endswith(')')
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
+        # Bracket-aware split (a naive `inner.split(',')` turned a nested
+        # target like `(report_type, (old_mode, old_file))` into the bogus
+        # name fragments `(old_mode` / `old_file)` — declared verbatim as
+        # `int64_t (old_mode;` etc., hard C syntax errors; see
+        # Lib/test/support/__init__.py's WindowsCleanup.__exit__).
         inner = var[1:-1].strip()
-        var_names = [v.strip() for v in inner.split(',')]
-        # Declare each slot by its REAL per-slot element type, not a
+        var_names = gen._split_top_level_comma(inner)
+        # Declare each FLAT slot by its real per-slot element type, not a
         # blanket int64_t: _declare_var is deliberately first-decl-wins,
         # so pre-declaring int64_t here permanently locked every unpacked
         # target to int64_t before the per-slot analysis below (dict-
@@ -901,10 +906,20 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # consumer consults (real: Apple/__main__.py's
         # `for slice_name, slice_parts in HOSTS[platform].items():`,
         # whose `CROSS_BUILD_DIR / slice_name` needs the key slot's real
-        # char* at the `/` lowering).
+        # char* at the `/` lowering). A nested parenthesized target is
+        # not itself a variable — recurse so only its INNER names get
+        # declared, as boxed int64_t (the body's nested-unpack recursion
+        # assigns them from opaque boxed pairs, matching the pre-typed-
+        # slots behavior for that shape).
         slot_elems = _tuple_unpack_slot_elems(gen, it_val, len(var_names))
+        def _declare_target_name(vn, se):
+            if vn.startswith('(') and vn.endswith(')'):
+                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+                    _declare_target_name(_nv, 'int64_t')
+            else:
+                gen._declare_var(vn, se, force=(vn == shadow_name))
         for vn, se in zip(var_names, slot_elems):
-            gen._declare_var(vn, se, force=(vn == shadow_name))
+            _declare_target_name(vn, se)
     else:
         var_names = None
         gen._declare_var(var, elem, force=(var == shadow_name))
@@ -941,13 +956,34 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # %ld). dict-items keys are always strings; the value slot's type
         # comes from the dict's value type. Homogeneous tuple-literal
         # lists store every slot by the tuple's own element type
-        # (_nested_elem_types). Slot types were already resolved (and the
-        # targets declared by them) at the top of this function via
-        # _tuple_unpack_slot_elems.
-        for i, vn in enumerate(var_names):
-            slot_elem = slot_elems[i]
-            # Re-resolve against first-decl-wins: an earlier declaration
-            # of the same name still wins; box/coerce into it below.
+        # (_nested_elem_types). pair_elem is kept for the nested-target
+        # recursion below; FLAT slot types come from slot_elems, resolved
+        # once at the top of this function (same dict-items /
+        # _tuple_slot_types / _nested_elem_types inputs — one computation
+        # shared with the declarations there).
+        pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+
+        def _emit_slot_read(ptr, i, slot_elem):
+            suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
+            if suf_i == 'str':
+                return 'char *', f"mojo_list_get_str ({ptr}, {i})"
+            return 'int64_t', f"mojo_list_get_int ({ptr}, {i})"
+
+        def _emit_target_assign(ptr, vn, i, slot_elem):
+            """Assign slot `i` of the tuple at `ptr` to target name `vn` —
+            which may itself be a parenthesized nested tuple target
+            (`(old_mode, old_file)`), in which case the slot is read as an
+            opaque boxed pair and recursively unpacked (one extra level is
+            the realistic real-world shape; deeper nesting recurses
+            identically)."""
+            if vn.startswith('(') and vn.endswith(')'):
+                rt, rv = _emit_slot_read(ptr, i, 'int64_t')
+                nested_raw = gen._new_val(rt, rv)
+                nested_ptr = gen._new_val('MojoList *', f"(MojoList *){nested_raw}")
+                nested_names = gen._split_top_level_comma(vn[1:-1].strip())
+                for j, nn in enumerate(nested_names):
+                    _emit_target_assign(nested_ptr, nn, j, pair_elem)
+                return
             gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
@@ -969,6 +1005,12 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     gen._emit(f"  {cvn} = {raw};")
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cvn)
+
+        for i, vn in enumerate(var_names):
+            if vn.startswith('(') and vn.endswith(')'):
+                _emit_target_assign(tuple_ptr, vn, i, 'int64_t')
+                continue
+            _emit_target_assign(tuple_ptr, vn, i, slot_elems[i])
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -1130,7 +1172,20 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     is_tuple = var.startswith('(') and var.endswith(')')
     if is_tuple:
         inner = var[1:-1].strip()
-        var_names = [v.strip() for v in inner.split(',')]
+        var_names = gen._split_top_level_comma(inner)
+        # Flatten any nested tuple target the same way _gen_for_list does
+        # (a naive split turned `(k, (a, b))` into the bogus fragments
+        # `(a` / `b)`, declared verbatim — hard C syntax errors).
+        def _flatten(vn, acc):
+            if vn.startswith('(') and vn.endswith(')'):
+                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+                    _flatten(_nv, acc)
+            else:
+                acc.append(vn)
+        _flat = []
+        for vn in var_names:
+            _flatten(vn, _flat)
+        var_names = _flat
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
         # slots int64_t (not char*) so a sibling list-iteration branch over

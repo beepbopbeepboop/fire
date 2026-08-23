@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/test/test_support.py
 
+## Status (updated 2026-08-23 — FIXED)
+
+`python3 mojo.py build Lib/test/test_support.py` now completes END-TO-END
+(EXIT=0) for the first time. Beyond the submodule-from-import fix above,
+this session fixed the remaining shared blockers: env-dict param
+inference, print_warning's module-level function-attribute namespace
+(now backed by a synthesized _funcattr_print_warning__orig_stderr global
+on both read and write sides), bigmemtest closure capture temps,
+patch()'s mojo_getattr declaration mismatch, and import_helper's
+unlink binding. The file's own `_caplog` generator compiles through the
+coroutine path; its `root_logger.addHandler/removeHandler` calls on the
+opaque logging.getLogger() result stub to diagnosed no-ops (consistent
+with the model's treatment of unrepresentable module calls). Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-19)
 
 The 2026-08-09 status below classified this doc's ONE own-file error

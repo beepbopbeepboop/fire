@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-23 — PARTIAL)
+
+The documented `cm.unraisable.*` int64_t-member errors are GONE:
+attribute reads/calls rooted at opaque-scalar locals now stub to 0
+(diagnosed) instead of emitting invalid C++, so `with ...
+catch_unraisable_exception() as cm:` bodies compile through. The build
+now fails one level deeper, on a NEWLY-diagnosed residual: inherited
+unittest.TestCase method calls from generator bodies
+(`self.assertIsInstance(...)`) get extern declarations whose parameter
+list defaults to `(self)`-only when no param info exists in this module,
+so the 3-arg call site fails 'too many arguments'. Same residual blocks
+_test_eintr's assertEqual sites. Not attempted here (needs arity-aware
+_cpp_struct_method_refs or inherited-method resolution). The #147-shaped
+classification below otherwise stands. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (re-verified 2026-08-11, unchanged — deeper investigation confirms genuinely structural, not attempted)
 
 Re-ran a fresh isolated build; reproduces identically to the 2026-08-09

@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-23 — STILL-OPEN)
+
+Re-ran the repro: identical `unsupported statement in generator body:
+StructDef` refusal on fake_pip. Unchanged; the three-piece scoped design
+recorded above stands. One adjacent enabler DID land this session (class-
+body conditional methods are now hoisted at parse time), but nested
+class DEFINITION inside a generator BODY remains unsupported. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-12 — re-verified, still not attempted; scoped a concrete design for a real fix)
 
 Re-verified against current master with a real `MOJO_DEBUG=1 python3

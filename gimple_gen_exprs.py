@@ -1047,6 +1047,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             ot = _pt
         field_type = gen.struct_field_types[_pst][node.member]
         t = gen._new_val(field_type, f"{ov}->{gimple_ctypes._safe_field(node.member)}")
+        # Propagate container element/value types onto the field-read temp,
+        # exactly like the generic instance-field branch further below (its
+        # `_field_elem_types`/`_field_dict_val_types` seeding at the
+        # field_map hit). This early param-struct branch used to return
+        # WITHOUT any propagation, so reading a List[String] field off a
+        # struct-typed PARAMETER (`c.variables[i]` inside
+        # `def set_variable(c: ComputerCase, ...)`) left _elem_types empty,
+        # the subscript fell back to int64_t, and string elements came back
+        # as raw boxed handles — box.3d/game's "set_variable then
+        # get_variable returns 0" failures (BUG-2026-023 residual).
+        if field_type == 'MojoList *':
+            stored = gen._field_elem_types.get(_pst, {}).get(node.member)
+            if stored:
+                gen._elem_types[t] = stored
+            dict_stored = gen._field_dict_val_types.get(_pst, {}).get(node.member)
+            if dict_stored:
+                gen._dict_val_types[t] = dict_stored
+        elif field_type == 'MojoDict *':
+            dict_stored = gen._field_dict_val_types.get(_pst, {}).get(node.member)
+            if dict_stored:
+                gen._dict_val_types[t] = dict_stored
         return field_type, t
 
     # If the object lowered to a C type name (class used as cls argument),
@@ -1738,13 +1759,27 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # value, not a string-stored-as-int. This is String concatenation with
         # an Int; emitting `char* + int` as C arithmetic is invalid and ICEs
         # gcc's build2. Stringify the numeric operand and concatenate.
+        # EXCEPTION: an operand whose _actual_types says 'char' came from
+        # string indexing (`ch = text[i]`) with its storage widened to
+        # int64_t by Pass 1.3b joining — that is a 1-CHARACTER STRING by
+        # dialect semantics (see _lower_list_method append's identical
+        # recovery), so concatenate via mojo_char_to_str, NOT
+        # mojo_str_from_int (which appended the decimal BYTE CODE:
+        # box.3d/game's ComputerMonitor.print_text turned "Hello, World!"
+        # into "72101108111144...").
         if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
-            nv = gen._to_int64(rt2, rv2)
-            sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
+            if gen._actual_types.get(rv2) == 'char':
+                sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv2)])
+            else:
+                nv = gen._to_int64(rt2, rv2)
+                sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
             return 'char *', gen._call_expr('char *', 'mojo_str_cat', [('char *', lv2), ('char *', sv)])
         if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
-            nv = gen._to_int64(lt2, lv2)
-            sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
+            if gen._actual_types.get(lv2) == 'char':
+                sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv2)])
+            else:
+                nv = gen._to_int64(lt2, lv2)
+                sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
             return 'char *', gen._call_expr('char *', 'mojo_str_cat', [('char *', sv), ('char *', rv2)])
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
@@ -1871,6 +1906,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             return '_Bool', t
 
 
+    # String ORDERING comparisons (`c >= "A"`, `name < "M"`, ...). Only
+    # ==/!= had strcmp-based handling; <,>,<=,>= fell through to the
+    # generic numeric-compare tail, which pointer-cast both char* operands
+    # to int64_t and compared ADDRESSES — so box.3d/game's tokenizer
+    # helpers (is_alpha_char: `c >= "A" and c <= "Z"`) always returned
+    # garbage and no identifier ever tokenized. Lexicographic byte order
+    # via mojo_cstr_cmp matches both C strncmp and the interpreter's
+    # str ordering for ASCII.
+    if op in ('<', '>', '<=', '>=') and (
+            lt == 'char *' or rt == 'char *'
+            or gen._actual_types.get(lv) == 'char'
+            or gen._actual_types.get(rv) == 'char'):
+        ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv)[1]
+        rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv)[1]
+        cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
+        t = gen._new_temp('_Bool')
+        gen._emit(f'  {t} = {cmp_t} {op} 0;')
+        return '_Bool', t
+
     # is / is not → pointer identity
     if op in ('is', 'is not'):
         c_op = '==' if op == 'is' else '!='
@@ -1909,11 +1963,22 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # becomes ordinary string concatenation. Found via mojo_compiler.py's
     # own `_decode_str_literal_text`'s `prefix += val[0]` failing to
     # self-compile with exactly that ICE.
-    if op == '+' and lt == 'char *' and rt == 'char':
+    #
+    # The char operand may also arrive typed int64_t: an unannotated local
+    # holding `text[i]` gets its declared storage WIDENED to int64_t by
+    # Pass 1.3b's assignment-type joining (the same widening
+    # _lower_list_method's append already recovers from via _actual_types).
+    # Without recovering here, `current_line = current_line + ch` emitted
+    # mojo_str_from_int(ch) — appending the DECIMAL BYTE CODES instead of
+    # the character ("Hello, World!" became "72101108111144..." in
+    # box.3d/game's ComputerMonitor.print_text). Mirror append's recovery.
+    if op == '+' and lt == 'char *' and rt in ('char', 'int', 'int64_t') \
+            and (rt == 'char' or gen._actual_types.get(rv) == 'char'):
         rv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
         return 'char *', t
-    if op == '+' and lt == 'char' and rt == 'char *':
+    if op == '+' and rt == 'char *' and lt in ('char', 'int', 'int64_t') \
+            and (lt == 'char' or gen._actual_types.get(lv) == 'char'):
         lv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
         return 'char *', t
@@ -3035,3 +3100,5 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
     return res_type, res
+
+# fp-probe

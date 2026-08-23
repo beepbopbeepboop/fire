@@ -439,6 +439,29 @@ def _mojo_type(ann: str | type | None) -> str:
             return 'MojoDict *'
         if base in ('set', 'Set'):
             return 'MojoSet *'
+    # Fixed-size array annotation spelling `[T; N]` (BUG-2026-008 family,
+    # box.3d/game: `[Int; 9]` crafting grids, `[Block; MAX_BLOCKS]`). The
+    # rest of this compiler ALREADY represents such arrays as boxed
+    # MojoList handles end-to-end wherever it works today: array literals
+    # lower to mojo_list_new()+append, subscript reads/writes route
+    # through mojo_list_get_int/set_int, and PARAMS of this spelling
+    # decay to an int64_t handle (_param_ctype's own path) that callees
+    # cast back to MojoList*. But THIS mapper — the canonical return-type
+    # / import-signature resolver both gimple_codegen._resolve_type and
+    # module_loader._mojo_type_to_c delegate to — had NO branch for the
+    # spelling, so a function RETURNING `[Int; 3]` was silently erased to
+    # int64_t on BOTH the definition and every importer's forward decl.
+    # Every subsequent subscript store on such a value then fell into the
+    # opaque-int-container fallback ("check if it's a list or dict ...
+    # default to dict") and emitted mojo_dict_set_int against raw scalar
+    # garbage — mutations lost / SIGSEGV (test_crafting's 72 wood->planks
+    # failures; minimal repro `g := make(); g[1] = 5; print(sum(g))`).
+    # Mapping to MojoList* matches the representation every working part
+    # of the pipeline already uses for this annotation shape.
+    if isinstance(ann, str):
+        _m = _FIXED_ARRAY_ANN_RE.match(ann.strip())
+        if _m:
+            return 'MojoList *'
     # Handle parameterized types: UnsafePointer[Int], List[Float64], etc.
     if '[' in ann:
         base, rest = ann.split('[', 1)
