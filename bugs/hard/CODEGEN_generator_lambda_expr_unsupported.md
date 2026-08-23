@@ -1,5 +1,20 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (re-verified 2026-08-23 — no new work)
+
+Re-ran `test_gimple_generator_runner.py`: **42/42 pass**, confirming both
+landed phases (zero-arg lambda / bound-method-value; single-param lambda +
+`sorted(..., key=...)` + the segfault fix) still hold after the Wave-2
+file refactor (`_CPP_CALLABLE_CTYPE`/`_CPP_CALLABLE_CTYPE_1ARG` now
+exported via gimple_cpp_core/gimple_codegen re-exports). Both open items
+remain open, unchanged: occurrence #2 (fsutil.py's `lambda *a, **k`) is
+gated behind the separately-tracked args/kwargs-forwarding gap, and the
+struct-pointer-key-field sub-gap below still needs the `_field_elem_types`
+pass-ordering change to `gen_module` — reconfirmed there is still NO
+confirmed real-corpus occurrence requiring it, and its failure mode stays
+a loud g++ error (safe degradation), so the risk/benefit of a shared
+pass-ordering change remains unfavorable. Not attempted this session.
+
 ## Status (updated 2026-08-21 — single-parameter lambda / `sorted(..., key=...)` FIXED; found+fixed a real SEGFAULT along the way; one narrower sub-gap still open)
 
 Extended the 2026-08-20 zero-argument-lambda mechanism (below) to a

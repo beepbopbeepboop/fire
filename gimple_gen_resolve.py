@@ -369,6 +369,9 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # share: Phase 3 per-function param-usage-scan cache
                 # (see its own declaration next to _field_scan_var_cache).
                 temp_gen._param_usage_scan_cache = gen._param_usage_scan_cache
+                # share: Phase 4 per-statement call-collection cache
+                # (see its own declaration next to _param_usage_scan_cache).
+                temp_gen._calls_in_stmts_cache = gen._calls_in_stmts_cache
                 temp_gen._extra_search_paths = gen._extra_search_paths  # share: sys.path.insert dirs seen anywhere in the closure
                 temp_gen.func_return_types = gen.func_return_types  # share across gens
                 # share: `self._compiled_modules`-based dedup (line above,
@@ -1577,7 +1580,8 @@ def _collect_return_elems(gen, stmts, acc) -> None:
 KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}
 
 
-def _infer_return_elem_type(gen, body, func_def=None) -> str | None:
+def _infer_return_elem_type(gen, body, func_def=None,
+                            _base_var_types=None) -> str | None:
     """Infer the container ELEMENT type a function returns, or None when it
     returns no statically-identifiable container. See _quick_container_elem.
 
@@ -1596,7 +1600,22 @@ def _infer_return_elem_type(gen, body, func_def=None) -> str | None:
     # element inference depending on module processing order.
     _saved = (gen.var_types, gen._elem_types, gen._dict_val_types,
               gen._actual_types, getattr(gen, '_prepass_struct', None))
-    gen.var_types = {}
+    # Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    # rescan.md): the per-call seed used to be built by iterating the
+    # ENTIRE tree-shared `func_return_types` dict one setdefault at a
+    # time — O(|func_return_types|) interpreted work on EVERY call, and
+    # Pass 2c calls this once per function per fixpoint iteration per
+    # nesting level (275k calls × ~1800 entries ≈ 500M setdefaults for
+    # Lib/contextlib.py). `func_return_types` is provably frozen for the
+    # duration of one Pass 2c run (its loop touches only bodies via this
+    # scan and writes only `self._return_elem_types`; nothing reachable
+    # from here registers return types), so the caller may hoist ONE
+    # snapshot of it per run and hand it in as `_base_var_types` — each
+    # call then copies that snapshot at C speed instead of re-seeding
+    # entry-by-entry. Content is identical either way; when no snapshot
+    # is supplied the legacy path below still seeds from
+    # gen.func_return_types directly.
+    gen.var_types = dict(_base_var_types) if _base_var_types is not None else {}
     # Seed with facts that are TRUE regardless of processing order: this
     # function's own annotated params, every registered cross-function
     # return type (imported externs + Pass-2a inferred), and the fixed
@@ -1605,8 +1624,9 @@ def _infer_return_elem_type(gen, body, func_def=None) -> str | None:
         for pname, ptype in (func_def.params or []):
             gen.var_types[pname] = (gimple_ctypes._mojo_type(ptype)
                                     if ptype else 'int64_t')
-    for k, v in gen.func_return_types.items():
-        gen.var_types.setdefault(k, v)
+    if _base_var_types is None:
+        for k, v in gen.func_return_types.items():
+            gen.var_types.setdefault(k, v)
     for k, v in KNOWN_LEAF_RETS.items():
         gen.var_types.setdefault(k, v)
     gen._elem_types = dict(_saved[1])   # container elem types stay visible
@@ -1816,21 +1836,51 @@ def _collect_calls(gen, expr, out):
 
 
 def _calls_in_stmts(gen, stmts, out):
-    """Collect every CallExpr reachable from a statement list."""
+    """Collect every CallExpr reachable from a statement list.
+
+    Phase 4 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    rescan.md): the traversal is a pure function of each top-level
+    statement's subtree (`_collect_calls` reads no mutable gen state —
+    its only gen call, `_fstring_sub_exprs`, re-parses the literal's own
+    text from scratch), and every consumer of the collected list only
+    READS the yielded CallExpr nodes (isinstance/`.func.name`/`.args`
+    inspection; none mutates them or compares identity). So each top-
+    level statement's contribution is memoized by id(stmt) in the
+    tree-wide shared `gen._calls_in_stmts_cache`, exactly like Phase 2's
+    field-scan caches: a statement already walked by any earlier level /
+    fixpoint round contributes its cached calls verbatim instead of
+    being re-walked O(levels × rounds) times as `imported_stmts` and the
+    Pass 1.3d/2c caller-body lists grow."""
+    cache = gen._calls_in_stmts_cache
     for n in stmts:
-        for attr in ('value', 'condition', 'iterable'):
-            if hasattr(n, attr):
-                gen._collect_calls(getattr(n, attr), out)
-        for attr in ('body', 'then_body', 'else_body', 'finally_body'):
-            sub = getattr(n, attr, None)
-            if isinstance(sub, list):
-                gen._calls_in_stmts(sub, out)
-        for _cond, eb in (getattr(n, 'elifs', None) or []):
-            gen._calls_in_stmts(eb, out)
-        for h in (getattr(n, 'handlers', None) or []):
-            hb = getattr(h, 'body', None)
-            if isinstance(hb, list):
-                gen._calls_in_stmts(hb, out)
+        cached = cache.get(id(n))
+        if cached is None:
+            sub = []
+            _collect_calls_in_stmt(gen, n, sub)
+            cached = tuple(sub)
+            cache[id(n)] = cached
+        out.extend(cached)
+
+
+def _collect_calls_in_stmt(gen, n, out):
+    """Walk ONE statement, appending every reachable CallExpr to out —
+    the exact per-statement body of the pre-memoization `_calls_in_stmts`
+    loop (same attribute order, same recursion through the memoized
+    `gen._calls_in_stmts` entry point so nested statement lists are
+    cached too)."""
+    for attr in ('value', 'condition', 'iterable'):
+        if hasattr(n, attr):
+            gen._collect_calls(getattr(n, attr), out)
+    for attr in ('body', 'then_body', 'else_body', 'finally_body'):
+        sub = getattr(n, attr, None)
+        if isinstance(sub, list):
+            gen._calls_in_stmts(sub, out)
+    for _cond, eb in (getattr(n, 'elifs', None) or []):
+        gen._calls_in_stmts(eb, out)
+    for h in (getattr(n, 'handlers', None) or []):
+        hb = getattr(h, 'body', None)
+        if isinstance(hb, list):
+            gen._calls_in_stmts(hb, out)
 
 def _split_expr_format(src: str) -> str:
     """Split off format spec and conversion from an f-string expression.

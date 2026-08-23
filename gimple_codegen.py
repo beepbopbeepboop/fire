@@ -615,6 +615,29 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        # Pre-body-emission companion of the stash above: a generator
+        # unit's OWN preliminary `_generator_tuple_yield_slot_ctypes`
+        # result (computed from just its params' types, before body
+        # emission fills `declared`), stashed so `_cpp_yield_tuple` —
+        # which runs DURING body emission, strictly before the
+        # post-emission computation that fills _cpp_last_tuple_slot_
+        # ctypes — can box every tuple-yield site out to the UNIFIED
+        # arity (padding shorter sites with zero/empty values) whenever
+        # the sites disagree on element count. None for every
+        # non-tuple-yielding or type-unresolvable generator; cleared in
+        # each unit's `finally` alongside the other per-compile state.
+        self._cpp_pending_tuple_slots: list | None = None
+        # THIS instance's own Phase 1.7 conclusions for its OWN top-level
+        # globals (bare name -> semantic ctype), recorded at write time
+        # alongside the whole-program-shared _global_var_types entry. The
+        # shared flat dict is keyed by bare name alone, so any
+        # later-processed module declaring the same bare name overwrites
+        # it (io.py/inspect.py/tokenize.py's `__author__`, token.py/
+        # tarfile.py's `ENCODING`) — an assignment emitted after that
+        # overwrite would coerce its RHS to ANOTHER module's type.
+        # Consumers use `_global_dst_ctype`, which trusts this overlay for
+        # scalar conclusions and falls back to the shared dicts otherwise.
+        self._own_global_var_types: dict = {}
         # cpp_text fragments from _gen_cpp_generator_unit, one per supported
         # generator, concatenated into self.generated_cpp at the end of
         # gen_module once the common preamble is known.
@@ -1270,6 +1293,16 @@ class GimpleGen:
         # `self.struct_field_types`, grown monotonically during
         # compilation — the same time-dependent-filter trap as Phase 2).
         self._param_usage_scan_cache: dict = {}
+        # Phase 4 (same doc, same pattern): per-top-level-statement
+        # memoization of `_calls_in_stmts`' pure CallExpr-collection walk
+        # (gen_module's ctor-literal scan plus its Pass 1.3d/2c caller-body
+        # scans — the latter re-collects every caller body 4 more times
+        # inside its own fixpoint loop). Keyed by id(stmt); shared by
+        # reference into every temp_gen like the caches above. Safe to
+        # cache whole because the traversal reads no mutable gen state and
+        # every consumer only READS the collected nodes; see
+        # gimple_gen_resolve._calls_in_stmts.
+        self._calls_in_stmts_cache: dict = {}
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
@@ -2720,6 +2753,34 @@ class GimpleGen:
         return gfn._collect_body_import_bindings(self, node_list, scope)
     def _func_qualifier(self, bare_name: str) -> str:
         return gfn._func_qualifier(self, bare_name)
+    def _global_dst_ctype(self, name: str) -> str:
+        """The destination C type for an assignment to a bare-name module
+        global — the same lookup the four global-assignment emission sites
+        in gimple_gen_stmts.py used to inline as
+        `_global_c_decl_types.get(name, _global_var_types[name])`, plus one
+        override: when THIS instance's own Phase 1.7 scan concluded a SCALAR
+        type for this name (recorded in `_own_global_var_types` at write
+        time), trust it over both shared dicts. The shared dicts are keyed
+        by bare name across every module compiled together, so a
+        later-scanned module declaring the same bare name (tokenize.py vs
+        io.py/inspect.py's `__author__`, tarfile.py vs token.py's
+        `ENCODING`) would otherwise make this module's own assignment
+        coerce its RHS to the OTHER module's type (the observed "assignment
+        to 'char *' from 'int64_t'" family). Two things keep prior behavior
+        otherwise intact: a genuine POINTER entry in `_global_c_decl_types`
+        (e.g. the `_EARLY_DISPATCH_DICTS`/`_EARLY_DISPATCH_SETS` overrides
+        for this compiler's own dispatch tables) still wins unconditionally,
+        and a CONTAINER-typed own conclusion still defers to
+        `_global_c_decl_types`'s int64_t boxing exactly as before."""
+        own = self._own_global_var_types.get(name)
+        if own is not None:
+            cdecl = self._global_c_decl_types.get(name)
+            if cdecl is not None and cdecl.endswith(' *'):
+                return cdecl
+            if own in ('int64_t', 'double', '_Bool', 'char *'):
+                return own
+            return cdecl if cdecl is not None else own
+        return self._global_c_decl_types.get(name, self._global_var_types.get(name, 'int64_t'))
     def _locally_binds_name(self, bare_name: str) -> bool:
         return gfn._locally_binds_name(self, bare_name)
     def _func_mangleable(self, name: str) -> bool:
@@ -2764,7 +2825,7 @@ class GimpleGen:
         return gfn._struct_method_overload_ids(stmt)
     def _struct_method_qualifier(self, struct_name: str) -> str:
         return gfn._struct_method_qualifier(self, struct_name)
-    def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str) -> str:
+    def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str='') -> str:
         return gfn._struct_method_csym(self, struct_name, method_name, overload_id)
     @staticmethod
     @staticmethod
@@ -3180,8 +3241,10 @@ class GimpleGen:
         return grsl._collect_local_container_elems(self, stmts)
     def _collect_return_elems(self, stmts, acc) -> None:
         return grsl._collect_return_elems(self, stmts, acc)
-    def _infer_return_elem_type(self, body, func_def=None) -> str | None:
-        return grsl._infer_return_elem_type(self, body, func_def=func_def)
+    def _infer_return_elem_type(self, body, func_def=None,
+                                _base_var_types=None) -> str | None:
+        return grsl._infer_return_elem_type(self, body, func_def=func_def,
+                                            _base_var_types=_base_var_types)
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):

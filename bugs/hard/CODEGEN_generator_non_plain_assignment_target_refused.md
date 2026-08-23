@@ -1,5 +1,20 @@
 # HARD BUG: any assignment inside a generator body whose target isn't a bare identifier is refused outright
 
+## Status (re-verified 2026-08-23 — no new work)
+
+Re-ran `test_gimple_generator_runner.py`: **42/42 pass** — every shape
+this doc records as fixed (self-field write, tuple/list-unpack incl.
+Comprehension RHS, sys.stderr/stdout/stdin elision, full-slice-assign,
+subscript read/write via the runtime helpers) still holds after the
+Wave-2 file refactor. The two remaining refused shapes were re-scoped
+rather than re-attempted: bounded/stepped slice-assign still has NO
+splice-write runtime facility to lower to (checked `runtime/mojo_runtime.h`
+today — only the read-only copy op `mojo_list_slice(l, start, stop)`
+exists, nothing that shifts elements in place), confirming the "genuinely
+bigger" characterization; non-self/non-sys MemberExpr targets are
+unchanged (no backing-storage representation in this model). Both stay
+deliberately refused.
+
 ## Status (updated 2026-08-19, subscript READ+WRITE (`d[k]=val`/`arr[i]=val`) was actually BROKEN, not "already supported" as this doc previously believed — FIXED)
 
 Investigated the two sub-shapes the "What a fix needs" section (below)

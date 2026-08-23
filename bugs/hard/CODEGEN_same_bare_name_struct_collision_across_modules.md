@@ -1,5 +1,34 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
+## Re-verified 2026-08-23 (triage pass): minimal repro still corrupts at the TYPE-IDENTITY layer; general plan remains DOCUMENTED-NOT-FIXED
+
+Re-ran the minimal 3-file repro (mod_a.py and mod_b.py each defining
+an unrelated `class Dialog` — fields `widgetName` vs `result` — with a
+root main.py importing both under aliases and constructing both)
+directly against the vulnerable entry point
+(`gimple_codegen.compile_to_gimple_cached(src, do_imports=True)`),
+then compiled the generated .ci with the project's real `-fgimple`
+GCC:
+
+- The 2026-08-20 method-symbol fix is holding: the two classes'
+  methods now emit/declare as `mod_a_Dialog___init__`/`mod_a_Dialog_show`
+  vs `mod_b_Dialog___init__`/`mod_b_Dialog_show` (no C symbol collision).
+- But the STRUCT TYPEDEF itself is still one bare-name winner: a single
+  `typedef struct Dialog { int64_t widgetName; } Dialog;`, and mod_b's
+  `___init__` body still emits `self->result = ...` against it —
+  confirmed live via `gcc-mp-15 -fgimple -x c -c`: exactly
+  `mod_b.py:3:7: error: 'Dialog' has no member named 'result'`.
+
+So the corruption this doc describes has moved fully into the
+field-table/type-identity layer, precisely as the general 4-step plan
+below anticipates. That plan (module-qualified field-table keys,
+value-identity propagation to field-access sites, per-owner tables in
+Phase 2a's method compile loop, typedef-name qualification) remains
+unattempted — still foundational machinery touched by every compiled
+struct, still rated moderate-to-high risk by this doc's own Risk
+section. DOCUMENTED-NOT-FIXED; the fresh repro commands above are the
+fastest known way to re-derive the failure.
+
 ## Partial fix (2026-08-20 — the STRUCT-METHOD-SYMBOL-QUALIFIER piece of this mechanism is fixed; the general struct FIELD-TABLE/TYPE-IDENTITY plan below remains open/unattempted)
 
 Investigating the live `Lib/mailbox.py` instance from the 2026-08-11

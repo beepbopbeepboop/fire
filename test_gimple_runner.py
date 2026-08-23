@@ -406,6 +406,47 @@ def main():
 main()
 """, "read_nonlocal\n11\n")
 
+    # 19. (bugs/CODEGEN_keyword_only_ctor_call_skips_earlier_default.md) A
+    # keyword-only constructor call must fill every SKIPPED earlier param
+    # with its own declared default, not 0. Before the fix: `Derived(b=99)`
+    # emitted a=0, b=99, c=3 -- a silent wrong value, invisible to any
+    # compile-only gate.
+    test_gimple_stdout("gimple_ctor_kwarg_skipped_earlier_defaults", """\
+struct Base:
+    var a: Int
+    var b: Int
+    var c: Int
+    fn __init__(out self, a: Int = 1, b: Int = 2, c: Int = 3):
+        self.a = a
+        self.b = b
+        self.c = c
+
+fn main():
+    var d = Base(b=99)
+    print(d.a)
+    print(d.b)
+    print(d.c)
+
+main()
+""", "1\n99\n3\n")
+
+    # 20. Same bug through the **kwargs ctor slot: unknown keywords pack
+    # into the dict while earlier defaulted params keep their real default.
+    test_gimple_stdout("gimple_ctor_kwargs_pack_keeps_earlier_default", """\
+struct Cfg:
+    var verbose: Int
+    var rest: Dict[String, Int]
+    fn __init__(out self, verbose: Int = 5, **rest):
+        self.verbose = verbose
+        self.rest = rest
+
+fn main():
+    var c = Cfg(level=2)
+    print(c.verbose)
+
+main()
+""", "5\n")
+
 
 def main():
     gcc = find_gcc()

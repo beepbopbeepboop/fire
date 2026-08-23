@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/turtle.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged from the 2026-08-20 state)
+
+Re-verified against current HEAD via a real `python3 mojo.py build
+.../Lib/turtle.py`: turtle.py's own isolated error set is unchanged —
+the same 5 root-caused lines (189 `eval()` dynamic-retyped local,
+3078/3314/3379 `Vec2D` tuple-subclass operator-overload arithmetic,
+4170 dead-code demo-block `write`) plus the module-qualified-symbol
+cluster (213/218/219, `genericpath_isfile_584a43`-vs-`_0c85c9` suffix
+mismatch — the bare-name/suffix collision family already tracked by
+`bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`'s
+analysis). All 3 of turtle.py's own generator sites still compile
+cleanly. No new work attempted; every remaining line is already
+classified in the 2026-08-20 entry below as broad/deferred or
+dead-code-only. Doc stays open.
+
 ## Status (updated 2026-08-20 — 2 of the remaining 7 isolated errors root-caused and fixed; other 5 root-caused and correctly classified as broad/deferred or dead-code-only)
 
 Followed up on the 2026-08-18 entry's remaining 7-error list (189, 3078,

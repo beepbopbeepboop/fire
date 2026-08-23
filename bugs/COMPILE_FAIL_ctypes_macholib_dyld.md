@@ -2,6 +2,25 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
+## Status (re-verified 2026-08-23, triage pass): identical failure, all five generator-codegen bullets still reproduce
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/macholib/dyld.py`: fails at the same `dyld_gen.cpp` C++-coroutine
+stage with the same error cluster — `'framework_info' was not declared
+in this scope` (sibling module-level function called from inside a
+generator body), `'begin'/'end' was not declared in this scope` (raw
+range-for over `MojoList *`-returning calls and module-level list
+globals), `'os' was not declared in this scope; did you mean 'cos'`
+(module import not threaded into generator-body scope),
+`request for member 'startswith'/'endswith' in ..., which is of non-
+class type 'int64_t'` (untyped generator params defaulting to int64_t
+instead of inferred `char *`), and the matching `co_yield`
+`invalid conversion from 'int64_t' to 'char*'` errors. Nothing in this
+cluster changed since the 2026-08-09 re-verification. Still five
+maturity gaps in one shared codegen path (generator/coroutine
+lowering), not a narrow fix: DOCUMENTED-NOT-FIXED — see the analysis
+below for per-bullet detail.
+
 ## Status (updated 2026-08-06)
 
 ### 1. FIXED (commit d7a3043): nested-closure default params dropped at call sites

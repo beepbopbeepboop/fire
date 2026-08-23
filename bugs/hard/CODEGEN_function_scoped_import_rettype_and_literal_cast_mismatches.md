@@ -1,5 +1,22 @@
 # HARD BUG (4 distinct root causes, same symptom cluster): GIMPLE type mismatches from (1) function-scoped-import return-type default drift, (2) `_new_val`'s missing `_Bool` literal-cast guard, (3) uncast `self` in `super().method()` calls, (4) imported-class name mistaken for a zero-arg accessor function in `X.ATTR` member access
 
+## Re-verified 2026-08-23 (fresh pass, no code change)
+
+All four fix sites confirmed present and intact after the Wave-2 file
+split of the old monolithic gimple_codegen.py: Mechanism 1's `ret = sig[0]
+if sig else 'int64_t'` now lives at `gimple_gen_funcs.py:358`; Mechanism
+2's `ctype in ('int64_t', '_Bool')` guard at `gimple_gen_resolve.py:857`;
+Mechanism 3's derived-to-base `self` materializing cast at
+`gimple_gen_methods.py:440-441`; Mechanism 4's PascalCase-import guard at
+`gimple_gen_exprs.py:891`. Mechanism 1's own minimal repro
+(`Foo.bar` with a function-scoped `from _colorize import can_colorize`)
+builds via `mojo.py build` with **zero** `invalid conversion in gimple
+call` errors. The previously documented remainders are unchanged:
+Mechanism 4's `Parameter(...)` constructor-call shape stays open for the
+documented cross-module resolution-ordering risk reasons, and the
+weakref.py line-attribution / argparse kwargs / dynamic-% items stay
+out of scope as recorded below.
+
 ## Re-verified 2026-08-09 (fresh pass, no code change)
 
 Confirmed all four fixes below are present and committed on `master`

@@ -2,6 +2,28 @@
 
 ## Status (updated 2026-08-07)
 
+**REOPENED 2026-08-23 (REGRESSED, different failure mode)**: this doc's
+own minimal repro (a.mojo/b.mojo each with a top-level `walk`, main.mojo
+importing both — the exact shape the 2026-08-07 verification ran
+end-to-end clean with correct interleaved output) now FAILS to build:
+`main.mojo:6:9: error: too many arguments to function 'a_walk'; expected
+0, have 1` and `main.mojo:8:10: error: too many arguments to function
+'b_walk'; expected 0, have 4` (RC=1). The ORIGINAL symptom this fix
+addressed is genuinely gone (no `_mojogen_walk_start` conflicting-types
+errors; symbols ARE module-qualified now) — but the call sites lower the
+imported generators as ORDINARY qualified functions (`a_walk`/`b_walk`,
+the SB-1 free-function convention) instead of routing through the
+compiled-generator `_mojogen_*_start` delegation, and no arity is
+registered for them cross-module ("expected 0"). This is adjacent to the
+doc's own documented residual ("compiled generator support through
+do_imports=True ... never worked at all for a generator reached only via
+import") but strictly worse than the verified-fixed 2026-08-07 state,
+where THIS exact direct-import repro built AND ran. Confirmed NOT caused
+by concurrent perf work: identical failure with all working-tree changes
+stashed. Fresh evidence recorded; root cause of the new call-site
+routing not yet bisected (432 commits since 76e820e); fix not attempted
+in this pass.
+
 **FIXED** (task #146), scoped narrowly per the "Why a fix needs care"
 analysis below — root-caused 2026-08-06 while classifying the
 `CODEGEN_generator_function_Lib_*.md` cluster (tasks #95-135), fixed

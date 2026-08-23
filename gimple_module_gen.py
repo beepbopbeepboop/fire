@@ -1626,12 +1626,14 @@ def gen_module_impl(self, stmts):
         if not _changed:
             break
 
+    _p2c_base_var_types = dict(self.func_return_types)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:
             if _is_foreign_main(s) or not isinstance(s, FunctionDef):
                 continue
-            _ret_elem = self._infer_return_elem_type(s.body, func_def=s)
+            _ret_elem = self._infer_return_elem_type(
+                s.body, func_def=s, _base_var_types=_p2c_base_var_types)
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
@@ -1641,7 +1643,8 @@ def gen_module_impl(self, stmts):
                 for m in s.methods:
                     if m.name == '__init__':
                         continue
-                    _ret_elem = self._infer_return_elem_type(m.body)
+                    _ret_elem = self._infer_return_elem_type(
+                        m.body, _base_var_types=_p2c_base_var_types)
                     _key = f"{s.name}_{m.name}"
                     if _ret_elem is not None and self._return_elem_types.get(_key) != _ret_elem:
                         self._return_elem_types[_key] = _ret_elem
@@ -2572,6 +2575,30 @@ def gen_module_impl(self, stmts):
         all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         self._dispatch_solver.analyze(all_stmts_for_dispatch)
         self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
+        # Dispatch-table callee qualification: each planned row's symbol was
+        # registered BARE (`f"{struct}_{method}"`, see DispatchSolver's
+        # struct_methods population), but Phase 2a emits a non-root module's
+        # methods under `{home_module}_{Struct}_{method}` via
+        # _struct_method_csym — a table initializer naming the bare spelling
+        # references an undeclared symbol (the 11 `Repr_repr*` "undeclared
+        # here" GCC errors reprlib.Repr's prefix-shaped
+        # `getattr(self, 'repr_' + typename)` pattern produced inside the
+        # whole-program Lib/socket.py build, and generally this hard-bug
+        # doc's residual "option 3" gap). Re-resolve every row through that
+        # same composer now: root-local and self-host structs qualify to ''
+        # and keep the bare spelling byte-identical, so only genuinely
+        # imported structs' rows change.
+        if self._dispatch_tables:
+            _ds = self._dispatch_solver
+            for _dt in self._dispatch_tables.values():
+                _rows = []
+                for _mn, _sig, _full in _dt.methods:
+                    _home = _ds.callee_home.get(_full)
+                    _meth = _ds.callee_method.get(_full)
+                    if _home and _meth:
+                        _full = self._struct_method_csym(_home, _meth)
+                    _rows.append((_mn, _sig, _full))
+                _dt.methods = _rows
 
     self._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
 
@@ -2917,6 +2944,14 @@ def gen_module_impl(self, stmts):
             else:
                 return 'int64_t'
 
+    def _phase17_set_gtype(_gname, _ctype):
+        """Record a Phase 1.7 global-type conclusion into BOTH the
+        whole-program-shared dict and THIS instance's own overlay (see
+        `_own_global_var_types`/`_global_dst_ctype` for why the overlay
+        must exist alongside the shared dict)."""
+        self._global_var_types[_gname] = _ctype
+        self._own_global_var_types[_gname] = _ctype
+
     def _phase17_infer_global_type(_gname, _value):
         """Infer & record a global's C type (self._global_var_types,
         plus element type for list/tuple literals) from its assigned
@@ -2933,7 +2968,7 @@ def gen_module_impl(self, stmts):
         bugs/hard/CODEGEN_multi_assign_local_var_type_not_inferred.md
         (that doc covers the LOCAL-variable analogue of this same
         gap; this is the GLOBAL/module-scope sibling)."""
-        self._global_var_types[_gname] = _phase17_value_type(_value)
+        _phase17_set_gtype(_gname, _phase17_value_type(_value))
         if isinstance(_value, (ListExpr, TupleExpr)) and _value.elements:
             _elt = self._quick_type(_value.elements[0])
             for _e in _value.elements[1:]:
@@ -3081,54 +3116,54 @@ def gen_module_impl(self, stmts):
                 self._global_to_module[_scan_stmt.name] = _phase17_mod
             if _scan_stmt.type_ann:
                 _resolved = self._resolve_type(_scan_stmt.type_ann)
-                self._global_var_types[_scan_stmt.name] = _resolved
+                _phase17_set_gtype(_scan_stmt.name, _resolved)
                 if _resolved in ('MojoDict *', 'MojoList *', 'MojoSet *'):
                     self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
             else:
                 if hasattr(_scan_stmt, 'value') and _scan_stmt.value:
                     if isinstance(_scan_stmt.value, DictExpr):
-                        self._global_var_types[_scan_stmt.name] = 'MojoDict *'
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoDict *')
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, (ListExpr, TupleExpr)):
-                        self._global_var_types[_scan_stmt.name] = 'MojoList *'
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, SetExpr):
-                        self._global_var_types[_scan_stmt.name] = 'MojoSet *'
+                        _phase17_set_gtype(_scan_stmt.name, 'MojoSet *')
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, StringLiteral):
-                        self._global_var_types[_scan_stmt.name] = 'char *'
+                        _phase17_set_gtype(_scan_stmt.name, 'char *')
                     elif (isinstance(_scan_stmt.value, CallExpr)
                             and isinstance(_scan_stmt.value.func, IdentExpr)
                             and _scan_stmt.value.func.name in ('dict', 'Dict', 'list', 'List', 'set', 'Set')):
-                        self._global_var_types[_scan_stmt.name] = {
+                        _phase17_set_gtype(_scan_stmt.name, {
                             'dict': 'MojoDict *', 'Dict': 'MojoDict *',
                             'list': 'MojoList *', 'List': 'MojoList *',
                             'set': 'MojoSet *', 'Set': 'MojoSet *',
-                        }[_scan_stmt.value.func.name]
+                        }[_scan_stmt.value.func.name])
                         self._global_c_decl_types[_scan_stmt.name] = 'int64_t'
                     elif isinstance(_scan_stmt.value, CallExpr):
                         if isinstance(_scan_stmt.value.func, IdentExpr):
                             ret = self.func_return_types.get(_scan_stmt.value.func.name, '')
                             if ret and ret.endswith(' *'):
-                                self._global_var_types[_scan_stmt.name] = ret
+                                _phase17_set_gtype(_scan_stmt.name, ret)
                             elif ret == 'char *':
-                                self._global_var_types[_scan_stmt.name] = 'char *'
+                                _phase17_set_gtype(_scan_stmt.name, 'char *')
                             else:
-                                self._global_var_types[_scan_stmt.name] = 'int64_t'
+                                _phase17_set_gtype(_scan_stmt.name, 'int64_t')
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member in ('read', 'readline')
                                 and not _scan_stmt.value.args):
-                            self._global_var_types[_scan_stmt.name] = 'char *'
+                            _phase17_set_gtype(_scan_stmt.name, 'char *')
                         elif (isinstance(_scan_stmt.value.func, MemberExpr)
                                 and _scan_stmt.value.func.member == 'readlines'):
-                            self._global_var_types[_scan_stmt.name] = 'MojoList *'
+                            _phase17_set_gtype(_scan_stmt.name, 'MojoList *')
                         else:
-                            self._global_var_types[_scan_stmt.name] = 'int64_t'
+                            _phase17_set_gtype(_scan_stmt.name, 'int64_t')
                     else:
                         qt = self._quick_type(_scan_stmt.value) or 'int64_t'
-                        self._global_var_types[_scan_stmt.name] = qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t'
+                        _phase17_set_gtype(_scan_stmt.name, qt if (qt.endswith(' *') or qt == '_Bool') else 'int64_t')
                 else:
-                    self._global_var_types[_scan_stmt.name] = 'int64_t'
+                    _phase17_set_gtype(_scan_stmt.name, 'int64_t')
         elif isinstance(_scan_stmt, TryStmt):
             for _gname, _gtype in _phase17_scan_try_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
@@ -3136,7 +3171,7 @@ def gen_module_impl(self, stmts):
                 _pre_declared_globals.add(_gname)
                 if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
                     self._global_to_module[_gname] = _phase17_mod
-                self._global_var_types[_gname] = _gtype
+                _phase17_set_gtype(_gname, _gtype)
         elif isinstance(_scan_stmt, IfStmt):
             for _gname, _gtype in _phase17_scan_if_branches(_scan_stmt).items():
                 if _gname in _pre_declared_globals:
@@ -3144,7 +3179,7 @@ def gen_module_impl(self, stmts):
                 _pre_declared_globals.add(_gname)
                 if _gname not in self._global_to_module and id(_scan_stmt) in _phase17_own_ids:
                     self._global_to_module[_gname] = _phase17_mod
-                self._global_var_types[_gname] = _gtype
+                _phase17_set_gtype(_gname, _gtype)
         elif (isinstance(_scan_stmt, ComptimeVarStmt)
                 and isinstance(_scan_stmt.value, (ListExpr, TupleExpr))
                 and _scan_stmt.target not in _pre_declared_globals):
@@ -3422,6 +3457,14 @@ def gen_module_impl(self, stmts):
                 if isinstance(_crt, str) and _crt.endswith(' *'):
                     self._global_c_decl_types[_gn] = _crt
                     self._global_var_types[_gn] = _crt
+                    # Mirror into this instance's own overlay: the widened
+                    # pointer is NEWER information than the Phase 1.7 scan's
+                    # int64_t scalar freeze, and `_global_dst_ctype` trusts
+                    # own SCALAR conclusions over the shared dicts — without
+                    # this mirror that trust would suppress exactly the
+                    # widening this loop exists to perform at every
+                    # global-assignment emission site.
+                    self._own_global_var_types[_gn] = _crt
     if has_toplevel_code:
         toplevel_func = self._gen_toplevel(toplevel_stmts)
         func_parts.append(toplevel_func)

@@ -246,7 +246,7 @@ def _gen_stmt_VarDecl(gen, node):
         # a cast" — found via box.3d/game/lib/recipes.mojo.
         if ((gen._in_toplevel_gen or node.name in getattr(gen, '_func_declared_globals', ()))
                 and node.name in gen._global_var_types):
-            actual_dst = gen._global_c_decl_types.get(node.name, gen._global_var_types[node.name])
+            actual_dst = gen._global_dst_ctype(node.name)
         if ctype in ('MojoList *', 'MojoSet *') and v in gen._elem_types:
             gen._elem_types[node.name] = gen._elem_types[v]
         if ctype == 'MojoDict *':
@@ -362,7 +362,7 @@ def _gen_stmt_VarDecl(gen, node):
                 actual_dst = gen.var_types.get(node.name, ctype)
                 if ((gen._in_toplevel_gen or node.name in getattr(gen, '_func_declared_globals', ()))
                         and node.name in gen._global_var_types):
-                    actual_dst = gen._global_c_decl_types.get(node.name, gen._global_var_types[node.name])
+                    actual_dst = gen._global_dst_ctype(node.name)
                 gen._safe_coerce_emit(ctype, actual_dst, v, gen._write_dest(node.name))
     gen._layout_hint = gimple_solvers.LayoutSolver.HEAP
 
@@ -582,8 +582,11 @@ def _gen_stmt_AssignStmt(gen, node):
             # in _dispatch_names is boxed as `int64_t` at the C level, see
             # the global-scan's DictExpr/ListExpr/SetExpr cases) — coerce to
             # that actual declared type, not the semantic one, or GIMPLE
-            # rejects the direct pointer/int64_t mismatch.
-            gtype = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
+            # rejects the direct pointer/int64_t mismatch. `_global_dst_
+            # ctype` additionally trusts THIS module's own Phase 1.7 scalar
+            # conclusion over the whole-program-shared dicts, which a
+            # later-scanned same-bare-name global may have overwritten.
+            gtype = gen._global_dst_ctype(tname)
             gen._safe_coerce_emit(vtype, gtype, v, field_ref)
             # Propagate dict/list/set value-type tracking for global variables.
             # Without this, _dict_val_types[name] is never set for globals,
@@ -629,7 +632,7 @@ def _gen_stmt_AssignStmt(gen, node):
             field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
             # See the _func_declared_globals branch above: coerce to the
             # struct field's real declared C type, not the semantic one.
-            gtype = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
+            gtype = gen._global_dst_ctype(tname)
             gen._safe_coerce_emit(vtype, gtype, v, field_ref)
             # Propagate dict/list/set value-type tracking for module-level
             # globals — the same fix as the _func_declared_globals branch above,
@@ -1182,7 +1185,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # as ordinary as a top-level `X += " world"` on a string
             # global (found via Tools/build/generate_token.py's own
             # `token_h_template += """..."""`).
-            dst = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
+            dst = gen._global_dst_ctype(tname)
         else:
             dst = gen._type_of(tname)
         gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
@@ -1774,7 +1777,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 # interpreter's dynamic scope chain).
                 safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
                 field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
-                gtype = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
+                gtype = gen._global_dst_ctype(tname)
                 gen._safe_coerce_emit(vtype, gtype, v, field_ref)
                 if vtype == 'MojoDict *':
                     if v in gen._dict_val_types:
@@ -1786,7 +1789,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             if gen._in_toplevel_gen and tname in gen._global_var_types:
                 safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
                 field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
-                gtype = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
+                gtype = gen._global_dst_ctype(tname)
                 gen._safe_coerce_emit(vtype, gtype, v, field_ref)
                 if vtype == 'MojoDict *':
                     if v in gen._dict_val_types:

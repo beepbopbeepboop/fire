@@ -31,6 +31,111 @@ noticeably; see "Remaining work" below for the full updated ranking,
 including two costlier-but-riskier consumers that were considered and
 deliberately NOT touched this round).
 
+**Phase 4 implemented and verified 2026-08-23** (see "Phase 4
+implementation notes" below) — two consumers, chosen by a FRESH cProfile
+of the current tree (the shape had shifted again since 08-18): (a) Pass
+2c's `_infer_return_elem_type`, whose PER-CALL seeding from the whole
+tree-shared `func_return_types` dict had become the single dominant cost
+(74.0s cumtime of a 129.3s profiled run, ~500M interpreted
+`dict.setdefault` calls) — fixed by hoisting one snapshot per Pass-2c
+run, exactly the "quadratic rescan" pattern this doc exists to kill; and
+(b) `_calls_in_stmts`, memoized per top-level statement like Phase 2
+(its four gen_module consumer sites include a fixpoint loop that
+re-collected every caller body 4x per level). Behavior-identity is
+proven by BYTE-IDENTICAL generated C on the largest succeeding
+whole-program case (`Lib/socket.py`, 20,168,554 bytes, `cmp` clean).
+
+### Phase 4 implementation notes (2026-08-23)
+
+A fresh baseline `cProfile` of `Lib/contextlib.py` on the then-current
+tree (post-Phases-1..3) re-ranked the remaining consumers — the old
+ranking was stale:
+
+| rank | function | cumtime | ncalls | note |
+|---|---|---|---|---|
+| 1 | `_infer_return_elem_type` | 74.04s | 275,262 | Pass 2c fixpoint — its own frame + 32.05s / 501.9M `dict.setdefault` child calls = the per-call re-seeding |
+| 2 | `_dedup_variadic_externs` | 6.09s | 38 | C-text post-processing, out of scope (unchanged from 08-18) |
+| 3 | `_class_attr_ctype` caller loop | 4.80s | 11.76M | still entangled with time-dependent `struct_field_types` state (line 926's `cur is None or cur in ('int','int64_t')` branch can flip between levels); NOT touched, same reasoning as 08-18 |
+| 4 | `_collect_self_assigns` | 4.92s | 29,471 | still mutates struct ASTs; NOT touched |
+| 5 | `_calls_in_stmts` | 3.13s | 201,928/34,408 primitive | **chosen target (b)** |
+
+**(a) Pass 2c seeding hoist.** Reading `_infer_return_elem_type`
+(gimple_gen_resolve.py) showed where the 500M setdefaults live: every
+call builds its hermetic scratch `var_types` from scratch by iterating
+the ENTIRE tree-shared `func_return_types` dict one `setdefault` at a
+time — O(|func_return_types|) interpreted work × 275k calls (once per
+function per Pass-2c iteration per nesting level), i.e. precisely this
+doc's O(N²)-in-tree-size rescan shape, relocated by the earlier phases
+into the seeding step. The fix exploits a provable invariant rather
+than adding a cache: NOTHING reachable from within one Pass-2c run can
+mutate `func_return_types` during that run (the loop body only scans
+bodies via this function and writes only `self._return_elem_types`; the
+two `func_return_types[...] = ...` write sites in gimple_gen_resolve.py
+live in `_register_link_imports`/`_register_reflected_struct`, which are
+unreachable from the scan). So `gen_module`'s Pass 2c now takes ONE
+`dict(self.func_return_types)` snapshot before the fixpoint loop and
+passes it to every call as a new optional `_base_var_types` kwarg; the
+function copies that snapshot at C speed (`dict(base)`) instead of
+re-seeding entry-by-entry. Seeding PRECEDENCE is preserved exactly
+(params > func_return_types > `KNOWN_LEAF_RETS`: params were assigned
+before the frt setdefault loop and still win by being assigned after
+the copy; KLR still loses to both via setdefault). Callers without the
+kwarg keep the byte-for-byte legacy path. No var_types iteration-order
+dependence exists downstream (verified by grep: only key lookups).
+
+**(b) `_calls_in_stmts` per-statement memoization.** Same pattern as
+Phase 2, new shared-by-reference `self._calls_in_stmts_cache` dict
+(declared next to the Phase 2/3 caches in `__init__`, shared into every
+temp_gen in `_compile_imported_module`'s sharing block). Safe to cache
+the WHOLE per-statement contribution (not just syntactic candidates)
+because, unlike Phases 2/3, there is NO time-dependent filter here at
+all: the traversal is a pure function of each statement's subtree
+(`_collect_calls` reads no mutable gen state — its only gen call,
+`_fstring_sub_exprs`, re-parses the StringLiteral's own text), and all
+four gen_module consumer sites only READ the collected nodes
+(isinstance/`.func.name`/`.args` inspection — no mutation, no identity
+comparison). Mutation safety was checked explicitly: the only passes
+that rewrite bodies AFTER these scans run (`_inline_single_use_task_
+composition`/`_normalize_await_kwargs`) either replace statements with
+fresh objects (new ids → natural cache miss) or mutate exclusively
+inside AwaitExpr subtrees, which `_collect_calls` never descends into
+(it has no AwaitExpr case) — so no stale entry is observable. The
+per-statement walk itself (`_collect_calls_in_stmt`) reproduces the old
+loop body verbatim (same attribute order, recursion still through the
+memoized entry point so nested lists are cached too).
+
+### Validation (2026-08-23, Phase 4)
+
+Direct (non-profiled) wall-clock timing of
+`gimple_codegen.compile_to_gimple(src, do_imports=True, ...)`,
+back-to-back runs, same machine (heavily contended by concurrent agent
+builds throughout — reported as measured):
+
+| file | before | after |
+|---|---|---|
+| `Lib/contextlib.py` (fails at the same documented async-codegen point both sides) | 38.65s / 38.63s / 39.08s | 19.21s / 18.98s / 18.75s |
+| `Lib/socket.py` (SUCCEEDS) | 142.09s / 132.57s | 100.47s |
+
+~2.1x on contextlib.py, ~1.3-1.4x on socket.py. Correctness anchor:
+socket.py's GENERATED C IS BYTE-IDENTICAL before/after (`cmp` clean,
+20,168,554 bytes both sides) — pure performance change, zero output
+difference. cProfile diff, contextlib.py, same method as Phase 3:
+
+| metric | before | after |
+|---|---|---|
+| total profiled time | 129.3s | 54.6s |
+| `_infer_return_elem_type` cumtime | 74.04s | 5.55s (−93%) |
+| `dict.setdefault` calls | 501.9M / 32.0s | gone from top-45 |
+| `_calls_in_stmts` cumtime | 3.13s / 201,928 calls | gone from top-45 |
+| total function calls | 939.3M | 420.2M |
+
+Full quality gate (2026-08-23):
+1. `python3 test_gimple.py` — 250 passed, 0 failed.
+2. `python3 test_module_cache.py` — 76 passed, 0 failed.
+3. `make check-selfhost` — clean (`✓ self-host compiles + links clean`).
+4. From-scratch stdlib dylib rebuild — exit 0, 0 `skip <module>:` lines
+   (baseline before the change also 0 — no increase).
+
 ### Phase 1 implementation notes
 
 Implemented exactly as planned: a new pair of shared-by-reference
@@ -335,43 +440,31 @@ its own documented default of `os.cpu_count()`, not hardcoded to `-j8`):
 
 ### Remaining work (not attempted)
 
-11 of the original ~13 `imported_stmts`/`all_functions`/`all_structs_
-for_methods` consumers in `gen_module` are still unmemoized (Phase 2 fixed
-`_scan_body_for_local_field_access`, Phase 3 fixed `_infer_param_types`'s
-`analyze_param_usage` sub-scan). Per the fresh 2026-08-18 profile above,
-the highest-value remaining targets, in order, are:
-- `_class_attr_ctype`'s Pass 1.1 caller loop (`all_struct_defs`, ~6.09s) —
-  considered this round, safety plausible but needs disentangling from
-  the adjacent struct-inheritance-merge logic it's interleaved with
-  before it can be isolated and memoized independently.
-- `_collect_self_assigns`'s Pass 1.2 caller loop (`all_structs_for_
-  methods`, ~6.03s) — considered this round, rejected as higher-risk: it
-  mutates the struct AST directly (`s.fields.append(...)`) and its
-  correct output depends on three separately-evolving pieces of state
-  (`self.struct_field_types`, `self._resolve_type`, `self._ctor_lit_
-  param_types`), not just one.
-- `self._calls_in_stmts(imported_stmts, _ctor_calls)` (~3.38s) — not yet
-  classified.
-- `_infer_local_var_types` (Pass 1.3b, the sibling pass to this round's
-  Pass 1.3, same `all_functions`/`all_structs_for_methods` shape) — not
-  yet classified; likely a similar pure-scan/time-dependent-filter split
-  to Pass 1.3, not yet verified.
-- The Pass 2c fixpoint loop (`for _pass2c_iter in range(8): ... self.
-  _infer_return_elem_type(...) ...`) — NOT a simple candidate: unlike
-  every other consumer here, its own termination condition depends on
-  `self._return_elem_types`, which the loop body itself writes to
-  *within the same call* across up to 8 iterations, so a naive per-
-  statement memoization could interact with the fixpoint's own
-  convergence in ways not yet analyzed. Needs dedicated attention, not a
-  copy-paste of the Phase 2/3 pattern.
-- The remaining named-but-not-yet-profiled-individually consumers
-  (`all_scan`, `all_global_scan`, the method-dispatch scan, the mods
-  scan, etc.) — each would need the same per-consumer classification
-  (side-effect-free/shared-state-only vs. emits-per-visit-once, vs.
-  fixpoint-internal-state-dependent per the Pass 2c finding above) before
-  applying the same candidate-cache pattern — genuinely one-at-a-time,
-  independently-verified work, not attempted here for time-budget reasons
-now that the single biggest offender is fixed.
+Updated 2026-08-23 after Phase 4 (fresh profile in the Phase 4 notes
+above). The single dominant consumer is now fixed; what remains, in
+order:
+
+- `_class_attr_ctype`'s Pass 1.1 caller loop (`all_struct_defs`,
+  ~4.80s post-Phase-4) — still entangled with time-dependent
+  `struct_field_types` state and adjacent inheritance-merge logic;
+  unchanged from the 08-18 analysis.
+- `_collect_self_assigns`' Pass 1.2 caller loop
+  (`all_structs_for_methods`, ~4.92s) — still mutates the struct AST
+  directly and depends on three separately-evolving pieces of state;
+  unchanged from the 08-18 analysis.
+- `_dedup_variadic_externs` (~5.7s) — NOT an `imported_stmts` AST
+  consumer (post-hoc string dedup of generated C text); out of this
+  bug's scope, as classified on 08-18.
+- The remaining smaller consumers (`_infer_local_var_types` Pass 1.3b,
+  ~1.17s post-Phase-4 — would need the Phase-3-style pure-scan/
+  time-dependent-filter split since it calls state-dependent
+  `_quick_type` per assignment; the Pass 2c residual scan walks
+  themselves, ~5.5s, which could be halved by a within-Pass-2c-run
+  result cache keyed on `(id(func), _prepass_struct)` since all their
+  inputs are provably frozen for one run — not attempted, following
+  this doc's one-consumer-at-a-time discipline now that no single
+  remaining line dominates).
+
 
 ## Symptom
 

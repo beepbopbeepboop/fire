@@ -1,5 +1,45 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the ENCODING global-type cross-contamination FIXED; two documented residual clusters remain)
+
+The `149:26`/`151:26` `assignment to 'char *' from 'int'` pair on
+tarfile.py's own `ENCODING = ...` lines — root-caused in the 2026-08-11
+entry below as the shared, whole-program-flat `_global_var_types` dict
+being overwritten between this module's Phase 1.7 scan and its own Phase
+2a assignment emission (here by `Lib/token.py`'s unrelated same-bare-name
+`ENCODING` int constant) — is now FIXED via a per-instance overlay:
+each GimpleGen's Phase 1.7 scan additionally records its OWN conclusions
+into `_own_global_var_types` (via the new `_phase17_set_gtype`, now used
+by every write site of the scan), and the six global-assignment emission
+sites in gimple_gen_stmts.py route through a new `_global_dst_ctype`
+helper that trusts the overlay's SCALAR conclusions over both shared
+dicts while keeping pointer `_global_c_decl_types` overrides (e.g.
+`_EARLY_DISPATCH_DICTS`) and container int64_t boxing authoritative.
+This is deliberately NOT the full per-module rework the 2026-08-11 entry
+deferred (the shared dicts themselves are untouched; reads/decls still
+consult them) — it fixes exactly the assignment-side mis-coercion class.
+Commit 65706f3. Verified: a real `mojo.py build .../Lib/tarfile.py` no
+longer emits either ENCODING error.
+
+**Remaining tarfile.py-own errors (5 raw lines, unchanged families):**
+`754:7 'SpecialFileError' has no member named 'tarinfo'` (root-caused a
+step further this pass: `Lib/shutil.py` defines its OWN bare-name-identical
+`SpecialFileError(OSError)` with NO fields — in a whole-program build the
+struct definition that wins lacks tarfile's field; same deferred
+bare-name-struct-collision family as `bugs/hard/
+CODEGEN_same_bare_name_struct_collision_across_modules.md`, not a new
+mechanism) plus the `bz2_BZ2File___init__`/`lzma_LZMAFile___init__`
+implicit-declaration cluster (function-scoped `from bz2/lzma import ...`
+inside `try:` — the already-tracked `bugs/hard/
+CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md`
+class). All 3 generator sites still compile cleanly. Doc stays open.
+
+Quality gate for the overlay change: `test_gimple.py` 250/250,
+`test_module_cache.py` 76/76, `make check-selfhost` clean (after catching
+and fixing a first-attempt precedence regression vs this compiler's own
+dispatch-table globals), from-scratch stdlib dylib rebuild 0
+`skip <module>` lines — same as baseline.
+
 ## Status (updated 2026-08-18 — targeted investigation of the 2026-08-09 `:2418:27` "unexpected RHS" error: already fixed, no code change needed)
 
 Investigated the specific remaining item flagged in the 2026-08-09
