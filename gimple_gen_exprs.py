@@ -1005,15 +1005,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # on a closure/bound-method OBJECT itself reaches the existing
         # dynamic-attribute machinery instead of being auto-invoked.
         if ot == 'MojoBoundMethod *' and isinstance(node.obj, gimple_ctypes.MemberExpr):
-            ret_type = gen._bound_method_ret_types.get(ov, 'int64_t')
-            raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
-                                     [('MojoBoundMethod *', ov)])
-            if ret_type in ('int64_t', 'int'):
-                ot, ov = ret_type, raw_t
-            elif ret_type == 'void':
-                ot, ov = 'int', gen._new_val('int', '0')
-            else:
-                ot, ov = ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
+            ot, ov = gmp._auto_invoke_bound_method_value(gen, ov)
         # Resolve an int64_t-boxed pointer to its real struct type (e.g.
         # `t = self._peek()` boxes a `Token *` as int64_t) — without this,
         # `t.line` never found a real struct field and fell through to the
@@ -1616,25 +1608,9 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # back to an opaque type there instead).
     if node.op not in ('is', 'is not'):
         if lt == 'MojoBoundMethod *':
-            ret_type = gen._bound_method_ret_types.get(lv, 'int64_t')
-            raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
-                                     [('MojoBoundMethod *', lv)])
-            if ret_type in ('int64_t', 'int'):
-                lt, lv = ret_type, raw_t
-            elif ret_type == 'void':
-                lt, lv = 'int', gen._new_val('int', '0')
-            else:
-                lt, lv = ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
+            lt, lv = gmp._auto_invoke_bound_method_value(gen, lv)
         if rt == 'MojoBoundMethod *':
-            ret_type = gen._bound_method_ret_types.get(rv, 'int64_t')
-            raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
-                                     [('MojoBoundMethod *', rv)])
-            if ret_type in ('int64_t', 'int'):
-                rt, rv = ret_type, raw_t
-            elif ret_type == 'void':
-                rt, rv = 'int', gen._new_val('int', '0')
-            else:
-                rt, rv = ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
+            rt, rv = gmp._auto_invoke_bound_method_value(gen, rv)
 
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
 

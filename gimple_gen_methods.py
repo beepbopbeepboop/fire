@@ -114,6 +114,40 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
     return 'MojoBoundMethod *', t
 
 
+def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
+    """Auto-invoke a deferred, uncalled `MojoBoundMethod *` value (`ov`)
+    and return the invoked result's (ctype, value) — the shared lowering
+    for every direct-consumer context where real Python auto-invokes a
+    bare 0-arg property/method read before using it (chained member
+    access `self.prop.attr`, binary-operator operands `self.prop + x`,
+    subscript reads `self.prop[key]`).
+
+    `mojo_bound_method_call_0` always returns an int64_t-typed C value;
+    the method's STATICALLY INFERRED return type (`_bound_method_ret_
+    types`, recorded from func_return_types at bound-method construction)
+    is what every other consumer of that inference sees. When the two
+    disagree — most commonly an inferred plain 'int' (the unannotated-
+    field/param default) against the int64_t call result — the claimed
+    ctype MUST be materialized into its own correctly-typed temp via an
+    explicit cast: claiming 'int' while handing callers the raw int64_t
+    temp made every later use emit mismatched-operand GIMPLE (GCC:
+    "type mismatch in binary expression", `int = int64_t + int64_t`;
+    real repro Lib/pathlib/__init__.py's PurePath.anchor,
+    `return self.drive + self.root`, both @property getters inferred
+    'int' from their `_drv`/`_root` field defaults). 'int64_t' needs no
+    temp (the call result already is one); 'void' degrades to a scalar
+    0 like the pre-consolidation copies did.
+    """
+    ret_type = gen._bound_method_ret_types.get(bm_val, 'int64_t')
+    raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
+                            [('MojoBoundMethod *', bm_val)])
+    if ret_type == 'int64_t':
+        return 'int64_t', raw_t
+    if ret_type == 'void':
+        return 'int', gen._new_val('int', '0')
+    return ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
+
+
 def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
                               stored_ctype: str = 'MojoBoundMethod *') -> tuple[str, str]:
     """Call a `MojoBoundMethod *` value (see _lower_bound_method_value):

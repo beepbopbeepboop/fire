@@ -2995,15 +2995,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # subscript's own object expression is a bare, uncalled bound
     # method the same way any deferred `f = self.method` reference is.
     if ot == 'MojoBoundMethod *':
-        ret_type = gen._bound_method_ret_types.get(ov, 'int64_t')
-        raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
-                                 [('MojoBoundMethod *', ov)])
-        if ret_type in ('int64_t', 'int'):
-            ot, ov = ret_type, raw_t
-        elif ret_type == 'void':
-            ot, ov = 'int', gen._new_val('int', '0')
-        else:
-            ot, ov = ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
+        ot, ov = gmp._auto_invoke_bound_method_value(gen, ov)
 
     idx_type, iv  = gen.lower_expr(node.index)
 
