@@ -2,7 +2,22 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/asyncio/queues.py`
 
-## Status (updated 2026-08-06)
+## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/asyncio/
+queues.py` fresh: still fails with the IDENTICAL up-front refusal —
+`cannot compile module: function(s) get, join, put (async function(s),
+declared async def)`. Unaffected by anything landed since the last
+pass (including this cluster's fd909e9, which touches only the
+generator-body call fallback, not the async pre-filter): the blocker
+remains exactly the `_async_quick_eligible` await-shape whitelist gap
+pinned down below — `await <local Future variable>` (`putter`/
+`getter`) and `await <bound-method call>` (`self._finished.wait()`)
+are still unrecognized await shapes. Generalizing suspension to the
+real Awaitable protocol remains a broad shared-machinery change;
+not attempted.
+
+## Status (updated 2026-08-06 — historical)
 
 Re-ran; the original doc had an empty error snippet. Current failure is
 an honest up-front refusal, not a GCC error:

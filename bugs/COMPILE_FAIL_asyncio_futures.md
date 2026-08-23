@@ -2,7 +2,21 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/asyncio/futures.py`
 
-## Status (updated 2026-08-10 — NOT actually blocked by tuple-valued yield; unaffected by this session's tuple-yield fix)
+## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/asyncio/
+futures.py` fresh: still fails with the IDENTICAL up-front refusal —
+`cannot compile module: function(s) __await__ (generator function(s),
+contain a yield/yield from)`. Unaffected by the compiled-generator
+work landed since the last pass (including this cluster's fd909e9,
+which only tightened the coroutine-body refusal contract): the blocker
+remains exactly the value-carrying `return self.result()` inside a
+generator analyzed below — the C++20-coroutine promise in this codegen
+still has `return_void()` only, no `return_value(v)` channel, and no
+`yield from`/`await` consumer machinery to read one back. Feature-sized
+promise-design change, not attempted; see the 2026-08-09 analysis below.
+
+## Status (updated 2026-08-10 — historical)
 
 This session implemented real tuple-valued-`yield` support
 (`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_

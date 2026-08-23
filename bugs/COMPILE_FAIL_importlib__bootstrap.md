@@ -2,6 +2,28 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/_bootstrap.py`
 
+## Status (updated 2026-08-23 — RESOLVED, builds and links clean)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/
+_bootstrap.py` fresh against master `626f3f0` (plus this cluster's own
+commit fd909e9): **exit code 0, a linked executable is produced**
+(`Built: .../_bootstrap`). The previously-open link-time blocker below
+(`__WeakValueDictionary__KeyedRef` / `__WeakValueDictionary_data`
+undefined symbols from `self.data[key]()` / `self._KeyedRef(default,
+key)` inside `_WeakValueDictionary.setdefault`) no longer reproduces —
+resolved by upstream call-lowering work landed between 2026-08-10 and
+now (the SubscriptExpr-on-member call shape now lowers through a real
+path instead of the bracket-generic-method misdispatch; most plausibly
+1f26bb5's obj[key] protocol dispatch and f82b87c's weak-stub binding
+for never-defined callees, which together turn those two call shapes
+into either real lowerings or honest weak stubs that link). Not
+independently re-investigated further since the repro is simply green.
+All three originally-tracked issues (#1 `_verbose_message` vararg
+packing, #2 `cls._SEP`, #3 `with`-statement `__exit__` literal casts)
+remain fixed as documented below.
+
+Closing this doc as RESOLVED against current master.
+
 ## Status (updated 2026-08-09)
 
 Re-verified fresh. Substantial progress since the 2026-08-08 note below:
