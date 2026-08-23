@@ -2572,6 +2572,30 @@ def gen_module_impl(self, stmts):
         all_stmts_for_dispatch = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
         self._dispatch_solver.analyze(all_stmts_for_dispatch)
         self._dispatch_tables = self._dispatch_solver.get_dispatch_tables()
+        # Dispatch-table callee qualification: each planned row's symbol was
+        # registered BARE (`f"{struct}_{method}"`, see DispatchSolver's
+        # struct_methods population), but Phase 2a emits a non-root module's
+        # methods under `{home_module}_{Struct}_{method}` via
+        # _struct_method_csym — a table initializer naming the bare spelling
+        # references an undeclared symbol (the 11 `Repr_repr*` "undeclared
+        # here" GCC errors reprlib.Repr's prefix-shaped
+        # `getattr(self, 'repr_' + typename)` pattern produced inside the
+        # whole-program Lib/socket.py build, and generally this hard-bug
+        # doc's residual "option 3" gap). Re-resolve every row through that
+        # same composer now: root-local and self-host structs qualify to ''
+        # and keep the bare spelling byte-identical, so only genuinely
+        # imported structs' rows change.
+        if self._dispatch_tables:
+            _ds = self._dispatch_solver
+            for _dt in self._dispatch_tables.values():
+                _rows = []
+                for _mn, _sig, _full in _dt.methods:
+                    _home = _ds.callee_home.get(_full)
+                    _meth = _ds.callee_method.get(_full)
+                    if _home and _meth:
+                        _full = self._struct_method_csym(_home, _meth)
+                    _rows.append((_mn, _sig, _full))
+                _dt.methods = _rows
 
     self._all_closures: dict = {}  # outer_name → {inner_name → ClosureInfo}
 

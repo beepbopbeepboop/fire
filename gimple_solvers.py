@@ -479,6 +479,23 @@ class DispatchSolver:
         # fallback entirely rather than roping in every method of the
         # enclosing struct as a bogus dispatch-table callee.
         self.allow_assume_all_methods = allow_assume_all_methods
+        # Bare callee C name -> (owning struct, real Python method name),
+        # for the two struct_methods entries this solver knows about;
+        # populated by _plan_dispatch_tables alongside its own local
+        # reverse maps so a caller holding only `get_dispatch_tables()`
+        # output can still recover WHICH struct/method each table row
+        # refers to. gen_module uses it to re-resolve each row's symbol
+        # through GimpleGen._struct_method_csym (the one composer every
+        # emitted method symbol must go through) — see the "dispatch
+        # table callee qualification" fix-up right after analyze()'s call
+        # site: rows are registered bare (`f"{stmt.name}_{method.name}"`)
+        # but a non-root module's methods are EMITTED under
+        # `{home_module}_{Struct}_{method}`, and a table initializer
+        # naming the bare spelling is an undeclared-symbol GCC error
+        # (bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_
+        # misfires_on_ordinary_code.md's residual "option 3" gap).
+        self.callee_home: dict = {}
+        self.callee_method: dict = {}
 
         # Call graph: caller_name → Set[callee_name]
         # Only includes direct, static calls (not through getattr/dict)
@@ -849,6 +866,8 @@ class DispatchSolver:
             for _mname, _full in _smethods.items():
                 _callee_to_struct[_full] = _sname
                 _callee_to_method[_full] = _mname
+        self.callee_home = _callee_to_struct
+        self.callee_method = _callee_to_method
 
         for pattern_id, pattern in self.dispatch_patterns.items():
             if not pattern.possible_callees:
