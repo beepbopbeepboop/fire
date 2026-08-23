@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-23 — re-verified; Idler.burst cpp down to 2 errors, both previously documented, neither new)
+
+Fresh isolated triage: ci_errors=0; `burst`'s generated .cpp has exactly 2
+errors, matching the documented open items: (1) line 127
+`self->_imap.sock` — still the ALREADY-TRACKED unannotated-`__init__`-param
+hard bug (`Idler.__init__(self, imap, duration=None)` types `_imap` as
+int64_t, so the two-level field-chain fix can't activate); (2) line 133
+`co_yield Idler___next__(self)` — `__next__`'s inferred return type
+(MojoList*) disagrees with burst's unified promise type (int64_t), a
+yield-type-unification blind spot for cross-method return types that only
+matters once (1) stops masking later parts of the body (the walrus/
+truthiness items below). Neither attempted; both owned by their existing
+write-ups. No regression from this session's three generic fixes (all 48 generator-runner
+tests pass, including this session's six new compiled-and-run ones).
+
+
 ## Status (updated 2026-08-20 — a THIRD, distinct occurrence of the dispatch-table "bare unmangled symbol" failure mode FIXED, unrelated to generators)
 
 Investigated a fresh report of 8 "undeclared here (not in a function)"

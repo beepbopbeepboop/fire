@@ -509,6 +509,44 @@ void mojo_list_set_str(MojoList *l, int64_t i, char *v)
     l->data[_norm_idx(l, i)] = (int64_t)(uintptr_t)v;
 }
 
+/* list.insert(i, v): shift slots up from the tail, then store. Python
+ * negative-index + clamp semantics (i<0 counts from the end; i>len appends).
+ * All three element kinds share one int64 slot representation (doubles as
+ * raw bits, strings as pointers — same convention as append/set above), so
+ * a single slot-shifting helper covers them. Found missing via box.3d/game's
+ * FileSystem.current_dir_path (`path_parts.insert(0, name)` silently no-op'd
+ * — the unknown-method fallback dropped the call entirely — leaving every
+ * path "/"-rooted). */
+static void _mojo_list_insert_slot(MojoList *l, int64_t i, int64_t v)
+{
+    if (!l) return;
+    int64_t n = l->len;
+    if (i < 0) i += n;
+    if (i < 0) i = 0;
+    if (i > n) i = n;
+    mojo_list_append_int(l, 0);      /* grow by exactly one slot */
+    for (int64_t k = n; k > i; --k)
+        l->data[k] = l->data[k - 1];
+    l->data[i] = v;
+}
+
+void mojo_list_insert_int(MojoList *l, int64_t i, int64_t v)
+{
+    _mojo_list_insert_slot(l, i, v);
+}
+
+void mojo_list_insert_double(MojoList *l, int64_t i, double v)
+{
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    _mojo_list_insert_slot(l, i, bits);
+}
+
+void mojo_list_insert_str(MojoList *l, int64_t i, char *v)
+{
+    _mojo_list_insert_slot(l, i, (int64_t)(uintptr_t)v);
+}
+
 char *mojo_list_get_str(MojoList *l, int64_t i)
 {
     if (!l || !l->data) return "";

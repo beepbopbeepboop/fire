@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-23 — STILL-OPEN (unchanged blocker))
+
+Re-ran the repro: identical honest refusal — `resource_info` refused on
+`getattr(obj, name)` with a non-static attribute name (no runtime
+attribute-reflection table). This session confirmed gaps 1 and 2 of the
+2026-08-11 list remain fixed, and the transitively-imported
+test/support/__init__.py is no longer a factor either way. Gap 3 stays
+genuinely structural (needs a real compile-time name->member reflection
+table). Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-11 — 2 of the 3 stacked gaps below FIXED; 1 confirmed genuinely structural)
 
 Re-verified this doc's own 3-gap list (from the 2026-08-10 note directly

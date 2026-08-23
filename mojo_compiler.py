@@ -2704,6 +2704,39 @@ class Parser:
         body = self._parse_block()
         fields  = param_fields + [s for s in body if isinstance(s, (VarDecl, AssignStmt))]
         methods = [s for s in body if isinstance(s, FunctionDef)]
+
+        # Methods defined inside CLASS-BODY CONDITIONAL blocks were
+        # silently dropped here (an `if`/`elif`/`else` statement in a
+        # class body is neither a VarDecl/AssignStmt nor a top-level
+        # FunctionDef, so the comprehensions above skipped its nested
+        # `def`s entirely) — e.g. Lib/test/support/__init__.py's
+        # `PythonSymlink`, whose `_platform_specific` exists only as
+        # two `if sys.platform == "win32": / else:` branch definitions;
+        # `self._platform_specific()` in `__init__` then compiled
+        # against a phantom `<Class>__platform_specific` symbol that
+        # nothing ever defined ("symbol(s) not found" at link).
+        # Hoist every branch-nested `def` into `.methods`. When the
+        # SAME name is defined in more than one mutually-exclusive
+        # branch (the whole point of the idiom), keep only the LAST —
+        # matching real Python's "a later `def` rebinds the attribute"
+        # semantics and the conventional guard layout where the final
+        # `else:` holds the default implementation.
+        seen_method_names = {m.name for m in methods}
+        _cond_stack = [s for s in body if isinstance(s, IfStmt)]
+        while _cond_stack:
+            _c = _cond_stack.pop(0)
+            for _bd in ([_c.then_body]
+                        + [_eb for _, _eb in getattr(_c, 'elifs', [])]
+                        + ([_c.else_body] if _c.else_body else [])):
+                for _bs in _bd:
+                    if isinstance(_bs, FunctionDef):
+                        if _bs.name in seen_method_names:
+                            methods = [m for m in methods if m.name != _bs.name]
+                        else:
+                            seen_method_names.add(_bs.name)
+                        methods.append(_bs)
+                    elif isinstance(_bs, IfStmt):
+                        _cond_stack.append(_bs)
         # Struct-level `comptime NAME = expr` are aliases, not physical fields.
         # Capture them so member access can expand `self.NAME` to its expression
         # (this codegen does not monomorphize, so e.g. _words_size depends on the

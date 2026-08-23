@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-23 — re-verified; walk/_fwalk/fwalk refusal unchanged, tagged-union conclusion stands)
+
+Isolated compile reproduces the identical refusal (now naming `walk`,
+`_fwalk` AND `fwalk` — the third sibling surfaces now that earlier passes
+get further, same shape). This session's three generic generator-codegen
+fixes don't approach the core obstacle the 2026-08-11 entry nailed down:
+`walk`'s control flow depends on runtime type discrimination over a
+heterogeneously-typed stack (`isinstance(top, tuple)` on elements that are
+sometimes strings, sometimes 3-tuples), which this codegen's statically-
+typed container/value model cannot represent regardless of how much
+fixed-shape tuple-yield machinery exists. Tagged-union redesign remains
+the prerequisite; documented-not-fixed stands; doc kept open.
+
+
 ## Status (updated 2026-08-11 — re-verified still refused; deepened root cause, confirms (not reverses) prior "needs tagged-union redesign" conclusion)
 
 Re-verified against current master: `python3 mojo.py build

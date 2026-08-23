@@ -1211,6 +1211,30 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         # CHARACTER (non-slice subscript), not another substring".
         derived_from_param: set = {param_name}
         single_char_vars: set = set()
+        # Dict-vs-list disambiguation signals for the param's own
+        # subscripts. This runtime has exactly two subscriptable
+        # containers — MojoList (int64_t indices) and MojoDict (char*
+        # keys) — so a subscript whose KEY is provably a string is
+        # impossible for a real list and identifies the param as a dict
+        # (Lib/test/support/__init__.py's
+        # `set_sanitizer_env_var(env, option)`: `env[name] += f':{option}'`
+        # with `name` iterating a tuple of string literals was inferred
+        # MojoList*, and the store emitted mojo_list_set_int with a char*
+        # key/value — hard -Wint-conversion errors). Any OTHER subscript
+        # key (int literal, arithmetic, unknown identifier) or any slice
+        # keeps the historical sequence interpretation.
+        is_str_key_subscripted = False
+        is_nondict_key_subscripted = False
+        str_vars: set = set()
+
+        def _expr_is_stringish(e):
+            if isinstance(e, gimple_ctypes.StringLiteral):
+                return True
+            if isinstance(e, gimple_ctypes.TstringLiteral):
+                return True
+            if isinstance(e, gimple_ctypes.IdentExpr) and e.name in str_vars:
+                return True
+            return False
 
         def _is_single_char_literal(e):
             return isinstance(e, gimple_ctypes.StringLiteral) and len(e.value) <= 3  # quotes + <=1 char
@@ -1218,6 +1242,7 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
         def scan_expr(expr):
             """Recursively scan an expression."""
             nonlocal is_subscripted, is_string_method, is_char_compared, is_iterated
+            nonlocal is_str_key_subscripted, is_nondict_key_subscripted
             if isinstance(expr, gimple_ctypes.Comprehension):
                 # A list/set/dict/generator comprehension embedded inside
                 # an expression (`sum(x**2 for x in values)`,
@@ -1252,12 +1277,17 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                     base = base.obj
                 if isinstance(base, gimple_ctypes.IdentExpr) and base.name == param_name:
                     is_subscripted = True
+                    if _expr_is_stringish(expr.index):
+                        is_str_key_subscripted = True
+                    else:
+                        is_nondict_key_subscripted = True
                 scan_expr(expr.obj)
                 scan_expr(expr.index)
             elif isinstance(expr, gimple_ctypes.SliceExpr):
                 # Slicing a param means it is an indexable sequence, same as subscript.
                 if isinstance(expr.obj, gimple_ctypes.IdentExpr) and expr.obj.name == param_name:
                     is_subscripted = True
+                    is_nondict_key_subscripted = True
                 scan_expr(expr.obj)
                 if expr.start is not None: scan_expr(expr.start)
                 if expr.stop is not None: scan_expr(expr.stop)
@@ -1365,6 +1395,9 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                             _track_derivation(t_el, v_el)
                     else:
                         _track_derivation(node.target, node.value)
+                    if (isinstance(node.target, gimple_ctypes.IdentExpr)
+                            and isinstance(node.value, gimple_ctypes.StringLiteral)):
+                        str_vars.add(node.target.name)
                     scan_expr(node.target)
                     scan_expr(node.value)
                 elif isinstance(node, gimple_ctypes.ExprStmt):
@@ -1387,6 +1420,21 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                         it = node.iterable
                         if isinstance(it, gimple_ctypes.IdentExpr) and it.name == param_name:
                             is_iterated = True
+                        # `for name in ('A', 'B', ...):` — every element of
+                        # an all-string-literal tuple/list/set literal is a
+                        # string, so the loop target is a string variable (a
+                        # dict-key source for `param[name]` subscripts).
+                        if (isinstance(it, (gimple_ctypes.TupleExpr,
+                                            gimple_ctypes.ListExpr,
+                                            gimple_ctypes.SetExpr))
+                                and it.elements
+                                and all(isinstance(el, gimple_ctypes.StringLiteral)
+                                        for el in it.elements)):
+                            tgt = node.target
+                            if isinstance(tgt, gimple_ctypes.IdentExpr):
+                                str_vars.add(tgt.name)
+                            elif isinstance(tgt, str):
+                                str_vars.add(tgt)
                         scan_expr(node.iterable)
                     scan_nodes(node.body)
                     if node.else_body:
@@ -1419,7 +1467,8 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
 
         scan_nodes(nodes)
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
-                is_iterated, is_char_compared)
+                is_iterated, is_char_compared, is_str_key_subscripted,
+                is_nondict_key_subscripted)
 
     # For each parameter without a type annotation, infer from usage
     for pname, ptype in func.params:
@@ -1442,13 +1491,16 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             _pu_cached = _g._param_usage_scan_cache.get(_pu_key)
             if _pu_cached is not None:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
-                 is_iterated, is_char_compared) = _pu_cached
+                 is_iterated, is_char_compared, is_str_key_subscripted,
+                 is_nondict_key_subscripted) = _pu_cached
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
-                 is_iterated, is_char_compared) = analyze_param_usage(func.body, pname)
+                 is_iterated, is_char_compared, is_str_key_subscripted,
+                 is_nondict_key_subscripted) = analyze_param_usage(func.body, pname)
                 _g._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
-                    is_iterated, is_char_compared)
+                    is_iterated, is_char_compared, is_str_key_subscripted,
+                    is_nondict_key_subscripted)
 
             # If passed to isinstance() as first arg, it's polymorphic → keep as int64_t
             is_polymorphic = any(
@@ -1465,7 +1517,16 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
             # char*, not MojoList*. Check subscript/iteration FIRST to
             # override generic function-call inference like len() either way.
             if is_subscripted or is_iterated:
-                inferred[pname] = 'char *' if (is_string_method or is_char_compared) else 'MojoList *'
+                if is_str_key_subscripted and not is_nondict_key_subscripted:
+                    # Every provable subscript key is a string (a string
+                    # literal, f-string, or a local bound to one) and there
+                    # is no int-keyed subscript/slice anywhere — impossible
+                    # for a real list under this runtime's int64_t-index
+                    # lists, so the param is a dict. See the signals'
+                    # declaration above for the motivating repro.
+                    inferred[pname] = 'MojoDict *'
+                else:
+                    inferred[pname] = 'char *' if (is_string_method or is_char_compared) else 'MojoList *'
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
@@ -2342,10 +2403,20 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         start_v = gen._new_val('int64_t', '(int64_t)0')
         step_v = gen._new_val('int64_t', '(int64_t)1')
         cond_op = '<'
-        _, stop_v = gen.lower_expr(args[0])
+        _stop_t, stop_v = gen.lower_expr(args[0])
+        if _stop_t != 'int64_t':
+            # Same reasoning as start_v below: a bare int-typed bound
+            # compared against the int64_t-declared loop target gives
+            # "mismatching comparison operand types" under strict
+            # -fgimple (GCC does NOT apply usual arithmetic conversions
+            # across a GIMPLE comparison statement) — test_deque.py's
+            # `list(range(50, 150))` ctor lowering.
+            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
     elif len(args) == 2:
         start_t, start_v = gen.lower_expr(args[0])
-        _, stop_v  = gen.lower_expr(args[1])
+        _stop_t, stop_v  = gen.lower_expr(args[1])
+        if _stop_t != 'int64_t':
+            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
         # `start_v` (unlike `stop_v`, only ever used in a comparison,
         # which undergoes GIMPLE's usual arithmetic conversion) feeds a
         # DIRECT `{target} = {start_v};` assignment below into an
@@ -2363,7 +2434,9 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         cond_op = '<'
     elif len(args) == 3:
         start_t, start_v = gen.lower_expr(args[0])
-        _, stop_v  = gen.lower_expr(args[1])
+        _stop_t, stop_v  = gen.lower_expr(args[1])
+        if _stop_t != 'int64_t':
+            stop_v = gen._new_val('int64_t', f"(int64_t){stop_v}")
         se = args[2]
         if isinstance(se, gimple_ctypes.IntLiteral) and se.value < 0:
             cond_op = '>'
