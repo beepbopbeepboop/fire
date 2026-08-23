@@ -1155,6 +1155,63 @@ def main():
         print(v)
 """, "200\n500\n")
 
+    # `lines = []` + `lines.append(v)` + iteration/subscript/len over the
+    # local list inside a generator body — the single most common
+    # accumulator idiom in real stdlib generators (ftplib.py's mlsd and
+    # many others). Previously the literal lowered to raw C++ brace-init
+    # text assigned to an int64_t-declared local ("request for member
+    # 'append' in 'lines', which is of non-class type 'int64_t'"); now a
+    # real MojoList* with element-type tracking driving the accessors.
+    test_generator_stdout("generator_list_literal_local_append_iterate", """\
+def gen(n):
+    acc = []
+    acc.append(1)
+    acc.append(2 * n)
+    yield len(acc)
+    yield acc[1]
+    total = 0
+    for v in acc:
+        total = total + v
+    yield total
+
+def main():
+    for v in gen(10):
+        print(v)
+""", "2\n20\n21\n")
+
+    test_generator_stdout("generator_str_list_local_roundtrip", """\
+def gen():
+    lines = []
+    lines.append("alpha")
+    lines.append("beta")
+    for s in lines:
+        yield s
+    yield lines[0]
+
+def main():
+    for v in gen():
+        print(v)
+""", "alpha\nbeta\nalpha\n")
+
+    # `entry = {}` + string-keyed writes + reads keyed by a loop variable
+    # over a string-literal tuple (the tuple-range-for's `auto` target must
+    # be tracked as char* or the dict key gets garbage-stringified through
+    # mojo_str_from_int).
+    test_generator_stdout("generator_dict_local_string_keys", """\
+def dgen():
+    entry = {}
+    entry["alpha"] = 1
+    entry["beta"] = 2
+    s = 0
+    for k in ("alpha", "beta"):
+        s = s + entry[k]
+    yield s
+
+def main():
+    for v in dgen():
+        print(v)
+""", "3\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

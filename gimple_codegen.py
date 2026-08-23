@@ -699,6 +699,15 @@ class GimpleGen:
         # coroutine-body compile. See `_gen_cpp_generator_unit` /
         # `_gen_cpp_async_unit` for init/clear.
         self._cpp_func_scope_decls: list[str] | None = None
+        # Per-coroutine-unit element ctype of LIST locals built by
+        # `xs = [...]` literal assignment + `xs.append(v)` calls in a
+        # compiled generator body (gimple_cpp_core.py's AssignStmt
+        # container branch + `.append` call case, which write it; the
+        # for-over-list indexed loop and SubscriptExpr read sites read
+        # it to pick mojo_list_get_str/_double/_int). Keyed by local
+        # name; init/cleared per coroutine unit alongside
+        # _cpp_func_scope_decls.
+        self._cpp_list_local_elem_types: dict[str, str] = {}
         # Module-level symbols (globals + functions) referenced by compiled
         # generator/async bodies, so the .cpp preamble can declare them
         # extern (a generator body calling tokenize.py's `detect_encoding`

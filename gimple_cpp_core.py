@@ -133,6 +133,96 @@ def _cpp_in_link(gen, a: str, a_node, b: str, b_node, negate: bool) -> str:
     return f"({res})"
 
 
+def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list[str]:
+    """Emit a REAL runtime construction for a container-LITERAL assignment
+    target (`lines = []`, `entry = {}`) into an already-container-typed
+    local `name` — the statement-level counterpart of `_infer_simple_expr_
+    ctype`'s ListExpr/DictExpr/SetExpr cases (which type the local). The
+    expression emitter's literal cases produce raw C++ brace-init text
+    (`{}`), which is only valid for scalar/aggregate C++ types, never for
+    a MojoList*/MojoDict*/MojoSet* local. Python semantics create a FRESH
+    object per evaluation, so each call re-constructs rather than clearing.
+
+    Element/value ctypes come from the same `_infer_simple_expr_ctype`
+    (default int64_t, this model's boxed-value convention); the list's
+    unified element type is recorded into `gen._cpp_list_local_elem_types`
+    for the later `.append`/for-loop/subscript-read sites to reuse.
+    Non-literal-typed elements (a nested literal, a call of unknown type)
+    still append via the int64_t box — matching every other "unknown ->
+    int64_t box" convention in this emitter — EXCEPT genuinely nested
+    containers, which have no flat representation here and refuse honestly.
+    """
+    elem_reg = getattr(gen, '_cpp_list_local_elem_types', None)
+    if isinstance(value_node, gimple_ctypes.ListExpr):
+        etype = None
+        for el in value_node.elements:
+            if isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr,
+                               gimple_ctypes.SetExpr, gimple_ctypes.TupleExpr)):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "a nested container literal has no representation as a "
+                    "list element in this coroutine-body model")
+            ect = gimple_exprtypes._infer_simple_expr_ctype(
+                el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'int64_t'
+            etype = ect if etype is None else (gimple_ctypes.TypeLattice.join(etype, ect) or 'int64_t')
+        lines = [f"{indent}{name} = mojo_list_new();"]
+        for el in value_node.elements:
+            ev = gen._cpp_expr(el)
+            ect = gimple_exprtypes._infer_simple_expr_ctype(
+                el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'int64_t'
+            if etype == 'char *':
+                lines.append(f"{indent}mojo_list_append_str({name}, "
+                             f"(char *)({ev}));")
+            elif etype == 'double':
+                lines.append(f"{indent}mojo_list_append_double({name}, "
+                             f"(double)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_list_append_int({name}, "
+                             f"(int64_t)({ev}));")
+        if elem_reg is not None:
+            elem_reg[name] = etype or 'int64_t'
+        return lines
+    if isinstance(value_node, gimple_ctypes.DictExpr):
+        lines = [f"{indent}{name} = mojo_dict_new();"]
+        vtype = None
+        for k_node, v_node in value_node.pairs:
+            if not isinstance(k_node, gimple_ctypes.StringLiteral):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "only string-literal keys are supported in a dict "
+                    "literal inside a coroutine body")
+            vct = gimple_exprtypes._infer_simple_expr_ctype(
+                v_node, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'int64_t'
+            vtype = vct if vtype is None else (gimple_ctypes.TypeLattice.join(vtype, vct) or 'int64_t')
+        for k_node, v_node in value_node.pairs:
+            vv = gen._cpp_expr(v_node)
+            key = f'"{gimple_ctypes._c_escape(k_node.value)}"'
+            if vtype == 'char *':
+                lines.append(f"{indent}mojo_dict_set_str({name}, {key}, "
+                             f"(char *)({vv}));")
+            elif vtype == 'double':
+                lines.append(f"{indent}mojo_dict_set_double({name}, {key}, "
+                             f"(double)({vv}));")
+            else:
+                lines.append(f"{indent}mojo_dict_set_int({name}, {key}, "
+                             f"(int64_t)({vv}));")
+        return lines
+    if isinstance(value_node, gimple_ctypes.SetExpr):
+        lines = [f"{indent}{name} = mojo_set_new();"]
+        for el in value_node.elements:
+            ev = gen._cpp_expr(el)
+            ect = gimple_exprtypes._infer_simple_expr_ctype(
+                el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'int64_t'
+            if ect == 'char *':
+                lines.append(f"{indent}mojo_set_add_str({name}, (char *)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_set_add_int({name}, (int64_t)({ev}));")
+        return lines
+    return None
+
+
 def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
                                      args: list) -> list:
     """Pad a coroutine-body struct-method call's argument list out to the
@@ -809,6 +899,56 @@ def _cpp_expr(gen, e) -> str:
             # pattern for free functions. See bugs/hard/CODEGEN_
             # generator_struct_typed_param_refused.md.
             _cpp_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
+            # `<container-local>.append(v)` / `<set-local>.add(v)` — a
+            # mutating container-method call on a local whose declared
+            # type is a real container pointer (`lines.append("alpha")`
+            # after `lines = []`, ftplib.py's `FTP.mlsd`). The generic
+            # `{obj}.{member}(...)` fallback below emits C++ member-call
+            # syntax, which is invalid on a plain struct pointer with no
+            # member functions ("request for member 'append' in 'lines',
+            # which is of non-class type 'int64_t'" when untyped — the
+            # pre-container-typing symptom; "no member named 'append'"
+            # once typed). Lowers through the same runtime primitives the
+            # subscript-write branch already uses, wrapped in a comma
+            # expression so it works in both statement and expression
+            # slots (the runtime append/add helpers return void). The
+            # appended value's own inferred ctype updates the local's
+            # unified element-type registry (same join rule the literal-
+            # init helper uses), so later iteration/subscript reads pick
+            # the right accessor.
+            if (isinstance(e.func.obj, gimple_ctypes.IdentExpr)
+                    and gen._cpp_declared is not None
+                    and e.func.obj.name in gen._cpp_declared):
+                _cont_name = e.func.obj.name
+                _cont_ct = gen._cpp_declared.get(_cont_name)
+                if (_cont_ct == 'MojoList *' and e.func.member == 'append'
+                        and len(e.args) == 1):
+                    _avct = gimple_exprtypes._infer_simple_expr_ctype(
+                        e.args[0], gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api) or 'int64_t'
+                    _reg = getattr(gen, '_cpp_list_local_elem_types', None)
+                    if _reg is not None:
+                        _prev = _reg.get(_cont_name)
+                        _reg[_cont_name] = _avct if _prev is None else (
+                            gimple_ctypes.TypeLattice.join(_prev, _avct) or 'int64_t')
+                    _a = gen._cpp_expr(e.args[0])
+                    _eff = (_reg or {}).get(_cont_name, _avct)
+                    if _eff == 'char *':
+                        return f"(mojo_list_append_str({_cont_name}, (char *)({_a})), 0)"
+                    if _eff == 'double':
+                        return f"(mojo_list_append_double({_cont_name}, (double)({_a})), 0)"
+                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_a})), 0)"
+                if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
+                        and len(e.args) == 1):
+                    _avct = gimple_exprtypes._infer_simple_expr_ctype(
+                        e.args[0], gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api) or 'int64_t'
+                    _a = gen._cpp_expr(e.args[0])
+                    if _avct == 'char *':
+                        return f"(mojo_set_add_str({_cont_name}, (char *)({_a})), 0)"
+                    return f"(mojo_set_add_int({_cont_name}, (int64_t)({_a})), 0)"
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'self' \
                     and _cpp_self_struct:
                 args = [gen._cpp_expr(a) for a in e.args]
@@ -1024,6 +1164,30 @@ def _cpp_expr(gen, e) -> str:
             # call handling further down when shadowed.
             if (fname == 'len' and len(e.args) == 1
                     and not gen._locally_binds_name('len')):
+                # Dispatch on the argument's declared type — the same
+                # shape the ordinary path's `_lower_builtin_len` already
+                # implements (MojoList*/MojoDict*/MojoSet* → their real
+                # len helpers, char* → mojo_strlen). The previous
+                # unconditional `mojo_len(...)` fallback hit that
+                # runtime helper's honest always-0 stub for every
+                # container-typed local (`len(acc)` after `acc = []` +
+                # appends returned 0). An UNTRACKED argument keeps the
+                # old stub: this emitter has no boxed-value kind
+                # tracking equivalent to the plain path's
+                # `_actual_types`, so guessing list-vs-string there
+                # could misroute a string through mojo_list_len.
+                _len_arg = e.args[0]
+                _lct = (gen._cpp_declared.get(_len_arg.name)
+                        if gen._cpp_declared is not None
+                        and isinstance(_len_arg, gimple_ctypes.IdentExpr) else None)
+                if _lct == 'MojoList *':
+                    return f"mojo_list_len((MojoList *)({args[0]}))"
+                if _lct == 'MojoDict *':
+                    return f"mojo_dict_len((MojoDict *)({args[0]}))"
+                if _lct == 'MojoSet *':
+                    return f"mojo_set_len((MojoSet *)({args[0]}))"
+                if _lct == 'char *':
+                    return f"mojo_strlen((char *)({args[0]}))"
                 # mojo_len takes the boxed int64_t representation of a
                 # container/string pointer — exactly what this emitter's
                 # locals hold.
@@ -1437,6 +1601,16 @@ def _cpp_expr(gen, e) -> str:
         if isinstance(e.obj, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral, gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared.get(e.obj.name) == 'MojoList *':
+                # Element type known from literal-init/append tracking
+                # (`gen._cpp_list_local_elem_types`) — read back through
+                # the matching accessor instead of the int64_t-box
+                # default, so a yielded/read string element round-trips
+                # as char* rather than being reinterpreted as an integer.
+                _leet = getattr(gen, '_cpp_list_local_elem_types', {}).get(e.obj.name)
+                if _leet == 'char *':
+                    return f"mojo_list_get_str((MojoList *)({obj}), (int64_t)({idx}))"
+                if _leet == 'double':
+                    return f"mojo_list_get_double((MojoList *)({obj}), (int64_t)({idx}))"
                 return f"mojo_list_get_int((MojoList *)({obj}), (int64_t)({idx}))"
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
@@ -2212,6 +2386,17 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "only a plain identifier assignment target is supported")
         name = s.target.name
+        # A list/dict/set LITERAL RHS (`lines = []`, ftplib.py's mlsd) is
+        # NOT representable as the raw C++ brace-init text `_cpp_expr`'s
+        # literal cases emit — for a container-typed local that text must
+        # become a real runtime construction instead (`mojo_list_new()` +
+        # element appends). Handled for BOTH the first assignment (which
+        # also declares the local with its real container type via
+        # `_infer_simple_expr_ctype`'s matching cases) and any later
+        # re-assignment of an already-container-typed local.
+        _container_literal = isinstance(s.value, (gimple_ctypes.ListExpr,
+                                                  gimple_ctypes.DictExpr,
+                                                  gimple_ctypes.SetExpr))
         val = gen._cpp_expr(s.value)
         # See self._cpp_kw_param_renames's docstring — an assignment
         # TARGET is emitted directly (`name = val`, bypassing
@@ -2274,7 +2459,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
+            if _container_literal and ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
+                if init is not None:
+                    return init
             return [f"{indent}{cpp_name} = {val};"]
+        if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
+            if init is not None:
+                return init
         # A mutated-by-reference capture (see `_gen_cpp_async_unit`'s
         # `mut_capture_names` docstring) is a pointer parameter -- the
         # WRITE must go through it (`*name = ...`), not overwrite the
@@ -3205,6 +3398,12 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     and gen._cpp_declared[s.iterable.name] in ('int64_t', 'MojoList *'))
                     or _self_field_itname is not None):
                 _itname = _self_field_itname if _self_field_itname is not None else s.iterable.name
+                # A LOCAL list's element type (literal-init/append
+                # tracking) — same role `_self_field_elem_ctype` plays
+                # for the self-field case below.
+                _local_elem_ctype = None
+                if _self_field_itname is None:
+                    _local_elem_ctype = getattr(gen, '_cpp_list_local_elem_types', {}).get(_itname)
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = list(_pre_lines)
                 # A known struct-pointer element type (e.g. `Thing *`,
@@ -3223,11 +3422,13 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # closes that same gap for a plain (non-sorted)
                 # `for x in self.<field>:` over a `list[Struct]` field.
                 _elem_struct_ctype = None
-                if (isinstance(_self_field_elem_ctype, str)
-                        and _self_field_elem_ctype.endswith(' *')
-                        and _self_field_elem_ctype[:-2] in gen.struct_field_types):
-                    _elem_struct_ctype = _self_field_elem_ctype
-                if _self_field_elem_ctype == 'char *':
+                _eff_elem = (_self_field_elem_ctype if _self_field_elem_ctype is not None
+                             else _local_elem_ctype)
+                if (isinstance(_eff_elem, str)
+                        and _eff_elem.endswith(' *')
+                        and _eff_elem[:-2] in gen.struct_field_types):
+                    _elem_struct_ctype = _eff_elem
+                if _eff_elem == 'char *':
                     if not target_was_declared:
                         lines.append(f"{indent}char *{target};")
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
@@ -3235,6 +3436,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr}++) {{")
                     lines.append(f"{indent}    {target} = "
                                  f"mojo_list_get_str((MojoList *)({_itname}), {_ctr});")
+                elif _eff_elem == 'double':
+                    if not target_was_declared:
+                        lines.append(f"{indent}double {target};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                 f"{_ctr}++) {{")
+                    lines.append(f"{indent}    {target} = "
+                                 f"mojo_list_get_double((MojoList *)({_itname}), {_ctr});")
                 elif _elem_struct_ctype is not None:
                     if not target_was_declared:
                         lines.append(f"{indent}{_elem_struct_ctype}{target};")
@@ -3251,8 +3460,10 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                  f"{_ctr}++) {{")
                     lines.append(f"{indent}    {target} = "
                                  f"mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
-                if _self_field_elem_ctype == 'char *':
+                if _eff_elem == 'char *':
                     declared[target] = 'char *'
+                elif _eff_elem == 'double':
+                    declared[target] = 'double'
                 elif _elem_struct_ctype is not None:
                     declared[target] = _elem_struct_ctype
                 else:
@@ -3267,6 +3478,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # WhileStmt else handling with a shared break flag.
                 brk_var = gen._cpp_fresh_name("_mg_brk")
                 lines = [f"{indent}bool {brk_var} = false;"]
+                if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+                        and s.iterable.elements
+                        and all(isinstance(el, gimple_ctypes.StringLiteral)
+                                for el in s.iterable.elements)):
+                    declared[target] = 'char *'
                 lines.append(f"{indent}for (auto {target} : {iter_expr}) {{")
                 for inner in s.body:
                     lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
@@ -3276,6 +3492,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
                 return lines
+            if (isinstance(s.iterable, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+                    and s.iterable.elements
+                    and all(isinstance(el, gimple_ctypes.StringLiteral)
+                            for el in s.iterable.elements)):
+                # `for k in ("a", "b"):` — the generic range-for declares
+                # the target via C++ `auto`, but this emitter's OWN type
+                # tracking must still learn the target's real ctype
+                # (char *), or later uses — most importantly a dict
+                # subscript keyed by the loop variable (`d[k]`) — fall
+                # back to the int64_t default and stringify the pointer
+                # through mojo_str_from_int (garbage key).
+                declared[target] = 'char *'
             lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))

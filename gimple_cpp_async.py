@@ -148,7 +148,11 @@ def _cpp_dict_key_expr(gen, idx_node, idx_cpp: str) -> str:
     ictype = gimple_exprtypes._infer_simple_expr_ctype(
         idx_node, gen._cpp_declared, self_fields, gen._async_api)
     if ictype == 'char *':
-        return idx_cpp
+        # An explicit (char *) cast: a range-for over a string-literal
+        # tuple (`for k in ("a", "b"):`) binds its target to
+        # `const char *` (C++ braced-init-list element type), and the
+        # runtime dict helpers take plain `char *` keys.
+        return f"(char *)({idx_cpp})"
     return f"mojo_str_from_int((int64_t)({idx_cpp}))"
 
 def _cpp_fresh_name(gen, prefix: str = "_mg_t") -> str:
@@ -583,6 +587,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_gen_self_recursed = False
     func_decls: list[str] = []
     gen._cpp_func_scope_decls = []
+    gen._cpp_list_local_elem_types = {}
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -645,6 +650,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_fields = None
         gen._cpp_declared = None
         gen._cpp_func_scope_decls = None
+        gen._cpp_list_local_elem_types = {}
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
@@ -1251,6 +1257,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         gen._cpp_async_enclosing_scope = None
         gen._cpp_declared = None
         gen._cpp_func_scope_decls = None
+        gen._cpp_list_local_elem_types = {}
         gen._cpp_mut_capture_names = frozenset()
     if value_ctype is None:
         # A genuinely void-returning async function (declared `-> None`
