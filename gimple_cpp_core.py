@@ -464,6 +464,30 @@ def _cpp_expr(gen, e) -> str:
                     return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                             f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))")
                 return f"{obj_expr}->{e.member}"
+        # A member READ rooted at a DECLARED local typed as a plain
+        # scalar — including multi-level chains like
+        # `cm.unraisable.exc_value` (test_ctypes/test_random_things.py),
+        # where EVERY intermediate link lowers recursively: the
+        # innermost `cm.unraisable` becomes `0`, and the outer level
+        # would then emit `0.object` — which C++ tokenizes as the float
+        # literal `0.` followed by an identifier ("exponent has no
+        # digits"). Walk to the chain's root identifier and check ITS
+        # declared ctype BEFORE any recursion-shaped emission. Mirror the
+        # module-member stub convention: emit 0, diagnosed via
+        # _debug_note, so the body still COMPILES. Must sit OUTSIDE the
+        # `isinstance(e.obj, IdentExpr)` block above precisely so it
+        # also covers chains whose obj is itself a MemberExpr.
+        _chain_root = e
+        while isinstance(_chain_root, gimple_ctypes.MemberExpr):
+            _chain_root = _chain_root.obj
+        if isinstance(_chain_root, gimple_ctypes.IdentExpr) \
+                and gen._cpp_declared is not None \
+                and gen._cpp_declared.get(_chain_root.name) in (
+                    'int', 'int64_t', 'double', '_Bool'):
+            gimple_ctypes._debug_note('stubbed operation',
+                        f'generator-body attribute read on opaque '
+                        f'scalar local {_chain_root.name}.{e.member}')
+            return '0'
         return f"{obj_expr}.{e.member}"
     if isinstance(e, gimple_ctypes.LambdaExpr):
         # A `lambda` used as a VALUE inside a generator body (e.g.
@@ -942,6 +966,26 @@ def _cpp_expr(gen, e) -> str:
                     return (f"({_dict_val_ct})mojo_dict_get_int("
                             f"(MojoDict *)({_obj_expr}), {_key_expr})")
                 return f"mojo_dict_get_int((MojoDict *)({_obj_expr}), {_key_expr})"
+            # A member call on a DECLARED local whose ctype is a plain
+            # scalar (`root_logger = logging.getLogger()` — the module-
+            # call elision already typed `root_logger` int64_t and
+            # initialized it to 0, so the value semantics are already
+            # gone before this call). The generic `{obj}.{member}(...)`
+            # fallback just below would emit invalid C++
+            # (`root_logger.addHandler(handler)` against a raw int64_t).
+            # Mirror the module-member stub convention immediately above:
+            # emit 0 (diagnosed via _debug_note) so the body still
+            # COMPILES. Deliberately placed AFTER the `.replace`/`.get`
+            # real-method cases above so genuinely-typed char*/MojoDict*
+            # receivers keep their real lowerings.
+            if isinstance(e.func.obj, gimple_ctypes.IdentExpr) \
+                    and gen._cpp_declared is not None \
+                    and gen._cpp_declared.get(e.func.obj.name) in (
+                        'int', 'int64_t', 'double', '_Bool'):
+                gimple_ctypes._debug_note('stubbed operation',
+                            f'generator-body method call on opaque scalar '
+                            f'local {e.func.obj.name}.{e.func.member}()')
+                return '0'
             obj = gen._cpp_expr(e.func.obj)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
             return f"{obj}.{e.func.member}({args})"
@@ -3180,6 +3224,23 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 for inner in s.body:
                     lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
                 lines.append(f"{indent}}}")
+                return lines
+            if iter_expr == '0':
+                # The iterable lowered to the scalar stub '0' (e.g.
+                # test_exception_group.py's leaf_generator:
+                # `for e in exc.exceptions:` where `exc` is an untyped
+                # param boxed to int64_t and `.exceptions` is the
+                # diagnosed attribute-read stub). A range-for over `0`
+                # is invalid C++, and the iterable's real value is
+                # already unrepresentable here — so run ZERO
+                # iterations: bind the target to 0 and skip the body,
+                # mirroring how every other stubbed operation in this
+                # body model behaves.
+                lines = []
+                if not target_was_declared:
+                    lines.append(f"{indent}int64_t {target} = 0;")
+                else:
+                    lines.append(f"{indent}{target} = 0;")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop
