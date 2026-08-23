@@ -37,6 +37,7 @@ import gimple_solvers
 import gimple_exprtypes
 from gimple_exprtypes import _walk_ast
 import gimple_codegen
+import gimple_gen_funcs as _ggf_dup
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _emitted_unresolved_stub_syms, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 
@@ -292,18 +293,56 @@ def gen_module_impl(self, stmts):
             self._c_kw_struct_renames[_s.name] = _safe
             _s.name = _safe
     self._local_struct_names = {s.name for s in stmts if isinstance(s, StructDef)}
-    # Overloaded top-level functions (same name, multiple defs) can't be
-    # emitted as distinct C symbols. Drop them here — the elaborator selects
-    # and instantiates the right overload per call site (slice 4). One filter
-    # at the top keeps every downstream loop collision-free. No-op otherwise.
-    _fn_counts = {}
+    # Overloaded / duplicated top-level functions (same name, multiple defs)
+    # can't all be emitted as distinct C symbols. Two genuinely different
+    # situations hide behind that one description, with OPPOSITE correct
+    # handling (BUG-2026-021):
+    #
+    # - GENUINE OVERLOADS — same name, DIFFERENT parameter signatures
+    #   (`can_craft(t: Tuff, ...)` vs `can_craft(t: TuffBricks, ...)` in two
+    #   copies of a mod family). Still dropped entirely here: the elaborator
+    #   selects and instantiates the right overload per call site (slice 4),
+    #   so no single C definition exists to emit.
+    # - REDEFINITIONS — identical signature, e.g. test suites whose tail was
+    #   accidentally pasted twice (`def main():` twice). myinterpreter.py's
+    #   module dict binding means the INTERPRETER silently runs the LAST
+    #   definition; stripping every copy here instead left the program with
+    #   no `main` at all — entry-point synthesis fell back to an empty
+    #   `_gimple_main { return 0; }` and the whole --jit run exited 0 with
+    #   zero output. Keep exactly the LAST copy (interpreter semantics).
+    #
+    # dup_def_signature_key is the shared classifier (reflect.
+    # collect_exports_src uses it too, so the reflection table advertises
+    # exactly the one survivor this pass keeps). One filter at the top keeps
+    # every downstream loop collision-free. No-op otherwise.
+    _dup_defs: dict = {}
     for _s in stmts:
         if isinstance(_s, FunctionDef):
-            _fn_counts[_s.name] = _fn_counts.get(_s.name, 0) + 1
-    _overloaded = {n for n, c in _fn_counts.items() if c > 1}
-    if _overloaded:
-        stmts = [s for s in stmts
-                 if not (isinstance(s, FunctionDef) and s.name in _overloaded)]
+            _dup_defs.setdefault(_s.name, []).append(_s)
+    _dup_drop_ids: set = set()
+    for _dup_list in _dup_defs.values():
+        if len(_dup_list) < 2:
+            continue
+        if len({_ggf_dup.dup_def_signature_key(_d) for _d in _dup_list}) == 1:
+            _dup_drop_ids.update(id(_d) for _d in _dup_list[:-1])
+        else:
+            _dup_drop_ids.update(id(_d) for _d in _dup_list)
+    if _dup_drop_ids:
+        stmts = [s for s in stmts if id(s) not in _dup_drop_ids]
+    # BUG-2026-019 seeding: THIS compile unit's own surviving top-level
+    # FunctionDefs by bare name, plus the memo _local_def_pts fills lazily.
+    # A same-named free function defined by several sibling modules of one
+    # import closure gets its C symbol suffix AND its call-site argument
+    # coercion from THIS map first (_overload_suffix/_func_csym), never from
+    # the shared func_param_types[bare] slot those siblings' registration
+    # passes overwrite once per module — the off-by-one-sibling wrong-struct
+    # cast (`Tuff *` passed where tuff_bricks.mojo's own can_craft wanted
+    # `TuffBricks *`). Resolved LAZILY (empty memo here): struct-typed
+    # parameter annotations need the struct registration passes further down
+    # gen_module to have run before _signature_ctypes can resolve them, and
+    # the first suffix computation happens during body emission, long after.
+    self._local_def_nodes = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
+    self._local_def_param_types: dict = {}
 
     # `try: from X import Y / except ImportError: from Z import Y`
     # (or a bare `def NAME(): ...` fallback shape) — the standard

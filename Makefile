@@ -78,7 +78,7 @@ check-modcache: $(GIMPLE_SOURCES) test_module_cache.py myinterpreter.py mojo.py 
 # link cleanliness so it can't silently regress.
 check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py mojo_main.py test_selfhost.py
 	python3 checked_run.py check-selfhost \
-		--extra $(GIMPLE_SOURCES) \
+		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py --extra mojo_main.py \
 		--extra test_selfhost.py \
 		-- python3 test_selfhost.py
@@ -91,7 +91,7 @@ check-selfhost: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py mojo
 # (generator_simple — the C++ coroutine frontier).
 check-runtimediff: $(GIMPLE_SOURCES) mojo_compiler.py myinterpreter.py mojo.py test_runtime_diff.py
 	python3 checked_run.py check-runtimediff \
-		--extra $(GIMPLE_SOURCES) \
+		$(foreach s,$(GIMPLE_SOURCES),--extra $(s)) \
 		--extra mojo_compiler.py --extra myinterpreter.py --extra mojo.py \
 		--extra test_runtime_diff.py \
 		-- python3 test_runtime_diff.py
