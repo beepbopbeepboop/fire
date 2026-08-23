@@ -1626,12 +1626,14 @@ def gen_module_impl(self, stmts):
         if not _changed:
             break
 
+    _p2c_base_var_types = dict(self.func_return_types)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:
             if _is_foreign_main(s) or not isinstance(s, FunctionDef):
                 continue
-            _ret_elem = self._infer_return_elem_type(s.body, func_def=s)
+            _ret_elem = self._infer_return_elem_type(
+                s.body, func_def=s, _base_var_types=_p2c_base_var_types)
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
@@ -1641,7 +1643,8 @@ def gen_module_impl(self, stmts):
                 for m in s.methods:
                     if m.name == '__init__':
                         continue
-                    _ret_elem = self._infer_return_elem_type(m.body)
+                    _ret_elem = self._infer_return_elem_type(
+                        m.body, _base_var_types=_p2c_base_var_types)
                     _key = f"{s.name}_{m.name}"
                     if _ret_elem is not None and self._return_elem_types.get(_key) != _ret_elem:
                         self._return_elem_types[_key] = _ret_elem

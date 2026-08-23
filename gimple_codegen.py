@@ -1270,6 +1270,16 @@ class GimpleGen:
         # `self.struct_field_types`, grown monotonically during
         # compilation — the same time-dependent-filter trap as Phase 2).
         self._param_usage_scan_cache: dict = {}
+        # Phase 4 (same doc, same pattern): per-top-level-statement
+        # memoization of `_calls_in_stmts`' pure CallExpr-collection walk
+        # (gen_module's ctor-literal scan plus its Pass 1.3d/2c caller-body
+        # scans — the latter re-collects every caller body 4 more times
+        # inside its own fixpoint loop). Keyed by id(stmt); shared by
+        # reference into every temp_gen like the caches above. Safe to
+        # cache whole because the traversal reads no mutable gen state and
+        # every consumer only READS the collected nodes; see
+        # gimple_gen_resolve._calls_in_stmts.
+        self._calls_in_stmts_cache: dict = {}
         self._emitted_structs: set[str] = set()      # struct names already emitted (dedup across modules)
         self._str_pool: dict[str, str] = {}          # escaped string → _slit_N (shared across imports)
         # Compile-time-known regex support (see regex_compile.py, BACKLOG-CODEGEN.md §4f):
@@ -3180,8 +3190,10 @@ class GimpleGen:
         return grsl._collect_local_container_elems(self, stmts)
     def _collect_return_elems(self, stmts, acc) -> None:
         return grsl._collect_return_elems(self, stmts, acc)
-    def _infer_return_elem_type(self, body, func_def=None) -> str | None:
-        return grsl._infer_return_elem_type(self, body, func_def=func_def)
+    def _infer_return_elem_type(self, body, func_def=None,
+                                _base_var_types=None) -> str | None:
+        return grsl._infer_return_elem_type(self, body, func_def=func_def,
+                                            _base_var_types=_base_var_types)
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):

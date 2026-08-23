@@ -2,6 +2,35 @@
 
 ## Status (updated 2026-08-07)
 
+**REOPENED 2026-08-23 (REGRESSED)**: this doc's own minimal repro
+(cls-UNUSED classmethod generator, `for x in Widget.make_range(3)`)
+now FAILS to build on current code:
+`repro2_classmethod_unused.mojo:13:3: error: implicit declaration of
+function 'Widget_make_range' [-Wimplicit-function-declaration]`
+(RC=1) — but the `.ci` DOES still contain the four
+`_mojogen_Widget_make_range_start/_resume/_value/_destroy` externs, so
+the coroutine unit itself is still compiled and registered; what's
+broken is the CALL SITE. The cls-USING shape no longer gets the
+documented accurate refusal either (`Widget.gen` with `yield cls.count`
+produces the SAME implicit-declaration error for `Widget_gen`, not the
+"references `cls` in its body" message). Mechanism: `_lower_method_
+call`'s class-level call branch (gimple_gen_methods.py ~1173-1230,
+receiver typed `int64_t` = the class-ref lowering, gate `f"{Class}_{method}"
+in func_return_types`) emits an ordinary `StructName_method(...)`
+call WITHOUT consulting `self._generator_method_api`, while gen_module's
+Phase 2a correctly no longer declares that ordinary symbol for a
+compiled generator method ("see gen_module's Phase 2a skip for
+_supported_generator_methods") — so the call site references a symbol
+that was deliberately never emitted. The generator-method check that
+DOES exist (~line 1109) requires the receiver type to end in ' *', which
+a class-ref receiver never does; that check text is identical at the
+2026-08-07 fix commit (76e820e), so whatever changed lives elsewhere in
+the 432 commits between 76e820e and now (the wave2 extraction of this
+code into gimple_gen_methods.py is the obvious suspect window).
+Confirmed NOT caused by concurrent perf work: identical failure with
+all working-tree changes stashed. Fresh evidence + mechanism recorded;
+fix not attempted in this pass.
+
 **FIXED** (`gimple_codegen.py`, three call sites — see below). Root-caused
 2026-08-06 while classifying the `CODEGEN_generator_function_Lib_*.md`
 cluster (tasks #95-135) — found via `Lib/test/test_finalization.py`, one

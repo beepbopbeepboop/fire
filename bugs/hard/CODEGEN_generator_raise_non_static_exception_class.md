@@ -2,6 +2,15 @@
 
 ## Status (updated 2026-08-07)
 
+**Re-verified FIXED 2026-08-23**: this doc's own minimal repro
+(`Widget.gen`, `raise self._boom.exc_cls("dynamic raise inside a
+generator")`) now builds clean end-to-end via `python3 mojo.py build`
+(exit 0, no "unsupported `raise` value expression" refusal anywhere)
+AND the binary RUNS, actually throwing at runtime with the correct
+message (`Unhandled exception: dynamic raise inside a generator`) —
+stronger than this doc's original g++ `-fsyntax-only`-in-isolation
+verification. No regression.
+
 **FIXED** (task #149), scoped to `raise <MemberExpr>(...)`/bare
 `raise <MemberExpr>` specifically (the confirmed real-world shape).
 Root-caused 2026-08-06 while classifying the `CODEGEN_generator_
