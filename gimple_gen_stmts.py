@@ -864,6 +864,15 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        # A USER-STRUCT instance whose class defines `__setitem__`: the
+        # write is protocol dispatch to that method, not a container
+        # store (see _lower_struct_subscript_dunder). vtype/v and the
+        # index are already lowered above, so this keeps the statement's
+        # single-evaluation guarantee.
+        _setitem_r = gmp._lower_struct_subscript_dunder(
+            gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
+        if _setitem_r is not None:
+            return
         if ot == 'MojoList *':
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -1208,6 +1217,14 @@ def _gen_stmt_AugAssignStmt(gen, node):
         else:
             ot, obj_v = gen.lower_expr(node.target.obj)
         it, idx_v  = gen.lower_expr(node.target.index)
+        # Augmented-assignment analogue of the AssignStmt branch above:
+        # `obj[key] += v` on a user struct defining `__setitem__` stores
+        # through that method; the read half already dispatched to
+        # `__getitem__` via the fake-BinaryOp subscript lowering.
+        _setitem_r = gmp._lower_struct_subscript_dunder(
+            gen, ot, obj_v, '__setitem__', [(it, idx_v), (vtype, v)])
+        if _setitem_r is not None:
+            return
         if ot == 'MojoList *':
             elem = gen._elem_of(obj_v)
             suf  = gimple_ctypes.TypeLattice.list_suffix(elem)

@@ -148,6 +148,55 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     return ret_type, gen._new_val(ret_type, f'({ret_type}){raw_t}')
 
 
+def _lower_struct_subscript_dunder(gen, ot: str, ov: str, method: str,
+                                   arg_pairs: list) -> tuple[str, str] | None:
+    """Dispatch `obj[key]` / `obj[key] = v` protocol on a USER-STRUCT
+    instance to its own (or inherited, via the merged-methods view)
+    `__getitem__` / `__setitem__` C method, with the arguments supplied
+    as ALREADY-LOWERED (ctype, value) pairs so every call site keeps its
+    existing single-evaluation guarantee (the surrounding statement
+    lowering has usually already emitted code for the key/value exprs).
+
+    Returns None when `ot` is not a known struct pointer or the class
+    doesn't register that dunder — builtin containers (MojoList/
+    MojoDict/MojoSet) never do, so their ordinary container branches are
+    unaffected. Without this dispatch the struct-pointer fallbacks treat
+    the instance itself as an array container (`_struct_data_field`
+    pointer arithmetic) or degrade the read to an opaque int64_t handle;
+    the latter is also a hard `-fgimple` error at any struct-valued
+    element ("invalid types in nop conversion") and always silently-wrong
+    semantics. Real: Lib/collections/__init__.py's `UserDict.get`
+    (`return self[key]`) against UserDict's own `__getitem__`.
+    """
+    sn = gimple_exprtypes._struct_name_of(ot)
+    cands = gen._struct_method_signatures.get((sn, method)) if sn else None
+    if not (ot.endswith(' *') and sn in gen.struct_field_types and cands):
+        return None
+    chosen = None
+    if len(cands) == 1:
+        chosen = cands[0]
+    else:
+        n = len(arg_pairs)
+        matching = [c for c in cands
+                    if c.get('min_arity', 0) <= n <= c.get('max_arity')
+                    if c.get('max_arity') is not None] or \
+                   [c for c in cands if c.get('min_arity', 0) <= n]
+        if len(matching) == 1:
+            chosen = matching[0]
+    overload_id = (chosen or {}).get('overload_id', '') or ''
+    mangled = gen._struct_method_csym(sn, method, overload_id)
+    ret_type = (chosen or {}).get('ret_type') or gen.func_return_types.get(
+        mangled, gen.func_return_types.get(f"{sn}_{method}", 'int64_t'))
+    all_pairs = [(ot, ov)] + list(arg_pairs)
+    if ret_type == 'void':
+        gen._emit_call('void', '', mangled, all_pairs)
+        return 'void', ''
+    t = gen._call_expr(ret_type, mangled, all_pairs)
+    if mangled in gen._return_elem_types:
+        gen._elem_types[t] = gen._return_elem_types[mangled]
+    return ret_type, t
+
+
 def _lower_bound_method_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr,
                               stored_ctype: str = 'MojoBoundMethod *') -> tuple[str, str]:
     """Call a `MojoBoundMethod *` value (see _lower_bound_method_value):

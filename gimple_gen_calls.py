@@ -2999,6 +2999,16 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     idx_type, iv  = gen.lower_expr(node.index)
 
+    # A USER-STRUCT instance whose class defines `__getitem__`: `obj[key]`
+    # is real Python protocol dispatch to that method — NOT a container
+    # read (see _lower_struct_subscript_dunder). Must sit after the
+    # MojoList/MojoDict branches' guard conditions can't fire for user
+    # structs anyway, but before the struct-pointer fallbacks below.
+    _getitem_r = gmp._lower_struct_subscript_dunder(gen, ot, ov, '__getitem__',
+                                                    [(idx_type, iv)])
+    if _getitem_r is not None:
+        return _getitem_r
+
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
