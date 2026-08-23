@@ -606,6 +606,23 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_gen_self_recursed = False
     func_decls: list[str] = []
     gen._cpp_func_scope_decls = []
+    # Pre-body-emission tuple-slot arity pass: `_cpp_yield_tuple` runs
+    # DURING the emission loop just below, but the unified per-slot list
+    # it must pad every site out to can only be computed from a
+    # whole-body walk — so run that walk here, BEFORE emission, on this
+    # unit's own initial `declared` (params only at this point) and the
+    # same `generator_api` view the post-emission companion call below
+    # will see (neither changes during one unit's compile: registration
+    # happens only after all units finish, so both passes observe an
+    # identical set of yield/delegate sites — arity unification is purely
+    # structural; only per-slot TYPES differ between the two passes, and
+    # only the post-emission result is trusted for consumer-side
+    # accessor selection). Stashed via _cpp_pending_tuple_slots for
+    # `_cpp_yield_tuple` to consult; cleared in `finally` below.
+    _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
+        fn, declared, self_fields, gen._async_api,
+        generator_api=gen._generator_api)
+    gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     gen._cpp_list_local_elem_types = {}
     try:
         body_lines: list[str] = []
@@ -665,6 +682,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
     finally:
+        gen._cpp_pending_tuple_slots = None
+        gen._cpp_emit_kind = 'generator'
         gen._cpp_gen_self_struct = None
         gen._cpp_gen_self_fields = None
         gen._cpp_declared = None
@@ -2311,6 +2330,13 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     gen._cpp_gen_self_struct = None
     gen._cpp_gen_self_fields = None
     gen._cpp_emit_kind = 'async_gen'
+    # See _gen_cpp_generator_unit's identical pre-body-emission
+    # tuple-slot arity pass for the full rationale — same stash, same
+    # `finally` clearing, reused verbatim for the async-generator case.
+    _pre_ok, _pre_slots = gimple_exprtypes._generator_tuple_yield_slot_ctypes(
+        fn, declared, None, gen._async_api,
+        generator_api=gen._generator_api)
+    gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     try:
         body_lines: list[str] = []
         for s in fn.body:

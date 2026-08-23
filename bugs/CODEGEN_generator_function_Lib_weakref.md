@@ -1,5 +1,54 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the `_cpp_for_stmt` tuple-target gap FIXED; all 8 of weakref.py's own generators now compile; own-code error count 0)
+
+The `for k, wr in self.data.copy().items():` blocker left by the
+2026-08-10 entry below is fixed. Three coordinated pieces in the
+coroutine-body emitter (commit 53b1aaa):
+
+1. `_cpp_for_stmt`'s tuple-target branch gained a plain-dict case:
+   `for k, v in <dict-typed expr>.items():` lowers through the SAME
+   runtime protocol the plain-GIMPLE path's tuple branch already uses —
+   `mojo_dict_items` builds a MojoList of boxed 2-element sub-lists,
+   unpacked per-slot (`mojo_list_get_str` for the key — dict keys are
+   always `char *` in this runtime — and `mojo_list_get_int` for the
+   value), with the receiver expression evaluated exactly once into a
+   cached list local. Previously ANY non-enumerate/non-generator-call
+   tuple target fell through to the string-target path and emitted the
+   whole comma-joined target as ONE bogus C++ identifier
+   (`for (auto k, wr : ...)`, g++ "declaration of 'auto k' has no
+   initializer") — exactly this doc's reported failure.
+2. `_cpp_for_stmt`'s single-name target path gained `.keys()/
+   .values()/.items()` and bare-dict iteration (`for wr in self.data.
+   copy():`) via the same helpers, replacing the generic `for (auto x :
+   ...)` range-for that cannot compile against opaque pointer types.
+3. `_cpp_expr` gained zero-arg `.copy()/.items()/.keys()/.values()` on
+   `MojoDict *`-typed receivers (the `.get(...)` case's existing
+   siblings), with receiver-type resolution consolidated into a new
+   shared `_cpp_receiver_ctype` helper (declared locals, `self.<field>`,
+   `cls.<class-attr>`, `<struct-ptr local>.<field>` — the shape that
+   makes non-method generators like calendar.py's work too — plus
+   zero-arg `.copy()` chains), replacing three previously-inline lookups.
+
+Verified end-to-end, not just eligibility: an isolated
+`compile_to_gimple_with_cpp(do_imports=False)` of weakref.py compiles
+clean; the emitted C++ shows all five shapes lowering correctly
+(`WeakValueDictionary.items/keys/values/itervaluerefs`,
+`WeakKeyDictionary.items/keys/values`). A standalone runtime repro
+(struct field dict + generator iterating it + consumer loop) compiled
+AND ran correctly through both `driver.compile_program` and the inline
+builder (`alpha/7/beta/9/got beta/done`).
+
+**weakref.py's own source now contributes ZERO errors** to its whole-
+program build; no "not eligible" refusal names any of its own
+generators anymore. The build still fails on transitively-imported
+files only (traceback.py's `extended_frame_gen` refusal, codecs/
+argparse cascade) — out of scope, doc kept open per convention.
+
+Quality gate for the change: `test_gimple.py` 250/250,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, stdlib dylib
+rebuild 0 skips.
+
 ## Status (updated 2026-08-10, later same session — re-verified the "struct _X_toplev" pattern task; a related-but-distinct variant found+fixed)
 
 Investigated this session's cross-cutting task tracing a recurring

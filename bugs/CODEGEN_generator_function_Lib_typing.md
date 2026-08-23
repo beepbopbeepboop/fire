@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified; 4 own residuals, all in already-documented deferred families)
+
+Re-verified against current HEAD via a real `python3 mojo.py build
+.../Lib/typing.py`. typing.py's own generator sites still compile
+cleanly (no refusals). Remaining own-code errors (4 raw lines), each
+confirmed to belong to an already-tracked deferred family rather than a
+new mechanism:
+
+- `1348/1353 '_CallableGenericAlias' has no member named
+  '__parameters__'/'__module__'` — the 2026-08-20 qualifier-priority fix
+  below resolved the redefinition errors, but the bare-name struct
+  collision itself remains: whichever same-named struct definition wins
+  the whole-program TU lacks the subclass's fields. Same deferred family
+  as `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`.
+- `3357 '_TypedDictMeta' has no member named '__orig_bases__'` — dynamic
+  attribute set on a call RESULT (`td.__orig_bases__ = (TypedDict,)`),
+  the `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` family.
+- `430 assignment to '_Sentinel *' from 'int64_t'` on `_sentinel =
+  _Sentinel()` — the global's field is declared `_Sentinel *` but the
+  Phase 1.7 semantic conclusion for a zero-arg constructor call falls to
+  int64_t; isolated repros of global = StructCall compile and run fine,
+  so this is specific to `_Sentinel`'s registration ordering inside
+  typing.py's own large module — left for a dedicated pass.
+
+Doc stays open (transitive contextlib cascade + above).
+
 ## Status (updated 2026-08-20): `_CallableGenericAlias` redefinition FIXED, file still fails on unrelated errors
 
 The `redefinition of '_collections_abc__CallableGenericAlias___repr__'`/
