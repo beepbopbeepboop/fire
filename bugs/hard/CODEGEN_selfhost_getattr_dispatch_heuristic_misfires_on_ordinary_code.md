@@ -1,5 +1,72 @@
 # HARD BUG: the self-hosting `getattr(self, x)`-dispatch-table heuristic mis-fires on ordinary stdlib code, emitting invalid C
 
+## 2026-08-23: residual "option 3" callee-qualification gap FIXED — live real-world instance found and eliminated (`Lib/socket.py`'s 11 `Repr_repr*` undeclared-symbol errors)
+
+The "option 3" gap this doc kept open through both fixes below —
+dispatch-table callees registered under their BARE
+`f"{struct}_{method}"` names while a non-root module's methods are
+actually EMITTED under `{home_module}_{Struct}_{method}` — turned out
+to have a live, reachable instance on an ordinary (non-selfhost)
+build after all, via the branch nobody gated: `_infer_getattr_targets`
+(the prefix-shaped `getattr(self, 'x_' + y)` recognizer) applies to
+ANY code, self-hosting or not. Concrete instance inside the whole-
+program `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+socket.py` closure: `Lib/reprlib.py:81`'s `method = getattr(self,
+'repr_' + typename, None)` plans a dispatch table whose initializer
+referenced bare `Repr_repr`, `Repr_repr_array`, ... while reprlib's
+own methods are emitted as `reprlib_Repr_repr_*` — 11 hard GCC
+"'Repr_repr*' undeclared here (not in a function)" errors (enum.py's
+`__repr__`-registration lines merely host the #line-mapped references;
+the emitting site is the `calc_run_dispatch`-style table init in the
+generated C). This is exactly the failure shape the 2026-08-10 entry
+below predicted, reached through the prefix branch instead of the
+(fallback-gated) assume-all branch.
+
+Fix: dispatch-table ROWS are now re-resolved through the one emitter-
+side composer immediately after planning — gen_module (post-`analyze()`,
+gimple_module_gen.py) walks every planned `DispatchTable`, recovers each
+row's owning struct + true method name from two new solver-exposed
+reverse maps (`DispatchSolver.callee_home`/`.callee_method`, populated
+alongside `_plan_dispatch_tables`' own local reverse maps), and
+recomputes the row symbol via `GimpleGen._struct_method_csym(struct,
+method)` — the SAME composer Phase 2a emission uses, so decl and
+reference cannot disagree. Root-local structs (qualifier '') and
+self-host `.py` structs (self-host exemption in
+`_struct_method_qualifier`) resolve back to the exact bare spelling,
+so every table emitted before this change is byte-identical except for
+rows whose struct genuinely lives in another module. Deliberately NOT
+a stored resolver callable on DispatchSolver: a first attempt passing
+`method_csym_resolver=self._struct_method_csym` broke `make
+check-selfhost` with `_DispatchSolver_method_csym_resolver` undefined
+— the self-host struct-field scanner can't infer a C field for a
+callable-typed attribute (unlike its dict-typed siblings), so reads of
+it lower to an undeclared getter symbol. Keeping the solver pure-data
+(two plain str→str dicts) plus the resolution loop in gen_module (which
+already owns qualifier state) compiles clean through the full self-host
+path. Along the same edit, `GimpleGen._struct_method_csym`'s delegating
+signature gained the `overload_id: str = ''` default its implementation
+always had (test_dispatch_phase_c.py caught the missing default).
+
+Verification:
+- Minimal 2-file repro (root imports `mymod.Calc` whose `run()` does
+  `getattr(self, 'op_' + name)`): table init went from
+  `.op_add = ...Calc_op_add` (undeclared) to
+  `.op_add = ...mymod_Calc_op_add` (the real emitted symbol).
+- `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`:
+  `error:` lines 189 → 178, with ALL 11 `Repr_repr*` undeclared-here
+  errors gone and the remaining error set otherwise byte-identical
+  (diffed sorted error text before vs. after).
+- `test_dispatch_phase_b.py`/`test_dispatch_phase_c.py`/
+  `test_dispatch_solver.py`/`test_dispatch_myinterpreter.py` — pass.
+- Full gate: `test_gimple.py` 250/250, `test_module_cache.py` 76/76,
+  `make check-selfhost` clean, from-scratch stdlib dylib rebuild skip
+  count unchanged (0 before, 0 after).
+
+This closes the last open item this doc was being kept open for: the
+over-eager fallback is gated to self-hosting contexts by design
+(2026-08-18), and now BOTH of its branches (plus the ungated prefix
+branch) emit module-correct symbols when they do fire.
+
 ## 2026-08-19: 02b14c5's own gate was too narrow, broke `test_dispatch_phase_b.py`/`test_dispatch_phase_c.py` — fixed by having the TESTS opt in, not by widening the production gate
 
 The 2026-08-18 fix directly below (gating the "assume all methods"

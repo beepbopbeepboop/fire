@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/test/test_doctest/test_doctest.py
 
+## Status (updated 2026-08-23 — FIXED)
+
+The file now builds END-TO-END (EXIT=0). The last remaining blocker from
+the 2026-08-11 note — link failure `undefined symbols: _Wrapper_func` —
+is root-caused and FIXED: `self.func(*args, **kwargs)` where `func` is a
+FIELD holding a callable was resolved as a same-named STRUCT METHOD,
+emitting a call to a phantom `<Struct>_<field>` symbol. Calls through
+declared fields that are not real methods now load the field value and
+dispatch via the mojo_fnptr_call_N indirect-call helpers (spread-
+forwarding shapes degrade to evaluate-args-no-op). The same mechanism
+also fixed unittest/case.py's `_Predicate_func` and Stopwatch.get_time
+link errors seen transitively by other cluster files. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-11) — this doc's own bug FIXED, file still doesn't build clean (unrelated bug)
 
 Re-verified against current master with a real rebuild: the two documented

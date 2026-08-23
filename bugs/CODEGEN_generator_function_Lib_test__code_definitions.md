@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-23 — STILL-OPEN)
+
+Re-ran the repro against this branch: byte-for-byte identical refusal
+(`asyncgen_spam: *args/**kwargs parameters not supported for compiled
+async generators`). Nothing in this pass touched async-generator
+eligibility; classification unchanged (feature-sized: varargs widening +
+first-class non-consumed construction). Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-11)
 
 Re-verified against current master; reproduces identically:

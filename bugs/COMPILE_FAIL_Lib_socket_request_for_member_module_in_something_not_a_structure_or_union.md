@@ -1,5 +1,28 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (updated 2026-08-23): error count 201 → 178; the last cross-module "undeclared here" collision class (`Repr_repr*`) fixed via dispatch-table qualification
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+socket.py`: 178 `error:` lines (was 201). The "'X' undeclared here"
+collision pattern is now ZERO (was 13 at the 2026-08-20 update): all
+11 remaining instances were `Repr_repr*` — reprlib.Repr's prefix-
+shaped `getattr(self, 'repr_' + typename)` pattern planned a dispatch
+table whose initializer referenced bare `Repr_repr*` symbols while
+reprlib's methods are emitted as `reprlib_Repr_repr_*`. Root-caused
+and fixed as the live instance of the residual callee-qualification
+gap in `bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_
+misfires_on_ordinary_code.md` (2026-08-23 entry there: rows now
+re-resolved through `_struct_method_csym`; diffed sorted error set
+before/after shows ONLY those 11 errors removed).
+
+**socket.py still does not build.** The remaining 178 errors are the
+same independent grab-bag as catalogued below (enum.py's struct/dict
+`%` operator x12 + `invalid types for 'trunc_mod_expr'` x11,
+argparse.py's `_kw_default` member access x4, operator.py's
+`partial`/lambda lowering, pickle.py's `partial`, contextlib's
+`exc.__traceback__` member writes, posixpath/ntpath struct-shape
+mismatch, etc.) — none struct-collision-shaped. Doc kept open.
+
 ## Status (updated 2026-08-20): task #141's struct-method-qualifier mechanism (the dominant blocker class) FIXED, file still fails overall
 
 The 2026-08-09 status below identified "task #141 cross-module

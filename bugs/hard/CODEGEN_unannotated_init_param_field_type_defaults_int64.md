@@ -1,5 +1,17 @@
 # HARD BUG: `self.field = param` with an unannotated, no-default `__init__` parameter always types the field `int64_t`, even for real string/list/etc. call-site arguments
 
+## Status (re-verified 2026-08-23 — no new work)
+
+Re-ran all three repro shapes via `mojo.py build` + executing the binary:
+direct-literal `Widget("hello")` → `hello`/`5`; the 2026-08-18
+IdentExpr-case fix `s = "hello"; w = Widget(s)` → `hello`/`5`; and the
+conflicting-call-site case (`Thing("str")` + `Thing(3.5)`) still correctly
+falls back to the `int64_t` default under the documented "not unanimous →
+leave unresolved" rule (compiles and runs cleanly; no spurious
+resolution). The 2026-08-18 fix is fully intact after the Wave-2 file
+refactor; the remaining MemberExpr/CallExpr ctor-argument limitation
+stands as documented below.
+
 ## Status (2026-08-18 — IdentExpr-argument case FIXED via a later reconciliation pass)
 
 Closed the "Known limitation" gap this doc's 2026-08-09 status left open:

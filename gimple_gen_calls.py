@@ -2006,8 +2006,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # C reserved function renaming
     elif (fname_raw in gimple_ctypes._C_RESERVED_FUNCS and fname_raw not in gen.func_return_types
             and fname_raw not in gimple_ctypes._FORCE_RENAME_RESERVED
-            and fname_raw not in gen.imported_symbols):
-        fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
+            and (fname_raw not in gen.imported_symbols
+                 or fname_raw in gen._unresolved_import_aliases)):
+        if fname_raw in gen._unresolved_import_aliases:
+            # A relative/external import this compile could never resolve
+            # (`from .os_helper import unlink` at module scope — the name
+            # lands in _unresolved_import_aliases, NOT imported_symbols).
+            # The preamble's weak-stub pass names that stub via
+            # `_func_csym(sym_name)` (= `_safe_name`, i.e. `mojo_unlink`);
+            # the call site must bind to the SAME symbol. Emitting the raw
+            # reserved name here instead silently retargeted the call at
+            # libc's same-named function with no visible prototype —
+            # "implicit declaration of function 'unlink'" (a hard error)
+            # for Lib/test/support/import_helper.py's forget().
+            fname = gen._func_csym(fname_raw)
+        else:
+            fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
     else:
         # _func_csym applies the same overload suffix the definition used.
         fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, gen._func_csym(fname_raw))
@@ -2204,7 +2218,17 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # entry in _KNOWN_SIGS either (e.g. a struct constructor like
     # ARM64JIT, called with stale/vestigial kwargs its real 0-arg
     # constructor ignores) is untouched, exactly as before.
-    expected_params = gen.func_param_types.get(fname_raw, [])
+    # BUG-2026-024: same tiered truth _overload_suffix/_func_csym's mirror
+    # use — the raw bare-name slot oscillates whenever sibling homonyms
+    # exist (refinedstorage: controller's start_crafting vs crafting_
+    # monitor's start_crafting), and padding/truncating against whichever
+    # sibling registered last produced both "too few" and "too many
+    # arguments" GCC errors against the correctly-suffixed prototype.
+    # Function-local import: gimple_gen_funcs already imports this module.
+    import gimple_gen_funcs as _ggf_eff
+    expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
+    if not expected_params:
+        expected_params = gen.func_param_types.get(fname_raw, [])
     if not expected_params and fname_raw in gen._KNOWN_SIGS:
         expected_params = gen._KNOWN_SIGS[fname_raw][1]
     elif not expected_params and fname in gen._KNOWN_SIGS:
@@ -2258,6 +2282,24 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
                 arg_pairs.append(('int', '0'))
+
+    # Arity parity with myinterpreter.py (BUG-2026-024 follow-up,
+    # test_primal_mod/test_refined_storage_mod): the interpreter binds
+    # positional args loosely — SURPLUS positional args are evaluated and
+    # silently discarded (`f(1, 2, 3)` against `def f(a: Int) -> Int`
+    # returns 10; minimal repro confirmed). The compiled path forwarded
+    # every lowered arg into the C call instead, tripping GCC's "too many
+    # arguments to function" against the callee's real prototype. Drop the
+    # surplus pairs here — each dropped arg's lower_expr already ran while
+    # building arg_pairs, so its side effects still happen exactly once,
+    # matching the interpreter's evaluate-then-ignore order. Never applied
+    # to variadic callees: a '...' signature takes the extras by
+    # convention, and a MojoList* parameter slot means this call was (or
+    # will be) pack-lowered, where extras belong INSIDE the pack.
+    if (expected_params and len(arg_pairs) > len(expected_params)
+            and not any('...' in p or p == 'MojoList *'
+                        for p in expected_params)):
+        arg_pairs = arg_pairs[:len(expected_params)]
 
     # exit(msg)/quit(msg): Python's builtin exit()/quit() (and
     # sys.exit(), which redirects here the same way) accept an
@@ -2666,8 +2708,15 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     for idx, pname in enumerate(chosen['param_names']):
         if pname not in kw:
             continue
+        # A keyword binding past the last lowered positional arg must fill
+        # every SKIPPED intermediate param with ITS OWN declared default,
+        # not a blanket 0 — `Derived(b=99)` against `(a=1, b=2, c=3)` was
+        # emitting a=0 (see CODEGEN_keyword_only_ctor_call_skips_earlier_
+        # default.md). No-default params still fall back to 0 here via
+        # _default_expr_to_pair(None).
         while len(out) <= idx:
-            out.append(('int', '0'))
+            out.append(gen._default_expr_to_pair(
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[idx] = gen.lower_expr(kw[pname])
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
@@ -2676,20 +2725,12 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             if _kn not in _named:
                 _rest[_kn] = gen.lower_expr(kw[_kn])
         while len(out) <= _kw_idx:
-            out.append(('int', '0'))
+            out.append(gen._default_expr_to_pair(
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[_kw_idx] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
     while len(out) < chosen['max_arity']:
         _dflt = (defaults or {}).get(chosen['param_names'][len(out)]) if len(out) < len(chosen['param_names']) else None
-        if isinstance(_dflt, gimple_ctypes.BoolLiteral):
-            out.append(('_Bool', '1' if _dflt.value else '0'))
-        elif isinstance(_dflt, gimple_ctypes.StringLiteral):
-            out.append(('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"'))
-        elif isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
-            out.append(('int', str(_dflt.value)))
-        elif isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-            out.append(('int64_t', '0'))
-        else:
-            out.append(('int', '0'))
+        out.append(gen._default_expr_to_pair(_dflt))
     return out
 
 
@@ -2757,7 +2798,10 @@ def _lower_struct_constructor(gen, struct_name: str,
                     continue
                 pos = idx + 1  # +1 for self slot
                 while len(arg_pairs) <= pos:
-                    arg_pairs.append(('int', '0'))
+                    _gap_i = len(arg_pairs) - 1
+                    _gap_dflt = (init_defaults.get(init_pnames[_gap_i])
+                                 if 0 <= _gap_i < len(init_pnames) else None)
+                    arg_pairs.append(gen._default_expr_to_pair(_gap_dflt))
                 arg_pairs[pos] = gen.lower_expr(kw[pname])
             # `**kwargs`: pack every keyword that isn't a named parameter
             # into a real MojoDict (see _pack_kwargs_dict). Without this
@@ -2778,7 +2822,10 @@ def _lower_struct_constructor(gen, struct_name: str,
                         _rest[_kn] = gen.lower_expr(kw[_kn])
                 _pos = _kw_i + 1  # +1 for self slot
                 while len(arg_pairs) <= _pos:
-                    arg_pairs.append(('int', '0'))
+                    _gap_i = len(arg_pairs) - 1
+                    _gap_dflt = (init_defaults.get(init_pnames[_gap_i])
+                                 if 0 <= _gap_i < len(init_pnames) else None)
+                    arg_pairs.append(gen._default_expr_to_pair(_gap_dflt))
                 arg_pairs[_pos] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
         elif kwargs:
             for _kn, kexpr in kwargs:
@@ -2796,16 +2843,7 @@ def _lower_struct_constructor(gen, struct_name: str,
         while len(arg_pairs) - 1 < expected:
             _missing_pname = init_pnames[len(arg_pairs) - 1] if init_pnames and len(arg_pairs) - 1 < len(init_pnames) else None
             _dflt = init_defaults.get(_missing_pname) if _missing_pname else None
-            if isinstance(_dflt, gimple_ctypes.BoolLiteral):
-                arg_pairs.append(('_Bool', '1' if _dflt.value else '0'))
-            elif isinstance(_dflt, gimple_ctypes.StringLiteral):
-                arg_pairs.append(('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"'))
-            elif isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
-                arg_pairs.append(('int', str(_dflt.value)))
-            elif isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-                arg_pairs.append(('int64_t', '0'))
-            else:
-                arg_pairs.append(('int', '0'))
+            arg_pairs.append(gen._default_expr_to_pair(_dflt))
         gen._emit_call('void', '', init_fname, arg_pairs)
     elif kwargs or args:
         # Positional args + keyword args — assign fields by position then by name

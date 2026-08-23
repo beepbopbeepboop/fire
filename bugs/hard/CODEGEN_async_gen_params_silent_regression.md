@@ -1,5 +1,13 @@
 # HARD BUG: Phase 7's "async generator params" eligibility widening was never wired to the only real consumption path, producing invalid C++ (or an accidental whole-module fallback) instead of an honest front-door refusal
 
+## Status (re-verified 2026-08-23 — no new work)
+
+Re-ran `test_gimple_async_runner.py` on the current tree: **38/38 pass**,
+including all three parametrized-async-generator tests by name
+(`async_gen_with_parameters`, `async_gen_with_multiple_parameters`,
+`async_gen_wrong_arg_count_still_refused`) — the 2026-08-19 real fix is
+fully intact after the Wave-2 file refactor. Nothing further to do.
+
 ## Status (2026-08-19) — REAL FIX LANDED
 
 Parametrized async generators consumed via `async for x in f(<args>):` now

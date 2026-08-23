@@ -1,5 +1,20 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (updated 2026-08-23 — PARTIAL)
+
+ALL 9 previously-listed transitive-dependency errors (support/__init__.py
+488/1184/1186/1420/1905-1908 + import_helper.py unlink) are fixed this
+session; the file's own generator TU now compiles further and fails on
+exactly TWO remaining errors, both in test_dbm_gen.cpp itself:
+'dbm' was not declared in this scope (generator body referencing the
+module-level `dbm` import) and '__import__' was not declared (dynamic
+import call). Both belong to the same documented structural family —
+arbitrary outer-scope/module-name resolution inside a generator's
+separately-compiled translation unit — not narrow fixes. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (re-verified 2026-08-11, unchanged classification, error count down further)
 
 Re-ran against current master (154 commits past the 2026-08-09 note

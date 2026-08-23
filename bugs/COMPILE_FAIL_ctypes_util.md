@@ -2,6 +2,56 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (re-verified 2026-08-23, triage pass): identical failure; root cause refined into three stacked gaps
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/util.py`: byte-identical failure — same two errors at the same
+lines (`util.py:500`/`502`, `variable or field '_t21' declared void` /
+`invalid use of void expression`), `cdll` still lowered as the generic
+weak int64_t stub, and the generated code at line 500 still
+dereferences `_funcptr_cdll` (`_t20 = _funcptr_cdll; _t21 = *_t20;`).
+Also re-confirmed `python3 mojo.py build .../Lib/ctypes/__init__.py`
+builds clean end-to-end (exit 0) and, compiled standalone, gives
+`cdll` a REAL type (`_global_var_types['cdll'] == 'LibraryLoader *'`,
+stored in `_root_globals.cdll` with a typed accessor) — so upstream
+compile health is no longer the blocker; the cross-module view is.
+
+Refined root cause — three independent gaps stack up, and ALL must be
+fixed for this file to build:
+
+1. **Bare package imports never resolve to `<pkg>/__init__.py`.**
+   `_module_candidate_paths` (gimple_gen_resolve.py) tries
+   `<dir>/<name>.{py,mojo}` for every search dir but only appends the
+   `<name>/__init__.{ext}` package form for DOTTED module names — so
+   `from ctypes import cdll` inside util.py never even locates
+   `/Users/mrs/net/Python-3.14.6/Lib/ctypes/__init__.py`, and
+   ctypes/__init__ is never inline-compiled into util.py's whole-
+   program unit at all (`LibraryLoader` absent from struct_field_types,
+   `cdll` absent from the shared `_global_var_types`). The interpreter's
+   own resolution (myinterpreter.py's `rel_pkg_path`) and imports.py's
+   `_find` both DO try package-`__init__` forms for bare names — the
+   compiled path is the outlier. (Note imports.py only tries `.mojo`
+   there, not `.py`.)
+2. **No from-import path for module-level VALUES.** Even with the
+   package resolved, `_gen_stmt_FromImportStmt` can only register
+   function signatures (or submodule markers); binding a cross-module
+   global VALUE (a struct instance like `LibraryLoader(CDLL)`) into
+   function scope has no lowering at all — it would need to read the
+   owning module's globals-struct field (the `_<mod>_globals.<name>`
+   machinery that MemberExpr-on-module already uses).
+3. **`LibraryLoader`'s attribute surface is genuinely dynamic.**
+   `cdll.msvcrt` / `cdll.load(...)` go through LibraryLoader's own
+   `__getattr__` in real Python (any attribute = load that DLL); the
+   struct model has no representation for per-instance dynamic
+   attributes beyond the runtime `_mojo_dispatch_getattr` fallback.
+
+Fixing only #1 was judged NOT worth landing alone under this session's
+no-half-measures constraint: it changes which sources get inline-
+compiled across every bare-package import in every build (broad blast
+radius) while fixing none of this doc's errors by itself (#2/#3 would
+still leave `cdll` unresolved). DOCUMENTED-NOT-FIXED; failing code
+remains dead test-only `def test():` never invoked by anything.
+
 ## Status (updated 2026-08-09)
 
 Re-verified fresh via `python3 mojo.py build`. Symptom is byte-for-byte
