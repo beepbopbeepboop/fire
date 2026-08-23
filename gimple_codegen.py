@@ -158,6 +158,9 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_list_set_int':          'void',
     'mojo_list_set_double':       'void',
     'mojo_list_set_str':          'void',
+    'mojo_list_insert_int':       'void',
+    'mojo_list_insert_double':    'void',
+    'mojo_list_insert_str':       'void',
     'mojo_list_slice':            'MojoList *',
     'mojo_list_concat':           'MojoList *',
     # dict
@@ -1588,6 +1591,27 @@ class GimpleGen:
         # compile has its own scope stack), exactly like
         # _own_imported_func_home.
         self._import_scope_stack: list = []
+        # (sanitized_home_qualifier, as_referenced_name) -> [ctype, ...]:
+        # the parameter ctypes a name's HOME MODULE says it has, snapshotted
+        # at FromImportStmt registration time (gimple_module_gen's
+        # _register_sym path, right beside the matching
+        # _note_own_func_home call). BUG-2026-024: the SHARED
+        # func_param_types[bare] slot this used to be read from is
+        # overwritten once per sibling module whose inline compile
+        # registers a same-named function of its own
+        # (mod.computer.computer_case.get_energy(c: ComputerCase) vs
+        # mod.computer.network.get_energy(n: ComputerNetwork), one import
+        # aliased, one not), so an importer's call sites hashed whichever
+        # sibling registered LAST and emitted call symbols whose overload
+        # suffix matched no definition ("implicit declaration of function
+        # ..._77b31a; did you mean ..._0ed997?"). Keying by home module
+        # makes same-named siblings land under different keys — nothing to
+        # fight over. Lookup goes through gimple_gen_funcs._imported_def_pts,
+        # which mirrors _func_qualifier's tier order (scope stack, then
+        # _own_imported_func_home, then the shared _imported_func_home) so
+        # the suffix and the qualifier halves of one mangled symbol can
+        # never disagree about which entry they mean.
+        self._imported_home_param_types: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen

@@ -2109,6 +2109,35 @@ def gen_module_impl(self, stmts):
                         _dv_early = self._annotation_dict_val_type(field.type_ann)
                         if _dv_early is not None:
                             self._field_dict_val_types.setdefault(s.name, {})[f_name] = _dv_early
+                        # BUG-2026-023 residual (box.3d/game's
+                        # ComputerCase.variables: List[String]): seed
+                        # `_field_elem_types` from this field's OWN declared
+                        # annotation too, exactly mirroring `_dv_early`
+                        # above for dict value types. The only previous
+                        # seeding path was `.append()` call sites tracked
+                        # through `self.`-prefixed field owners
+                        # (_lower_list_method's _struct_field_owners
+                        # branch), so a List[...] field appended through a
+                        # NON-self parameter name (`c.variables.append(..)`
+                        # inside a free function taking `c: ComputerCase`)
+                        # never recorded its element type — a later
+                        # `c.variables[i]` read then fell back to int64_t
+                        # and yielded raw boxed handles instead of strings
+                        # ("set_variable(x,10)" then "get_variable(x)"
+                        # returning 0 across test_computer_mod). The
+                        # annotation is static truth available right here;
+                        # only non-default element types need recording
+                        # (int64_t is what every fallback already assumes).
+                        if (ft == 'MojoList *' and field.type_ann
+                                and '[' in str(field.type_ann)):
+                            _li = gimple_ctypes._split_top_level_commas(
+                                str(field.type_ann).split('[', 1)[1].rstrip(']').strip())
+                            if _li:
+                                _et = self._resolve_type(_li[0].strip())
+                                if _et and _et not in ('int64_t', 'MojoList *'):
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
+                                elif _et == 'MojoList *':
+                                    self._field_elem_types.setdefault(s.name, {})[f_name] = _et
 
             # Always scan ALL methods for self.x = ... to build complete field list.
             # Uses the generic _walk_ast walker (module-level, above) rather than
@@ -2940,6 +2969,43 @@ def gen_module_impl(self, stmts):
                                      .replace('-', '_'))
                         else:
                             _qual = _sib_qualifier
+                        # BUG-2026-024: snapshot THIS import's param ctypes
+                        # under (home_qualifier, as_referenced_name) BEFORE
+                        # anything else can overwrite the shared bare-name
+                        # slot — a later sibling module's inline compile
+                        # registers its own same-named function into
+                        # func_param_types[bare] (mod.computer.network's
+                        # get_energy(n: ComputerNetwork) clobbering
+                        # mod.computer.computer_case's get_energy(c:
+                        # ComputerCase) after this line wrote the Case
+                        # shape), and _overload_suffix's shared-slot tier
+                        # then hashes the WRONG sibling for every one of
+                        # this module's call sites. The snapshot is keyed by
+                        # home module, so same-named siblings land under
+                        # different keys and nothing oscillates; lookup goes
+                        # through _imported_def_pts, which walks the SAME
+                        # tier order _func_qualifier uses, so the qualifier
+                        # half and suffix half of one mangled symbol always
+                        # mean the same binding. Preferred source is the
+                        # defining module's own FunctionDef resolved via
+                        # THIS gen's _signature_ctypes (the definition
+                        # side's exact resolver — export-table c_parameters
+                        # can carry int64_t placeholders for struct params,
+                        # which hashed a DIFFERENT suffix than the
+                        # definition); falls back to the already-populated
+                        # slot.
+                        try:
+                            _pts_snap = None
+                            for _fs in (self._parsed_import(s.module)[2] or []):
+                                if isinstance(_fs, FunctionDef) and _fs.name == name:
+                                    _pts_snap = self._signature_ctypes(_fs.params, _fs)
+                                    break
+                        except Exception:
+                            _pts_snap = None
+                        if not _pts_snap:
+                            _pts_snap = self.func_param_types.get(sym_name)
+                        if _pts_snap is not None:
+                            self._imported_home_param_types[(_qual, sym_name)] = list(_pts_snap)
                         self._note_own_func_home(sym_name, _qual)
                 try:
                     if not s.names:

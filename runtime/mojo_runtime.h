@@ -196,6 +196,9 @@ int mojo_list_contains_str(MojoList *l, char *v);
 
 /* Item mutation and extra accessors */
 void     mojo_list_set_int(MojoList *l, int64_t i, int64_t v);
+void     mojo_list_insert_int(MojoList *l, int64_t i, int64_t v);
+void     mojo_list_insert_double(MojoList *l, int64_t i, double v);
+void     mojo_list_insert_str(MojoList *l, int64_t i, char *v);
 void     mojo_list_set_double(MojoList *l, int64_t i, double v);
 void     mojo_list_set_str(MojoList *l, int64_t i, char *v);
 char    *mojo_list_get_str(MojoList *l, int64_t i);

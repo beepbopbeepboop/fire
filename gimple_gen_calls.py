@@ -2204,7 +2204,17 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # entry in _KNOWN_SIGS either (e.g. a struct constructor like
     # ARM64JIT, called with stale/vestigial kwargs its real 0-arg
     # constructor ignores) is untouched, exactly as before.
-    expected_params = gen.func_param_types.get(fname_raw, [])
+    # BUG-2026-024: same tiered truth _overload_suffix/_func_csym's mirror
+    # use — the raw bare-name slot oscillates whenever sibling homonyms
+    # exist (refinedstorage: controller's start_crafting vs crafting_
+    # monitor's start_crafting), and padding/truncating against whichever
+    # sibling registered last produced both "too few" and "too many
+    # arguments" GCC errors against the correctly-suffixed prototype.
+    # Function-local import: gimple_gen_funcs already imports this module.
+    import gimple_gen_funcs as _ggf_eff
+    expected_params = _ggf_eff._effective_param_types(gen, fname_raw)
+    if not expected_params:
+        expected_params = gen.func_param_types.get(fname_raw, [])
     if not expected_params and fname_raw in gen._KNOWN_SIGS:
         expected_params = gen._KNOWN_SIGS[fname_raw][1]
     elif not expected_params and fname in gen._KNOWN_SIGS:
@@ -2258,6 +2268,24 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
                 arg_pairs.append(('int', '0'))
+
+    # Arity parity with myinterpreter.py (BUG-2026-024 follow-up,
+    # test_primal_mod/test_refined_storage_mod): the interpreter binds
+    # positional args loosely — SURPLUS positional args are evaluated and
+    # silently discarded (`f(1, 2, 3)` against `def f(a: Int) -> Int`
+    # returns 10; minimal repro confirmed). The compiled path forwarded
+    # every lowered arg into the C call instead, tripping GCC's "too many
+    # arguments to function" against the callee's real prototype. Drop the
+    # surplus pairs here — each dropped arg's lower_expr already ran while
+    # building arg_pairs, so its side effects still happen exactly once,
+    # matching the interpreter's evaluate-then-ignore order. Never applied
+    # to variadic callees: a '...' signature takes the extras by
+    # convention, and a MojoList* parameter slot means this call was (or
+    # will be) pack-lowered, where extras belong INSIDE the pack.
+    if (expected_params and len(arg_pairs) > len(expected_params)
+            and not any('...' in p or p == 'MojoList *'
+                        for p in expected_params)):
+        arg_pairs = arg_pairs[:len(expected_params)]
 
     # exit(msg)/quit(msg): Python's builtin exit()/quit() (and
     # sys.exit(), which redirects here the same way) accept an
