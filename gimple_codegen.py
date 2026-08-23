@@ -2715,7 +2715,7 @@ class GimpleGen:
         return gfn._struct_method_overload_ids(stmt)
     def _struct_method_qualifier(self, struct_name: str) -> str:
         return gfn._struct_method_qualifier(self, struct_name)
-    def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str) -> str:
+    def _struct_method_csym(self, struct_name: str, method_name: str, overload_id: str='') -> str:
         return gfn._struct_method_csym(self, struct_name, method_name, overload_id)
     @staticmethod
     @staticmethod
