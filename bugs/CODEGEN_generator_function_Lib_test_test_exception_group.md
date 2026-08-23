@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/test/test_exception_group.py
 
+## Status (updated 2026-08-23 — FIXED)
+
+The file now builds END-TO-END (EXIT=0). Remaining blockers since the
+2026-08-12 fix were cleared this session: leaf_generator's
+`tbs.append(exc.__traceback__)`/`exc.exceptions` attribute reads on
+untyped params now stub honestly instead of emitting invalid C++; the
+`for e in exc.exceptions:` loop over such a stubbed iterable runs zero
+iterations rather than emitting an invalid range-for over 0; and the
+transitively-imported test/support/__init__.py + seq_tests.py errors
+(dict-param inference, mut-capture temps, funcptr->_start, weak-defines)
+are all fixed. leaf_generator compiles through the coroutine path with
+its tuple-yield consumer intact. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-12 — this doc's own `leaf_generator` cascade FIXED; file still blocked by unrelated Lib/test/support/__init__.py gaps)
 
 Re-verified against current master with a real `MOJO_DEBUG=1 python3 mojo.py

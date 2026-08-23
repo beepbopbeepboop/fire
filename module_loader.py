@@ -228,6 +228,26 @@ class ModuleLoader:
 
             exports = {}
 
+            # BUG-2026-023 (box.3d/game): the C-stdlib skip below exists to
+            # keep THIS compiler's prelude headers (stdio's remove/rename,
+            # math's nan/abs, ...) from conflicting with an unqualified
+            # extern — a concern that only applies to STDLIB/TEST modules,
+            # whose exported symbols the extern-emission pass emits under
+            # their bare C names. A LOCAL PROJECT module (game mod code:
+            # `def remove(t: Tuff, amount: Int) -> Int` in tuff.mojo) is
+            # compiled with its symbols module-qualified AND
+            # overload-suffix-mangled (`mod_tuff_tuff_remove_2ea17f`), so a
+            # same-named C stdlib function can never collide — but skipping
+            # it here silently DELETED the export, the importer's
+            # FromImportStmt registration then marked the alias unresolved,
+            # and every call site bound to a weak "unavailable in compiled
+            # mode" stub that returned 0 instead of mutating (the exact
+            # "remove/craft leave counts unchanged" signature of
+            # BUG-2026-023). Apply the filter ONLY when scanning this
+            # compiler's own stdlib/test trees.
+            _apply_c_stdlib_skip = path.startswith(STDLIB_PATH + os.sep) or \
+                path.startswith(TEST_PATH + os.sep)
+
             # C standard library function names that are already declared by
             # our prelude headers (stdint/stdlib/string/math/stdio). Returning
             # them from load_module would cause _emit_stdlib_import_externs to
@@ -282,7 +302,7 @@ class ModuleLoader:
                     if _l.startswith('fn ') or _l.startswith('def '):
                         _n = _l[3:] if _l.startswith('fn ') else _l[4:]
                         _n = _n.split('[')[0].split('(')[0].strip()
-                        if _n and _n not in _C_STDLIB_SKIP:
+                        if _n and (not _apply_c_stdlib_skip or _n not in _C_STDLIB_SKIP):
                             _name_counts[_n] = _name_counts.get(_n, 0) + 1
                 _overloaded = {n for n, c in _name_counts.items() if c > 1}
 
@@ -349,7 +369,7 @@ class ModuleLoader:
                             name = name_part.split()[-1] if name_part else ''
                         params_str = sig[paren_start + 1:paren_end].strip()
 
-                        if not name or name in _C_STDLIB_SKIP:
+                        if not name or (_apply_c_stdlib_skip and name in _C_STDLIB_SKIP):
                             continue
 
                         # Extract return type
@@ -526,7 +546,7 @@ class ModuleLoader:
                 if not _m:
                     continue
                 _vname, _vrhs = _m.group(1), _m.group(2).strip()
-                if _vname in exports or _vname in _C_STDLIB_SKIP:
+                if _vname in exports or (_apply_c_stdlib_skip and _vname in _C_STDLIB_SKIP):
                     continue   # a same-named fn/def export always wins
                 if _vrhs.startswith('"') or _vrhs.startswith("'"):
                     _vctype = 'char *'

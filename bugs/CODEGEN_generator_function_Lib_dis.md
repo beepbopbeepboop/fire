@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-23 — re-verified; refusal set narrowed to ONE function, whose blocker is the `*`-unpack call argument)
+
+Fresh triage: the isolated compile now aborts on exactly ONE generator —
+`_get_instructions_bytes`, refused with "a `*`/`**`-unpack call argument is
+not supported in a compiled generator/coroutine body". The concrete site is
+line 799's `Positions(*next(co_positions, ()))` — a spread CALL ARGUMENT
+(the same honest-refusal guard codecs.py's iterencode hits), NOT a new
+shape. All four generators named in the older entries below no longer
+refuse together: `_unpack_opargs`, `findlinestarts`, and `_find_imports`
+now pass eligibility and reach real coroutine generation (tuple-yield,
+nested-tuple-enumerate, and delegate fixes all holding). The whole-program
+build's `dis.py:915 variable or field 'instrs' declared void` /
+`:904 invalid use of void expression` errors are DOWNSTREAM symptoms of
+that single refusal: the ordinary-path fallback emits `_get_instructions_
+bytes` as a void-returning C function and its caller assigns it. Making
+THIS file build needs: (a) `*`-unpack call-argument support or a narrower
+special case for the `f(*next(it, ()))` idiom, plus the previously-documented
+`code.co_lines()` introspection / module-level-dict-globals (`opmap`) gaps
+for the rest of the file. Still open; no new mechanism discovered.
+
+
 ## Status (updated 2026-08-18 — `_find_imports`'s NESTED-tuple-`enumerate` target FIXED; file still doesn't build)
 
 **Fixed**: `_find_imports`'s `for i, (op, oparg) in enumerate(opargs):` —

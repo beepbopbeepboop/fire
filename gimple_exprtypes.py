@@ -668,6 +668,21 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
                     return rt
                 if _is_known_struct_ptr_ctype(rt, known_structs):
                     return rt
+    if isinstance(e, (ListExpr, DictExpr, SetExpr)):
+        # A list/dict/set LITERAL used as a plain local's RHS (`lines =
+        # []`, `entry = {}` — ftplib.py's `FTP.mlsd`, and the single most
+        # common accumulator idiom in real stdlib generator bodies): this
+        # is a genuine container value, not an unknown scalar. Returning
+        # the real container pointer type here lets _cpp_stmt's AssignStmt
+        # case declare the local with it AND emit a real runtime
+        # construction (`mojo_list_new()`/`mojo_dict_new()`), instead of
+        # declaring `int64_t` while assigning the raw C++ brace-init text
+        # `_cpp_expr`'s literal cases produce ("request for member 'append'
+        # in 'lines', which is of non-class type 'int64_t'" at the first
+        # later `.append`). Must stay consistent with those two emission
+        # sites — see gimple_cpp_core.py's AssignStmt container branch.
+        return ('MojoList *' if isinstance(e, ListExpr)
+                else 'MojoDict *' if isinstance(e, DictExpr) else 'MojoSet *')
     if isinstance(e, Comprehension):
         # A list/dict/set comprehension used as a plain local's RHS
         # (`items = [x for x in ... ]`, as opposed to the already-handled

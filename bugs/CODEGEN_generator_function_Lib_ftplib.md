@@ -1,5 +1,30 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-23 — mlsd's body partially improved by shared coroutine-emitter work; remaining blockers enumerated precisely)
+
+Re-triaged the isolated compile (ci_errors=0; cpp_errors=6 → 4 unique,
+all inside `_mojogen_FTP_mlsd_impl`). Session progress that helps this
+file: `lines = []` (mlsd's accumulator) now lowers to a REAL `MojoList *`
+with typed appends instead of an int64_t local holding brace-init garbage
+(one error gone), and defaulted-argument calls pad correctly. The four
+REMAINING errors are independent, each its own narrow-but-real coroutine-
+body expression-emitter gap (none generator-machinery-specific):
+1. `";".join(facts)` — a str-LITERAL method call (`.join` on a
+   `const char[2]`); the emitter has `.replace()` on char*-typed receivers
+   but no join/split/rstrip family on literals.
+2. `"MLSD %s" % path` — `%`-format-string on a literal + non-constant RHS
+   (the long-standing dynamic-%-format gap, here reached via the .cpp path).
+3. `FTP_retrlines(self, cmd, lines.append)` — a bound-method VALUE used as
+   a callback argument (`lines.append` read without an immediate call); the
+   emitter's bound-method-as-value support covers `self.<method>` and
+   struct-pointer locals via `_CPP_CALLABLE_CTYPE`, not container members.
+4. `line.rstrip(...)`/`fact.split(";")`/`key.lower()` — str-method calls on
+   values whose element type this scalar model can't statically know
+   (`line` comes from a list populated only at runtime by the callback in 3).
+Each is feature-sized; fixing any one alone leaves mlsd blocked by the
+others, so none was attempted piecemeal this pass. Doc kept open.
+
+
 ## Status (updated 2026-08-18 — the `Popen__close_pipe_fds`/`calendar.Month`/`Day` blocker below is FIXED, file still doesn't build for other unrelated reasons)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py`

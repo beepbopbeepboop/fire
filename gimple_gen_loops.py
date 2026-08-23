@@ -868,10 +868,21 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     is_tuple = var.startswith('(') and var.endswith(')')
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
+        # Bracket-aware split (a naive `inner.split(',')` turned a nested
+        # target like `(report_type, (old_mode, old_file))` into the bogus
+        # name fragments `(old_mode` / `old_file)` — declared verbatim as
+        # `int64_t (old_mode;` etc., hard C syntax errors; see
+        # Lib/test/support/__init__.py's WindowsCleanup.__exit__).
         inner = var[1:-1].strip()
-        var_names = [v.strip() for v in inner.split(',')]
+        var_names = gen._split_top_level_comma(inner)
+        def _declare_target_name(vn):
+            if vn.startswith('(') and vn.endswith(')'):
+                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+                    _declare_target_name(_nv)
+            else:
+                gen._declare_var(vn, 'int64_t', force=(vn == shadow_name))
         for vn in var_names:
-            gen._declare_var(vn, 'int64_t', force=(vn == shadow_name))
+            _declare_target_name(vn)
     else:
         var_names = None
         gen._declare_var(var, elem, force=(var == shadow_name))
@@ -913,23 +924,33 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         value_elem = gen._dict_items_val_elems.get(it_val) if is_dict_items else None
         slot_types = gen._tuple_slot_types.get(it_val)
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
-        for i, vn in enumerate(var_names):
+
+        def _emit_slot_read(ptr, i, slot_elem):
+            suf_i = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
+            if suf_i == 'str':
+                return 'char *', f"mojo_list_get_str ({ptr}, {i})"
+            return 'int64_t', f"mojo_list_get_int ({ptr}, {i})"
+
+        def _emit_target_assign(ptr, vn, i, slot_elem):
+            """Assign slot `i` of the tuple at `ptr` to target name `vn` —
+            which may itself be a parenthesized nested tuple target
+            (`(old_mode, old_file)`), in which case the slot is read as an
+            opaque boxed pair and recursively unpacked (one extra level is
+            the realistic real-world shape; deeper nesting recurses
+            identically)."""
+            if vn.startswith('(') and vn.endswith(')'):
+                rt, rv = _emit_slot_read(ptr, i, 'int64_t')
+                nested_raw = gen._new_val(rt, rv)
+                nested_ptr = gen._new_val('MojoList *', f"(MojoList *){nested_raw}")
+                nested_names = gen._split_top_level_comma(vn[1:-1].strip())
+                for j, nn in enumerate(nested_names):
+                    _emit_target_assign(nested_ptr, nn, j, pair_elem)
+                return
             # Declare each slot by its own element type (char* for a
             # string slot) so a later use passes/returns the real type
             # instead of a boxed int64_t. First-decl-wins may still leave
             # an int64_t declaration from an earlier loop over the same
             # name — the per-type assignment below boxes/coerces.
-            if is_dict_items:
-                slot_elem = 'char *' if i == 0 else (value_elem or 'int64_t')
-            elif slot_types is not None and i < len(slot_types):
-                # Heterogeneous tuple-literal list: each slot stored by
-                # its own type (`(name, func)` → [char*, void*]) — a
-                # function-pointer slot must be read via get_int and kept
-                # a pointer (not forced to the joined 'char *' elem, which
-                # makes `func(...)` compile to a bogus direct call).
-                slot_elem = slot_types[i]
-            else:
-                slot_elem = pair_elem
             gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
@@ -951,6 +972,23 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     gen._emit(f"  {cvn} = {raw};")
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cvn)
+
+        for i, vn in enumerate(var_names):
+            if vn.startswith('(') and vn.endswith(')'):
+                _emit_target_assign(tuple_ptr, vn, i, 'int64_t')
+                continue
+            if is_dict_items:
+                slot_elem = 'char *' if i == 0 else (value_elem or 'int64_t')
+            elif slot_types is not None and i < len(slot_types):
+                # Heterogeneous tuple-literal list: each slot stored by
+                # its own type (`(name, func)` → [char*, void*]) — a
+                # function-pointer slot must be read via get_int and kept
+                # a pointer (not forced to the joined 'char *' elem, which
+                # makes `func(...)` compile to a bogus direct call).
+                slot_elem = slot_types[i]
+            else:
+                slot_elem = pair_elem
+            _emit_target_assign(tuple_ptr, vn, i, slot_elem)
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -1112,7 +1150,20 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     is_tuple = var.startswith('(') and var.endswith(')')
     if is_tuple:
         inner = var[1:-1].strip()
-        var_names = [v.strip() for v in inner.split(',')]
+        var_names = gen._split_top_level_comma(inner)
+        # Flatten any nested tuple target the same way _gen_for_list does
+        # (a naive split turned `(k, (a, b))` into the bogus fragments
+        # `(a` / `b)`, declared verbatim — hard C syntax errors).
+        def _flatten(vn, acc):
+            if vn.startswith('(') and vn.endswith(')'):
+                for _nv in gen._split_top_level_comma(vn[1:-1].strip()):
+                    _flatten(_nv, acc)
+            else:
+                acc.append(vn)
+        _flat = []
+        for vn in var_names:
+            _flatten(vn, _flat)
+        var_names = _flat
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
         # slots int64_t (not char*) so a sibling list-iteration branch over

@@ -1,5 +1,30 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-23 — every .ci-side error GONE; all remaining errors are ONE generator's module-global regex access + %-format literals in the .cpp)
+
+Fresh isolated triage (`compile_to_gimple_with_cpp(do_imports=False)`):
+ci_errors=0 — the entire historical .ci error list (208/217 `_parse`
+tuple-return collapse, 472/485 dynamic-%-format, 554 `mojo_open_file`
+arity, 114 `mojo_enumerate` arity, the 843 red herring) no longer
+reproduces anywhere. Root cause #2 (enumerate start) was fixed 2026-08-18;
+roots #1/#3 have been absorbed by unrelated work since. ALL 7 remaining
+errors are in the coroutine translation unit, all inside ONE function,
+`_mojogen__tokenize_impl` (gettext.py's `_tokenize` generator, ~line 100):
+1. `'re' was not declared` + `_token_pattern.finditer` on int64_t —
+   MODULE-LEVEL GLOBALS (the `re` module object and the `_token_pattern`
+   compiled-regex string) are unresolvable in this coroutine-body model,
+   which has no module-global read path for anything but the specific
+   shapes other fixes added (`cls.<attr>` redirect, sys.* elision).
+   Real regex compilation would additionally need the regex engine — a
+   genuine feature gap.
+2. `"..." % (...)`-style literal %-formatting (×2) and a pointer/int
+   comparison pair downstream of the same unresolved values.
+Classification unchanged: NOT a generator-machinery failure — the one
+remaining generator compiles except for the same non-generator expression
+gaps the 2026-08-10 entry pinned down, now narrowed to a single function.
+Not attempted (module-global-object model = feature-sized). Doc kept open.
+
+
 ## Status (updated 2026-08-18 — root cause #2, `mojo_enumerate`'s `start` gap, FIXED)
 
 `enumerate(iterable, start)`'s `start` argument is now modeled everywhere

@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-23 — CORRECTION to the 2026-08-20 entry: the isolated compile was only ever checking the .ci; the .cpp has 72 errors, all pre-existing shapes)
+
+The 2026-08-20 entry's "isolated compile of ipaddress.py's own code now
+completely clean" claim checked ONLY the `-fgimple` .ci side. Re-running
+the SAME isolated compile and ALSO syntax-checking the companion coroutine
+.cpp shows **72 errors** — the two "separate, deeper pre-existing gaps"
+the 2026-08-11 entry documented did NOT silently disappear; they live in
+the .cpp that entry's methodology never examined. Breakdown (all shapes
+already documented in this doc or its siblings):
+- `summarize_address_range`'s unannotated `first`/`last` params used as
+  objects (`first.version`, `first._ip`, `other.subnet_of` — ×3+ each),
+  and `_find_address_range`'s `ip._ip`/`last._ip`: the unannotated-param
+  int64_t-defaulting family (tracked hard-bug class).
+- `'next' was not declared` + `invalid use of void expression` in
+  `_find_address_range`: `it = iter(addresses); first = last = next(it)` —
+  the plain-iterator-cursor gap (a); unchanged since 2026-08-11.
+- 7× "expected primary-expression before '{'" / 5× "invalid cast from
+  'std::function<long long int()>' to int": braced-init text and
+  callable-value casts emitted where the surrounding statement can't
+  accept them — further instances of the coroutine-expression-emitter
+  fallthrough class this doc's history records.
+No regression from this session's three generic fixes (own-file .cpp error
+count moved only 74 → 72 via them). Both real blockers remain
+feature-sized/unannotated-type-family; still not attempted.
+
+
 ## Status (updated 2026-08-20 — unbound-instance-method arity bug FIXED; isolated compile of ipaddress.py's OWN code now fully clean; whole-program build still blocked by unrelated transitively-imported-file errors)
 
 Root-caused and fixed 4 real `too many arguments` errors, all the same
