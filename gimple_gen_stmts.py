@@ -527,7 +527,20 @@ def _gen_stmt_AssignStmt(gen, node):
         # cross_contamination_via_imported_stmts.md's write-side addendum).
         # A `global tname` statement unambiguously means THIS function's
         # own enclosing module's global under real Python scoping.
-        if tname in gen._func_declared_globals and tname in gen._global_var_types:
+        # A bare-name write whose name is THIS module's own global and that
+        # no local/param shadows routes to the globals struct too — same
+        # interpreter-parity fix as _write_dest's (BUG-2026-018): the read
+        # half of `_passed + 1` already resolved to the module global while
+        # this write used to create a dead local, so check()/assert_* in
+        # test_framework.mojo silently lost every increment under --jit.
+        # Ownership guard mirrors the IdentExpr read path exactly
+        # (_global_to_module is None or ours), so this can never redirect a
+        # genuine local into some OTHER inlined module's same-named global.
+        if (((tname in gen._func_declared_globals
+                or (tname not in gen.var_types
+                    and getattr(gen, '_global_to_module', {}).get(tname) in (
+                        None, gen.module_name or "root"))))
+                and tname in gen._global_var_types):
             safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
             field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
             # The struct field's REAL declared C type can differ from the
@@ -1652,7 +1665,16 @@ def _gen_stmt_MultiAssignStmt(gen, node):
             # module's own struct directly (self._current_module_ctx),
             # not `_global_to_module.get(tname)` — see
             # _gen_stmt_AssignStmt's identical branch for why.
-            if tname in gen._func_declared_globals and tname in gen._global_var_types:
+            if (((tname in gen._func_declared_globals
+                    or (tname not in gen.var_types
+                        and getattr(gen, '_global_to_module', {}).get(tname) in (
+                            None, gen.module_name or "root"))))
+                    and tname in gen._global_var_types):
+                # Same BUG-2026-018 interpreter-parity extension as
+                # _gen_stmt_AssignStmt's branch above (un-shadowed bare-name
+                # writes to this module's own globals land on the globals
+                # struct, matching both the IdentExpr read path and the
+                # interpreter's dynamic scope chain).
                 safe_module = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
                 field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(tname)}"
                 gtype = gen._global_c_decl_types.get(tname, gen._global_var_types[tname])
@@ -2133,10 +2155,29 @@ def _gen_stmt_ExprStmt(gen, node):
         if not expected_params and fname in gen._KNOWN_SIGS:
             expected_params = gen._KNOWN_SIGS[fname][1]
         if expected_params and len(arg_pairs) < len(expected_params):
+            # BUG-2026-020: pad with the callee's DECLARED DEFAULTS first —
+            # this statement-level twin previously only knew kwargs-then-0,
+            # so every bare, value-discarding call that omitted a defaulted
+            # argument (`check("one-arg")`, `greet()`) passed literal 0 and
+            # phantom-failed under --jit (43/170 in test_furnace.mojo).
+            # Mirrors _lower_named_call's identical padding, including the
+            # trailing-run offset (`param_defaults` only holds entries for
+            # params THAT HAVE one, starting at the first defaulted
+            # position).
+            _dflts = (gen._func_param_defaults.get(fname)
+                      or gen._func_param_defaults.get(raw_name) or [])
+            _n_req = len(expected_params) - len(_dflts)
             kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
             while len(arg_pairs) < len(expected_params):
                 if kwarg_values:
                     arg_pairs.append(kwarg_values.pop(0))
+                    continue
+                _pos = len(arg_pairs)
+                _dv = None
+                if _dflts and 0 <= _pos - _n_req < len(_dflts):
+                    _dv = _dflts[_pos - _n_req][1]
+                if _dv is not None:
+                    arg_pairs.append(gen._default_expr_to_pair(_dv))
                 else:
                     arg_pairs.append(('int', '0'))
 

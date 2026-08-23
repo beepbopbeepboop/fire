@@ -1625,7 +1625,25 @@ def _write_dest(gen, name: str) -> str:
     # a hard compile failure, not just a silently-dropped update.
     if (name in gen._global_var_types
             and (gen._in_toplevel_gen
-                 or name in getattr(gen, '_func_declared_globals', ()))):
+                 or name in getattr(gen, '_func_declared_globals', ())
+                 # BUG-2026-018 (box.3d/game test_framework): a write to a
+                 # bare name that is THIS module's own global, from a
+                 # function that never declared `global name`, must still
+                 # land on the globals struct — the interpreter mutates the
+                 # module binding through its dynamic scope chain (8/8 in
+                 # test_field_access.mojo), while the compiled side used to
+                 # declare a fresh LOCAL here and drop every increment
+                 # (`_passed = _passed + 1` in check() wrote a dead temp;
+                 # every suite printed 0/0). This mirrors the IdentExpr
+                 # READ path's exact condition (un-shadowed + owned by this
+                 # module or unowned), keeping reads and writes on the SAME
+                 # storage — before this, the read half of `_passed + 1`
+                # already resolved to the global while the write went to a
+                # local.
+                 or (not gen._in_toplevel_gen
+                     and name not in gen.var_types
+                     and getattr(gen, '_global_to_module', {}).get(name) in (
+                         None, gen.module_name or "root")))):
         # `global x` declared in this function — write to the module
         # globals struct, mirroring the AssignStmt write path's routing
         # (otherwise AugAssign `x += 1` on a global emitted a LOCAL

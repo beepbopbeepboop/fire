@@ -2226,6 +2226,13 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # called as `greet()` must pad with "world", not NULL/0.
         _dflts = gen._func_param_defaults.get(fname) or gen._func_param_defaults.get(fname_raw) or []
         _dflt_by_pos = {pn: _dv for pn, _dv in _dflts}
+        # `param_defaults` only holds entries for params THAT HAVE one,
+        # starting at the first defaulted position — i.e. the last
+        # len(_dflts) slots (a leading required param like
+        # `check_like(name, ok=True)` shifts the run off zero, and plain
+        # `_dflts[_pos]` indexing then missed every time, padding the
+        # omitted arg with 0 — BUG-2026-020).
+        _first_dflt = len(expected_params) - len(_dflts)
         # `**kwargs` slot: pack the LITERAL keyword arguments into a real
         # MojoDict (see _func_kwargs_slot). `f(**d)` forwarding is a
         # different shape — the parser flattens the spread into a single
@@ -2245,8 +2252,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             # C-type-list position (param names aren't in expected_params).
             _pos = len(arg_pairs)
             _dv = None
-            if _dflts and _pos < len(_dflts):
-                _dv = _dflts[_pos][1]
+            if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
+                _dv = _dflts[_pos - _first_dflt][1]
             if _dv is not None:
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:

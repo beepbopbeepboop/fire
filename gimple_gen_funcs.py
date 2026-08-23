@@ -256,6 +256,80 @@ def _gen_stmt_FromImportStmt(gen, node):
                 gen._emit(f"  {gen._cname(symbol_name)} = (int64_t)0;  "
                            f"/* module marker (from-import submodule) */")
             continue
+        # BUG-2026-021: resolve the name for real when the module is
+        # resolvable — a function-scoped `from sibling import f` used to fall
+        # straight to the bare no-signature registration below, so the
+        # extern-preamble pass read it as "never resolved to any real
+        # implementation" and emitted a WEAK STUB (`int64_t f (...)`
+        # "unavailable in compiled mode") alongside the REAL `extern void
+        # f (void);` another pass had already declared from the same import —
+        # conflicting C types, hard GCC failure. Mirrors the top-level
+        # Process-imports loop's own resolution chain: load_module() first
+        # (stdlib/test modules), then the local-sibling source fallback.
+        _fi_exports = None
+        _fi_qual = None
+        try:
+            _fi_exports = gen.load_module(node.module)
+            import module_loader as _mlmod_fi
+            _fi_path = _mlmod_fi._module_loader.resolve_module_path(node.module)
+            if _fi_path and os.path.exists(_fi_path):
+                _fi_qual = _mlmod_fi.module_name_for_path(_fi_path)
+        except Exception:
+            try:
+                _fi_exports, _fi_qual = gen._local_sibling_module_exports(node.module)
+            except Exception:
+                _fi_exports = None
+        _fi_info = (_fi_exports or {}).get(name)
+        if isinstance(_fi_info, dict) and _fi_info.get('signature'):
+            if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
+                    and 'signature' in gen.imported_symbols[symbol_name]):
+                _fi_sig = _fi_info['signature']
+                if symbol_name != name:
+                    import re as _re_fi
+                    _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
+                                         symbol_name, _fi_sig, count=1)
+                gen.imported_symbols[symbol_name] = {
+                    'module': node.module,
+                    'original_name': name,
+                    'c_return_type': _fi_info.get('c_return_type', 'int64_t'),
+                    'return_type': _fi_info.get('return_type'),
+                    'parameters': _fi_info.get('parameters'),
+                    'c_parameters': _fi_info.get('c_parameters'),
+                    'signature': _fi_sig,
+                }
+            ret = _fi_info.get('c_return_type', 'int64_t')
+            if symbol_name not in gen.func_return_types:
+                gen.func_return_types[symbol_name] = ret
+            if _fi_qual:
+                # Same mode-dependent qualifier rule as the top-level
+                # Process-imports loop (do_imports inlines siblings under
+                # the dotted-import string sanitized; per-file dylib
+                # pipelines use the path-derived qualifier).
+                if getattr(gen, 'do_imports', False):
+                    _fi_home = node.module.replace('.', '_').replace('-', '_')
+                else:
+                    _fi_home = _fi_qual
+                gen._note_own_func_home(symbol_name, _fi_home)
+            # Param defaults too — same gap as the top-level loop had
+            # before its own BUG-2026-020 fix.
+            try:
+                _fi_fn = None
+                for _fs in (gen._parsed_import(node.module)[2] or []):
+                    if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
+                        _fi_fn = _fs
+                        break
+                _pd = getattr(_fi_fn, 'param_defaults', None) or {} if _fi_fn else {}
+                if _pd:
+                    _dl = list(_pd.items())
+                    gen._func_param_defaults.setdefault(symbol_name, _dl)
+                    try:
+                        gen._func_param_defaults.setdefault(
+                            gen._func_csym(symbol_name), _dl)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            continue
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
@@ -616,8 +690,49 @@ def overload_suffix_for(c_param_types) -> str:
     return f'_{h}'
 
 
+def _local_def_pts(gen, bare_name: str):
+    """BUG-2026-019 helper: THIS compile unit's own ctypes for `bare_name`,
+    resolved lazily from the module's own FunctionDef node (see gen_module's
+    seeding comment for why lazily — struct-typed params need the struct
+    registration passes to have run first). Memoized in
+    `_local_def_param_types`; None when this unit doesn't define the name or
+    its signature can't be resolved."""
+    m = getattr(gen, '_local_def_param_types', None)
+    if m is None:
+        return None
+    if bare_name in m:
+        return m[bare_name]
+    node = getattr(gen, '_local_def_nodes', {}).get(bare_name)
+    if node is None:
+        return None
+    try:
+        pts = gen._signature_ctypes(node.params, node)
+    except Exception:
+        return None
+    if not pts:
+        return None
+    m[bare_name] = pts
+    return pts
+
+
 def _overload_suffix(gen, bare_name: str) -> str:
-    return gen.overload_suffix_for(gen.func_param_types.get(bare_name))
+    # BUG-2026-019 (box.3d/game mod families): prefer THIS compile unit's own
+    # definition of `bare_name` over the shared whole-program registry. In a
+    # flattened do_imports/link-fallback compile every nested module's
+    # registration passes re-write the SHARED bare-name slot
+    # (func_param_types['can_craft']) once per sibling that defines a
+    # same-named function — tuff.mojo's `can_craft(t: Tuff)` and
+    # tuff_bricks.mojo's `can_craft(t: TuffBricks)` fight over one key, so
+    # whichever wrote last/first at any given moment decided BOTH modules'
+    # overload suffixes. That mismatched tuff_bricks's own definition/call
+    # symbols against its correctly-typed forward decl and dylib-reflection
+    # extern ("expected 'TuffBricks *' but argument is of type 'Tuff *'").
+    # The qualifier tier already disambiguates the NAME; this gives the
+    # SUFFIX the same per-module truth.
+    pts = _local_def_pts(gen, bare_name)
+    if pts is None:
+        pts = gen.func_param_types.get(bare_name)
+    return gen.overload_suffix_for(pts)
 
 
 def _note_own_func_home(gen, bare_name: str, module_name: str,
@@ -1049,8 +1164,19 @@ def _func_csym(gen, bare_name: str) -> str:
     # the fact is that later passes have STRICTLY MORE information than
     # earlier ones, never less.
     if mangled != base:
-        if bare_name in gen.func_param_types:
-            gen.func_param_types[mangled] = gen.func_param_types[bare_name]
+        # Mirror from the SAME effective param types _overload_suffix just
+        # used (this unit's own definition when it has one, shared registry
+        # otherwise — BUG-2026-019). Mirroring the raw bare-name slot here
+        # instead would key _emit_call's argument coercion by the mangled
+        # symbol while filling that key with ANOTHER module's homonym
+        # signature whenever the shared slot is mid-oscillation: exactly the
+        # `(Tuff *)t` wrong-struct cast at tuff_bricks.mojo's own internal
+        # can_craft call.
+        _eff_pts = _local_def_pts(gen, bare_name)
+        if _eff_pts is None:
+            _eff_pts = gen.func_param_types.get(bare_name)
+        if _eff_pts is not None:
+            gen.func_param_types[mangled] = _eff_pts
         if bare_name in gen.func_return_types:
             gen.func_return_types[mangled] = gen.func_return_types[bare_name]
     return mangled
