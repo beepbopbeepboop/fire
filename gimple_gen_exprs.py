@@ -1926,7 +1926,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
 
     # Path joining: Mojo uses `/` as the path-join operator (Path.__truediv__).
     # When we see int64_t/char* or char*/char* with op='/', dispatch to mojo_path_join.
-    if op == '/' and rt == 'char *':
+    # A char*-LHS with an int/int64_t RHS is the same join with the right
+    # operand still boxed (dynamic-getattr results, dict-unpacked loop
+    # keys, ...): real Python `str / <non-path>` raises TypeError, so a
+    # char*-LHS `/` can only ever be a join — coercing the boxed RHS
+    # through its int64_t bits is semantics-preserving, unlike numeric
+    # division (which always has a non-char* LHS and never reaches this).
+    # Real: Apple/__main__.py's `CROSS_BUILD_DIR / context.platform` /
+    # `CROSS_BUILD_DIR / host_triple`, whose RHS lowers via
+    # _mojo_dispatch_getattr to an untracked int64_t.
+    if op == '/' and (rt == 'char *'
+                      or (lt == 'char *' and rt in ('int', 'int64_t'))):
         t = gen._new_temp('char *')
         lv_str = lv
         if lt != 'char *':
@@ -1935,7 +1945,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             if lt != 'int64_t':
                 gen._emit(f'  {lv_i64} = (int64_t){lv};')
             gen._emit(f'  {lv_str} = (char *){lv_i64};')
-        gen._emit_call('char *', t, 'mojo_path_join', [('char *', lv_str), ('char *', rv)])
+        rv_str = rv
+        if rt != 'char *':
+            rv_str = gen._new_temp('char *')
+            rv_i64 = gen._new_temp('int64_t') if rt != 'int64_t' else rv
+            if rt != 'int64_t':
+                gen._emit(f'  {rv_i64} = (int64_t){rv};')
+            gen._emit(f'  {rv_str} = (char *){rv_i64};')
+        gen._emit_call('char *', t, 'mojo_path_join', [('char *', lv_str), ('char *', rv_str)])
         return 'char *', t
 
     # Raw pointer arithmetic: `ptr + n` / `ptr - n` for a genuine buffer

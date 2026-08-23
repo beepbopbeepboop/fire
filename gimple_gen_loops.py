@@ -863,6 +863,28 @@ def _gen_for_enumerate(gen, node):
     gen._emit_label(bb_after)
 
 
+def _tuple_unpack_slot_elems(gen, it_val: str, nslots: int) -> list:
+    """Per-slot C element types for a tuple-UNPACKING loop target
+    (`for k, v in <pairs>:`), from whatever container metadata is
+    tracked for the iterable value: dict-items pairs have a char* key
+    slot and the dict's own value-type value slot; a heterogeneous
+    tuple-literal list carries its per-slot types (_tuple_slot_types);
+    anything else falls back to the pair element type / int64_t."""
+    is_dict_items = it_val in gen._dict_items_val_elems
+    value_elem = gen._dict_items_val_elems.get(it_val) if is_dict_items else None
+    slot_types = gen._tuple_slot_types.get(it_val)
+    pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+    elems = []
+    for i in range(nslots):
+        if is_dict_items:
+            elems.append('char *' if i == 0 else (value_elem or 'int64_t'))
+        elif slot_types is not None and i < len(slot_types):
+            elems.append(slot_types[i])
+        else:
+            elems.append(pair_elem)
+    return elems
+
+
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
     # Handle tuple unpacking: for (a, b) in list_of_tuples:
     is_tuple = var.startswith('(') and var.endswith(')')
@@ -870,8 +892,19 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = [v.strip() for v in inner.split(',')]
-        for vn in var_names:
-            gen._declare_var(vn, 'int64_t', force=(vn == shadow_name))
+        # Declare each slot by its REAL per-slot element type, not a
+        # blanket int64_t: _declare_var is deliberately first-decl-wins,
+        # so pre-declaring int64_t here permanently locked every unpacked
+        # target to int64_t before the per-slot analysis below (dict-
+        # items key slot -> char*, etc.) ever ran — the body then saw
+        # only a boxed pointer plus an _actual_types hint that not every
+        # consumer consults (real: Apple/__main__.py's
+        # `for slice_name, slice_parts in HOSTS[platform].items():`,
+        # whose `CROSS_BUILD_DIR / slice_name` needs the key slot's real
+        # char* at the `/` lowering).
+        slot_elems = _tuple_unpack_slot_elems(gen, it_val, len(var_names))
+        for vn, se in zip(var_names, slot_elems):
+            gen._declare_var(vn, se, force=(vn == shadow_name))
     else:
         var_names = None
         gen._declare_var(var, elem, force=(var == shadow_name))
@@ -908,28 +941,13 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # %ld). dict-items keys are always strings; the value slot's type
         # comes from the dict's value type. Homogeneous tuple-literal
         # lists store every slot by the tuple's own element type
-        # (_nested_elem_types).
-        is_dict_items = it_val in gen._dict_items_val_elems
-        value_elem = gen._dict_items_val_elems.get(it_val) if is_dict_items else None
-        slot_types = gen._tuple_slot_types.get(it_val)
-        pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
+        # (_nested_elem_types). Slot types were already resolved (and the
+        # targets declared by them) at the top of this function via
+        # _tuple_unpack_slot_elems.
         for i, vn in enumerate(var_names):
-            # Declare each slot by its own element type (char* for a
-            # string slot) so a later use passes/returns the real type
-            # instead of a boxed int64_t. First-decl-wins may still leave
-            # an int64_t declaration from an earlier loop over the same
-            # name — the per-type assignment below boxes/coerces.
-            if is_dict_items:
-                slot_elem = 'char *' if i == 0 else (value_elem or 'int64_t')
-            elif slot_types is not None and i < len(slot_types):
-                # Heterogeneous tuple-literal list: each slot stored by
-                # its own type (`(name, func)` → [char*, void*]) — a
-                # function-pointer slot must be read via get_int and kept
-                # a pointer (not forced to the joined 'char *' elem, which
-                # makes `func(...)` compile to a bogus direct call).
-                slot_elem = slot_types[i]
-            else:
-                slot_elem = pair_elem
+            slot_elem = slot_elems[i]
+            # Re-resolve against first-decl-wins: an earlier declaration
+            # of the same name still wins; box/coerce into it below.
             gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(slot_elem)
