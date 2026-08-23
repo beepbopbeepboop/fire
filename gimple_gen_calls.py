@@ -2666,8 +2666,15 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     for idx, pname in enumerate(chosen['param_names']):
         if pname not in kw:
             continue
+        # A keyword binding past the last lowered positional arg must fill
+        # every SKIPPED intermediate param with ITS OWN declared default,
+        # not a blanket 0 — `Derived(b=99)` against `(a=1, b=2, c=3)` was
+        # emitting a=0 (see CODEGEN_keyword_only_ctor_call_skips_earlier_
+        # default.md). No-default params still fall back to 0 here via
+        # _default_expr_to_pair(None).
         while len(out) <= idx:
-            out.append(('int', '0'))
+            out.append(gen._default_expr_to_pair(
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[idx] = gen.lower_expr(kw[pname])
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
@@ -2676,20 +2683,12 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             if _kn not in _named:
                 _rest[_kn] = gen.lower_expr(kw[_kn])
         while len(out) <= _kw_idx:
-            out.append(('int', '0'))
+            out.append(gen._default_expr_to_pair(
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[_kw_idx] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
     while len(out) < chosen['max_arity']:
         _dflt = (defaults or {}).get(chosen['param_names'][len(out)]) if len(out) < len(chosen['param_names']) else None
-        if isinstance(_dflt, gimple_ctypes.BoolLiteral):
-            out.append(('_Bool', '1' if _dflt.value else '0'))
-        elif isinstance(_dflt, gimple_ctypes.StringLiteral):
-            out.append(('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"'))
-        elif isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
-            out.append(('int', str(_dflt.value)))
-        elif isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-            out.append(('int64_t', '0'))
-        else:
-            out.append(('int', '0'))
+        out.append(gen._default_expr_to_pair(_dflt))
     return out
 
 
@@ -2757,7 +2756,10 @@ def _lower_struct_constructor(gen, struct_name: str,
                     continue
                 pos = idx + 1  # +1 for self slot
                 while len(arg_pairs) <= pos:
-                    arg_pairs.append(('int', '0'))
+                    _gap_i = len(arg_pairs) - 1
+                    _gap_dflt = (init_defaults.get(init_pnames[_gap_i])
+                                 if 0 <= _gap_i < len(init_pnames) else None)
+                    arg_pairs.append(gen._default_expr_to_pair(_gap_dflt))
                 arg_pairs[pos] = gen.lower_expr(kw[pname])
             # `**kwargs`: pack every keyword that isn't a named parameter
             # into a real MojoDict (see _pack_kwargs_dict). Without this
@@ -2778,7 +2780,10 @@ def _lower_struct_constructor(gen, struct_name: str,
                         _rest[_kn] = gen.lower_expr(kw[_kn])
                 _pos = _kw_i + 1  # +1 for self slot
                 while len(arg_pairs) <= _pos:
-                    arg_pairs.append(('int', '0'))
+                    _gap_i = len(arg_pairs) - 1
+                    _gap_dflt = (init_defaults.get(init_pnames[_gap_i])
+                                 if 0 <= _gap_i < len(init_pnames) else None)
+                    arg_pairs.append(gen._default_expr_to_pair(_gap_dflt))
                 arg_pairs[_pos] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
         elif kwargs:
             for _kn, kexpr in kwargs:
@@ -2796,16 +2801,7 @@ def _lower_struct_constructor(gen, struct_name: str,
         while len(arg_pairs) - 1 < expected:
             _missing_pname = init_pnames[len(arg_pairs) - 1] if init_pnames and len(arg_pairs) - 1 < len(init_pnames) else None
             _dflt = init_defaults.get(_missing_pname) if _missing_pname else None
-            if isinstance(_dflt, gimple_ctypes.BoolLiteral):
-                arg_pairs.append(('_Bool', '1' if _dflt.value else '0'))
-            elif isinstance(_dflt, gimple_ctypes.StringLiteral):
-                arg_pairs.append(('char *', f'"{gimple_ctypes._c_escape(_dflt.value)}"'))
-            elif isinstance(_dflt, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral)):
-                arg_pairs.append(('int', str(_dflt.value)))
-            elif isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-                arg_pairs.append(('int64_t', '0'))
-            else:
-                arg_pairs.append(('int', '0'))
+            arg_pairs.append(gen._default_expr_to_pair(_dflt))
         gen._emit_call('void', '', init_fname, arg_pairs)
     elif kwargs or args:
         # Positional args + keyword args — assign fields by position then by name
