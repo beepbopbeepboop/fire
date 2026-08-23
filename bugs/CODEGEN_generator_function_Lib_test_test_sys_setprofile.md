@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/test/test_sys_setprofile.py
 
+## Status (updated 2026-08-23 — FIXED)
+
+`python3 mojo.py build Lib/test/test_sys_setprofile.py` now completes
+END-TO-END (EXIT=0). The line-415 error is FIXED for real: gen_module
+now reconciles toplevel global C types AFTER the gen_func loop finalizes
+all return types and BEFORE the toplevel body is generated — an
+int64_t-frozen global whose callee's pointer return type was inferred
+later ('protect_ident = ident(protect)', ident returning MojoList*) is
+upgraded in _global_c_decl_types/_global_var_types, so the store coerces
+to the real pointer type instead of boxing into the MojoList* globals
+field. Only ever widens int->pointer, never downgrades. The secondary
+_mojogen_f_Task redefinition among the three same-named nested `def f()`
+generators is also fixed (deterministic ordinal suffixes on repeated
+base names). All three `yield i` generators compile through the
+coroutine path. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (98e5aa3) with a real rebuild (real

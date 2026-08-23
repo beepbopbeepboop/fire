@@ -1,5 +1,14 @@
 # CODEGEN_generator_function: Lib/test/test_finalization.py
 
+## Status (updated 2026-08-23 — STILL-OPEN)
+
+Re-ran the repro: identical refusal on every inherited `test`
+classmethod generator (`cls.del_calls` etc.) — no class-level attribute
+access exists for compiled generators. Structural, unchanged. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (re-verified 2026-08-09)
 
 Re-verified against current master (fast-forwarded to `e5daa1d`, no
