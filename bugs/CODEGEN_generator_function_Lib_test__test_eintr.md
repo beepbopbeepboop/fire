@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-23 — PARTIAL)
+
+Major unblocking this session: ALL FOUR previously-enumerated
+Lib/test/support/__init__.py compile errors are gone (env[name]-dict
+inference, bigmemtest closure mut-capture temps, print_warning
+function-attribute namespace, patch()'s mojo_getattr signature), and
+import_helper.py's unlink now binds to its weak stub. The file's OWN
+generator (`_interrupted_reads`, `yield rd, datum`) now compiles all the
+way to the coroutine .cpp stage, where NEW, precisely-localized errors
+surface in ITS body only:
+1. `'os' was not declared` — `rd, wr = os.pipe()`: outer-scope module
+   name resolution inside a generator TU (documented structural family).
+2. brace-init-list assigned to an int64_t local — bare list literal
+   `data = [b'hello', ...]` still has no declared-type support.
+3. `'\n'.join(...)` lowered as member call on the C string literal.
+4. assertEqual arity: inherited-unittest-method extern declarations
+   default to (self)-only params (same new residual documented on
+   test_random_things below). Not attempted; outer-scope generator-TU
+   resolution remains the dominant blocker family. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-11 — tuple-valued yield fix holds; file's OWN code now compiles clean; blocked purely by 4 distinct, unrelated Lib/test/support/__init__.py bugs)
 
 Re-verified against current master with a fresh real rebuild. The

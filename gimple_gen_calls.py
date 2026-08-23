@@ -2006,8 +2006,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # C reserved function renaming
     elif (fname_raw in gimple_ctypes._C_RESERVED_FUNCS and fname_raw not in gen.func_return_types
             and fname_raw not in gimple_ctypes._FORCE_RENAME_RESERVED
-            and fname_raw not in gen.imported_symbols):
-        fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
+            and (fname_raw not in gen.imported_symbols
+                 or fname_raw in gen._unresolved_import_aliases)):
+        if fname_raw in gen._unresolved_import_aliases:
+            # A relative/external import this compile could never resolve
+            # (`from .os_helper import unlink` at module scope — the name
+            # lands in _unresolved_import_aliases, NOT imported_symbols).
+            # The preamble's weak-stub pass names that stub via
+            # `_func_csym(sym_name)` (= `_safe_name`, i.e. `mojo_unlink`);
+            # the call site must bind to the SAME symbol. Emitting the raw
+            # reserved name here instead silently retargeted the call at
+            # libc's same-named function with no visible prototype —
+            # "implicit declaration of function 'unlink'" (a hard error)
+            # for Lib/test/support/import_helper.py's forget().
+            fname = gen._func_csym(fname_raw)
+        else:
+            fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, fname_raw)
     else:
         # _func_csym applies the same overload suffix the definition used.
         fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, gen._func_csym(fname_raw))

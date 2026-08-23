@@ -1407,6 +1407,58 @@ def gen_module_impl(self, stmts):
         if isinstance(s, FunctionDef) and s.name in _own_top_level_func_names:
             _scan_func_body_for_self_attr(s.name, s.body)
 
+    def _scan_module_level_for_func_attrs(body):
+        """`f.attr = value` written at MODULE level (not inside `f`'s own
+        body) — e.g. Lib/test/support/__init__.py's
+        `print_warning.orig_stderr = sys.stderr`, a statement directly in
+        the module body AFTER the def. The per-function scans above only
+        ever looked at each function's OWN body, so such writes were never
+        registered into `_func_attrs`: the write fell through to dynamic
+        setattr on the boxed function pointer, and the matching read
+        (`stream = print_warning.orig_stderr`) fell through to "call the
+        bare function name then runtime-getattr the result" — emitting an
+        undeclared, un-mangled C symbol ("implicit declaration of function
+        'print_warning'"). One walk over the module-level statement tree,
+        NOT entering FunctionDef bodies (those are covered by the
+        per-function scans above), registering every hit whose target name
+        is one of this module's own top-level functions."""
+        _stack = list(body)
+        while _stack:
+            _fstmt = _stack.pop(0)
+            if isinstance(_fstmt, (FunctionDef, ImportStmt, FromImportStmt)):
+                continue
+            if (isinstance(_fstmt, AssignStmt)
+                    and isinstance(_fstmt.target, MemberExpr)
+                    and isinstance(_fstmt.target.obj, IdentExpr)
+                    and _fstmt.target.obj.name in _own_top_level_func_names):
+                fname = _fstmt.target.obj.name
+                attr = _fstmt.target.member
+                self._func_attrs.setdefault(fname, {})
+                if attr not in self._func_attrs[fname]:
+                    mangled = f"_funcattr_{fname}__{attr}"
+                    self._func_attrs[fname][attr] = mangled
+                    self._global_var_types.setdefault(mangled, 'int64_t')
+                    self._global_c_decl_types.setdefault(mangled, 'int64_t')
+            elif isinstance(_fstmt, IfStmt):
+                _stack.extend(_fstmt.then_body)
+                for _, _eb in _fstmt.elifs:
+                    _stack.extend(_eb)
+                if _fstmt.else_body:
+                    _stack.extend(_fstmt.else_body)
+            elif isinstance(_fstmt, (WhileStmt, ForStmt)):
+                _stack.extend(_fstmt.body)
+            elif isinstance(_fstmt, TryStmt):
+                _stack.extend(_fstmt.body)
+                for _h in (_fstmt.handlers or []):
+                    _stack.extend(_h.body)
+                if _fstmt.else_body:
+                    _stack.extend(_fstmt.else_body)
+                if _fstmt.finally_body:
+                    _stack.extend(_fstmt.finally_body)
+
+    if _own_top_level_func_names:
+        _scan_module_level_for_func_attrs(stmts)
+
     all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                 + self._imported_typedef_structs)
     for s in all_structs_for_methods:
@@ -2185,7 +2237,22 @@ def gen_module_impl(self, stmts):
             for _fn_name in _gen_only + _async_only + _async_gen:
                 _csym = self._func_csym(_fn_name)
                 _g = _stub_guard_name(_csym)
-                _stub = f'#ifndef {_g}\n#define {_g}\nint64_t {_csym} (...);\n#endif'
+                # A WEAK DEFINITION, not a bare declaration: the skipped
+                # generator/async function has no ordinary C definition
+                # anywhere in this compile, so any plain call site that
+                # reaches it (`find_name_in_mro` calling the skipped
+                # `iter_name_in_mro` generator) would satisfy -fgimple's
+                # name check against a decl-only stub and then fail at
+                # LINK ("symbol(s) not found"). Mirrors
+                # _lower_named_call's own identical weak-stub reasoning
+                # for never-defined names: an actual call prints an
+                # honest "unavailable in compiled mode" diagnostic and
+                # returns 0 instead of breaking the whole build.
+                _stub = (f'#ifndef {_g}\n#define {_g}\n'
+                         f'__attribute__((weak)) int64_t {_csym} (...) '
+                         f'{{ mojo_print ((char *)"{_fn_name}: unavailable in compiled mode '
+                         f'(unsupported generator/async function skipped)"); '
+                         f'return (int64_t)0; }}\n#endif')
                 if _stub not in self._elaborated_externs:
                     self._elaborated_externs.append(_stub)
                 self._unsupported_generator_names.add(_fn_name)
@@ -3235,6 +3302,27 @@ def gen_module_impl(self, stmts):
             self.func_param_types[fn.name] = param_ctypes
 
     has_toplevel_code = len(toplevel_stmts) > 0
+    # Reconcile toplevel global C types with LATE-resolved callee return
+    # types before the toplevel body is generated. The early global scans
+    # freeze an unannotated-call RHS (`protect_ident = ident(protect)`) at
+    # int64_t because func_return_types isn't populated yet; by now every
+    # function's return type IS final (the gen_func loop above completed),
+    # so an int64_t-frozen global whose callee returns a pointer would
+    # otherwise be stored through `_safe_coerce_emit` as a boxed int64 into
+    # a globals-struct FIELD the later assembly correctly declares as the
+    # real pointer type — "assignment to 'MojoList *' from 'int64_t'"
+    # (test_sys_setprofile.py:415). Only ever WIDENS int->pointer; never
+    # downgrades an already-correct pointer entry.
+    for _rs in stmts:
+        if (isinstance(_rs, AssignStmt) and isinstance(_rs.target, IdentExpr)
+                and isinstance(_rs.value, CallExpr)
+                and isinstance(_rs.value.func, IdentExpr)):
+            _gn = _rs.target.name
+            if self._global_c_decl_types.get(_gn) in ('int64_t', 'int'):
+                _crt = self.func_return_types.get(_rs.value.func.name, '')
+                if isinstance(_crt, str) and _crt.endswith(' *'):
+                    self._global_c_decl_types[_gn] = _crt
+                    self._global_var_types[_gn] = _crt
     if has_toplevel_code:
         toplevel_func = self._gen_toplevel(toplevel_stmts)
         func_parts.append(toplevel_func)
@@ -4696,10 +4784,28 @@ def gen_module_impl(self, stmts):
 
     if self._funcptr_builtins_needed:
         _new_names = sorted(self._funcptr_builtins_needed - self._emitted_funcptr_builtins)
+        # A SUPPORTED compiled generator has no ordinary C definition
+        # under its bare csym (only its `<base>_start/_resume/_value/
+        # _destroy` coroutine API), so a plain `(void *)<csym>`
+        # initializer referenced an undefined symbol ("symbol(s) not
+        # found" at link — test/seq_tests.py's `iterfunc`, itself a
+        # generator, collected into a callable table alongside ordinary
+        # functions). Point such slots at `<base>_start` instead: real
+        # Python's "calling a generator FUNCTION constructs the
+        # generator object without running its body", which is exactly
+        # what `_start` does.
+        def _funcptr_target(c_name):
+            for _gfn, _gapi in self._generator_api.items():
+                try:
+                    if self._func_csym(_gfn) == c_name:
+                        return f"{_gapi['base']}_start"
+                except Exception:
+                    continue
+            return c_name
         if _new_names:
             for c_name in _new_names:
                 if c_name and c_name[0] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_':
-                    parts.append(f"static void * _funcptr_{c_name} = (void *){c_name};")
+                    parts.append(f"static void * _funcptr_{c_name} = (void *){_funcptr_target(c_name)};")
                 self._emitted_funcptr_builtins.add(c_name)
             parts.append('')
 

@@ -1537,6 +1537,39 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen.lower_expr(extra_arg)
         return 'int64_t', t
 
+    # A call through a struct FIELD that holds a callable value
+    # (`Wrapper.__call__`'s `self.func(*args)`,
+    # `Stopwatch.__exit__`'s `stopwatch.get_time()` — the field assigned
+    # in `__init__` from a constructor argument, e.g.
+    # `self.func = func`). The old fallthrough below resolved ANY
+    # member call on a struct-typed receiver as a same-named STRUCT
+    # METHOD, emitting a call to a phantom `<Struct>_<field>` C symbol
+    # nothing ever defines — it compiled against a bare variadic
+    # declaration and then failed at LINK ("symbol(s) not found") for
+    # every such site. When the name IS a declared field of the
+    # receiver's struct and is NOT also a real compiled method, load
+    # the field's VALUE and dispatch through the existing
+    # mojo_fnptr_call_N indirect-call helpers instead
+    # (_lower_fnptr_call_value).
+    _recv_struct = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
+    if (_recv_struct is not None and _recv_struct in gen.struct_field_types
+            and method in gen.struct_field_types[_recv_struct]
+            and f'{_recv_struct}_{method}' not in gen.func_return_types
+            and (_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
+        _has_spread = any(isinstance(a, gimple_ctypes.UnaryOp) and a.op in ('*', '**')
+                          for a in node.args)
+        if _has_spread:
+            # A `*`/`**`-forwarding shape needs dynamic arity this
+            # fixed-arity fnptr-helper model can't express. Follow this
+            # file's own established "evaluate arguments for side
+            # effects, then no-op" degradation (see the unresolvable-
+            # base case above) rather than emitting a bogus direct call.
+            for a in node.args:
+                gen.lower_expr(a)
+            return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
+        fp_type, fp_val = gen.lower_expr(node.func)
+        return gen._lower_fnptr_call_value(fp_type, fp_val, node, 'int64_t')
+
     # Struct method call: obj.method(args) → StructName_method(self, args)
     return gen._lower_struct_method_call(ov, ot, method, node)
 

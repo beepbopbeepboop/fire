@@ -517,6 +517,25 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _gen_qualifier = gen._func_qualifier(fn.name)
         base = (f"_mojogen_{_gen_qualifier}_{gimple_ctypes._safe_name(fn.name)}"
                 if _gen_qualifier else f"_mojogen_{gimple_ctypes._safe_name(fn.name)}")
+        # Several DISTINCT nested `def`s can share one bare name inside
+        # different enclosing functions (test_sys_setprofile.py defines
+        # `def f(): yield i` in three separate test methods) — every one
+        # compiled to the SAME `_mojogen_f_*` symbol set, a hard
+        # "redefinition of 'struct _mojogen_f_Task'" C++ error. Append a
+        # deterministic ordinal (compilation order is source order, which
+        # is stable for identical input, preserving CAS-cache identity)
+        # to the second and later same-named units. Call-site resolution
+        # remains name-keyed (`_generator_api[name]`, last registration
+        # wins) — the same accepted "first/last-writer-wins" residual
+        # limitation the ordinary-function home machinery already
+        # documents for cross-module same-bare-name functions.
+        _seen_bases = getattr(gen, '_seen_generator_base_names', None)
+        if _seen_bases is None:
+            _seen_bases = gen._seen_generator_base_names = {}
+        _occurrence = _seen_bases.get(base, 0) + 1
+        _seen_bases[base] = _occurrence
+        if _occurrence > 1:
+            base = f"{base}_{_occurrence}"
     # Params are already "declared" locals as far as the body emitter is
     # concerned — a param can be read (`i = start`) or directly
     # reassigned/augmented (`start = start + 1`) without a fresh `Type
@@ -942,14 +961,54 @@ def _mutated_free_names(gen, inner: gimple_ctypes.FunctionDef, candidate_names) 
     this project already supports (device_context.mojo's closures,
     `test_asyncrt_add`'s threaded comptime params, ...), none of which
     ever reassign a captured name."""
+    # A plain `name = ...` assignment lexically INSIDE a deeper nested
+    # `def` is that def's OWN fresh local binding (Python — and this
+    # codegen's closure lifting — both scope it to the innermost def),
+    # NOT a write to the captured free variable, even when the two share
+    # a spelling: Lib/test/support/__init__.py's bigmemtest decorator
+    # family does `size = wrapper.size` / `memuse = wrapper.memuse`
+    # inside `wrapper` purely to read back function attributes that
+    # shadow the outer names, and counting those as mutations made the
+    # OUTER function's capture-store emit `{vtype} *` temps assigned
+    # from plain int64_t locals ("assignment to 'int64_t *' from
+    # 'int64_t' makes pointer from integer"). So plain assignments are
+    # only collected for statements in THIS def's own body (control-flow
+    # nesting included, nested defs excluded), while augmented
+    # assignments (`name += 1`, real Mojo's `{mut}` idiom) still count
+    # at every depth, preserving every previously-supported mutation
+    # shape unchanged.
     mutated: set = set()
-    for n in gimple_exprtypes._walk_ast(inner.body):
+    _stack = list(inner.body)
+    while _stack:
+        n = _stack.pop(0)
+        if isinstance(n, gimple_ctypes.FunctionDef):
+            continue
         if isinstance(n, gimple_ctypes.AssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
             if n.target.name in candidate_names:
                 mutated.add(n.target.name)
         elif isinstance(n, gimple_ctypes.AugAssignStmt) and isinstance(n.target, gimple_ctypes.IdentExpr):
             if n.target.name in candidate_names:
                 mutated.add(n.target.name)
+        elif isinstance(n, gimple_ctypes.IfStmt):
+            _stack.extend(n.then_body)
+            for _, _eb in n.elifs:
+                _stack.extend(_eb)
+            if n.else_body:
+                _stack.extend(n.else_body)
+        elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
+            _stack.extend(n.body)
+            if getattr(n, 'else_body', None):
+                _stack.extend(n.else_body)
+        elif isinstance(n, gimple_ctypes.WithStmt):
+            _stack.extend(n.body)
+        elif isinstance(n, gimple_ctypes.TryStmt):
+            _stack.extend(n.body)
+            for _h in (n.handlers or []):
+                _stack.extend(_h.body)
+            if n.else_body:
+                _stack.extend(n.else_body)
+            if n.finally_body:
+                _stack.extend(n.finally_body)
     return frozenset(mutated)
 
 

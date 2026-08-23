@@ -1,5 +1,26 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-23 — PARTIAL)
+
+All Lib/test/support/__init__.py errors blocking this file's builds are
+fixed (see sibling docs). Remaining, both in transitively-imported
+support/script_helper.py, both newly precise:
+1. line 222 `p.stdin.close()` — the generated struct-field access emits
+   the field name `stdin`, which macOS libc MACRO-EXPANDS to `__stdinp`
+   ('MojoCompletedProcess' has no member '__stdinp'). A platform-macro
+   field-name collision (_safe_field escapes C keywords but not libc
+   stdin/stdout/stderr macros); additionally the receiver is a
+   subprocess.Popen-shaped param typed MojoCompletedProcess*, which has
+   no stdin field at all.
+2. line 324 `assert_python_ok('-u', script, '-v')` — callee declared
+   (*args, **kwargs) -> (MojoList*, MojoDict*) but the imported call
+   site passed 3 raw positional args: the kwargs-slot packing table is
+   keyed per-module and has no entry for the cross-module callee.
+Neither is generator-related; not attempted this session. Gate verification (2026-08-23): `test_gimple.py` 250 passed / 0 failed;
+`test_module_cache.py` 76 / 0; `make check-selfhost` clean; from-scratch
+stdlib dylib rebuild EXIT=0 with **0** `skip <module>:` lines — matching
+the pre-change baseline of exactly 0 skips.
+
 ## Status (updated 2026-08-12, re-verified — unchanged)
 
 Re-verified against current master with a real `MOJO_DEBUG=1 python3
