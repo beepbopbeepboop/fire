@@ -1085,6 +1085,47 @@ def main():
         print(x)
 """, "3\n2\n1\n")
 
+    # `for i, d in enumerate(<call to another compiled generator>, start):`
+    # inside a generator body — a GENERATOR CALL as enumerate's OWN first
+    # argument (flat 2-name target), composed with the sub-generator drive
+    # loop and its index tracking. Real target: Lib/calendar.py's
+    # `Calendar.itermonthdays2` (`for i, d in
+    # enumerate(self.itermonthdays(year, month), self.firstweekday):`) —
+    # previously `_cpp_expr` lowered the generator call through the wrong
+    # ordinary extern "C" stub (void-returning), producing g++'s "void
+    # value not ignored as it ought to be". The free-function callee shape
+    # exercises the same delegation machinery through its other branch.
+    test_generator_stdout("enumerate_generator_method_arg_start", """\
+class Cal:
+    def __init__(self):
+        self.firstweekday = 2
+
+    def iterdays(self, n):
+        yield from range(1, n + 1)
+
+    def iterdaynum(self, n):
+        for i, d in enumerate(self.iterdays(n), self.firstweekday):
+            yield d, i % 7
+
+def main():
+    c = Cal()
+    for d, wd in c.iterdaynum(4):
+        print(d, wd)
+""", "1 2\n2 3\n3 4\n4 5\n")
+
+    test_generator_stdout("enumerate_generator_free_fn_arg_start", """\
+def days(n):
+    yield from range(1, n + 1)
+
+def numbered(n, start):
+    for i, d in enumerate(days(n), start):
+        yield d * 100 + i
+
+def main():
+    for v in numbered(3, 10):
+        print(v)
+""", "110\n211\n312\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

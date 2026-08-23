@@ -2886,6 +2886,28 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                 and s.iterable.func.name == 'enumerate'
                 and s.iterable.args):
+            # `enumerate`'s own iterable argument may itself be a call to
+            # another compiled generator (calendar.py's `itermonthdays2`:
+            # `for i, d in enumerate(self.itermonthdays(year, month),
+            # self.firstweekday):`) — delegate to
+            # `_cpp_for_generator_delegate`, composing its sub-generator
+            # drive loop with the same `index_var`/`index_start_expr`
+            # index-tracking support the NESTED-tuple-target case just
+            # above uses (this is that composition's flat-target twin:
+            # the value slot is the generator's own yielded scalar,
+            # assigned through its registered `value_ctype`, never a
+            # boxed-tuple read-back). Without this, `_cpp_expr` lowered
+            # the generator call through the ordinary (non-coroutine)
+            # extern "C" stub — void-returning — producing "void value
+            # not ignored as it ought to be" at g++ time.
+            _enum_src_node = s.iterable.args[0]
+            if not s.else_body and gen._cpp_iterable_is_delegatable_generator_call(_enum_src_node):
+                _idx_start_expr = '0'
+                if len(s.iterable.args) >= 2:
+                    _idx_start_expr = gen._cpp_expr(s.iterable.args[1])
+                return gen._cpp_for_generator_delegate(
+                    _names[1], _enum_src_node, s.body, declared, indent,
+                    index_var=_names[0], index_start_expr=_idx_start_expr)
             _src = gen._cpp_expr(s.iterable.args[0])
             _ctr = gen._cpp_fresh_name("_mg_i")
             # Optional 2-arg `enumerate(iterable, start)` form
