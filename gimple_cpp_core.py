@@ -241,6 +241,51 @@ def _cpp_try_kwargs_forward_call(gen, e):
     return f"[&]() -> {ret_ctype} {{ {body} }}()"
 
 
+def _cpp_receiver_ctype(gen, e):
+    """Best-effort static C type of a method-call RECEIVER expression inside
+    a compiled generator/coroutine body, for the receiver-typed dispatch the
+    `.replace(...)`/`.get(...)`/`.items()`-family lowering below (and
+    `_cpp_for_stmt`'s dict-iteration cases) need. Covers exactly the four
+    receiver shapes this body model can actually type — a declared local/param,
+    a `self.<field>` struct field, a `cls.<class-attr>` class-level global,
+    and a zero-argument `.copy()` chain over either collection type (the one
+    chained call whose result type is statically knowable: mojo_dict_copy/
+    mojo_list_copy preserve the receiver's pointer type) — returning None for
+    everything else, which every caller treats as "unknown, fall through to
+    the generic lowering". Consolidates what used to be three separate inline
+    lookups inside `_cpp_expr`'s MemberExpr-call handling so `_cpp_for_stmt`
+    can share them instead of growing its own divergent copy."""
+    declared = getattr(gen, '_cpp_declared', None)
+    if isinstance(e, gimple_ctypes.IdentExpr):
+        return declared.get(e.name) if declared is not None else None
+    if isinstance(e, gimple_ctypes.MemberExpr):
+        _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
+        if (_self_struct and isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and e.obj.name == 'self'):
+            return gen.struct_field_types.get(_self_struct, {}).get(e.member)
+        if (_self_struct and isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and e.obj.name == 'cls'):
+            _cls_gname = gen._class_attrs.get(_self_struct, {}).get(e.member)
+            if _cls_gname is not None:
+                return gen._global_var_types.get(_cls_gname)
+        # `<struct-pointer local>.<field>` — the non-self sibling of the
+        # `self.<field>` case (e.g. a generator taking a struct-typed
+        # parameter: `for k, v in b.data.copy().items():`), resolved
+        # through the same declared-struct-pointer-local lookup
+        # `_cpp_expr`'s MemberExpr case already uses for the read itself.
+        if isinstance(e.obj, gimple_ctypes.IdentExpr):
+            _obj_struct = gen._cpp_struct_ptr_local(e.obj.name)
+            if _obj_struct:
+                return gen.struct_field_types.get(_obj_struct, {}).get(e.member)
+        return None
+    if (isinstance(e, gimple_ctypes.CallExpr)
+            and isinstance(e.func, gimple_ctypes.MemberExpr)
+            and not e.args and e.func.member == 'copy'):
+        rc = _cpp_receiver_ctype(gen, e.func.obj)
+        return rc if rc in ('MojoDict *', 'MojoList *') else None
+    return None
+
+
 def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.IntLiteral):
         return str(e.value)
@@ -857,29 +902,7 @@ def _cpp_expr(gen, e) -> str:
             # <mojo_runtime.h>` every generated .cpp file has — no new
             # extern declaration needed). Real: save_env.py's
             # `resource_info`: `name.replace('.', '_')`.
-            _str_obj_ctype = None
-            if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and gen._cpp_declared is not None:
-                _str_obj_ctype = gen._cpp_declared.get(e.func.obj.name)
-            elif (isinstance(e.func.obj, gimple_ctypes.MemberExpr)
-                    and isinstance(e.func.obj.obj, gimple_ctypes.IdentExpr)
-                    and e.func.obj.obj.name == 'self' and _cpp_self_struct):
-                _str_obj_ctype = gen.struct_field_types.get(
-                    _cpp_self_struct, {}).get(e.func.obj.member)
-            elif (isinstance(e.func.obj, gimple_ctypes.MemberExpr)
-                    and isinstance(e.func.obj.obj, gimple_ctypes.IdentExpr)
-                    and e.func.obj.obj.name == 'cls' and _cpp_self_struct):
-                # `cls.<class-attr>.get(...)` — the class-level analogue
-                # of `self.<field>.get(...)` just above (e.g. Lib/
-                # enum.py's `Flag._iter_member_by_value_`: `cls.
-                # _value2member_map_.get(val)`). `cls.<attr>` has no
-                # instance-field form (see the MemberExpr case's own
-                # `cls.<attr>` branch), only the class-attribute-global
-                # redirect, so the receiver's ctype comes from THAT
-                # global's registered type instead of struct_field_types.
-                _cls_gname = gen._class_attrs.get(
-                    _cpp_self_struct, {}).get(e.func.obj.member)
-                if _cls_gname is not None:
-                    _str_obj_ctype = gen._global_var_types.get(_cls_gname)
+            _str_obj_ctype = _cpp_receiver_ctype(gen, e.func.obj)
             if (_str_obj_ctype == 'char *' and e.func.member == 'replace'
                     and len(e.args) == 2):
                 _obj_expr = gen._cpp_expr(e.func.obj)
@@ -942,6 +965,23 @@ def _cpp_expr(gen, e) -> str:
                     return (f"({_dict_val_ct})mojo_dict_get_int("
                             f"(MojoDict *)({_obj_expr}), {_key_expr})")
                 return f"mojo_dict_get_int((MojoDict *)({_obj_expr}), {_key_expr})"
+            # `<dict-typed obj>.copy()/.items()/.keys()/.values()` — the
+            # zero-argument collection-accessor siblings of the `.get(...)`
+            # case just above, same receiver-typing mechanism
+            # (`_cpp_receiver_ctype`) and same runtime helpers the ordinary
+            # GIMPLE path's own dict-method lowering already routes through
+            # (gimple_gen_methods.py's identical `mojo_dict_*` mapping).
+            # Without this, a coroutine body's `self.data.copy().items()`
+            # fell to the generic `{obj}.{member}(...)` fallback and emitted
+            # invalid C++ member-call syntax on an opaque struct pointer.
+            # Real: Lib/weakref.py's WeakValueDictionary.items/keys:
+            # `for k, wr in self.data.copy().items():`.
+            if (_str_obj_ctype == 'MojoDict *' and not e.args
+                    and e.func.member in ('copy', 'items', 'keys', 'values')):
+                _dict_fn = {'copy': 'mojo_dict_copy', 'items': 'mojo_dict_items',
+                            'keys': 'mojo_dict_keys',
+                            'values': 'mojo_dict_values'}[e.func.member]
+                return f"{_dict_fn}((MojoDict *)({gen._cpp_expr(e.func.obj)}))"
             obj = gen._cpp_expr(e.func.obj)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
             return f"{obj}.{e.func.member}({args})"
@@ -2941,6 +2981,51 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if not s.else_body and gen._cpp_iterable_is_delegatable_generator_call(s.iterable):
             return gen._cpp_for_generator_delegate(_names, s.iterable, s.body,
                                                       declared, indent)
+        # `for k, v in <dict-typed expr>.items():` — a plain (non-generator)
+        # dict iteration with a 2-name tuple target, inside a coroutine body.
+        # Lowered through the SAME runtime protocol the ordinary GIMPLE
+        # path's `for k, v in d.items():` tuple branch already uses:
+        # mojo_dict_items builds a MojoList of boxed 2-element sub-lists
+        # (keys always char*, values read as the int64_t convention), and
+        # this unpacks each pair per-slot. Before this, any tuple target
+        # over a non-enumerate/non-generator call fell through to the
+        # string-target path below and emitted the whole comma-joined
+        # target as ONE bogus C++ identifier (`for (auto k, wr : ...)`,
+        # g++: "declaration of 'auto k' has no initializer"). Real: Lib/
+        # weakref.py's WeakValueDictionary.items/keys and
+        # WeakKeyDictionary.items/values. The `.items()` CALL itself is
+        # lowered by _cpp_expr's own `<dict>.items()` case; here only the
+        # loop shape is built, so the receiver expression is evaluated
+        # exactly once into a cached list local (a `.copy()` receiver
+        # must not re-run per iteration).
+        if (len(_names) == 2
+                and isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+                and s.iterable.func.member == 'items'
+                and not s.iterable.args
+                and not s.else_body
+                and _cpp_receiver_ctype(gen, s.iterable.func.obj) == 'MojoDict *'):
+            _dsrc = gen._cpp_expr(s.iterable.func.obj)
+            _items = gen._cpp_fresh_name("_mg_items")
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _pair = gen._cpp_fresh_name("_mg_pair")
+            lines = []
+            for _nm, _ct in ((_names[0], 'char *'), (_names[1], 'int64_t')):
+                if _nm not in declared:
+                    declared[_nm] = _ct
+                    lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_ct)} {_nm};")
+            lines.append(f"{indent}MojoList *{_items} = "
+                         f"mojo_dict_items((MojoDict *)({_dsrc}));")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_items}); {_ctr}++) {{")
+            lines.append(f"{indent}    MojoList *{_pair} = "
+                         f"(MojoList *)mojo_list_get_int({_items}, {_ctr});")
+            lines.append(f"{indent}    {_names[0]} = mojo_list_get_str({_pair}, 0);")
+            lines.append(f"{indent}    {_names[1]} = mojo_list_get_int({_pair}, 1);")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
         target = target[1:-1]
     if isinstance(target, str):
         # `for x in <call to another already-compiled generator>():` —
@@ -3017,6 +3102,60 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}int64_t _rep_n = {times_expr};")
             lines.append(f"{indent}for (int64_t {ctr} = 0; {ctr} < _rep_n; {ctr}++) {{")
             lines.append(f"{indent}    {target} = _rep_val;")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
+        # `for x in <dict-typed expr>.keys()/.values()/.items():` and the
+        # bare-dict sibling `for k in <dict-typed expr>:` — plain dict
+        # iteration with a single-name target inside a coroutine body.
+        # Lowered through the same mojo_dict_keys/mojo_dict_values/
+        # mojo_dict_items runtime helpers the ordinary GIMPLE path already
+        # uses (evaluated ONCE into a cached list local, then an indexed
+        # loop): keys are always char* in this dict representation, values
+        # use the boxed-int64_t convention, so `.items()`'s pairs read as
+        # int64_t sub-list pointers here (a TUPLE-target `.items()` loop is
+        # handled by its own per-slot case in the tuple-target branch
+        # above). Without this, a single-name loop over a dict-shaped call
+        # fell to the generic `for (auto x : ...)` range-for, which cannot
+        # compile against any of these opaque pointer types (no ADL
+        # begin/end). Real: Lib/weakref.py's WeakValueDictionary.values
+        # (`for wr in self.data.copy().values():`) and WeakKeyDictionary's
+        # own keys (`for wr in self.data.copy():`).
+        _dict_iter_fn = None
+        _dict_iter_elem = None
+        _dict_iter_src = None
+        if not s.else_body:
+            if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                    and isinstance(s.iterable.func, gimple_ctypes.MemberExpr)
+                    and not s.iterable.args
+                    and s.iterable.func.member in ('keys', 'values', 'items')
+                    and _cpp_receiver_ctype(gen, s.iterable.func.obj) == 'MojoDict *'):
+                _dict_iter_fn = f"mojo_dict_{s.iterable.func.member}"
+                _dict_iter_elem = ('char *' if s.iterable.func.member == 'keys'
+                                   else 'int64_t')
+                _dict_iter_src = gen._cpp_expr(s.iterable.func.obj)
+            elif _cpp_receiver_ctype(gen, s.iterable) == 'MojoDict *':
+                _dict_iter_fn = 'mojo_dict_keys'
+                _dict_iter_elem = 'char *'
+                _dict_iter_src = gen._cpp_expr(s.iterable)
+        if _dict_iter_fn is not None:
+            _dlist = gen._cpp_fresh_name("_mg_dlist")
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            lines = []
+            if not target_was_declared:
+                declared[target] = _dict_iter_elem
+                lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_dict_iter_elem)} {target};")
+            lines.append(f"{indent}MojoList *{_dlist} = "
+                         f"{_dict_iter_fn}((MojoDict *)({_dict_iter_src}));")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                         f"{_ctr} < mojo_list_len({_dlist}); {_ctr}++) {{")
+            if _dict_iter_elem == 'char *':
+                lines.append(f"{indent}    {target} = "
+                             f"mojo_list_get_str({_dlist}, {_ctr});")
+            else:
+                lines.append(f"{indent}    {target} = "
+                             f"mojo_list_get_int({_dlist}, {_ctr});")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
