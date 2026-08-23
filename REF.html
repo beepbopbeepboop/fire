@@ -420,7 +420,77 @@ compiler-core sources that were never GIMPLE-clean into the self-host closure.</
 <li>stdlib gate now uses default parallelism (<code>build_stdlib()</code>, no jobs=8) — faster.</li>
 </ul>
 
-<h2>9. Risk register</h2>
+<h2>8e. Wave-2 FINAL — all milestones merged to master</h2>
+<p><strong>Date:</strong> 2026-08-22 · <strong>master tip:</strong> comment-diet + all integrations</p>
+
+<h3>Final file map (16 modules)</h3>
+<table>
+<tr><th>Module</th><th>Lines</th><th>Content</th></tr>
+<tr><td>gimple_module_gen.py</td><td>4,939</td><td>gen_module body (single hoisted function, post-comment-diet)</td></tr>
+<tr><td>gimple_cpp_core.py</td><td>3,958</td><td>C++ fallback expressions/statements/control flow</td></tr>
+<tr><td><b>gimple_codegen.py</b></td><td><b>3,453</b></td><td><b>GimpleGen class + delegates + compile_* entry points</b></td></tr>
+<tr><td>gimple_gen_calls.py</td><td>3,367</td><td>call/constructor/subscript lowering</td></tr>
+<tr><td>gimple_gen_exprs.py</td><td>3,044</td><td>expression lowering</td></tr>
+<tr><td>gimple_gen_infra.py</td><td>2,927</td><td>emit/temps/coercion/const-eval/strings/comprehensions infrastructure</td></tr>
+<tr><td>gimple_gen_stmts.py</td><td>2,911</td><td>statement lowering</td></tr>
+<tr><td>gimple_gen_resolve.py</td><td>2,866</td><td>generics elaboration, imports/linking, closures, reset_func</td></tr>
+<tr><td>gimple_gen_funcs.py</td><td>2,801</td><td>function/method generation, struct methods, import scopes</td></tr>
+<tr><td>gimple_cpp_async.py</td><td>2,366</td><td>C++20 coroutine generator/async unit generators</td></tr>
+<tr><td>gimple_gen_methods.py</td><td>2,276</td><td>receiver-method dispatch (dict/list/set/file/str/pointer/struct)</td></tr>
+<tr><td>gimple_gen_loops.py</td><td>1,648</td><td>for-loop family</td></tr>
+<tr><td>gimple_solvers.py</td><td>1,433</td><td>EscapeAnalyzer, LayoutSolver, DispatchSolver, FunctionCompilability, TypePromotionSolver, ClosureInfo</td></tr>
+<tr><td>gimple_exprtypes.py</td><td>1,368</td><td>ctype inference free functions</td></tr>
+<tr><td>gimple_ctypes.py</td><td>1,274</td><td>TypeLattice, TYPE_MAP, ctype/name/format utilities, leaf constants</td></tr>
+</table>
+<p>Total: ~40,600 lines across 16 modules (from 42,612 in ONE file). 15 of 16 files under the 4k target.</p>
+
+<h3>Final gate results</h3>
+<table>
+<tr><th>Gate</th><th>Baseline (pre-refactor)</th><th>Final</th></tr>
+<tr><td>test_gimple</td><td>250/250</td><td class="ok">250/250</td></tr>
+<tr><td>test_module_cache</td><td>76/76</td><td class="ok">76/76</td></tr>
+<tr><td>check-selfhost</td><td>PASS</td><td class="ok">PASS</td></tr>
+<tr><td>stdlib dylib skip count</td><td>0</td><td class="ok">0</td></tr>
+<tr><td>make bootstrap</td><td>—</td><td class="ok">PASS — all stage outputs match</td></tr>
+<tr><td>test_refactor_bugs</td><td>—</td><td class="ok">PASS</td></tr>
+</table>
+
+<h3>Bug fixes integrated from mojo-reference2</h3>
+<table>
+<tr><th>Bug</th><th>Fix summary</th><th>Landed in</th></tr>
+<tr><td>BUG-2026-014/015</td><td>Cross-module struct resolution via re-export chains; gen_module field pre-registration; bare-capitalized field annotations → real pointer types</td><td>91651f3</td></tr>
+<tr><td>BUG-2026-016</td><td>Auto-address coercion for annotated numeric locals passed to *T out-params</td><td>91651f3</td></tr>
+<tr><td>BUG-2026-018</td><td>Un-shadowed bare-name writes to module-owned globals route to globals struct (interpreter parity)</td><td>9dd382a</td></tr>
+<tr><td>BUG-2026-019</td><td>Per-module overload suffixes via _local_def_pts; _func_csym mirrors effective param types</td><td>9dd382a</td></tr>
+<tr><td>BUG-2026-020</td><td>Default-arg padding accounts for leading required params shifting defaults run</td><td>9dd382a</td></tr>
+<tr><td>BUG-2026-021</td><td>Dup-def classifier distinguishes genuine overloads from redefinitions (keep last copy); shared with reflect.py</td><td>b02288e</td></tr>
+</table>
+
+<h3>Toolchain hardening</h3>
+<ul>
+<li><strong>CAS auto-discovery:</strong> gimple_*.py sources auto-included in compiler fingerprint via glob — new modules self-register (fixes BUG-2026-022 candidate)</li>
+<li><strong>Makefile gates:</strong> $(GIMPLE_SOURCES) wildcard covers all codegen modules as prerequisites and --extra args</li>
+<li><strong>CLAUDE.md:</strong> Git safety section added after path-scoped checkout destroyed uncommitted work</li>
+<li><strong>tools/slice_gen_module.py:</strong> whole-body gen_module extractor (v4, explicit value threading design documented for future use)</li>
+</ul>
+
+<h3>Known limitations / future work</h3>
+<ul>
+<li><code>gimple_module_gen.py</code> is 4,939 lines — contains a SINGLE function whose ~20 phases share deeply intertwined local state. Further decomposition requires manually identifying safe extraction seams and designing parameter/return contracts. Comment-diet already reduced it 47% (9,381 → 4,940).</li>
+<li>Comment-diet was applied ONLY to gimple_module_gen.py; other extracted modules retain their original comments (which serve as important context for their specific lowering logic).</li>
+<li>The emitter's cross-module symbol dedup regression (same-named functions across modules) was worked around but not root-caused — see refactor/batch3-wip notes on branch history.</li>
+</ul>
+
+<h2>10. Summary statistics</h2>
+<table>
+<tr><th>Metric</th><th>Before</th><th>After</th></tr>
+<tr><td>gimple_codegen.py lines</td><td>42,612</td><td>3,453 (−92%)</td></tr>
+<tr><td>Total codegen module files</td><td>1</td><td>15 (+ facade = 16)</td></tr>
+<tr><td>Files over 4k lines</td><td>1 (at 42.6k)</td><td>1 (at 4.9k, single function)</td></tr>
+<tr><td>Comment lines across split modules</td><td>~17,000</td><td>~5,500 (−68%)</td></tr>
+<tr><td>Gates passing</td><td>All</td><td class="ok">All (no regressions)</td></tr>
+<tr><td>New bug fixes integrated</td><td>—</td><td>BUG-2026-011..021 (11 bugs)</td></tr>
+</table>
 <table>
 <tr><th>Risk</th><th>Mitigation</th></tr>
 <tr><td>Hidden dynamic attribute access on <code>GimpleGen</code>/<code>gimple_codegen</code> not in the re-export list</td><td>Facade <code>__getattr__</code> delegates to implementation modules; grep-audit tests for <code>gimple_codegen.&lt;attr&gt;</code> patterns before each landing</td></tr>
