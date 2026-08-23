@@ -2,6 +2,24 @@
 
 ## Status (updated 2026-08-07)
 
+**Re-verified FIXED 2026-08-23**: this doc's own minimal repro
+(`iter_files` with keyword-only `get_files`) builds clean via `python3
+mojo.py build` (exit 0) — both originally-documented errors ("too few
+arguments to function ...", "invalid conversion from 'int64_t' to
+'char*'") remain gone. The doc's runtime-verified second shape
+(`countdown(n, *, step)`, self-recursive `yield from` with a
+keyword-only arg) also still builds AND runs, printing the correct
+`5\n3\n1\n`. No regression of anything this fix claimed.
+
+New observation, NOT a claim of this fix and NOT a regression of it:
+the iter_files repro now builds but its output is WRONG at runtime
+(prints a single garbage integer, e.g. `43637542464`, instead of
+iterating `["a.txt", "b.txt"]`). The 2026-08-07 verification only ever
+claimed a CLEAN BUILD for this repro (runtime correctness was verified
+on countdown only), so the fixed-state bar documented here still holds —
+but the wrong-output shape (string values flowing through a recursive
+`yield from` with defaulted params) is worth its own hard-bug doc.
+
 **FIXED** (task #138). Real root cause, precisely identified: a
 generator's registration into `self._generator_api` (the dict every
 `yield from <call>` site consults to recognize "this delegates to a

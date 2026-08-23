@@ -2,6 +2,13 @@
 
 ## Status (updated 2026-08-07)
 
+**Re-verified FIXED 2026-08-23**: this doc's own minimal repro
+(`Widget.make_rows`) builds clean via `python3 mojo.py build` (exit 0)
+on current `fix/perf-triage` and the binary runs, printing the
+correctly-shaped nested list `[[None, 1], [2, 3], [4, 5]]` — same
+result as the original verification including the documented,
+unrelated "0 prints as None in a list" display quirk. No regression.
+
 **FIXED** (task #145), with the extra-careful verification this doc's
 own "What a fix needs" section called for (`_quick_type` is shared
 inference machinery — full 5-step gate re-run, not just the two fast
