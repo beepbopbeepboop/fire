@@ -612,6 +612,18 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        # Pre-body-emission companion of the stash above: a generator
+        # unit's OWN preliminary `_generator_tuple_yield_slot_ctypes`
+        # result (computed from just its params' types, before body
+        # emission fills `declared`), stashed so `_cpp_yield_tuple` —
+        # which runs DURING body emission, strictly before the
+        # post-emission computation that fills _cpp_last_tuple_slot_
+        # ctypes — can box every tuple-yield site out to the UNIFIED
+        # arity (padding shorter sites with zero/empty values) whenever
+        # the sites disagree on element count. None for every
+        # non-tuple-yielding or type-unresolvable generator; cleared in
+        # each unit's `finally` alongside the other per-compile state.
+        self._cpp_pending_tuple_slots: list | None = None
         # cpp_text fragments from _gen_cpp_generator_unit, one per supported
         # generator, concatenated into self.generated_cpp at the end of
         # gen_module once the common preamble is known.

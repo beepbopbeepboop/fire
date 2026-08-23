@@ -913,13 +913,28 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None = Non
         generator this codegen already supports; callers must not treat
         this as a refusal.
       - `(True, None)`: `fn` DOES have at least one tuple-valued yield,
-        but the sites disagree in a way that can't be resolved (different
-        element COUNTS across sites — this generator's single promise
-        type can only ever carry one fixed shape — or two sites disagree
-        on one slot's type in a way the same char*-preference rule
-        `_generator_yield_ctype` itself uses doesn't resolve). Callers
+        but two sites disagree irreconcilably on ONE SLOT's TYPE (a
+        pair the same char*-preference rule `_generator_yield_ctype`
+        itself uses doesn't resolve — e.g. int64_t vs double). Callers
         must treat this exactly like `_generator_yield_ctype` returning
         None for any other unsupported shape: refuse the whole generator.
+        Differing element COUNTS across sites are NOT a refusal anymore:
+        they're unified to the LONGEST site's shape by padding every
+        shorter site's slot list with the longer site's tail types
+        (first-contributing-site-wins per tail position) — the producer
+        side (`_cpp_yield_tuple`, via the pre-pass
+        `_cpp_pending_tuple_slots` stash its callers set before body
+        emission) boxes each site's real elements and then appends
+        zero/empty padding values so EVERY co_yield'd list carries
+        exactly the unified arity, keeping every consumer-side per-slot
+        accessor read in bounds. A consumer unpacking fewer names than
+        the unified arity simply ignores the tail slots; unpacking more
+        than some site really produced reads that site's zero padding
+        (real Python would raise ValueError there — compiled consumers
+        in practice always unpack the common prefix). Real: Lib/
+        pickletools.py's `_genops` yielding a 3-tuple (`opcode, arg,
+        pos`) at one site and a 4-tuple (`opcode, arg, pos, getpos()`,
+        gated by `yield_end_pos`) at another.
       - `(True, [ctype, ...])`: every tuple-yield site agreed (directly or
         via the char*-preference rule) on both arity and each slot's type
         — the list to hand to the consumer-side unpacking helper.
@@ -970,10 +985,13 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None = Non
             continue
         found = True
         if slots is None:
-            slots = site
-        elif len(slots) != len(site):
-            return True, None
+            slots = list(site)
         else:
+            if len(site) != len(slots):
+                if len(site) > len(slots):
+                    slots = slots + site[len(slots):]
+                else:
+                    site = site + slots[len(site):]
             merged = []
             for a, b in zip(slots, site):
                 if a == b:

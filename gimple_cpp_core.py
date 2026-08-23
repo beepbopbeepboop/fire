@@ -1613,6 +1613,16 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
             lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")
         else:
             lines.append(f"{indent}mojo_list_append_int({tvar}, (int64_t)({ev}));")
+    pending = getattr(gen, '_cpp_pending_tuple_slots', None)
+    if pending and len(pending) > len(tup.elements):
+        for i in range(len(tup.elements), len(pending)):
+            suf = gimple_ctypes.TypeLattice.list_suffix(pending[i])
+            if suf == 'double':
+                lines.append(f"{indent}mojo_list_append_double({tvar}, 0.0);")
+            elif suf == 'str':
+                lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)\"\");")
+            else:
+                lines.append(f"{indent}mojo_list_append_int({tvar}, 0);")
     lines.append(f"{indent}co_yield {tvar};")
     return lines
 
