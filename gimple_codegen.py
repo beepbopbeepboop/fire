@@ -2475,17 +2475,7 @@ class GimpleGen:
     def gen_module(self, stmts: list) -> str:
         # Ensure _actual_types knows stmts is MojoList* so for-loop dispatch
         # works when this method is compiled by the self-hosted backend.
-        from types import SimpleNamespace as _NS
-        _ctx = _NS()
-        _ctx.stmts = stmts
-        # Phases (hoisted verbatim to gimple_module_gen.py):
-        gmg._gm_head(self, _ctx)
-        gmg._gm_phase0_imports(self, _ctx)
-        gmg._gm_pass1b_2_fixpoints(self, _ctx)
-        gmg._gm_phase2_pre(self, _ctx)
-        gmg._gm_phase2a(self, _ctx)
-        gmg._gm_phase2b(self, _ctx)
-        gmg._gm_tail_emit(self, _ctx)
+        return gmg.gen_module_impl(self, stmts)
 
     # ---- function-extraction delegates (bodies live in gimple_gen_methods.py) ----
     def _lower_bound_method_value(self, struct_name: str, method: str, self_type: str, self_val: str) -> tuple[str, str]:
