@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-23 — re-verified unchanged; honest-refusal state confirmed still correct)
+
+Re-ran the repro against current code (this session landed three generic
+generator-codegen fixes, none touching this shape): isolated compile of
+Lib/codecs.py still fails with the exact same honest refusal —
+`RuntimeError: cannot compile module: function(s) iterdecode, iterencode
+(generator function(s), contain a yield/yield from)` — raised by the
+`*`/`**`-unpack-call-argument guard in the coroutine-body emitter, never
+reaching any C emission. The underlying feature gap (kwargs-spread against
+a dynamically-obtained callee) remains genuinely unimplemented and
+feature-sized, exactly as the 2026-08-10 entry concluded. No change; no
+new investigation warranted.
+
+
 ## Status (updated 2026-08-10, later same session — the `**kwargs`-unpack MISCOMPILE fixed into an honest refusal)
 
 The `**kwargs`-call-argument miscompile documented below (`_cpp_expr`

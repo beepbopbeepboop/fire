@@ -1,5 +1,48 @@
 # CODEGEN_generator_function: Lib/calendar.py
 
+## Status (updated 2026-08-23 — LAST own-file gap closed: flat-target `enumerate(<generator call>, start)` now delegates; calendar.py's own code compiles with ZERO errors)
+
+**Fixed**: `itermonthdays2`'s `for i, d in enumerate(self.itermonthdays(year,
+month), self.firstweekday):` — the "generator call as `enumerate`'s OWN
+first argument" gap this doc's earlier entries documented as open. The FLAT
+2-name-target enumerate branch in `_cpp_for_stmt` (gimple_cpp_core.py)
+previously called `_cpp_expr(s.iterable.args[0])` directly on the generator
+call, routing it through the ordinary void-returning extern "C" stub
+("void value not ignored as it ought to be" ×2 at g++ time — the only two
+remaining own-file errors in an isolated compile). It now mirrors the
+NESTED-tuple-target case's existing composition: when enumerate's first
+argument is itself a delegatable generator call (`_cpp_iterable_is_
+delegatable_generator_call`) and there is no for/else, the whole loop
+delegates through `_cpp_for_generator_delegate` with its existing
+`index_var`/`index_start_expr` index tracking (the optional 2nd argument
+supplies the start offset; the value slot comes from the sub-generator's
+registered `value_ctype`). Commit: `0d59f49`.
+
+**Verified**: isolated compile (`compile_to_gimple_with_cpp(do_imports=
+False)` + `g++ -std=c++20 -fsyntax-only`) of real Lib/calendar.py:
+cpp_errors went 2 → **0**, ci_errors already 0. Two new compiled-and-RUN
+regression tests in `test_gimple_generator_runner.py`
+(`enumerate_generator_method_arg_start`: `Cal.iterdaynum` consuming
+`enumerate(self.iterdays(n), self.firstweekday)` with tuple yield + %7;
+`enumerate_generator_free_fn_arg_start`: free-function callee) both assert
+exact stdout. Whole-program `mojo.py build .../Lib/calendar.py`: **zero**
+errors attributed to calendar.py itself (169 errors, ALL in
+transitively-imported files — operator.py, posixpath.py, locale.py,
+os.py, threading.py, dis.py, enum.py — none this doc's concern).
+Note: `MOJO_DEBUG=1` still prints pass-1 "not eligible" lines naming
+itermonthdates — those are benign retry-loop noise (pass 2 rescues them;
+confirmed via generated .cpp containing `_mojogen_Calendar_itermonthdates_`).
+
+Quality gate (CLAUDE.md): test_gimple.py 250/250, test_module_cache.py
+76/76, make check-selfhost clean, from-scratch stdlib dylib rebuild 0
+`skip <module>:` lines before and after (baseline captured before any edit).
+
+calendar.py's OWN generator-codegen concerns are now exhausted — every
+remaining build blocker is another module's separate, tracked-elsewhere
+bug. Doc kept open only per the "file still doesn't build end-to-end"
+convention; nothing calendar-specific remains.
+
+
 ## Status (updated 2026-08-20 — `_CLIDemoCalendar___init__` "too few arguments" arity bug FIXED; file still blocked by other, separate, already-documented gaps)
 
 **Fixed**: `cal = _CLIDemoCalendar(highlight_day=today)` (line 904) produced

@@ -1,5 +1,19 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-23 — re-verified unchanged; refusals remain the verified-correct ones)
+
+Re-ran `MOJO_DEBUG=1 mojo.py build` + isolated compile: identical 4 refusal
+lines (Flag/IntFlag `_iter_member_by_value_`/`_iter_member_by_def_`,
+"cls referenced in an unsupported way") escalating to the standard fatal
+module refusal. This session's three generic generator-codegen fixes
+(enumerate-over-generator delegation, struct-method default-arg padding,
+list/dict/set literal locals in coroutine bodies) do not touch either
+remaining root cause: the dynamic-metaclass-populated attributes
+(`cls._flag_mask_`/`cls._value2member_map_` never appear as class-body
+AssignStmts) and the `LambdaExpr`-as-call-argument sort key — both still
+feature-sized, both still honestly refused. No change.
+
+
 ## Status (updated 2026-08-21 — `cls`-attribute-redirect IMPLEMENTED; enum.py's OWN refusal still stands, for an honest reason)
 
 The 2026-08-10 note's own real-fix-attempt (points (1)+(2): `cls.method(...)`
