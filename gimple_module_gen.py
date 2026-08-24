@@ -1996,6 +1996,7 @@ def gen_module_impl(self, stmts):
         try:
             cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
         except _UnsupportedGeneratorShape as e:
+            self._cpp_refusal_reasons.setdefault(s.name, str(e))
             _debug_note(f'generator {s.name!r} not eligible for C++ '
                         'coroutine path, falling back to honest refusal', e)
             continue
@@ -2025,6 +2026,7 @@ def gen_module_impl(self, stmts):
             try:
                 cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
             except _UnsupportedGeneratorShape as e:
+                self._cpp_refusal_reasons.setdefault(s.name, str(e))
                 _debug_note(f'generator {s.name!r} not eligible for C++ '
                             f'coroutine path (pass {_pass+2}), falling back', e)
                 continue
@@ -2051,6 +2053,7 @@ def gen_module_impl(self, stmts):
             cpp_text, value_ctype, base, param_ctypes = \
                 self._gen_cpp_async_generator_unit(s)
         except _UnsupportedGeneratorShape as e:
+            self._cpp_refusal_reasons.setdefault(s.name, str(e))
             _debug_note(f'async generator {s.name!r} not eligible for '
                         'C++ coroutine path, falling back to honest '
                         'refusal', e)
@@ -2075,6 +2078,7 @@ def gen_module_impl(self, stmts):
                 cpp_text, value_ctype, base, param_ctypes = \
                     self._gen_cpp_async_generator_unit(s)
             except _UnsupportedGeneratorShape as e:
+                self._cpp_refusal_reasons.setdefault(s.name, str(e))
                 _debug_note(f'async generator {s.name!r} not eligible '
                             '(pass 2)', e)
                 continue
@@ -2099,6 +2103,7 @@ def gen_module_impl(self, stmts):
         try:
             cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_async_unit(s)
         except _UnsupportedGeneratorShape as e:
+            self._cpp_refusal_reasons.setdefault(s.name, str(e))
             _debug_note(f'async function {s.name!r} not eligible for '
                         'C++ coroutine path, falling back to honest '
                         'refusal', e)
@@ -2141,6 +2146,7 @@ def gen_module_impl(self, stmts):
             try:
                 cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_async_unit(s)
             except _UnsupportedGeneratorShape as e:
+                self._cpp_refusal_reasons.setdefault(s.name, str(e))
                 _debug_note(f'async function {s.name!r} not eligible '
                             '(pass 2)', e)
                 continue
@@ -2171,6 +2177,7 @@ def gen_module_impl(self, stmts):
                 cpp_text, value_ctype, base, param_ctypes = \
                     self._gen_cpp_generator_unit(m, struct_name=_sd.name)
             except _UnsupportedGeneratorShape as e:
+                self._cpp_refusal_reasons.setdefault(m.name, str(e))
                 _debug_note(f'generator method {_sd.name}.{m.name!r} not '
                             'eligible for C++ coroutine path, falling '
                             'back to honest refusal', e)
@@ -2202,6 +2209,7 @@ def gen_module_impl(self, stmts):
                 cpp_text, value_ctype, base, param_ctypes = \
                     self._gen_cpp_generator_unit(m, struct_name=_sd.name)
             except _UnsupportedGeneratorShape as e:
+                self._cpp_refusal_reasons.setdefault(m.name, str(e))
                 _debug_note(f'generator method {_sd.name}.{m.name!r} not '
                             'eligible (pass 2)', e)
                 continue
@@ -2247,6 +2255,7 @@ def gen_module_impl(self, stmts):
                                                  base_name_override=_base_override2,
                                                  enclosing_scope=_od.name)
                 except _UnsupportedGeneratorShape as e:
+                    self._cpp_refusal_reasons.setdefault(_inner.name, str(e))
                     _debug_note(f'nested async function {_od.name}.'
                                 f'{_inner.name!r} not eligible for C++ '
                                 'coroutine path, falling back to honest '
@@ -2288,6 +2297,7 @@ def gen_module_impl(self, stmts):
                         self._gen_cpp_async_unit(_inner, extra_captures=_captures,
                                                  base_name_override=_base_override)
                 except _UnsupportedGeneratorShape as e:
+                    self._cpp_refusal_reasons.setdefault(_inner.name, str(e))
                     _debug_note(f'nested async closure {_sd.name}.{_m.name}.'
                                 f'{_inner.name!r} not eligible for C++ '
                                 'coroutine path, falling back to honest '
@@ -2359,6 +2369,15 @@ def gen_module_impl(self, stmts):
                     self._elaborated_externs.append(_stub)
                 self._unsupported_generator_names.add(_fn_name)
         else:
+            _reason_bits = []
+            for _fn_name in _gen_only + _async_only + _async_gen:
+                _rr = self._cpp_refusal_reasons.get(_fn_name)
+                if _rr:
+                    _reason_bits.append(f"{_fn_name}: {_rr}")
+            _reason_suffix = ""
+            if _reason_bits:
+                _reason_suffix = (" Unsupported shape(s): "
+                                  + "; ".join(_reason_bits) + ".")
             raise RuntimeError(
                 "cannot compile module: function(s) "
                 + "; ".join(_categories) +
@@ -2368,7 +2387,8 @@ def gen_module_impl(self, stmts):
                 "/ suspend-resume codegen for async functions, yet, so "
                 "these cannot be represented as compiled C without "
                 "emitting silently wrong or broken code; falling back to "
-                "interpreting this module from source instead")
+                "interpreting this module from source instead"
+                + _reason_suffix)
 
     for s in all_functions:
         if isinstance(s, FunctionDef) and s.return_type is None:
