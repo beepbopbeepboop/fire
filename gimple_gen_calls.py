@@ -35,6 +35,84 @@ import gimple_codegen
 import gimple_gen_methods as gmp
 import gimple_gen_calls as ggc
 
+def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
+                               fname_raw: str) -> str:
+    """Shared lowering for every bare-call CONSTRUCTION of a compiled
+    free-function generator (`counter(3)` on a local definition, or
+    `walk_a("x")` where walk_a is an aliased import of another module's
+    compiled generator): lowers each argument with the ordinary
+    lower_expr-per-arg path, pads missing trailing params from keyword
+    arguments / real defaults (see _lower_named_call's identical padding
+    for ordinary functions), emits `<base>_start(args...)`, and records
+    the result temp -> api in _generator_var_api so every later consumer
+    of the handle (a `for` loop, next(), list()) recovers the right
+    resume/value/destroy API. Consolidates what used to be two verbatim
+    copies of this block (local-definition vs imported-binding branches
+    of _lower_call) so the padding/kwslot/registration logic can't drift.
+    """
+    # Argument lowering reuses the exact same gen.lower_expr(a)-per-
+    # arg + _call_expr/_emit_call path every ordinary function call
+    # in this file uses — func_param_types[f"{base}_start"] (registered in
+    # gen_module's generator pre-pass, or setdefault'd from the api entry's
+    # own 'params' for a cross-module binding at its import site) is what
+    # lets _emit_call's existing coercion logic (int literal -> int64_t,
+    # etc.) apply here with no separate/duplicated coercion code.
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    # Pad missing trailing params with keyword args / real defaults,
+    # mirroring _lower_named_call's identical padding for ordinary
+    # functions (see its own comment on `greet()` vs `def greet(name
+    # = "world")`). Without this, a generator call omitting any
+    # keyword-or-defaulted param (e.g. `tokenize(src, filename=
+    # filename)`, real code in Tools/cases_generator/lexer.py) only
+    # ever passed the bare positional args straight through — the
+    # keyword argument was silently DROPPED entirely and no default
+    # value filled the gap either, producing a hard "too few
+    # arguments to function '<base>_start'" compile error since
+    # `<base>_start`'s real C signature has one slot per Python
+    # parameter, unconditionally.
+    _gen_kwargs = getattr(node, 'kwargs', []) or []
+    _gen_expected = gen.func_param_types.get(f"{api['base']}_start", [])
+    # Which C-signature slot (if any) is this generator function's
+    # OWN `**kwargs` parameter — see _func_kwargs_slot's docstring.
+    # A literal keyword argument destined for that slot must be
+    # PACKED into a real MojoDict (via _pack_kwargs_dict), exactly
+    # like _lower_named_call's identical `_kwslot_for_pack` handling
+    # for ordinary (non-generator) functions — mirrored here rather
+    # than duplicated differently. Without this, the loop below
+    # just popped the next literal keyword argument's raw lowered
+    # VALUE into whichever slot came next in sequence, with no
+    # awareness that one particular slot is a `MojoDict *`:
+    # `gen_forward(3, b=5)` emitted `_t4 = (MojoDict *)_t3` — the
+    # integer 5 reinterpreted as a dict pointer — which segfaults
+    # the moment the generator body reads its own `**kwargs`.
+    _gen_kwslot = gen._func_kwargs_slot.get(
+        fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
+    if _gen_expected and len(arg_pairs) < len(_gen_expected):
+        _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
+        _gen_kwarg_values = list(_gen_kwarg_dict.values())
+        _gen_dflts = gen._func_param_defaults.get(f"{api['base']}_start", [])
+        while len(arg_pairs) < len(_gen_expected):
+            _pos = len(arg_pairs)
+            if _gen_kwslot >= 0 and _pos == _gen_kwslot:
+                arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(_gen_kwarg_dict)))
+                _gen_kwarg_values = []
+                continue
+            if _gen_kwarg_values:
+                arg_pairs.append(_gen_kwarg_values.pop(0))
+                continue
+            _dv = _gen_dflts[_pos][1] if _pos < len(_gen_dflts) else None
+            if _dv is not None:
+                arg_pairs.append(gen._default_expr_to_pair(_dv))
+            else:
+                arg_pairs.append(('int', '0'))
+    else:
+        for _, _ke in _gen_kwargs:
+            gen.lower_expr(_ke)
+    t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
+    gen._generator_var_api[t] = api
+    return t
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Step I (create_task/Task/TaskGroup/RaisingTask project):
     # `create_task(f())` / `create_raising_task(f())` where `f` is a
@@ -506,76 +584,37 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # no ordinary C function with this name to call — see gen_module's
     # Phase 2a skip for _supported_generators).
     if fname_raw in gen._generator_api:
-        api = gen._generator_api[fname_raw]
-        # Argument lowering reuses the exact same self.lower_expr(a)-per-
-        # arg + _call_expr/_emit_call path every ordinary function call
-        # in this file uses (see the plain call path a little further
-        # down) — func_param_types[f"{base}_start"] (registered in
-        # gen_module's generator pre-pass) is what lets _emit_call's
-        # existing coercion logic (int literal -> int64_t, etc.) apply
-        # here with no separate/duplicated coercion code.
-        arg_pairs = [gen.lower_expr(a) for a in node.args]
-        # Pad missing trailing params with keyword args / real defaults,
-        # mirroring _lower_named_call's identical padding for ordinary
-        # functions (see its own comment on `greet()` vs `def greet(name
-        # = "world")`). Without this, a generator call omitting any
-        # keyword-or-defaulted param (e.g. `tokenize(src, filename=
-        # filename)`, real code in Tools/cases_generator/lexer.py) only
-        # ever passed the bare positional args straight through — the
-        # keyword argument was silently DROPPED entirely (this whole
-        # branch never even looked at `node.kwargs`) and no default
-        # value filled the gap either, producing a hard "too few
-        # arguments to function '<base>_start'" compile error since
-        # `<base>_start`'s real C signature has one slot per Python
-        # parameter, unconditionally.
-        _gen_kwargs = getattr(node, 'kwargs', []) or []
-        _gen_expected = gen.func_param_types.get(f"{api['base']}_start", [])
-        # Which C-signature slot (if any) is this generator function's
-        # OWN `**kwargs` parameter — see _func_kwargs_slot's docstring.
-        # A literal keyword argument destined for that slot must be
-        # PACKED into a real MojoDict (via _pack_kwargs_dict), exactly
-        # like _lower_named_call's identical `_kwslot_for_pack` handling
-        # for ordinary (non-generator) functions — mirrored here rather
-        # than duplicated differently. Without this, the loop below
-        # (before this fix) just popped the next literal keyword
-        # argument's raw lowered VALUE into whichever slot came next in
-        # sequence, with no awareness that one particular slot is a
-        # `MojoDict *`: `gen_forward(3, b=5)` emitted `_t4 = (MojoDict
-        # *)_t3` — the integer 5 reinterpreted as a dict pointer —
-        # which segfaults the moment the generator body reads its own
-        # `**kwargs` (same failure shape as the bug _func_kwargs_slot's
-        # own docstring documents for the ordinary call path; found via
-        # the coroutine-body `**kwargs`-forwarding repro in bugs/
-        # COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md, whose
-        # `gen_forward(3, b=5)` top-level call site hit this exact bug
-        # even before reaching the generator BODY's own separately
-        # fixed `**kwargs`-forwarding).
-        _gen_kwslot = gen._func_kwargs_slot.get(
-            fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
-        if _gen_expected and len(arg_pairs) < len(_gen_expected):
-            _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
-            _gen_kwarg_values = list(_gen_kwarg_dict.values())
-            _gen_dflts = gen._func_param_defaults.get(f"{api['base']}_start", [])
-            while len(arg_pairs) < len(_gen_expected):
-                _pos = len(arg_pairs)
-                if _gen_kwslot >= 0 and _pos == _gen_kwslot:
-                    arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(_gen_kwarg_dict)))
-                    _gen_kwarg_values = []
-                    continue
-                if _gen_kwarg_values:
-                    arg_pairs.append(_gen_kwarg_values.pop(0))
-                    continue
-                _dv = _gen_dflts[_pos][1] if _pos < len(_gen_dflts) else None
-                if _dv is not None:
-                    arg_pairs.append(gen._default_expr_to_pair(_dv))
-                else:
-                    arg_pairs.append(('int', '0'))
-        else:
-            for _, _ke in _gen_kwargs:
-                gen.lower_expr(_ke)
-        t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
-        gen._generator_var_api[t] = api
-        return 'MojoGenerator *', t
+        return 'MojoGenerator *', _emit_generator_start_call(
+            gen, node, gen._generator_api[fname_raw], fname_raw)
+    # Same construction, but the callee is a generator this module only
+    # knows through an (optionally aliased) cross-module import (`from a
+    # import walk as walk_a`): _imported_generator_bindings — populated at
+    # each FromImportStmt site from the whole-program _generator_home_api
+    # registry, keyed (defining module's qualifier, ORIGINAL function
+    # name) so two sibling modules' same-named generators stay distinct —
+    # carries the defining module's own api entry ('base' is already the
+    # DEFINING module-qualified `_mojogen_<qual>_<name>`, matching the
+    # coroutine translation unit that module's compile emitted). Without
+    # this branch the call fell through to the ordinary-function lowering,
+    # emitting a call to a plain `<qual>_<name>_<overload-suffix>` symbol
+    # no module ever defines ("too many arguments to function 'a_walk_...';
+    # expected 0" — Phase 2a skips ordinary emission for compiled
+    # generators, and the arity came from a guessed bare extern).
+    # func_param_types/_func_param_defaults are per-GimpleGen (the api's
+    # params were registered in the DEFINING temp_gen's own dicts), so the
+    # binding's own 'params'/'defaults' snapshot seeds THIS gen's dicts
+    # before emission — setdefault, never overwrite: a same-named local
+    # definition must keep winning (it takes the _generator_api branch
+    # above first anyway).
+    _imp_gen_api = getattr(gen, '_imported_generator_bindings', {}).get(fname_raw)
+    if _imp_gen_api is not None:
+        gen.func_param_types.setdefault(
+            f"{_imp_gen_api['base']}_start", list(_imp_gen_api.get('params') or []))
+        if _imp_gen_api.get('defaults'):
+            gen._func_param_defaults.setdefault(
+                f"{_imp_gen_api['base']}_start", list(_imp_gen_api['defaults']))
+        return 'MojoGenerator *', _emit_generator_start_call(
+            gen, node, _imp_gen_api, fname_raw)
     # Step B (revised — see bugs/CODEGEN_compiled_async_eager_execution_
     # semantic_mismatch.md): `f()` where `f` is a supported compiled
     # async function, with its result actually CONSUMED as a value

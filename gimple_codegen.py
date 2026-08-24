@@ -607,6 +607,66 @@ class GimpleGen:
         # for every entry in _supported_generators — the exact extern "C" API
         # names/types the .c side forward-declares and calls into.
         self._generator_api: dict[str, dict] = {}
+        # (home-module qualifier, ORIGINAL function name) -> the same api
+        # dict _generator_api holds — the whole-program, cross-module view
+        # of every compiled free-function generator. _generator_api itself
+        # is keyed by bare name alone and is SHARED across a do_imports=
+        # True build's nested temp_gens by object identity, so two sibling
+        # modules' same-named generators overwrite each other's entry
+        # (last-compiled-wins) even before any call site runs; this
+        # registry keeps both discoverable. Shared with temp_gens in
+        # _compile_imported_module (same block that shares
+        # _generator_api/_generator_method_api); consumers are the
+        # FromImportStmt registration sites, which snapshot an import's
+        # api into the per-instance _imported_generator_bindings below.
+        # Keyed by a composite STRING "<home-qualifier>::<name>", not a
+        # genuine (str, str) tuple — this dict (like _xmod_gen_param_hints
+        # below) is part of GimpleGen's own instance state, which is real
+        # Python running the compiler normally but becomes actual compiled
+        # Mojo/C when this compiler's own source is self-hosted (test_
+        # selfhost.py / `mojo.py --jit mojo.py`). This runtime's MojoDict
+        # has no representation for a tuple key (keys are always coerced
+        # to char * at the C level, see _char_to_cstr), so a genuine tuple
+        # key here would either silently mis-stringify on write or (worse,
+        # confirmed) hard-fail to compile the moment BOTH a tuple literal
+        # and a `for k in this_dict:` iteration bind the SAME loop-variable
+        # name within one self-hosted function: this compiler's per-name
+        # "first C declaration wins" variable-typing model then declares
+        # that name once (as the tuple's boxed MojoList * shape) and later
+        # tries to store the iteration's real char * key straight into it
+        # — "assignment to 'MojoList *' from incompatible pointer type
+        # 'char *'". A plain string composite key sidesteps the whole
+        # class of problem in both the interpreted and self-hosted-
+        # compiled paths identically, rather than special-casing self-host.
+        self._generator_home_api: dict[str, dict] = {}
+        # as-bound alias/symbol name -> api dict, for generators THIS
+        # module only knows through `from M import name [as alias]`
+        # (populated at FromImportStmt lowering/registration time, so it
+        # reflects exactly this module's own bindings). Per-instance by
+        # design — never shared across temp_gens: each module's imports
+        # bind names for ITSELF. Consulted by _lower_call's cross-module
+        # generator-call branch and _quick_type's construction-shape rule.
+        self._imported_generator_bindings: dict[str, dict] = {}
+        # (sanitized home-module qualifier, ORIGINAL fn name) ->
+        # {param name -> unanimous literal scalar ctype} — cross-call
+        # scalar contracts for IMPORTED compiled generators, collected
+        # from THIS module's own call sites BEFORE any imported module is
+        # inlined, and applied by _compile_imported_module into the
+        # temp_gen's _inferred_param_types so its generator unit is
+        # generated with the caller's real parameter types (char */double)
+        # instead of the int64_t default. Mirrors Pass 1.3d's same-module
+        # contract exactly (same unanimity rule, same two scalar types) —
+        # without it an unannotated `def walk(top): yield top` inlined
+        # from a sibling module compiles `top` as int64_t while every
+        # importing call site passes a char *, and every yielded value
+        # prints as a raw pointer integer.
+        # Keyed by the same composite "<home-qualifier>::<name>" string as
+        # _generator_home_api above, for the identical reason (see that
+        # field's docstring) — this dict is iterated by key (`for k in
+        # self._xmod_gen_param_hints:`) in gen_module's merge pass, which
+        # is exactly the tuple-key-plus-iteration shape that breaks self-
+        # hosted compilation.
+        self._xmod_gen_param_hints: dict[str, dict[str, str]] = {}
         # Default empty; gen_module overwrites this with the module's real
         # set once it's scanned (see that assignment's own docstring) —
         # this fallback just keeps `_cpp_for_generator_delegate`'s caller
