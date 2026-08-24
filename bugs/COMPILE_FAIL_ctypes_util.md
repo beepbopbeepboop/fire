@@ -2,22 +2,48 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
-## Status (2026-08-24): not re-verified this session; root cause unrelated to the fix landed
+## Status (2026-08-24): gap #1 (bare package-import resolution) FIXED; util.py's own documented error is GONE; file still does not build end-to-end (gaps #2/#3 below remain, plus unrelated errors in other transitively-imported modules)
 
-This session landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s
-targeted fix (coroutine-body local/yield typing derived from a
-callee's trusted return type, in `gimple_cpp_core.py`/
-`gimple_exprtypes.py`). This file's own documented blocker (below) is
-entirely in a different subsystem — bare package-import resolution
-(`_module_candidate_paths` not trying `<pkg>/__init__.py` for a bare
-`from ctypes import cdll`) and from-import binding of module-level
-VALUES — with zero overlap with coroutine/generator codegen, so no
-behavior change is expected here. A full re-run was started
-(`python3 mojo.py build .../ctypes/util.py`) but not completed within
-this session's time budget — this file's own doc history already
-notes multi-minute-to-9-minute build times on a loaded machine. Left
-unverified rather than reporting a guessed result; re-run standalone
-to confirm before any future fix attempt on this doc's own root cause.
+The commit landed this session (see `bugs/COMPILE_FAIL_ctypes_
+macholib_dyld.md`'s 2026-08-24 entry) turned out to include a real fix
+for this doc's own **gap #1**: `gimple_gen_resolve.py`'s
+`_module_candidate_paths` now also tries the `<dir>/<name>/__init__.
+<ext>` package form for a BARE (non-dotted) module name, mirroring
+what it already did for dotted names and what the interpreter side
+already did — exactly the fix this doc's 2026-08-23 entry identified
+as needed. (It also walks the importer's ancestor directories, bounded
+6 levels, for nested-package-relative imports — found via `dyld.py`'s
+own `from ctypes.macholib.framework import framework_info`.)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/util.py` end-to-end (full run, ~4 min): **the previously-
+documented failure at `util.py:500`/`502` (`variable or field '_t21'
+declared void'` / `invalid use of void expression`, from `cdll` being
+lowered as the generic weak int64_t stub) no longer reproduces —
+`ctypes/util.py` itself now has ZERO errors.** `ctypes/__init__.py`
+is now genuinely inline-compiled into the whole-program unit (confirms
+gap #1 is fixed, not just coincidentally unreached).
+
+`python3 mojo.py build` for this file still exits 1 overall: 265 real
+compiler errors remain, but ALL in other transitively-imported
+modules (`_collections_abc.py`, `argparse.py`, `ast.py`, `dataclasses.
+py`, `operator.py`, `os.py`, `pickle.py`, `types.py`, etc.) — none at
+`ctypes/util.py`'s own lines. Some of these (e.g. `ctypes/__init__.py`
+itself: `reprlib_Repr_repr*` "undeclared here") are the same already-
+tracked bare-name-collision class noted in `bugs/COMPILE_FAIL_Lib_
+socket_...md`'s 2026-08-24 entry and `bugs/hard/CODEGEN_same_bare_
+name_struct_collision_across_modules.md` — not new. Gaps #2 (from-
+import binding of module-level VALUES) and #3 (`LibraryLoader`'s
+dynamic attribute surface) below remain genuinely unfixed and
+unattempted — not verified whether they'd still block `cdll` usage on
+their own now that gap #1 no longer masks them, since the build never
+gets isolated enough from the other modules' unrelated errors to tell
+cleanly. Quality gate for the fix itself verified clean: `test_gimple.
+py` 252/252, `test_module_cache.py` 76/76, `make check-selfhost`
+clean, stdlib dylib rebuild 0 skips.
+
+Doc kept open (file still doesn't build end-to-end) — gap #1's fix is
+real progress, not a full resolution.
 
 ## Status (re-verified 2026-08-23, triage pass): identical failure; root cause refined into three stacked gaps
 
