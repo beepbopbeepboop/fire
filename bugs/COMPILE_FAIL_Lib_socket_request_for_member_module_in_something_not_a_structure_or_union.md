@@ -1,5 +1,41 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (2026-08-24): unrelated `gimple_cpp_core.py` generator-typing fix landed; error count 178 → 187, but the shift is coverage noise in the already-tracked bare-name-collision class, not a new bug
+
+Landed the `_cpp_trusted_fn_return_types`/`_cpp_fn_container_shape`
+coroutine-body-typing feature (see `bugs/COMPILE_FAIL_ctypes_
+macholib_dyld.md`'s 2026-08-24 entry for what it targets — it does
+NOT target this file's failure class at all). Re-ran `python3 mojo.py
+build /Users/mrs/net/Python-3.14.6/Lib/socket.py`: 187 `error:` lines
+(was 178). Did a controlled A/B (`git stash` the fix, rebuild, diff
+the exact sorted error sets against the fix applied) rather than trust
+the raw count: every one of the 30 errors that DISAPPEARED and all 33
+that APPEARED are the same already-tracked, still-open bare-name-
+collision shape this doc and `bugs/hard/CODEGEN_same_bare_name_
+struct_collision_across_modules.md` both describe (`redefinition of
+'_alloc_expandvars_repl_env'`/`'expandvars_repl_env' has no member
+named ...` moved from `posixpath.py` to the sibling `ntpath.py`;
+`reprlib_Repr_repr*` "undeclared here" reappeared, now in `enum.py`'s
+compile unit instead of being fully absent; `namedtuple___*`/
+`inspect_getattr_static_*`/`_signature_get_user_defined_method_
+lambda_1` "undeclared here" appeared in `io.py`/`dataclasses.py`).
+None of these are new failure MODES — they're the same general,
+already-documented-as-unfixed mechanism (only the STRUCT-METHOD-
+QUALIFIER slice and one specific `Repr_repr*` dispatch-table instance
+of it were ever fixed, per that doc's own 2026-08-20/08-23 entries;
+the general struct-field-table/type-identity fix remains open) landing
+on a different sibling module because this session's fix changes which
+functions successfully type-check as coroutine bodies, which shifts
+whole-program compile order and which module "wins" a given bare-name
+race. Net: **not a regression from this fix** — same bug class,
+different specific victim files, count within noise for a ~180-error
+grab-bag file with many independent unrelated root causes.
+
+**socket.py still does not build.** Quality gate for the fix itself
+(unrelated to this file) verified clean: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, stdlib
+dylib rebuild 0 skips.
+
 ## Status (updated 2026-08-23): error count 201 → 178; the last cross-module "undeclared here" collision class (`Repr_repr*`) fixed via dispatch-table qualification
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

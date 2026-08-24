@@ -1305,6 +1305,31 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
                             is_char_compared = True
+                if expr.op == '+':
+                    # `param + <string literal>` / `<string literal> +
+                    # param` (directly, or through a local already known
+                    # to hold a string) — real Python str concatenation,
+                    # which only type-checks when BOTH operands are
+                    # strings, so the param is one. Unambiguous even when
+                    # the param is ALSO subscripted elsewhere (a list
+                    # element + str would be a TypeError in real Python).
+                    # Found via Lib/ctypes/macholib/dyld.py's `_inject`
+                    # generator: `yield path[:-len('.dylib')] + suffix +
+                    # '.dylib'` — `suffix` had no other string signal (no
+                    # str-only method call, no subscript) and defaulted
+                    # to int64_t, so the coroutine body's co_yield hit
+                    # "invalid conversion from 'int64_t' to 'char*'".
+                    for _a, _b in ((expr.left, expr.right), (expr.right, expr.left)):
+                        _a_param = (isinstance(_a, gimple_ctypes.IdentExpr)
+                                    and _a.name == param_name)
+                        if not _a_param:
+                            continue
+                        if _expr_is_stringish(_b):
+                            is_string_method = True
+                        elif (isinstance(_b, gimple_ctypes.IdentExpr)
+                                and _b.name != param_name
+                                and _b.name in str_vars):
+                            is_string_method = True
                 scan_expr(expr.left)
                 scan_expr(expr.right)
             elif isinstance(expr, gimple_ctypes.CompareChain):
@@ -1569,6 +1594,13 @@ def _infer_param_types(_g, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
                 ]
                 if len(matches) == 1:
                     inferred[pname] = f"{matches[0]} *"
+
+            # Last resort: string-only evidence (a str-only method call or
+            # string concatenation, with no field access suggesting a
+            # struct) — see the BinaryOp '+' scan above for the motivating
+            # dyld.py `suffix` shape.
+            if pname not in inferred and is_string_method and not fields_accessed:
+                inferred[pname] = 'char *'
 
     return inferred
 

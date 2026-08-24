@@ -2,6 +2,48 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/macholib/dyld.py`
 
+## Status (2026-08-24): the whole 5-bullet generator-codegen cluster below is FIXED; file still doesn't build end-to-end, but only due to unrelated pre-existing gaps elsewhere in its dependency closure
+
+Landed the `_cpp_trusted_fn_return_types`/`_cpp_fn_container_shape`
+feature in `gimple_cpp_core.py` (coroutine-body local-variable/yield
+typing derived from a callee's own inferred return ctype, plus a
+static dict/list container-shape scan of module-level functions for
+subscript lowering inside a generator body) — this directly targets
+every one of the five bullets in the "2026-08-06" entry below. Re-ran
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+ctypes/macholib/dyld.py`: **`dyld.py` (and `ctypes/macholib/
+framework.py`) now compile with ZERO errors** — only harmless
+unused-variable/unused-label warnings — where before the whole
+`dyld_gen.cpp`/inline-C++-coroutine stage failed hard. Specifically
+verified gone: `framework_info` no longer "not declared in this
+scope" (sibling module-function calls now resolve via
+`_cpp_trusted_fn_return_types`), `os.path.basename` no longer "'os'
+not declared" and no more `begin()`/`end()` errors on `MojoList*`
+iteration, `name.startswith`/`path.endswith` no longer fail on a
+mistyped `int64_t` param, and no more `co_yield` int64_t/char*
+conversion errors.
+
+`python3 mojo.py build` for this file still exits 1 overall, but the
+remaining ~300 errors are entirely in OTHER, transitively-imported
+modules with their own separate, pre-existing, unrelated failure
+classes — `collections`/`inspect` (subscript-store fallback, benign),
+`operator.py`/`copy.py`/`types.py`/`weakref.py`/`io.py`/`pickle.py`/
+`argparse.py`/`enum.py`/`typing.py`/etc. Notably, some of these are
+the ALREADY-DOCUMENTED, still-open bare-name-collision class
+(`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
+— e.g. `reprlib_Repr_repr*` "undeclared here" in `framework.py`'s own
+compile unit, from `reprlib.Repr`'s dispatch table colliding with
+another same-named symbol elsewhere in the transitive closure); none
+of this is new, and none of it is generator/coroutine-codegen shaped.
+
+Quality gate verified clean: `test_gimple.py` 252/252, `test_module_
+cache.py` 76/76, `make check-selfhost` clean, from-scratch stdlib
+dylib rebuild 0 skips (baseline 0, no regression).
+
+Doc kept open (file still doesn't build end-to-end), but the specific
+cluster this doc tracked is resolved — whoever next touches this file
+should look at the remaining OTHER modules' failures, not this one.
+
 ## Status (re-verified 2026-08-23, triage pass): identical failure, all five generator-codegen bullets still reproduce
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

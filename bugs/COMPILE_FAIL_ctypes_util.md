@@ -2,6 +2,23 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
+## Status (2026-08-24): not re-verified this session; root cause unrelated to the fix landed
+
+This session landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s
+targeted fix (coroutine-body local/yield typing derived from a
+callee's trusted return type, in `gimple_cpp_core.py`/
+`gimple_exprtypes.py`). This file's own documented blocker (below) is
+entirely in a different subsystem — bare package-import resolution
+(`_module_candidate_paths` not trying `<pkg>/__init__.py` for a bare
+`from ctypes import cdll`) and from-import binding of module-level
+VALUES — with zero overlap with coroutine/generator codegen, so no
+behavior change is expected here. A full re-run was started
+(`python3 mojo.py build .../ctypes/util.py`) but not completed within
+this session's time budget — this file's own doc history already
+notes multi-minute-to-9-minute build times on a loaded machine. Left
+unverified rather than reporting a guessed result; re-run standalone
+to confirm before any future fix attempt on this doc's own root cause.
+
 ## Status (re-verified 2026-08-23, triage pass): identical failure; root cause refined into three stacked gaps
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

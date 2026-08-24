@@ -1,5 +1,23 @@
 # COMPILE_FAIL: Lib/contextlib.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-24): unchanged, unaffected by the unrelated `gimple_cpp_core.py` generator-typing fix landed this session
+
+Landed `bugs/COMPILE_FAIL_ctypes_macholib_dyld.md`'s targeted fix
+(coroutine-body local/yield typing derived from a callee's trusted
+return type). Re-ran `python3 mojo.py build /Users/mrs/net/
+Python-3.14.6/Lib/contextlib.py`: byte-for-byte identical failure —
+same `RuntimeError` naming the same 11 async functions (`__aenter__`
+x3, `__aexit__` x4, `_exit_wrapper`, `aclose`, `enter_async_context`,
+`inner`), same "no suspend/resume state-machine transform" /
+"*args/**kwargs parameters not supported" messages. Expected: this
+file's blocker is the async-eligibility gate rejecting non-scalar
+`__aenter__` returns and variadic `__aexit__` params, entirely
+upstream of and unrelated to the return-type-typing fix this session
+landed (which only affects locals/yields ALREADY inside an eligible
+coroutine body). Still DOCUMENTED-NOT-FIXED, still a genuinely large
+separate feature (non-scalar coroutine value boxing/type-erasure +
+variadic coroutine-frame parameters) — not attempted here.
+
 ## Status (re-verified 2026-08-23, triage pass)
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/

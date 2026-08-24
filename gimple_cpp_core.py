@@ -422,6 +422,146 @@ def _cpp_receiver_ctype(gen, e):
     return None
 
 
+def _cpp_trusted_fn_return_types(gen) -> dict:
+    """The subset of `gen.func_return_types` a coroutine body may trust for
+    local-variable typing: only pointer-shaped ctypes ('char *' and the
+    container pointers, plus known-struct pointers). An int64_t entry carries
+    no information beyond this emitter's own untyped-local default, so it is
+    excluded — trusting it could never change anything, but scanning less
+    keeps the map honest about what it asserts. Built once per module compile
+    into `gen._cpp_trusted_fn_returns`; func_return_types entries are
+    corrected in place by later passes (see _func_csym's Pass 1.3e note), so
+    the cache is cleared in gen_module's generator/async pre-passes' unit
+    builder `finally` blocks via `_cpp_reset_unit_state`."""
+    cached = getattr(gen, '_cpp_trusted_fn_returns', None)
+    if cached is not None:
+        return cached
+    trusted: dict = {}
+    _known_structs = frozenset(gen.struct_field_types.keys())
+    for _k, _v in gen.func_return_types.items():
+        if not isinstance(_v, str):
+            continue
+        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (
+                _v.endswith(' *') and _v[:-2] in _known_structs):
+            trusted[_k] = _v
+    gen._cpp_trusted_fn_returns = trusted
+    return trusted
+
+
+def _cpp_fn_container_shape(gen, fname: str, depth: int = 0) -> str | None:
+    """'dict' / 'list' when EVERY value-returning exit of module-level
+    function `fname` provably produces that container kind (never both), by
+    scanning its FunctionDef AST — the coroutine-body emitter's substitute
+    for the ordinary path's per-temp `_actual_types` propagation, which a
+    separately-compiled C++ unit cannot read. Recognized shapes: DictExpr /
+    `<regex match>.groupdict()` / a local bound to either; ListExpr /
+    `<str>.split(...)` / sorted(...) / a local bound to those; plus
+    pass-through returns of another module function with an already-known
+    shape (depth-limited). Mixed dict/list returns, unknown shapes, and
+    functions returning None alongside nothing else resolve to None ("no
+    proof"), which every consumer must treat as "keep the previous
+    lowering". Real driver: dyld.py's generators subscripting
+    `framework_info(name)['name']` — framework_info's int64_t-boxed dict
+    result previously lowered as a STRING slice (mojo_cstr_slice on a dict
+    pointer)."""
+    if depth > 4:
+        return None
+    cache = getattr(gen, '_cpp_fn_shape_cache', None)
+    if cache is None:
+        cache = {}
+        gen._cpp_fn_shape_cache = cache
+    if fname in cache:
+        return cache[fname]
+    fn_ast = getattr(gen, '_cpp_module_fn_asts', {}).get(fname)
+    if fn_ast is None:
+        return None
+    shapes: set = set()
+
+    def _shape_of(expr, locals_shape: dict):
+        if expr is None:
+            return None
+        if isinstance(expr, gimple_ctypes.DictExpr):
+            return 'dict'
+        if isinstance(expr, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
+                             gimple_ctypes.Comprehension)):
+            return 'list'
+        if isinstance(expr, gimple_ctypes.TupleExpr):
+            return 'list'
+        if isinstance(expr, gimple_ctypes.TernaryExpr):
+            a = _shape_of(getattr(expr, 'then_val', None), locals_shape)
+            b = _shape_of(getattr(expr, 'else_val', None), locals_shape)
+            return a if a == b else None
+        if isinstance(expr, gimple_ctypes.IdentExpr):
+            if expr.name == 'None':
+                return None
+            return locals_shape.get(expr.name)
+        if isinstance(expr, gimple_ctypes.CallExpr):
+            f = expr.func
+            if isinstance(f, gimple_ctypes.MemberExpr):
+                if f.member in ('groupdict', 'items', 'copy') and not expr.args:
+                    return 'dict' if f.member in ('groupdict', 'items') else None
+                if f.member == 'split':
+                    return 'list'
+                return None
+            if isinstance(f, gimple_ctypes.IdentExpr):
+                if f.name == 'sorted' or f.name == 'dict':
+                    return 'list' if f.name == 'sorted' else 'dict'
+                sub = _cpp_fn_container_shape(gen, f.name, depth + 1)
+                if sub:
+                    shapes.add(sub)
+                return None
+        return None
+
+    def _scan(stmts, locals_shape: dict):
+        for st in stmts:
+            if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):
+                sh = _shape_of(st.value, locals_shape)
+                if sh:
+                    locals_shape[st.target.name] = sh
+            elif isinstance(st, gimple_ctypes.ReturnStmt):
+                sh = _shape_of(st.value, locals_shape)
+                if sh:
+                    shapes.add(sh)
+            elif isinstance(st, gimple_ctypes.IfStmt):
+                _scan(st.then_body or [], dict(locals_shape))
+                for _, elif_body in (st.elifs or []):
+                    _scan(elif_body or [], dict(locals_shape))
+                if st.else_body:
+                    _scan(st.else_body, dict(locals_shape))
+            elif isinstance(st, gimple_ctypes.TryStmt):
+                _scan(st.body or [], dict(locals_shape))
+                for h in (st.handlers or []):
+                    _scan(h.body or [], dict(locals_shape))
+                if st.else_body:
+                    _scan(st.else_body, dict(locals_shape))
+    _scan(fn_ast.body, {})
+    # `next(iter(shapes))` avoided deliberately: this module is itself
+    # compiled by the self-hosting `make check-selfhost` pass, whose
+    # plain-C `next()` lowering only understands a MojoGenerator* operand
+    # (see gimple_gen_calls.py's `next` handling) — `next()` on a `set`
+    # falls through to an undefined-at-link-time generic stub. A plain
+    # loop over the one-element set reaches the same value through a
+    # shape this codegen path already supports.
+    if len(shapes) == 1:
+        for _shape in shapes:
+            cache[fname] = _shape
+            return _shape
+    cache[fname] = None
+    return None
+
+
+def _cpp_reset_unit_state(gen):
+    """Reset the per-coroutine-unit emitter state: the lazy caches
+    `_cpp_trusted_fn_return_types` / `_cpp_fn_container_shape` populate
+    (rebuilt per unit so func_return_types corrections earlier passes made
+    meanwhile are re-read — see _func_csym's stale-freeze warning), plus the
+    per-unit map of locals statically known to hold a dict/list (from a
+    container-shaped callee), consumed by SubscriptExpr lowering."""
+    gen._cpp_trusted_fn_returns = None
+    gen._cpp_fn_shape_cache = {}
+    gen._cpp_local_container_shapes = {}
+
+
 def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.IntLiteral):
         return str(e.value)
@@ -764,23 +904,37 @@ def _cpp_expr(gen, e) -> str:
             return f"__mojo_floordiv({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
         if e.op == '**':
             return f"pow({gen._cpp_expr(e.left)}, {gen._cpp_expr(e.right)})"
-        if e.op == '+' and isinstance(e.left, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)) \
-                and isinstance(e.right, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
-            # String concatenation (`current + part`, pprint.py's shape)
-            # → mojo_str_cat, mirroring the GIMPLE path's char* + char*
-            # lowering. Fires ONLY when BOTH operands are string-typed:
-            # either a string literal or an identifier the coroutine-body
-            # `declared` map types as char* (via self._cpp_declared). A
-            # genuinely numeric `a + b` (both declared int64_t) and a
-            # HETEROGENEOUS `total + x` (int64_t += char*, the async
-            # runner's `total = total + x` shape) both fall through to
-            # the plain `+` below — never mis-cat.
+        if e.op == '+':
+            # String concatenation (`current + part`, pprint.py's shape;
+            # `path[:-len('.dylib')] + suffix`, dyld.py's `_inject`) →
+            # mojo_str_cat, mirroring the GIMPLE path's char* + char*
+            # lowering. Fires ONLY when BOTH operands are string-typed
+            # (see _is_str_operand just below). A genuinely numeric
+            # `a + b` (both declared int64_t) and a HETEROGENEOUS
+            # `total + x` (int64_t += char*, the async runner's
+            # `total = total + x` shape) both fall through to the plain
+            # `+` below — never mis-cat.
             def _is_str_operand(node):
                 if isinstance(node, gimple_ctypes.StringLiteral):
                     return True
                 if isinstance(node, gimple_ctypes.IdentExpr) and gen._cpp_declared is not None:
                     return gen._cpp_declared.get(node.name) == 'char *'
-                return False
+                # A slice/subscript of a string (`path[:-len('.dylib')]`,
+                # dyld.py's `_inject`) or a call whose trusted module
+                # return type is char* (`int64_t_basename(p)`) also
+                # produces a genuine char* in this body model — the
+                # narrow IdentExpr/literal check above left those to the
+                # raw `+` fallthrough, an invalid char* + char* C++
+                # operand combination.
+                try:
+                    return gimple_exprtypes._infer_simple_expr_ctype(
+                        node, gen._cpp_declared,
+                        getattr(gen, '_cpp_gen_self_fields', None),
+                        gen._async_api,
+                        fn_return_types=_cpp_trusted_fn_return_types(gen),
+                    ) == 'char *'
+                except Exception:
+                    return False
             if _is_str_operand(e.left) and _is_str_operand(e.right):
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
@@ -942,6 +1096,24 @@ def _cpp_expr(gen, e) -> str:
                     return '0'
                 if e.func.member in ('normpath', 'relpath') and len(a) >= 1:
                     return a[0]
+                # basename/dirname/splitext/expanduser/abspath — the
+                # remaining real-runtime os.path helpers, mirroring the
+                # GIMPLE path's own dispatch (mojo_runtime.h's
+                # int64_t_basename/int64_t_splitext/int64_t_expanduser/
+                # int_abspath/int_dirname). Without these, dyld.py's
+                # generator bodies emitted raw `os.path.basename(name)`
+                # C++ ("'os' was not declared in this scope; did you mean
+                # 'cos'").
+                if e.func.member == 'basename' and len(a) == 1:
+                    return f"int64_t_basename((char *)({a[0]}))"
+                if e.func.member == 'dirname' and len(a) == 1:
+                    return f"(char *)int_dirname(0, (int64_t)(char *)({a[0]}))"
+                if e.func.member == 'splitext' and len(a) == 1:
+                    return f"int64_t_splitext((char *)({a[0]}))"
+                if e.func.member == 'expanduser' and len(a) == 1:
+                    return f"int64_t_expanduser((char *)({a[0]}))"
+                if e.func.member == 'abspath' and len(a) == 1:
+                    return f"(char *)int_abspath(0, (int64_t)(char *)({a[0]}))"
             if isinstance(e.func.obj, gimple_ctypes.IdentExpr) and e.func.obj.name == 'math':
                 a = [gen._cpp_expr(x) for x in e.args]
                 if e.func.member in ('isnan', 'isinf', 'floor', 'ceil', 'fabs',
@@ -1732,6 +1904,13 @@ def _cpp_expr(gen, e) -> str:
                 if _leet == 'double':
                     return f"mojo_list_get_double((MojoList *)({obj}), (int64_t)({idx}))"
                 return f"mojo_list_get_int((MojoList *)({obj}), (int64_t)({idx}))"
+            if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr):
+                _local_shape = getattr(gen, '_cpp_local_container_shapes', {}).get(e.obj.name)
+                if _local_shape == 'list':
+                    return f"mojo_list_get_int((MojoList *)({obj}), (int64_t)({idx}))"
+                if _local_shape == 'dict':
+                    key_expr = gen._cpp_dict_key_expr(e.index, idx)
+                    return f"mojo_dict_get_int((MojoDict *)({obj}), {key_expr})"
             if gen._cpp_declared is not None and isinstance(e.obj, gimple_ctypes.IdentExpr) \
                     and gen._cpp_declared.get(e.obj.name) == 'MojoDict *':
                 key_expr = gen._cpp_dict_key_expr(e.index, idx)
@@ -2572,10 +2751,31 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             else:
                 ctype = gimple_exprtypes._infer_simple_expr_ctype(
                     s.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
-                    gen._async_api)
+                    gen._async_api,
+                    fn_return_types=_cpp_trusted_fn_return_types(gen))
             if ctype is None:
                 ctype = 'int64_t'  # default for unknown-type locals
             declared[name] = ctype
+            # A call to a module-level function whose every value-return is
+            # provably a dict/list (`_cpp_fn_container_shape`) — record the
+            # local's container kind so a later `local['key']` /
+            # `local[i]` subscript lowers through the real runtime dict/list
+            # getter instead of the string-substring fallback. The local's
+            # STORAGE type stays the boxed int64_t (the .c side stores
+            # cross-function container values exactly that way), so this
+            # side map — not `declared` — carries the extra knowledge.
+            if (ctype == 'int64_t' and isinstance(s.value, gimple_ctypes.CallExpr)
+                    and isinstance(s.value.func, gimple_ctypes.IdentExpr)):
+                _shp = _cpp_fn_container_shape(gen, s.value.func.name)
+                if _shp:
+                    gen._cpp_local_container_shapes[name] = _shp
+            if (ctype == 'MojoList *' and isinstance(s.value, gimple_ctypes.CallExpr)
+                    and isinstance(s.value.func, gimple_ctypes.IdentExpr)):
+                _ret_elem = gen._return_elem_types.get(s.value.func.name)
+                if _ret_elem:
+                    reg = getattr(gen, '_cpp_list_local_elem_types', None)
+                    if reg is not None:
+                        reg[name] = _ret_elem
             # Hoist the declaration to the coroutine's top (function)
             # scope so a local first-assigned inside a `try:`/`for:` body
             # is still visible to a sibling `else:`/post-loop block (the
@@ -2779,7 +2979,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                             vt = gen.func_return_types.get(f"{_mstruct}_{_mf.member}")
                     if vt is None:
                         vt = gimple_exprtypes._infer_simple_expr_ctype(
-                            s.value, declared, getattr(gen, '_cpp_gen_self_fields', None))
+                            s.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                            fn_return_types=_cpp_trusted_fn_return_types(gen))
                     if vt is None:
                         vt = 'int64_t'
                     declared[tname] = vt
@@ -3717,6 +3918,64 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(f"{indent}int64_t {target} = 0;")
                 else:
                     lines.append(f"{indent}{target} = 0;")
+                return lines
+            # `for x in <MojoList *-typed expression>:` where the list
+            # provenance is statically known but the iterable is NOT one of
+            # the shapes the branches above already handle: a call to a
+            # module-level function whose inferred return ctype is
+            # MojoList* (dyld.py's `for path in dyld_framework_path(env):`),
+            # or a module-level list global (`for path in
+            # DEFAULT_FRAMEWORK_FALLBACK:`). The generic range-for below
+            # cannot iterate a raw MojoList* pointer ("no viable 'begin'
+            # function available"), so lower through the same cached-local
+            # + indexed loop every other list-iteration branch here uses.
+            # Element type comes from Pass 2c's `_return_elem_types`
+            # fixpoint for the callee ('char *' for a split()-of-strings
+            # producer like dyld_env), defaulting to the boxed int64_t
+            # convention when unknown.
+            _iter_list_expr = None
+            _iter_elem = None
+            if isinstance(s.iterable, gimple_ctypes.CallExpr) and isinstance(s.iterable.func, gimple_ctypes.IdentExpr):
+                _callee = s.iterable.func.name
+                if gen.func_return_types.get(_callee) == 'MojoList *':
+                    _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
+                    _iter_elem = gen._return_elem_types.get(_callee)
+            elif isinstance(s.iterable, gimple_ctypes.IdentExpr) \
+                    and gen._cpp_declared is not None \
+                    and s.iterable.name not in gen._cpp_declared \
+                    and gen._global_var_types.get(s.iterable.name) == 'MojoList *':
+                _iter_list_expr = f"(MojoList *)({gen._cpp_expr(s.iterable)})"
+            if _iter_list_expr is not None and not isinstance(target, str):
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "unsupported for-loop target over a list-typed iterable")
+            if _iter_list_expr is not None:
+                _cached = gen._cpp_fresh_name("_mg_iter")
+                _ctr = gen._cpp_fresh_name("_mg_i")
+                lines = [f"{indent}MojoList *{_cached} = {_iter_list_expr};"]
+                if _iter_elem == 'char *':
+                    if not target_was_declared:
+                        declared[target] = 'char *'
+                        lines.append(f"{indent}char *{target};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+                    lines.append(f"{indent}    {target} = mojo_list_get_str({_cached}, {_ctr});")
+                elif _iter_elem == 'double':
+                    if not target_was_declared:
+                        declared[target] = 'double'
+                        lines.append(f"{indent}double {target};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+                    lines.append(f"{indent}    {target} = mojo_list_get_double({_cached}, {_ctr});")
+                else:
+                    if not target_was_declared:
+                        declared[target] = 'int64_t'
+                        lines.append(f"{indent}int64_t {target};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len({_cached}); {_ctr}++) {{")
+                    lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
+                for inner in s.body:
+                    lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
                 # for/else: the else body runs only when the loop

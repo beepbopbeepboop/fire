@@ -624,6 +624,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         generator_api=gen._generator_api)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
     gen._cpp_list_local_elem_types = {}
+    gcc_._cpp_reset_unit_state(gen)
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -661,7 +662,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         value_ctype = gimple_exprtypes._generator_yield_ctype(
             fn, declared, gen._generator_api, self_fields,
             known_structs=_known_structs, dict_val_types=_dict_val_types,
-            method_return_types=gen.func_return_types)
+            method_return_types=gen.func_return_types,
+            fn_return_types=gcc_._cpp_trusted_fn_return_types(gen))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-

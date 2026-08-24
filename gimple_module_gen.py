@@ -1426,6 +1426,10 @@ def gen_module_impl(self, stmts):
                         self._unresolved_import_aliases.add(_fb_sym)
 
     all_functions = stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
+    self._cpp_module_fn_asts = {}
+    for _fn_ast in all_functions:
+        if isinstance(_fn_ast, FunctionDef):
+            self._cpp_module_fn_asts.setdefault(_fn_ast.name, _fn_ast)
     def _is_foreign_main(s):
         return isinstance(s, FunctionDef) and s.name == 'main' and s not in stmts
     for s in all_functions:
@@ -1892,6 +1896,36 @@ def gen_module_impl(self, stmts):
             if cur in (None, 'int', 'int64_t'):
                 resolved_type = 'double' if types == {'double'} else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
+
+    # Coroutine-bound functions (generators/async defs about to go down the
+    # C++20-coroutine pre-pass) never get an ordinary gen_func compile, so
+    # the usage-based parameter inference `_gen_lifted_closure` relies on
+    # (`_infer_param_types`) never ran for them: their unannotated params
+    # all defaulted to int64_t in the emitted coroutine signature, so a
+    # string param hit "invalid conversion from 'int64_t' to 'char*'" at
+    # every co_yield/str-method site (Lib/ctypes/macholib/dyld.py's
+    # dyld_default_search(name) et al). Seed the SAME shared
+    # _inferred_param_types registry here — call-site literal evidence
+    # (just above) deliberately wins, explicit annotations are respected,
+    # and ambiguous 'int' results are skipped — so `_param_ctype`, read by
+    # BOTH the coroutine unit builder and func_param_types registration
+    # below, sees the real inferred types. Scoped strictly to functions
+    # still bound for the coroutine path: ordinary functions keep their
+    # existing evidence pipeline untouched.
+    for _cs_fn in all_functions:
+        if not isinstance(_cs_fn, FunctionDef):
+            continue
+        if id(_cs_fn) not in _generator_fns and id(_cs_fn) not in _async_fns:
+            continue
+        _cs_inferred = self._infer_param_types(_cs_fn)
+        for _pn, _ct in _cs_inferred.items():
+            if _ct == 'int':
+                continue
+            if _pn in ('self', 'cls'):
+                continue
+            _cur = self._inferred_param_types.get(_cs_fn.name, {}).get(_pn)
+            if _cur is None:
+                self._inferred_param_types.setdefault(_cs_fn.name, {})[_pn] = _ct
 
     for s in all_functions:
         if _is_foreign_main(s):

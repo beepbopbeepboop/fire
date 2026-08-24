@@ -171,16 +171,47 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         importer_dir = gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(_importer))
     # Explicit `sys.path.insert(...)` directories win outright — the user
     # said "look here first" (see _record_sys_path_inserts) — then the
-    # importing file's own directory, then CWD and its parent, and only
+    # importing file's own directory, then ITS ANCESTOR directories
+    # (nearest first, bounded — same bounded upward walk the INTERPRETER
+    # side has always done for exactly the same reason: a nested package
+    # member's imports are anchored at the package ROOT several levels up,
+    # e.g. Lib/ctypes/macholib/dyld.py's `from ctypes.macholib.framework
+    # import framework_info`, whose package root is .../Lib, two levels up
+    # from the importing file's own directory — see myinterpreter.py's
+    # matching search_dirs walk), then CWD and its parent, and only
     # then this repo's own installation directory as a last resort.
     search_dirs = list(gen._extra_search_paths)
     if importer_dir:
         search_dirs.append(importer_dir)
+        _anc = gimple_ctypes.os.path.dirname(importer_dir)
+        for _ in range(6):
+            if not _anc or _anc == gimple_ctypes.os.path.sep:
+                break
+            search_dirs.append(_anc)
+            _parent = gimple_ctypes.os.path.dirname(_anc)
+            if _parent == _anc:
+                break
+            _anc = _parent
     search_dirs += ['.', '..', script_dir]
     mojo_paths = []
+    _seen_dirs: list = []
     for d in search_dirs:
+        if d in _seen_dirs:
+            continue
+        _seen_dirs.append(d)
         for ext in extensions:
             mojo_paths.append(gimple_ctypes.os.path.join(d, f"{module_name}{ext}"))
+            if '.' not in module_name:
+                # BARE-package form: `from ctypes import cdll` names the PACKAGE
+                # directory's own __init__ source when no sibling `ctypes.py`
+                # exists — mirror the interpreter, which tries the
+                # `<name>/__init__.<ext>` form for EVERY module name (see its
+                # rel_pkg_path above), not just dotted ones. Without this, any
+                # bare import of a real package (ctypes/, json/, ...) resolved
+                # to nothing on the compiled path even though the identical
+                # import worked interpreted.
+                mojo_paths.append(gimple_ctypes.os.path.join(
+                    d, module_name, f"__init__{ext}"))
     # A DOTTED module_name (e.g. `import pkg.helper as m`, module_name ==
     # "pkg.helper") names a package-relative path, not a literal
     # filename with dots in it — the loop above only ever tried the
@@ -205,10 +236,11 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         _dotted_parts = module_name.split('.')
         _rel_flat = gimple_ctypes.os.sep.join(_dotted_parts)
         _rel_pkg = gimple_ctypes.os.path.join(gimple_ctypes.os.sep.join(_dotted_parts), '__init__')
-        for d in search_dirs:
-            for ext in extensions:
-                mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_flat}{ext}"))
-                mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_pkg}{ext}"))
+        for d in _seen_dirs:
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_flat}.py"))
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_flat}.mojo"))
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_pkg}.py"))
+            mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_pkg}.mojo"))
         # `from tkinter import commondialog` inside tkinter/filedialog.py
         # itself: module_name is "tkinter.commondialog", but the
         # IMPORTING file's own directory (in search_dirs) already IS
@@ -224,7 +256,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
             _suffix_parts = _dotted_parts[1:]
             _rel_suffix_flat = gimple_ctypes.os.sep.join(_suffix_parts)
             _rel_suffix_pkg = gimple_ctypes.os.path.join(gimple_ctypes.os.sep.join(_suffix_parts), '__init__')
-            for d in search_dirs:
+            for d in _seen_dirs:
                 if gimple_ctypes.os.path.basename(gimple_ctypes.os.path.normpath(d)) == _dotted_parts[0]:
                     for ext in extensions:
                         mojo_paths.append(gimple_ctypes.os.path.join(d, f"{_rel_suffix_flat}{ext}"))

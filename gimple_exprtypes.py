@@ -467,7 +467,8 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
                               closure_api: dict | None = None,
                               known_structs: frozenset | None = None,
                               dict_val_types: dict | None = None,
-                              method_return_types: dict | None = None) -> str | None:
+                              method_return_types: dict | None = None,
+                              fn_return_types: dict | None = None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -529,17 +530,17 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
     if isinstance(e, TernaryExpr):
-        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api)
-        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api)
-        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api)
+        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
         if tt is not None: return tt
         if et is not None: return et
         return 'int64_t'
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api)
-        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
         if lt is None or rt is None:
             return None
         if 'char *' in (lt, rt):
@@ -588,6 +589,27 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             if known[e.func.name] == _CPP_CALLABLE_CTYPE:
                 return 'int64_t'
             return known[e.func.name]
+        # A call to a MODULE-LEVEL function whose inferred return ctype is
+        # a real pointer-shaped value (`char *`/`MojoList *`/...): the
+        # assigned local must carry that same type, not the int64_t
+        # default — otherwise `fallback_framework_path =
+        # dyld_fallback_framework_path(env)` (dyld.py's generator body)
+        # declared the local int64_t while the callee's extern (and the
+        # .c side's real definition) return MojoList*, producing an
+        # invalid-C++ pointer-to-int assignment and a bogus "range
+        # expression of type 'int64_t'" at the later for-loop over it.
+        # ONLY pointer-shaped entries are trusted: an int64_t entry is
+        # indistinguishable from "no information" (the default), so
+        # consulting it could never change anything anyway. `None` when
+        # not threaded (every existing caller keeps its exact prior
+        # behavior).
+        if fn_return_types is not None:
+            _frt = fn_return_types.get(e.func.name)
+            if isinstance(_frt, str) and (
+                    _frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                    or (_frt.endswith(' *') and known_structs is not None
+                        and _frt[:-2] in known_structs)):
+                return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         # Module-attribute call type inference: os.path.join → char* (the
         # GIMPLE path's `os.path.*` handling types these as char*), math
@@ -1026,7 +1048,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                             closure_api: dict | None = None,
                             known_structs: frozenset | None = None,
                             dict_val_types: dict | None = None,
-                            method_return_types: dict | None = None) -> str | None:
+                            method_return_types: dict | None = None,
+                            fn_return_types: dict | None = None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1110,7 +1133,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
                 t = 'MojoList *'
             else:
                 t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
-                                             known_structs, dict_val_types, method_return_types)
+                                             known_structs, dict_val_types, method_return_types,
+                                             fn_return_types)
                 if t is None:
                     t = 'int64_t'  # default when type can't be inferred
             if ctype is None:
@@ -1168,7 +1192,8 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None = None,
             if n.value is None:
                 continue
             t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api,
-                                             known_structs, dict_val_types, method_return_types)
+                                             known_structs, dict_val_types, method_return_types,
+                                             fn_return_types)
             if t is None:
                 return None
             if ctype is None:
