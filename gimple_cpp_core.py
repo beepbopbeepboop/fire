@@ -448,6 +448,122 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     return trusted
 
 
+def _cpp_percent_format(gen, node) -> str | None:
+    """Coroutine-body counterpart of the ordinary GIMPLE path's
+    `_lower_percent_format` (gimple_gen_exprs.py) — Python `%`-style
+    string formatting (`"%s and %s are not of the same version" %
+    (self, other)`, ipaddress.py's `BaseNetwork.address_exclude`;
+    `"%r is not a positive integer"`, enum.py's `_iter_bits_lsb`;
+    `"MLSD %s" % path`, ftplib.py's `mlsd`) when the LHS is a literal
+    format string, inside a compiled generator/async body.
+
+    That statement-based helper can't be reused directly: it emits
+    GIMPLE temp-declaration statements via `gen._new_val` and reads
+    typed (et, ev) pairs off `gen.lower_expr`'s own SSA-like value
+    system, neither of which this emitter has — `_cpp_expr` always
+    returns one inline C++ EXPRESSION string, no side-channel statement
+    list. So this rebuilds the same left-to-right literal/spec split,
+    but composes the result as a nested `mojo_str_cat(...)` expression
+    tree instead of a sequence of statements, and dispatches each
+    operand's stringification off `_infer_simple_expr_ctype` (this
+    body model's own best-effort static ctype) rather than the ordinary
+    path's exact GIMPLE-inferred (et, ev).
+
+    Deliberately narrow: only bare `%s`/`%r`/`%d`/`%i` specs (no
+    width/precision/flags — dynamic padding is rare for the
+    error-message shape this targets, and `mojo_str`'s int/pointer
+    heuristic — the same one `str(x)` already uses inside this emitter,
+    see the `fname == 'str'` branch above — has no notion of field
+    width to apply anyway). Returns None (the same "give up, let the
+    caller fall through" sentinel `_lower_percent` uses) for: a
+    non-literal or f-string LHS, a mismatched spec/operand count, an
+    unsupported conversion character, or no specs at all (a literal
+    `%` that wasn't really meant as a template) — the caller then emits
+    the plain numeric `%` operator, unchanged from before this function
+    existed.
+    """
+    if not isinstance(node.left, gimple_ctypes.StringLiteral):
+        return None
+    fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
+    if is_fstring:
+        return None
+    rhs_exprs = (list(node.right.elements)
+                 if isinstance(node.right, gimple_ctypes.TupleExpr)
+                 else [node.right])
+    parts = []
+    buf = []
+    i, n = 0, len(fmt_text)
+    while i < n:
+        c = fmt_text[i]
+        if c != '%':
+            buf.append(c); i += 1
+            continue
+        if i + 1 < n and fmt_text[i + 1] == '%':
+            buf.append('%'); i += 2
+            continue
+        if buf:
+            parts.append(('lit', ''.join(buf))); buf = []
+        spec_start = i
+        i += 1
+        while i < n and fmt_text[i] in '-+0 #.123456789':
+            i += 1
+        conv = fmt_text[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_text[spec_start:i], conv))
+    if buf:
+        parts.append(('lit', ''.join(buf)))
+    n_specs = sum(1 for p in parts if p[0] == 'spec')
+    if n_specs == 0 or n_specs != len(rhs_exprs):
+        return None
+    if any(p[0] == 'spec' and p[1] not in ('%s', '%r', '%d', '%i') for p in parts):
+        return None
+
+    self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+    fn_ret = _cpp_trusted_fn_return_types(gen)
+
+    def _operand_ctype(operand):
+        try:
+            return gimple_exprtypes._infer_simple_expr_ctype(
+                operand, gen._cpp_declared, self_fields, gen._async_api,
+                fn_return_types=fn_ret) or 'int64_t'
+        except Exception:
+            return 'int64_t'
+
+    def _stringify(operand, conv):
+        v = gen._cpp_expr(operand)
+        ct = _operand_ctype(operand)
+        if conv == 'r':
+            if ct == 'char *':
+                return f"mojo_repr_str((char *)({v}))"
+            if ct == 'double':
+                return f"mojo_repr_float(({v}))"
+            return f"mojo_str((void *)({v}))"
+        # 's' / 'd' / 'i'
+        if ct == 'char *':
+            return v
+        if ct == 'double':
+            return f"mojo_repr_float(({v}))"
+        return f"mojo_str((void *)({v}))"
+
+    acc = None
+    arg_i = 0
+    for p in parts:
+        if p[0] == 'lit':
+            text = p[1]
+            if not text:
+                continue
+            piece = f'"{gimple_ctypes._c_escape(text)}"'
+        else:
+            _, _full_spec, conv = p
+            operand = rhs_exprs[arg_i]
+            arg_i += 1
+            piece = _stringify(operand, conv)
+        acc = piece if acc is None else (
+            f"mojo_str_cat((char *)({acc}), (char *)({piece}))")
+    return acc if acc is not None else '""'
+
+
 def _cpp_fn_container_shape(gen, fname: str, depth: int = 0) -> str | None:
     """'dict' / 'list' when EVERY value-returning exit of module-level
     function `fname` provably produces that container kind (never both), by
@@ -938,6 +1054,10 @@ def _cpp_expr(gen, e) -> str:
             if _is_str_operand(e.left) and _is_str_operand(e.right):
                 return (f"mojo_str_cat((char *)({gen._cpp_expr(e.left)}), "
                         f"(char *)({gen._cpp_expr(e.right)}))")
+        if e.op == '%':
+            _pf = _cpp_percent_format(gen, e)
+            if _pf is not None:
+                return _pf
         if e.op in ('in', 'not in'):
             # `'x' not in s` is parsed as a BinaryOp (mojo_compiler.py),
             # not a CompareChain — so the CompareChain 'in'/'not in' branch

@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-24 — `%`-format crash in `mlsd` FIXED; 4 unrelated errors remain, own-.cpp count 5 -> 4)
+
+Re-verified via isolated compile (`GimpleGen(do_imports=False,
+relaxed_imports=True)` + `gcc-mp-15`/`g++-mp-15 -fsyntax-only`): `.ci`
+side clean. `.cpp` side, `FTP.mlsd`, previously 5 distinct errors, now 4:
+
+**Fixed**: `cmd = "MLSD %s" % path` — the shared coroutine-body `%`-
+format crash (see `bugs/CODEGEN_generator_function_Lib_ipaddress.md`'s
+matching entry for the fix, `gimple_cpp_core.py`'s new
+`_cpp_percent_format`). Confirmed gone from the isolated `.cpp`.
+
+**Still open, 4 distinct, unrelated, all narrow feature gaps in the
+coroutine-body expression emitter, none attempted here**:
+1. `";".join(facts)` — `.join()` called on a STRING LITERAL (not a
+   `MojoList *`/`MojoSet *` local) — `_cpp_expr` has no case for a
+   string-literal receiver here (only a container-typed local's
+   `.join`-equivalent call shapes are handled elsewhere).
+2. `self.retrlines(cmd, lines.append)` — `lines.append` passed as a
+   VALUE (a bound-method callback argument), not called — the same
+   "compiled callable surface has no first-class value form in this
+   scalar body model" class of gap `glob.py`'s doc documents for a
+   generator method referenced as a plain value.
+3. `facts_found[:-1].split(";")` iterated via `for fact in ...:` —
+   `.split()`'s result (from a `mojo_cstr_slice(...)` char* expression)
+   used directly as a `for`-loop iterable; no case recognizes a chained
+   `.split()` call as a loop iterable here (only a bare declared
+   `MojoList *` local is).
+4. `fact.partition("=")` unpacked into `key, _, value` — same
+   underlying issue as (1)/(3): `facts_found`/`fact`, sourced from an
+   unannotated `path`/`facts` `FTP.mlsd(self, path="", facts=[])`
+   parameter pair, get mis-typed further downstream (visible upstream
+   as `(void)(0.partition(" "))` — `line.rstrip(CRLF).partition(' ')`'s
+   LHS resolving to the integer literal `0` instead of a real `char *`)
+   — very likely another instance of the already-tracked
+   `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+   family (that hard bug's own doc explicitly flags itself as high-risk,
+   shared, regression-prone machinery — NOT re-attempted here per this
+   session's scope).
+
+Full mandatory gate for the `%`-format fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skip lines. Commit `d3154a6`.
+
+`ftplib.py` as a whole still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-23 — mlsd's body partially improved by shared coroutine-emitter work; remaining blockers enumerated precisely)
 
 Re-triaged the isolated compile (ci_errors=0; cpp_errors=6 → 4 unique,

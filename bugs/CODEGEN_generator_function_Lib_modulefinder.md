@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/modulefinder.py
 
+## Status (updated 2026-08-24 — re-verified unchanged)
+
+Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
+True)`): identical refusal — `scan_opcodes`: "every `yield` must carry a
+value, and all values must agree on one scalar type" — the variable-
+arity nested-tuple-yield shape this doc already documents (different
+`yield` sites in the same generator produce tuples of DIFFERENT arity,
+which the fixed-shape tuple-yield machinery elsewhere in this codegen
+can't represent as one promise type). No change; doc stays open.
+
+
 ## Status (updated 2026-08-23 — re-verified; scan_opcodes refusal unchanged, 3-gap analysis stands)
 
 Isolated compile reproduces the identical honest refusal for `scan_opcodes`.

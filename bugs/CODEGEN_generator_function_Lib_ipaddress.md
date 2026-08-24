@@ -1,5 +1,55 @@
 # CODEGEN_generator_function: Lib/ipaddress.py
 
+## Status (updated 2026-08-24 — the `%`-format tuple/scalar RHS crash FIXED; own-.cpp errors 15 -> 1)
+
+Re-verified via a fresh isolated compile (`GimpleGen(do_imports=False,
+relaxed_imports=True)` + `gcc-mp-15 -fgimple -fsyntax-only` / `g++-mp-15
+-std=c++20 -fsyntax-only`): `.ci` side is clean (0 errors, matches prior
+sessions); the `.cpp` side had grown to 15 errors since the last status
+entry below (not a regression from anything in THIS cluster — the file
+just reaches further now than when "72 errors" was last measured).
+12 of those 15 were one shared root cause: `BaseNetwork.address_exclude`
+building raise-messages via `"%s and %s are not of the same version" %
+(self, other)`/`"%s is not a network object" % other`/`"%s not contained
+in %s" % (other, self)` — the coroutine-body expression emitter (`_cpp_
+expr` in `gimple_cpp_core.py`) had NO case at all for Python's `%`-string-
+format operator; a scalar RHS produced an invalid raw C++ `%` on a `const
+char *` operand, and a TUPLE RHS produced literal garbage syntax
+(`"fmt" % {self, other}`, a brace-init-list as the right operand of `%`).
+
+**Fixed** (`gimple_cpp_core.py`): new `_cpp_percent_format` helper — the
+coroutine-body counterpart of the ordinary GIMPLE path's existing
+`_lower_percent_format` (`gimple_gen_exprs.py`), which can't be reused
+directly since it emits GIMPLE temp-declaration statements via `gen.
+_new_val` and this emitter only ever returns one inline C++ expression
+string. Builds the equivalent as a nested `mojo_str_cat(...)` expression
+tree, dispatching each `%s`/`%r`/`%d`/`%i` operand's stringification off
+`_infer_simple_expr_ctype` (`mojo_str`'s existing int/pointer heuristic
+for a generically-typed `int64_t` operand — the same one `str(x)` already
+uses in this emitter — for anything not statically `char *`/`double`).
+Deliberately narrow: only bare specs (no width/precision) with a matched
+spec/operand count; anything else falls through to the previous
+(unchanged) behavior. Wired into `_cpp_expr`'s `BinaryOp` `%` case ahead
+of the generic numeric-modulo fallback.
+
+Verified: `ipaddress.py`'s own isolated `.cpp` errors 15 -> 1 (the
+remaining one, `if ((other == self))` — an ISO C++ pointer/int comparison
+— is the SAME unannotated-parameter-defaults-to-int64_t hard bug tracked
+in `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`
+extended to ordinary function params, not this fix's concern). Also fixed
+the same crash class in `enum.py` (`_iter_bits_lsb`'s `%r`) and
+`ftplib.py` (`FTP.mlsd`'s `"MLSD %s" % path`) — see those docs.
+
+Full mandatory gate: `test_gimple.py` 252/252, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild 0
+skip lines (unchanged from baseline). Commit `d3154a6`.
+
+`ipaddress.py` as a whole still does not build end-to-end — the
+remaining pointer/int-comparison error above, plus the usual
+transitively-imported-file errors in a real whole-program build, are
+unrelated to this fix and not attempted here.
+
+
 ## Status (updated 2026-08-23 — CORRECTION to the 2026-08-20 entry: the isolated compile was only ever checking the .ci; the .cpp has 72 errors, all pre-existing shapes)
 
 The 2026-08-20 entry's "isolated compile of ipaddress.py's own code now

@@ -1,5 +1,28 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-24 — re-verified; 6 of 7 remaining errors GONE (incidental, no code change here); ONE error left, same root cause)
+
+Fresh isolated triage (`compile_to_gimple_with_cpp(do_imports=False)` +
+real `gcc-mp-15 -fgimple -fsyntax-only` / `g++-mp-15 -std=c++20
+-fsyntax-only`, not clang's `-fgimple`-incompatible driver — a
+methodology correction from prior sessions that may have used a
+different compiler): `.ci` side still 0 errors. `.cpp` side is down to
+**ONE** error (previously 7) — `'re' was not declared in this scope` at
+`_token_pattern = re.compile(...)`. The `"..." % (...)`-style literal
+%-formatting errors this doc's 2026-08-23 entry counted as 2 of the 7
+are GONE without any change in this session (not this session's `%`-
+format fix either — `_tokenize`'s own %-format calls must have started
+resolving via some other, unrelated, already-landed fix since 2026-08-23;
+not investigated further since the file's real remaining blocker is
+unchanged). Classification unchanged: the one remaining error is
+root cause #1 from the 2026-08-23 entry — a MODULE-LEVEL GLOBAL (the
+`re` module object) unresolvable in this coroutine-body model, which has
+no module-global-OBJECT read path (as opposed to a module-global
+SCALAR/string, which IS supported) at all. Real regex compilation would
+additionally need the regex engine wired through — genuine feature-sized
+gap, not attempted. Doc stays open.
+
+
 ## Status (updated 2026-08-23 — every .ci-side error GONE; all remaining errors are ONE generator's module-global regex access + %-format literals in the .cpp)
 
 Fresh isolated triage (`compile_to_gimple_with_cpp(do_imports=False)`):

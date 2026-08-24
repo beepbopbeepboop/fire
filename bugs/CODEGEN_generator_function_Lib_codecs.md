@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/codecs.py
 
+## Status (updated 2026-08-24 — re-verified unchanged)
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/codecs.py` still
+refuses at the module gate exactly as documented:
+`iterdecode, iterencode` refused for "a `*`/`**`-unpack call argument is
+not supported" — `getincrementalencoder(encoding)(errors, **kwargs)`,
+a dynamically-obtained callee whose real parameter names aren't known
+at compile time. Genuinely unfixable without a much larger dynamic-
+kwargs-dispatch feature (as already assessed). No change; doc stays open.
+
+
 ## Status (updated 2026-08-23 — re-verified unchanged; honest-refusal state confirmed still correct)
 
 Re-ran the repro against current code (this session landed three generic

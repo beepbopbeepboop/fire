@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/dis.py
 
+## Status (updated 2026-08-24 — re-verified unchanged; confirmed via `MOJO_DEBUG=1 mojo.py build`)
+
+Re-confirmed the 2026-08-23 entry exactly: `_get_instructions_bytes` is
+retried across the multi-pass loop (its FIRST-pass refusal reason,
+recorded via `_cpp_refusal_reasons.setdefault`, is a stale "consumed
+generator must be defined earlier" message that a plain single-shot
+build's error text still surfaces even though a LATER pass gets further
+— confirmed via `MOJO_DEBUG=1`, which shows the refusal reason actually
+change pass-to-pass, settling on "a `*`/`**`-unpack call argument is not
+supported" by pass 4). The concrete blocker remains
+`Positions(*next(co_positions, ()))` at line 799 — unchanged, no new
+mechanism found. Not attempted (same reasoning as before: a dynamic-
+arity spread call argument needs either a general unpack-argument
+feature or a narrow special case for `KnownStruct(*expr)` against a
+statically-known-arity constructor; out of scope for this pass). Doc
+stays open.
+
+
 ## Status (updated 2026-08-23 — re-verified; refusal set narrowed to ONE function, whose blocker is the `*`-unpack call argument)
 
 Fresh triage: the isolated compile now aborts on exactly ONE generator —
