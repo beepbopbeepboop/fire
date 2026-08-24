@@ -2737,6 +2737,73 @@ class Parser:
                         methods.append(_bs)
                     elif isinstance(_bs, IfStmt):
                         _cond_stack.append(_bs)
+        # A class-body DUNDER-METHOD ALIAS via chained assignment
+        # (`__iter__ = __len__ = __getitem__ = __setitem__ = __delitem__
+        # = keys = closed`, Lib/shelve.py's `_ClosedDict` idiom — every
+        # container-protocol dunder rebound to one shared implementation)
+        # parses as a `MultiAssignStmt`, which neither the `fields`
+        # comprehension above (VarDecl/AssignStmt only) nor the
+        # `methods` one (FunctionDef only) recognizes — it was silently
+        # dropped from the StructDef entirely, so e.g. `__setitem__`
+        # never reached `_struct_method_signatures`, and codegen's own
+        # `obj[key] = v` lowering fell through to "no `__setitem__`
+        # method and no backing container field" as if the class had no
+        # subscript support at all. Recognized here, narrowly: only when
+        # the RHS is a bare name that already resolves to a method
+        # defined earlier in this same class body (never a data value),
+        # each target name gets registered as its own method — a shallow
+        # copy of the referenced method's FunctionDef with `.name`
+        # replaced, so it compiles as an ordinary same-body method under
+        # the new name (small code duplication, no shared codegen state,
+        # same low-risk shape the conditional-def hoisting just above
+        # already uses for a different `methods`-population gap).
+        _alias_by_name = {m.name: m for m in methods}
+        for _s in body:
+            if not isinstance(_s, MultiAssignStmt):
+                continue
+            if not isinstance(_s.value, IdentExpr):
+                continue
+            _src = _alias_by_name.get(_s.value.name)
+            if _src is None:
+                continue
+            for _tgt in _s.targets:
+                if not isinstance(_tgt, IdentExpr) or _tgt.name in _alias_by_name:
+                    continue
+                _alias = dataclasses.replace(_src, name=_tgt.name)
+                methods.append(_alias)
+                _alias_by_name[_tgt.name] = _alias
+        # Same idiom, single-target form (`__copy__ = copy` /
+        # `__iter__ = keys` — Lib/weakref.py's WeakValueDictionary/
+        # WeakKeyDictionary; `__call__ = _idfunc` /
+        # `__instancecheck__ = __subclasscheck__` — Lib/typing.py;
+        # `__del__ = Close` — Lib/subprocess.py's Popen). This parses as
+        # a plain `AssignStmt`, so unlike the chained form above it WAS
+        # already being captured by the `fields` comprehension — as a
+        # bogus data field (a `_class_attrs` global of a made-up ctype,
+        # never the real callable), silently shadowing the method
+        # dispatch this name actually needs. Recognized the same way:
+        # RHS a bare name resolving to an already-known method: register
+        # the alias method AND drop the AssignStmt from `fields` (it was
+        # never a real field — leaving it there would double-register
+        # this name as both a method and a struct field).
+        _alias_assigns = []
+        for _s in body:
+            if not isinstance(_s, AssignStmt):
+                continue
+            if not (isinstance(_s.target, IdentExpr) and isinstance(_s.value, IdentExpr)):
+                continue
+            if _s.target.name in _alias_by_name:
+                continue
+            _src = _alias_by_name.get(_s.value.name)
+            if _src is None:
+                continue
+            _alias = dataclasses.replace(_src, name=_s.target.name)
+            methods.append(_alias)
+            _alias_by_name[_s.target.name] = _alias
+            _alias_assigns.append(_s)
+        if _alias_assigns:
+            _alias_assign_ids = {id(f) for f in _alias_assigns}
+            fields = [f for f in fields if id(f) not in _alias_assign_ids]
         # Struct-level `comptime NAME = expr` are aliases, not physical fields.
         # Capture them so member access can expand `self.NAME` to its expression
         # (this codegen does not monomorphize, so e.g. _words_size depends on the
