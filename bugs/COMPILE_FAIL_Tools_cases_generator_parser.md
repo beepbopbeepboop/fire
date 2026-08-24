@@ -4,6 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-08-23): ALREADY-FIXED end-to-end at the compile/link level.
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py`
+now exits 0 and produces a real arm64 Mach-O executable ("Built: parser") on
+branch `fix/tools-misc`. Both of the doc's historical blockers are resolved:
+the client-`.c` `'Parser' undeclared` errors no longer reproduce (master's
+absorbed struct-emission fixes), and the `__mojogen_lexer_tokenize_*`
+undefined-symbol link failure is gone — this branch's landed commit `736b349`
+("Fix build_executable dropping sibling-module coroutine units from the link
+line") is precisely the build_executable-path counterpart of the
+`_compile_imported_module` capture gap described in the 2026-08-20 entry below,
+and with it the full inline pipeline links lexer.py's coroutine unit.
+
+Runtime caveat (not a compile issue, recorded for completeness): executing the
+built binary prints `globals: unavailable in compiled mode` and then dies with
+`Unhandled exception: AttributeError: Token` — a separate, runtime-level gap in
+this codegen, out of scope for this COMPILE_FAIL doc. Compile+link status:
+fixed; doc can be closed once its sibling docs' shared context is no longer
+needed.
+
 ## Status (2026-08-20): the documented link-time gap (4th coroutine-code
 ## source) is FIXED at the mechanism level. `parser.py` itself is STILL
 ## blocked end-to-end, now by a DIFFERENT, earlier (compile-time, not

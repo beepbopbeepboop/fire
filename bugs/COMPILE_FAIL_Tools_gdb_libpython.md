@@ -4,7 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-10 — 3 of the 4 tuple-valued-yield refusals now FIXED; `PyDictObjectPtr.iteritems` remains refused for a distinct, deeper reason)
+## Status (2026-08-23): the up-front generator refusal is GONE entirely (all 4
+## tuple-yield generators, `iteritems` included, now pass the gate); new
+## blockers are .cpp-stage hard errors. Still open.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`, which includes
+master's absorbed lambda/tuple-yield coroutine work). No `cannot compile module`
+refusal is emitted anymore — the build proceeds all the way to compiling the
+generated `libpython_gen.cpp` and fails there with a fresh frontier of errors:
+
+- `PyObjectPtr` (the file's own base wrapper class, source line 160) "was not
+  declared in this scope" — the cpp emission never declares that struct;
+- `begin`/`end` undeclared (colliding with `std::ranges` names in scope);
+- 14× `invalid conversion from 'const char*' to 'int64_t'`;
+- `_mojogen_PyFramePtr_iter_locals_impl`: `obj_ptr_ptr = 0.pointer().pointer();`
+  — an unresolved receiver lowered to literal `0`, then `.pointer()` emitted as
+  a raw member call on the int literal (GCC reads it as a user-defined-literal,
+  `unable to find numeric literal operator 'operator""pointer'`) — same
+  opaque-receiver-method-call class as wasi `__main__.py`'s surviving error;
+- `too many arguments to function 'PyDictObjectPtr__get_entries(int64_t)'`.
+
+All of these are instances of the compiled-generator/cpp-emission project scope
+(struct declaration coverage/ordering in standalone coroutine units,
+unresolved-receiver method dispatch), not narrow fixes; not attempted here.
+Every previously documented blocker (including 2026-08-10's last refusal,
+`iteritems`'s mixed-shape yields) is nonetheless verified gone.
+
+## Status (updated 2026-08-10, historical — superseded by 2026-08-23 above)
 
 Implemented real tuple-valued-`yield` support this session (see
 `gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
