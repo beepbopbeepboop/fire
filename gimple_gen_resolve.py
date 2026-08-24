@@ -433,6 +433,14 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._async_api = gen._async_api
                 temp_gen._generator_api = gen._generator_api
                 temp_gen._generator_method_api = gen._generator_method_api
+                # share: the (home-qualifier, fn-name)-keyed cross-module
+                # generator registry — every module inlined into this
+                # whole-program compile must see every OTHER module's
+                # compiled generators, or an aliased import of one (`from
+                # a import walk as walk_a`) can't bind to its api at all.
+                # _imported_generator_bindings deliberately stays
+                # per-instance: each module's import bindings are its own.
+                temp_gen._generator_home_api = gen._generator_home_api
                 # share: link mode's own link-line accumulators
                 # (dylibs/objects the final `mojo.py build` link step
                 # needs — see compile_linked's own docstring) must be
@@ -459,6 +467,15 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._link_objects = gen._link_objects
                 temp_gen._link_dylibs = gen._link_dylibs
                 temp_gen._link_needs_cxx_box = gen._link_needs_cxx_box
+                # Cross-module generator scalar contracts: share the
+                # importing side's collected hints with THIS temp_gen —
+                # gen_module applies the entries matching its own
+                # module_name right after its _inferred_param_types init
+                # (see the merge there), so the generator eligibility pass
+                # resolves each unannotated param via _param_ctype from the
+                # caller's real char */double instead of int64_t defaults.
+                if getattr(gen, '_xmod_gen_param_hints', None):
+                    temp_gen._xmod_gen_param_hints = gen._xmod_gen_param_hints
                 code = temp_gen.gen_module(stmts)
 
                 # Link mode's 4th coroutine-code source: a PLAIN (non-
@@ -1257,6 +1274,13 @@ def _quick_type(gen, node) -> str:
         # pattern Pass 1.3e/1.3f already use for a plain unannotated-
         # callee return-type correction.
         if fname in gen._generator_api:
+            return 'MojoGenerator *'
+        # Same construction-shape rule for a generator reached through an
+        # ALIASED/qualified cross-module import (`from a import walk as
+        # walk_a`): the binding table records exactly the names THIS module
+        # imported as compiled generators, so `var g = walk_a("x")` quick-
+        # types to the same opaque MojoGenerator* a local definition would.
+        if fname in getattr(gen, '_imported_generator_bindings', ()):
             return 'MojoGenerator *'
         return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):

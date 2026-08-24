@@ -405,6 +405,76 @@ def gen_module_impl(self, stmts):
 
         find_imports(stmts)
 
+        # Cross-module generator scalar contracts (pre-pass, MUST run
+        # before any imported module is inlined): for every bare-name call
+        # whose callee is bound by a `from M import name [as alias]`
+        # anywhere in THIS module, where M's own `name` is a top-level
+        # GENERATOR FunctionDef, record the unanimous literal-scalar type
+        # of each argument — exactly Pass 1.3d's same-module contract rule,
+        # just collected early enough to be visible to the imported
+        # module's temp_gen (which runs BEFORE this module's inference
+        # passes and would otherwise generate the unit with int64_t
+        # defaults, mis-typing every char */double argument and yielded
+        # value). Literal args only: at this point none of this module's
+        # local-variable inference has run, so an identifier argument has
+        # no trustworthy type yet; non-unanimous or non-literal sites hint
+        # nothing and keep today's behavior.
+        if self.do_imports:
+            _xg_alias_mod: dict = {}
+            _xg_alias_orig: dict = {}
+            _xg_calls = []
+            for _xg_n in _walk_ast(stmts):
+                if isinstance(_xg_n, FromImportStmt) and not getattr(_xg_n, 'wildcard', False):
+                    for _xg_name, _xg_alias in (_xg_n.names or []):
+                        _xg_bound = _xg_alias if _xg_alias else _xg_name
+                        _xg_pm = _xg_alias_mod.get(_xg_bound)
+                        if _xg_pm is None:
+                            _xg_alias_mod[_xg_bound] = _xg_n.module
+                            _xg_alias_orig[_xg_bound] = _xg_name
+                        elif _xg_pm != _xg_n.module or _xg_alias_orig.get(_xg_bound) != _xg_name:
+                            _xg_alias_mod[_xg_bound] = None  # ambiguous binding — no hints
+                elif isinstance(_xg_n, CallExpr) and isinstance(_xg_n.func, IdentExpr):
+                    _xg_calls.append(_xg_n)
+            for _xg_call in _xg_calls:
+                _xg_cname = _xg_call.func.name
+                if _xg_cname not in _xg_alias_mod:
+                    continue
+                _xg_mod = _xg_alias_mod.get(_xg_cname)
+                if not _xg_mod:
+                    continue
+                _xg_orig = _xg_alias_orig.get(_xg_cname)
+                try:
+                    _xg_parsed = self._parsed_import(_xg_mod)[2] or []
+                except Exception:
+                    continue
+                _xg_fn = None
+                for _xg_s in _xg_parsed:
+                    if isinstance(_xg_s, FunctionDef) and _xg_s.name == _xg_orig:
+                        _xg_fn = _xg_s
+                        break
+                if _xg_fn is None or not _xg_fn.is_generator:
+                    continue  # ordinary callees keep Pass 1.3d's own ordering
+                # Composite string key ("<qualifier>::<name>"), not a
+                # genuine tuple — see _xmod_gen_param_hints's docstring
+                # (gimple_codegen.py) for why a real tuple key breaks this
+                # dict's self-hosted compilation.
+                _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
+                _xg_pnames = [pn.lstrip('*') for pn, _pt in (_xg_fn.params or [])]
+                for _xi, _xa in enumerate(_xg_call.args):
+                    if _xi >= len(_xg_pnames):
+                        break
+                    if isinstance(_xa, StringLiteral):
+                        _xt = 'char *'
+                    elif isinstance(_xa, FloatLiteral):
+                        _xt = 'double'
+                    else:
+                        continue
+                    _xg_map = self._xmod_gen_param_hints.setdefault(_xg_key, {})
+                    if _xg_map.get(_xg_pnames[_xi], _xt) != _xt:
+                        _xg_map[_xg_pnames[_xi]] = None  # sites disagree — no hint
+                    else:
+                        _xg_map[_xg_pnames[_xi]] = _xt
+
         for module_name in sorted(modules_to_compile):
             if module_name not in self._compiled_modules:
                 self._compiled_modules.add(module_name)
@@ -1409,6 +1479,24 @@ def gen_module_impl(self, stmts):
                         for name, alias in s.names:
                             sym_name = alias if alias else name
                             sym_info = exports.get(name, {})
+                            # A compiled free-function generator in another
+                            # module of this whole-program compile: bind the
+                            # alias to that module's api (via the shared
+                            # (home-qualifier, name) registry) instead of
+                            # registering an ORDINARY imported symbol —
+                            # Phase 2a skipped ordinary emission for it in
+                            # its defining module, so an ordinary extern +
+                            # call site would reference a symbol nothing
+                            # defines ("too many arguments to function
+                            # 'a_walk_...'; expected 0"). do_imports-only:
+                            # cross-module generator units are only emitted/
+                            # linked on the inline-compile pipeline.
+                            if not s.wildcard and self.do_imports:
+                                _gmh_api = self._generator_home_api.get(
+                                    s.module.replace('.', '_').replace('-', '_') + '::' + name)
+                                if _gmh_api is not None:
+                                    self._imported_generator_bindings[sym_name] = _gmh_api
+                                    continue
                             _register_sym(sym_name, name, sym_info)
                 except Exception:
                     _debug_note('error registering sibling module imports', s.module)
@@ -1417,6 +1505,17 @@ def gen_module_impl(self, stmts):
                 if not s.wildcard:
                     for _fb_name, _fb_alias in s.names:
                         _fb_sym = _fb_alias if _fb_alias else _fb_name
+                        # Same generator-binding rule as the resolved-exports
+                        # branch above: exports can fail to load while the
+                        # module itself still compiled fine as part of this
+                        # same program's closure (its generators are in the
+                        # registry either way).
+                        if self.do_imports:
+                            _fb_gmh = self._generator_home_api.get(
+                                s.module.replace('.', '_').replace('-', '_') + '::' + _fb_name)
+                            if _fb_gmh is not None:
+                                self._imported_generator_bindings[_fb_sym] = _fb_gmh
+                                continue
                         if self._from_import_name_is_submodule(s.module, _fb_name):
                             self.imported_symbols[_fb_sym] = {
                                 'module': f"{s.module}.{_fb_name}",
@@ -1748,6 +1847,33 @@ def gen_module_impl(self, stmts):
             for m in s.methods:
                 key = f"{s.name}_{m.name}"
                 self._inferred_param_types[key] = self._infer_param_types(m)
+    # Cross-module generator scalar contracts (see the pre-pass beside the
+    # modules_to_compile loop that collects them): entries whose
+    # home-module qualifier matches THIS compile's own module_name are
+    # this module's own generators as seen from an importing module.
+    # Merged here — AFTER the body-evidence pass above (which REPLACES
+    # each function's whole entry, so an earlier merge would be wiped) and
+    # before every consumer: the generator eligibility pass resolves each
+    # unannotated param via _param_ctype from these, so the emitted
+    # coroutine unit's signature and yield type carry the caller's real
+    # char */double instead of int64_t defaults. Only ever non-empty for a
+    # temp_gen compiling an imported module of a whole-program build (the
+    # sharing block in _compile_imported_module); a root/self-host
+    # compile's own qualifier never matches its own collected keys.
+    if self._xmod_gen_param_hints and self.module_name:
+        _xg_self_q = self.module_name.replace('.', '_').replace('-', '_')
+        for _xg_key in self._xmod_gen_param_hints:
+            # Composite "<qualifier>::<name>" string key, not a tuple —
+            # see _xmod_gen_param_hints's docstring (gimple_codegen.py).
+            _xg_hq, _xg_hfn = _xg_key.split('::', 1)
+            if _xg_hq != _xg_self_q:
+                continue
+            _xg_pmap = self._xmod_gen_param_hints[_xg_key]
+            _xg_tgt = self._inferred_param_types.setdefault(_xg_hfn, {})
+            for _xg_pn in _xg_pmap:
+                _xg_ct = _xg_pmap[_xg_pn]
+                if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
+                    _xg_tgt[_xg_pn] = _xg_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
     for s in all_functions:
@@ -2019,6 +2145,42 @@ def gen_module_impl(self, stmts):
                 if isinstance(_gi.else_body, list):
                     _scan_cpp_nested_imports(_gi.else_body)
     _scan_cpp_nested_imports(stmts)
+
+    def _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes):
+        """Shared registration for one supported free-function generator
+        (both eligibility passes below call this — the blocks were verbatim
+        duplicates): records the api under the bare name, seeds THIS gen's
+        func_param_types/_func_param_defaults for `<base>_start`, appends
+        the coroutine translation unit, and — for cross-module discovery —
+        files the same api dict into _generator_home_api keyed by the
+        composite "<home-module qualifier>::<original name>" string, the
+        whole-program view
+        FromImportStmt sites consult to bind aliased imports of another
+        module's compiled generator (_imported_generator_bindings). The
+        qualifier half uses _func_qualifier tier 1 — the exact same
+        computation _gen_cpp_generator_unit used to build `base` itself,
+        so registry key and emitted symbol always agree."""
+        self._supported_generators[s.name] = s
+        self._generator_api[s.name] = {
+            'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
+            'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+        }
+        _gq = self._func_qualifier(s.name)
+        if _gq:
+            self._generator_home_api[_gq + '::' + s.name] = self._generator_api[s.name]
+        self.func_param_types[f"{base}_start"] = param_ctypes
+        _gen_dflts = getattr(s, 'param_defaults', None) or {}
+        if _gen_dflts:
+            _dflt_list = [(pn, dv) for pn, dv in _gen_dflts.items()]
+            self._func_param_defaults[f"{base}_start"] = _dflt_list
+            # Cross-module call sites register from this snapshot (their own
+            # _func_param_defaults never saw the defining module's pass).
+            # The home-registry value IS this api dict (same object), so
+            # both views see the key.
+            self._generator_api[s.name]['defaults'] = _dflt_list
+        self._generator_cpp_units.append(cpp_text)
+        _generator_fns.pop(id(s), None)
+
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
@@ -2034,18 +2196,7 @@ def gen_module_impl(self, stmts):
             _debug_note(f'generator {s.name!r} not eligible for C++ '
                         'coroutine path, falling back to honest refusal', e)
             continue
-        self._supported_generators[s.name] = s
-        self._generator_api[s.name] = {
-            'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-            'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
-        }
-        self.func_param_types[f"{base}_start"] = param_ctypes
-        _gen_dflts = getattr(s, 'param_defaults', None) or {}
-        if _gen_dflts:
-            self._func_param_defaults[f"{base}_start"] = [
-                (pn, dv) for pn, dv in _gen_dflts.items()]
-        self._generator_cpp_units.append(cpp_text)
-        _generator_fns.pop(id(s), None)
+        _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes)
 
     for _pass in range(3):
         if not _generator_fns:
@@ -2064,18 +2215,7 @@ def gen_module_impl(self, stmts):
                 _debug_note(f'generator {s.name!r} not eligible for C++ '
                             f'coroutine path (pass {_pass+2}), falling back', e)
                 continue
-            self._supported_generators[s.name] = s
-            self._generator_api[s.name] = {
-                'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
-                'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
-            }
-            self.func_param_types[f"{base}_start"] = param_ctypes
-            _gen_dflts = getattr(s, 'param_defaults', None) or {}
-            if _gen_dflts:
-                self._func_param_defaults[f"{base}_start"] = [
-                    (pn, dv) for pn, dv in _gen_dflts.items()]
-            self._generator_cpp_units.append(cpp_text)
-            _generator_fns.pop(_gm_id, None)
+            _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes)
 
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _async_fns

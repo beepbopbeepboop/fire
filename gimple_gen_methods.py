@@ -1189,45 +1189,65 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # StructName_method(...) lowering (there is no such ordinary C
     # function for it; see gen_module's Phase 2a skip for
     # _supported_generator_methods).
+    #
+    # The lookup also fires for a CLASS-LEVEL receiver (`Widget.make_
+    # range(...)` on a compiled @classmethod generator): there `ot` is
+    # the class-ref lowering (int64_t), which never ends in ' *', so
+    # the pointer-typed branch below used to miss it entirely and the
+    # call fell through to the ordinary ClassName_method(...) lowering
+    # — a symbol gen_module's Phase 2a deliberately never emits for a
+    # compiled generator method ("implicit declaration of function
+    # 'Widget_make_range'"). The api entry's emitted signature carries
+    # an opaque int64_t placeholder in the receiver slot (never read by
+    # the unit — see _gen_cpp_generator_unit's cls handling), so passing
+    # the class-ref value positionally, exactly like the ordinary
+    # classmethod branch below prepends `(ot, ov)`, is all the ABI
+    # needs.
     _gm_struct_name = gimple_exprtypes._struct_name_of(ot) if isinstance(ot, str) and ot.endswith(' *') else None
+    _gm_api = None
     if _gm_struct_name is not None:
         _gm_api = gen._generator_method_api.get((_gm_struct_name, method))
-        if _gm_api is not None:
-            arg_pairs = [gen.lower_expr(a) for a in node.args]
-            all_args = [(ot, ov)] + arg_pairs
-            # Pad missing trailing params with keyword args / real
-            # defaults — see the identical free-function generator-call
-            # padding in _lower_call's `fname_raw in self._generator_api`
-            # branch for the full rationale (same root cause: a keyword
-            # or defaulted argument was silently dropped, producing "too
-            # few arguments to function '<base>_start'"). `self` occupies
-            # slot 0 here, so padding starts from `all_args`, not
-            # `arg_pairs`.
-            _gm_kwargs = getattr(node, 'kwargs', []) or []
-            _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
-            if _gm_expected and len(all_args) < len(_gm_expected):
-                _gm_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gm_kwargs}
-                _gm_kwarg_values = list(_gm_kwarg_dict.values())
-                _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
-                while len(all_args) < len(_gm_expected):
-                    if _gm_kwarg_values:
-                        all_args.append(_gm_kwarg_values.pop(0))
-                        continue
-                    # -1: `self` is slot 0 in all_args but has no entry
-                    # in param_defaults (defaults are keyed by the
-                    # ORIGINAL Python params, which exclude `self`).
-                    _pos = len(all_args) - 1
-                    _dv = _gm_dflts[_pos][1] if 0 <= _pos < len(_gm_dflts) else None
-                    if _dv is not None:
-                        all_args.append(gen._default_expr_to_pair(_dv))
-                    else:
-                        all_args.append(('int', '0'))
-            else:
-                for _, _ke in _gm_kwargs:
-                    gen.lower_expr(_ke)
-            t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
-            gen._generator_var_api[t] = _gm_api
-            return 'MojoGenerator *', t
+    elif (isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and func.obj.name not in gen.var_types
+            and func.obj.name not in gen._compiled_modules
+            and ot in ('int', 'int64_t')):
+        _gm_api = gen._generator_method_api.get((func.obj.name, method))
+    if _gm_api is not None:
+        arg_pairs = [gen.lower_expr(a) for a in node.args]
+        all_args = [(ot, ov)] + arg_pairs
+        # Pad missing trailing params with keyword args / real
+        # defaults — see the identical free-function generator-call
+        # padding in _lower_call's `fname_raw in self._generator_api`
+        # branch for the full rationale (same root cause: a keyword
+        # or defaulted argument was silently dropped, producing "too
+        # few arguments to function '<base>_start'"). `self` occupies
+        # slot 0 here, so padding starts from `all_args`, not
+        # `arg_pairs`.
+        _gm_kwargs = getattr(node, 'kwargs', []) or []
+        _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
+        if _gm_expected and len(all_args) < len(_gm_expected):
+            _gm_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gm_kwargs}
+            _gm_kwarg_values = list(_gm_kwarg_dict.values())
+            _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
+            while len(all_args) < len(_gm_expected):
+                if _gm_kwarg_values:
+                    all_args.append(_gm_kwarg_values.pop(0))
+                    continue
+                # -1: `self` is slot 0 in all_args but has no entry
+                # in param_defaults (defaults are keyed by the
+                # ORIGINAL Python params, which exclude `self`).
+                _pos = len(all_args) - 1
+                _dv = _gm_dflts[_pos][1] if 0 <= _pos < len(_gm_dflts) else None
+                if _dv is not None:
+                    all_args.append(gen._default_expr_to_pair(_dv))
+                else:
+                    all_args.append(('int', '0'))
+        else:
+            for _, _ke in _gm_kwargs:
+                gen.lower_expr(_ke)
+        t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
+        gen._generator_var_api[t] = _gm_api
+        return 'MojoGenerator *', t
 
     # ── Class/static method call: ClassName.method(args) → ClassName_method(args) ──────
     # Must intercept BEFORE the opaque-int coerce below, which would misidentify

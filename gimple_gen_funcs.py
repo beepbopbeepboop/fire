@@ -222,6 +222,22 @@ def _gen_stmt_FromImportStmt(gen, node):
                 _scope[alias if alias else name] = _scope_qual
     for name, alias in node.names:
         symbol_name = alias if alias else name
+        # A compiled free-function generator reached through a
+        # function-body-scoped cross-module import: bind it exactly like
+        # the top-level registration loop does (shared _generator_home_api,
+        # keyed by "<DEFINING module's qualifier>::<ORIGINAL name>") and
+        # skip the ordinary-symbol resolution below —
+        # the defining module never emitted an ordinary C function for a
+        # compiled generator (Phase 2a skip), so an ordinary extern/call
+        # would reference a symbol nothing defines. do_imports-only, same
+        # reason as the top-level site.
+        if (getattr(gen, 'do_imports', False)
+                and not getattr(node, 'wildcard', False)):
+            _fi_gmh = getattr(gen, '_generator_home_api', {}).get(
+                node.module.replace('.', '_').replace('-', '_') + '::' + name)
+            if _fi_gmh is not None:
+                gen._imported_generator_bindings[symbol_name] = _fi_gmh
+                continue
         # `from PKG import SUBMOD` where SUBMOD names a real submodule
         # FILE (PKG/SUBMOD.py or PKG/SUBMOD/__init__.py), not a symbol
         # defined inside PKG's own source — register it exactly like
