@@ -515,12 +515,19 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._assign_target(tgt, set_et, sev)
             total = gen._new_val('int64_t', f"mojo_list_len ({lp})")
             star_start = gen._new_val('int64_t', f"(int64_t){n_before}")
-            star_stop = gen._new_val('int64_t', f"{total} - {n_after}")
+            # GIMPLE (-fgimple) requires both operands of a binary expr to
+            # have the identical type, so each literal operand must go
+            # through its own int64_t temp — a bare C `int` literal next to
+            # an int64_t SSA name is a hard gcc verifier error ("type
+            # mismatch in binary expression"), not a warning.
+            n_after64 = gen._new_val('int64_t', f"(int64_t){n_after}")
+            star_stop = gen._new_val('int64_t', f"{total} - {n_after64}")
             star_v = gen._new_val('MojoList *', f"mojo_list_slice ({lp}, {star_start}, {star_stop})")
             gen._elem_types[star_v] = elem_type
             gen._assign_target(star_target, 'MojoList *', star_v)
             for j, tgt in enumerate(after):
-                idx64 = gen._new_val('int64_t', f"{star_stop} + {j}")
+                j64 = gen._new_val('int64_t', f"(int64_t){j}")
+                idx64 = gen._new_val('int64_t', f"{star_stop} + {j64}")
                 sev = gen._new_val(set_et, f"mojo_list_get_{suf} ({lp}, {idx64})")
                 gen._assign_target(tgt, set_et, sev)
             return
