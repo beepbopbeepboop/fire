@@ -1,5 +1,65 @@
 # CODEGEN_generator_function: Lib/shelve.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — `_ClosedDict`'s own real blocker FIXED; cascade + a separate line-attribution artifact remain)
+
+Fresh re-verification found this doc's "0 own-code errors" claim was
+stale in a way its own isolated-compile check couldn't catch: a real
+`python3 mojo.py build .../Lib/shelve.py` (not just the isolated
+`do_imports=False` coroutine-path check the 2026-08-23 entry relied on)
+showed `Shelf`'s own `_ClosedDict` class (`shelve.py:66`, `'Marker for a
+closed dict' — __iter__ = __len__ = __getitem__ = __setitem__ =
+__delitem__ = keys = closed`) hitting a hard module refusal: `` `
+_ClosedDict[...] = ...` subscript store on user-defined struct
+'_ClosedDict' (no `__setitem__` method and no backing container
+field)``, from `Shelf.__setitem__`'s `self.dict[key...] = ...` once
+`self.dict` has been reassigned a `_ClosedDict()` by `Shelf.close()`.
+
+Root cause (genuinely shelve.py's own code, not a cascade issue):
+`_ClosedDict`'s dunder methods are all defined via one CHAINED
+class-body alias assignment (`a = b = c = ... = closed`), which
+`mojo_compiler.py`'s `_parse_class` parses as a `MultiAssignStmt` —
+neither its `fields` comprehension (`VarDecl`/`AssignStmt` only) nor
+its `methods` one (`FunctionDef` only) recognized this node at all, so
+`__setitem__` (and every other aliased dunder) never reached
+`_struct_method_signatures`, and the class looked to codegen like it
+had NO subscript-protocol support whatsoever. **Fixed** in
+`mojo_compiler.py`'s `_parse_class` (commit `6e92df8`): a chained or
+single-target class-body assignment whose RHS is a bare name resolving
+to an already-known method now registers every target name as its own
+method (a `dataclasses.replace`d shallow copy of the source method).
+Also covers the single-target form of the same idiom found elsewhere in
+this cluster (`subprocess.py`'s `__del__ = Close`, `weakref.py`'s
+`__iter__ = keys`/`__copy__ = copy`, `typing.py`'s `__call__ = _idfunc`).
+Verified via an isolated repro (`mojo.py build` + run) and via
+`_ClosedDict`'s own isolated coroutine-path compile, which now succeeds
+(was: hard refusal). Full quality gate: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 `skip <module>:` lines.
+
+**shelve.py still does not build end-to-end.** A fresh full rebuild
+after the fix shows 146 real `error:` lines, dominated by `argparse.py`
+(44), `_collections_abc.py` (22), `pickle.py` (19) — all
+already-documented, out-of-scope transitive cascades (dynamic
+`%`-format, `**kwargs`-dict-subscript, etc., per `bugs/hard/
+CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md`
+and siblings) — plus 12 lines newly attributed to `shelve.py` itself at
+line numbers (457, 795, 836, 935, 952, 966, 988, 1006) that don't
+exist in the file (`shelve.py` is only 250 lines). This is the SAME
+`#line`-directive-filename mislabeling already root-caused (but not
+fixed, diagnostics-only, high-risk shared-machinery territory) for
+`weakref.py` in `bugs/hard/
+CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md`'s
+"Not fixed" section — an inherited-mixin-method "flattening" mechanism
+(here, `Shelf`'s `collections.abc.MutableMapping` mixin methods) that
+updates the `#line` NUMBER per source line but never re-points the
+`#line` FILENAME when it switches into the mixin's own source. Not
+re-attempted here for the same reason that doc gives (narrowly-scoped
+changes to this exact shared machinery have previously caused
+corpus-wide regressions even after a clean quality-gate pass). Two of
+the 12 lines (113, 142) fall within shelve.py's real line range and
+were not further disambiguated as real-vs-misattributed. Doc stays
+open — not a generator-codegen-cluster failure either way.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
 
 Re-verified against current HEAD via a real `python3 mojo.py build

@@ -1,5 +1,30 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unaffected by this session's fixes; `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` (the "same deferred family" this doc pointed at below) has since been fully resolved and deleted, but tempfile.py's own 3 lines are a distinct chained-getattr shape not covered by that fix)
+
+Re-ran the isolated coroutine-path compile fresh, post-`fd909e9` and
+post-this-session's own `6e92df8` (class-body dunder-alias methods —
+doesn't apply here, no alias-assignment dunders found in tempfile.py).
+`compile_to_gimple_with_cpp(do_imports=False)` on tempfile.py still
+succeeds cleanly; `_TemporaryFileWrapper.__iter__` unaffected either
+way. Checked whether the now-resolved dynamic-attribute doc's fix
+(`git log`: `dfc0bee`/`2cf2ab1`/`a05a5c7`/... — real per-object
+attribute storage) happens to also cover the 3 `request for member
+'name'` chained-getattr lines (609/668/703,
+`getattr(getattr(file, 'buffer', file), 'raw', raw).name = ...`) — it
+does not: those fixes address dynamic attribute SET/GET on a struct
+instance whose declared type is known, not this shape's core problem
+(the intermediate `getattr(x, 'attr', default)` calls themselves have
+no static return type to hang a further `.name` access off of). Still
+open, still the same deferred family in spirit (no static type for a
+chained dynamic-attribute read), just not literally fixed by that
+doc's landed work. The `operator.py:270` transitive blocker
+(`attrgetter`/`itemgetter` closed over a tuple of CALLABLE values) is
+unchanged — same "opaque callable value has no representation"
+structural family this session confirmed independently via
+`pickletools.py`'s `getpos` and `weakref.py`'s `wr()` (see those docs'
+2026-08-24 entries). Doc stays open.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified; own-code set down to the 3 chained-getattr errors)
 
 Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3). The

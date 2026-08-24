@@ -1,5 +1,27 @@
 # CODEGEN_generator_function: Lib/tokenize.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — "own error count now ZERO" was stale; two own generators refuse honestly on real remaining gaps)
+
+Same `fd909e9`-timing issue as this cluster's `pickletools.py`/
+`weakref.py` 2026-08-24 entries: re-run fresh, the isolated coroutine-
+path compile this doc's 2026-08-23 entry relied on now raises (`fd909e9`
+landed later the same day): `_generate_tokens_from_c_tokenizer` calls
+`type(...)` (Python's dynamic-type-introspection builtin — no
+coroutine-body lowering exists for it, a real, separate feature) and
+`tokenize` (the free function) calls `TokenInfo(...)` — a dynamically-
+created `collections.namedtuple('TokenInfo', ...)` type, not a `class`
+statement, so it never registers as a known struct constructor the
+coroutine emitter can dispatch to. Both are genuine, different
+structural gaps (dynamic `type()` reflection; a compile-time-invisible
+namedtuple-as-class), not narrow bugs — not attempted, matching this
+cluster's scoping for the sibling opaque-value/dynamic-reflection gaps.
+
+tokenize.py's own `def open(filename)`/`def any(*choices)` shadowing
+fixes and the `__author__` cross-contamination fix (below) all still
+hold — this is a NEW pair of refusals only now visible because
+`fd909e9` turned what used to be a silent bare-identifier miscompile
+into an honest one. Doc stays open; not a narrow fix.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — tokenize.py's own error count now ZERO)
 
 The last tokenize.py-own error (`23:28 assignment to 'char *' from

@@ -1,5 +1,18 @@
 # CODEGEN_generator_function: Lib/symtable.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unchanged; unaffected by this session's fixes)
+
+Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`
+("refuse unresolved callees honestly") and post-this-session's own
+`6e92df8` (class-body dunder-alias methods) — neither applies to this
+file: `compile_to_gimple_with_cpp(do_imports=False)` on symtable.py
+still succeeds cleanly (its own generator `yield flagname` unaffected
+by either change, unlike `pickletools.py`/`weakref.py`/`tokenize.py` in
+this same cluster, which turned out to have been relying on
+now-corrected silent-miscompile behavior). Classification unchanged:
+NOT a generator-codegen-cluster failure; blocked purely on the
+already-documented transitive cascade. Doc stays open per convention.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
 
 Re-verified against current HEAD via a real `python3 mojo.py build

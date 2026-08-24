@@ -1,5 +1,42 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — "all 8 generators compile, 0 own-code errors" was stale; `items`/`keys`/`values` refuse honestly on a real remaining gap; one unrelated dunder-alias bug fixed)
+
+Same story as `bugs/CODEGEN_generator_function_Lib_pickletools.md`'s
+2026-08-24 entry: the 2026-08-23 "0 own-code errors" verdict below was
+from an isolated `compile_to_gimple_with_cpp(do_imports=False)` check
+that predates the same-day `fd909e9` commit ("generators: refuse
+unresolved callees honestly"). Re-run fresh, that same isolated check
+now raises: `WeakValueDictionary.items`/`keys`/`values` (and their
+`WeakKeyDictionary` siblings) each hit `` a call to unresolved callee
+'wr(...)' is not supported ...`` — `wr` is a weakref VALUE read out of
+`self.data`'s dict (`for k, wr in self.data.copy().items(): ... wr()`),
+called to dereference it. This is another instance of the same "opaque
+callable value has no representation" family as `pickletools.py`'s
+`getpos` gap and `operator.py`'s `attrgetter`/`itemgetter` — calling an
+arbitrary VALUE (here, a weakref object read out of a dict) rather than
+a statically-known bound method or lambda. Not attempted, same scoping
+rationale as the sibling docs.
+
+Separately, this session's `mojo_compiler.py` fix (commit `6e92df8`,
+class-body dunder-alias methods — see `bugs/
+CODEGEN_generator_function_Lib_shelve.md`'s 2026-08-24 entry for the
+full mechanism) DOES apply here: `WeakValueDictionary`/`WeakKeyDictionary`
+both define `__copy__ = copy` and `__iter__ = keys` via the single-
+target form of this idiom, previously silently dropped into a bogus
+data field with no real dispatch. Effect on this file: `__iter__` is
+now correctly recognized as its own (generator) method sharing `keys`'s
+body, so it refuses for the exact same honest `wr(...)` reason `keys`
+does — consistent, not a regression (previously `__iter__` had no
+compiled dispatch at all, silently). Verified via isolated compile: no
+new/different errors, `__iter__` simply joins `keys`/`items`/`values`'s
+refusal set instead of being invisible to it.
+
+**weakref.py still does not build.** Classification unchanged: not
+fixable as a narrow generator-codegen bug; blocked on the same
+structural callable-value gap flagged across this cluster. Doc stays
+open.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the `_cpp_for_stmt` tuple-target gap FIXED; all 8 of weakref.py's own generators now compile; own-code error count 0)
 
 The `for k, wr in self.data.copy().items():` blocker left by the

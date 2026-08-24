@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/typing.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, isolated coroutine-path compile still clean)
+
+Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`
+("refuse unresolved callees honestly") and post-this-session's own
+`6e92df8` (class-body dunder-alias methods — applies here: `typing.py`
+defines `__call__ = _idfunc` and `__instancecheck__ =
+__subclasscheck__` via the single-target form of the idiom, now
+correctly registered as real methods instead of silently becoming bogus
+data fields; no error-shape change observed, since neither alias was
+previously implicated in the 4 documented residuals). `compile_to_
+gimple_with_cpp(do_imports=False)` on typing.py still succeeds cleanly
+— unlike `pickletools.py`/`weakref.py`/`tokenize.py` in this cluster,
+typing.py's own generator sites were never relying on the
+now-corrected silent-miscompile behavior `fd909e9` fixed. The 4 raw
+own-code error lines from a real whole-program build remain exactly as
+documented below (all already-tracked deferred families). Doc stays
+open.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified; 4 own residuals, all in already-documented deferred families)
 
 Re-verified against current HEAD via a real `python3 mojo.py build

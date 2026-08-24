@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/turtle.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unaffected by this session's fixes)
+
+Re-ran the isolated coroutine-path compile fresh, post-`fd909e9`
+("refuse unresolved callees honestly") and post-this-session's own
+`6e92df8` (class-body dunder-alias methods — doesn't apply here, no
+alias-assignment dunders found in turtle.py). `compile_to_gimple_
+with_cpp(do_imports=False)` on turtle.py still succeeds cleanly; all 3
+of its own generator sites remain unaffected either way. The 5
+documented own-code error lines (189 `eval()`, 3078/3314/3379
+`Vec2D`-as-tuple-subclass operator overloads, 4170 dead code) are
+unchanged — the `Vec2D(tuple)` case is the same "subclassing a builtin
+container type" structural gap already flagged elsewhere in this
+project as feature-sized (`bugs/COMPILE_FAIL_collections___init__.md`'s
+`Counter(dict)`/`OrderedDict(dict)` writeup), not attempted here. Doc
+stays open.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged from the 2026-08-20 state)
 
 Re-verified against current HEAD via a real `python3 mojo.py build

@@ -1,5 +1,23 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — re-verified fresh, findings unchanged; not fixable narrowly)
+
+Re-ran the isolated coroutine-path compile fresh (post-`fd909e9`,
+post-this-session's `6e92df8` dunder-alias fix — neither applies to
+this file's own blockers). Confirms the 2026-08-23 entry's diagnosis
+exactly: `iter_importers` (`getattr(obj, name)` with a non-static
+name), `iter_modules` (`importers = map(get_importer, path)` then
+consumed later — `map()` has no coroutine-body lowering; a narrower fix
+scoped to "a KNOWN module-level function passed to `map`" was
+considered but would still leave `walk_packages` and `iter_importers`
+blocked on their own separate gaps, so not attempted), and
+`walk_packages` (consumes `iter_modules`, which is defined LATER in the
+module than `walk_packages` itself — this single-pass emitter requires
+a consumed generator to be defined earlier) all still refuse for the
+same reasons. Three independent, genuinely feature-sized gaps stacked
+on three functions — confirmed, not narrow. Doc stays open, unchanged
+classification.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged; correctly NOT fixed)
 
 Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3) via a real

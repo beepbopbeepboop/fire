@@ -1,5 +1,51 @@
 # CODEGEN_generator_function: Lib/pickletools.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — the 2026-08-23 "`_genops` now compiles" claim was stale; `_genops` refuses again, honestly, on a real remaining gap)
+
+Re-verified from scratch (a real `python3 mojo.py build .../Lib/
+pickletools.py`, and an isolated `compile_to_gimple_with_cpp(do_imports
+=False)` matching the exact repro the entry below used). Both now
+raise: `` cannot compile module: function(s) _genops (generator
+function(s), contain a `yield`/`yield from`) ... Unsupported shape(s):
+_genops: a call to unresolved callee 'getpos(...)' is not supported in
+a compiled generator/coroutine body (not a builtin this emitter
+supports, a known module-level/imported function, a same-module struct
+constructor, or a declared callable-value local).`` — i.e. the exact
+refusal the entry below says was closed.
+
+This is not a regression of the tuple-yield fix; it's a LATER same-day
+commit (`fd909e9`, "generators: refuse unresolved callees honestly")
+converting what used to be a silent bare-identifier miscompile into an
+honest `_UnsupportedGeneratorShape` refusal. Before `fd909e9`, `_cpp_
+expr`'s CallExpr fallback emitted ANY unresolved callee as a bare `name
+(...)` C++ call unconditionally — including `getpos()` after `pickletools.
+py:2273`'s `getpos = data.tell` (a bound-method-VALUE assignment off a
+PARAMETER of unknown/opaque type, not a known struct), which is invalid
+C++ whenever `getpos`'s declared type isn't the coroutine model's one
+callable-value category (`_CPP_CALLABLE_CTYPE`) — which it wasn't here,
+since `_cpp_is_callable_value_expr` only recognizes a bound method off
+`self` or an already-known STRUCT-typed local, not an opaque/unknown-
+typed one like `data`. So the 2026-08-23 entry's "compiles clean"
+verdict was checking only that the Python call didn't raise — it never
+ran the emitted text through a real C++ compiler, and would have
+produced silently-broken output had the whole-program build reached
+codegen for this function before `fd909e9` landed same-day.
+
+**Current, accurate state**: `_genops`'s `getpos = data.tell` /
+`getpos = lambda: None` (branch-dependent bound-method-or-lambda local,
+then called later as `getpos()`) is a genuine instance of this
+codegen's already-documented "opaque callable value has no
+representation" structural gap — the same family as `Lib/operator.py`'s
+`attrgetter`/`itemgetter` blocker (`bugs/CODEGEN_generator_function_Lib_
+tempfile.md`'s 2026-08-11 entry) and `Lib/codecs.py`'s kwargs-spread-
+against-dynamic-callee blocker. Extending `_cpp_is_callable_value_expr`
+to cover a bound method off an OPAQUE (not statically-known-struct)
+receiver would need real runtime bound-method dispatch for arbitrary
+values, not a narrow one-spot fix — not attempted here, consistent with
+this cluster's established scoping for the sibling cases. Doc stays
+open; every prior "generator-codegen gap closed" claim below this entry
+about `_genops` specifically should be read as superseded by this one.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the last generator gap (varying-arity tuple yields) FIXED; `_genops` now compiles; file still blocked by transitive-only errors)
 
 Stacked gap 3 from the 2026-08-11/08-20 entries below is now closed:
