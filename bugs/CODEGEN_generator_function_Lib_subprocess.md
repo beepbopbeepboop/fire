@@ -1,5 +1,68 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (updated 2026-08-24, worktree fix/gen-core — the doc's own previously-documented real blocker is now fixed upstream (deleted `bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`); a NEW own-code bug found, root-caused, a fix attempted and REVERTED after it regressed a real test)
+
+`bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`
+(this doc's previously-cited real blocker, the threading/os bare-name
+generator-symbol collision) is gone from `bugs/` — resolved and deleted
+by commit `2c9fe02` ("codegen: module-qualify + cross-module hint
+compiled generator symbols"), already on this branch. A fresh full
+`python3 mojo.py build .../Lib/subprocess.py` no longer shows that
+error at all.
+
+**A different, real own-code bug surfaced in its place**: 3 `error:`
+lines now attributed to `subprocess.py` itself, at real in-range lines
+(2252, 2257 — the file is 2257 lines): `` implicit declaration of
+function 'mojo_signal' `` + `` unexpected RHS for assignment `` on
+`Popen.terminate`'s `self.send_signal(signal.SIGTERM)` and
+`Popen.kill`'s `self.send_signal(signal.SIGKILL)`.
+
+Root cause: `signal` (the imported module, `subprocess.py:49`'s plain
+`import signal`) collides with `signal` the C standard library function
+name (`gimple_ctypes._C_RESERVED_FUNCS`) AND, independently, with
+`Lib/signal.py`'s own top-level `def signal(signalnum, handler):` — so
+`'signal' in gen.func_return_types` is true once `signal.py` is
+transitively inlined. `_lower_MemberExpr`'s "zero-arg function used in
+member-access context" fallback (`gimple_gen_exprs.py`, the same
+fallback the already-fixed `Parameter.ATTR`/`enum.py` "Mechanism 4" bug
+in `bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
+mismatches.md` guards against for PascalCase imports) has no equivalent
+guard for a lowercase MODULE name that happens to also be a real
+function name — so `signal.SIGTERM` gets misread as "call the
+zero-arg function `signal()`, then read `.SIGTERM` off the result",
+emitting the invalid `mojo_signal ()` call.
+
+**A fix was attempted and reverted.** Added a guard excluding
+`node.obj.name` from the fallback whenever it's a known module import
+(`gen.imported_symbols.get(name, {}).get('module')` truthy) — the same
+shape as the existing PascalCase guard, just broadened to real module
+markers regardless of case. `test_gimple.py` stayed 252/252, but
+`test_module_cache.py` regressed 74/76 (2 new failures, both the SB-1
+per-scope-import cross-module miscompile-regression test — "the
+compiled binary gets BOTH distinct, correct values ... the shape that
+used to silently miscompile"). Investigating why `gen.imported_symbols`
+turned out NOT to contain `'signal'` (or even `'os'`/`'sys'`) when
+inspected post-hoc after a full `do_imports=True` compile suggests this
+dict's state during live `_lower_MemberExpr` calls doesn't match what a
+simple membership check assumes — likely bound up with the same
+per-lexical-scope import-tracking machinery `test_module_cache.py`'s
+SB-1 tests specifically exist to guard (`gimple_solvers.py`'s
+`DispatchSolver` / per-scope import resolution). Reverted immediately
+(clean revert, `git diff` empty) rather than dig further into this
+shared, regression-prone machinery under this session's time budget —
+matches this project's own documented precedent (`bugs/hard/
+CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md`'s
+Mechanism 4 section: an analogous cross-module resolution-ordering fix
+passed the full gate clean and still had to be reverted after a
+corpus-wide regression). Left as a known, root-caused, NOT-fixed bug —
+worth a dedicated, careful pass with the per-scope-import machinery in
+view, not a quick follow-up.
+
+subprocess.py still does not build end-to-end (127 total `error:`
+lines on a fresh build, dominated by `argparse.py` (44) and
+`_collections_abc.py` (22) — the same already-documented transitive
+cascade every other doc in this cluster hits). Doc stays open.
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — re-verified, unchanged)
 
 Re-verified against current HEAD (post f7cf084/53b1aaa/65706f3) via a real
