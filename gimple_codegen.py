@@ -416,6 +416,22 @@ def _compute_exc_descendants(all_struct_defs):
 _BRACKET_HEAD_RE = re.compile(r'\b(?:fn|def)\s+(\w+)\s*\[([^\]]*)\]')
 
 
+def _unpack_target_leaf_names(target: str) -> list:
+    """Flatten a tuple-unpack target string (`'(a, b)'`,
+    `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
+    preserves) into its LEAF variable names. Bracket-aware at every
+    level: a naive `.split(',')` tore nested slots into paren-carrying
+    fragments that then leaked into declared-name sets (or worse, into
+    emitted C declarations verbatim)."""
+    t = target.strip()
+    if t.startswith('(') and t.endswith(')'):
+        names = []
+        for part in ginf._split_top_level_comma(t[1:-1]):
+            names.extend(_unpack_target_leaf_names(part))
+        return names
+    return [t] if t else []
+
+
 def _declared_vars_body(stmts) -> set:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
     result: set = set()
@@ -427,10 +443,7 @@ def _declared_vars_body(stmts) -> set:
             name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
             if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
                 # tuple target `for a, b in ...`: each unpacked name is declared
-                for part in name[1:-1].split(','):
-                    p = part.strip()
-                    if p:
-                        result.add(p)
+                result.update(_unpack_target_leaf_names(name))
             elif name:
                 result.add(name)
             result |= _declared_vars_body(node.body)

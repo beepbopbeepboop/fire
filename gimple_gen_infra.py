@@ -2464,7 +2464,17 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     else:
         return
 
-    gen._emit(f"  {gen0.target} = {start_v};")
+    # Every emitted reference below must go through _cname: _declare_var
+    # renames targets colliding with C reserved identifiers (`index` is a
+    # POSIX function, so `_declare_var('index')` declares `_var_index` and
+    # records the mapping in _c_names) — emitting the raw Python name made
+    # the loop write an UNDECLARED `index` while body reads (which resolve
+    # through _c_names) read the declared-but-never-assigned `_var_index`
+    # (GCC: "lvalue required as left operand of assignment"; real repro:
+    # Tools/scripts/summarize_stats.py's `{...: v for (index, v) in
+    # enumerate(...)}` inside OpcodeStats.get_specialization_failure_kinds).
+    tgt_c = gen._cname(gen0.target)
+    gen._emit(f"  {tgt_c} = {start_v};")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -2472,12 +2482,12 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     if dynamic_step:
         t_lt = gen._new_temp('_Bool'); t_gt = gen._new_temp('_Bool')
         t_sp = gen._new_temp('_Bool'); cond_t = gen._new_temp('_Bool')
-        gen._emit(f"  {t_lt} = {gen0.target} < {stop_v};")
-        gen._emit(f"  {t_gt} = {gen0.target} > {stop_v};")
+        gen._emit(f"  {t_lt} = {tgt_c} < {stop_v};")
+        gen._emit(f"  {t_gt} = {tgt_c} > {stop_v};")
         gen._emit(f"  {t_sp} = {step_v} > 0;")
         gen._emit(f"  {cond_t} = {t_sp} ? {t_lt} : {t_gt};")
     else:
-        cond_t = gen._new_val('_Bool', f"{gen0.target} {cond_op} {stop_v}")
+        cond_t = gen._new_val('_Bool', f"{tgt_c} {cond_op} {stop_v}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
@@ -2492,8 +2502,8 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
     # range(...)]` and friends), not just some narrow edge case.
     # Found via pathlib/__init__.py's `tuple(self[i] for i in
     # range(*idx.indices(len(self))))`.
-    st = gen._new_val('int64_t', f"{gen0.target} + {step_v}")
-    gen._emit(f"  {gen0.target} = {st};")
+    st = gen._new_val('int64_t', f"{tgt_c} + {step_v}")
+    gen._emit(f"  {tgt_c} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
 
@@ -2518,7 +2528,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # treated as a pointer by `_lower_binary_tail`'s `_actual_
         # types.get(rv, ...)` lookup, producing "passing argument 2 of
         # 'mojo_range' makes integer from pointer without a cast".
-        var_names = [v.strip() for v in inner_str.split(',')]
+        # Bracket-aware split (see _gen_for_list's identical fix): a naive
+        # `inner_str.split(',')` tore a NESTED target like
+        # `label, (value, den)` into the bogus fragments `(value` / `den)`
+        # which were then declared and assigned VERBATIM as C identifiers
+        # (`(value = _t10;` / `den) = _t11;`) — hard syntax errors at the
+        # comprehension site (real: Tools/scripts/summarize_stats.py's
+        # `[... for label, (value, den) in object_stats.items()]`).
+        var_names = _split_top_level_comma(inner_str)
         is_dict_items = it_val in gen._dict_items_val_elems
         value_elem = gen._dict_items_val_elems.get(it_val) if is_dict_items else None
         slot_types = gen._tuple_slot_types.get(it_val)
@@ -2532,7 +2549,20 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             else:
                 se = pair_elem
             slot_elems.append(se)
-            gen._declare_var(vn, se)
+
+        def _declare_target_name(vn, se):
+            # A parenthesized slot is not itself a variable — recurse so
+            # only its INNER names get declared, as boxed int64_t (the
+            # assignment recursion below reads the slot as an opaque
+            # boxed pair; mirrors _gen_for_list's identical convention).
+            if vn.startswith('(') and vn.endswith(')'):
+                for _nv in _split_top_level_comma(vn[1:-1].strip()):
+                    _declare_target_name(_nv, 'int64_t')
+            else:
+                gen._declare_var(vn, se)
+
+        for vn, se in zip(var_names, slot_elems):
+            _declare_target_name(vn, se)
         len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -2544,13 +2574,25 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit_label(bb_body)
         raw_elem = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
         sub_list = gen._new_val('MojoList *', f"(MojoList *){raw_elem}")
-        for i, vn in enumerate(var_names):
-            se = slot_elems[i]
+
+        def _emit_slot_assign(ptr, vn, i, se):
+            # Nested tuple target: the slot is an opaque boxed pair —
+            # cast and recurse one level (deeper nesting recurses
+            # identically), mirroring _gen_for_list. Checked BEFORE any
+            # accessor dispatch so even a wrongly-str-typed slot can't
+            # emit a parenthesized name verbatim.
+            if vn.startswith('(') and vn.endswith(')'):
+                raw_n = gen._new_val('int64_t', f"mojo_list_get_int ({ptr}, {i})")
+                nested_ptr = gen._new_val('MojoList *', f"(MojoList *){raw_n}")
+                nested_names = _split_top_level_comma(vn[1:-1].strip())
+                for j, nn in enumerate(nested_names):
+                    _emit_slot_assign(nested_ptr, nn, j, 'int64_t')
+                return
             cv = gen._cname(vn)
             suf = gimple_ctypes.TypeLattice.list_suffix(se)
             vt = gen.var_types.get(vn, se)
             if suf == 'str':
-                sub_str = gen._new_val('char *', f"mojo_list_get_str ({sub_list}, {i})")
+                sub_str = gen._new_val('char *', f"mojo_list_get_str ({ptr}, {i})")
                 if vt == 'char *':
                     gen._emit(f"  {cv} = {sub_str};")
                 else:
@@ -2558,11 +2600,14 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
                     gen._emit(f"  {cv} = {sub_val};")
                     gen._actual_types[vn] = 'char *'
             else:
-                raw = gen._new_val('int64_t', f"mojo_list_get_int ({sub_list}, {i})")
+                raw = gen._new_val('int64_t', f"mojo_list_get_int ({ptr}, {i})")
                 if vt == 'int64_t':
                     gen._emit(f"  {cv} = {raw};")
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cv)
+
+        for i, vn in enumerate(var_names):
+            _emit_slot_assign(sub_list, vn, i, slot_elems[i])
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._emit(f"  goto {bb_post};")
         gen._emit_label(bb_post)
@@ -2679,7 +2724,10 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
     else:
-        gen._emit(f"  {gen0.target} = {val};")
+        # _cname, not the raw Python name: see _compr_range_loop's
+        # reserved-identifier comment (`index` et al. are renamed by
+        # _declare_var; body reads resolve through _c_names).
+        gen._emit(f"  {gen._cname(gen0.target)} = {val};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2704,12 +2752,13 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     key_tmp = gen._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
     tgt = gen0.target
     vt = gen.var_types.get(tgt, 'char *')
+    tgt_c = gen._cname(tgt)
     if vt in ('int64_t', 'int', 'int32_t'):
         vp = gen._new_val('void *', f'(void *){key_tmp}')
         box = gen._new_val('int64_t', f'(int64_t){vp}')
-        gen._emit(f"  {tgt} = {box};")
+        gen._emit(f"  {tgt_c} = {box};")
     else:
-        gen._emit(f"  {tgt} = (char *) {key_tmp};")
+        gen._emit(f"  {tgt_c} = (char *) {key_tmp};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2731,7 +2780,7 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{more_t} != 0")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen0.target} = mojo_set_iter_val_int ({iter_t});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_set_iter_val_int ({iter_t});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

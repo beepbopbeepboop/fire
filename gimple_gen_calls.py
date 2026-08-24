@@ -318,6 +318,33 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # other comptime parameter this narrow mechanism doesn't touch)
     # left `func` unresolved inside the method body / its nested
     # closures, emitted as a bogus, never-defined bare C identifier call.
+    # Python collections-module constructors: collections.Counter[T](...),
+    # collections.defaultdict(...) / collections.OrderedDict(...) — in
+    # bracketed AND bare form. These used to fall through to the
+    # subscripted-MemberExpr METHOD dispatch below (receiver = the module
+    # object's own boxed handle), whose generic fallback just ECHOED the
+    # receiver back ("int64_t.Counter() stubbed") — so `stats =
+    # collections.Counter[str]()` bound the MODULE handle itself as the
+    # "counter", and every later `stats[k] += ...` store then wrote
+    # through a bogus pointer (segfault; real repro:
+    # Tools/scripts/summarize_stats.py's load_raw_data). A Counter IS a
+    # dict in this codegen's model (str keys, subscript read/write, +=)
+    # — construct a real MojoDict. The bracket parameter(s) are a typing
+    # alias at runtime (real Python: `Counter[str]` is just Counter), so
+    # they're lowered-and-discarded exactly like the List[T]/Dict[K,V]
+    # block below.
+    if ((isinstance(node.func, gimple_ctypes.MemberExpr)
+         and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+         and node.func.obj.name == 'collections'
+         and node.func.member in ('Counter', 'defaultdict', 'OrderedDict'))
+        or (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.func.obj, gimple_ctypes.MemberExpr)
+            and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.obj.name == 'collections'
+            and node.func.obj.member in ('Counter', 'defaultdict', 'OrderedDict'))):
+        t = gen._new_val('MojoDict *', 'mojo_dict_new ()')
+        for a in node.args: gen.lower_expr(a)
+        return 'MojoDict *', t
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.MemberExpr):
         method_name = node.func.obj.member
         extra_args = []
@@ -2441,6 +2468,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # direct-cast special case immediately below.
     if fname_raw == 'int' and len(arg_pairs) == 1:
         at, av = arg_pairs[0]
+        # A var statically declared int64_t but _actual_types-tracked as
+        # 'char *' holds a BOXED STRING (e.g. a tuple-unpack slot typed by
+        # the loop machinery's int64_t convention while the runtime value
+        # came from `line.split(":")`). Python `int(x)` on it must PARSE
+        # the digits — returning x unchanged leaked that same
+        # _actual_types['char *'] entry into the enclosing expression,
+        # where binary '+' then dispatched to string concatenation
+        # (`mojo_str_from_int(old) + str_cat(...)`) instead of integer
+        # addition; even type-correct consumers read the pointer bits as
+        # the "int". Route through mojo_make_int, exactly like the
+        # statically-char* `int("42")` case this special case already
+        # handles. Real repro: Tools/scripts/summarize_stats.py's
+        # load_raw_data: `stats[key.strip()] += int(value)`.
+        if at in ('int', 'int64_t', '_Bool') and gen._actual_types.get(av) == 'char *':
+            cp = gen._new_val('char *', f'(char *){av}')
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_make_int', [('char *', cp)])
         if at == 'double':
             return 'int64_t', gen._new_val('int64_t', f'(int64_t){av}')
         if at == 'int64_t':
@@ -2451,6 +2494,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # float(x) — direct cast for numeric types
     if fname_raw == 'float' and arg_pairs:
         at, av = arg_pairs[0]
+        # Same boxed-string trap as int() above: `(double)<char*>` casts
+        # pointer BITS, silently producing garbage; parse instead.
+        if at in ('int64_t', 'int', '_Bool') and gen._actual_types.get(av) == 'char *':
+            cp = gen._new_val('char *', f'(char *){av}')
+            return 'double', gen._call_expr('double', 'mojo_make_float', [('char *', cp)])
         if at in ('int64_t', 'int', '_Bool'): return 'double', gen._new_val('double', f'(double){av}')
         if at == 'double':                    return 'double', av
 

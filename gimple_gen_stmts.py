@@ -202,7 +202,12 @@ def _gen_stmt_VarDecl(gen, node):
     # assignments to avoid GIMPLE's implicit multi-value decl which causes
     # "redeclaration with no linkage" when the names were already declared.
     if isinstance(node.name, str) and ',' in node.name and node.value is not None:
-        names = [n.strip() for n in node.name.split(',')]
+        # Bracket-aware split: a naive `.split(',')` tore a nested slot
+        # `(b, c)` into the bogus fragments `(b` / `c)` (declared verbatim
+        # as C identifiers). One name per TOP-LEVEL slot keeps the
+        # position-to-_tuple_elem_value mapping intact.
+        names = [n.strip() for n in gimple_ctypes._split_top_level_commas(node.name)
+                 if n.strip()]
         vtype, v = gen.lower_expr(node.value)
         for i, n in enumerate(names):
             if n == '_':
@@ -1309,11 +1314,28 @@ def _gen_stmt_AugAssignStmt(gen, node):
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
         elif ot in ('int', 'int64_t'):
             # Opaque int/int64_t used as subscript target — could be a
-            # list OR a dict (e.g. a closure-captured env field, whose
-            # static type isn't tracked); check like _gen_stmt_AssignStmt
-            # does rather than always assuming MojoList.
+            # list OR a dict (e.g. a closure-captured env field, or a
+            # stubbed constructor like `collections.Counter[str]()`,
+            # whose static type isn't tracked). Dispatch EXACTLY like
+            # the subscript READ path (_lower_subscript's opaque-int
+            # case), because an augmented subscript assignment is a
+            # read-modify-write: the read half already picks dict when
+            # the index is string-typed ("no list is indexable by a
+            # string"), and this write half used to dispatch on the
+            # actual-type check ALONE — falling into its MojoList
+            # fallback for any not-statically-dict container. A
+            # str-keyed `stats[k] += v` on such a container then READ
+            # mojo_dict_get_int (dict) but STORED via
+            # mojo_list_set_int(list) — a GCC int-conversion hard error
+            # at best (v a char*), silent header-as-list memory
+            # corruption at worst (v an int; real repro:
+            # Tools/scripts/summarize_stats.py's load_raw_data, whose
+            # `stats` is a stubbed Counter and which segfaulted as a
+            # minimal 6-line repro before erroring there).
             actual_type = gen._get_actual_type(ot, obj_v)
-            if actual_type == 'MojoDict *':
+            idx_is_str = (it in ('char *', 'MojoStr *')
+                          or gen._get_actual_type(it, idx_v) == 'char *')
+            if actual_type == 'MojoDict *' or (idx_is_str and actual_type not in ('MojoList *', 'MojoSet *')):
                 ip = gen._new_temp('int64_t')
                 dp = gen._new_temp('MojoDict *')
                 gen._emit(f"  {ip} = (int64_t){obj_v};")

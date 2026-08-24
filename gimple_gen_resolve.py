@@ -2603,6 +2603,16 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     elem = gen._elem_of(it_val)
     gen._declare_var(idx_var, 'int64_t')
     gen._declare_var(val_var, elem if elem else 'int64_t')
+    # Emitted references go through _cname: _declare_var renames targets
+    # colliding with C reserved identifiers (`index` is a POSIX function →
+    # `_var_index`), and emitting the raw Python name wrote an UNDECLARED
+    # identifier while body reads resolved through _c_names to the declared
+    # but never-assigned mangled name (GCC: "lvalue required as left
+    # operand of assignment"; real repro: Tools/scripts/summarize_stats.py's
+    # `{kind_to_text(index, opcode): value for (index, value) in
+    # enumerate(failure_kinds) if value}`).
+    idx_c = gen._cname(idx_var)
+    val_c = gen._cname(val_var)
 
     len64 = gen._new_val('int64_t', f'mojo_list_len ({it_val})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
@@ -2615,27 +2625,27 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     gen._emit_label(bb_body)
     if start_val is not None:
         disp_idx = gen._new_val('int64_t', f"{idx64} + {start_val}")
-        gen._emit(f"  {idx_var} = {disp_idx};")
+        gen._emit(f"  {idx_c} = {disp_idx};")
     else:
-        gen._emit(f"  {idx_var} = {idx64};")
+        gen._emit(f"  {idx_c} = {idx64};")
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'double':
-        gen._emit(f"  {val_var} = mojo_list_get_double ({it_val}, {idx64});")
+        gen._emit(f"  {val_c} = mojo_list_get_double ({it_val}, {idx64});")
     elif suf == 'str':
         temp_str = gen._new_val('char *', f"mojo_list_get_str ({it_val}, {idx64})")
         target_type = gen._type_of(val_var)
         if target_type == 'char *':
-            gen._emit(f"  {val_var} = {temp_str};")
+            gen._emit(f"  {val_c} = {temp_str};")
         else:
             int_ptr = gen._new_val('int64_t', f"(int64_t){temp_str}")
-            gen._emit(f"  {val_var} = {int_ptr};")
+            gen._emit(f"  {val_c} = {int_ptr};")
     else:
         raw64 = gen._new_val('int64_t', f"mojo_list_get_int ({it_val}, {idx64})")
         target_type = gen._type_of(val_var)
         if target_type and target_type != 'int64_t':
-            gen._safe_coerce_emit('int64_t', target_type, raw64, val_var)
+            gen._safe_coerce_emit('int64_t', target_type, raw64, val_c)
         else:
-            gen._emit(f"  {val_var} = (int64_t) {raw64};")
+            gen._emit(f"  {val_c} = (int64_t) {raw64};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2657,7 +2667,7 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen0.target} = mojo_str_char_at ({it_val}, {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({it_val}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2693,7 +2703,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit_label(bb_body)
     gen._ptr_helpers_needed.add('char')
     addr = gen._new_val('char *', f"_mojo_at_char ({it_val}, {idx64})")
-    gen._emit(f"  {gen0.target} = *{addr};")
+    gen._emit(f"  {gen._cname(gen0.target)} = *{addr};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
