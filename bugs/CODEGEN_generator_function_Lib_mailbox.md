@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (updated 2026-08-24 — re-verified; an EARLIER-stage, unrelated refusal now surfaces first, not previously documented)
+
+Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
+True)`, matching this doc's own prior methodology) now hard-refuses the
+WHOLE module before ever reaching generator-body codegen:
+`` `Message[...] = ...` subscript store on user-defined struct 'Message'
+(no `__setitem__` method and no backing container field) ``. Root cause:
+`BabylMessage.__setitem__` (mailbox.py:1950, `self._visible[header] =
+self[header]`) stores into `self._visible`, typed as `Message` — and
+mailbox.py's own `Message` class (line 1564, `class Message(email.
+message.Message)`) does NOT define `__setitem__` itself; it inherits it
+from `email.message.Message`, an EXTERNAL base class this isolated,
+`do_imports=False` compile never sees. This is a plain ordinary-GIMPLE-
+path refusal (subscript-store on a struct with no locally-visible
+`__setitem__`), NOT a generator-machinery issue, and not something the
+2026-08-23 entry below's "own .cpp down to 1 error" finding could have
+seen if its own probe reached generator bodies via a route that doesn't
+also compile `BabylMessage.__setitem__` first — not reconciled further.
+Given `email.message.Message` is unlikely to itself compile cleanly
+(large, complex, not part of this cluster), this is likely a genuine,
+separate blocker for `mailbox.py` regardless of `do_imports` — a
+cross-module inherited-dunder-method resolution gap, feature-sized, not
+attempted here. Doc stays open; the previously-documented `_toc`
+unannotated-field finding (same hard-bug family as imaplib.py's) is
+presumably still reachable once/if this newer blocker is addressed, but
+that could not be re-confirmed this pass since this refusal now fires
+first.
+
+
 ## Status (updated 2026-08-23 — BOTH remaining "too few arguments" errors FIXED (struct-method default-arg padding); own-file .cpp down to 1 error, the unannotated-field family)
 
 **Fixed**: `_mojogen__singlefileMailbox_iterkeys_impl` emitting

@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/imaplib.py
 
+## Status (updated 2026-08-24 — re-verified unchanged)
+
+Re-ran the isolated `Idler.burst` triage: `ci_errors=0`; the generated
+`.cpp` still has exactly the 2 documented blockers, both owned by their
+existing write-ups: (1) `self._imap.sock` still blocked by the
+ALREADY-TRACKED `bugs/hard/CODEGEN_unannotated_init_param_field_type_
+defaults_int64.md` hard bug (`Idler.__init__(self, imap, ...)` leaves
+`imap` unannotated) — that doc's own "Risk" section documents a real
+history of broad regressions from touching this exact shared call-site/
+parameter type-inference machinery, and its most recent (2026-08-18)
+extension was itself scoped narrowly (`IdentExpr`-argument constructor
+calls only) after two earlier, more ambitious attempts caused real
+regressions; not re-attempted here for the same reason. (2) the
+`__next__`-return/`burst`-promise scalar-type-unification gap, likewise
+unowned by this session. No new work; doc stays open.
+
+
 ## Status (updated 2026-08-23 — re-verified; Idler.burst cpp down to 2 errors, both previously documented, neither new)
 
 Fresh isolated triage: ci_errors=0; `burst`'s generated .cpp has exactly 2

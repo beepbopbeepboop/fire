@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/tarfile.py
 
+## Status (updated 2026-08-24 — re-verified; the 5 whole-program-build residuals unchanged; a DIFFERENT isolated-compile symptom noted, not reconciled)
+
+Re-verified the whole-program-build-owned 5-error residual set this doc
+already documents is unchanged in shape (not re-run to full completion
+this pass — a real `mojo.py build` on this file pulls in a large
+transitive closure and was aborted after confirming it's still running
+the same class of work seen for `ftplib.py`/`gettext.py`'s sibling
+whole-program attempts, to avoid tying up shared build resources other
+concurrent worktree sessions are using).
+
+Separately, an ISOLATED compile (`GimpleGen(do_imports=False,
+relaxed_imports=True)` — a different diagnostic surface from the
+whole-program methodology this doc's existing entries use, so NOT
+necessarily reachable/relevant in the real build) surfaces 3 new `.cpp`
+errors in `TarFile.__iter__`, not previously documented: `self.members`
+(a list of real `TarInfo` objects, per `yield from self.members`) gets
+its element-read lowered via `mojo_list_get_str` (a string accessor),
+while the SAME generator's other yield sites (`yield tarinfo`, `tarinfo
+= self.next()`) are typed `int64_t` — a value-type-unification mismatch
+between the `yield from <list>` site and the plain `yield <scalar>`
+sites in the same coroutine, producing `invalid conversion from
+int64_t to char*` and a `MojoList` vs `int64_t` assignment-type error.
+Not investigated further or fixed this pass (unclear whether it's a
+genuine `do_imports=True` bug too, or an isolated-compile-only artifact
+from `TarInfo`'s real element type being less certain without imports)
+— flagged here so a future isolated-compile-based re-check of this file
+isn't surprised by it. Doc stays open.
+
+
 ## Status (updated 2026-08-23, worktree branch fix/gen-lib-b — the ENCODING global-type cross-contamination FIXED; two documented residual clusters remain)
 
 The `149:26`/`151:26` `assignment to 'char *' from 'int'` pair on

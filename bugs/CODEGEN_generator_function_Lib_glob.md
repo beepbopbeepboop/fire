@@ -1,5 +1,16 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (updated 2026-08-24 — re-verified unchanged)
+
+Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
+True)`): identical refusal — `self.select_exists` on `_GlobberBase` is a
+compiled GENERATOR method referenced as a plain value (not called),
+which this scalar coroutine-body model has no first-class-value
+representation for (only the `<base>_start/_resume/_value/_destroy` API
+exists, not a `MojoBoundMethod*`-callable form). Same feature gap as
+before; no change. Doc stays open.
+
+
 ## Status (updated 2026-08-23 — re-verified; honest refusal for `self.select_exists` as a plain value unchanged)
 
 Isolated compile reproduces the exact `RuntimeError: cannot compile module:

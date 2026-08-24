@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-24 — `%r`-format crash in `_iter_bits_lsb` FIXED; one unrelated arity bug newly surfaced)
+
+Re-verified with `GimpleGen(do_imports=False, relaxed_imports=True)`
+(bypasses the 4 already-documented `cls`-attribute refusals so the REST
+of the file still gets a `.cpp` emitted, rather than the hard whole-
+module `RuntimeError` a plain `mojo.py build`/non-relaxed isolated
+compile produces — same methodology `dis.py`'s doc already uses). This
+surfaces 2 further, previously-masked issues once past those 4 refusals:
+
+1. **Fixed**: `_iter_bits_lsb`'s `raise ValueError("%r is not a positive
+   integer" % original)` — the coroutine-body `%`-format crash (see
+   `bugs/CODEGEN_generator_function_Lib_ipaddress.md`'s matching entry
+   for the shared root cause and fix, `gimple_cpp_core.py`'s new
+   `_cpp_percent_format`). Confirmed via isolated compile: this specific
+   error is gone.
+2. **NOT fixed, newly surfaced, unrelated**: `Flag.__iter__` (line 200)
+   emits `Flag__iter_member_(self, self->_value_)` — 2 arguments — against
+   `_iter_member_` declared taking only `(Flag *)` (1 argument, no
+   `_value_`). A real arity/signature-resolution mismatch for a struct-
+   method call inside a coroutine body, unrelated to the `cls`-attribute
+   refusals or the `%`-format fix; not investigated further (out of
+   scope for this pass — a narrow but real bug worth its own follow-up).
+
+Full mandatory gate for the `%`-format fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skip lines. Commit `d3154a6`.
+
+`enum.py` as a whole still does not build — the 4 already-documented
+`cls`-attribute refusals (still genuinely feature-sized, unchanged) plus
+the newly-surfaced `_iter_member_` arity bug above remain. Doc stays
+open.
+
+
 ## Status (updated 2026-08-23 — re-verified unchanged; refusals remain the verified-correct ones)
 
 Re-ran `MOJO_DEBUG=1 mojo.py build` + isolated compile: identical 4 refusal

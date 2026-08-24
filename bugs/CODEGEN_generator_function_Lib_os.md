@@ -1,5 +1,21 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (updated 2026-08-24 — re-verified; tagged-union conclusion stands, out of scope for this cluster)
+
+Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
+True)`) surfaces `walk`/`fwalk` refused on an EARLIER, shallower symptom
+now (`fspath(...)`/`close(...)`/`list(...)` unresolved-callee refusals —
+builtins this narrow relaxed-import isolated harness doesn't wire up),
+but this doesn't change the underlying diagnosis: per the 2026-08-11/
+2026-08-23 entries below, `walk`'s control flow fundamentally depends on
+runtime type discrimination over a heterogeneously-typed stack
+(`isinstance(top, tuple)` on elements that are sometimes `str`, sometimes
+3-tuples), which this codegen's statically-typed value model has no
+representation for at all — a tagged-union redesign, not a narrow fix.
+Per this session's assignment, deliberately NOT attempted (disproportionate
+scope for this cluster). Doc stays open, honestly triaged as out of scope.
+
+
 ## Status (updated 2026-08-23 — re-verified; walk/_fwalk/fwalk refusal unchanged, tagged-union conclusion stands)
 
 Isolated compile reproduces the identical refusal (now naming `walk`,
