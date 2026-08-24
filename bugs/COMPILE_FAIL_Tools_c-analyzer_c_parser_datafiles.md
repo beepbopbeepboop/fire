@@ -4,6 +4,42 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.p
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23 — failure shape changed: consumption-ordering refusal + ordinary-path GCC errors now surface)
+
+Re-ran against current master tip (`626f3f0`). The two 2026-08-10
+blockers below are superseded by a different, later-reaching failure
+set (tuple-yield still holds; `_iter_decls_tsv`'s own tuple yield is no
+longer refused):
+
+1. `iter_decls_tsv` refuses with the consumption-ordering message —
+   `for info, extra in _iter_decls_tsv(infile, extracolumns)` consumes
+   a generator defined LATER in the module, and the coroutine drive-loop
+   only supports generators already translated in an earlier pass:
+
+```
+[gimple_codegen] generator 'iter_decls_tsv' not eligible for C++
+coroutine path, falling back to honest refusal: `for ... in
+_iter_decls_tsv(...)` does not consume a generator this compile has
+itself already translated via the C++20-coroutine path (either it's not
+a generator this codegen supports, or it's defined LATER in this module
+— the consumed generator must be defined earlier)
+```
+
+2. Independently, the ORDINARY (non-generator) GIMPLE path for this
+   file's plain functions now reaches g++ and fails there:
+   `write_decls` emits `invalid use of void expression`
+   (datafiles.py:57) and `variable or field '_t13'/'_t16' declared
+   void` (:60/:64); transitively-imported `c_parser/info.py:825` emits
+   `non-trivial conversion in 'parm_decl'`. These are new observations,
+   previously masked by the earlier generator refusals; not
+   root-caused further this session.
+
+The transitively-imported `c_parser/info.py` render methods also refuse
+on their scalar-only yields ("every `yield` must carry a value, and all
+values must agree on one scalar type"), same as that doc documents. All
+mechanisms remain within the tracked coroutine/ordinary-codegen gap
+families; doc kept open; not attempted.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; other, pre-existing gaps now block)
 
 Implemented real tuple-valued-`yield` support this session (see

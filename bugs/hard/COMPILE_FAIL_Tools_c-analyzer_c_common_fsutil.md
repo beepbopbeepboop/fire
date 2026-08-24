@@ -1,5 +1,30 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (re-verified 2026-08-23, unchanged)
+
+Re-ran against current master tip (`626f3f0`): identical outcome to the
+2026-08-20 update below. `iter_files` is still refused for exactly the
+same reason — its `get_files = (lambda *a, **k: _walk(*a, walk=_files,
+**k))` is a parameterized `*args`/`**kwargs`-forwarding lambda, which
+the (real, but deliberately narrow) zero-arg/single-plain-param lambda
+support does not attempt:
+
+```
+[gimple_codegen] generator 'iter_files' not eligible for C++ coroutine
+path, falling back to honest refusal: a `lambda` with more than one
+parameter, a `*`/`**`-forwarding parameter, or a parameter default is
+not supported as a value inside a compiled generator/coroutine body
+(only a zero-argument lambda or a single plain-parameter lambda, e.g.
+`lambda: None` / `lambda x: x`, is supported)
+Error building: cannot compile module: function(s) iter_files ...
+```
+
+The whole-module pre-check aborts at `iter_files`, so
+`process_filenames`'s 4-tuple yield (second documented blocker) is not
+re-flagged this run — presumably still present behind it, unverified.
+Both gaps remain structural per the analysis below; no code change —
+doc re-verified only.
+
 ## Status (updated 2026-08-20, LambdaExpr blocker narrowed, NOT closed for this file)
 
 `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` has been fixed

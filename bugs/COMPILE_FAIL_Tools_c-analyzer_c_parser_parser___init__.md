@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23 — fails EARLIER now, on `**kwargs`→generator-callee forwarding; old GCC errors no longer reached)
+
+Re-ran against current master tip (`626f3f0`). The build now aborts in
+the eligibility pre-pass before ever emitting the `__init___gen.cpp`
+whose GCC errors the 2026-08-09 update below quotes — so that
+diagnosis is unreachable/masked today, not refuted. The new first
+refusals:
+
+```
+[gimple_codegen] generator '_parse' not eligible for C++ coroutine
+path, falling back to honest refusal: a `*`/`**`-unpack call argument
+is not supported in a compiled generator/coroutine body
+[gimple_codegen] generator 'parse' not eligible ... : `for ... in
+_parse(...)` does not consume a generator this compile has itself
+already translated via the C++20-coroutine path (either it's not a
+generator this codegen supports, or it's defined LATER in this module
+— the consumed generator must be defined earlier)
+```
+
+Root cause for `_parse`: its body's FIRST statement is `source =
+_iter_source(srclines, **srckwargs)` — a `**kwargs` spread forwarded to
+a statically-known GENERATOR callee defined later in the module.
+`_cpp_try_kwargs_forward_call` deliberately excludes generator callees
+(no directly-callable C symbol; only the `_start`/`_resume`/`_value`
+API), there is no generator-object-value representation in a coroutine
+body (so even holding the result would refuse), and `_iter_source`
+itself — whose SourceInfo-based state machine needs struct-typed
+locals/fields the scalar body model can't represent — never becomes
+eligible either. `parse` then refuses consuming `_parse` via the same
+ordering constraint (`parse` also yields a cross-module struct,
+`ParsedItem.from_raw(result)`, per the 2026-08-09 analysis, which still
+applies once these earlier gates are passed). Same tracked
+compiled-generator project scope; not attempted.
+
 ## Status (re-verified 2026-08-09): still fails, same generator/coroutine gap, confirmed precisely
 
 Re-ran on current `master` (`python3 mojo.py build .../c_parser/parser/__init__.py`,

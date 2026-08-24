@@ -4,6 +4,27 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-23)
+
+Re-ran against current master tip (`626f3f0`): still fails, still in the
+generated `info_gen.cpp`, with the SAME error shapes the 2026-08-09
+root-cause below identified (unannotated generator-body params
+`item`/`fmt` falling back to naive types):
+
+```
+info_gen.cpp:138:27: error: request for member 'render' in
+    'self->Analyzed::item', which is of non-class type 'int64_t'
+info_gen.cpp:134:14 / 158:19 / 161:19: error: ISO C++ forbids comparison
+    between pointer and integer   (fmt == "raw" / "summary" / "full")
+info_gen.cpp:159:48: error: invalid conversion from 'int64_t' to 'char*'
+info_gen.cpp:146:35: error: void value not ignored as it ought to be
+```
+
+Byte-for-byte the same mechanism (coroutine-path type inference lacks
+the ordinary path's param/field inference; same tracked generator/async
+codegen project, tasks #95-135). Structural; unchanged; no code change —
+doc re-verified only.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (fast-forwarded to `bf1ead2`, after

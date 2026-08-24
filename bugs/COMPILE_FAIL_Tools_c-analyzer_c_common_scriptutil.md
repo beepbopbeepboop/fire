@@ -4,6 +4,47 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23 — BOTH 2026-08-10 blockers confirmed gone; new refusal chain documented)
+
+Re-ran against current master tip (`626f3f0`). Both blockers the
+2026-08-10 update below listed are confirmed no longer reached:
+`main_for_filenames` is not refused for its tuple-valued yield (the
+tuple-yield support holds), and `_iter_filenames`'s `check =
+(lambda: True)` is not refused either (zero-arg lambda support landed
+2026-08-20 per the fsutil doc's update; `_iter_filenames` produces no
+refusal at all in this run's MOJO_DEBUG output).
+
+The build now aborts on a DIFFERENT generator, with a new precise
+refusal:
+
+```
+[gimple_codegen] generator 'track_progress_compact' not eligible for
+C++ coroutine path, falling back to honest refusal: a `*`/`**`-unpack
+call argument is not supported in a compiled generator/coroutine body
+Error building: cannot compile module: function(s)
+track_progress_compact ...
+```
+
+Root cause: `track_progress_compact`'s body does `marks =
+iter_marks(groups=groups, **mark_kwargs)` — a literal keyword PLUS a
+`**kwargs` spread forwarded to a statically-known GENERATOR callee.
+The existing narrow kwargs-forwarding helper (`_cpp_try_kwargs_forward_call`,
+gimple_cpp_core.py) deliberately excludes generator callees (compiled
+generators have no directly-callable C symbol, only the
+`_start`/`_resume`/`_value` API), and there is today NO
+generator-object-value representation in a coroutine body at all
+(no way to hold `marks`, and `next(marks)` two lines later has no
+lowering either), so this shape is refused honestly rather than
+mis-lowered.
+
+Also visible in MOJO_DEBUG (retried on later passes but not the final
+aborting name): `filter_filenames` and `main_for_filenames` refuse
+consuming `_iter_filenames(...)` — "does not consume a generator this
+compile has itself already translated ... or it's defined LATER in this
+module" — the same source-ordering constraint that binds all
+cross-generator consumption here. All shapes remain within the tracked
+coroutine-codegen project scope; not attempted this session.
+
 ## Status (updated 2026-08-10 — `main_for_filenames`'s tuple-valued yield now FIXED; `_iter_filenames` remains refused for an unrelated, non-tuple reason)
 
 Implemented real tuple-valued-`yield` support this session (see

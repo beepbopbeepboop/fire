@@ -4,6 +4,37 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23 — the generator-as-value blocker is no longer FIRST; a new, different refusal surfaces)
+
+Re-ran against current master tip (`626f3f0`). The build no longer fails
+on the four `'fmt_*' undeclared here` GCC errors documented below — the
+compile now aborts EARLIER, in the generator-eligibility pre-pass, on a
+different function entirely:
+
+```
+[gimple_codegen] generator 'fmt_full' not eligible for C++ coroutine
+path, falling back to honest refusal: sorted(..., key=...) is only
+supported for a list-typed iterable in a compiled generator/coroutine
+body
+Error building: cannot compile module: function(s) fmt_full (generator
+function(s), contain a `yield`/`yield from`) — ...
+```
+
+`fmt_full` (line ~245 of the real file) does `items = sorted(analysis,
+key=lambda v: v.key)` where `analysis` is an unannotated parameter the
+coroutine-body model can't prove is a list (it's dict-shaped at the real
+call sites), and the body emitter's `sorted()` support only fires for a
+list-typed iterable. The file also has `sorted(items, key=sortkey)`
+(line 110) and bare `sorted(analysis)` (line 204) in sibling generators.
+
+IMPORTANT caveat, since eligibility runs before any C emission: this
+does NOT prove the old "generator function referenced as a bare value"
+gap below is fixed — only that it is no longer the first failure
+reached. It may well resurface once `fmt_full` gets past its own gate.
+Either way the file still doesn't build; both candidate blockers live in
+the separately-maintained coroutine-body lowering (tracked project,
+tasks #95-135). Not attempted; doc re-triaged with fresh evidence.
+
 ## Status (updated 2026-08-09)
 
 Re-verified against current master (fast-forwarded to `bf1ead2`, after

@@ -4,6 +4,31 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-23)
+
+Re-ran against current master tip (`fix/c-analyzer` fast-forwarded to
+`626f3f0`, which absorbs all sibling fixes through today). Still fails,
+with the EXACT same sole remaining blocker the 2026-08-14 update below
+documented: `iter_decls`'s `parse_files(filenames, **kwargs)` call — a
+`**kwargs` spread forwarded to a DYNAMIC (parameter-valued) callee — is
+honestly refused by the coroutine-body emitter:
+
+```
+[gimple_codegen] generator 'iter_decls' not eligible for C++ coroutine
+path, falling back to honest refusal: a `*`/`**`-unpack call argument is
+not supported in a compiled generator/coroutine body
+Error building: cannot compile module: function(s) iter_decls (generator
+function(s), contain a `yield`/`yield from`) — ...
+```
+
+(MOJO_DEBUG shows the identical refusal on passes 2–4 of the retry loop,
+then the final whole-module refusal naming only `iter_decls`.) Nothing
+regressed and nothing new surfaced: the static-callee narrow case fixed
+below still holds, and the dynamic-callee case remains genuinely
+structural (a dynamically-obtained callable's real signature isn't known
+at compile time in this codegen's model). Still out of scope; no code
+change — doc re-verified only.
+
 ## Status (updated 2026-08-14)
 
 Still fails to compile as a whole module, but two of the module's four

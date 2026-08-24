@@ -4,6 +4,60 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-23 — real progress: coroutine units now EMIT C++ and reach g++; 13 new, precisely-diagnosed C++ errors remain)
+
+Re-ran against current master tip (`626f3f0`). For the first time this
+file's generators get past the eligibility pre-pass entirely —
+`parse_table`, `read_table`, and `_fix_write_default` all emit real
+coroutine `.cpp` units (confirming the tuple-yield support AND the
+2026-08-13 keyword-parameter escaping fix below both hold: no
+"expected ',' or '...' before 'default'" anywhere) — and the build now
+fails at the g++ stage with 13 errors that are ALL new, unrelated to
+either old blocker:
+
+```
+tables_gen.cpp: In function '_mojogen__fix_write_default_Task
+_mojogen__fix_write_default_impl(MojoList*, int64_t)':
+179:32: error: operands to '?:' have different types 'int64_t' and 'char*'
+tables_gen.cpp: In function '_mojogen_read_table_Task ...':
+258:13: error: 'strutil' was not declared in this scope; did you mean 'strtol'?
+265:24: error: 'next' was not declared in this scope
+273:28: error: invalid conversion from 'const char*' to 'int64_t'
+282:41: error: invalid conversion from 'MojoBoundMethod*' to 'int64_t'
+283:32: error: '_get_reader' cannot be used as a function
+284:31: error: 'fix_row' cannot be used as a function
+tables_gen.cpp: In function '_mojogen_parse_table_Task ...':
+359:10: error: declaration of 'auto line' has no initializer
+359:19: error: multiple declarations in range-based 'for' loop
+359:32: error: 'strutil' was not declared in this scope
+361/382: error: 'filename' was not declared in this scope
+```
+
+Mechanisms (all in the separately-maintained coroutine-body emitter,
+`_cpp_expr`/`_cpp_for_stmt` in gimple_cpp_core.py):
+1. `for line, filename in _get_reader(...)` inside `parse_table` — a
+   TUPLE-target for-loop over a non-`enumerate` iterable emits malformed
+   `for (auto line, filename : ...)` C++ ("multiple declarations in
+   range-based 'for' loop", cascading "'filename' was not declared").
+   The coroutine drive-loop's tuple-unpack exists but only for an
+   already-translated GENERATOR callee; `_get_reader` isn't one here.
+   Same gap family `c_parser/datafiles.py`'s doc lists.
+2. Bare module references in the body (`strutil.split(...)` etc.) have
+   no lowering → `'strutil' was not declared`; same for the `next()`
+   builtin (used against a generator-object local).
+3. `_get_reader(...)`/`fix_row(...)` as nested-function calls resolve to
+   undeclared symbols; a bound method stored/passed as a value converts
+   `MojoBoundMethod*`→`int64_t`.
+4. `_fix_write_default`'s ternary over a param default mixes
+   int64_t and char* (`default=None` vs string defaults).
+
+Notably, the 2026-08-09 note's latent `ColumnSpec._parse` `cls(*values)`
+spread-call finding is no longer observable either way — the ordinary
+path now handles spread call arguments (the parser wraps them in a
+UnaryOp node; see this repo's CLAUDE.md), and `_parse` compiles past
+that line. Doc kept open; every remaining mechanism above is
+feature-sized work on shared coroutine-codegen machinery. Not attempted.
+
 ## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a NEW, precisely-diagnosed, unrelated blocker found)
 
 Implemented real tuple-valued-`yield` support this session (see
