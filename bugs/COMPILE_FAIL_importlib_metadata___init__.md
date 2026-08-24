@@ -2,7 +2,96 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
-## Status (updated 2026-08-10 — NOT actually blocked by tuple-valued yield)
+## Status (updated 2026-08-23 — compiler-side emission bug FIXED (fd909e9); module itself STILL does not compile, blocker now precisely characterized)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+importlib/metadata/__init__.py` fresh against master `626f3f0`. The
+2026-08-09 "invalid conversion in return statement" cluster below is
+GONE — both former problem functions (`Sectioned.read`,
+`Distribution._convert_egg_info_reqs_to_simple_reqs`) are generators
+and now take the C++20-coroutine path implemented by the
+compiled-generator project, which sidesteps the ordinary-path return
+type inference entirely.
+
+The build then failed with SIX g++ errors in the two generated
+coroutine impl bodies (`__init___gen.cpp:110/120/183/184`), all one
+class:
+
+```
+error: 'map' was not declared in this scope          (Sectioned.read: filter(map(str.strip, ...)))
+error: 'filter' was not declared in this scope       (Sectioned.read)
+error: 'str' was not declared in this scope          (str.strip as a first-class callable argument)
+error: 'Pair' was not declared in this scope         (yield Pair(name, value) — Pair lives in importlib.metadata._collections)
+error: 'url_req_space' was not declared in this scope  (nested def called inside the generator body)
+error: 'quoted_marker' was not declared in this scope  (same)
+```
+
+Root cause: `_cpp_expr`'s final CallExpr fallback
+(gimple_cpp_core.py, the IdentExpr-callee tail of the CallExpr case)
+emitted ANY callee it couldn't resolve as a bare, undeclared C++
+identifier call. The three real shapes landing there:
+
+1. **Nested `def`s local to the generator body** (`quoted_marker`,
+   `url_req_space`, defined inside
+   `_convert_egg_info_reqs_to_simple_reqs` and called from its loop) —
+   this scalar coroutine-body model has no closure/nested-def
+   compilation at all.
+2. **Python builtins with no coroutine-body lowering** (`map`,
+   `filter`, plus `str.strip` used as a first-class callable VALUE
+   passed to `map`) — every other builtin (len/str/repr/range/sorted/
+   enumerate/iter/next/isinstance/hasattr/callable/object/getattr)
+   has an explicit lower-or-refuse case; these did not.
+3. **A foreign-module struct constructor** (`Pair(name, value)` —
+   `Pair` is imported from `importlib.metadata._collections`, so it
+   isn't in THIS module's `struct_field_types` and the existing
+   same-module ctor branch can't fire).
+
+**Fixed this session (commit fd909e9)** — measured-regression-safe:
+instrumentation first confirmed the bare-name fallback fires ZERO
+times across test_gimple.py, test_module_cache.py, check-selfhost,
+and a full stdlib dylib rebuild, i.e. every current reach was broken
+emission. The fallback now (a) keeps emitting bare-name calls ONLY
+for the one shape where that's valid C++ — a declared callable-value
+local of `_CPP_CALLABLE_CTYPE`/`_CPP_CALLABLE_CTYPE_1ARG`
+(`getpos = lambda: ...; getpos()`, std::function `operator()`), now
+covered by its own regression test
+(`test_generator_callable_local_call_compiles_via_cpp_path`), and
+(b) raises `_UnsupportedGeneratorShape("a call to unresolved callee
+'X(...)' is not supported...")` for everything else
+(`test_generator_unresolved_callee_honest_refusal`). Additionally,
+every generator/async catch site in gen_module now records its refusal
+reason into `GimpleGen._cpp_refusal_reasons`, and the strict-mode
+whole-module RuntimeError appends them — so the failure now reads
+`Unsupported shape(s): _convert_egg_info_reqs_to_simple_reqs: a call
+to unresolved callee 'url_req_space(...)' ...; read: ... 'map(...)'
+...` instead of six opaque g++ errors. Full gate verified clean:
+test_gimple.py 252/252, test_module_cache.py 76/76, check-selfhost
+clean, from-scratch dylib rebuild exit 0 with 0 `skip <module>:`
+lines.
+
+**The module still does NOT compile**, and closing the remaining gap
+is feature-sized work on the coroutine-body emitter, deliberately not
+attempted here (per the no-half-landing rule):
+
+1. Nested-def/closure compilation inside coroutine bodies (the
+   `quoted_marker`/`url_req_space`/`make_condition` trio needs f-string
+   formatting, `str.partition`, `' and '.join(...)`, `'@' in req`,
+   string multiplication — none of which the scalar body model has).
+   Design shape: lift each nested def to either a capturing C++ lambda
+   (the model already emits those for LambdaExpr values) or a static
+   local function, after its own body clears the scalar-shape checks.
+2. `map`/`filter` (and callable-valued builtins like `str.strip`)
+   producing iterable/callable first-class values — needs a lazy-
+   iterable representation plus a calling convention for arbitrary
+   boxed callables in the scalar model (the existing fnptr/lambda
+   machinery covers only statically-known callees).
+3. Foreign-module struct construction (`Pair(...)`) — needs imported
+   structs registered into `struct_field_types`/`_struct_has_init` for
+   the importing module so the existing inline-calloc+`_init` ctor
+   branch can fire, plus the foreign typedef re-emitted into the .cpp
+   preamble (the `_struct_typedef_texts` plumbing already exists).
+
+## Status (updated 2026-08-10 — historical)
 
 This session implemented real tuple-valued-`yield` support in the
 compiled-generator coroutine codegen (`gimple_codegen.py`'s

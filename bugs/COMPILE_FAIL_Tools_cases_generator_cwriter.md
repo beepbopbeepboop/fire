@@ -4,7 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-08-09): the ICE from 2026-08-07 is FIXED. File still doesn't
+## Status (2026-08-23): re-verified — STILL-OPEN, unchanged, on item 3 only.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`). The build
+now fails with exactly the two diagnostics of the already-documented structural
+item 3 below and nothing else:
+
+```
+error: request for member 'write' in 'self->CWriter::out', which is of
+non-class type 'int64_t'   (×2)
+```
+
+i.e. `CWriter.header_guard`'s `@contextlib.contextmanager` bare-`yield`
+generator's companion `.cpp` calling `.write()` on `self.out`, whose real type
+(TextIO) boxes to `int64_t`. No new issues; no regression; not attempted (still
+out of scope per `bugs/hard/CODEGEN_generator_struct_typed_param_refused.md`).
+Sibling note: with parser.py now building end-to-end and analyzer.py blocked on
+its own unrelated error, cwriter.py is no longer on any other file's blocking
+path.
+
+## Status (2026-08-09, historical — superseded header only): the ICE from 2026-08-07 is FIXED. File still doesn't
 ## fully build, for the separate, already-documented, structural reason
 ## (item 3 below) — that part is unchanged and left open.
 

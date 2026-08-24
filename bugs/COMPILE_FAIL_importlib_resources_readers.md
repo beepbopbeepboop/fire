@@ -4,7 +4,27 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (re-verified 2026-08-09): blocker changed, now a confirmed structural gap
+## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+importlib/resources/readers.py` fresh: still fails with the IDENTICAL
+up-front refusal, byte-for-byte the 2026-08-09 message —
+`cannot compile module: function(s) _candidate_paths (generator
+function(s), contain a yield/yield from)`. Although the compiled-
+generator project landed substantial coroutine-body support since the
+last pass (C++20-coroutine units for many shapes; this cluster's own
+fd909e9 tightened its refusal contract), `_candidate_paths` remains
+outside every supported shape and is refused by the module-level
+pre-pass before any per-function codegen. The gap is exactly as the
+2026-08-09 analysis below describes: a plain `yield` of a constructed
+value (`yield pathlib.Path(path_str)` — a foreign-module constructor,
+itself unsupported in the scalar body model) followed by `yield from`
+delegating to another generator METHOD (`cls._resolve_zip_path`, a
+@classmethod generator call needing the classmethod-generator
+call-convention machinery). Feature-sized, not attempted; see that
+write-up for the full shape requirements.
+
+## Status (re-verified 2026-08-09 — historical): blocker changed, now a confirmed structural gap
 
 Re-ran `python3 mojo.py build .../readers.py` fresh against current
 master. The 2026-08-06 blocker below (the `NamespaceReader.__init__`

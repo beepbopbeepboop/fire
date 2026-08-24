@@ -4,11 +4,25 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-08-09): both prior blockers (cwriter.py's ICE, and the
-## cross-module struct-field-inheritance corruption that also hit
-## `parser.py`) are FIXED. Now blocked on a separate, structural,
-## newly-exposed generator-codegen gap specific to this file's own
-## `Stmt` subclasses' `tokens()` methods.
+## Status (2026-08-23): re-verified — STILL-OPEN on the same documented blocker.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`; parser.py, the
+sibling that shared the struct-inheritance and link-stage blockers, now builds
+end-to-end — see its doc). `parsing.py` still fails in its own generated
+coroutine companion with the SAME polymorphic-field shape documented in the
+2026-08-09 entry below: `request for member 'tokens' in 'self->IfStmt::body'`
+(`Stmt *`), `'self->ForStmt::body'`/`WhileStmt::body`/`IfStmt::else_body`
+(`MojoList *`) — i.e. `yield from self.<field>.tokens()` on fields whose
+declared type is base `Stmt` (or list-of-`Stmt`), where the concrete subclass's
+generator method must be dispatched at runtime. The error set also gained 7×
+`invalid conversion from 'int64_t' to 'char*'` and one
+`int64_t → Stmt*` in the same functions (`IfStmt.tokens`/`ForStmt.tokens`/
+`WhileStmt.tokens`/...), same underlying typing gap. Structural per the
+existing analysis (needs polymorphic receiver dispatch in the coroutine path);
+not attempted here. Note: sibling `parser.py` is now compile-clean, so this
+file's remaining errors are purely its own — no transitive masking remains.
+
+## Status (2026-08-09, historical — superseded header only; body below unchanged): both prior blockers
 
 Re-verified fresh. `cwriter.py`'s ICE is fixed this session (see that
 file's own doc), so `parsing.py` gets past it. That surfaced the SAME

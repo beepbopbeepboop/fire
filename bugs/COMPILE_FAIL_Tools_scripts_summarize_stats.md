@@ -4,7 +4,55 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-09, 3 of 4 original functions now fixed by intervening work; last one confirmed structural)
+## Status (2026-08-23): error set SHIFTED twice over; old blockers all gone, new
+## blocker is a fresh frontier of .cpp coroutine-stage mislowering. Still open.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`, which includes
+master's absorbed generator work plus this branch's tuple-target/_cname/Counter/
+boxed-cast/AugAssign-dispatch fixes). Two distinct layers of progress since the
+2026-08-09 note, verified by a pristine-HEAD side-by-side (`git archive HEAD`
+build in a scratch dir):
+
+1. **The `iter_pre_succ_pairs_tables` LambdaExpr refusal is GONE.** Master
+   absorbed lambda-in-generator-body support (the emitted `.cpp` now contains
+   IIFE lambdas inside `co_yield`, e.g.
+   `co_yield [&]() -> Table * { ... }()`), so the module no longer fails at the
+   up-front eligibility gate at all.
+2. **All 13 client-`.c` errors that pristine HEAD still produces are gone.**
+   Pristine HEAD (`736b349`'s parent content, same dylib) fails in
+   `load_raw_data_0c85c9` / `OpcodeStats_get_specialization_failure_kinds` /
+   `object_stats_section_calc_object_stats_table` /
+   `optimization_section_calc_optimization_table` with exactly the four shapes
+   fixed by this branch's commit `c16c05c`: `stats[key.strip()] += int(value)`
+   stored through `mojo_list_set_int` with a `char *` value (4×),
+   `lvalue required as left operand of assignment` on the enumerate-comprehension
+   `index` target, and paren-fragment C syntax errors from naive nested-tuple
+   target splitting (2 fns). With `c16c05c` the whole client `.c` compiles clean
+   and the build advances to the LATER `.cpp` coroutine-companion stage.
+
+**New blocker (52 hard C++ errors, all first reached today).** The generator
+bodies for `iter_optimization_tables`/`iter_specialization_tables`/
+`iter_pre_succ_pairs_tables` lower to broken C++:
+
+- unresolved callees lowered as literal `0` and their results assigned to
+  plain `int64_t`s (`opcode_stats = Stats_get_opcode_stats(base_stats,
+  "opcode");` declared `int64_t`; `names = names &= 0;`);
+- `Section___init__`'s extern signature types its list parameter `int64_t`,
+  while call sites pass brace-init lists of `Table *` (the cpp-path sibling of
+  `bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md`);
+- a bare `continue;` emitted outside any loop (`iter_specialization_tables`),
+  `yield_value(int64_t)` receiving `Section *`, `'OpcodeStats' does not name a
+  type` (declaration ordering), and `_mojogen_iter_parts_impl` reading closure
+  variable `part_iter` (captured from the enclosing `pre_succ_pairs_section()`)
+  without it ever being threaded into the standalone impl function.
+
+These are instances of the compiled-generator/async-codegen project scope
+(unresolved-callee policy in coroutine bodies, cross-function closure capture,
+cpp-side struct field typing) — not narrow fixes; not attempted here. The file
+still does not compile; every previously documented blocker is nonetheless
+verified fixed.
+
+## Status (updated 2026-08-09, historical — superseded by 2026-08-23 above)
 
 Re-ran against current master (`c4340d2`). Real progress since the
 2026-08-06 status: the refusal now lists only **one** function, down

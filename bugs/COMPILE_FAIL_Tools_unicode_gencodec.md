@@ -4,7 +4,33 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-09)
+## Status (2026-08-23): COMPILES end-to-end now (both old issues fixed);
+## runtime smoke test exposes a DIFFERENT, unrelated iteration gap.
+
+`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
+exits 0 and produces a real arm64 executable on branch `fix/tools-misc`
+(`c16c05c`). Issue 1 (bare `len(t)` statement) was already fixed per the
+2026-08-09 note. Issue 2 (nested tuple-unpack target `for e,(u,c) in
+map.items():`) no longer produces any paren-fragment syntax errors — the
+bracket-aware, depth-aware target splitting consolidated across
+gimple_gen_infra.py/gimple_gen_loops.py/gimple_gen_stmts.py/gimple_codegen.py
+(this branch's commit `c16c05c`, plus master's pair-value dict-items iteration
+machinery) covers every previously-counted duplicated split site. The 2026-08-09
+note's "even a syntactic fix would be semantically wrong" concern did NOT
+materialize for this loop shape: values flow through the pair-value path rather
+than the dummy-0 `_gen_for_dict` fallback.
+
+Runtime caveat found by actually executing the built binary (no args): it exits
+0 but emits `mojo_unsupported_iter: 'for' loop over unsupported iterable type
+gencodec.py:375: int64_t (the loop body runs zero times)` — line 375 is `for
+mapname in mapnames:` where `mapnames = os.listdir(dir)`: `os.listdir` is
+unmodeled, its result defaults to opaque `int64_t`, and the loop silently runs
+zero times (with that one diagnostic). That is a NEW, separate gap (`os.listdir`
+modeling), not a regression of either fixed issue — but it means the built
+binary is not yet behaviorally correct. Status: compile-level ALREADY-FIXED;
+runtime PARTIAL pending os.listdir support.
+
+## Status (updated 2026-08-09, historical — superseded by 2026-08-23 above)
 
 Re-ran; the file had two distinct issues. One is now FIXED (narrow, landed
 this session). The other is real-rooted and STRUCTURAL — not fixed.

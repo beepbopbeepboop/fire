@@ -4,7 +4,30 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/importbench/importbench.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-09, root-caused per-function via `MOJO_DEBUG=1`; still structural, not attempted)
+## Status (2026-08-23): refusal list shrank 6 → 1; the one survivor is the
+## already-documented non-plain-assignment-target gap. Still open.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`). The up-front
+refusal now names ONLY `from_cache`:
+
+```
+Error building: cannot compile module: function(s) from_cache (generator
+function(s), contain a `yield`/`yield from`) — ...
+```
+
+The LambdaExpr gap (2026-08-09's blocker for 5 of the 6 functions) is FIXED by
+master's absorbed lambda-in-generator-body support — `benchmark_wo_bytecode`,
+`builtin_mod`, `source_using_bytecode`, `source_wo_bytecode`, and
+`using_bytecode_benchmark` all now pass the eligibility gate, which also makes
+the note's gap-3 (`sys.dont_write_bytecode` elision widening) moot for this
+file's outcome, exactly as that note predicted. `from_cache` remains refused
+for the documented reason only: `module.__file__ = '<test>'` /
+`module.__package__ = ''` on a real, later-read `types.ModuleType` instance —
+`bugs/hard/CODEGEN_generator_non_plain_assignment_target_refused.md`'s
+unfixed case, correctly still refused rather than silently elided. No new root
+cause; no code change made.
+
+## Status (updated 2026-08-09, historical — superseded by 2026-08-23 above)
 
 Re-ran against current master (`c4340d2`); still an honest up-front
 refusal, not a GCC error:

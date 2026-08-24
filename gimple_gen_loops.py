@@ -476,7 +476,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         list_ast = gen._comptime_list_asts[it.func.index.name]
         var0 = node.target
         if isinstance(var0, str) and var0.startswith('(') and var0.endswith(')'):
-            tgt_names = [v.strip() for v in var0[1:-1].split(',')]
+            tgt_names = gen._split_top_level_comma(var0[1:-1])
         else:
             tgt_names = [var0]
         for el in list_ast.elements:
@@ -1601,7 +1601,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
     if is_tuple_target:
-        var_names = [v.strip() for v in var[1:-1].split(',')]
+        var_names = gen._split_top_level_comma(var[1:-1])
     else:
         var_names = None
         gen._declare_var(var, vct)

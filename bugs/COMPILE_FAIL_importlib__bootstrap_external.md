@@ -2,7 +2,34 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/_bootstrap_external.py`
 
-## Status (updated 2026-08-09)
+## Status (updated 2026-08-23 — RESOLVED, builds and links clean)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/importlib/
+_bootstrap_external.py` fresh against master `626f3f0` (plus this
+cluster's own commit fd909e9): **exit code 0, a linked executable is
+produced** (`Built: .../_bootstrap_external`). Every previously-tracked
+issue in this doc is confirmed fixed on current master:
+
+- The "NOT FIXED (structural)" multiple-inheritance-mixin /
+  instance-callable-field LINK failure below (5 undefined symbols:
+  `SourceLoader_get_data`, `_SourceLoader_get_filename`,
+  `_LoaderBasics_get_code`, `_LoaderBasics_get_filename`,
+  `_NamespacePath__path_finder`) no longer reproduces — the build now
+  compiles AND links clean end-to-end. Resolved as a side effect of
+  upstream method-call-lowering work landed between 2026-08-10 and now
+  (most plausibly 9b28bf5 "call through callable-valued struct fields
+  via fnptr indirection" plus f82b87c's weak-stub binding for
+  unresolved relative-import calls, which together give the two gaps'
+  shapes real definitions/bindings); not independently re-investigated,
+  since the repro is simply green.
+- The earlier compile-time fixes documented below
+  (`_write_atomic.__code__` dunder-member heuristic exclusion,
+  platform-branch selection, global-list element typing) all remain in
+  place and are exercised by this passing build.
+
+Closing this doc as RESOLVED against current master.
+
+## Status (updated 2026-08-09 — historical)
 
 Three of the four originally-found issues are now FIXED (commit fd29316
 and the platform-branch-selection fix 7014dde from prior sessions, plus

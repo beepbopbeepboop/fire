@@ -2,7 +2,26 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/_collections.py`
 
-## Status (re-verified 2026-08-09)
+## Status (updated 2026-08-23 — RESOLVED, builds clean)
+
+Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/
+importlib/metadata/_collections.py` fresh against master `626f3f0`:
+**exit code 0, a linked executable is produced**
+(`Built: .../_collections`). The 2026-08-06/08-09 blocker below
+(`Pair.parse`'s `return cls(*map(str.strip, text.split("=", 1)))`
+producing `non-trivial conversion in 'mem_ref'` off an unmodeled
+`collections.namedtuple(...)` base) no longer reproduces — resolved by
+upstream work landed between 2026-08-09 and now (the compiled-generator
+project's coroutine lowering plus the type-inference/dup-def fixes;
+not independently bisected, since the repro is simply green). The two
+exotic class-definition shapes the old write-up flagged
+(`FreezableDefaultDict(collections.defaultdict)` and
+`Pair(collections.namedtuple('Pair', 'name value'))`) both compile on
+current master.
+
+Closing this doc as RESOLVED against current master.
+
+## Status (re-verified 2026-08-09 — historical)
 
 Re-ran `python3 mojo.py build .../_collections.py` fresh against current
 master. Still fails, byte-identical to the 2026-08-06 finding below:

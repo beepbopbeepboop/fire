@@ -4,7 +4,19 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/wasm/wasi/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-09)
+## Status (2026-08-23): re-verified — STILL-OPEN, narrowed to issue 2 exactly.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`): the build
+now fails with ONLY issue 2's two documented `invalid call to non-function
+before ';' token` errors (`working_dir(context)` in `subdir`'s `wrapper`, and
+`step(context)` in `build_steps`' `builder` — callable-typed unannotated
+parameters defaulting to `int64_t`; structural per the 2026-08-09 analysis).
+The additional later-line `char*`/`int64_t` binary-`/` error that the 2026-08-09
+note's issue 3 mentioned (`context.wasi_sdk_path` dynamic attribute read) no
+longer reproduces — absorbed by intervening dynamic-attribute work — so issue 2
+is now the sole blocker on this file.
+
+## Status (updated 2026-08-09, historical — superseded header only)
 
 Re-verified fresh. Of the three originally-reported issues, 1 and 3 are
 now resolved (1 by an earlier session's `try`/`except ImportError`

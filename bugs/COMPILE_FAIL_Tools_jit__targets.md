@@ -4,7 +4,15 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (updated 2026-08-09, root-caused via `MOJO_DEBUG=1`; confirmed structural, not attempted)
+## Status (2026-08-23): re-verified — STILL-OPEN, byte-identical refusal.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`): same honest
+up-front refusal of exactly `_build_stencils`, `_compile`, `_parse` (async
+functions), same `with tempfile.TemporaryDirectory() ... not CallExpr`
+eligibility trigger pinned by MOJO_DEBUG in the 2026-08-09 entry below. No
+movement; still structural per that analysis.
+
+## Status (updated 2026-08-09, historical — superseded header only; root-caused via `MOJO_DEBUG=1`; confirmed structural, not attempted)
 
 Re-ran against current master (`c4340d2`); still an honest up-front
 refusal, not a GCC error, and still the same 3 functions:

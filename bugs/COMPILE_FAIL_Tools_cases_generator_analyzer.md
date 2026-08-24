@@ -4,7 +4,34 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (re-verified 2026-08-09): unchanged, still blocked on sibling cwriter.py ICE
+## Status (2026-08-23): no longer blocked by cwriter.py at all; now blocked by
+## analyzer.py's OWN new-shape error. Still open, root-caused.
+
+Re-ran against current code (branch `fix/tools-misc` @ `c16c05c`). The
+transitively-imported `cwriter.py` ICE documented below is long gone and
+`cwriter.py` itself now fails only on its own separate item — this file's build
+gets all the way to its own client `.c` and fails with exactly one distinct
+error site (3 GCC diagnostics):
+
+```
+analyzer.py:386:8: error: request for member 'peek' in something not a
+structure or union   (×2, for the two chained targets)
+analyzer.py:386:8: error: request for member 'used' in ... (1 more site)
+```
+
+Source (line 377–386): `for input, output in itertools.zip_longest(inputs,
+outputs):` ... `input.peek = output.peek = True`. `itertools.zip_longest` is
+unmodeled, so its element values default to opaque `int64_t`; a CHAINED
+attribute assignment (`a.peek = b.peek = True`) on those opaque values then
+emits raw struct-member writes into a non-struct. Root cause class: unmodeled
+stdlib iterator element typing + attribute-assignment-target lowering on
+opaque values — same "opaque receiver" family as wasi `__main__.py`'s surviving
+`invalid call to non-function`, not previously tracked for this file. Not
+attempted here (element-typing contracts for unmodeled stdlib calls are the
+shared Pass-1.3d machinery with this project's documented regression history);
+recorded honestly as this file's own next blocker.
+
+## Status (re-verified 2026-08-09, historical — superseded by 2026-08-23 above): unchanged, still blocked on sibling cwriter.py ICE
 
 Re-ran on current `master` (`python3 mojo.py build .../cases_generator/analyzer.py`,
 exit 1). Single error, identical to 2026-08-07:
