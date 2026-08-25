@@ -124,6 +124,7 @@ def _gen_stmt_ImportStmt(gen, node):
             'module': module,
             'return_type': 'unknown',
         }
+        gen._module_alias_names.add(local_name)
         # Declare the module as an int marker for attribute access
         # This allows code like os.path.basename() to work
         if local_name not in gen.var_types:
@@ -263,6 +264,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                     'module': _sub_mod,
                     'return_type': 'unknown',
                 }
+            gen._module_alias_names.add(symbol_name)
             if symbol_name not in gen.var_types:
                 gen._declare_var(symbol_name, 'int64_t')
                 # See _gen_stmt_ImportStmt's identical marker-assignment

@@ -1229,6 +1229,31 @@ class GimpleGen:
         # every emission site routes the name through _func_csym for consistency.
         self._mangled_funcs: set[str] = set()
         self.imported_symbols: dict[str, tuple] = {}  # symbol_name -> (module, orig_name, type)
+        # Subset of `imported_symbols` keys that are genuine MODULE/
+        # NAMESPACE markers (`import X [as Y]`, or `from PKG import
+        # submod` where `submod` names a real submodule FILE) — as
+        # opposed to a plain VALUE/function bound via `from X import
+        # name`. Both shapes populate `imported_symbols` with the exact
+        # same `{'module': ..., 'return_type': ...}` dict shape whenever
+        # the imported function's signature couldn't be resolved (see
+        # `_gen_stmt_FromImportStmt`'s bare-stub fallback), so `name in
+        # imported_symbols` alone can't tell "X is a namespace" from "X
+        # is an unresolved imported function" — confirmed via a real
+        # regression: `std/gpu/primitives/id.mojo`'s `block_idx`/
+        # `thread_idx` (real zero-arg accessor FUNCTIONS, imported via
+        # `from gpu.primitives import block_idx` somewhere in the
+        # transitively-compiled builtin prelude, but never resolved to a
+        # real signature) register into `imported_symbols` with the
+        # IDENTICAL shape as a genuine `import signal`-style namespace
+        # marker. Populated ONLY by the two `import`-statement sites
+        # (`_gen_stmt_ImportStmt`, and gimple_module_gen.py's top-level
+        # import-alias pre-scan) and the FromImportStmt submodule branch
+        # — never by an ordinary `from X import name` value/function
+        # binding — so a caller that needs "is this genuinely a
+        # namespace, not a value" (e.g. `_lower_MemberExpr`'s unresolved-
+        # module-attribute fallback) can check this set instead of the
+        # ambiguous `imported_symbols` membership alone.
+        self._module_alias_names: set[str] = set()
         # Names imported (under their alias, if any) from a module
         # load_module() couldn't resolve (e.g. real Python's `os`/`sys`, or
         # any external/relative package outside this compiler's own tracked

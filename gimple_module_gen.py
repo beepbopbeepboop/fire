@@ -1404,6 +1404,7 @@ def gen_module_impl(self, stmts):
                         'module': _im_mod,
                         'return_type': 'unknown',
                     }
+                self._module_alias_names.add(_im_local)
 
     for s in stmts:
         if isinstance(s, FromImportStmt):
@@ -1433,6 +1434,7 @@ def gen_module_impl(self, stmts):
                             'module': f"{s.module}.{orig_name}",
                             'return_type': 'unknown',
                         }
+                        self._module_alias_names.add(sym_name)
                         return
                     if _sib_qualifier and not sym_info:
                         if not s.wildcard:
@@ -4226,6 +4228,7 @@ def gen_module_impl(self, stmts):
                         'module': _tm,
                         'return_type': 'unknown',
                     }
+                self._module_alias_names.add(local_name)
     def _collect_global_stmts(stmt_list):
         result = []
         for _gs in stmt_list:

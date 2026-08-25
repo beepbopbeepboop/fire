@@ -965,12 +965,58 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # name, which the generic dynamic-dispatch fallback further below
     # (the `ot in ('int', 'int64_t', 'void *', ...)` case) then handles
     # like any other opaque-pointer member read.
+    # Excludes a real MODULE/NAMESPACE alias whose bare name also happens
+    # to collide with a same-named top-level function pulled in from some
+    # OTHER transitively-compiled module (`self.func_return_types` is a
+    # single whole-program-shared, bare-name-keyed dict — see the same
+    # caveat already documented a few branches up for `_global_var_types`).
+    # E.g. `subprocess.py`'s `import signal` + `signal.SIGTERM`: `signal`
+    # the MODULE MARKER is also, coincidentally, the bare name of `Lib/
+    # signal.py`'s own top-level `def signal(signalnum, handler):` once
+    # that module is transitively inlined into the same translation unit
+    # (plus, independently, a real libc function of the same name) — so
+    # this zero-arg-function fallback (meant for real accessor functions
+    # like `block_idx.x`) misread `signal.SIGTERM` as "call the zero-arg
+    # function `signal()`, then read `.SIGTERM` off the result", emitting
+    # an invalid `mojo_signal ()`/bare `signal ()` call.
+    #
+    # Gated on `gen._module_alias_names`, NOT plain `gen.imported_symbols`
+    # membership — a first fix attempt used `imported_symbols` and had to
+    # be reverted: `imported_symbols` also holds every ordinary `from X
+    # import name` VALUE/function binding (not just genuine `import X`
+    # namespace markers), and an UNRESOLVED such binding (no real
+    # signature found) registers with the exact same `{'module': ...,
+    # 'return_type': ...}` shape a genuine namespace marker uses — see
+    # `_module_alias_names`'s own docstring (gimple_codegen.py). Confirmed
+    # via a real regression this broader check caused: `std/gpu/
+    # primitives/id.mojo`'s `block_idx`/`thread_idx` (real zero-arg
+    # accessor functions, imported into the always-present builtin
+    # prelude but never resolved to a real signature) collided with
+    # `imported_symbols` the same way `signal` does, wrongly excluding
+    # the GENUINE `block_idx.x`/`thread_idx.x` GPU-intrinsic accessor
+    # shape this fallback exists for in the first place — silently
+    # breaking it (confirmed via `test_module_cache.py`'s SB-1 per-scope-
+    # import CLI tests, which transitively pull this same builtin prelude
+    # into every `mojo.py build`: 2 tests regressed with a `dyld: symbol
+    # not found ... '_block_idx'` runtime crash). `_module_alias_names`
+    # is populated ONLY by the two real `import`-statement sites, never by
+    # an ordinary `from X import name` binding, so it doesn't have this
+    # ambiguity. Mirrors the `module_name in gen.imported_symbols` guard
+    # already used a few branches up in this same function's
+    # `isinstance(node.obj, IdentExpr)` block — moved to cover this
+    # SEPARATE, later fallback that re-checks `isinstance(node.obj,
+    # IdentExpr)` on its own, since a real module marker can reach here
+    # whenever none of that earlier block's more specific attribute cases
+    # matched (e.g. an unresolved/unknown module attribute like `signal.
+    # SIGTERM`, which comes from the unloadable C extension `_signal` and
+    # so is never registered as a known global).
     _dunder_member = node.member.startswith('__') and node.member.endswith('__')
     if (isinstance(node.obj, gimple_ctypes.IdentExpr)
             and node.obj.name in gen.func_return_types
             and node.obj.name not in gen.var_types
             and node.obj.name not in gen.struct_field_types
             and node.obj.name not in gen.BUILTIN_VALUE_MAP
+            and node.obj.name not in gen._module_alias_names
             and not _dunder_member):
         _fn_name = node.obj.name
         _c_fn = gen._c_names.get(_fn_name, gimple_ctypes._safe_name(_fn_name))
