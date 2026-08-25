@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/_code_definitions.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster (no rebuild re-run -- classification already re-confirmed 2026-08-23 with a clean gate, and this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies) touch neither the async-generator varargs refusal nor the bare-construction-without-consumption gap this file is blocked on. Still feature-sized; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN)
 
 Re-ran the repro against this branch: byte-for-byte identical refusal

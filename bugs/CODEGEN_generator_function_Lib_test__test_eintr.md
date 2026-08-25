@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. This session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- strip/lstrip/rstrip/lower/upper/startswith/endswith) do not touch this file's dominant blocker (outer-scope module-name resolution, e.g. `os.pipe()`, inside a generator's own translation unit -- a module name like `os` is never in this narrow body model's known-symbol set at all, so no string-method or field-name fix reaches it). Still structural; untouched.
+
+
 ## Status (updated 2026-08-23 — PARTIAL)
 
 Major unblocking this session: ALL FOUR previously-enumerated

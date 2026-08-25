@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. The residual blocker (inherited unittest.TestCase method calls from a generator body getting a `(self)`-only extern declaration, arity mismatch on the real multi-arg call) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Not attempted (needs arity-aware extern declaration or real inherited-method resolution -- a shared-machinery change, not narrow). Still open; untouched.
+
+
 ## Status (updated 2026-08-23 — PARTIAL)
 
 The documented `cm.unraisable.*` int64_t-member errors are GONE:

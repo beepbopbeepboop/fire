@@ -1,5 +1,10 @@
 # COMPILE_FAIL: asyncio/queues.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C4 cluster. The blocker (`get`/`join`/`put`'s `await <local Future>` / `await <bound-method call>` shapes, outside `_async_quick_eligible`'s narrow whitelist) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/asyncio/queues.py`
 
 ## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)

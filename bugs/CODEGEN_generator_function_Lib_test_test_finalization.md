@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_finalization.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. The blocker (inherited `test` classmethod generator reading `cls.del_calls`/etc. -- no class-level attribute-access story for compiled generators) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN)
 
 Re-ran the repro: identical refusal on every inherited `test`

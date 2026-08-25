@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. The blocker (`class FakePip(): ...` defined INSIDE a generator body -- nested-struct-definition discovery/hoisting, a 3-piece design change already scoped in the 2026-08-12 update below) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still feature-sized; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN)
 
 Re-ran the repro: identical `unsupported statement in generator body:

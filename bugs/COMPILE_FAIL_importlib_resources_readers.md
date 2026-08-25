@@ -1,5 +1,10 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C4 cluster. The blocker (`_candidate_paths`: a plain `yield` of a foreign-module constructor followed by `yield from` delegating to another classmethod generator) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)

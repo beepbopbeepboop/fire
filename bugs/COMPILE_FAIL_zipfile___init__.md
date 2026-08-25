@@ -1,5 +1,10 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C4 cluster. All four residual issues (classmethod-generator receiver-passing mismatch in `_Extra.strip`; `int`/`int64_t` struct-field width under-inference in `FileHeader`; the `pwd=None` caller/callee signature disagreement) are unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- none of this file's own blockers touch string methods or stdin/stdout/stderr-named fields). Still structural / shared fragile type-inference machinery; untouched.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)

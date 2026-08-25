@@ -4,6 +4,39 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-24 — PARTIAL: one of the two stacked gaps below fixed, file still doesn't build)
+
+This session (commit 753b199) added real `char *`-receiver dispatch for
+`.strip()`/`.lstrip()`/`.rstrip()`/`.lower()`/`.upper()`/`.startswith()`/
+`.endswith()` to the coroutine-body expression emitter (`_cpp_expr`,
+`gimple_cpp_core.py`), routing through the same `mojo_str_*`/`string_*`
+runtime helpers the ordinary (non-generator) GIMPLE path already uses —
+directly motivated by this doc's own 2026-08-09 analysis ("this
+codegen's generator/coroutine body expression emitter has no string-
+method-call support at all"). Re-ran the repro fresh against the fixed
+tree: confirmed via `MOJO_DEBUG=1` that `path.rstrip()` inside
+`_ancestry` no longer falls into the raw-miscompile/opaque-stub path
+via a wrong mechanism — it's still stubbed (`generator-body method call
+on opaque scalar local path.rstrip()`), but that's now because `path`'s
+OWN declared ctype is `int64_t` (the SEPARATE, still-unfixed param-type-
+inference gap this doc's 2026-08-09 analysis already called out:
+`_ancestry(path)` has no literal call-site anywhere in the file, so
+`_param_ctype` never gets evidence to resolve it past its `int64_t`
+default) — not because `.rstrip()` itself is unhandled. Confirmed via a
+minimal isolated repro that a generator with a param whose type DOES
+resolve to `char *` now compiles `.rstrip()`/`.lower()`/`.startswith()`
+etc. correctly through the new dispatch. This file's actual build still
+fails (fresh `python3 mojo.py build` of this file transitively pulls in
+several other, unrelated, already-documented failing modules —
+`collections`'s `Counter[...] = ...` subscript-store gap, `inspect`'s
+`OrderedDict[...] = ...` same gap, and this file's own eventual link
+failure) — the string-method fix is real forward progress but not
+sufficient on its own to close this doc; the param-type-inference gap
+for `_ancestry`/`_parents` remains the binding blocker. Full quality
+gate clean: `test_gimple.py` 252/252, `test_module_cache.py` 76/76,
+`make check-selfhost` clean, from-scratch stdlib dylib rebuild exit 0,
+0 `skip <module>:` lines.
+
 ## Status (re-verified 2026-08-23, wt09 fix/stdlib-mods `945af88` — unchanged)
 
 Re-ran the repro fresh; identical failure shape to the 2026-08-09

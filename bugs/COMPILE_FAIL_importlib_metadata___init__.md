@@ -1,5 +1,10 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C4 cluster. The three remaining feature-sized gaps (nested-def/closure compilation inside coroutine bodies; map/filter and other first-class-callable builtins; foreign-module struct construction) are unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- this file's own blockers are a different shape). Still feature-sized; untouched.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py`
 
 ## Status (updated 2026-08-23 — compiler-side emission bug FIXED (fd909e9); module itself STILL does not compile, blocker now precisely characterized)

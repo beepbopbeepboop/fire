@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. Both residual errors (`'dbm' was not declared`, `'__import__' was not declared`) are instances of the same outer-scope module-name-resolution gap _test_eintr.py hits with `os.pipe()` -- unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies), since neither adds general module-name resolution to the coroutine-body emitter. Still structural; untouched.
+
+
 ## Status (updated 2026-08-23 — PARTIAL)
 
 ALL 9 previously-listed transitive-dependency errors (support/__init__.py

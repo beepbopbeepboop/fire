@@ -1,5 +1,10 @@
 # COMPILE_FAIL: asyncio/futures.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C4 cluster. The blocker (`Future.__await__`'s value-carrying `return self.result()` inside a generator -- the coroutine promise has no `return_value(v)` channel) is unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still a promise-design-level gap; untouched.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/asyncio/futures.py`
 
 ## Status (re-verified 2026-08-23 against master 626f3f0 — unchanged, STILL-OPEN structural)

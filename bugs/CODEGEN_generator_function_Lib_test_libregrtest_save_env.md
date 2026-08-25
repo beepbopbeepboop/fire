@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/libregrtest/save_env.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. Gap 3 (`getattr(self, get_name)` with a runtime-computed name, needing real compile-time name->member reflection) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still structural; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN (unchanged blocker))
 
 Re-ran the repro: identical honest refusal — `resource_info` refused on

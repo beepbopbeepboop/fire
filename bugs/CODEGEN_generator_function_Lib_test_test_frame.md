@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. The blocker (no runtime integer division-by-zero trapping anywhere in the compiled path, plain-GIMPLE or coroutine) is unrelated to and unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Still a standalone correctness-feature project; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN)
 
 Unchanged from the 2026-08-18 investigation: the compiled path has NO

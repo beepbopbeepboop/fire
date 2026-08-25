@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-24 — PARTIAL, item 1 fixed; full-file build still unresolved and slow)
+
+Fixed item 1 below this session (commit 753b199): `_safe_field` now
+escapes `stdin`/`stdout`/`stderr` field names (Darwin `<stdio.h>` macro
+collision), so `p.stdin.close()`'s "'MojoCompletedProcess' has no member
+'__stdinp'" no longer reproduces. Item 2 (kwargs-slot packing arity for
+the cross-module `assert_python_ok` callee) is unchanged/not attempted.
+This file's full build was NOT independently confirmed to complete:
+it pulls in a very large transitive import chain (collections, inspect,
+typing, ctypes, compression/lzma/zstd, struct, ...) and three bounded
+verification attempts this session did not reach a definitive pass/fail
+— a 240s-capped run on the PRE-fix tree (baseline) stayed under 1GB RSS
+but timed out before finishing; two bounded runs on the POST-fix tree
+also didn't finish, and the longest (900s cap, isolated, no other
+concurrent builds) hit 11.9GB RSS and climbing at 820s before the
+watchdog killed it. This could be a real memory-growth regression from
+this session's edits, or simply this file's own transitive-import
+weight (the baseline run never got far enough in its 240s budget to
+reach a comparable point, so the two aren't directly comparable) —
+NOT conclusively isolated either way given this session's time budget.
+Flagging as a possible memory-blowup issue needing dedicated follow-up
+with a longer, controlled bisection (baseline vs. fixed tree, same
+wall-clock budget, single isolated run each) rather than claiming this
+doc resolved. The stdin-macro fix itself is verified correct and low-
+risk independently: full quality gate clean (`test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean x2,
+from-scratch stdlib dylib rebuild exit 0, 0 skips).
+
 ## Status (updated 2026-08-23 — PARTIAL)
 
 All Lib/test/support/__init__.py errors blocking this file's builds are

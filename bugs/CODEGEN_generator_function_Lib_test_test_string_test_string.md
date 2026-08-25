@@ -1,5 +1,10 @@
 # CODEGEN_generator_function: Lib/test/test_string/test_string.py
 
+## Status (updated 2026-08-24 -- re-verified, unchanged)
+
+Re-checked this session while triaging the C3 cluster. The blocker (`BarFormatter` -- and its generator method `parse` -- defined INSIDE `test_override_parse`'s function body, so struct registration never sees it) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies) -- same nested-class-discovery family as test_ensurepip.py above. Still feature-sized; untouched.
+
+
 ## Status (updated 2026-08-23 — STILL-OPEN)
 
 Re-ran the repro: identical whole-module fallback naming `parse` with no
