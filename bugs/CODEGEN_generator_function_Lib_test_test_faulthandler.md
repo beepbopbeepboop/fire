@@ -1,5 +1,36 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder3 — the `'os_helper' was not declared` gap FIXED (root cause: a FromImportStmt tuple-unpack bug, not the RAII-lambda-scoping theory the prior entry guessed); checked ONLY via a bounded isolated compile per the safety rule)
+
+Root-caused precisely (the prior entry's guess — a `finally:`-lambda-
+specific scoping gap — was WRONG): `os_helper` (`from test.support
+import os_helper, script_helper, ...`) was never actually in `gen.
+_cpp_early_global_names` at all, for any generator body, `finally:` or
+not — `FromImportStmt.names` is `[(name, alias|None), ...]`, and all 3
+places that scanned it added the raw `(name, alias)` TUPLE to the set
+instead of the real bound-name STRING, so a plain `x in gen._cpp_early_
+global_names` membership check could never match. This affected every
+`from X import Y` at module scope project-wide, not just this file or
+`finally:` bodies — see `gimple_module_gen.py`/`gimple_cpp_core.py`'s
+matching fix commit for the full mechanism.
+
+Fixed (unpack each tuple to its real bound name before adding, at all
+3 call sites). Re-verified via a fresh bounded isolated compile
+(`ulimit -v 8000000` + watcher, `compile_to_gimple_with_cpp(do_imports=
+False)`, no real `mojo.py build`/link — same safety constraint as
+before): `'os_helper' was not declared` is GONE. Only the already-
+documented `assertEqual`/`addCleanup`-family arity mismatch (inherited
+`unittest.TestCase` methods, see `bugs/CODEGEN_generator_function_
+Lib_test_test_ctypes_test_random_things.md`'s entry) remains.
+
+Full mandatory gate: `test_gimple.py` 252/252, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with 0 skip lines.
+
+Doc stays open (file still does not build; no real `mojo.py build` was
+attempted against this specific file, per the safety rule).
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — checked ONLY via a safety-bounded ISOLATED compile (do_imports=False, no real `mojo.py build`/link) per this session's mandatory memory-safety rule for this exact file; one new, different blocker found, not attempted)
 
 **Safety note**: this file is the confirmed 43+GB-RSS runaway-compile
