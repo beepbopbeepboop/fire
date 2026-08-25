@@ -2,6 +2,41 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/pathlib/__init__.py`
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder — the `'os' was not declared` coroutine-body error (from the 2026-08-23 entry below) is ALSO fixed by this session's module-attribute-value fix; several OTHER, unrelated .cpp errors remain in the same generators)
+
+This session's `_cpp_expr` MemberExpr fix (see `bugs/CODEGEN_generator_
+function_Lib_test_test_dbm.md`'s 2026-08-24 entry) covers this file's
+own trigger too: `Path.walk`'s `follow_symlinks = os._walk_symlinks_as_
+files` (a module-import name read as a bare attribute VALUE). Verified
+via a fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`: `'os' was not declared` no longer
+appears anywhere in the output.
+
+The file is nowhere close to building even so — several OTHER,
+unrelated, pre-existing `.cpp`-stage errors remain in the SAME two
+generators (`Path._filter_trailing_slash`, `Path.walk`), all distinct
+from this fix and not attempted: `self->parser.sep` accessed through a
+field typed plain `int` (the "field-under-widening" family the
+2026-08-23 entry below already names); an `anchor_len` local cast from
+a `std::function<int64_t()>` bound-method-value wrapper straight to
+`int64_t` (invalid cast — the callable needs to be INVOKED, not
+reinterpreted); a pointer-vs-int64_t comparison and a `char*`-to-
+`int64_t` conversion downstream of the same untyped chain; and a tuple-
+target redeclaration conflict (`path_str` declared once as `char *`,
+then again as `int64_t` a few lines later in the same function, from
+`Path.walk`'s tuple-unpacking machinery disagreeing with an earlier
+declaration). None of these were investigated further this session —
+each looks like its own narrow-but-real gap, but chasing them wasn't
+this fix's purpose.
+
+Full mandatory gate for the underlying fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines (see the dbm doc's entry
+for the shared gate run).
+
+Doc stays open — file still does not build.
+
+
 ## Status (updated 2026-08-23, wt09 fix/stdlib-mods `de9b885` — GIMPLE stage now passes; PARTIAL progress, file still doesn't build)
 
 Root-caused the then-current blocker (6x GCC `type mismatch in binary
