@@ -1,5 +1,79 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-25 — gap #1 (`FTP_sendcmd` extern typed its `cmd` param `int64_t`) FIXED; gaps #2-4 unchanged)
+
+**Root cause**: `FTP.sendcmd(self, cmd)`'s body only FORWARDS `cmd` into
+`self.putcmd(cmd)` — no str-method call, no concat, no subscript on the
+param itself — so the usage-based `_infer_param_types` pass had zero signal
+and the parameter fell to the int64_t default in
+`func_param_types['FTP_sendcmd']`, which is what both the .c forward decl
+and the coroutine .cpp emitter's `_cpp_struct_method_refs` extern loop read.
+The module already HAD the right architecture for this — the cross-call
+scalar contract (Pass 1.3d for free functions, Pass 1.3d-ctor for
+constructor calls) — but neither covered plain `receiver.method(...)`
+call sites.
+
+**Fixed** (commit `20d2cb6`, shared compiler source): new Pass 1.3e in
+`gen_module` (`gimple_module_gen.py`) extends the same
+unanimity-over-call-sites refinement to struct methods: bare-`self` or
+known-struct-pointer receivers only; unanimous `{'double'}`/`{'char *'}`
+observation sets only; explicit annotations and defaulted params respected;
+bounded fixpoint (≤4 rounds) so pure forwarding chains resolve one hop per
+round (ftplib resolves sendcmd.cmd and voidcmd.cmd from their string-literal
+call sites, then putcmd.line from those two's now-resolved params). Two
+evidence extensions are deliberately scoped to THIS pass alone after each
+was shown to regress free-function compiles when shared: `deep_str`
+(a `'+'`/`'%'` expression with a provable string operand is sound char*
+evidence — without it a method whose ONLY call site is mlsd's concat gets
+no vote) and `prefer_refined_param` (a refined caller-param type outranks a
+stale `_inferred_var_types` int64_t entry, un-freezing deeper forwarding
+hops). Three consumers of the previously method-invisible qualified registry
+were aligned so definition, .c forward decls, .cpp externs, and pre-
+definition call-site argument conversions all agree: the func_param_types
+registration loop and `_signature_ctypes` now consult the qualified
+"Struct_method" key before `_param_ctype`'s bare-name lookup, and Pass
+2b-bis's `_mangled_signature_ctypes` entries are refreshed post-pass (for a
+`*args` method `_emit_call` prefers that sentinel form — without the
+refresh, self-host myinterpreter.py's `Interpreter__call_dunder` failed
+"makes pointer from integer"; caught by `make check-selfhost` mid-session,
+fixed, re-gated).
+
+**Verification**: isolated compile per this doc's methodology
+(`GimpleGen(do_imports=False, relaxed_imports=True)` +
+`g++-mp-15 -std=c++20 -fsyntax-only`, see
+`scripts/repro_ftplib_isolated.py`): gap #1's
+`invalid conversion from 'char*' to 'int64_t'` at the
+`self.sendcmd("OPTS MLST " + ...)` line is GONE (.ci 0 errors; .cpp 4 -> 3
+errors — exactly gaps #2/#3/#4 below, untouched). Real safety-wrapped
+`mojo.py build /Users/mrs/net/Python-3.14.6/Lib/ftplib.py`: ftplib's OWN
+code compiles clean (zero FTP_/mlsd/sendcmd errors anywhere in the log);
+the 217 total errors are byte-identical to the pre-change run and all live
+in transitively-imported modules (argparse/typing/os/pickle/codecs/
+weakref/tracemalloc/tokenize/gettext/functools) — the documented
+whole-program blockers, not this file. Runtime behavior confirmed correct,
+not just compiling: a standalone generator→`sendcmd(concat)`→`putcmd`→
+`putline` chain repro built via `mojo.py build` prints the intact command
+strings (`OPTS MLST type;size;perm;\r\n`, `TYPE I\r\n`), where the
+pre-fix tree fails to compile that shape at all.
+
+Full mandatory gate for this fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines (baseline 0, unchanged).
+
+Gaps #2 (`lines.append` passed as a value), #3 (`.split()` chained-call
+result as loop iterable), and #4 (`fact.partition(...)` on an
+unannotated-param-derived string, the high-risk
+`unannotated_init_param_field_type_defaults_int64` family) are UNCHANGED —
+confirmed still present in the same isolated compile. Note gap #4 remains
+distinct from this fix's mechanism: Pass 1.3e refines METHOD PARAMETERS
+from unanimous call-site evidence; it does not touch
+`_collect_self_assigns`/struct-field typing, and mlsd's own `path`/`facts`
+params got no unanimous evidence anyway (their C types are still int64_t,
+as before).
+
+`ftplib.py` as a whole still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — gap #1 (`";".join(facts)`) FIXED; a NEW, previously-masked error surfaced on the same line; gaps #2-4 unchanged)
 
 Implemented real `str.join(...)` support in the coroutine-body expression
