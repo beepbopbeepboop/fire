@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <dirent.h>
 
 #define USE_PYTHON 0
 
@@ -3119,6 +3120,79 @@ int64_t int_getcwd(int64_t marker) {
     if (getcwd(buf, cap)) return (int64_t)buf;
     free(buf);
     return (int64_t)"";
+}
+
+MojoList *mojo_listdir(char *path) {
+    /* os.listdir(path) -> list[str] of entry names. "." and ".." are
+     * excluded per Python semantics; order is the OS's readdir order
+     * (real Python makes no ordering guarantee either). A path that
+     * cannot be opened yields an empty list — real Python raises
+     * OSError, but this runtime has no raise-from-C bridge here, and
+     * real call sites either gate on os.path.isdir/exists first or
+     * iterate defensively. */
+    MojoList *l = mojo_list_new();
+    if (!path || !*path) return l;
+    DIR *d = opendir(path);
+    if (!d) return l;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *name = ent->d_name;
+        if (name[0] == '.' && name[1] == '\0') continue;          /* "."  */
+        if (name[0] == '.' && name[1] == '.' && name[2] == '\0') continue; /* ".." */
+        mojo_list_append_str(l, strdup(name));
+    }
+    closedir(d);
+    return l;
+}
+
+int int_isfile(int64_t marker, int64_t path) {
+    /* os.path.isfile(path) — S_ISREG twin of int_isdir above. The codegen
+     * previously stubbed this call shape to a literal 0 ("not a file"),
+     * which made `if not os.path.isfile(p): continue` unconditional: every
+     * iteration of e.g. Tools/unicode/gencodec.py's convertdir() loop was
+     * silently skipped even after os.listdir returned a real list. */
+    (void)marker;
+    char *p = (char *)path;
+    if (!p) return 0;
+    struct stat st;
+    return (stat(p, &st) == 0 && S_ISREG(st.st_mode));
+}
+
+MojoList *int64_t_path_split(char *path) {
+    /* os.path.split(path) -> [head, tail] as a 2-element string list.
+     * Python returns a tuple; the codegen models materialized pairs as a
+     * MojoList* of strings exactly like its os.path.splitext lowering
+     * ([root, ext]). Semantics mirror cpython's posixpath.split verbatim:
+     * split at the last '/', keep ONE trailing slash in head only when it
+     * is the whole string ('/' -> ['/', '']), and strip any other run of
+     * trailing slashes from head ('a/b//' -> ['a/b', '']). */
+    MojoList *l = mojo_list_new();
+    char *head, *tail;
+    if (!path) path = "";
+    size_t plen = strlen(path);
+    /* i = p.rfind('/') + 1 */
+    size_t i = 0;
+    for (size_t k = 0; k < plen; k++) {
+        if (path[k] == '/') i = k + 1;
+    }
+    head = (char *)malloc(i + 1);
+    memcpy(head, path, i);
+    head[i] = '\0';
+    tail = strdup(path + i);
+    /* if head and head != '/'*len(head): head = head.rstrip('/') */
+    if (i > 0) {
+        size_t hlen = i;
+        size_t end = hlen;
+        while (end > 0 && head[end - 1] == '/') end--;
+        if (end == 0) {
+            /* all slashes: leave as-is */
+        } else if (end < hlen) {
+            head[end] = '\0';
+        }
+    }
+    mojo_list_append_str(l, head);
+    mojo_list_append_str(l, tail);
+    return l;
 }
 
 char *int64_t_basename(char *path) {

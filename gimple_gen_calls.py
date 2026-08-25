@@ -1964,6 +1964,96 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     return ret_type, t
 
 
+def _expand_sole_spread_into_fixed_slots(gen, node, fname, fname_raw,
+                                          arg_pairs, expected_params):
+    """`f(*iterable)` against a callee with KNOWN, FIXED positional params
+    (no `*args`/`**kwargs` of its own — those forwarding shapes are
+    deliberately excluded below): real Python unpacks the iterable's
+    ELEMENTS positionally into f's parameter slots. This call shape
+    previously fell out of _lower_UnaryOp's spread pass-through as a
+    single ('MojoList *', lst) pair, which the generic coercion then
+    cast to the FIRST fixed param's type and passed as argument 0 —
+    so `convertdir(*sys.argv[1:])` (Tools/unicode/gencodec.py's main)
+    received the whole argv-slice LIST POINTER as its `char * dir`
+    parameter, every downstream os.path/os.listdir operation on it hit
+    garbage, and the loop silently ran zero times because
+    opendir(list-pointer-as-path) fails.
+
+    Expands the spread across ALL fixed slots, each guarded by an in-range
+    check: slot i past the list's end falls back to the callee's own
+    recorded parameter DEFAULT (same _func_param_defaults source the
+    missing-argument padding loops use), else a typed zero — mirroring
+    `convertdir(dir)` leaving dirprefix/nameprefix/comments at their
+    defaults. Surplus list elements beyond the fixed slots are ignored,
+    matching _lower_named_call's documented surplus-drop convention.
+
+    Narrow shape on purpose: exactly one '*'-spread as the SOLE positional
+    argument, no '**'-spread, no literal keyword args, and only concrete
+    fixed C param types. Returns arg_pairs unchanged for every other shape.
+
+    Shared by `_lower_named_call` (value-consuming call sites) and
+    _gen_stmt_ExprStmt's statement-level twin (bare, value-discarding
+    calls — which never reach _lower_named_call at all)."""
+    if not (len(node.args) == 1
+            and isinstance(node.args[0], gimple_ctypes.UnaryOp)
+            and node.args[0].op == '*'
+            and not getattr(node, 'kwargs', None)
+            and expected_params
+            and not any('...' in p or p in ('MojoList *', 'MojoDict *')
+                        for p in expected_params)):
+        return arg_pairs
+    if not (arg_pairs and arg_pairs[0][0] == 'MojoList *'):
+        return arg_pairs
+    _lst_v = arg_pairs[0][1]
+    _dflts = gen._func_param_defaults.get(fname) or \
+        gen._func_param_defaults.get(fname_raw) or []
+    _first_dflt = len(expected_params) - len(_dflts)
+    _expanded: list = []
+    for _pos, _ptype in enumerate(expected_params):
+        _idx64 = gen._new_val('int64_t', f"(int64_t){_pos}")
+        _len64 = gen._call_expr('int64_t', 'mojo_list_len',
+                                 [('MojoList *', _lst_v)])
+        _inrange = gen._new_val('_Bool', f"{_idx64} < {_len64}")
+        _bb_in, _bb_out, _bb_merge = gen._new_bb(), gen._new_bb(), gen._new_bb()
+        # Result slot declared once, assigned in both branches (GIMPLE:
+        # no phi nodes / no ternaries across divergent types).
+        _slot = gen._new_temp(_ptype if _ptype != 'void *' else 'int64_t')
+        gen._emit(f"  if ({_inrange}) goto {_bb_in}; else goto {_bb_out};")
+        gen._emit_label(_bb_in)
+        if _ptype == 'char *':
+            gen._emit(f"  {_slot} = mojo_list_get_str ({_lst_v}, {_idx64});")
+        elif _ptype == 'double':
+            gen._emit(f"  {_slot} = mojo_list_get_double ({_lst_v}, {_idx64});")
+        else:
+            _raw = gen._new_val('int64_t',
+                                 f"mojo_list_get_int ({_lst_v}, {_idx64})")
+            gen._emit(f"  {_slot} = "
+                       + (f"({_ptype}){_raw};" if _ptype != 'int64_t'
+                          else f"{_raw};"))
+        gen._emit(f"  goto {_bb_merge};")
+        gen._emit_label(_bb_out)
+        _dv = None
+        if _dflts and 0 <= _pos - _first_dflt < len(_dflts):
+            _dv = _dflts[_pos - _first_dflt][1]
+        _dt, _dval = gen._default_expr_to_pair(_dv)
+        if _ptype == 'char *':
+            if _dt != 'char *':
+                # No string default: NULL (real Python would have raised
+                # TypeError for a genuinely-required arg left unfilled).
+                _dval = '(char *)0'
+            gen._emit(f"  {_slot} = {_dval};")
+        elif _ptype == 'double':
+            gen._emit(f"  {_slot} = (double){_dval};")
+        else:
+            gen._emit(f"  {_slot} = "
+                       + (f"({_ptype}){_dval};" if _ptype != 'int64_t'
+                          else f"(int64_t){_dval};"))
+        gen._emit(f"  goto {_bb_merge};")
+        gen._emit_label(_bb_merge)
+        _expanded.append((_ptype, _slot))
+    return _expanded
+
+
 def _default_expr_to_pair(gen, _dflt) -> tuple:
     """Convert a default-arg expression AST node to a (ctype, rvalue) pair,
     for padding a call site that omitted the argument. Mirrors the struct
@@ -2347,6 +2437,12 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         # C bootstrap), so padding with NULL below is exactly right,
         # not just "doesn't crash."
         expected_params = gen._KNOWN_SIGS[fname][1]
+
+    # `f(*iterable)` unpacking against a fixed-arity callee — shared with
+    # _gen_stmt_ExprStmt's statement-level twin path (see that site).
+    arg_pairs = gen._expand_sole_spread_into_fixed_slots(
+        node, fname, fname_raw, arg_pairs, expected_params)
+
     if expected_params and len(arg_pairs) < len(expected_params):
         kwarg_values = list(kwarg_dict.values()) if kwarg_dict else []
         # Free-function param defaults: `def greet(name: String = "world")`

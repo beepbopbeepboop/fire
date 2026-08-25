@@ -2309,6 +2309,10 @@ def _gen_stmt_ExprStmt(gen, node):
         expected_params = gen.func_param_types.get(raw_name, [])
         if not expected_params and fname in gen._KNOWN_SIGS:
             expected_params = gen._KNOWN_SIGS[fname][1]
+        # `f(*iterable)` unpacking against a fixed-arity callee — shared
+        # with _lower_named_call's identical expansion (see there).
+        arg_pairs = gen._expand_sole_spread_into_fixed_slots(
+            node.value, fname, raw_name, arg_pairs, expected_params)
         if expected_params and len(arg_pairs) < len(expected_params):
             # BUG-2026-020: pad with the callee's DECLARED DEFAULTS first —
             # this statement-level twin previously only knew kwargs-then-0,

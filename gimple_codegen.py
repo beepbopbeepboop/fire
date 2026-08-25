@@ -2094,6 +2094,9 @@ class GimpleGen:
         # NOT already resolved that way, i.e. only for the broken case this
         # removal fixes.
         'int_isdir':             ('int',         ['int64_t', 'int64_t']),  # os.path.isdir(path)
+        'int_isfile':            ('int',         ['int64_t', 'int64_t']),  # os.path.isfile(path)
+        'int64_t_path_split':    ('MojoList *',  ['char *']),              # os.path.split(path) -> [head, tail]
+        'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),
@@ -2776,6 +2779,9 @@ class GimpleGen:
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
+
+    def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
+        return ggc._expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params)
 
     def _lower_named_call(self, fname_raw: str, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_named_call(self, fname_raw, node)

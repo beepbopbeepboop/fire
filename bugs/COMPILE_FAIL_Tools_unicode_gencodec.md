@@ -4,8 +4,107 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-08-23): COMPILES end-to-end now (both old issues fixed);
-## runtime smoke test exposes a DIFFERENT, unrelated iteration gap.
+## Status (2026-08-25): os.listdir iteration gap FIXED + verified;
+## doc still OPEN on two NEWLY-DIAGNOSED downstream runtime gaps.
+
+The 2026-08-23 iteration gap is fixed for real. Branch
+`fix/opencode-gencodec`, commits `6dce849` + `bdabb8a`. Four separate
+root causes had to land before the loop body genuinely executed:
+
+1. **`os.listdir` was an opaque stub returning the module marker itself.**
+   The call fell through every module-method case in `_lower_method_call`
+   to the generic scalar-receiver stub (`int64_t.listdir() stubbed`),
+   which returned the `os` module marker (an int64_t) as the "list"; the
+   for-loop then hit the not-a-registered-container fallback and ran zero
+   times (`mojo_unsupported_iter`). Fixed with a real runtime helper,
+   `mojo_listdir(path)` (runtime/mojo_runtime.c: opendir/readdir, "."/".."
+   excluded), wired through `_lower_method_call`'s module-method dispatch,
+   `_KNOWN_SIGS`, and both type-inference pre-passes (result infers as
+   `MojoList *` of `char *`). Verified byte-for-byte against real CPython:
+   a standalone repro iterating `/tmp/genc_test/dir` prints identical
+   entries in identical (readdir) order with an identical count.
+2. **`os.path.isfile` was a literal-0 stub** ("not a file"), so even with
+   listdir fixed, `if not os.path.isfile(mappathname): continue` was
+   UNCONDITIONAL — every iteration silently skipped, zero visible
+   behavior. Fixed with `int_isfile` (S_ISREG twin of the existing
+   `int_isdir`); the generator-body path (gimple_cpp_core.py) mirrors the
+   same real helper now instead of its old literal-0 copy.
+3. **`os.path.split(mapname)[1]` never reached any real lowering** — the
+   chained `os.path.*` block had no `split` case, so it fell through to
+   generic string-method dispatch with the `os.path` MODULE MARKER coerced
+   into the SEPARATOR argument (`mojo_str_split((char *)0, mapname)`),
+   i.e. element [1] of a whitespace-split of the path. Fixed with
+   `int64_t_path_split` (cpython posixpath.split semantics verbatim,
+   returned as a 2-element string list exactly like the existing splitext
+   lowering). A standalone repro of convertdir()'s whole name-mangling
+   prologue (listdir → join → isfile-guard → split[1] → replace('-','_')
+   → split('.')[0] → lower()) now produces output IDENTICAL to real
+   `python3 gencodec.py`'s first stage.
+4. **`convertdir(*sys.argv[1:])` passed the argv-slice LIST POINTER as
+   `dir`.** A '*'-spread survives `_lower_UnaryOp` as a single
+   `('MojoList *', lst)` pair, which the generic coercion cast to the
+   FIRST fixed param's type — so `opendir(list-pointer-as-path)` failed
+   and the (now-real) listdir returned an empty list, again zero
+   iterations, silently. Fixed by `_expand_sole_spread_into_fixed_slots`
+   (gimple_gen_calls.py), shared between `_lower_named_call` and
+   `_gen_stmt_ExprStmt`'s statement-level twin per this project's
+   consolidate-duplicates rule: expands a sole '*'-spread across all
+   fixed C param slots with per-slot in-range guards; out-of-range slots
+   fall back to the callee's recorded parameter defaults (so
+   `convertdir(dir)` still gets dirprefix=''/nameprefix=''/comments=1).
+
+After all four: the built binary enters convertdir, iterates the real
+directory listing, passes the isfile guard, and prints the
+`converting <mapname> to ... and ...` line per entry — the loop body
+provably executes end-to-end. Quality gates all clean at commits
+`6dce849`+`bdabb8a`: test_gimple.py 252/252, test_module_cache.py 76/76,
+`make check-selfhost` clean, from-scratch stdlib dylib rebuild with
+0 `skip <module>:` lines (baseline 0).
+
+### Why the doc stays open: first divergences from real CPython (both DOWNSTREAM of the fixed loop)
+
+Running `./gencodec /tmp/genc_test/dir` (one mapping file, one README,
+one subdirectory) vs real `python3 gencodec.py` on the same dir:
+
+1. **Garbage string prefixes from int64_t-typed string-default params.**
+   Real: `converting readme.md to readme.py and readme.mapping`.
+   Compiled: `converting readme.md to 43713230804371323080readme.py ...`.
+   Root cause: `convertdir(dir, dirprefix='', nameprefix='', comments=1)`
+   — an UNANNOTATED param whose default is a string literal still gets
+   typed `int64_t` (`_param_ctype` consults only annotations and call-site
+   usage inference, never the default expression), so `nameprefix + name`
+   lowers as int-concat: `mojo_str_from_int(<boxed char* pointer>)`
+   formats the pointer's decimal digits. The call site dutifully passes
+   interned `""` as int64_t, so the value is a real string pointer being
+   printed as an integer. Fix shape: teach `_param_ctype` that an
+   unannotated param with a StringLiteral default is `char *` — small but
+   signature-changing across every similarly-shaped function, so it needs
+   its own gates pass (mangling/suffix implications), NOT smuggled into a
+   doc-closing commit. (Note `comments=1` already works: an int default
+   happens to coincide with the int64_t box.)
+2. **`Unhandled exception: AttributeError: append` — a container method
+   referenced as a first-class VALUE.** After the print, pymap → codegen →
+   `python_mapdef_code` does the classic aliasing idiom `l = [];
+   append = l.append; append(...)`. `_lower_bound_method_value` /
+   MojoBoundMethod* covers USER-STRUCT methods only; a builtin-container
+   member read as a value falls to generic getattr and raises at runtime.
+   Minimal repro (compiles today, fails identically):
+   `def g(): l = []; append = l.append; append(1); print(len(l)); g()`.
+   This blocks python_mapdef_code/python_tabledef_code entirely, hence
+   no .py/.mapping output files are produced yet.
+
+Not yet reached (unverified, likely further gaps once 1+2 land):
+`marshal.dump(d, f)` ('wb' mode), `codecs.make_encoding_map`,
+`sorted(map.items())`, `%a` formatting in python_tabledef_code.
+
+No-arg invocation divergence (minor, noted for completeness): real Python
+raises TypeError (missing `dir`); the compiled binary now unpacks an empty
+argv-slice into all-NULL/defaults and exits 0 having iterated nothing.
+Honest-stub territory, harmless here, but not byte-equivalent.
+
+## Status (2026-08-23, historical — superseded by 2026-08-25 above)
+## COMPILED end-to-end (both old issues fixed);
+## runtime smoke test exposed the (now-fixed) iteration gap.
 
 `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 exits 0 and produces a real arm64 executable on branch `fix/tools-misc`
