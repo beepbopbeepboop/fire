@@ -3845,6 +3845,48 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                                                       declared, indent)
         target_was_declared = target in declared
         declared[target] = 'int64_t'
+        # `for i in reversed(range(...)):` — a real, recurring idiom
+        # (`_collections_abc.py`'s `Sequence.__reversed__`, `heapq.py`,
+        # `random.py`, `_osx_support.py`: `for i in reversed(range(len(
+        # self))):` etc.) that previously fell all the way through to
+        # this function's final `_UnsupportedGeneratorShape` refusal —
+        # `reversed(...)` has no case at all in this coroutine-body
+        # for-loop lowering (the ordinary, non-generator GIMPLE path
+        # already handles it generically via the `mojo_reversed`
+        # runtime helper, but that helper's opaque return value can't
+        # be range-for'd here, same reason plain `range(...)` needs its
+        # own indexed-loop lowering just below instead of a runtime
+        # object). Narrowly scoped to `reversed(range(stop))` /
+        # `reversed(range(start, stop))` — i.e. step==1 — the shape
+        # every real instance found in this corpus uses; a non-unit
+        # step falls through unhandled (not attempted, no real instance
+        # seen). Lowered as a plain descending indexed loop: the
+        # reverse of `range(start, stop)` (step 1) is `stop-1, stop-2,
+        # ..., start`.
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name == 'reversed'
+                and len(s.iterable.args) == 1
+                and isinstance(s.iterable.args[0], gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.args[0].func, gimple_ctypes.IdentExpr)
+                and s.iterable.args[0].func.name == 'range'
+                and len(s.iterable.args[0].args) in (1, 2)):
+            _rargs = [gen._cpp_expr(a) for a in s.iterable.args[0].args]
+            if len(_rargs) == 1:
+                _start_e, _stop_e = '0', _rargs[0]
+            else:
+                _start_e, _stop_e = _rargs[0], _rargs[1]
+            ctr = gen._cpp_fresh_name("_mg_i")
+            lines = []
+            if not target_was_declared:
+                lines.append(f"{indent}int64_t {target};")
+            lines.append(f"{indent}for (int64_t {ctr} = ({_stop_e}) - 1; "
+                         f"{ctr} >= ({_start_e}); {ctr}--) {{")
+            lines.append(f"{indent}    {target} = {ctr};")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
         # `for i in range(...)` → a plain indexed loop, mirroring the
         # GIMPLE path's _gen_for_range. The C++20-coroutine body can't
         # range-for over mojo_range()'s opaque void* — an explicit
