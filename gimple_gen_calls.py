@@ -1020,7 +1020,44 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if (isinstance(node.args[1], gimple_ctypes.StringLiteral)
                 and len(node.args) in (2, 3)):
             _attr = node.args[1].value
-            _boxed_ft = gen._known_field_type(_attr)
+            # `_known_field_type` resolves `_attr`'s C type ONLY when
+            # every struct across the WHOLE-PROGRAM-shared `struct_
+            # field_types` that happens to have a field of this bare
+            # name agrees on its type — true even when only a SINGLE,
+            # totally unrelated struct anywhere in the huge transitive
+            # compile happens to define it (see that helper's own
+            # docstring, gimple_gen_infra.py). That is sound for the A5
+            # idiom this branch was built for (this compiler's OWN self-
+            # hosted `getattr(s, 'elifs', [])`-style reads on a boxed AST
+            # NODE handle, where `_attr` genuinely does name one of a
+            # small, closed set of AST-node field names), but unsound
+            # for an arbitrary third-party `getattr(obj, name, default)`
+            # call on an opaque receiver with NO relationship at all to
+            # whichever struct happens to own that field name elsewhere
+            # in the program — common, generic field names like
+            # 'buffer'/'raw'/'name' collide easily across a huge stdlib
+            # corpus. Confirmed real regression: `Lib/tempfile.py`'s
+            # `raw = getattr(file, 'buffer', file)` (file/raw both
+            # genuinely opaque `_io.open()` results, no relation to any
+            # user struct) picked up SOME unrelated class's own `buffer:
+            # String` field's `char *` type purely by name coincidence,
+            # mistyping `raw` as `char *` — then `raw.name = name` (a
+            # LATER, separate real attribute write) tried a literal `.`
+            # member access on that `char *`, a hard GCC "request for
+            # member 'name' in something not a structure or union"
+            # error. Scoped to this compiler's OWN self-hosted source
+            # (the same path-based gate `gen_module`'s `_is_selfhost_
+            # file`/`DispatchSolver(allow_assume_all_methods=...)` use)
+            # since that's the only place this A5 idiom is meant to
+            # fire; every other file falls through to the generic
+            # untyped-int64_t path below unchanged (the ONLY behavior
+            # this ever had before A5 was added).
+            _cur_file = getattr(gen, '_current_filename', None)
+            _cur_abs = os.path.abspath(_cur_file) if _cur_file else ''
+            _is_selfhost_file = bool(_cur_file) and (
+                _cur_abs == gimple_codegen._SELFHOST_DIR
+                or _cur_abs.startswith(gimple_codegen._SELFHOST_DIR + os.sep))
+            _boxed_ft = gen._known_field_type(_attr) if _is_selfhost_file else None
             if _boxed_ft is not None:
                 ot, ov = gen.lower_expr(node.args[0])
                 if ot in ('int', 'char'):
