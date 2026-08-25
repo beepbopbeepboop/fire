@@ -4,25 +4,71 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-08-23): ALREADY-FIXED end-to-end at the compile/link level.
+## Status (2026-08-24, worktree fix/rest-remainder4, commit `6da43a2`): the
+## 2026-08-23 "ALREADY-FIXED" claim below was NOT actually true against a
+## fresh `master` checkout (not a regression from this session's other 5
+## fixes — the gap this entry fixes predates and is independent of them);
+## a real, separate compile blocker in `736b349`'s own mechanism was found
+## and fixed. Compile+link now genuinely succeeds; the already-documented
+## runtime gap (`AttributeError: Token`) remains, unresolved, out of scope.
 
-`python3 mojo.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/parser.py`
-now exits 0 and produces a real arm64 Mach-O executable ("Built: parser") on
-branch `fix/tools-misc`. Both of the doc's historical blockers are resolved:
-the client-`.c` `'Parser' undeclared` errors no longer reproduce (master's
-absorbed struct-emission fixes), and the `__mojogen_lexer_tokenize_*`
-undefined-symbol link failure is gone — this branch's landed commit `736b349`
-("Fix build_executable dropping sibling-module coroutine units from the link
-line") is precisely the build_executable-path counterpart of the
-`_compile_imported_module` capture gap described in the 2026-08-20 entry below,
-and with it the full inline pipeline links lexer.py's coroutine unit.
+Re-verified fresh against current `master` (before any change this
+session): `python3 mojo.py build .../parser.py` reproduced the EXACT
+`__mojogen_lexer_tokenize_*` undefined-symbol link failure the 2026-08-23
+entry below claims was fixed by `736b349` — i.e. that entry's "ALREADY-
+FIXED end-to-end" claim (verified only on the separate, since-merged
+`fix/tools-misc` branch) was never actually true against this file's real
+dependency chain, or was tested in a state that happened to mask the real
+remaining gap.
 
-Runtime caveat (not a compile issue, recorded for completeness): executing the
-built binary prints `globals: unavailable in compiled mode` and then dies with
-`Unhandled exception: AttributeError: Token` — a separate, runtime-level gap in
-this codegen, out of scope for this COMPILE_FAIL doc. Compile+link status:
-fixed; doc can be closed once its sibling docs' shared context is no longer
-needed.
+Root-caused via direct instrumentation of `_compile_imported_module`/
+`_compile_link_inline_cpp_unit` (`gimple_gen_resolve.py`/`gimple_gen_
+infra.py`): `736b349`'s own fix — compiling a transitively-imported
+sibling module's `generated_cpp` as its own standalone translation unit —
+genuinely captures `lexer.py`'s `tokenize()` coroutine unit
+(`temp_gen.generated_cpp`, 6058 chars, non-empty), but `_compile_link_
+inline_cpp_unit`'s g++ invocation on that unit was silently failing every
+time (caught by its own `try/except`, returned `None`, discarded with no
+visible signal short of `MOJO_DEBUG=1`): the standalone unit references
+`Token *` (a struct defined IN `lexer.py` ITSELF, `tokenize()`'s yield
+type) with **no declaration of `Token` anywhere in the unit** — a hard
+`'Token' does not name a type` g++ error. Cause: the cpp preamble's
+"struct layout(s) needed" block (`gimple_module_gen.py`'s `gen_module_
+impl`) only ever emits a struct's typedef if `self._struct_typedef_texts`
+already has it, and that dict is populated ONLY by the `emit_struct_defs=
+True` pass — which every `_compile_imported_module` temp_gen (i.e. every
+transitively-imported sibling, including `lexer.py`'s own) is created
+with `emit_struct_defs=False`, so it NEVER runs. `736b349`'s own fix was
+therefore silently inert for any struct-typed generator (only its
+hand-built scalar-only repro — `yield i * 10` — ever actually exercised
+the success path); `cwriter.py` and `parsing.py`'s own top-level
+generators hit the identical silent-failure gap for the same reason
+(all three showed up in a fresh `MOJO_DEBUG=1` run as "failed to compile
+link-mode inline-module cpp unit").
+
+**Fixed** (`gimple_module_gen.py`, commit `6da43a2`): hoisted the
+per-struct typedef-body rendering into a shared `_render_struct_typedef_
+body` helper, and made the cpp-preamble's struct-layout block fall back
+to synthesizing a struct's typedef ON DEMAND from `self.struct_field_
+types` (shared BY REFERENCE across every nested temp_gen, so always
+populated regardless of `emit_struct_defs`) whenever `_struct_typedef_
+texts` doesn't have it yet, instead of silently omitting the struct.
+Verified via direct instrumentation: `lexer.py`'s `tokenize()` unit now
+compiles cleanly standalone and its object lands in `link_objects_out`;
+`cwriter.py`'s and `parsing.py`'s own units also now compile clean.
+
+**`python3 mojo.py build .../parser.py` now exits 0** and produces a real
+arm64 executable ("Built: parser") against plain `master` + this one
+commit — no other branch/state dependency. This is a genuine, verified
+compile+link fix, not a restatement of the earlier (inaccurate) claim.
+
+Runtime caveat (not a compile issue, unchanged from the note below):
+executing the built binary prints `globals: unavailable in compiled
+mode` then dies with `Unhandled exception: AttributeError: Token` — a
+separate, pre-existing, runtime-level gap in this codegen, out of scope
+for this COMPILE_FAIL doc and NOT fixed by this session. Because of this,
+the doc is NOT closed/removed (this campaign's "done" bar requires the
+binary to run correctly, not just link) — kept open, status corrected.
 
 ## Status (2026-08-20): the documented link-time gap (4th coroutine-code
 ## source) is FIXED at the mechanism level. `parser.py` itself is STILL
