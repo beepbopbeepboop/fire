@@ -1,5 +1,52 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder — the `.join()` gap from the 2026-08-23 entry (item 3) is FIXED; two other, DIFFERENT blockers now surface on the same/nearby lines, unaffected)
+
+This session's `.join()`-on-string-literal fix (see `bugs/
+CODEGEN_generator_function_Lib_ftplib.md`'s matching 2026-08-24 entry for
+the mechanism) resolves this file's own item 3 (`'\n'.join((...))` was
+previously refused outright as "`.join()` unsupported in the coroutine-
+body expression lowering" — confirmed gone via a fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` + `g++-mp-15 -std=c++20
+-fsyntax-only`: `mojo_str_join(...)` is now correctly emitted for this
+call).
+
+However, the SAME statement doesn't compile clean either way — its
+argument is a LITERAL multi-line string tuple (`'\n'.join(("import os,
+sys, time", "", ...))`), and a literal `TupleExpr`/`ListExpr` used
+directly as a call ARGUMENT (as opposed to an assignment RHS, which this
+emitter already has real `mojo_list_new()`-based construction for) still
+lowers to a bare C++ brace-init-list, which isn't a valid `MojoList *`
+argument (`expected ';' before '}' token` / a downstream `cannot convert
+'char*' to 'MojoList*'`). This is a DIFFERENT, narrower gap than the
+`.join()` refusal it was hiding behind — not attempted here (scope
+creep beyond this session's `.join()` fix) — flagged for whoever picks
+this up: extending the existing list/dict/set-literal-as-assignment-RHS
+construction path to also cover a literal used directly as a call
+argument would close it.
+
+This file's DOMINANT blocker (item 1, `os.pipe()`/`os.close` — outer-
+scope module-name resolution inside a generator's own translation unit)
+is confirmed UNCHANGED and untouched by either fix — still the first
+thing that would need solving for this file to build. Item 4
+(`assertEqual` arity — inherited `unittest.TestCase` methods getting a
+`(self)`-only extern declaration) also confirmed unchanged; investigated
+this session (see `bugs/CODEGEN_generator_function_Lib_test_test_ctypes_
+test_random_things.md`'s matching entry) but NOT fixed — the "declare
+the extern as C-variadic instead" idea was considered but not attempted,
+since there's no confirmed evidence a real backing DEFINITION for an
+inherited-but-uncompiled base-class method exists to link against at any
+arity; changing the extern declaration alone risks trading a diagnosable
+compile-time arity error for a much more confusing link-time undefined-
+symbol error. Needs a dedicated investigation into what (if anything)
+currently backs these symbols before attempting.
+
+Full mandatory gate for the `.join()` fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines.
+
+Doc stays open — file still does not build.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. This session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- strip/lstrip/rstrip/lower/upper/startswith/endswith) do not touch this file's dominant blocker (outer-scope module-name resolution, e.g. `os.pipe()`, inside a generator's own translation unit -- a module name like `os` is never in this narrow body model's known-symbol set at all, so no string-method or field-name fix reaches it). Still structural; untouched.

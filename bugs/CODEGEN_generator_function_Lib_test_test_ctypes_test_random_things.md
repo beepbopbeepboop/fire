@@ -1,8 +1,40 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
-## Status (updated 2026-08-24 -- re-verified, unchanged)
+## Status (updated 2026-08-24, worktree fix/rest-remainder — arity-mismatch fix considered and DELIBERATELY NOT attempted; see reasoning)
 
-Re-checked this session while triaging the C3 cluster. The residual blocker (inherited unittest.TestCase method calls from a generator body getting a `(self)`-only extern declaration, arity mismatch on the real multi-arg call) is unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies). Not attempted (needs arity-aware extern declaration or real inherited-method resolution -- a shared-machinery change, not narrow). Still open; untouched.
+Investigated the `(self)`-only extern-declaration arity mismatch (the
+residual blocker shared with `_test_eintr.py`'s `assertEqual`/
+`assertIsInstance` sites — same underlying mechanism,
+`gimple_module_gen.py`'s `_cpp_struct_method_refs` extern-declaration
+loop: `self.func_param_types.get(_smsym, self.func_param_types.get(
+_smkey, [f"{_sm_struct} *"]))` falls back to a bare `(self *)`-only
+signature whenever an inherited method — one never defined on the local
+subclass itself, only on an uncompiled base class like
+`unittest.TestCase` — has no recorded real signature).
+
+The obvious-looking narrow fix (declare it C-variadic, `extern "C" T sym
+(...);`, mirroring this same file's existing `_cpp_module_variadic_
+func_refs` convention for an unresolved free function) was NOT attempted:
+that convention's free-function counterpart pairs its variadic EXTERN
+DECLARATION with a real, matching, weakly-defined VARIADIC STUB BODY
+(`__attribute__((weak)) {ret_type} {safe} (...) {body}`, `gimple_module_
+gen.py` ~line 4931) generated elsewhere for exactly the same symbol — so
+the two sides of the link always agree. The struct-method case has no
+such confirmed backing definition: `unittest.TestCase` is real CPython
+source (not a project-local stub module — confirmed no `unittest.mojo`/
+similar exists anywhere in this repo), so whether `OSEINTRTest_
+assertEqual`-style symbols get ANY real or weak-stub definition anywhere
+in a full whole-program build was not established. Changing only the
+extern declaration's arity, without confirming (or adding) a matching
+definition, risks silently trading a diagnosable compile-time "too many
+arguments" error for a much harder-to-diagnose link-time "undefined
+symbol" error — worse, not better, and contrary to this codegen's
+existing "refuse honestly, don't guess" convention. A real fix needs
+either (a) confirming/adding a weak variadic stub definition alongside
+the variadic extern declaration (mirroring the free-function mechanism
+exactly), or (b) real inherited-method signature resolution. Left
+open, not attempted, for whoever picks this up next with the time to
+verify the link-level assumption first.
 
 
 ## Status (updated 2026-08-23 — PARTIAL)

@@ -664,6 +664,21 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
             return 'char *'
         if e.func.member in ('lower', 'upper') and len(e.args) == 0:
             return 'char *'
+        # `<str-or-literal>.join(iterable)` — mirrors `_cpp_expr`'s
+        # (gimple_cpp_core.py) matching CallExpr/MemberExpr `.join(...)`
+        # case (routes through the real `mojo_str_join` runtime helper,
+        # always returning `char *`), same rationale as `.replace`/
+        # `.strip` above: without a matching entry here, a first-
+        # assigned local like ftplib.py's `mlsd`: `line = ";".join
+        # (facts)` defaulted to the int64_t fallback below, so the
+        # DECLARED C type disagreed with the real `char *` value
+        # `_cpp_expr` actually emits for it (`assignment to 'int64_t'
+        # from 'char*'`) — no receiver-type gate needed here (unlike
+        # `.replace`/`.strip`, `.join`'s receiver is irrelevant to its
+        # OWN return type, only to whether `_cpp_expr` can lower the
+        # call at all).
+        if e.func.member == 'join' and len(e.args) == 1:
+            return 'char *'
         # `<str>.startswith(prefix)` / `.endswith(suffix)` — mirrors the
         # matching `_cpp_expr` case below (`mojo_str_startswith`/
         # `mojo_str_endswith`, both real C `int`-returning helpers).

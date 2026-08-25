@@ -1463,6 +1463,30 @@ def _cpp_expr(gen, e) -> str:
                 _fn = 'mojo_str_startswith' if e.func.member == 'startswith' else 'mojo_str_endswith'
                 _a0 = gen._cpp_expr(e.args[0])
                 return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)"
+            # `<char*-typed-or-literal obj>.join(iterable)` — a real
+            # `str.join(...)` call on either a declared/self-field `char *`
+            # separator OR (unlike the string methods just above, which
+            # only recognize a receiver `_cpp_receiver_ctype` can resolve
+            # to a known local/field) a bare STRING LITERAL separator —
+            # `";".join(facts)`, ftplib.py's `mlsd`. `_cpp_receiver_ctype`
+            # has no StringLiteral case (nothing else needs one), so this
+            # is checked directly here rather than widening that shared
+            # helper. Routes through the SAME `mojo_str_join(sep, parts)`
+            # runtime helper the ordinary GIMPLE path's own `str.join`
+            # lowering already uses (gimple_gen_methods.py); the argument
+            # is cast straight to `MojoList *` (this emitter's other
+            # container-typed-call sites, e.g. the `sorted()` case above,
+            # do the same unconditional cast rather than the ordinary
+            # path's int64_t-widening dance, since a coroutine-body
+            # argument that isn't already list-shaped has no narrower
+            # static type to widen from here).
+            if e.func.member == 'join' and len(e.args) == 1 and (
+                    _str_obj_ctype == 'char *'
+                    or isinstance(e.func.obj, gimple_ctypes.StringLiteral)):
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _a0 = gen._cpp_expr(e.args[0])
+                return (f"(char *)mojo_str_join((char *)({_obj_expr}), "
+                        f"(MojoList *)({_a0}))")
             # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
             # dict method call on a local/self-field this narrow body
             # model already knows is `MojoDict *`, which (like `.replace`

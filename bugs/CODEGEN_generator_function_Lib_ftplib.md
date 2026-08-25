@@ -1,5 +1,45 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder — gap #1 (`";".join(facts)`) FIXED; a NEW, previously-masked error surfaced on the same line; gaps #2-4 unchanged)
+
+Implemented real `str.join(...)` support in the coroutine-body expression
+emitter this session (`gimple_cpp_core.py`'s `_cpp_expr` CallExpr/MemberExpr
+case, plus a matching `_infer_simple_expr_ctype` entry in
+`gimple_exprtypes.py` so a freshly-assigned local like `cmd = "OPTS MLST " +
+";".join(facts) + ";"` gets the real `char *` declared type instead of the
+int64_t default): a bare string-literal OR declared-`char *` receiver's
+`.join(iterable)` now routes through the same `mojo_str_join(sep, parts)`
+runtime helper the ordinary GIMPLE path already uses. Verified via a
+standalone repro (`";".join(["a","b","c"])` inside a generator, yielded and
+printed) — `mojo.py build` + running the binary prints `a;b;c` correctly.
+
+Re-verified this file specifically via an isolated
+`compile_to_gimple_with_cpp(do_imports=False)` + `g++-mp-15 -std=c++20
+-fsyntax-only`: the previously-documented `.join()`-on-literal error at
+this exact line is GONE. However, the SAME line (`self.sendcmd("OPTS MLST "
++ ";".join(facts) + ";")`) now surfaces a DIFFERENT, previously-masked
+error: `FTP_sendcmd`'s own extern declaration types its `cmd` parameter
+`int64_t` (not `char *`), so passing the now-correctly-`char *`-typed join
+result is a hard `invalid conversion from 'char*' to 'int64_t'`. This is a
+distinct, pre-existing gap (an inherited/cross-reference struct-method
+extern-declaration parameter-typing issue, not a `.join()` problem) that
+gap #1's own fix simply unmasked by getting past it — not investigated or
+attempted this session; flagged for whoever picks up FTP's own
+`sendcmd`/`retrlines` external-signature accuracy.
+
+Full mandatory gate for this fix: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines (baseline 0, unchanged).
+
+Gaps #2 (`lines.append` passed as a value), #3 (`.split()` chained-call
+result used as a loop iterable), and #4 (`fact.partition(...)` on an
+unannotated-param-derived string, the `unannotated_init_param_field_type_
+defaults_int64` hard-bug family) are UNCHANGED — none touch `.join()`,
+confirmed still present in the same isolated compile.
+
+`ftplib.py` as a whole still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-24 — `%`-format crash in `mlsd` FIXED; 4 unrelated errors remain, own-.cpp count 5 -> 4)
 
 Re-verified via isolated compile (`GimpleGen(do_imports=False,
