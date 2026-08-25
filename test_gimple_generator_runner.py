@@ -1212,6 +1212,136 @@ def main():
         print(v)
 """, "3\n")
 
+    # ── Generator-consumption ordering + param-default padding family ─────
+    #
+    # A DEEP forward-consumption chain: every consumer is defined BEFORE
+    # its producer, and each level's unit only becomes compilable after
+    # the level below it registers (gen_module's retry passes). The retry
+    # loop used to be a hard-coded 3 passes — this 5-deep chain needs 4,
+    # so it used to leave head/l3 refused and fall back to interpreting
+    # the whole module. Values are chosen so each link's wiring is
+    # visible in the final number: tail(3)=0+1+2 -> l1=30 -> l2=130 ->
+    # l3=130 -> head=1130.
+    test_generator_stdout("generator_forward_consumption_deep_chain", """\
+def head(n):
+    t = 0
+    for x in l3(n):
+        t = t + x
+    yield t + 1000
+
+def l3(n):
+    t = 0
+    for x in l2(n):
+        t = t + x
+    yield t
+
+def l2(n):
+    t = 0
+    for x in l1(n):
+        t = t + x
+    yield t + 100
+
+def l1(n):
+    t = 0
+    for x in tail(n):
+        t = t + x
+    yield t * 10
+
+def tail(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    for v in head(3):
+        print(v)
+""", "1130\n")
+
+    # A consuming for-loop omitting a LATER-defaulted argument of the
+    # consumed generator (`for x in prod(n)` against `def prod(n,
+    # step=10)`): must pad step=10, not refuse on arity and not pad a
+    # typed zero (which silently produced 0+1+2=3 instead of 33).
+    test_generator_stdout("generator_for_consumption_pads_callee_defaults", """\
+def prod(n, step=10):
+    i = 0
+    while i < n:
+        yield i + step
+        i = i + 1
+
+def consumer(n):
+    total = 0
+    for x in prod(n):
+        total = total + x
+    yield total
+
+def main():
+    for v in consumer(3):
+        print(v)
+""", "33\n")
+
+    # The DIRECT construction call path with an omitted non-zero-offset
+    # default (`prod(3)` against `def prod(n, step=10)`): the padding
+    # indexed the defaults list WITHOUT its trailing-run offset, so the
+    # omitted arg silently got 0 instead of 10 — real compiled output,
+    # no refusal, wrong number. Regression test for that silent-miscompile.
+    test_generator_stdout("generator_direct_call_pads_nonzero_offset_default", """\
+def prod(n, step=10):
+    i = 0
+    while i < n:
+        yield i + step
+        i = i + 1
+
+def main():
+    total = 0
+    for v in prod(3):
+        total = total + v
+    print(total)
+""", "33\n")
+
+    # Same trailing-default padding through the `yield from` delegation
+    # drive loop (`yield from inner(base)` against `def inner(start,
+    # count=2)`): must delegate with count=2.
+    test_generator_stdout("generator_yield_from_pads_callee_defaults", """\
+def inner(start, count=2):
+    i = start
+    k = 0
+    while k < count:
+        yield i
+        i = i + 1
+        k = k + 1
+
+def outer(base):
+    yield from inner(base)
+
+def main():
+    for v in outer(7):
+        print(v)
+""", "7\n8\n")
+
+    # Method-generator direct call with an omitted default after a
+    # leading required non-self param (`c.gen(3)` against `def gen(self,
+    # n, step=2)`): the method-call padding must skip `self` AND apply
+    # the trailing-run offset — it previously did neither correctly for
+    # this shape (padded 0, yielding 10/11/12).
+    test_generator_stdout("generator_method_call_pads_nonzero_offset_default", """\
+class C:
+    def __init__(self, base: Int):
+        self.base = base
+
+    def gen(self, n: Int, step: Int = 2):
+        i = 0
+        while i < n:
+            yield self.base + i * step
+            i = i + 1
+
+def main():
+    c = C(10)
+    for v in c.gen(3):
+        print(v)
+""", "10\n12\n14\n")
+
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)

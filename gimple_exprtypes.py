@@ -248,6 +248,31 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
     return True
 
 
+def _trailing_default_at(dflts, n_params: int, pos: int):
+    """Default-arg AST node for call slot `pos` out of `n_params` total
+    params, given `dflts` = [(param_name, default_ast), ...] covering ONLY
+    the params that HAVE a default (`FunctionDef.param_defaults`'s shape).
+    Returns None when that slot has no default — i.e. when the omitted
+    argument is genuinely required and the caller must refuse/pad-zero per
+    its own convention.
+
+    Shared by every generator-call/consumption padding site (the direct
+    `<base>_start` construction paths in gimple_gen_calls/gimple_gen_methods
+    and the coroutine-body consumption paths in gimple_cpp_core) so the
+    offset arithmetic lives in exactly one place. That offset matters:
+    Python guarantees defaults form a TRAILING run, so the first defaulted
+    slot is `n_params - len(dflts)` — naive `dflts[pos]` indexing misses
+    every time once a leading required param exists (e.g. `def prod(n,
+    step=10)` called as `prod(3)`), silently padding the omitted arg with a
+    typed zero instead of the declared default — the GIMPLE-side
+    BUG-2026-020 family, regressed by the generator-call sites that
+    predate it."""
+    _first = n_params - len(dflts)
+    if dflts and 0 <= pos - _first < len(dflts):
+        return dflts[pos - _first][1]
+    return None
+
+
 def _async_gen_quick_eligible(fn: FunctionDef, known_async_names=frozenset()) -> bool:
     """Cheap pre-filter for the final step of the async/await codegen
     project: `async def f(): ... yield ... ...` (is_async AND is_generator

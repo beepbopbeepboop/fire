@@ -2445,6 +2445,108 @@ def main():
 
     test_generator_yield_from_delegation_compiles_via_cpp_path()
 
+    # Forward consumption of a LATER-defined sibling generator — the
+    # "consumed generator must be defined earlier" constraint's real
+    # scope. gen_module registers each generator's API only after its
+    # coroutine unit succeeds, so a consumer earlier in source order can
+    # only compile on a RETRY pass; the retry loop runs to a fixed point
+    # (it used to be a hard-coded 3 passes, which silently left chains
+    # deeper than 4 refusing and took the whole module down to
+    # interpreter fallback). This chain is 5 deep (head -> l3 -> l2 ->
+    # l1 -> tail, every consumer BEFORE its producer), needing 4 retries.
+    # Confirms: (a) the whole module still compiles via the C++ path,
+    # (b) all five generators' extern "C" APIs exist in the .cpp, and
+    # (c) head's body really drives tail's API through the intermediate
+    # units (the delegation/consumption loop text is present).
+    def test_generator_forward_consumption_chain_compiles_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+def head(n):
+    t = 0
+    for x in l3(n):
+        t = t + x
+    yield t + 1000
+
+def l3(n):
+    t = 0
+    for x in l2(n):
+        t = t + x
+    yield t
+
+def l2(n):
+    t = 0
+    for x in l1(n):
+        t = t + x
+    yield t + 100
+
+def l1(n):
+    t = 0
+    for x in tail(n):
+        t = t + x
+    yield t * 10
+
+def tail(n):
+    i = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+def main():
+    for v in head(3):
+        print(v)
+"""
+        name = "generator_forward_consumption_chain_compiles_via_cpp_path"
+        try:
+            c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: compile_to_gimple_with_cpp raised {e!r}")
+            _FAIL += 1
+            return
+        if not cpp_src:
+            print(f"FAIL  {name}: expected non-empty generated .cpp text")
+            _FAIL += 1
+            return
+        import re as _re
+        for fn in ('head', 'l3', 'l2', 'l1', 'tail'):
+            # Parametrized generators carry an overload suffix in their
+            # mangled base (`_mojogen_head_3_start`) — match both forms.
+            if not _re.search(rf'_mojogen_{fn}(?:_\d+)?_start\b', cpp_src):
+                print(f"FAIL  {name}: .cpp output missing later-defined "
+                      f"generator {fn}'s extern \"C\" API")
+                _FAIL += 1
+                return
+        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+            f.write(c_src); c_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src); cpp_path = f.name
+        try:
+            r_c = subprocess.run(
+                [GCC, '-fgimple', '-fsyntax-only', f'-I{_RUNTIME_INC}', c_path],
+                capture_output=True, text=True)
+            from build_config import find_gxx
+            gxx = find_gxx()
+            r_cpp = subprocess.run(
+                [gxx, '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+                capture_output=True, text=True)
+            if r_c.returncode == 0 and r_cpp.returncode == 0:
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}")
+                if r_c.returncode != 0:
+                    print("      --- gcc (.c) stderr ---")
+                    for line in r_c.stderr.splitlines(): print(f"      {line}")
+                if r_cpp.returncode != 0:
+                    print("      --- g++ (.cpp) stderr ---")
+                    for line in r_cpp.stderr.splitlines(): print(f"      {line}")
+                _FAIL += 1
+        finally:
+            os.unlink(c_path)
+            os.unlink(cpp_path)
+
+    test_generator_forward_consumption_chain_compiles_via_cpp_path()
+
     # A generator body calling an UNRESOLVABLE callee — a nested `def`
     # local to the generator (this scalar coroutine-body model has no
     # closure compilation), a Python builtin with no coroutine-body

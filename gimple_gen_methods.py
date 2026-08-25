@@ -1275,11 +1275,18 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
-                # -1: `self` is slot 0 in all_args but has no entry
-                # in param_defaults (defaults are keyed by the
-                # ORIGINAL Python params, which exclude `self`).
+                # -1 shifts BOTH the total-param count and the missing
+                # slot index past `self`: `self` occupies slot 0 in
+                # all_args but has no entry in param_defaults (defaults
+                # are keyed by the ORIGINAL Python params, which exclude
+                # `self`). The shared helper applies the trailing-run
+                # offset — plain `_gm_dflts[_pos]` indexing missed every
+                # time once a leading required non-self param exists
+                # (`def m(self, n, step=2)` called as `obj.m(5)` padded
+                # step with 0 instead of 2).
                 _pos = len(all_args) - 1
-                _dv = _gm_dflts[_pos][1] if 0 <= _pos < len(_gm_dflts) else None
+                _dv = gimple_exprtypes._trailing_default_at(
+                    _gm_dflts, len(_gm_expected) - 1, _pos)
                 if _dv is not None:
                     all_args.append(gen._default_expr_to_pair(_dv))
                 else:

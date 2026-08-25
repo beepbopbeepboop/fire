@@ -2498,15 +2498,39 @@ def gen_module_impl(self, stmts):
         try:
             cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
         except _UnsupportedGeneratorShape as e:
-            self._cpp_refusal_reasons.setdefault(s.name, str(e))
+            # Latest-wins, matching the retry passes below: the reasons
+            # dict is only ever read for generators STILL pending after
+            # every retry, and each pending generator is re-attempted at
+            # least once more, so its final entry always reflects the last
+            # actual attempt.
+            self._cpp_refusal_reasons[s.name] = str(e)
             _debug_note(f'generator {s.name!r} not eligible for C++ '
                         'coroutine path, falling back to honest refusal', e)
             continue
         _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes)
 
-    for _pass in range(3):
+    # Multi-pass retry loop for generators whose pass-1 attempt raised
+    # _UnsupportedGeneratorShape only because a consumed/delegated-to
+    # SIBLING generator wasn't registered yet ("defined LATER in this
+    # module" — registration happens as each generator's unit succeeds, so
+    # a consumer earlier in source order can only succeed on a later pass).
+    # Runs to a FIXED POINT rather than a fixed small pass count: each
+    # iteration re-attempts every still-pending generator in source order,
+    # and any chain of forward references (a1 -> a2 -> ... -> aN) needs up
+    # to N-1 retries to fully resolve — one per link, since a pass only
+    # registers the tail a later pass unblocked. The old hard-coded
+    # `range(3)` silently left chains deeper than 4 refusing (real repro:
+    # a 6-generator chain left its 2 head generators refused; the module
+    # then fell back to whole-module interpretation). Termination is
+    # deterministic: each iteration either registers >= 1 generator
+    # (shrinking _generator_fns) or breaks, so at most len(_generator_fns)
+    # iterations run — mutual-recursion cycles (A consumes B consumes A)
+    # make no progress and break out to the honest whole-module refusal,
+    # unchanged.
+    for _pass in range(max(len(_generator_fns), 1)):
         if not _generator_fns:
             break
+        _registered_this_pass = 0
         for _gm_id, s in list(_generator_fns.items()):
             if _gm_id in _async_fns:
                 continue
@@ -2517,11 +2541,24 @@ def gen_module_impl(self, stmts):
             try:
                 cpp_text, value_ctype, base, param_ctypes = self._gen_cpp_generator_unit(s)
             except _UnsupportedGeneratorShape as e:
-                self._cpp_refusal_reasons.setdefault(s.name, str(e))
+                # Latest-wins (not setdefault): an early pass's reason is
+                # frequently stale by the final failure — e.g. pass 1 says
+                # "does not consume a generator ... defined LATER", while
+                # the retry that actually decided the outcome failed on a
+                # DIFFERENT shape (argument arity, an unsupported body
+                # expression). Reporting the FIRST message sent real
+                # diagnoses down the wrong path (the consumption-ordering
+                # bug docs all quote it). A generator that ultimately
+                # SUCCEEDS keeps no refusal reason that matters — the
+                # reasons dict is only read for names still pending below.
+                self._cpp_refusal_reasons[s.name] = str(e)
                 _debug_note(f'generator {s.name!r} not eligible for C++ '
-                            f'coroutine path (pass {_pass+2}), falling back', e)
+                            f'coroutine path (retry pass {_pass+2}), falling back', e)
                 continue
             _register_free_generator(s, cpp_text, base, value_ctype, param_ctypes)
+            _registered_this_pass += 1
+        if not _registered_this_pass:
+            break
 
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _async_fns

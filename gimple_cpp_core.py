@@ -3521,12 +3521,35 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                     "the consumed generator must be defined earlier)")
         receiver_exprs = []
     sub_params = api.get('params') or []
-    if len(call.args) + len(receiver_exprs) != len(sub_params):
+    # Pad omitted trailing arguments from the callee's registered param
+    # defaults (same convention the direct `<base>_start(...)` construction
+    # paths already apply — see gimple_gen_calls._emit_generator_start_call):
+    # `for x in prod(n):` against `def prod(n, step=10)` must consume
+    # step=10, not hard-refuse on arity. Padded defaults go through
+    # `_default_expr_to_pair` (literals/True/False/None only; everything
+    # else is a typed zero by that helper's own documented convention) so
+    # no default expression can ever emit an undeclared identifier into
+    # the coroutine body. Generator params are scalar-only (enforced at
+    # registration), so each padded text is trivially convertible to its
+    # slot's C++ type. A slot with NO default — or surplus arguments —
+    # still refuses honestly below, unchanged.
+    _dflts = (api.get('defaults')
+              or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
+              or [])
+    arg_exprs = receiver_exprs + [gen._cpp_expr(a) for a in call.args]
+    while len(arg_exprs) < len(sub_params):
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"`for ... in {sub_name}(...)`: expected "
+                f"{len(sub_params) - len(receiver_exprs)} argument(s), "
+                f"got {len(call.args)}")
+        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+    if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
             f"{len(sub_params) - len(receiver_exprs)} argument(s), "
             f"got {len(call.args)}")
-    arg_exprs = receiver_exprs + [gen._cpp_expr(a) for a in call.args]
     base = api['base']
     vct = api['value_ctype']
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
@@ -4946,11 +4969,27 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 "codegen supports, or it's defined LATER in this module — "
                 "the delegated-to generator must be defined earlier)")
     sub_params: list = api.get('params') or []
-    if len(call.args) != len(sub_params):
+    # Same defaults-aware trailing-argument padding as
+    # _cpp_for_generator_delegate's consumption loop just above (shared
+    # helper + `_default_expr_to_pair` literal-text convention): a bare
+    # `yield from prod(n)` against `def prod(n, step=10)` must delegate
+    # with step=10, not refuse on arity. A slot with no default — or
+    # surplus arguments — still refuses honestly below, unchanged.
+    _dflts = (api.get('defaults')
+              or getattr(gen, '_func_param_defaults', {}).get(f"{api['base']}_start")
+              or [])
+    arg_exprs = [gen._cpp_expr(a) for a in call.args]
+    while len(arg_exprs) < len(sub_params):
+        _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
+        if _dv is None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
+                f"argument(s), got {len(call.args)}")
+        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+    if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
             f"argument(s), got {len(call.args)}")
-    arg_exprs = [gen._cpp_expr(a) for a in call.args]
     sub_base = api['base']
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"

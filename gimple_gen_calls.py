@@ -100,7 +100,13 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             if _gen_kwarg_values:
                 arg_pairs.append(_gen_kwarg_values.pop(0))
                 continue
-            _dv = _gen_dflts[_pos][1] if _pos < len(_gen_dflts) else None
+            # Trailing-run offset via the shared helper (`param_defaults`
+            # only covers params that HAVE one — `def prod(n, step=10)`
+            # called as `prod(3)` must pad slot 1 with 10, not 0; plain
+            # `_gen_dflts[_pos]` indexing missed every time here, silently
+            # miscompiling the omitted arg to a typed zero).
+            _dv = gimple_exprtypes._trailing_default_at(
+                _gen_dflts, len(_gen_expected), _pos)
             if _dv is not None:
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
