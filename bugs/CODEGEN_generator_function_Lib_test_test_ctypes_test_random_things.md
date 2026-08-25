@@ -1,5 +1,92 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-arity — RESOLVED: the inherited-method arity blocker is FIXED and the full build now exits 0 with verified runtime behavior)
+
+The doc's own proposed fix (mirror `_cpp_module_variadic_func_refs`'s
+variadic-extern convention for unresolved free functions, paired with a
+matching weak stub definition) was implemented for the struct-method case
+and verified END-TO-END. Commit `b46fd5d` on `fix/opencode-arity`.
+
+**The uncertainty that stopped the 2026-08-24 pass is now resolved
+definitively.** Tracing the codegen found that the ordinary
+(non-generator) path ALREADY had half the mechanism:
+`_lower_struct_method_call`'s auto-stub branch
+(gimple_gen_methods.py, the `struct_name in gen._structs_with_
+unresolved_base` case) emits a WEAK variadic stub definition —
+`__attribute__((weak)) int64_t Sym (Struct *_self, ...) { mojo_print
+("...unavailable in compiled mode (inherited from an unmodeled base
+class)"); return 0; }` — into the .ci whenever an inherited method of
+an unresolved-base struct is called from an ordinary function body.
+But generator-body call sites only recorded `(struct, method)` pairs
+in `_cpp_struct_method_refs`; nothing emitted any definition for them,
+and the extern-declaration loop's `[f"{_sm_struct} *"]` fallback made
+the declaration itself non-variadic. So a generator-only call site got
+neither correct arity NOR a backing definition.
+
+The fix (gimple_module_gen.py's final `.cpp` assembly, `_cpp_struct_
+method_refs` loop): when neither lookup key has recorded param types,
+emit BOTH halves in the companion `.cpp` TU — (1) the weak variadic
+stub DEFINITION (`extern "C" __attribute__((weak)) T Sym (Struct
+*_self, ...) { ... honest diagnostic ... }`, same guard namespace
+`_MOJO_STUB_*` via `_stub_guard_name`, same message wording as the
+ordinary path's auto-stub) and (2) implicitly its own prototype — so
+declaration and definition always agree regardless of which other TUs
+participate. The definition is `extern "C"` so it lands on the same
+UNMANGLED C symbol a real definition elsewhere would use; verified via
+`nm` (weak external `_CallbackTracbackTestCase_assertEqual`, no C++
+mangling) AND via an explicit strong-definition link test: linking a
+third object defining the same symbol strongly succeeds with no
+duplicate-symbol error and the strong def wins, while linking WITHOUT
+one succeeds against the weak stub — both sides of the link agree in
+every scenario. A bare-vararg-only recorded signature (`['...']`) is
+routed through the same variadic treatment rather than joined as a
+receiver-less `(...)`.
+
+Verification (all real, this session):
+1. Isolated repro (`compile_to_gimple_with_cpp(do_imports=False)` +
+   `gcc-mp-15 -fgimple -fsyntax-only` / `g++-mp-15 -std=c++20
+   -fsyntax-only`): the 4 documented "too many arguments" errors at
+   lines 128/130/132/133 are GONE — 0 errors on BOTH sides.
+2. Full link: both objects + `build/libmojostdlib.dylib` link clean
+   into a working executable (C++ driver for the final link, as the
+   pipeline's needs_cxx logic prescribes).
+3. FULL BUILD: `python3 mojo.py build .../test_random_things.py`
+   EXITS 0 (8s warm-CAS run) producing a working `test_random_things`
+   executable; module-level execution correctly does nothing (source
+   guards `unittest.main()` under `__name__ == '__main__'`) and exits
+   0.
+4. RUNTIME behavior of the previously-broken generator verified with a
+   small C driver driving the exported coroutine API
+   (`_mojogen_CallbackTracbackTestCase_expect_unraisable_start/resume/
+   value/destroy`): generator starts, yields the bare yield (value=0),
+   then on resume runs each formerly-failing site — each prints the
+   honest per-site diagnostic ("CallbackTracbackTestCase.assertEqual:
+   unavailable in compiled mode (inherited from an unmodeled base
+   class)") and returns 0, exactly the established weak-stub
+   convention — then completes cleanly, exit 0. With a REAL backing
+   implementation linked strongly, those calls would dispatch to it
+   instead (verified at link level as above).
+5. Full mandatory gate for the gimple_module_gen.py change:
+   `test_gimple.py` 252/252, `test_module_cache.py` 76/76,
+   `make check-selfhost` clean ("self-host compiles + links clean"),
+   from-scratch stdlib dylib rebuild EXIT=0 with **0** `skip <module>:`
+   lines — matching the baseline of exactly 0 skips.
+
+Operational note for future sessions: with NO stdlib dylib present and
+a cold CAS cache, `mojo.py build` of this file walks its transitive
+import closure INLINE, spending minutes PER MODULE on big modules that
+then fall back to interpretation anyway (collections → inspect →
+shutil → ...), with RSS climbing ~6.7GB before our watcher killed one
+run — the same runaway family the faulthandler doc warns about, here
+driven by import-closure compile cost rather than one bad file. With
+`build/libmojostdlib.dylib` built (gate 4 builds it), imports resolve
+via link mode and the whole build takes seconds. Build the dylib
+first.
+
+Same mechanism re-verified fixed for `_test_eintr.py`'s
+assertEqual/assertIsInstance/addCleanup sites — see that doc's
+2026-08-25 entry.
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — arity-mismatch fix considered and DELIBERATELY NOT attempted; see reasoning)
 
 Investigated the `(self)`-only extern-declaration arity mismatch (the

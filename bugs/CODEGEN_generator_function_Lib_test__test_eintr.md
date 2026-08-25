@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-25, worktree fix/opencode-arity — item 4, the inherited-method arity family (`assertEqual`/`assertIsInstance`/`addCleanup`), is FIXED by commit `b46fd5d`; file still does not build — remaining blocker is the list-literal-as-call-argument gap)
+
+The arity-mismatch family this doc's 2026-08-24 entries investigated and
+deliberately left alone is now RESOLVED: gimple_module_gen.py's
+`_cpp_struct_method_refs` extern loop no longer falls back to a
+`(self *)`-only declaration for methods with no recorded signature.
+Instead it emits a WEAK variadic stub definition + matching `extern "C"`
+variadic prototype in the companion .cpp TU (same mechanism/wording as
+the ordinary path's `_lower_struct_method_call` auto-stub; full
+mechanism and ABI-level verification documented in bugs/
+CODEGEN_generator_function_Lib_test_test_ctypes_test_random_things.md's
+2026-08-25 entry).
+
+Re-verified for THIS file via a fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` + `gcc-mp-15 -fgimple
+-fsyntax-only` / `g++-mp-15 -std=c++20 -fsyntax-only`: `.ci` side 0
+errors; the previously-failing `OSEINTRTest_addCleanup(self, 0, rd)`
+and both `assertEqual` sites in `_interrupted_reads`' body now compile
+clean. The ONLY remaining .cpp errors are this doc's already-documented
+item from the 2026-08-24 entry: the literal multi-line string tuple
+used directly as a call argument (`'\n'.join((...))`) still lowers to a
+bare brace-init-list cast to `MojoList *`
+(`expected ';' before '}' token` / `cannot convert 'char*' to
+'MojoList*'`). That is the separate "extend the list-literal-as-
+assignment-RHS construction path to literal-call-arguments" gap flagged
+there for whoever picks it up — untouched here.
+
+Gate for the underlying change: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, stdlib
+dylib rebuild EXIT=0 with 0 skip lines.
+
+Doc stays open — file still does not build.
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder, 2nd entry — item 1 (`os.pipe()`/`os.close`, the file's PREVIOUSLY-DOMINANT blocker) FIXED too; arity-mismatch family (item 4) now the first thing reached)
 
 Follow-up fix in the same session (see `bugs/CODEGEN_generator_function_

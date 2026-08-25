@@ -5519,11 +5519,64 @@ def gen_module_impl(self, stmts):
                     _smkey = f"{_sm_struct}_{_safe_name(_sm_method)}"
                     _smret = self.func_return_types.get(
                         _smsym, self.func_return_types.get(_smkey, 'int64_t'))
-                    _smparams = self.func_param_types.get(
-                        _smsym, self.func_param_types.get(_smkey, [f"{_sm_struct} *"]))
+                    # An INHERITED method — one never defined on this struct
+                    # or anywhere else in this compile (its real home is a
+                    # base class this codegen could not resolve to a
+                    # StructDef at all, e.g. `unittest.TestCase`) — has no
+                    # recorded signature under either key. The old
+                    # `[f"{_sm_struct} *"]` fallback declared it
+                    # `(self *)`-only, so any call passing the receiver
+                    # PLUS arguments (test_random_things.py's generator
+                    # body calling the inherited
+                    # `self.assertEqual(a, b)`) failed g++ with "too many
+                    # arguments" — a hard compile error for what is by
+                    # construction an unresolvable-at-compile-time symbol.
+                    # Mirror the two existing conventions for exactly this
+                    # shape instead of guessing a fixed arity: (1) declare
+                    # the extern C-VARIADIC with a named receiver —
+                    # `extern "C" T Sym (Struct *, ...);` — matching
+                    # `_cpp_module_variadic_func_refs`'s variadic-extern
+                    # treatment of unresolved free functions; and (2)
+                    # pair that declaration with a real, WEAKLY-defined,
+                    # arity-agnostic stub body in THIS SAME translation
+                    # unit (`__attribute__((weak)) ... { mojo_print(...);
+                    # return 0; }`), so both sides of the link always
+                    # agree even when no other TU defines the symbol —
+                    # the identical mechanism `_lower_struct_method_call`'s
+                    # own auto-stub path already uses for inherited-method
+                    # calls from ORDINARY (non-generator) function bodies
+                    # (gimple_gen_methods.py's `_structs_with_unresolved_
+                    # base` branch). If a real definition DOES exist in
+                    # another TU of a whole-program build (a sibling
+                    # module / dylib exporting the same mangled symbol),
+                    # that strong definition simply wins over this weak
+                    # one and the real method runs — the weak stub is
+                    # dead weight, never wrong behavior. See bugs/
+                    # CODEGEN_generator_function_Lib_test_test_ctypes_
+                    # test_random_things.md.
+                    _known_params = (self.func_param_types.get(_smsym)
+                                     or self.func_param_types.get(_smkey))
                     _smret_cpp = _smret.replace('_Bool', 'bool')
+                    if not _known_params or (
+                            len(_known_params) == 1 and _known_params[0] == '...'):
+                        _stub_guard = _stub_guard_name(f"{_smkey}")
+                        if _smret_cpp == 'void':
+                            _stub_body = (f'{{ (void)_self; mojo_print ((char *)'
+                                          f'"{_sm_struct}.{_sm_method}: unavailable in '
+                                          f'compiled mode (inherited from an unmodeled '
+                                          f'base class)"); }}')
+                        else:
+                            _stub_body = (f'{{ (void)_self; mojo_print ((char *)'
+                                          f'"{_sm_struct}.{_sm_method}: unavailable in '
+                                          f'compiled mode (inherited from an unmodeled '
+                                          f'base class)"); return ({_smret_cpp})0; }}')
+                        cpp_parts.append(
+                            f'#ifndef {_stub_guard}\n#define {_stub_guard}\n'
+                            f'extern "C" __attribute__((weak)) {_smret_cpp} {_smsym} '
+                            f'({_sm_struct} *_self, ...) {_stub_body}\n#endif')
+                        continue
                     _smparam_str = ', '.join(
-                        p if p != '_Bool' else 'bool' for p in _smparams)
+                        p if p != '_Bool' else 'bool' for p in _known_params)
                     cpp_parts.append(
                         f'extern "C" {_smret_cpp} {_smsym} ({_smparam_str});')
                 except Exception:
