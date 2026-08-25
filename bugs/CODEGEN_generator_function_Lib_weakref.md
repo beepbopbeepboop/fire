@@ -1,5 +1,85 @@
 # CODEGEN_generator_function: Lib/weakref.py
 
+## Status (updated 2026-08-25, worktree wtOpencode_weakref — assignment was to investigate whether weakref-ref CALLING has a narrower solution than the general callable-value gap; verdict: genuinely feature-sized, NO weakref runtime representation exists anywhere; no code change)
+
+Fresh repro on branch tip (`2d0823b`, under the mandated RAM/wall-clock
+watcher): `python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Lib/weakref.py` fails exactly as the 2026-08-24 entry describes —
+`__iter__`/`items`/`keys`/`values` × WeakValueDictionary/
+WeakKeyDictionary (8 total) each refuse with ``a call to unresolved
+callee 'wr(...)' is not supported in a compiled generator/coroutine
+body (...)``; only absorbed transitive-import fallbacks (collections'
+`Counter[...] = ...`, inspect's `OrderedDict[...] = ...`) appear above
+it. The generators' sole remaining own-code blocker is exactly this one
+shape.
+
+Investigation findings (all verified against current source, not
+assumed):
+
+1. **No weakref runtime representation exists at all.** Grep for
+   `weakref`/`mojo_weakref` across *.py/*.mojo/*.h/*.c: every hit is a
+   comment citing this or a sibling bug doc. No `mojo_weakref_new/deref`,
+   no `_weakref` C-extension recognition anywhere in the FromImportStmt
+   resolution passes, no `KeyedRef` handling. Empirically confirmed with
+   a minimal standalone file: `from _weakref import ref` lowers `ref`
+   to a weak auto-stub that PRINTS ``ref: unavailable in compiled mode
+   (imported from an unresolved external/relative module)`` and returns
+   0 at runtime (the gimple_gen_calls.py `_unresolved_import_aliases`
+   stub, ~line 2172).
+2. **Every callable-value representation this codegen HAS requires a
+   statically-known C symbol at value-CREATION time**, so none can host
+   a value read out of a dict: runtime `mojo_fnptr_call_0..4` (free
+   function pointers); `MojoBoundMethod{fn,self}` +
+   `mojo_bound_method_call_N` (bound methods); coroutine-body
+   `_CPP_CALLABLE_CTYPE` (`std::function<int64_t()>`) locals — assigned
+   only when the RHS is statically a lambda or a `self.<real-method>`
+   read (`_cpp_is_callable_value_expr`). `wr`'s "value" is a dict-unpack
+   slot declared plain `int64_t` by BOTH coroutine-body unpack paths
+   (`_cpp_for_stmt`'s 2-name `.items()` case and its single-name
+   `.keys()/.values()/bare-dict` case), with no kind tag of any kind.
+3. **The ordinary (non-generator) path's precedent is cast-and-call,
+   and it would be a regression to copy it here.** Same standalone repro:
+   `def deref(wr): return wr()` compiles on the ordinary path to
+   `mojo_fnptr_call_0((void *)wr)` — fine for real function pointers,
+   but for a weakref (or ANY non-fnptr opaque value) it calls through
+   garbage (with `wr = ref(...)`'s stub result, a NULL call). The
+   generator emitter deliberately refuses instead (fd909e9): a refusal
+   makes gen_module fall back to source interpretation, which runs these
+   modules CORRECTLY (myinterpreter executes inside real CPython, so
+   `_weakref` works natively there). Adding an unkeyed "zero-arg call
+   through an opaque scalar local = fnptr-call" branch would convert
+   today's working interpreter fallbacks (importlib/metadata's nested
+   defs, codecs, pickletools' dispatch values, ...) into compiled code
+   that crashes or silently misbehaves at runtime — strictly worse, and
+   exactly the narrow-looking-edit-to-shared-call-machinery shape this
+   campaign's history warns about.
+4. **What a genuinely narrow, weakref-only fix would take** (recorded so
+   nobody re-derives it): a new runtime value kind + identity-boxing
+   helpers (`mojo_weakref_new/deref` — defensible semantics since this
+   GC-less world never drops objects, so weakref ≡ strong ref and
+   `wr()` ≡ identity); recognition of `_weakref.{ref,KeyedRef,proxy}`
+   constructor CALLS at their store sites (`self.data[key] =
+   KeyedRef(value, self._remove, key)`) feeding the existing
+   `_field_dict_val_types` registry (gimple_gen_stmts.py ~line 920
+   already records dict value ctypes per struct field — plumbing
+   half-exists); propagation of that marker ctype through both
+   coroutine-body unpack paths' target declarations (today hardcoded
+   'int64_t'); and a marker-keyed dispatch at the generator-body call
+   site. That spans runtime, import resolution, ordinary-path store
+   lowering, and two coroutine-body emitters — feature-sized
+   cross-cutting work.
+5. **Even fully landed, the DONE bar ("build exits 0 AND runtime
+   behavior correct") stays unreachable**: `_weakref.ref`/`KeyedRef`
+   themselves are unresolved-import stubs (finding 1), so any actual USE
+   of a compiled WeakValueDictionary fails before `wr()` could ever run;
+   making it truly work would require modeling the `_weakref` C
+   extension itself.
+
+Classification unchanged: blocked on the structural callable-value gap
+PLUS a missing weakref runtime representation. Doc stays open. No code
+changed this session (nothing on the compiled path touched, so no
+quality-gate rerun required).
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — "all 8 generators compile, 0 own-code errors" was stale; `items`/`keys`/`values` refuse honestly on a real remaining gap; one unrelated dunder-alias bug fixed)
 
 Same story as `bugs/CODEGEN_generator_function_Lib_pickletools.md`'s
