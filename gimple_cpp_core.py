@@ -3227,6 +3227,36 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.GlobalStmt):
         return []  # global declarations are compile-time-only in generators
     if isinstance(s, (gimple_ctypes.ImportStmt, gimple_ctypes.FromImportStmt)):
+        # A no-op for the (overwhelmingly common) case this comment
+        # originally documented: a MODULE-LEVEL `import X` already
+        # registered into `gen._cpp_early_global_names` by gen_module's
+        # own module-statement pre-scan before any generator body
+        # compiles (see that scan's docstring in gimple_module_gen.py).
+        # But a LOCAL/lazy import -- `import re` written INSIDE a
+        # function body, e.g. gettext.py's `_tokenize`: `if _token_
+        # pattern is None: import re; _token_pattern = re.compile(...)`
+        # -- is invisible to that module-level-only scan (it only walks
+        # top-level `stmts`, never recursing into a FunctionDef's own
+        # body), so the imported name was NEVER added anywhere this
+        # emitter's own module-attribute resolution (`_cpp_expr`'s
+        # IdentExpr/MemberExpr module-stub checks) could find it --
+        # `re.compile(...)` emitted the bare, undeclared identifier
+        # `re` in the generated C++ ("'re' was not declared in this
+        # scope"), a hard compile error, even though this exact
+        # STATEMENT (the local `import re` itself) correctly no-ops.
+        # Registered here, into the SAME set the module-level scan
+        # populates, so every later `_cpp_expr` reference within this
+        # (or, harmlessly, any other) generator resolves through the
+        # existing "known early-global, not a declared local -> stub to
+        # 0 (diagnosed)" convention instead of emitting raw undeclared
+        # text -- consistent with how a module-level import of the same
+        # name would already behave.
+        if isinstance(s, gimple_ctypes.ImportStmt):
+            for _tm, _ta in gimple_ctypes._import_targets(s):
+                gen._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
+        else:
+            for _nm in getattr(s, 'names', []) or []:
+                gen._cpp_early_global_names.add(_nm)
         return []  # imports are resolved at module scope; no-op in generators
     if isinstance(s, gimple_ctypes.FunctionDef):
         return []  # nested function definitions are compiled separately
