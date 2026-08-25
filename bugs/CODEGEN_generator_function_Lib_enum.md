@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder3 — the `_iter_member_` "1-arg-only" symptom re-investigated; NOT an arity bug, root cause is deeper)
+
+Re-verified the `Flag__iter_member_(self, self->_value_)` call the prior
+entry flagged. The arity itself is now correct (2 args, matching the
+class-body-alias mechanism from commit `6e92df8` — `_iter_member_ =
+_iter_member_by_value_` correctly copies the real method's 2-param
+signature into the alias). The actual current error is different:
+`Flag__iter_member_` is declared `extern "C" void (int64_t, int64_t)` —
+a bare ORDINARY-struct-method fallback signature — while the real call
+site needs the GENERATOR-METHOD-API convention (this method has a real
+`yield`/`yield from`, consumed via `yield from cls._iter_member_(...)`
+in `Flag.__iter__`). Traced further: `gen._struct_generator_method_
+names['Flag']` correctly LISTS `_iter_member_` (and `_iter_member_by_
+value_`/`_iter_member_by_def_`) as known generator methods by name, but
+`gen._generator_method_api` has NO entry for ANY of the three — meaning
+none of them actually got compiled into a real coroutine unit in this
+run; the extern declaration falls back to the generic non-generator
+default. Not root-caused further (why the classmethod generator itself
+never registers, despite being correctly named) — likely related to,
+but distinct from, the file's 4 already-documented `cls`-attribute
+eligibility refusals (task's own `relaxed_imports=True` bypass may be
+masking rather than fixing whatever blocks these three specifically).
+Not attempted: even a full fix here would not unblock `enum.py`
+end-to-end (still blocked by the 4 already-documented `cls`-attribute
+refusals regardless). Flagged for whoever next investigates the
+generator-method-API registration gap for classmethod generators.
+
+
 ## Status (updated 2026-08-24 — `%r`-format crash in `_iter_bits_lsb` FIXED; one unrelated arity bug newly surfaced)
 
 Re-verified with `GimpleGen(do_imports=False, relaxed_imports=True)`
