@@ -4,6 +4,41 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder, 2nd entry — the `'posixpath' was not declared` gap ALSO fixed; isolated coroutine TU for this file's own generators now compiles with ZERO g++ errors; still blocked overall by the pre-existing param-type-inference gap + unrelated transitive-dependency failures)
+
+This session's `_cpp_expr` MemberExpr fix (see `bugs/CODEGEN_generator_
+function_Lib_test_test_dbm.md`'s 2026-08-24 entry for the mechanism —
+a module-import name read as a bare, uncalled attribute VALUE, e.g.
+`path.rstrip(posixpath.sep)`'s `posixpath.sep`, previously emitted as
+literal undeclared `posixpath` text) also resolves this file's own
+`'posixpath' was not declared in this scope` error, noted in the
+2026-08-23 entry below alongside the (separately-fixed, prior session)
+`.rstrip()` gap.
+
+Re-verified via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + `g++-mp-15 -std=c++20 -fsyntax-only`: **ZERO** g++ errors for
+this file's own generator translation unit (`_ancestry`/`_parents`,
+both). Honest caveat, consistent with this doc's own prior analysis:
+this does NOT make the file build end-to-end or behave correctly —
+`path`'s parameter ctype is still the pre-existing, unfixed `int64_t`
+default (the param-type-inference gap this doc already identified as
+the BINDING blocker: `_ancestry(path)` has no literal call site
+anywhere in the file for `_param_ctype` to learn from), so the whole
+generator body is dead code either way (`path = 0; while (0) { ... }`).
+A real `python3 mojo.py build` of this file also still fails from
+unrelated transitive dependencies (`collections`/`inspect`'s
+`Counter[...] = .../OrderedDict[...] = ...` subscript-store gap,
+already documented elsewhere) — not re-run this session (no code
+change to those paths), so overall build status is unchanged: still
+does not build end-to-end.
+
+Full mandatory gate: `test_gimple.py` 252/252, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with 0 skip lines.
+
+Doc stays open.
+
+
 ## Status (updated 2026-08-24 — PARTIAL: one of the two stacked gaps below fixed, file still doesn't build)
 
 This session (commit 753b199) added real `char *`-receiver dispatch for
