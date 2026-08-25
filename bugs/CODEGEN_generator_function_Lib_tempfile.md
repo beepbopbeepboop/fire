@@ -1,5 +1,76 @@
 # CODEGEN_generator_function: Lib/tempfile.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder6 — the chained-getattr `request for member 'name'` bug from the entry below is root-caused and FIXED for real; it was never a "no static type" gap, it was a WRONG static type)
+
+The entry below this one framed tempfile.py's 3 remaining own-file
+errors (`getattr(getattr(file, 'buffer', file), 'raw', raw).name = ...`
+at lines 609/668/703) as "no static type for a chained dynamic-
+attribute read" — deferred as the same family as `bugs/hard/
+CODEGEN_dynamic_attribute_on_generic_object.md`. That framing was
+wrong: root-caused this session to a WRONG static type, not a missing
+one.
+
+`gimple_gen_calls.py`'s "A5" getattr()-call fast path (`getattr(s,
+'elifs', [])` on a boxed AST-node handle) calls `gen._known_field_type
+(attr)`, which resolves `attr`'s C type whenever every struct across
+the WHOLE-PROGRAM-shared `struct_field_types` that happens to define a
+field of this bare name agrees on its type — true even when only ONE,
+totally unrelated struct anywhere in the huge transitive stdlib compile
+happens to define it. `raw = getattr(file, 'buffer', file)` (`file`/
+`raw` are genuinely opaque `_io.open()` results, unrelated to any user
+struct) picked up SOME unrelated class's own `buffer: String` field's
+`char *` type purely by bare-name coincidence, mistyping `raw` as
+`char *`. The LATER, separate real attribute write `raw.name = name`
+then emitted a literal `.` member access directly on that `char *` — a
+hard gcc "request for member 'name' in something not a structure or
+union" error (the reported symptom). Confirmed via a from-scratch
+minimal repro (an unrelated class defining `buffer: String` alongside
+the exact `getattr(file, 'buffer', file)` / `raw.name = name` shape)
+that reproduces the identical error signature standalone, with no
+tempfile.py/stdlib involvement at all.
+
+**Fix**: this A5 fast path was built for this compiler's OWN self-
+hosted source (the `getattr(s, 'elifs', [])`-style idiom reading fields
+off a boxed AST-node handle in `mojo_compiler.py`/`myinterpreter.py`,
+where `attr` genuinely does name one of a small, closed set of AST-node
+field names) — applying the same "single struct anywhere agrees"
+heuristic to an arbitrary third-party `getattr(obj, name, default)`
+call anywhere in the huge stdlib corpus is unsound, since common,
+generic field names like `buffer`/`raw`/`name` collide easily across
+unrelated classes. Scoped the heuristic to fire only when compiling
+this project's own self-hosted source (the same path-based gate
+`gen_module`'s `_is_selfhost_file`/`DispatchSolver(allow_assume_all_
+methods=...)` already use) — every other file now falls through to the
+generic untyped-`int64_t` path unchanged, the only behavior this call
+had before the A5 fast path existed. Commit `2d2bf8a`.
+
+**Verified**: the minimal repro above now compiles clean under
+`gcc-mp-15 -fgimple -fsyntax-only`. A real, direct `mojo.py build
+.../Lib/tempfile.py` was attempted for full end-to-end confirmation but
+hit this file's own already-documented, pre-existing, unrelated perf
+issue (`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+rescan.md` — this file has historically taken "over an hour" to build
+whole-program; this session's attempt was killed after ~4 minutes per
+this project's runaway-build safety rule, a pre-existing slow-compile
+data point unrelated to this fix, not a regression). The isolated
+repro plus direct inspection of the fixed code path (both `getattr()`
+call sites now only take the A5 branch when `_is_selfhost_file` is
+true) is the verification standard used here, matching this doc's own
+established methodology for this file (`compile_to_gimple_with_cpp
+(do_imports=False)` isolated checks, given the whole-program build's
+known perf cost). Full quality gate: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild 0 skips.
+
+Per the 2026-08-23 entry below, tempfile.py's own error set WAS exactly
+these 3 chained-getattr lines (the `TMP_MAX`-family and textwrap
+issues were already fixed earlier). With this fix, tempfile.py's own
+source should now be fully clean (not independently re-confirmed via a
+full whole-program build this session, per the perf note above) — the
+file's remaining blocker is the transitively-imported `operator.py:270`
+`attrgetter`/`itemgetter`-closure-of-callables issue (unaffected by
+this fix, see the 2026-08-11 entry below). Doc stays open.
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — re-verified, unaffected by this session's fixes; `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md` (the "same deferred family" this doc pointed at below) has since been fully resolved and deleted, but tempfile.py's own 3 lines are a distinct chained-getattr shape not covered by that fix)
 
 Re-ran the isolated coroutine-path compile fresh, post-`fd909e9` and

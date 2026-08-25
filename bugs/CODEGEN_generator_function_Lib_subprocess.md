@@ -1,5 +1,57 @@
 # CODEGEN_generator_function: Lib/subprocess.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder6 — the `signal.SIGTERM` bug from the entry below is FIXED for real; subprocess.py's own source now contributes ZERO errors)
+
+The entry immediately below this one root-caused `self.send_signal(
+signal.SIGTERM)`/`signal.SIGKILL` emitting an invalid `mojo_signal ()`
+call, attempted a fix, and reverted it after it regressed 2 of
+`test_module_cache.py`'s SB-1 per-scope-import tests. That regression
+is now understood and fixed for real: the prior attempt guarded
+`_lower_MemberExpr`'s zero-arg-function fallback on plain `gen.
+imported_symbols` membership, but `imported_symbols` ALSO holds every
+ordinary `from X import name` value/function binding (not just genuine
+`import X` namespace markers) — including, critically, `std/gpu/
+primitives/id.mojo`'s `block_idx`/`thread_idx` (real zero-arg GPU
+accessor functions, pulled into the always-present builtin prelude but
+never resolved to a real signature), which register with the EXACT
+SAME `{'module': ..., 'return_type': ...}` shape a genuine `signal`-
+style namespace marker uses. The broadened guard wrongly excluded the
+real `block_idx.x`/`thread_idx.x` GPU-intrinsic accessor shape this
+fallback exists for, crashing those 2 SB-1 tests at runtime (`dyld:
+symbol not found ... '_block_idx'`) — which is exactly why the first
+attempt had to be reverted.
+
+Fixed with a precise discriminator: `gimple_codegen.py` gained a new
+`gen._module_alias_names` set, populated ONLY by the two real
+`import`-statement registration sites (`_gen_stmt_ImportStmt`, and its
+module-level pre-scan mirrors in `gen_module` — one of which is the
+`ca242a6` top-level-import-alias fix) plus the `from PKG import
+submod`-names-a-real-submodule-file branch of `_gen_stmt_
+FromImportStmt` — never by an ordinary `from X import name` value/
+function binding, so it has no ambiguity with `block_idx`-style
+unresolved imported functions. `_lower_MemberExpr`'s fallback (`gimple_
+gen_exprs.py`) now excludes `node.obj.name in gen._module_alias_names`
+instead of the broader `imported_symbols` check.
+
+**Verified end-to-end**: a real `python3 mojo.py build .../Lib/
+subprocess.py` now attributes **ZERO `error:` lines to subprocess.py's
+own source** (132 total build errors remain, all in transitively-
+imported files — dominated by `argparse.py` (44) and `_collections_
+abc.py` (22), the same already-documented cascade every other doc in
+this cluster hits). Isolated repro (`gcc-mp-15 -fgimple -fsyntax-only`)
+confirms the `mojo_signal ()`/`unexpected RHS for assignment` errors
+are fully gone. Full quality gate: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76 (including all 4 SB-1 per-scope-import
+tests, confirming no regression this time), `make check-selfhost`
+clean, from-scratch stdlib dylib rebuild 0 skips. Commit `0f6b59e`.
+
+subprocess.py still does not build end-to-end — the file remains
+blocked purely by the already-documented transitive cascade
+(`argparse.py`/`_collections_abc.py`/...), not by anything of its own.
+Doc stays open per this project's convention (only files that 100%
+compile clean get removed), but subprocess.py's own real blocker is
+now fully resolved.
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — the doc's own previously-documented real blocker is now fixed upstream (deleted `bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`); a NEW own-code bug found, root-caused, a fix attempted and REVERTED after it regressed a real test)
 
 `bugs/hard/CODEGEN_generator_function_symbol_not_module_qualified.md`
