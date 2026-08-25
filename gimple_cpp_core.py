@@ -3255,8 +3255,14 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             for _tm, _ta in gimple_ctypes._import_targets(s):
                 gen._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
         else:
+            # `FromImportStmt.names` is `[(name, alias|None), ...]`, not
+            # a flat list of bound-name strings (see gimple_module_
+            # gen.py's matching module-level-scan fix for the full
+            # mechanism) -- unpack each tuple to the real local binding
+            # name rather than adding the tuple itself.
             for _nm in getattr(s, 'names', []) or []:
-                gen._cpp_early_global_names.add(_nm)
+                _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
+                gen._cpp_early_global_names.add(_ia if _ia else _in)
         return []  # imports are resolved at module scope; no-op in generators
     if isinstance(s, gimple_ctypes.FunctionDef):
         return []  # nested function definitions are compiled separately

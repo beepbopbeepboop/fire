@@ -2117,8 +2117,27 @@ def gen_module_impl(self, stmts):
             for _tm, _ta in _import_targets(_gm_stmt):
                 self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
         elif isinstance(_gm_stmt, FromImportStmt):
+            # `FromImportStmt.names` is `[(name, alias|None), ...]`
+            # (mojo_compiler.py) -- NOT a flat list of bound-name
+            # strings. Adding the raw `(name, alias)` TUPLE here (the
+            # previous code) meant `_cpp_early_global_names` never
+            # actually contained the real local binding name for ANY
+            # `from X import Y` / `from X import Y as Z` at module
+            # level -- a plain string membership check like `e.name in
+            # gen._cpp_early_global_names` (every consumer of this set)
+            # can never match a tuple element, so EVERY such import was
+            # invisible to the coroutine-body module-name resolution
+            # this set exists for (found via `from os import path as
+            # os_helper`; `os_helper.unlink(...)` inside a generator
+            # emitted literal, undeclared `os_helper` text instead of
+            # resolving through the "known early-global -> stub" path).
+            # Unpack each tuple to the real bound name (alias when
+            # present, else the imported name itself), mirroring the
+            # ImportStmt branch just above's identical `_ta if _ta else
+            # ...` pattern.
             for _nm in getattr(_gm_stmt, 'names', []) or []:
-                self._cpp_early_global_names.add(_nm)
+                _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
+                self._cpp_early_global_names.add(_ia if _ia else _in)
         elif isinstance(_gm_stmt, FunctionDef):
             self._cpp_early_global_names.add(_gm_stmt.name)
             self._cpp_module_fn_names.add(_gm_stmt.name)
@@ -2130,8 +2149,12 @@ def gen_module_impl(self, stmts):
                     for _tm, _ta in _import_targets(_gi):
                         self._cpp_early_global_names.add(_ta if _ta else _tm.split('.', 1)[0])
                 else:
+                    # Same tuple-unpack fix as the top-level scan above
+                    # (see that branch's comment) -- this is the nested
+                    # (try/if-guarded import) sibling scan.
                     for _nm in getattr(_gi, 'names', []) or []:
-                        self._cpp_early_global_names.add(_nm)
+                        _in, _ia = _nm if isinstance(_nm, tuple) else (_nm, None)
+                        self._cpp_early_global_names.add(_ia if _ia else _in)
             elif isinstance(_gi, AssignStmt) and isinstance(_gi.target, IdentExpr):
                 self._cpp_early_global_names.add(_gi.target.name)
             elif isinstance(_gi, TryStmt):
