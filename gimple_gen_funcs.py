@@ -609,7 +609,25 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             # against the actual fields, not the runtime's builtin ones.
             out.append(f"{self_struct} *")
         else:
-            out.append(gen._param_ctype(pn, pt, node))
+            # Method context: consult the method's QUALIFIED
+            # "Struct_method" inferred-param entry (usage-based inference
+            # and the cross-call scalar contract both store there) before
+            # falling back to _param_ctype, which can only see BARE
+            # function-name keys and so silently missed every method's
+            # resolved types — leaving unannotated varargs-method params
+            # at the int64_t default in _mangled_signature_ctypes /
+            # func_param_types even after the qualified registry held the
+            # real type, so pre-definition call sites converted arguments
+            # against the stale boxed type ("makes pointer from integer
+            # without a cast", self-hosted myinterpreter.py's
+            # Interpreter__call_dunder). Mirrors the precedence the
+            # gen_module forward-declaration loop applies.
+            _msig_ct = None
+            if pt is None and self_struct and hasattr(gen, '_inferred_param_types'):
+                _msig_ct = gen._inferred_param_types.get(
+                    f"{self_struct}_{node.name}", {}).get(pn)
+            out.append(_msig_ct if _msig_ct is not None
+                       else gen._param_ctype(pn, pt, node))
     return out
 
 

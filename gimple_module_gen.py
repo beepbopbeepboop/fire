@@ -1954,6 +1954,217 @@ def gen_module_impl(self, stmts):
                 key = f"{s.name}_{m.name}"
                 self._inferred_var_types[key] = self._infer_local_var_types(m)
 
+    def _expr_provably_str(e):
+        """Is `e` an expression whose Python runtime value is provably a
+        str? Sound transitive closure over the two string-producing binary
+        operators: `%`-format yields str whenever the FORMAT (LHS) is a
+        str literal, and `+` yields str whenever EITHER operand is a str —
+        str.__add__ rejects non-str operands with TypeError, so a literal
+        str on either side proves BOTH sides are strs (which is what
+        disambiguates this from list/tuple concatenation, the other
+        inhabitant of `+`). Lets call sites like
+        `self.sendcmd("OPTS MLST " + facts_joined + ";")` contribute real
+        char* evidence instead of silence — without which a method whose
+        ONLY call sites pass computed strings keeps its unannotated
+        parameter at the int64_t default (ftplib.py gap #1's exact shape,
+        reached once a module has no bare-literal call site to carry the
+        vote alone)."""
+        if isinstance(e, (StringLiteral, TstringLiteral)):
+            return True
+        if isinstance(e, BinaryOp):
+            if e.op == '%':
+                return _expr_provably_str(e.left)
+            if e.op == '+':
+                return (_expr_provably_str(e.left)
+                        or _expr_provably_str(e.right))
+        return False
+
+    def _arg_scalar_type(caller_name, a, deep_str=False,
+                         prefer_refined_param=False):
+        """Observed scalar C type of one call argument, or None.
+
+        Both extension flags are used ONLY by the struct-METHOD observation
+        pass below; the free-function Pass 1.3d and constructor observers
+        keep the plain behavior. Rationale per flag:
+
+        - deep_str extends literal recognition to computed-but-provably-str
+          expressions (`"OPTS MLST " + ";".join(facts) + ";"`) via
+          _expr_provably_str.
+
+        - prefer_refined_param lets a REFINED cross-call scalar contract for
+          the caller's own parameter outrank a possibly-stale
+          _inferred_var_types entry (_infer_local_var_types can record a
+          method's unannotated param as plain int64_t, shadowing the char*
+          the contract passes resolved for it one round earlier — freezing
+          pure forwarding chains like sendcmd's cmd → putcmd's line →
+          putline's line at the first hop forwarded through such a param).
+          Scoped to the method pass because its observations land ONLY on
+          method parameters; giving the free-function pass the same
+          precedence changed what Pass 1.3d observed about FREE callees
+          (real instance: ntpath.split refined to char* from forwarded
+          arguments while its own forwarders basename/dirname stayed
+          int64_t-typed — new -Wint-conversion errors at those forwards),
+          and a free function's full caller set is not visible to any
+          fixpoint here, so such a flip cannot be made consistent.
+        """
+        if isinstance(a, FloatLiteral):
+            return 'double'
+        if isinstance(a, StringLiteral):
+            return 'char *'
+        if deep_str and _expr_provably_str(a):
+            return 'char *'
+        if isinstance(a, IdentExpr):
+            t = self._inferred_var_types.get(caller_name, {}).get(a.name)
+            if prefer_refined_param:
+                _pt = self._inferred_param_types.get(caller_name, {}) \
+                    .get(a.name)
+                if _pt in ('char *', 'double'):
+                    return _pt
+                return t or _pt
+            return t or self._inferred_param_types.get(caller_name, {}) \
+                .get(a.name)
+        return None
+
+    _TOPLEVEL_CALLER = '<toplevel>'
+    _caller_bodies = [(s.name, s.body) for s in all_functions if isinstance(s, FunctionDef)]
+    _caller_bodies.append((_TOPLEVEL_CALLER, stmts))
+
+    # Pass 1.3e: struct-METHOD cross-call scalar contract — the same
+    # unanimity-over-call-sites refinement Pass 1.3d below provides for
+    # FREE functions (and Pass 1.3d-ctor provides for constructor calls),
+    # extended to `receiver.method(...)` call sites. Without it, an
+    # ordinary method whose unannotated parameter is only ever FORWARDED
+    # deeper (`FTP.sendcmd(self, cmd)` doing nothing but `self.putcmd(cmd)`)
+    # has zero body-level usage signal for _infer_param_types, so its
+    # func_param_types entry — read by the .c definition AND by every
+    # forward/extern declaration, including the coroutine .cpp emitter's
+    # _cpp_struct_method_refs loop — stays at the int64_t default even when
+    # every call site in the module passes a genuine string expression
+    # (Lib/ftplib.py: sendcmd('TYPE A'), voidcmd('QUIT'), ...; see bugs/
+    # CODEGEN_generator_function_Lib_ftplib.md gap #1). Receiver resolution
+    # is deliberately narrow: a bare `self` inside a method of a known
+    # StructDef, or an identifier whose own _inferred_var_types entry is a
+    # "<Struct> *" pointer. Everything else (attribute chains, unknown
+    # receivers, container receivers like MojoList/MojoDict, methods with no
+    # StructDef anywhere in this compile — i.e. inherited-from-an-unmodeled-
+    # base shapes) contributes NOTHING, matching how every sibling pass
+    # treats unrecognized shapes as no-evidence rather than wrong evidence.
+    # Application mirrors Pass 1.3d exactly: only unanimous {'double'} /
+    # {'char *'} observation sets resolve, explicit annotations are
+    # respected, defaulted parameters keep their default-derived type (a
+    # call site omitting the argument would otherwise feed the default
+    # value through the refined C type), and an already-resolved non-default
+    # entry is never overwritten. Collection+application iterates to a small
+    # bounded fixpoint so pure forwarding chains resolve one hop per round
+    # (sendcmd's cmd from its string-literal call sites, then putcmd's line
+    # from sendcmd/voidcmd's now-resolved cmd); the per-statement call walk
+    # is memoized (_calls_in_stmts_cache), so rounds after the first are
+    # cheap. Results land under the SAME qualified "Struct_method" key
+    # everything else uses for method params; the func_param_types
+    # registration loop directly below consults that key before falling back
+    # to _param_ctype.
+    # _method_scalar_ann deliberately covers only AST-visible StructDefs
+    # (this module's own + inlined-import structs) — NOT
+    # _imported_typedef_structs. A typedef struct's method externs were
+    # already baked into _elaborated_externs from Pass 2b-bis's pre-inference
+    # ctypes; refining such a param here would desynchronize those stale
+    # declarations from newly-refined call-site conversions.
+    _method_scalar_ann: dict = {}   # struct name -> {method name -> FunctionDef}
+    for s in (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])):
+        if isinstance(s, StructDef):
+            for m in s.methods:
+                _method_scalar_ann.setdefault(s.name, {})[m.name] = m
+
+    _method_caller_bodies = (
+        [(f"{s.name}_{m.name}", s.name, m.body)
+         for s in all_structs_for_methods if isinstance(s, StructDef)
+         for m in s.methods]
+        + [(name, None, body) for name, body in _caller_bodies])
+
+    def _collect_method_scalar_obs():
+        obs: dict = {}
+        for caller_name, caller_struct, cbody in _method_caller_bodies:
+            calls = []
+            self._calls_in_stmts(cbody, calls)
+            for call in calls:
+                if not isinstance(call.func, MemberExpr):
+                    continue
+                recv = call.func.obj
+                rstruct = None
+                if isinstance(recv, IdentExpr):
+                    if recv.name == 'self':
+                        rstruct = caller_struct
+                    else:
+                        t = self._inferred_var_types.get(caller_name, {}).get(recv.name)
+                        if isinstance(t, str) and t.endswith(' *'):
+                            rstruct = t[:-2]
+                meth = (_method_scalar_ann.get(rstruct, {}) if rstruct else {}) \
+                    .get(call.func.member)
+                if meth is None:
+                    continue
+                pnames = [pn for pn, _ in (meth.params or [])
+                          if pn != 'self' and not pn.startswith('*')]
+                for i, a in enumerate(call.args):
+                    if i >= len(pnames):
+                        break
+                    st = _arg_scalar_type(caller_name, a, deep_str=True,
+                                          prefer_refined_param=True)
+                    if st:
+                        obs.setdefault((rstruct, call.func.member), {}) \
+                            .setdefault(pnames[i], set()).add(st)
+        return obs
+
+    def _apply_method_scalar_obs(obs):
+        changed = False
+        for (rstruct, mname), pmap in obs.items():
+            meth = _method_scalar_ann.get(rstruct, {}).get(mname)
+            if meth is None:
+                continue
+            key = f"{rstruct}_{mname}"
+            ann = {pn: pt for pn, pt in (meth.params or [])}
+            defaults = getattr(meth, 'param_defaults', {}) or {}
+            for pname, types in pmap.items():
+                if types not in ({'double'}, {'char *'}):
+                    continue                 # not unanimous double / char *
+                if ann.get(pname) is not None:
+                    continue                 # respect explicit annotation
+                if pname in defaults:
+                    continue                 # respect default-value inference
+                cur = self._inferred_param_types.get(key, {}).get(pname)
+                if cur in (None, 'int', 'int64_t'):
+                    self._inferred_param_types.setdefault(key, {})[pname] = (
+                        'double' if types == {'double'} else 'char *')
+                    changed = True
+        return changed
+
+    for _mse_round in range(4):
+        if not _apply_method_scalar_obs(_collect_method_scalar_obs()):
+            break
+
+    # Refresh Pass 2b-bis's precomputed per-overload signature ctypes for
+    # methods whose parameters the pass above just resolved. Pass 2b-bis
+    # runs BEFORE any inference exists, so its _mangled_signature_ctypes
+    # entries hold the int64_t defaults; for a `*args` method _emit_call
+    # deliberately prefers that sentinel form over func_param_types (the
+    # Parser__is_kw packing-sentinel fix), so without this refresh a
+    # pre-definition call site converts its arguments against the stale
+    # boxed types while the definition/declaration carry the refined ones
+    # ("passing argument N of 'X' makes pointer from integer without a
+    # cast", self-hosted myinterpreter.py's Interpreter__call_dunder).
+    # Same AST-visible universe as the observation pass above — typedef
+    # structs' baked externs must stay in sync with their entries.
+    for s in (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])):
+        if not isinstance(s, StructDef):
+            continue
+        for m, _oid in zip(s.methods, self._struct_method_overload_ids(s)):
+            _sigkey = f"{s.name}_{m.name}{_oid}"
+            _old_ct = self._mangled_signature_ctypes.get(_sigkey)
+            if _old_ct is None:
+                continue
+            _new_ct = self._signature_ctypes(m.params, m, s.name)
+            if _new_ct != _old_ct:
+                self._mangled_signature_ctypes[_sigkey] = _new_ct
+
     for s in all_functions:
         if _is_foreign_main(s):
             continue
@@ -1979,7 +2190,24 @@ def gen_module_impl(self, stmts):
                         if pname == 'self':
                             param_ctypes.append(f"{s.name} *")
                         else:
-                            param_ctypes.append(self._param_ctype(pname, ptype, m))
+                            # Usage/call-site inference for struct methods is
+                            # stored under the QUALIFIED "Struct_method" key,
+                            # but _param_ctype consults the bare node.name —
+                            # so a resolved entry was invisible here and every
+                            # such param silently fell to the int64_t default.
+                            # Consult the qualified key first, mirroring the
+                            # forward-declaration loop's own precedence below;
+                            # Pass 1.3e feeds it (and _infer_param_types's
+                            # results under this same key finally reach both
+                            # the .c definition and every extern/forward
+                            # declaration derived from func_param_types).
+                            _mipt = None
+                            if ptype is None:
+                                _mipt = self._inferred_param_types.get(
+                                    method_full_name, {}).get(pname)
+                            param_ctypes.append(
+                                _mipt if _mipt is not None
+                                else self._param_ctype(pname, ptype, m))
                     self.func_param_types[method_full_name] = param_ctypes
                 # Struct-METHOD parameter defaults, keyed by the same bare
                 # mangled name func_param_types just used — the coroutine-
@@ -2042,20 +2270,6 @@ def gen_module_impl(self, stmts):
     _fn_by_name = {s.name: s for s in all_functions if isinstance(s, FunctionDef)}
     _scalar_obs: dict[str, dict[str, set]] = {}   # callee -> {pname -> {types}}
 
-    def _arg_scalar_type(caller_name, a):
-        if isinstance(a, FloatLiteral):
-            return 'double'
-        if isinstance(a, StringLiteral):
-            return 'char *'
-        if isinstance(a, IdentExpr):
-            t = (self._inferred_var_types.get(caller_name, {}).get(a.name)
-                 or self._inferred_param_types.get(caller_name, {}).get(a.name))
-            return t
-        return None
-
-    _TOPLEVEL_CALLER = '<toplevel>'
-    _caller_bodies = [(s.name, s.body) for s in all_functions if isinstance(s, FunctionDef)]
-    _caller_bodies.append((_TOPLEVEL_CALLER, stmts))
     for caller_name, body in _caller_bodies:
         elem, nested, _ = self._scan_container_elems(body)
         calls = []
