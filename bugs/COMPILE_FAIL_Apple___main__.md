@@ -4,6 +4,38 @@ Source file: `/Users/mrs/net/Python-3.14.6/Apple/__main__.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder2 — re-triaged, blocker SHIFTED since the 2026-08-23 entry; the documented string-repeat/`print()` gap is no longer what's reached first)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` check:
+the module-level refusal now names `group` (the same generator the
+2026-08-23 entry's `print()`/string-repeat gap was found in) for a
+DIFFERENT, EARLIER reason:
+
+```
+Unsupported shape(s): group: a call to unresolved callee
+'mojo_c_getenv(...)' is not supported in a compiled generator/coroutine
+body
+```
+
+Root cause: `group`'s guard `if "GITHUB_ACTIONS" in os.environ:` — the
+ordinary (non-coroutine) GIMPLE path has a real, working `X in
+os.environ` -> `mojo_truthy_cstr(mojo_c_getenv(X))` lowering (confirmed
+via a minimal isolated repro's generated `.ci`), but NOTHING under
+`gimple_*.py` mentions `'environ'` by name anywhere (confirmed via
+grep) — the mechanism that produces this lowering was not traced to
+its exact site this pass. The coroutine-body emitter's own generic
+unresolved-callee refusal catches the resulting `mojo_c_getenv(...)`
+call instead of silently mis-lowering it (correct, honest behavior),
+but has no case recognizing this specific libc-wrapper name as safe to
+call directly (unlike ordinary GIMPLE-path calls, which go through
+`_KNOWN_SIGS`/`_LIBC_SIGS` in a way the coroutine emitter doesn't
+consult for arbitrary libc function names). NOT investigated to a
+fix this pass — the exact `os.environ` "in" lowering mechanism needs
+tracing first, and this file also has the previously-documented
+string-repeat/`print()` gap waiting immediately behind this one (the
+2026-08-23 entry's finding, not yet re-reached/re-verified). Doc stays
+open; not attempted.
+
 ## Status (updated 2026-08-23, wt09 fix/stdlib-mods `2daa41e` — ALL FOUR GIMPLE-stage errors FIXED at root cause; file still fails later, in the generator-body emitter — PARTIAL)
 
 The residual listed below (4x `invalid operands to binary / (have
