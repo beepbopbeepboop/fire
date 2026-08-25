@@ -1,5 +1,49 @@
 # CODEGEN_generator_function: Lib/gettext.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder2 — the LAST remaining error (`'re' was not declared`) FIXED; own generator now ZERO errors, isolated; whole-program build still fails on unrelated transitive-dependency errors)
+
+Root-caused precisely: `_tokenize`'s `import re` (the module-level `re`
+name this doc's prior entries assumed was simply "a module-level global
+unresolvable in this coroutine-body model") is actually a LOCAL/lazy
+import written INSIDE the function body itself (`if _token_pattern is
+None: import re; _token_pattern = re.compile(...)`), not a module-level
+`import re` at all — gettext.py has no top-level `import re` anywhere.
+`gen_module`'s early-global pre-scan only walks top-level module
+statements, never recursing into a function body, so this local `re`
+was never registered as a known name anywhere the coroutine-body
+emitter's module-attribute resolution could find it.
+
+Fixed (`gimple_cpp_core.py`'s `_cpp_stmt`, ImportStmt/FromImportStmt
+case): a local `import X` inside a generator/async body now registers
+`X` into the SAME `gen._cpp_early_global_names` set the module-level
+scan populates, so it resolves through the existing "known early-global
+-> stub to 0 (diagnosed)" convention like any module-level import.
+
+Verified via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + `g++-mp-15 -std=c++20 -fsyntax-only`: **ZERO** errors —
+`_tokenize`'s coroutine translation unit compiles completely clean now
+(was: this doc's one remaining documented error).
+
+**Not a full resolution of this doc**, however: also attempted a real,
+safety-wrapped `python3 mojo.py build` of `gettext.py` end-to-end
+(`ulimit -v 8000000` + a wall-clock/RSS watcher, per this task's mandatory
+rule). It still exits 1 — but for reasons entirely UNRELATED to
+gettext.py's own code or this fix: the whole-program build transitively
+pulls in `operator.py`/`io.py`/`types.py`/`enum.py`, each already failing
+for their own separately-documented, pre-existing reasons (bare-name
+symbol collisions, malformed `Parameter`/`Signature` declarations — the
+same patterns already tracked elsewhere in this backlog). gettext.py's
+own generator is no longer implicated in ANY of the build's error output.
+
+Full mandatory gate for the fix itself: `test_gimple.py` 252/252,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with 0 skip lines.
+
+Doc stays open (file still does not build end-to-end), but gettext.py's
+own generator-codegen blocker — the entire subject of this doc — is
+now fully resolved.
+
+
 ## Status (updated 2026-08-24 — re-verified; 6 of 7 remaining errors GONE (incidental, no code change here); ONE error left, same root cause)
 
 Fresh isolated triage (`compile_to_gimple_with_cpp(do_imports=False)` +
