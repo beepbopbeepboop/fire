@@ -4,6 +4,46 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; per-function reasons refined; refusal set unchanged)
+
+The shared "generator-consumption ordering" machinery (this doc's
+2026-08-23 note's `filter_filenames`/`main_for_filenames` refusals) is
+now FIXED in shared source (commit `9ea2749` on fix/opencode-pkgutil):
+the generator retry loop runs to a fixed point instead of a hard-coded
+3 passes, coroutine-body consumption paths pad omitted trailing args
+from the consumed generator's registered defaults, a silent direct-call
+default-mispad (`prod(3)` vs `def prod(n, step=10)` ran with step=0)
+is fixed, and refusal reasons are latest-wins so stale "defined LATER"
+text no longer masks real blockers. Forward consumption of an ELIGIBLE
+later-defined generator now works at any depth, verified end-to-end
+(new tests; gates 253/253, 76/76, selfhost clean, stdlib dylib 0 skips).
+
+Re-ran this file post-fix: same five-function refusal SET, but two
+reasons are now more precise (latest-wins reports each function's real
+final blocker, not pass 1's):
+
+- `_iter_filenames`: NOW refuses on `onempty = Exception('no filenames
+  provided')` — constructing a builtin-exception INSTANCE as a value in
+  a generator body has no lowering (unresolved callee `Exception(...)`)
+  — and only THEN hits the already-documented items (`iterutil.*`
+  module-member calls, `fsutil.USE_CWD`, tuple-target consumption of
+  `iterutil.iter_many(...)`). The 2026-08-10 lambda gap itself is gone
+  (zero/single-param lambda support landed since).
+- `filter_filenames` / `main_for_filenames`: still refuse consuming
+  `_iter_filenames(...)`, but this is now MOOT-ordering: an eligible
+  later-defined callee resolves automatically post-fix, and
+  `_iter_filenames` is never eligible for its own reasons above. These
+  two unblock only when `_iter_filenames` does.
+- `track_progress_compact`: unchanged (`**mark_kwargs` spread forwarded
+  to a known GENERATOR callee — separate documented gap).
+- `track_progress_flat`: newly visible (was masked behind siblings'
+  earlier refusals): its body calls `print(...)` inside the generator
+  body — print is not among the coroutine-body emitter's supported
+  callees.
+
+All shapes remain within tracked coroutine-codegen project scope; doc
+kept open.
+
 ## Status (updated 2026-08-23 — BOTH 2026-08-10 blockers confirmed gone; new refusal chain documented)
 
 Re-ran against current master tip (`626f3f0`). Both blockers the

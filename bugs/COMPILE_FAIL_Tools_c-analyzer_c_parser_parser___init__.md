@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; this file's blockers are all separate and unchanged)
+
+The shared "generator-consumption ordering" machinery (this doc's
+`parse` refusal below is an instance of it) is now FIXED in shared
+source (commit `9ea2749` on fix/opencode-pkgutil): gen_module's
+generator retry loop runs to a fixed point instead of a hard-coded 3
+passes, coroutine-body consumption paths pad omitted trailing args from
+the consumed generator's registered param defaults, the direct
+generator-call path's silent non-zero-offset default mispad is fixed,
+and refusal reasons are latest-wins (the stale pass-1 "defined LATER"
+text no longer masks a function's real final blocker). Forward
+consumption of an ELIGIBLE later-defined generator now works at any
+chain depth — verified end-to-end with compiled-path runtime output
+(new tests in test_gimple.py + test_gimple_generator_runner.py; gates
+253/253, 76/76, selfhost clean, stdlib dylib 0 skips).
+
+Re-ran post-fix: same three-function refusal set, each blocked on its
+own separately-classified gap, NOT ordering:
+
+- `_iter_source`: `SourceInfo(...)` — a cross-module struct constructor
+  call has no coroutine-body lowering (unresolved callee; same
+  struct-typed state-machine family the 2026-08-23 entry describes).
+- `_parse`: `source = _iter_source(srclines, **srckwargs)` — `**`-
+  spread to a known GENERATOR callee (separate documented gap), hit
+  before its consumption of the never-eligible `_iter_source`.
+- `parse`: refuses consuming `_parse(...)` — now MOOT-ordering: an
+  eligible later-defined callee resolves automatically post-fix;
+  `_parse` never becomes eligible. Additionally the 2026-08-09 analysis
+  still applies once these gates pass: `parse` itself yields a
+  cross-module struct (`ParsedItem.from_raw(result)`).
+
+All shapes remain within tracked coroutine-codegen project scope; doc
+kept open.
+
 ## Status (updated 2026-08-23 — fails EARLIER now, on `**kwargs`→generator-callee forwarding; old GCC errors no longer reached)
 
 Re-ran against current master tip (`626f3f0`). The build now aborts in

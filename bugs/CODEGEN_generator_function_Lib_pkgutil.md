@@ -1,5 +1,72 @@
 # CODEGEN_generator_function: Lib/pkgutil.py
 
+## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering blocker FIXED at the machinery level; this file stays open on its own separately-classified gaps)
+
+The "generator-consumption ordering" blocker this doc was the primary
+repro for is now fixed in shared source (commit `9ea2749`), just not in
+the shape earlier entries assumed. Findings that supersede the
+"single-pass emitter / consumed generator must be defined earlier"
+framing below:
+
+- The emitter has NOT been single-pass for a while: gen_module already
+  had a multi-pass retry loop for generators whose consumers precede
+  their producers. Two real defects remained ON TOP of it, both now
+  fixed:
+  1. The retry loop was hard-coded to `range(3)`. A forward-consumption
+     CHAIN needs one retry per link, so anything deeper than 4 silently
+     left its head generators refused (verified pre-fix with a
+     6-generator chain: a1/a2 stayed refused while a3..a6 compiled).
+     It now runs to a fixed point (bounded by the pending-generator
+     count; mutual-recursion cycles make no progress and break out to
+     the same honest refusal as before, verified terminating).
+  2. Both coroutine-body consumption paths (`for ... in <gen>(...)`
+     and `yield from <gen>(...)`) hard-refused on argument count when
+     the consumed generator had defaulted params ("expected 2
+     argument(s), got 1"), and the DIRECT generator-call path had
+     pre-BUG-2026-020 defaults indexing — `prod(3)` against
+     `def prod(n, step=10)` SILENTLY ran compiled with step=0 (a wrong-
+     code bug, not a refusal). All sites now share
+     `gimple_exprtypes._trailing_default_at` and pad honestly via
+     `_default_expr_to_pair` (literal-only, cannot emit an undeclared
+     identifier into a coroutine body).
+- Refusal reasons are now latest-wins across retries. Previously the
+  FIRST pass's message stuck (`setdefault`), which routinely reported
+  the stale "defined LATER" text even when the deciding failure was a
+  different shape entirely — several of this cluster's diagnoses (this
+  doc's included) were written off that stale message.
+- Verified END-TO-END (compiled path, not interpreter fallback):
+  5-deep all-forward consumption chains, defaults through every
+  consumption path (for-loop / yield-from / direct call / method call)
+  all compile AND produce correct runtime output; new regression tests
+  in test_gimple.py + test_gimple_generator_runner.py; gates clean
+  (253/253, 76/76, selfhost clean, stdlib dylib 0 skips).
+
+**What this means for pkgutil.py specifically: nothing closes yet, by
+design of the task split.** Current per-function state (fresh repro,
+post-fix):
+
+- `walk_packages`: still refuses consuming `iter_modules(...)` — but
+  the binding constraint is no longer ORDERING (an eligible later-defined
+  callee now resolves automatically); it is that `iter_modules` never
+  becomes a translated generator AT ALL, because of its own
+  `importers = map(get_importer, path)` gap. Moot-ordering refusal;
+  unblocks only when iter_modules' map() gap gets its own fix.
+- `iter_modules`: `map(...)` unresolved-callee refusal (separate,
+  already-documented gap; unchanged).
+- `iter_importers`: non-static `getattr(obj, name)` refusal (separate,
+  already-documented gap; unchanged).
+
+A true TWO-PASS scheme (pre-registering generator prototypes before
+body lowering) was investigated and deliberately NOT implemented: it
+buys only mutual-recursion cycles beyond what fixed-point retry
+already delivers, and cycles additionally need retraction semantics
+(a consumer's emitted unit references `{base}_start/_resume/_value`
+symbols that must disappear if the producer ultimately refuses — the
+current consume-only-fully-translated-generators rule is what guarantees
+link safety). Classified feature-sized, matching the project bar for
+shared emission-ordering machinery. Doc stays open — module still does
+not build.
+
 ## Status (updated 2026-08-24, worktree fix/gen-core — re-verified fresh, findings unchanged; not fixable narrowly)
 
 Re-ran the isolated coroutine-path compile fresh (post-`fd909e9`,

@@ -4,6 +4,47 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/datafiles.p
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; this file's remaining blockers are different and unchanged)
+
+The shared "generator-consumption ordering" machinery this doc's
+blocker #1 below was an instance of is now FIXED in shared source
+(commit `9ea2749` on fix/opencode-pkgutil): gen_module's generator
+retry loop runs to a fixed point instead of a hard-coded 3 passes,
+both coroutine-body consumption paths pad omitted trailing args from
+the consumed generator's registered param defaults instead of
+refusing on arity, the direct generator-call path's silent non-zero-
+offset default mispad (`prod(3)` against `def prod(n, step=10)` ran
+compiled with step=0) is fixed, and refusal reasons are latest-wins so
+the stale "defined LATER" text no longer masks a function's real final
+blocker. Forward consumption of an ELIGIBLE later-defined generator
+now works at any chain depth, verified end-to-end with compiled-path
+runtime output (new tests in test_gimple.py +
+test_gimple_generator_runner.py; gates 253/253, 76/76, selfhost clean,
+stdlib dylib 0 skips).
+
+Re-ran this file post-fix: **the failure set is UNCHANGED from the
+2026-08-23 entry** — `iter_decls_tsv`'s forward consumption of
+`_iter_decls_tsv` already resolved via retries even before this fix
+(1 link < 4), and the module still aborts on exactly one of its own
+generators:
+
+```
+cannot compile module: function(s) read_decls (generator function(s) ...)
+Unsupported shape(s): read_decls: unsupported for-loop iterable type: CallExpr
+```
+
+Precise current shape: `read_decls` does
+`read_all, _ = _get_format_handlers('decls', fmt)` then
+`for decl, _ in read_all(infile): yield decl` — the loop iterable is a
+call to a RUNTIME-SELECTED callback (`read_all` is not a statically
+known sibling generator), which the coroutine body's for-loop lowering
+has no representation for. That is a dynamic-callee consumption gap, NOT
+the ordering constraint (ordering can never be the issue when the callee
+isn't statically resolvable at all). The transitively-imported
+`c_parser/info.py` scalar-only-yield render-method refusals also still
+apply per that doc. All mechanisms remain within tracked
+coroutine/ordinary-codegen gap families; doc kept open.
+
 ## Status (updated 2026-08-23 — failure shape changed: consumption-ordering refusal + ordinary-path GCC errors now surface)
 
 Re-ran against current master tip (`626f3f0`). The two 2026-08-10
