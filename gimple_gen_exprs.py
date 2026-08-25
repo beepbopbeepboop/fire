@@ -902,6 +902,44 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             gen._emit(f"  {t} = 0;  /* class attr {module_name}.{node.member} — UNRESOLVED import, not yet inlined as a struct */")
             return 'int', t
 
+        # A real module alias's attribute names a known STRUCT/CLASS —
+        # `lx.Token` where `import lexer as lx` and `class Token` is a
+        # real, already-inlined class (`node.member in gen.
+        # struct_field_types`). Mirrors the `module_name[:1].isupper()`
+        # branch just above (which covers a class NAME used as the
+        # attribute base, e.g. `Parameter.VAR_POSITIONAL`) for the
+        # opposite shape: a class name used as the attribute VALUE off a
+        # real module marker, e.g. Tools/cases_generator/plexer.py's
+        # top-level `Token = lx.Token` (re-exporting a sibling module's
+        # class under a local alias — real Python has no distinct
+        # "class value" representation, it's just the class object
+        # itself). Without this check, `module_name in gen.imported_
+        # symbols` is true (a real module alias) but none of the
+        # earlier branches match (`node.member` isn't a function, not a
+        # `sys`/`os` special-case, not a matching-owner global) and
+        # `node.member[:1].isupper()` is irrelevant here since this
+        # checks `module_name`, not `node.member` — so it fell all the
+        # way through to the generic dynamic-dispatch fallback further
+        # below, which calls the real RUNTIME `mojo_obj_getattr` on the
+        # module marker's placeholder `(int64_t)0` value, unconditionally
+        # raising a genuine (uncaught) `AttributeError: Token` the
+        # instant this assignment executes — not merely an unresolved
+        # stub value, an actual fatal exception. See
+        # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's runtime
+        # `AttributeError: Token` gap (parser.py -> parsing.py -> `from
+        # plexer import PLexer` -> plexer.py's `Token = lx.Token`).
+        # Same "class access unimplemented, stub rather than crash"
+        # treatment as the two branches above, not a real fix for
+        # class-as-value support in general (still a real, documented
+        # feature gap — just no longer a hard runtime crash for it).
+        if (module_name in gen.imported_symbols
+                and module_name not in gen.struct_field_types
+                and node.member in gen.struct_field_types
+                and node.member not in gen.var_types):
+            t = gen._new_temp('int')
+            gen._emit(f"  {t} = 0;  /* class value {module_name}.{node.member} — UNRESOLVED, class-as-value not modeled */")
+            return 'int', t
+
     # If the object is a zero-arg function used in member-access context (e.g. block_idx.x),
     # call it first so we get the struct return value, not a void* funcptr.
     #

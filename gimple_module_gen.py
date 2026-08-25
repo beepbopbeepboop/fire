@@ -1369,6 +1369,42 @@ def gen_module_impl(self, stmts):
             self.func_return_types[s.name] = f"{s.name} *"
 
     self.imported_symbols = dict(_phase0_imported)   # restore Phase 0 imported_symbols
+
+    # A plain MODULE-TOP-LEVEL `import X as Y` (an `ImportStmt` node, as
+    # opposed to `from X import Y` below) never reaches `_gen_stmt_
+    # ImportStmt` — the ONLY other site that registers `imported_symbols`
+    # for it — because a top-level ImportStmt is silently `pass`ed over
+    # by this same function's later toplevel-statement filter ("Imports
+    # processed in pre-pass"; that "pre-pass" is supposed to be THIS
+    # scan). Without this, `imported_symbols` stayed empty for any
+    # top-level `import X as Y` alias, so every `_lower_MemberExpr`/
+    # `_lower_IdentExpr` branch gated on `module_name in gen.
+    # imported_symbols` (module-attribute-access special cases: a
+    # function value read off a module, `submod.GLOBAL`, a known class
+    # read off a module, ...) was silently unreachable for it — only a
+    # `from X import Y` or a NESTED (function-body) `import X as Y`
+    # actually worked. Concretely: Tools/cases_generator/plexer.py's
+    # top-level `import lexer as lx` / `Token = lx.Token` fell through
+    # every special case to the generic dynamic-dispatch fallback, which
+    # raises a genuine (uncaught) runtime `AttributeError: Token` the
+    # instant that assignment executes — see
+    # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md. Must run BEFORE
+    # `_gen_toplevel` (this scan does; a second, later, defensive-only
+    # copy of this same registration also lives in this file's toplevel
+    # global-declaration scan, which runs AFTER `_gen_toplevel` and so
+    # cannot fix this by itself). Mirrors `_gen_stmt_ImportStmt`'s own
+    # dict shape exactly; guarded so it never overwrites a richer entry
+    # a `from X import Y` already set for the same local name.
+    for s in stmts:
+        if isinstance(s, ImportStmt):
+            for _im_mod, _im_alias in _import_targets(s):
+                _im_local = _im_alias if _im_alias else _im_mod.split('.')[0]
+                if _im_local not in self.imported_symbols:
+                    self.imported_symbols[_im_local] = {
+                        'module': _im_mod,
+                        'return_type': 'unknown',
+                    }
+
     for s in stmts:
         if isinstance(s, FromImportStmt):
             _sib_qualifier = None
@@ -4157,6 +4193,39 @@ def gen_module_impl(self, stmts):
                     self._global_var_types[local_name] = 'int64_t'
                     if local_name not in self._global_to_module:
                         self._global_to_module[local_name] = current_mod_name
+                # A plain MODULE-TOP-LEVEL `import X as Y` never reaches
+                # `_gen_stmt_ImportStmt` (the only other site that
+                # populates `imported_symbols`, see its own docstring) —
+                # `gen_module_impl`'s toplevel-statement filter (below,
+                # this same file) silently `pass`es every top-level
+                # ImportStmt/FromImportStmt node ("Imports processed in
+                # pre-pass"), so a top-level import's own alias is left
+                # registered only as a bare int64_t global marker here,
+                # never as a real module alias — `imported_symbols` stays
+                # populated ONLY for a `from X import Y` (a different
+                # node type, handled by its own separate pre-pass further
+                # up this same function) or an import NESTED inside a
+                # function/method body (never filtered, so its own
+                # `_gen_stmt_ImportStmt` call fires normally). Any
+                # `_lower_MemberExpr`/`_lower_IdentExpr` branch gated on
+                # `module_name in gen.imported_symbols` for a plain
+                # top-level `import X as Y` alias was therefore silently
+                # unreachable — e.g. `lx.Token` (Tools/cases_generator/
+                # plexer.py's top-level `Token = lx.Token`, `import lexer
+                # as lx`) fell through every module-attribute special
+                # case straight to the generic dynamic-dispatch fallback,
+                # which raises a genuine (uncaught) runtime
+                # `AttributeError: Token` the instant that assignment
+                # executes. Mirrors `_gen_stmt_ImportStmt`'s own dict
+                # shape exactly; guarded so it never overwrites a
+                # richer/already-correct entry (e.g. one a FromImportStmt
+                # or nested-body import already set for this exact name).
+                # See bugs/COMPILE_FAIL_Tools_cases_generator_parser.md.
+                if local_name not in self.imported_symbols:
+                    self.imported_symbols[local_name] = {
+                        'module': _tm,
+                        'return_type': 'unknown',
+                    }
     def _collect_global_stmts(stmt_list):
         result = []
         for _gs in stmt_list:
