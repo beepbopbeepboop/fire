@@ -1,5 +1,99 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (updated 2026-08-24, branch fix/opencode-fsutil — gap 1 investigated DEEPER than ever, confirmed feature-sized AND insufficient on its own; NOT attempted; one adjacent silent-emission hazard discovered)
+
+Attempted per session task: extend generator-body LambdaExpr support to
+`iter_files`'s parameterized shape (`lambda *a, **k: _walk(*a,
+walk=_files, **k)`). Investigated end-to-end with minimal synthetic
+probe files (each shape isolated, built via `MOJO_DEBUG=1 mojo.py
+build`). No code change; conclusions below.
+
+**First, a correction of this doc's recorded picture**: the module does
+not fail on ONE generator. The whole-module escalation lists SIX
+independently-refused module-level generators (re-confirmed on branch
+tip `2d0823b`):
+```
+_walk_tree           unsupported for-loop iterable type: CallExpr
+glob_tree            unsupported for-loop iterable type: CallExpr
+walk_tree            unsupported for-loop iterable type: CallExpr
+iter_files           the lambda (gap 1, message below)
+iter_files_by_suffix call to unresolved callee '_iter_files(...)' (param-aliased same-module generator)
+process_filenames    call to unresolved callee 'set(...)' (+ tuple-yield gap 2 behind it)
+```
+Since `gen_module` hard-fails when ANY module-level generator is
+refused, `mojo.py build` cannot exit 0 for this file until ALL SIX
+clear. Fixing gap 1 alone therefore cannot turn this build green under
+any circumstances.
+
+**Gap-1-specific findings** (probe files, all verified):
+
+1. The recursive `yield from iter_files(..., get_files=get_files, ...)`
+   (lines 275-277) is NOT a blocker — a synthetic probe of exactly that
+   shape (self-recursive yield-from WITH kwargs forwarding through a
+   kw-default param) compiles clean, exit 0 (task #138's machinery
+   covers it).
+2. The lambda refusal fires first in `iter_files`'s body, but it is
+   only the FIRST of several unsupported shapes IN THAT ONE BODY:
+   - `filenames = get_files(root)` / `get_files(root, suffix=suffix)`:
+     calling a function-valued LOCAL is refused ("unresolved callee
+     'get_files(...)'") even with NO lambda involved — a probe with
+     plain `get_files = walk_tree` (module generator assigned as a
+     value) is refused identically. The existing "declared
+     callable-value local" category only arises from lambda/bound-method
+     assignments (the `_CPP_CALLABLE_CTYPE*` types); assigning a bare
+     module function/generator as a value does not create one, and no
+     kwargs-capable call-site machinery exists for any such local.
+   - `for filename in filenames:` where `filenames` holds a call
+     result: see item 4 below — worse than a refusal.
+3. Why no NARROW fix for the lambda exists for THIS occurrence: any
+   compile-time specialization/beta-reduction of the forwarding lambda
+   requires knowing exactly what the callable local holds. But
+   `get_files` is POLYMORPHICALLY assigned across branches — it arrives
+   as a keyword-only PARAMETER (default `os.walk`, or an arbitrary
+   caller-provided callable), then is reassigned to `_glob` OR the
+   lambda depending on the `if get_files in (glob.glob, glob.iglob,
+   glob_tree):` test. A general mechanism instead needs a callable-value
+   representation carrying a real signature that tolerates
+   positional+keyword forwarding — i.e. runtime args/kwargs packing and
+   named-slot binding (note `std::function` cannot even hold a variadic
+   signature) — plus new call-site lowering keyed on that signature.
+   That is new shared call-argument/lowering machinery, the exact class
+   of change this project's history (the "_tuplegetter incidents",
+   MEMORY.md's compiled-generator-codegen-project notes) warns has
+   caused broad regressions when attempted narrowly. Feature-sized, per
+   this doc's own prior assessments — now with concrete evidence.
+4. Adjacent hazard DISCOVERED while probing (not previously catalogued,
+   single synthetic occurrence so far — below the "recurs >= 2 times"
+   bar for its own doc, recorded here): a generator body holding a
+   generator CALL RESULT in a local and iterating it —
+   ```python
+   filenames = gen(root)
+   for x in filenames:
+       yield x
+   ```
+   PASSES the eligibility pre-check (no `_UnsupportedGeneratorShape`)
+   and emits broken C++: `filenames = gen_<hash>(root);` where the
+   generated start function returns void → real g++ error "void value
+   not ignored as it ought to be". I.e. this shape ESCAPES the
+   honest-refusal convention as a bad emission rather than being
+   refused. Not reachable in fsutil.py today (every path to it is
+   blocked by earlier refusals), but it is the same family as the
+   segfault class fixed in CODEGEN_generator_lambda_expr_unsupported.md's
+   2026-08-21 note and deserves attention if any future fix exposes
+   this region. (Contrast: iterating a DIRECT param-indirect call
+   result — `for parent, _, names in _walk(root):` — IS honestly
+   refused, "unsupported for-loop iterable type: CallExpr", which is
+   the shared blocker of `_walk_tree`/`walk_tree`/`glob_tree`.)
+
+Net: gap 1 remains OPEN — root-cause assessment unchanged (feature-
+sized), now corroborated by isolated-shape evidence, AND proven
+insufficient to close even if implemented (items 2 and the six-generator
+list stand between it and any green build). Gap 2 (tuple-valued yield)
+untouched, additionally masked behind `process_filenames`'s separate
+`set(<comprehension>)` refusal. Tree sanity re-confirmed post-investigation
+(no source changes): `test_gimple.py` 252/252, `test_module_cache.py`
+76/76.
+
 ## Status (re-verified 2026-08-23, unchanged)
 
 Re-ran against current master tip (`626f3f0`): identical outcome to the

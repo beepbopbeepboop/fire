@@ -1,5 +1,36 @@
 # HARD BUG: `lambda` expressions are entirely unsupported inside a compiled generator body
 
+## Status (updated 2026-08-24, occurrence #2 investigated deeper — still open, now with evidence it is ALSO insufficient on its own)
+
+Session task attempted to extend this file's mechanism to fsutil.py's
+`lambda *a, **k: _walk(*a, walk=_files, **k)` shape. Not implemented;
+investigation (full details in
+`COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s 2026-08-24 entry)
+established two NEW facts beyond the prior assessments:
+
+1. The parameterized-lambda gap is not merely still open for occurrence
+   #2 — closing it could not unblock that generator even in principle:
+   `iter_files`'s own body contains further independently-refused shapes
+   downstream of the lambda assignment (calling a function-valued local,
+   with or without kwargs; iterating the call result held in a local),
+   and the module hard-fails on five OTHER generators regardless.
+2. No narrow specialization of the forwarding lambda is available for
+   THIS occurrence: `get_files` is polymorphically assigned across
+   branches (incoming keyword-only param default `os.walk` / caller
+   callable / `_glob` / the lambda), defeating any closed-world "this
+   local is exactly this lambda" rewrite; a general mechanism needs a
+   signature-carrying callable-value representation plus runtime
+   args/kwargs packing and named-slot call-site binding (`std::function`
+   cannot hold variadic signatures at all) — shared call-argument/lowering
+   machinery this project's history warns against touching narrowly.
+
+Also discovered while probing: a local-held generator call result
+iterated by a `for` loop escapes the eligibility pre-check and emits
+invalid C++ (void-value g++ error) instead of an honest refusal — see
+the fsutil doc's 2026-08-24 entry, item 4. Doc stays open, unchanged
+scope: 0-/1-plain-param shapes supported, `*args`/`**kwargs` forwarding
+still refused honestly.
+
 ## Status (re-verified 2026-08-23 — no new work)
 
 Re-ran `test_gimple_generator_runner.py`: **42/42 pass**, confirming both
