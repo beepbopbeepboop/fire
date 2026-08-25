@@ -40,6 +40,37 @@ import gimple_codegen
 import gimple_gen_funcs as _ggf_dup
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _emitted_unresolved_stub_syms, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
+def _render_struct_typedef_body(struct_name, fields):
+    """Render just the `typedef struct NAME { ... } NAME;` body lines for
+    one struct, given its resolved {field_name: field_ctype} map (the same
+    per-field rendering gen_module_impl's own emit_struct_defs pass uses,
+    hoisted out so a SECOND, independent caller — the compiled-generator
+    C++ preamble's "struct layout(s) needed" block, which must synthesize
+    a typedef on demand for a struct whose OWN home module never ran with
+    emit_struct_defs=True (see that block's `_struct_typedef_texts` miss
+    case) — can produce byte-identical text without duplicating the
+    field-rendering rules (array-typed fields, self-referential `NAME *`
+    fields, C-keyword-colliding field names) and silently drifting out of
+    sync with them over time. Returns a list of text lines, EXCLUDING the
+    guard #define gen_module_impl's own caller appends separately."""
+    lines = [f"typedef struct {struct_name} {{", f"  int64_t __mojo_type_id;"]
+    if fields:
+        for field_name, field_type in fields.items():
+            ft = '' + field_type
+            if ft == f"{struct_name} *":
+                ft = f"struct {struct_name} *"
+            safe_fn = _safe_field(field_name)
+            _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
+            if _arr_dm:
+                lines.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
+            else:
+                lines.append(f"  {ft} {safe_fn};")
+    else:
+        lines.append(f"  int _dummy;")
+    lines.append(f"}} {struct_name};")
+    return lines
+
+
 def gen_module_impl(self, stmts):
     self._actual_types['stmts'] = 'MojoList *'
     self._toplevel_dep_init_modules: list[str] = []
@@ -4019,22 +4050,7 @@ def gen_module_impl(self, stmts):
                 if struct_name == 'Pointer':
                     parts.append('#define _MOJO_POINTER_STRUCT_DEF')
                     _td_start = len(parts)
-                parts.append(f"typedef struct {struct_name} {{")
-                parts.append(f"  int64_t __mojo_type_id;")
-                if fields:
-                    for field_name, field_type in fields.items():
-                        ft = '' + field_type
-                        if ft == f"{struct_name} *":
-                            ft = f"struct {struct_name} *"
-                        safe_fn = _safe_field(field_name)
-                        _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
-                        if _arr_dm:
-                            parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
-                        else:
-                            parts.append(f"  {ft} {safe_fn};")
-                else:
-                    parts.append(f"  int _dummy;")
-                parts.append(f"}} {struct_name};")
+                parts.extend(_render_struct_typedef_body(struct_name, fields))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
@@ -5341,13 +5357,36 @@ def gen_module_impl(self, stmts):
                                 and _gm_fld_sn not in _gm_struct_names_seen):
                             _gm_struct_names_seen.append(_gm_fld_sn)
                             _gm_frontier.append(_gm_fld_sn)
+            # A struct referenced only from a module compiled with
+            # emit_struct_defs=False (e.g. a transitively-imported
+            # sibling's own top-level generator, compiled standalone via
+            # _compile_imported_module -> _compile_link_inline_cpp_unit —
+            # see bugs/COMPILE_FAIL_Tools_cases_generator_parser.md) never
+            # populated THIS gen's own `_struct_typedef_texts` (that dict
+            # is per-instance, only ever filled by the emit_struct_defs=
+            # True pass above, which such a temp_gen never runs) even
+            # though `struct_field_types` — shared by reference across
+            # every nested temp_gen — already has its fully-resolved
+            # field layout. Synthesize the typedef text on demand from
+            # that shared, always-available source instead of silently
+            # omitting the struct (leaving `Token * v` etc. referencing
+            # an undeclared type — a real g++ hard-fail, not merely a
+            # cosmetic gap) whenever the cached text isn't there yet.
+            def _gm_typedef_text(_sn):
+                _cached = self._struct_typedef_texts.get(_sn)
+                if _cached:
+                    return _cached
+                _flds = self.struct_field_types.get(_sn)
+                if _flds is None:
+                    return None
+                return '\n'.join(_render_struct_typedef_body(_sn, _flds))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
-                if _gm_fwd_sn in self._struct_typedef_texts:
+                if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
-            if any(_fwd in self._struct_typedef_texts for _fwd in _gm_struct_names_seen):
+            if any(_gm_typedef_text(_fwd) is not None for _fwd in _gm_struct_names_seen):
                 cpp_parts.append('')
             for _gm_method_struct_name in sorted(_gm_struct_names_seen):
-                _td = self._struct_typedef_texts.get(_gm_method_struct_name)
+                _td = _gm_typedef_text(_gm_method_struct_name)
                 if _td:
                     cpp_parts.append(_td.replace('_Bool', 'bool'))
                     cpp_parts.append('')
