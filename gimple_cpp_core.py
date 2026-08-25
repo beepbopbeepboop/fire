@@ -883,6 +883,35 @@ def _cpp_expr(gen, e) -> str:
         # not `.`, same as `self` above; every other non-self case
         # (a module-object field like os.path, a scalar local with no
         # real struct type) keeps the existing `.` form unchanged.
+        # A member READ (NOT a call) rooted at a module IMPORT name used
+        # as a VALUE -- `os.close` passed as a plain callback argument,
+        # not immediately invoked (Lib/test/_test_eintr.py's `self.
+        # addCleanup(os.close, rd)`). Mirrors the CallExpr branch's own
+        # near-identical "opaque module-object attribute, stub to 0"
+        # convention a little further down in this same method (for
+        # module-attribute CALLS, e.g. `os.pipe()`) -- that check never
+        # covers this shape since it only fires inside CallExpr
+        # handling, and the line just below this comment (`obj_expr =
+        # ... else e.obj.name`) takes a raw-text shortcut for ANY
+        # IdentExpr receiver, bypassing `_cpp_expr`'s own IdentExpr
+        # resolution entirely -- so a module name here was never even
+        # checked against `_cpp_early_global_names`, just emitted
+        # verbatim as bare, undeclared C++ text ("'os' was not declared
+        # in this scope"). Checked here, ahead of that shortcut, with
+        # the identical gate the CallExpr module-stub case uses: a name
+        # that's a known early-global (import/function/assign target)
+        # but NOT a declared local/param (a real struct-pointer local
+        # sharing an early-global's bare name is already excluded by
+        # the `not in gen._cpp_declared` half of this same condition,
+        # since a declared param/local is always IN `_cpp_declared`).
+        if (isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None
+                and e.obj.name not in gen._cpp_declared
+                and e.obj.name in gen._cpp_early_global_names):
+            gimple_ctypes._debug_note('stubbed operation',
+                        f'generator-body module-member value read '
+                        f'{e.obj.name}.{e.member}')
+            return '0'
         obj_expr = gen._cpp_expr(e.obj) if not isinstance(e.obj, gimple_ctypes.IdentExpr) else e.obj.name
         if isinstance(e.obj, gimple_ctypes.IdentExpr):
             _ptr_struct = gen._cpp_struct_ptr_local(e.obj.name)

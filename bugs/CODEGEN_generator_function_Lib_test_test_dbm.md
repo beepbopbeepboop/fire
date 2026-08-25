@@ -1,5 +1,52 @@
 # CODEGEN_generator_function: Lib/test/test_dbm.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder — the `'dbm' was not declared` gap FIXED; isolated coroutine TU now compiles with ZERO errors)
+
+Root-caused the "outer-scope module-name resolution" family precisely
+for the SPECIFIC shape this file hits (`for name in dbm._names:`, a
+module-import name read as a bare, uncalled attribute VALUE — as
+opposed to `os.pipe()`-style module-attribute CALLS, which already had
+a "stub to 0" fallback): `gimple_cpp_core.py`'s `_cpp_expr` MemberExpr
+case has an `obj_expr = ... else e.obj.name` shortcut that, whenever
+the receiver is a bare `IdentExpr`, uses the raw Python name as C++ text
+directly — bypassing `_cpp_expr`'s own IdentExpr resolution (which
+already knows how to recognize a module-level global/import name)
+entirely. `dbm` (from `import dbm`) hit exactly this: emitted as literal
+`dbm` text, an undeclared C++ identifier.
+
+Fixed: added the same "known early-global name, not a declared local,
+stub to 0 (diagnosed)" check the CallExpr/MemberExpr branch already
+uses for module-attribute CALLS (`os.pipe()`), applied here too, ahead
+of the raw-text shortcut, for the uncalled-attribute-VALUE case.
+Verified via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + `g++-mp-15 -std=c++20 -fsyntax-only`: `test_dbm.py`'s own
+`dbm_iterator` generator TU now compiles with **ZERO** g++ errors (was:
+hard `'dbm' was not declared` failure). Caveat, honestly recorded: this
+doesn't make `dbm_iterator` semantically correct — `dbm._names` (the
+loop's iterable) isn't a real, resolvable `MojoList*`/`MojoDict*` in
+this narrow body model either, so the existing (separate, pre-existing)
+"iterable not statically list/dict-typed" fallback silently compiles
+the whole `for` loop as dead code (0 iterations) — the generated C++ is
+`int64_t name = 0; co_return;`, no loop at all. This is the SAME
+already-documented "loop runs zero times, diagnosed" convention seen
+elsewhere in this project (e.g. `Tools/unicode/gencodec.py`'s
+`os.listdir` gap) — a real, honest compile fix, not a runtime-behavior
+fix; `dbm_iterator` itself will not actually iterate real dbm backends
+once linked.
+
+The `__import__` (dynamic import call) blocker is UNCHANGED — a
+separate, genuinely structural gap (dynamic import resolution), not
+touched by this fix.
+
+Full mandatory gate: `test_gimple.py` 252/252, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with 0 skip lines.
+
+`test_dbm.py` as a whole still does not build (transitive dependency
+closure has its own separate failures, not investigated here). Doc
+stays open.
+
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C3 cluster. Both residual errors (`'dbm' was not declared`, `'__import__' was not declared`) are instances of the same outer-scope module-name-resolution gap _test_eintr.py hits with `os.pipe()` -- unaffected by this session's two landed fixes (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies), since neither adds general module-name resolution to the coroutine-body emitter. Still structural; untouched.

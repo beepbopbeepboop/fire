@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/test/_test_eintr.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder, 2nd entry — item 1 (`os.pipe()`/`os.close`, the file's PREVIOUSLY-DOMINANT blocker) FIXED too; arity-mismatch family (item 4) now the first thing reached)
+
+Follow-up fix in the same session (see `bugs/CODEGEN_generator_function_
+Lib_test_test_dbm.md`'s matching 2026-08-24 entry for the full mechanism):
+`gimple_cpp_core.py`'s `_cpp_expr` MemberExpr case had a raw-text
+shortcut (`obj_expr = ... else e.obj.name`) for any bare-IdentExpr
+receiver that bypassed module-name resolution entirely — `os.close`
+(read as a plain VALUE, passed to `self.addCleanup(os.close, rd)`,
+never called) emitted literal `os`, an undeclared identifier. Fixed by
+applying the same "known early-global, not a declared local → stub to
+0" convention the CallExpr branch already used for CALLED module
+attributes (`os.pipe()`) to this uncalled-value case too.
+
+Re-verified via a fresh isolated `compile_to_gimple_with_cpp(do_imports=
+False)` + `g++-mp-15 -std=c++20 -fsyntax-only`: item 1 (`'os' was not
+declared`) is confirmed GONE. The compile now proceeds all the way to
+item 4's family: `OSEINTRTest_addCleanup(self, 0, rd)` now fails
+"too many arguments" — `addCleanup`, like `assertEqual`, is inherited
+from `unittest.TestCase` and gets the same `(self)`-only extern
+declaration default this doc's earlier entry already flagged for
+`assertEqual` (see `bugs/CODEGEN_generator_function_Lib_test_test_
+ctypes_test_random_things.md`'s 2026-08-24 entry for why this wasn't
+attempted: no confirmed backing definition to link a variadic
+declaration against). Items 2/3 (list-literal-as-call-argument,
+`assertEqual` arity) remain as previously documented, now visible in
+the SAME pass instead of masked behind item 1.
+
+Full mandatory gate: `test_gimple.py` 252/252, `test_module_cache.py`
+76/76, `make check-selfhost` clean, from-scratch stdlib dylib rebuild
+EXIT=0 with 0 skip lines.
+
+`_test_eintr.py` still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-24, worktree fix/rest-remainder — the `.join()` gap from the 2026-08-23 entry (item 3) is FIXED; two other, DIFFERENT blockers now surface on the same/nearby lines, unaffected)
 
 This session's `.join()`-on-string-literal fix (see `bugs/

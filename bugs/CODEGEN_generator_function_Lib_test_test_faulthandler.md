@@ -1,5 +1,32 @@
 # CODEGEN_generator_function: Lib/test/test_faulthandler.py
 
+## Status (updated 2026-08-24, worktree fix/rest-remainder — checked ONLY via a safety-bounded ISOLATED compile (do_imports=False, no real `mojo.py build`/link) per this session's mandatory memory-safety rule for this exact file; one new, different blocker found, not attempted)
+
+**Safety note**: this file is the confirmed 43+GB-RSS runaway-compile
+hazard flagged in this task's own brief — a REAL `mojo.py build`/`run`
+against it (which resolves/links its huge transitive import chain) must
+never be run unbounded. This session used ONLY `gimple_codegen.
+compile_to_gimple_with_cpp(do_imports=False)` (no import resolution, no
+linking — a fundamentally bounded operation, unlike a real build), still
+wrapped in `ulimit -v 8000000` plus a wall-clock/RSS watcher as a
+belt-and-suspenders precaution; it completed in seconds. No real
+`mojo.py build`/`run` was attempted against this file this session.
+
+Isolated-compile `g++-mp-15 -std=c++20 -fsyntax-only` check on the
+resulting `.cpp`: a NEW error surfaces inside a `finally:`-block RAII
+lambda (`_MojoScopeExit`) at `os_helper.unlink(filename)` — `'os_helper'
+was not declared in this scope`. This is the SAME general shape this
+session's `_cpp_expr` MemberExpr fix targeted (an early-global module
+name read as a bare attribute, here via a CALL `os_helper.unlink(...)`
+rather than a bare value) — but it does NOT reproduce as fixed, meaning
+the `finally:`-lambda body emission path (`_cpp_try_stmt`'s RAII lambda
+construction) evidently does not see the same `_cpp_early_global_names`
+resolution the ordinary body-statement emitter does (a plausible
+scoping/context gap specific to that lambda's own expression-lowering
+context, not investigated further here — genuinely a different code
+path, out of scope for this session's narrower fix). Left open, flagged
+for whoever next picks up this exact shape.
+
 ## Status (updated 2026-08-24 — PARTIAL, item 1 fixed; full-file build still unresolved and slow)
 
 Fixed item 1 below this session (commit 753b199): `_safe_field` now
