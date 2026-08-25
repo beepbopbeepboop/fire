@@ -770,6 +770,23 @@ _C_MACRO_NAMES = frozenset({
     # declared/accessed — same failure mode SEEK_CUR/SEEK_SET/SEEK_END
     # above already guard against, just from the rest of the same header.
     'TMP_MAX', 'FILENAME_MAX', 'FOPEN_MAX', 'BUFSIZ', 'L_tmpnam', 'L_ctermid',
+    # Darwin/macOS <stdio.h> defines `stdin`/`stdout`/`stderr` as OBJECT-LIKE
+    # macros expanding to `__stdinp`/`__stdoutp`/`__stderrp` (unlike glibc,
+    # where they're ordinary extern FILE* declarations, not macros) — a Mojo
+    # struct field or local variable named `stdin` (e.g. a Popen-shaped
+    # `p.stdin` attribute, Lib/test/support/script_helper.py's real shape)
+    # gets silently text-substituted before GCC/G++ ever parses the struct,
+    # so the field is actually declared `__stdinp` while an unescaped access
+    # site (previously routed through `_safe_field`, which never consulted
+    # this set) still emitted the literal, unexpanded `stdin` token in a
+    # context where the macro substitution doesn't apply the same way (or
+    # does and produces a mismatched name) -- "'MojoCompletedProcess' has no
+    # member '__stdinp'"/"...'stdin'" depending on the site. Escaping to
+    # `_kw_stdin` at declaration AND every read/write site (the same `_kw_`
+    # convention `_c_field_name` already used for this exact set) sidesteps
+    # the platform macro entirely instead of trying to out-guess its
+    # expansion.
+    'stdin', 'stdout', 'stderr',
 })
 
 # Python pseudo-attributes provided by the runtime/type machinery, NOT real
@@ -790,8 +807,14 @@ _PSEUDO_DUNDER_ATTRS = frozenset({
 
 
 def _safe_field(name: str) -> str:
-    """Sanitize struct field and parameter names that are C keywords."""
-    if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS:
+    """Sanitize struct field and parameter names that are C keywords or
+    platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
+    entries — a field named identically to a Darwin <stdio.h> object-like
+    macro gets silently text-substituted before GCC/G++ parses it, exactly
+    the same failure mode _c_field_name already guards for module globals
+    and gimple_gen_infra.py's local-variable declarator already guards for
+    locals; this is that same chokepoint for struct fields/parameters)."""
+    if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES:
         return f'_kw_{name}'
     return name
 

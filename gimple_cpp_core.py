@@ -800,13 +800,13 @@ def _cpp_expr(gen, e) -> str:
             if e.member in _self_fields:
                 ft = _self_fields[e.member]
                 if ft in ('int64_t', 'double', '_Bool', 'char *'):
-                    return f"self->{e.member}"
+                    return f"self->{gimple_ctypes._safe_field(e.member)}"
                 # Unknown-shaped field: emit as self->member (C++ struct pointer access)
-                return f"self->{e.member}"
+                return f"self->{gimple_ctypes._safe_field(e.member)}"
             # Anything else (neither a field nor a real method — a
             # genuine not-yet-synthesized dynamic attribute) falls
             # through unchanged to the original best-effort raw access.
-            return f"self->{e.member}"
+            return f"self->{gimple_ctypes._safe_field(e.member)}"
         # `cls.<attr>` — the class-level (not instance) analogue of
         # `self.<field>` just above, for a @classmethod generator (see
         # the classmethod-generator eligibility check, ~line 30536,
@@ -875,7 +875,7 @@ def _cpp_expr(gen, e) -> str:
                 # `_cpp_param_struct_names` set that collection already
                 # reads from, rather than inventing a second one.
                 gen._cpp_param_struct_names.add(outer_ft[:-2])
-                return f"(({outer_ft})(self->{e.obj.member}))->{e.member}"
+                return f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}"
         # Non-self member access: entry.name, os.path, etc. A struct-
         # POINTER-typed local/parameter (see bugs/hard/CODEGEN_
         # generator_struct_typed_param_refused.md — e.g. dis.py's
@@ -900,7 +900,7 @@ def _cpp_expr(gen, e) -> str:
                     gen._cpp_struct_method_refs.add((_ptr_struct, e.member))
                     return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                             f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))")
-                return f"{obj_expr}->{e.member}"
+                return f"{obj_expr}->{gimple_ctypes._safe_field(e.member)}"
         # A member READ rooted at a DECLARED local typed as a plain
         # scalar — including multi-level chains like
         # `cm.unraisable.exc_value` (test_ctypes/test_random_things.py),
@@ -925,7 +925,7 @@ def _cpp_expr(gen, e) -> str:
                         f'generator-body attribute read on opaque '
                         f'scalar local {_chain_root.name}.{e.member}')
             return '0'
-        return f"{obj_expr}.{e.member}"
+        return f"{obj_expr}.{gimple_ctypes._safe_field(e.member)}"
     if isinstance(e, gimple_ctypes.LambdaExpr):
         # A `lambda` used as a VALUE inside a generator body (e.g.
         # pickletools.py's `_genops`: `getpos = lambda: None`, the
@@ -1424,6 +1424,45 @@ def _cpp_expr(gen, e) -> str:
                 _a1 = gen._cpp_expr(e.args[1])
                 return (f"(char *)_char_replace_impl((int64_t)(char *)({_obj_expr}), "
                         f"(int64_t)(char *)({_a0}), (int64_t)(char *)({_a1}))")
+            # `<char*-typed obj>.strip()`/`.lstrip()`/`.rstrip()` (0 or 1
+            # `chars` arg) / `.lower()`/`.upper()` (0 args) —
+            # same rationale/mechanism as `.replace` just above, routed
+            # through the SAME `mojo_str_lstrip`/`mojo_str_rstrip`/
+            # `mojo_str_rstrip_chars`/`mojo_str_lstrip_chars`/
+            # `string_strip`/`string_lower`/`string_upper` runtime
+            # helpers the ordinary GIMPLE path's own char* method-call
+            # dispatch already uses (`gimple_gen_methods.py`'s
+            # `_CSTR_METHODS` table) — reused, not reinvented. `.strip
+            # (chars)` with an argument mirrors that same table's own
+            # behavior (the `chars` arg is accepted syntactically but
+            # ignored — only `.lstrip`/`.rstrip` have a real chars-aware
+            # helper; matching, not a new limitation). Real:
+            # zipfile/_path/__init__.py's `_ancestry`: `path = path.
+            # rstrip(posixpath.sep)`.
+            if _str_obj_ctype == 'char *' and e.func.member in ('strip', 'lstrip', 'rstrip') \
+                    and len(e.args) in (0, 1):
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                if e.func.member == 'strip' or not e.args:
+                    _fn = {'strip': 'string_strip', 'lstrip': 'mojo_str_lstrip',
+                           'rstrip': 'mojo_str_rstrip'}[e.func.member]
+                    return f"(char *){_fn}((char *)({_obj_expr}))"
+                _fn = 'mojo_str_lstrip_chars' if e.func.member == 'lstrip' else 'mojo_str_rstrip_chars'
+                _a0 = gen._cpp_expr(e.args[0])
+                return f"(char *){_fn}((char *)({_obj_expr}), (char *)({_a0}))"
+            if _str_obj_ctype == 'char *' and e.func.member in ('lower', 'upper') and not e.args:
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _fn = 'string_lower' if e.func.member == 'lower' else 'string_upper'
+                return f"(char *){_fn}((char *)({_obj_expr}))"
+            # `<char*-typed obj>.startswith(prefix)` / `.endswith(suffix)`
+            # — real `int`-returning runtime helpers (`mojo_str_
+            # startswith`/`mojo_str_endswith`), same receiver-ctype gate
+            # as the string methods just above.
+            if _str_obj_ctype == 'char *' and e.func.member in ('startswith', 'endswith') \
+                    and len(e.args) == 1:
+                _obj_expr = gen._cpp_expr(e.func.obj)
+                _fn = 'mojo_str_startswith' if e.func.member == 'startswith' else 'mojo_str_endswith'
+                _a0 = gen._cpp_expr(e.args[0])
+                return f"({_fn}((char *)({_obj_expr}), (char *)({_a0})) != 0)"
             # `<dict-typed obj>.get(key)` / `.get(key, default)` — a real
             # dict method call on a local/self-field this narrow body
             # model already knows is `MojoDict *`, which (like `.replace`
@@ -2621,7 +2660,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr) \
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{s.target.member} = {val};"]
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"]
             # arr[i] = val / d[k] = val  →  a real runtime-helper write
             # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
             # (non-generator) GIMPLE path's own SubscriptExpr-target
@@ -2932,7 +2971,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{s.target.member} = self->{s.target.member} {op} {val};"]
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"]
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "augmented assignment to an undeclared/non-simple target")
         op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
@@ -3927,7 +3966,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _self_ft = gen.struct_field_types.get(
                     gen._cpp_gen_self_struct, {}).get(s.iterable.member)
                 if _self_ft not in ('int64_t', 'double', '_Bool', 'char *'):
-                    _self_field_itname = f"self->{s.iterable.member}"
+                    _self_field_itname = f"self->{gimple_ctypes._safe_field(s.iterable.member)}"
                     # The field's ELEMENT type (as opposed to the field's
                     # own MojoList*-pointer type just checked above) —
                     # `_field_elem_types` is the same struct-field

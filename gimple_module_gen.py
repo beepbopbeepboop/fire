@@ -4003,7 +4003,7 @@ def gen_module_impl(self, stmts):
                         ft = '' + field_type
                         if ft == f"{struct_name} *":
                             ft = f"struct {struct_name} *"
-                        safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
+                        safe_fn = _safe_field(field_name)
                         _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
                         if _arr_dm:
                             parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
@@ -4526,7 +4526,7 @@ def gen_module_impl(self, stmts):
                             ft = self.struct_field_types[sd.name][field.name]
                         else:
                             ft = self._resolve_type(field.type_ann) if field.type_ann else 'int'
-                        safe_fn = f'_kw_{field.name}' if (field.name in _C_KEYWORDS or field.name in _C_PARAM_EXTRA_KEYWORDS) else field.name
+                        safe_fn = _safe_field(field.name)
                         _arr_dm = re.match(r'^(.+)\[(\d+)\]$', ft)
                         if _arr_dm:
                             parts.append(f"  {_arr_dm.group(1)} {safe_fn}[{_arr_dm.group(2)}];")
@@ -4536,7 +4536,7 @@ def gen_module_impl(self, stmts):
                 if sd.name in self.struct_field_types:
                     for field_name, field_type in self.struct_field_types[sd.name].items():
                         if field_name not in emitted_fields:
-                            safe_fn = f'_kw_{field_name}' if (field_name in _C_KEYWORDS or field_name in _C_PARAM_EXTRA_KEYWORDS) else field_name
+                            safe_fn = _safe_field(field_name)
                             _arr_dm2 = re.match(r'^(.+)\[(\d+)\]$', field_type)
                             if _arr_dm2:
                                 parts.append(f"  {_arr_dm2.group(1)} {safe_fn}[{_arr_dm2.group(2)}];")

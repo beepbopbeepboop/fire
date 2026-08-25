@@ -648,6 +648,27 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         # emitted a raw, invalid C++ `+` instead of `mojo_str_cat`.
         if e.func.member == 'replace' and len(e.args) == 2:
             return 'char *'
+        # `<str>.strip()`/`.lstrip()`/`.rstrip()` (0 or 1 `chars` arg),
+        # `.lower()`/`.upper()` (0 args) — mirror `_cpp_expr`'s matching
+        # CallExpr/MemberExpr cases below (all route through existing
+        # `mojo_str_*`/`string_*` runtime helpers already declared via
+        # every generated .cpp's wholesale `#include <mojo_runtime.h>`,
+        # same convention as `.replace` just above), always returning
+        # `char *`. Without a matching entry here, a first-assigned
+        # local like zipfile/_path/__init__.py's `path = path.rstrip(
+        # posixpath.sep)` (well, any FIRST assignment of this shape to
+        # a fresh local) would default to the int64_t fallback, then
+        # fail a later string use the same way `.replace` already
+        # documented.
+        if e.func.member in ('strip', 'lstrip', 'rstrip') and len(e.args) in (0, 1):
+            return 'char *'
+        if e.func.member in ('lower', 'upper') and len(e.args) == 0:
+            return 'char *'
+        # `<str>.startswith(prefix)` / `.endswith(suffix)` — mirrors the
+        # matching `_cpp_expr` case below (`mojo_str_startswith`/
+        # `mojo_str_endswith`, both real C `int`-returning helpers).
+        if e.func.member in ('startswith', 'endswith') and len(e.args) == 1:
+            return '_Bool'
         # `<dict>.get(key)` / `<dict>.get(key, default)` where `<dict>` is a
         # bare local/param or `self.<field>` whose STORED dict value type
         # (`dict_val_types` — the enclosing struct's per-field dict-value-
