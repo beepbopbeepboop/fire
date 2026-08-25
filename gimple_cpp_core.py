@@ -1236,13 +1236,16 @@ def _cpp_expr(gen, e) -> str:
                     return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
                 if e.func.member == 'exists' and len(a) == 1:
                     return f"int_exists(0, (int64_t)(char *)({a[0]}))"
-                # isfile/normpath/relpath: mirror the GIMPLE path's own
-                # honest stubs for these exactly (isfile -> always
-                # false; normpath/relpath -> identity), rather than
-                # inventing different behavior for this narrower body
-                # model.
+                # isfile: real S_ISREG stat check — mirrors the GIMPLE
+                # path's own os.path.isfile dispatch (int_isfile in
+                # runtime/mojo_runtime.c; the GIMPLE side previously
+                # stubbed this to a literal 0, which made
+                # `if not os.path.isfile(p): continue` unconditional).
+                # normpath/relpath: mirror the GIMPLE path's own
+                # honest identity stubs, rather than inventing different
+                # behavior for this narrower body model.
                 if e.func.member == 'isfile' and len(a) == 1:
-                    return '0'
+                    return f"int_isfile(0, (int64_t)(char *)({a[0]}))"
                 if e.func.member in ('normpath', 'relpath') and len(a) >= 1:
                     return a[0]
                 # basename/dirname/splitext/expanduser/abspath — the

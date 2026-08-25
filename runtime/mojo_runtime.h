@@ -637,11 +637,14 @@ char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filen
 
 /* os.path bridge functions (called from compiled module_loader code) */
 int int_isdir(int64_t marker, int64_t path);           /* os.path.isdir */
+int int_isfile(int64_t marker, int64_t path);          /* os.path.isfile */
 int64_t int_abspath(int64_t marker, int64_t path);     /* os.path.abspath */
 int64_t int_dirname(int64_t marker, int64_t path);     /* os.path.dirname */
 int int_exists(int64_t marker, int64_t path);          /* os.path.exists */
 int64_t int_join(int64_t marker, int64_t base, int64_t part);  /* os.path.join(a, b) */
 int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*list) */
+MojoList *int64_t_path_split(char *path);              /* os.path.split(path) -> [head, tail] */
+MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 
 /* Forward declare ModuleLoader (defined in generated code) */

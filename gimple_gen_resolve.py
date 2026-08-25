@@ -1336,6 +1336,7 @@ def _quick_type(gen, node) -> str:
             if mod == 're' and meth == 'match':  return 'int'
             if mod == 're' and meth == 'search': return 'int'
             if mod == 'os' and meth in ('getcwd', 'path'): return 'char *'
+            if mod == 'os' and meth == 'listdir': return 'MojoList *'
             if mod == 'sysconfig' and meth == 'get_config_var': return 'char *'
             if mod == 'sys': return 'int'
             # dict.keys()/.values()/.items(): _lower_dict_method (below)
@@ -1397,7 +1398,10 @@ def _quick_type(gen, node) -> str:
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
             if node.func.member in ('basename', 'expanduser'):
                 return 'char *'
-            if node.func.member == 'splitext':
+            if node.func.member in ('splitext', 'split'):
+                # Both are 2-element string PAIRS in this codegen's model —
+                # splitext -> [root, ext] (int64_t_splitext + a built list),
+                # split -> [head, tail] (int64_t_path_split).
                 return 'MojoList *'
         # Chained string methods, e.g. `s.replace(a, b).replace(c, d)` —
         # the receiver here is itself a CallExpr (the inner .replace()),

@@ -657,6 +657,24 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                 [('MojoList *', lst), ('char *', '""')])
                 gen._elem_types[lst] = 'char *'
                 return 'MojoList *', lst
+            elif outer_member == 'split' and len(node.args) == 1:
+                # os.path.split(p) -> the real (head, tail) pair, materialized
+                # as a 2-element string list exactly like the splitext case
+                # above (runtime helper: int64_t_path_split mirrors cpython's
+                # posixpath.split verbatim). Previously this call shape fell
+                # through every os.path.* case to the generic module-receiver
+                # dispatch: receiver = the opaque `os.path` module marker
+                # (int64_t), method 'split' -> the generic string-.split()
+                # path with the marker coerced to the SEPARATOR argument —
+                # mojo_str_split((char *)0, p) — so `os.path.split(name)[1]`
+                # indexed element 1 of a whitespace-split of the whole path
+                # (usually out of range). Found via Tools/unicode/
+                # gencodec.py's convertdir(): `name = os.path.split(mapname)[1]`.
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                t = gen._call_expr('MojoList *', 'int64_t_path_split',
+                                    [(arg_type, arg_val)])
+                gen._elem_types[t] = 'char *'
+                return 'MojoList *', t
             elif outer_member == 'expanduser' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('char *', 'int64_t_expanduser', [(arg_type, arg_val)])
@@ -733,9 +751,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 return arg_type, arg_val
             elif outer_member == 'isfile' and len(node.args) == 1:
-                # os.path.isfile(p) → stub: return 0 (not a file)
-                for a in node.args: gen.lower_expr(a)
-                return 'int', gen._new_val('int', '0')
+                # os.path.isfile(p) — real S_ISREG stat check (int_isfile in
+                # runtime/mojo_runtime.c), mirroring the isdir/exists cases
+                # above. Previously a literal-0 stub ("not a file"), which
+                # made `if not os.path.isfile(p): continue` unconditional —
+                # every loop iteration silently skipped (found via
+                # Tools/unicode/gencodec.py's convertdir()).
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
+                return 'int', t
             elif outer_member == 'relpath' and len(node.args) >= 1:
                 # os.path.relpath(p) → stub: return p unchanged
                 arg_type, arg_val = gen.lower_expr(node.args[0])
@@ -863,6 +887,24 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_val = gen._new_val('MojoList *', f'(MojoList *){arg_val}')
             t = gen._call_expr('char *', 'mojo_shlex_join', [('MojoList *', arg_val)])
             return 'char *', t
+
+        # os.listdir(path) -> real list[str] of directory entries (runtime
+        # helper mojo_listdir, opendir/readdir, "."/".." excluded). This call
+        # shape previously fell through every module-method case to the
+        # generic opaque-receiver stub, which returned the `os` module marker
+        # ITSELF (int64_t) as the "list" — a for-loop over it then hit the
+        # runtime's not-a-registered-container fallback and silently ran zero
+        # times (mojo_unsupported_iter). Found via Tools/unicode/gencodec.py:
+        # `mapnames = os.listdir(dir)` / `for mapname in mapnames:`.
+        if module_name == 'os' and method_name == 'listdir' and len(node.args) == 1:
+            arg_type, arg_val = gen.lower_expr(node.args[0])
+            if arg_type not in ('char *', 'void *'):
+                arg_cast = gen._new_temp('char *')
+                gen._emit(f'  {arg_cast} = (char *){arg_val};')
+                arg_val = arg_cast
+            t = gen._call_expr('MojoList *', 'mojo_listdir', [('char *', arg_val)])
+            gen._elem_types[t] = 'char *'
+            return 'MojoList *', t
 
         # sysconfig.get_config_var(name) — real Python signature returns
         # `str | None` (the build-config value for `name`, e.g.

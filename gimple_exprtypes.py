@@ -619,9 +619,14 @@ def _infer_simple_expr_ctype(e, known: dict | None = None,
         if (isinstance(e.func.obj, MemberExpr)
                 and isinstance(e.func.obj.obj, IdentExpr)
                 and e.func.obj.obj.name == 'os' and e.func.obj.member == 'path'):
-            if e.func.member in ('join', 'basename', 'dirname', 'split', 'splitext',
+            if e.func.member in ('join', 'basename', 'dirname', 'splitext',
                                  'normpath', 'abspath', 'realpath'):
                 return 'char *'
+            # os.path.split(p) is a (head, tail) PAIR, materialized as a
+            # 2-element string list by the GIMPLE path's lowering
+            # (int64_t_path_split) — not a single char* string.
+            if e.func.member == 'split':
+                return 'MojoList *'
         if isinstance(e.func.obj, IdentExpr) and e.func.obj.name == 'math':
             if e.func.member in ('isnan', 'isinf', 'isfinite', 'isclose'):
                 return '_Bool'
