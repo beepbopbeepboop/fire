@@ -5090,7 +5090,20 @@ def gen_module_impl(self, stmts):
     for gname in sorted(_declared_globals):   # sorted: deterministic field order for bootstrap
         if gname in self._global_var_types:
             g_mtype = self._global_var_types[gname]
-            if gname in self._global_c_decl_types:
+            # Own-overlay first: the field decl must use the SAME
+            # resolution the assignment sites use (`_global_dst_ctype` →
+            # `_own_overlay_global_ctype`), so a cross-module same-bare-
+            # name homonym that polluted the SHARED `_global_c_decl_types`
+            # between this module's field-freeze and its body-emission
+            # (or vice versa) can never make the two sides disagree (the
+            # observed c_analyzer/info.py failure: `UNKNOWN` frozen
+            # int64_t here, then a foreign module's string `UNKNOWN`
+            # cdecl'd 'char *' into the shared dict, then the assignment
+            # coerced its RHS to `char *` against this int64_t field).
+            _own_t = self._own_overlay_global_ctype(gname)
+            if _own_t is not None:
+                c_type = _own_t
+            elif gname in self._global_c_decl_types:
                 c_type = self._global_c_decl_types[gname]
             elif g_mtype and g_mtype.endswith(' *') \
                     and self._cpp_known_ptr_struct(g_mtype):
