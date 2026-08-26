@@ -2,6 +2,23 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Doc/includes/dbpickle.py`
 
+## Status (re-verified 2026-08-26, branch fix/opencode-importlib — DOCUMENTED-NOT-FIXED, unchanged)
+
+Re-ran the full `python3 mojo.py build` repro fresh under the memory/
+time watcher: fails at 76s with the IDENTICAL single error signature
+(`dbpickle.py:80:3: error: cannot convert to a pointer type` at
+`DBUnpickler(file, conn).load()`). Also re-checked the tree directly:
+still zero references to `BytesIO`/`StringIO`/`Pickler`/`Unpickler`
+anywhere in gimple_codegen.py or runtime/. None of the recent shared
+mechanism landings touch this file's shape (it has no generators; its
+needs are two from-scratch runtime subsystems). Assessment unchanged:
+a real growable byte-buffer `io.BytesIO` plus a subclassable pickle
+engine honoring `persistent_id`/`persistent_load` overrides — each
+comparable in scope to the existing sqlite3 binding, and the pickle
+engine additionally needs real user-subclass virtual dispatch.
+Doc/includes/ example code, low value relative to effort; not
+attempted.
+
 ## Status (re-verified 2026-08-25, worktree fix/rest-remainder12 — DOCUMENTED-NOT-FIXED, unchanged)
 
 Re-ran an isolated `compile_to_gimple` check fresh against this
