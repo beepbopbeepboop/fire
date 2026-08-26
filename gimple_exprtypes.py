@@ -25,6 +25,57 @@ from mojo_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
 )
 
+_WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
+
+
+def _walk_ast_into(node, out):
+    """Append to `out` every AST node `_walk_ast(node)` would return, in
+    exactly its order — the same pre-order generic walk, minus the
+    intermediate per-subtree lists (`result.extend(_walk_ast(child))`
+    copied every node once per ancestor level before being discarded).
+
+    Phase 5 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
+    rescan.md): this is the whole-program walk utility itself, called by
+    the struct-field scans, Pass 1.2's self-assign/self-read collectors,
+    gen_func, closure/async pre-passes — every consumer of the flat
+    node list. A fresh cProfile of Lib/contextlib.py showed ~29s of its
+    71.8s cumulative cost inside `dataclasses.is_dataclass` +
+    `dataclasses.fields` re-reflection performed for EVERY node visit
+    (56.5M + 16.1M calls), plus the extend-churn above. Both are pure
+    overhead: a node class's dataclass field set is static for the life
+    of the process, so it is computed once per class via the real
+    `dataclasses.fields()` (exact semantics — including fields()' own
+    ClassVar exclusion — no private-API replication) and cached;
+    traversal order/content is byte-identical by construction."""
+    if node is None:
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _walk_ast_into(item, out)
+        return
+    out.append(node)
+    if isinstance(node, type):
+        # Mirrors the original `and not isinstance(node, type)` guard: a
+        # class OBJECT appearing as an attribute value is always a leaf,
+        # even when it is itself a dataclass class.
+        return
+    cls = type(node)
+    fnames = _WALK_FIELD_NAMES_CACHE.get(cls)
+    if fnames is None:
+        # First sight of this class: replicate the original
+        # `dataclasses.is_dataclass(node) and dataclasses.fields(node)`
+        # pair exactly, once, against the class (fields() accepts the
+        # class and returns the same Field sequence it would for an
+        # instance).
+        if hasattr(cls, '__dataclass_fields__'):
+            fnames = tuple(f.name for f in dataclasses.fields(cls))
+        else:
+            fnames = ()
+        _WALK_FIELD_NAMES_CACHE[cls] = fnames
+    for fname in fnames:
+        _walk_ast_into(getattr(node, fname), out)
+
+
 def _walk_ast(node):
     """Recursively return a list of every AST node (statement or expression)
     reachable from `node`, generically — walks every dataclasses.field of a
@@ -38,18 +89,9 @@ def _walk_ast(node):
     assigned only inside e.g. a `try:`/`except:` or `elif:` branch went
     unregistered and produced 'no member named ...' errors from the C
     compiler on the generated struct."""
-    if node is None:
-        return []
-    if isinstance(node, (list, tuple)):
-        result = []
-        for item in node:
-            result.extend(_walk_ast(item))
-        return result
-    result = [node]
-    if dataclasses.is_dataclass(node) and not isinstance(node, type):
-        for f in dataclasses.fields(node):
-            result.extend(_walk_ast(getattr(node, f.name)))
-    return result
+    out = []
+    _walk_ast_into(node, out)
+    return out
 
 
 class _UnsupportedGeneratorShape(Exception):
