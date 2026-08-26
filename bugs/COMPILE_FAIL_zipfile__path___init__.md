@@ -8,7 +8,10 @@ Source file: `/Users/mrs/net/Python-3.14.6/Lib/zipfile/_path/__init__.py`
 ## compile/link level: the driver build path now produces a binary ("Built:",
 ## exit 0); remaining residual is RUNTIME module-API support, not compilation)
 
-Re-verified fresh this session. The three documented link-time undefined
+Re-verified fresh this session (and again 2026-08-26, wtOpencode_canalyzer2,
+fresh-cut worktree: `python3 mojo.py build` exits 0 in 79s with a binary,
+0 skip lines; running it still hits the documented `AttributeError:
+fromkeys` runtime residual — no change). The three documented link-time undefined
 symbols are all FIXED by two shared-mechanism changes in
 `gimple_gen_methods.py`:
 
