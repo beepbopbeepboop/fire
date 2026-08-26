@@ -445,6 +445,12 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
                 temp_gen._global_var_types = gen._global_var_types
                 temp_gen._global_c_decl_types = gen._global_c_decl_types
+                # share: definition-side free-function signature truth —
+                # only the DEFINING unit writes it (its `_local_def_pts`
+                # resolution), every importer reads it FIRST when hashing a
+                # mangled call-site suffix, so both halves of one mangled
+                # symbol always agree (log_match c52cbf-vs-7a6366 family).
+                temp_gen._home_def_param_types = gen._home_def_param_types
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
                 # share: a builtin-as-bare-value static (`_funcptr_mojo_make_dict`
                 # etc.) must be declared at most once across the WHOLE transitive

@@ -1816,6 +1816,20 @@ class GimpleGen:
         # the suffix and the qualifier halves of one mangled symbol can
         # never disagree about which entry they mean.
         self._imported_home_param_types: dict = {}
+        # (sanitized home-module qualifier, fn name) -> [param ctypes] —
+        # the WHOLE-PROGRAM-SHARED definition-side truth for free-function
+        # signatures, written ONLY by a unit that actually defines the name
+        # (when its `_local_def_pts` resolves the FunctionDef it owns) and
+        # read FIRST by every importer's `_imported_def_pts`, ahead of that
+        # importer's own eager `_signature_ctypes` snapshot. The definer's
+        # committed signature is authoritative — exactly one definition
+        # symbol gets emitted — while an importer's snapshot can disagree
+        # because each gen's `_inferred_param_types` is per-instance
+        # (c_parser/parser/_global.py's literal-`group` call sites froze
+        # log_match's `group` to char * while _common.py's own definer had
+        # no call sites and froze int64_t: two different overload suffixes
+        # for one symbol — "implicit declaration of function" at g++).
+        self._home_def_param_types: dict = {}
         # module name -> (path, source_text, parsed stmts), parsed once.
         self._imported_src_cache: dict = {}
         # Directories added via a literal `sys.path.insert(N, "literal")` seen
