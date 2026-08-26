@@ -4,6 +4,16 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/var_access_benchmark.py
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): byte-identical, unchanged
+
+Fresh repro against current tree past d3e758a: identical two errors
+(`'_t5' undeclared ... did you mean '_t4'?` at var_access_benchmark.py
+91:7, `'a' undeclared` at 92:7) in `read_classvar_from_instance_d4d5c5`,
+same root cause (parameter `A` shadowing the C `typedef struct A A;`,
+requiring genuine scope-aware name resolution across ~40 call sites of
+bare-name struct/class lookup). Per this pass's explicit instructions,
+no fix attempted. No code change; doc re-verified only.
+
 ## Status (2026-08-26): re-verified — STILL-OPEN, byte-identical to the 2026-08-23 state.
 
 Fresh repro against this session's tree (`fix/rest-remainder18`):
