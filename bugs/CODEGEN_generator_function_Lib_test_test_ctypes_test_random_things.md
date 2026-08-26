@@ -1,5 +1,52 @@
 # CODEGEN_generator_function: Lib/test/test_ctypes/test_random_things.py
 
+## Status (updated 2026-08-25, worktree fix/rest-remainder13 — independent re-verification attempted; could not personally complete a fresh whole-program build within the safety budget this session, but found nothing contradicting the RESOLVED claim below)
+
+Attempted an independent, from-scratch re-verification of the RESOLVED
+claim directly below (commit `b46fd5d`, already an ancestor of this
+worktree's branch point — confirmed via `git merge-base --is-ancestor`).
+Rebuilt `build/libmojostdlib.dylib` from scratch first (0 `skip
+<module>:` lines). Two subsequent `python3 mojo.py build .../test_
+random_things.py` attempts (safety-wrapped, RSS-monitored) each ran
+past 3 minutes without finishing or exceeding the RSS cap — RSS stayed
+flat and safe (~1.6GB, well under the 6GB kill threshold) the whole
+time, so this was not the faulthandler-style runaway hazard, just a
+slow transitive `unittest`/`test.support` import-closure walk; likely
+compounded by this session's 3 other concurrently-running heavy
+opencode builds on the same machine contending for CPU/CAS. Killed both
+attempts manually per the wall-clock budget rather than let them run
+unbounded.
+
+An isolated (`do_imports=False`) compile + `g++-mp-15 -fsyntax-only`
+check of this file alone surfaced one artifact (`'struct _root_toplev'
+has no member named 'callback_func'`) — but this is a known side effect
+of skipping imports (the module-globals struct is only populated with
+fields the Phase 1.7 whole-program prescan actually reaches), not a
+regression of the arity fix: the RESOLVED entry below's own isolated
+repro already used `do_imports=False` for its FIRST verification step
+and then separately confirmed the full end-to-end shape via a real
+link + a hand-driven C caller exercising the compiled coroutine's
+exported API, which this session did not have budget to redo.
+
+Also independently confirmed `test_gimple.py` (256/256), `test_module_
+cache.py` (76/76), and `make check-selfhost` all still pass clean after
+this session's own unrelated fix (see `bugs/CODEGEN_generator_function_
+Lib_test__test_eintr.md`'s 2026-08-25 entry) — no evidence of any
+regression to the mechanism this doc's RESOLVED claim depends on
+(`gimple_module_gen.py`'s `_cpp_struct_method_refs` weak-variadic-stub
+emission).
+
+**Not marking this doc resolved-and-removed on my own authority** — per
+this task's "done" bar (build exits 0 AND runtime is verified, not just
+"no contradicting evidence") — since I could not personally reproduce
+the exit-0 outcome this session. But nothing found here contradicts the
+RESOLVED entry's own detailed, independently-reproducible verification
+(isolated 0-error compile, real link, `nm`-verified symbol agreement, a
+hand-driven coroutine-API runtime check, and a from-scratch stdlib
+dylib rebuild) — that entry's claim stands. Whoever next has a quieter
+machine (no concurrent heavy builds) should get a fast confirming
+`mojo.py build` run and can then `git rm` this doc.
+
 ## Status (updated 2026-08-25, worktree fix/opencode-arity — RESOLVED: the inherited-method arity blocker is FIXED and the full build now exits 0 with verified runtime behavior)
 
 The doc's own proposed fix (mirror `_cpp_module_variadic_func_refs`'s
