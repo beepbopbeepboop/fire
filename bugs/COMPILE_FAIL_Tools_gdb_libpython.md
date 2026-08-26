@@ -4,6 +4,26 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
+
+Fresh `MOJO_DEBUG=1 python3 mojo.py build /Users/mrs/net/Python-3.14.6/
+Tools/gdb/libpython.py` against current tree (`a913ab8`): exit 1,
+byte-for-byte the same error family as the 2026-08-25 entry below —
+`expected primary-expression before '.'`, `begin`/`end` not declared
+(×4), `PyObjectPtr` undeclared (×4, "did you mean 'PySetObjectPtr'"),
+`invalid conversion from 'const char*' to 'int64_t'` (dict-subscript
+misrouted to string-slice codegen), `PyDictObjectPtr* -> MojoDict*`
+conversion, `operator""pointer` unresolved-receiver shape, pointer-vs-
+integer comparison. None of this campaign's shared fixes (map/getattr
+gaps checked for pkgutil, int()/float() builtin already landed prior)
+touch struct-declaration coverage in standalone coroutine TUs,
+unresolved-receiver method dispatch, or dict-subscript dispatch in the
+coroutine expression emitter (`gimple_cpp_core.py`'s `_cpp_expr`
+SubscriptExpr case has no dict-vs-slice disambiguation for a raw
+struct-pointer receiver like `ep` here — confirmed by reading that
+function directly). Genuinely deep compiled-generator/cpp-emission
+project scope, not attempted. No code change. Doc stays open.
+
 ## Status (updated 2026-08-25, second session — the `-fgimple` ICE is ## ROOT-CAUSED and FIXED; the file advances to the .cpp coroutine stage ## and is blocked there by the SAME error family the 2026-08-23 entry ## documented — those were MASKED by earlier refusals, never resolved)
 
 The ICE was not GCC being flaky — the emitted GIMPLE was genuinely

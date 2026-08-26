@@ -4,6 +4,27 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
+
+Direct source re-check confirms this is still structural, not narrow:
+`gimple_cpp_core.py`'s struct-method call dispatch
+(`_struct_method_csym(struct_name, e.member, '')`, used at every
+`self.<method>(...)`/`<struct-ptr>.<method>(...)` call site in the
+coroutine emitter — ~9 call sites checked) always resolves the target
+method by the field's STATIC declared struct name, compiled to a fixed
+C symbol at codegen time — there is no vtable/runtime-type-tag dispatch
+mechanism anywhere in this coroutine path for a base-typed field (e.g.
+`IfStmt.body: Stmt`) holding a concrete subclass instance at runtime.
+`yield from self.<field>.tokens()` on such a field can therefore only
+ever resolve to `Stmt`'s own (missing/wrong) `tokens` method, not the
+real subclass's. Matches the doc's own diagnosis exactly; still
+squarely the excluded polymorphic-dispatch hard-doc cluster. No shared
+fix from this campaign's other recent landings touches static struct-
+method symbol resolution. Not attempted. No code change (full rebuild
+not re-run this pass — the mechanism-level source confirmation is
+conclusive and this file's line numbers are already known to shift
+cosmetically between rebuilds without changing the actual blocker).
+
 ## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
 Fresh repro: same structural class as both entries below — the

@@ -1,5 +1,36 @@
 # COMPILE_FAIL: Lib/socket.py — request for member '__module__' in something not a structure or union
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15): still does not build; error count 213 → 248, same already-catalogued grab-bag categories, no new failure class
+
+Fresh `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`
+against current tree (`a913ab8`): exit 1, 248 `error:` lines (was 213).
+Bucketed by normalized shape: `too many arguments to function 'X'`
+(19, `re/_compiler.py`'s `__compiler__compile` — arity mismatch, same
+qualifier-collision family), `expected expression before 'X'` (19 + 13,
+operator.py's `partial`/lambda lowering), `assignment ... makes integer
+from pointer` (17), `'X' has no member named 'X'` /
+`request for member 'X' in something not a structure or union` (16 + 10,
+posixpath/ntpath struct-shape mismatch class), `invalid operands to
+binary %` (13, enum.py's struct/dict `%`), `'X' undeclared here (not in
+a function)` (13 + 6, still the task #141 bare-name-collision class —
+now landing new instances in `io.py`'s `namedtuple___getnewargs__`/
+`_asdict`/`_make`/`_replace`, same mechanism as the 2026-08-25 entry's
+"shifts whole-program compile order, which module wins a bare-name
+race" finding, not a new bug class), `variable or field 'X' declared
+void` (11), `invalid types for 'X'` (11), `non-trivial conversion` (9),
+`implicit declaration of function` (8+3). Every category matches ones
+already catalogued in this doc's history; no new failure mode found.
+Consistent with the established finding that this file's error count
+oscillates with whole-program compile-order shifts from unrelated
+upstream fixes, not a regression. None of this session's investigations
+(pkgutil's map()/getattr, struct-collision re-check, lambda re-check)
+touch this file's still-open blockers (task #141 general struct-field-
+table qualification — explicitly out of scope per this round's
+guidance against the broad type-identity redesign — operator.py
+partial/lambda lowering, enum.py struct/dict codegen, posixpath/ntpath
+collision). Doc kept open — still not a narrow, single-cause fix; not
+attempted. No code change.
+
 ## Status (re-verified 2026-08-25): still does not build; error count 187 → 213, same already-catalogued grab-bag categories, no new failure class
 
 Re-ran `python3 mojo.py build /Users/mrs/net/Python-3.14.6/Lib/socket.py`

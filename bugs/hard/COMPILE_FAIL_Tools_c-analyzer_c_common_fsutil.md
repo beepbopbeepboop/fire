@@ -1,5 +1,25 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status (re-verified 2026-08-26, branch fix/rest-remainder15 — unchanged)
+
+Source-confirmed `map()`/`filter()` have no coroutine-body lowering
+(`gimple_cpp_core.py`'s CallExpr dispatch, ~line 2632-2660, own comment
+explicitly lists them as unhandled) — relevant to `iter_files`'s
+`get_files(...)` polymorphic-callable-value gap indirectly, and the
+`_CPP_CALLABLE_CTYPE*` lambda categories are still fixed at 0-arg/
+1-plain-arg only (re-confirmed against current tree, `a913ab8` — see
+this session's `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
+re-verification for the same source read). Nothing in this campaign's
+recent landings (generator-consumption fixed-point retry, defaults-
+aware padding, int()/float() coroutine builtins, isinstance() fix,
+itertools.zip_longest) touches variadic callable-value representation
+or the six independently-refused module-level generators this file's
+2026-08-24 entry catalogues. Confirmed unchanged, not attempted. No
+code change; full rebuild not re-run this pass (source-level
+confirmation of the exact same unmet preconditions is conclusive given
+the 2026-08-24 entry's already-exhaustive fresh investigation one day
+prior).
+
 ## Status (updated 2026-08-24, branch fix/opencode-fsutil — gap 1 investigated DEEPER than ever, confirmed feature-sized AND insufficient on its own; NOT attempted; one adjacent silent-emission hazard discovered)
 
 Attempted per session task: extend generator-body LambdaExpr support to
