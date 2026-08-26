@@ -4108,6 +4108,18 @@ class Parser:
         expect_name = True
         while depth > 0:
             t = self._peek()
+            # Parens/braces nest TOO: a FUNCTION-typed bracket parameter's
+            # annotation (`f_key: def(Self.K, mut Some[Writer]) thin`)
+            # carries commas inside `(...)` that must NOT be treated as
+            # parameter separators — otherwise the type's argument list
+            # leaks phantom "parameter" names (`mut`, `List`, ...) into
+            # comptime_params, and every consumer keying on declaration
+            # order/count (call-site bracket-argument mapping via
+            # _method_comptime_param_order) mis-aritificates the call.
+            if t.kind in ("LPAREN", "LBRACE"):
+                self._advance(); depth += 1; continue
+            if t.kind in ("RPAREN", "RBRACE"):
+                self._advance(); depth -= 1; continue
             if t.kind == "LBRACKET":
                 self._advance(); depth += 1; continue
             if t.kind == "RBRACKET":
