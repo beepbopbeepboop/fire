@@ -1607,7 +1607,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         'unsafe_mut_cast', 'unsafe_origin_cast', 'unsafe_ptr_cast',
         'origin_cast', 'mut_cast', 'decay', 'as_noalias_ptr',
     })
-    if ot.endswith(' *') and ot not in gen._RUNTIME_PTRS and method in _RAW_PTR_METHODS:
+    if (ot.endswith(' *') and ot not in gen._RUNTIME_PTRS
+            and ot[:-2] not in getattr(gen, '_structs_with_unresolved_base', ())
+            and method in _RAW_PTR_METHODS):
+        # NOTE the unresolved-base exclusion: a USER-STRUCT instance
+        # whose class extends an external/unmodeled base (`class
+        # DBUnpickler(pickle.Unpickler)` — Doc/includes/dbpickle.py)
+        # calling an INHERITED method spelled like a raw-pointer
+        # protocol method (`unpickler.load()`) must go to struct-method
+        # dispatch (which auto-stubs the never-defined inherited symbol
+        # honestly), NOT here — treating the struct pointer as an
+        # UnsafePointer emitted `_t = *recv;` (a whole-struct BY-VALUE
+        # copy) cast to whatever the surrounding context expected,
+        # GCC: "cannot convert to a pointer type". A genuine Mojo
+        # `UnsafePointer[T]` receiver keeps raw-pointer semantics: T
+        # itself has no unresolvable base-class inheritance.
         return gen._lower_pointer_method(ov, ot, method, node.args)
     if ot == 'void *':
         return gen._lower_file_method(ov, method, node.args)
