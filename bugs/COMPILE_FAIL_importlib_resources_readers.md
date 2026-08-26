@@ -1,6 +1,23 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
-## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged, root cause pinned down precisely)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — re-verified fresh, unchanged)
+
+Fresh isolated check reproduces the identical two-shape refusal:
+`_candidate_paths` (classmethod generator referencing `cls` via a
+delegating `yield from cls._resolve_zip_path(...)` into another
+generator) + `_resolve_zip_path` (`for match in reversed(list(
+re.finditer(...))):` for-iterable). Both remain the feature-sized gaps
+analyzed below: coroutine-to-coroutine delegation through a classmethod
+receiver needs the generator-method call convention wired into
+`_cpp_yield_from`'s delegation (the api registries exist —
+`_generator_method_api['base']`, `_struct_generator_method_names` — but
+no consumer builds the drive loop for this shape), and the
+reversed(list(...)) iterable has no lowering. Additionally, even past
+both, `_candidate_paths`'s `yield pathlib.Path(path_str)` needs
+foreign-module struct-construction yields to resolve Path's layout in
+the whole-program build. Doc kept open.
+
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, superseded above)
 
 Re-ran an isolated `compile_to_gimple_with_cpp` check fresh (post this
 session's coroutine-emitter fixes for COMPILE_FAIL_Apple___main__.md

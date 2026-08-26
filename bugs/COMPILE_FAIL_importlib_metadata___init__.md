@@ -1,6 +1,25 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
-## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, unchanged)
+## Status (updated 2026-08-26, worktree fix/opencode-group4 — re-verified fresh, unchanged)
+
+Fresh isolated check reproduces the identical refusal:
+`_convert_egg_info_reqs_to_simple_reqs: a call to unresolved callee
+'url_req_space(...)' is not supported in a compiled generator/coroutine
+body`. Confirmed at the AST level this session: `_cpp_stmt` SKIPS nested
+FunctionDef statements (`return []  # nested function definitions are
+compiled separately`), so the three pure local defs
+(`make_condition`/`quoted_marker`/`url_req_space`, none of which
+actually capture free variables) are never compiled anywhere and their
+call sites inside the generator body hit the unresolved-callee refusal.
+Lifting them would need a pre-pass that hoists capture-free nested defs
+to module scope (registering mangled names so the coroutine emitter's
+call resolution finds them) — real pipeline work. Even done, the file
+would still be blocked by Sectioned.read's `map`/`filter`/
+first-class-callable builtins and the foreign-struct `Pair(...)`
+construction yield: three independent feature-sized gaps, unchanged
+from the analysis below. Doc kept open.
+
+## Status (updated 2026-08-25 -- re-verified against fix/rest-remainder12, superseded above)
 
 Re-ran an isolated `compile_to_gimple_with_cpp` check fresh, after
 this session's 4 coroutine-emitter fixes landed for
