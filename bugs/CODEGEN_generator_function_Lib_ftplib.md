@@ -1,5 +1,62 @@
 # CODEGEN_generator_function: Lib/ftplib.py
 
+## Status (updated 2026-08-25, wtOpencode_group3 — gap #3 (`facts_found[:-1].split(";")` as a loop iterable) FIXED; gaps #2/#4 remain)
+
+Re-verified fresh via this doc's isolated methodology
+(`scripts/repro_ftplib_isolated_group3.py`, adapted to this worktree):
+`.ci` clean, `.cpp` down from 3 errors to **2**:
+
+- **FIXED (commit `43fac2c`, shared compiler source) — gap #3.** The
+  coroutine-body emitter had no `.split` case at all (the str-method
+  family stopped at replace/strip/partition/join), so
+  `for fact in facts_found[:-1].split(";"):` fell to the generic
+  `{obj}.{member}(...)` fallback and emitted invalid C++ member-call
+  syntax on a raw `char *`. Three coordinated pieces, all reusing
+  existing machinery: `_cpp_expr` gained the split family
+  (`split`/`rsplit`/`splitlines`, routed through the SAME
+  `mojo_str_split`/`mojo_str_rsplit`/`mojo_str_splitlines` runtime
+  helpers the ordinary path already uses — NULL sep IS Python's
+  whitespace split, negative maxsplit IS unlimited); `_cpp_for_stmt`'s
+  list-iterable branch recognizes the call shape (cached local +
+  indexed loop, element type char*); `_cpp_receiver_ctype` types a
+  subscript/slice rooted at a known-char* (or untracked) local as
+  char* so chained dispatch fires on the `[...]-then-.split` shape,
+  with the matching `MojoList *` entry in
+  `_infer_simple_expr_ctype`. A fourth piece was needed for the
+  general shape: `_infer_param_types` now unwraps slice/subscript
+  receivers when collecting STRING_ONLY_METHODS evidence
+  (`<param>[:-1].split(sep)` proves the param is a string exactly as
+  strongly as `<param>.split(sep)` did — previously the indirect shape
+  inferred MojoList* from the bare subscript). Verified end-to-end:
+  standalone generators iterating `s.split(";")` and
+  `s[:-1].split(",")` build AND print correct elements/counts.
+  Full gate: test_gimple 256/256, test_module_cache 76/76,
+  check-selfhost clean, stdlib dylib rebuild 0 skips.
+
+- **Gap #2 (`FTP_retrlines(self, cmd, lines.append)` — a bound
+  container method passed as a callback VALUE), re-assessed and still
+  not tractable narrowly.** The callee side is compiled through the
+  PLAIN path: its `callback` param is a raw int64_t consumed via
+  `mojo_fnptr_call_1(callback, line)` (a real C function-pointer call,
+  see runtime/mojo_runtime.h). The coroutine emitter's existing
+  callable-value form is a capturing C++ lambda convertible to
+  `std::function` — which has NO conversion to a raw function pointer,
+  so it cannot feed `mojo_fnptr_call_1`. Materializing a real
+  trampoline would need the receiver communicated out-of-band (a
+  global/static cell set before the call — unsound under same-site
+  reentrancy) or extending the callback ABI to carry a context
+  pointer through every plain-path callee (`retrbinary`/`storbinary`/
+  `storlines` share the convention) — both feature-sized/ABI-broad;
+  not attempted per campaign rules.
+
+- **Gap #4 (`(void)(0.partition(" "))`) unchanged** — upstream symptom
+  of `lines`' unknown element type (populated only at runtime via the
+  gap-#2 callback, so no static append evidence exists); same
+  classification as before.
+
+`ftplib.py` as a whole still does not build. Doc stays open.
+
+
 ## Status (updated 2026-08-25 — gap #1 (`FTP_sendcmd` extern typed its `cmd` param `int64_t`) FIXED; gaps #2-4 unchanged)
 
 **Root cause**: `FTP.sendcmd(self, cmd)`'s body only FORWARDS `cmd` into
