@@ -1466,6 +1466,16 @@ class GimpleGen:
         self._const_str_locals: dict[tuple, str] = {}  # (func_name, var_name) → compile-time-folded string constant
         self._struct_has_init: set[str] = set()      # structs that have __init__ methods
         self._struct_method_names: dict[str, set[str]] = {}  # struct name -> {real method names}, see its own population site's docstring
+        # struct name -> {@property getter names} (the subset of
+        # _struct_method_names decorated `@property`). Real Python
+        # auto-INVOKES a property getter on every bare read — a
+        # `self.<prop>` value IS the getter's result, never the callable
+        # itself — so the coroutine-body emitter needs this to emit a
+        # direct call for a property read instead of the bound-method-
+        # as-value wrapper it correctly still emits for ordinary
+        # methods. Populated alongside _struct_method_names (same AST
+        # walk sees m.decorators).
+        self._struct_property_names: dict[str, set[str]] = {}
         self._static_methods: set[str] = set()       # mangled names of @staticmethod methods
         self._classmethod_names: set[str] = set()     # mangled `Struct_method` names of REAL classmethods
         # (explicit @classmethod, plus the two dunders Python treats as

@@ -2005,6 +2005,8 @@ def gen_module_impl(self, stmts):
             if isinstance(s, StructDef):
                 for m in s.methods:
                     self._struct_method_names.setdefault(s.name, set()).add(m.name)
+                    if 'property' in (getattr(m, 'decorators', None) or []):
+                        self._struct_property_names.setdefault(s.name, set()).add(m.name)
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
                         self._struct_init_params[s.name] = [

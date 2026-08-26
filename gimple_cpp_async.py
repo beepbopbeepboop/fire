@@ -116,13 +116,20 @@ def _cpp_is_callable_value_expr(gen, node) -> bool:
         # this check alone — with no field-absence requirement — is
         # both necessary and sufficient, matching `_cpp_expr`'s own
         # method-name-checked-first ordering.
+        # A @property getter is EXCLUDED here (mirroring `_cpp_expr`'s
+        # own property carve-out): real Python auto-invokes a property
+        # on every bare read, so `x = self.<prop>` binds the getter's
+        # RESULT, not a callable — the local must get that value's
+        # ordinary inferred ctype, not `_CPP_CALLABLE_CTYPE`.
         struct_name = getattr(gen, '_cpp_gen_self_struct', None)
         if struct_name and isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == 'self':
-            return node.member in gen._struct_method_names.get(struct_name, ())
+            return (node.member in gen._struct_method_names.get(struct_name, ())
+                    and node.member not in gen._struct_property_names.get(struct_name, ()))
         if isinstance(node.obj, gimple_ctypes.IdentExpr):
             ptr_struct = gen._cpp_struct_ptr_local(node.obj.name)
             if ptr_struct:
-                return node.member in gen._struct_method_names.get(ptr_struct, ())
+                return (node.member in gen._struct_method_names.get(ptr_struct, ())
+                        and node.member not in gen._struct_property_names.get(ptr_struct, ()))
     return False
 
 

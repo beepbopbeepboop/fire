@@ -254,18 +254,40 @@ def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
         return args
     expected_non_self = len(expected) - 1
     if len(args) >= expected_non_self:
-        return args
-    dflts = gen._func_param_defaults.get(sym) or gen._func_param_defaults.get(bare) or []
-    first_dflt = expected_non_self - len(dflts)
-    out = list(args)
-    while len(out) < expected_non_self:
-        pos = len(out)
-        dv = dflts[pos - first_dflt][1] if (dflts and 0 <= pos - first_dflt < len(dflts)) else None
-        if dv is None:
-            out.append('0')
-        else:
-            _dt, dval = gen._default_expr_to_pair(dv)
-            out.append(dval)
+        out = list(args)
+    else:
+        dflts = gen._func_param_defaults.get(sym) or gen._func_param_defaults.get(bare) or []
+        first_dflt = expected_non_self - len(dflts)
+        out = list(args)
+        while len(out) < expected_non_self:
+            pos = len(out)
+            dv = dflts[pos - first_dflt][1] if (dflts and 0 <= pos - first_dflt < len(dflts)) else None
+            if dv is None:
+                out.append('0')
+            else:
+                _dt, dval = gen._default_expr_to_pair(dv)
+                out.append(dval)
+    # Cast every supplied argument to its positional parameter's real C
+    # type (the SAME registry `expected` comes from — slot 0 is the
+    # receiver, hence the +1). The lowered argument text's own C type is
+    # whatever the expression happened to infer (a char * local passed to
+    # an int64_t param: pathlib's `Path__from_parsed_string(self,
+    # path_str)`), so the raw call text previously emitted hard g++
+    # conversion errors whenever the two disagreed. An explicit C-style
+    # cast between scalar/pointer types always compiles, is value-
+    # preserving when the types already match (the overwhelmingly common
+    # case), and degrades honestly — never silently reinterprets more
+    # than the ordinary path's own `_emit_call` pair-coercion does.
+    if len(out) == expected_non_self:
+        casted = []
+        for i, a in enumerate(out):
+            pt = expected[i + 1]
+            if (pt in ('int64_t', 'int', 'double', '_Bool', 'char *')
+                    or (isinstance(pt, str) and pt.endswith(' *'))):
+                casted.append(f"({pt})({a})")
+            else:
+                casted.append(a)
+        return casted
     return out
 
 
@@ -375,6 +397,35 @@ def _cpp_try_kwargs_forward_call(gen, e):
     lines.append(f"return {fsym}({', '.join(call_args)});")
     body = ' '.join(lines)
     return f"[&]() -> {ret_ctype} {{ {body} }}()"
+
+
+def _cpp_body_str_evidence(name: str, body) -> bool:
+    """True when a for-loop target `name` is used inside its own loop
+    `body` in a way only valid for a STRING (char *) local: subscripted
+    or sliced (`path_str[-1]`, `path_str[2:]`), or passed as the
+    receiver of a str-method call (`path.strip(...)`). Consumed by
+    `_cpp_for_stmt`'s indexed-loop branch when an iterable's element
+    type is otherwise unknown (an untyped boxed-list parameter with no
+    literal/elem-hint evidence, e.g. pathlib's
+    `_filter_trailing_slash(paths)`): declaring such a target int64_t
+    made every later slice/str-method use emit hard g++ conversion
+    errors ('invalid conversion from char* to int64_t'). Conservative:
+    only POSITIVE evidence types the target char *; anything else keeps
+    the existing int64_t default."""
+    _STR_METHODS = ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
+                    'title', 'capitalize', 'split', 'rsplit', 'join',
+                    'replace', 'partition', 'rpartition', 'startswith',
+                    'endswith', 'removeprefix', 'removesuffix')
+    for n in gimple_exprtypes._walk_own_body(body):
+        if isinstance(n, (gimple_ctypes.SubscriptExpr, gimple_ctypes.SliceExpr)):
+            if isinstance(n.obj, gimple_ctypes.IdentExpr) and n.obj.name == name:
+                return True
+        elif isinstance(n, gimple_ctypes.CallExpr) and isinstance(n.func, gimple_ctypes.MemberExpr):
+            if (n.func.member in _STR_METHODS
+                    and isinstance(n.func.obj, gimple_ctypes.IdentExpr)
+                    and n.func.obj.name == name):
+                return True
+    return False
 
 
 def _cpp_receiver_ctype(gen, e):
@@ -847,6 +898,25 @@ def _cpp_expr_static_ctype(gen, e):
                 if e.func.member in ('partition', 'rpartition'):
                     return 'MojoList *'
                 return 'char *'
+    if isinstance(e, gimple_ctypes.MemberExpr):
+        # A bare @property getter read on `self` — real Python
+        # auto-invokes it (and `_cpp_expr`'s MemberExpr case now emits
+        # that direct call), so its static type is the getter's own
+        # registered return type (`len(self.anchor)` against pathlib's
+        # `PurePath.anchor` must route len() to mojo_strlen, not the
+        # opaque-boxed mojo_len stub). Only types this emitter can
+        # actually represent are claimed; anything else stays None so
+        # callers keep their conservative defaults.
+        struct_name = getattr(gen, '_cpp_gen_self_struct', None)
+        if (struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr)
+                and e.obj.name == 'self'
+                and e.member in gen._struct_property_names.get(struct_name, ())):
+            _sym = gen._struct_method_csym(struct_name, e.member, '')
+            rt = gen.func_return_types.get(_sym)
+            if rt is None:
+                rt = gen.func_return_types.get(f"{struct_name}_{e.member}")
+            if rt in ('char *', 'int64_t', 'double', '_Bool'):
+                return rt
     return None
 
 
@@ -1170,6 +1240,17 @@ def _cpp_expr(gen, e) -> str:
             if e.member in gen._struct_method_names.get(struct_name, ()):
                 _sym = gen._struct_method_csym(struct_name, e.member, '')
                 gen._cpp_struct_method_refs.add((struct_name, e.member))
+                # A @property getter read is auto-INVOKED, not wrapped:
+                # real Python's `self.<prop>` value IS the getter's
+                # result (pathlib's `len(self.anchor)` against
+                # `PurePath.anchor`), so emitting the callable-value
+                # wrapper here produced an invalid
+                # `(int64_t)(std::function<int64_t()>)` cast at every
+                # scalar consumer. Ordinary methods keep the wrapper
+                # (a genuine method-as-value like pickletools.py's
+                # `getpos = data.tell` must stay callable).
+                if e.member in gen._struct_property_names.get(struct_name, ()):
+                    return f"{_sym}(self)"
                 return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                         f"([&]() -> int64_t {{ return {_sym}(self); }}))")
             _self_fields = gen.struct_field_types.get(struct_name, {})
@@ -1252,6 +1333,22 @@ def _cpp_expr(gen, e) -> str:
                 # reads from, rather than inventing a second one.
                 gen._cpp_param_struct_names.add(outer_ft[:-2])
                 return f"(({outer_ft})(self->{gimple_ctypes._safe_field(e.obj.member)}))->{gimple_ctypes._safe_field(e.member)}"
+            if outer_ft in ('int', 'int64_t', 'double', '_Bool', 'char *'):
+                # An attribute read on an OPAQUE scalar-typed self-field
+                # (`self.parser.sep`, where `parser = os.path` — a
+                # module object this codegen stores as an opaque int —
+                # pathlib/__init__.py's `_filter_trailing_slash`).
+                # Emitting the raw C++ chain text produced `int.sep`
+                # member access on a non-class type (a hard g++ error);
+                # mirror this file's own "attribute read on opaque
+                # scalar local" convention instead: an honest,
+                # diagnosed 0 stub so the body still compiles (the same
+                # behavior the ordinary GIMPLE path's dynamic-getattr
+                # fallback gives an unresolvable attribute read).
+                gimple_ctypes._debug_note('stubbed operation',
+                            f'generator-body attribute read on opaque '
+                            f'self-field {e.obj.member}.{e.member}')
+                return '0'
         # Non-self member access: entry.name, os.path, etc. A struct-
         # POINTER-typed local/parameter (see bugs/hard/CODEGEN_
         # generator_struct_typed_param_refused.md — e.g. dis.py's
@@ -1303,6 +1400,11 @@ def _cpp_expr(gen, e) -> str:
                 if e.member in gen._struct_method_names.get(_ptr_struct, ()):
                     _sym = gen._struct_method_csym(_ptr_struct, e.member, '')
                     gen._cpp_struct_method_refs.add((_ptr_struct, e.member))
+                    # @property twin of the `self.<method>` case above:
+                    # a bare property read auto-invokes (its value IS
+                    # the getter's result), it never yields a callable.
+                    if e.member in gen._struct_property_names.get(_ptr_struct, ()):
+                        return f"{_sym}({obj_expr})"
                     return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                             f"([&]() -> int64_t {{ return {_sym}({obj_expr}); }}))")
                 return f"{obj_expr}->{gimple_ctypes._safe_field(e.member)}"
@@ -1518,7 +1620,29 @@ def _cpp_expr(gen, e) -> str:
             b = gen._cpp_expr(e.right)
             return gen._cpp_in_link(a, e.left, b, e.right, negate=(e.op == 'not in'))
         op = gimple_ctypes._GD_BIN_OPS.get(e.op, e.op)
-        return f"({gen._cpp_expr(e.left)} {op} {gen._cpp_expr(e.right)})"
+        _bl = gen._cpp_expr(e.left)
+        _br = gen._cpp_expr(e.right)
+        if op in ('==', '!=', '<', '<=', '>', '>='):
+            # Mixed-pointerness guard — identical rationale to the
+            # CompareChain branch's own copy above (this emitter's
+            # single-comparison shape parses as a BinaryOp here, not a
+            # CompareChain): exactly one side statically char *, the
+            # other a scalar → cast the scalar side so the raw
+            # comparison compiles instead of "ISO C++ forbids
+            # comparison between pointer and integer".
+            _lct = None
+            _rct = None
+            try:
+                _lct = _cpp_expr_static_ctype(gen, e.left)
+                _rct = _cpp_expr_static_ctype(gen, e.right)
+            except Exception:
+                pass
+            if (_lct == 'char *') != (_rct == 'char *'):
+                if _lct == 'char *':
+                    _br = f"((char *)({_br}))"
+                else:
+                    _bl = f"((char *)({_bl}))"
+        return f"({_bl} {op} {_br})"
     if isinstance(e, gimple_ctypes.CompareChain):
         links = []
         for i, op in enumerate(e.ops):
@@ -1530,6 +1654,29 @@ def _cpp_expr(gen, e) -> str:
                 links.append(gen._cpp_in_link(a, a_node, b, b_node,
                                                negate=(op == 'not in')))
             else:
+                # Mixed pointerness guard: exactly one side is a
+                # statically-known `char *` (a string slice/subscript,
+                # e.g. pathlib's `path_str[-1] == sep`) while the other
+                # side is a scalar-typed local/param (an opaque module-
+                # handle field read stubbed to 0, an int64_t loop
+                # element, ...). The raw C++ text emitted a hard g++
+                # error ("ISO C++ forbids comparison between pointer
+                # and integer"); casting the scalar side to `char *`
+                # compiles and keeps deterministic semantics (equal
+                # only against that exact pointer value — the same
+                # best-effort quality the ordinary GIMPLE path gives
+                # this shape via its own dynamic-compare fallbacks).
+                # Both-scalar / both-pointer comparisons are untouched.
+                _a_ct = _cpp_expr_static_ctype(gen, a_node)
+                _b_ct = _cpp_expr_static_ctype(gen, b_node)
+                if (_a_ct == 'char *') != (_b_ct == 'char *'):
+                    # Exactly one side is pointer-shaped: cast that
+                    # side's SCALAR opposite to `char *` so the raw
+                    # comparison text compiles.
+                    if _a_ct == 'char *':
+                        b = f"((char *)({b}))"
+                    else:
+                        a = f"((char *)({a}))"
                 links.append(f"({a} {gimple_ctypes._GD_BIN_OPS.get(op, op)} {b})")
         return '(' + ' && '.join(links) + ')'
     if isinstance(e, gimple_ctypes.DictExpr):
@@ -2164,6 +2311,18 @@ def _cpp_expr(gen, e) -> str:
                 _lct = (gen._cpp_declared.get(_len_arg.name)
                         if gen._cpp_declared is not None
                         and isinstance(_len_arg, gimple_ctypes.IdentExpr) else None)
+                if _lct is None and not isinstance(_len_arg, gimple_ctypes.IdentExpr):
+                    # A non-identifier argument (a property read, a
+                    # slice, a string-method call): consult this file's
+                    # own conservative static-ctype helper so a genuine
+                    # `char *` expression (`len(self.anchor)` against a
+                    # @property returning str — pathlib's
+                    # `_filter_trailing_slash`) routes to mojo_strlen,
+                    # not the always-0 opaque-boxed mojo_len stub.
+                    try:
+                        _lct = _cpp_expr_static_ctype(gen, _len_arg)
+                    except Exception:
+                        _lct = None
                 if _lct == 'MojoList *':
                     return f"mojo_list_len((MojoList *)({args[0]}))"
                 if _lct == 'MojoDict *':
@@ -4867,6 +5026,62 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     _local_elem_ctype = getattr(gen, '_cpp_list_local_elem_types', {}).get(_itname)
                 _ctr = gen._cpp_fresh_name("_mg_i")
                 lines = list(_pre_lines)
+                # TUPLE target over a boxed-list iterable (`for path_str,
+                # dirnames, filenames in results:` — pathlib's
+                # `Path.walk`). The old behavior declared the WHOLE
+                # comma-joined target as one C++ declarator list
+                # (`int64_t path_str, dirnames, filenames;`) and
+                # "assigned" via the comma-expression no-op
+                # `a, b, c = mojo_list_get_int(...)` — which both
+                # CONFLICTS with any name an earlier statement already
+                # declared under its own inferred type (walk's
+                # `path_str` was already char *, from its `[2:]` slice
+                # use: "conflicting declaration 'int64_t path_str'"),
+                # and silently performs NO unpacking at all. Lower it
+                # exactly like every other boxed-tuple consumer: cache
+                # each element (itself a `mojo_mark_as_tuple`'d MojoList *,
+                # per `_cpp_yield_tuple`'s producer convention) into a
+                # sub-list pointer, then read each name's slot through
+                # the accessor matching that name's ALREADY-DECLARED
+                # type when known (an earlier declaration wins — its C++
+                # type cannot change), int64_t otherwise.
+                _tuple_names = ([t.strip() for t in
+                                 gimple_ctypes._split_top_level_commas(target) if t.strip()]
+                                if isinstance(target, str) and ',' in target else None)
+                if _tuple_names:
+                    _tupvar = gen._cpp_fresh_name("_mg_tup")
+                    for _nm in _tuple_names:
+                        if _nm not in declared:
+                            # String-evidence in the loop body (a slice/
+                            # subscript/str-method use of this name)
+                            # types the target char * up front — the
+                            # body's own uses must agree with the one
+                            # C++ declaration this loop emits for it.
+                            _tct = ('char *'
+                                    if _cpp_body_str_evidence(_nm, s.body)
+                                    else 'int64_t')
+                            declared[_nm] = _tct
+                            lines.append(f"{indent}{'char *' if _tct == 'char *' else 'int64_t'} {_nm};")
+                    lines.append(f"{indent}for (int64_t {_ctr} = 0; "
+                                 f"{_ctr} < mojo_list_len((MojoList *)({_itname})); "
+                                 f"{_ctr}++) {{")
+                    lines.append(f"{indent}    MojoList *{_tupvar} = "
+                                 f"(MojoList *)mojo_list_get_int((MojoList *)({_itname}), {_ctr});")
+                    for _si, _nm in enumerate(_tuple_names):
+                        _nct = declared.get(_nm, 'int64_t')
+                        if _nct == 'char *':
+                            lines.append(f"{indent}    {_nm} = "
+                                         f"mojo_list_get_str({_tupvar}, {_si});")
+                        elif _nct == 'double':
+                            lines.append(f"{indent}    {_nm} = "
+                                         f"mojo_list_get_double({_tupvar}, {_si});")
+                        else:
+                            lines.append(f"{indent}    {_nm} = "
+                                         f"mojo_list_get_int({_tupvar}, {_si});")
+                    for inner in s.body:
+                        lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+                    lines.append(f"{indent}}}")
+                    return lines
                 # A known struct-pointer element type (e.g. `Thing *`,
                 # from `_field_elem_types` -- the `self.<field>: list
                 # [Struct]` case, and now also its `sorted(self.<field>,
@@ -4885,6 +5100,18 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 _elem_struct_ctype = None
                 _eff_elem = (_self_field_elem_ctype if _self_field_elem_ctype is not None
                              else _local_elem_ctype)
+                if (_eff_elem is None
+                        and not target_was_declared
+                        and isinstance(target, str)
+                        and ',' not in target
+                        and _cpp_body_str_evidence(target, s.body)):
+                    # Unknown element provenance but the loop body itself
+                    # uses the (single) target as a string — declare it
+                    # char * up front so every body use agrees with the
+                    # one declaration (pathlib's `_filter_trailing_slash`:
+                    # `for path_str in paths:` with `path_str[-1]` /
+                    # `path_str[:-1]` uses).
+                    _eff_elem = 'char *'
                 if (isinstance(_eff_elem, str)
                         and _eff_elem.endswith(' *')
                         and _eff_elem[:-2] in gen.struct_field_types):
