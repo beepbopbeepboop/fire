@@ -1110,6 +1110,14 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 "back to interpreting this module from source instead")
 
     ot, ov = gen.lower_expr(func.obj)
+    # The receiver's RAW lowered pair, before the resolution blocks below
+    # may retag `ot` (the classmethod-receiver block can retag an
+    # int64_t-typed `cls` to `{Struct} *`). The generator-method call
+    # branch needs this original scalar tag: a compiled @classmethod
+    # GENERATOR's start function takes an opaque, never-read int64_t
+    # `cls` placeholder in its receiver slot, so the raw int64_t pair is
+    # what must be passed for it (see the branch's own comment).
+    _recv_ot_raw, _recv_ov_raw = ot, ov
     method = func.member
 
     # `cls.method(...)` inside a @classmethod: resolve `cls` to the struct
@@ -1256,7 +1264,33 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _gm_api = gen._generator_method_api.get((func.obj.name, method))
     if _gm_api is not None:
         arg_pairs = [gen.lower_expr(a) for a in node.args]
-        all_args = [(ot, ov)] + arg_pairs
+        # A compiled @classmethod GENERATOR's start function declares its
+        # receiver slot as an opaque, never-read int64_t `cls` placeholder
+        # (see gimple_cpp_async.py's param_ctypes cls handling — the unit
+        # resolves every `cls.<...>` access purely by NAME, never by
+        # reading the value). Slot 0 of a registered generator-method
+        # start signature is 'int64_t' exactly when the method is such a
+        # classmethod (an ordinary `self` generator's slot 0 is the real
+        # `{Struct} *`; gimple_cpp_async refuses any other first param).
+        # When the receiver ALSO lowered to a SCALAR (the `cls.split(data)`
+        # shape inside another classmethod: `cls` is a plain int64_t C
+        # parameter), pass that raw pair straight through. Passing the
+        # post-resolution pair instead would coerce the struct-POINTER-
+        # tagged type into the int64_t slot via
+        # _ensure_local('{Struct} *', 'cls') — materializing a
+        # `{Struct} *`-declared temp from an int64_t scalar ("assignment
+        # to '_Extra *' from 'int64_t' makes pointer from integer without
+        # a cast", zipfile's _Extra.strip calling cls.split(data)). A
+        # class-level call (`Widget.make_range(...)`) already lowers its
+        # receiver to int64_t so this swap is a no-op there, and a genuine
+        # instance receiver (`obj.split(data)`) keeps the struct-pointer
+        # pair below, whose ptr->int64_t coercion is legal C.
+        if (_recv_ot_raw in ('int', 'int64_t')
+                and _gm_api.get('params')
+                and _gm_api['params'][0] == 'int64_t'):
+            all_args = [('int64_t', _recv_ov_raw)] + arg_pairs
+        else:
+            all_args = [(ot, ov)] + arg_pairs
         # Pad missing trailing params with keyword args / real
         # defaults — see the identical free-function generator-call
         # padding in _lower_call's `fname_raw in self._generator_api`
