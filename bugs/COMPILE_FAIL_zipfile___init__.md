@@ -1,5 +1,105 @@
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
+## Status (updated 2026-08-25, wtOpencode_zipfile / fix/opencode-zipfile -- TWO of the four groups FIXED, error set shifted again)
+
+Re-ran fresh. The error set has SHIFTED again since the 2026-08-24
+re-check: issue group (1)'s call-site half was fixed on another branch
+(2c9fe02, "module-qualify + cross-module hint compiled generator
+symbols") between sessions, so compilation now gets further and dies
+EARLIER, on a new first-order blocker inside `_Extra.split` itself:
+
+```
+Error building: cannot compile module: function(s) split (generator ...)
+ Unsupported shape(s): split: a call to unresolved callee
+ 'memoryview(...)' is not supported in a compiled generator/coroutine
+ body (...)
+```
+
+**NEW FIRST BLOCKER — memoryview in a compiled generator body.**
+`_Extra.split` (a `@classmethod` generator) does `rest = memoryview(data)`
+then `while rest:` + slices. `memoryview` has NO implementation anywhere
+in this codegen (zero occurrences outside bugs/ docs): strings/bytes are
+NUL-terminated `char *`, and there is no {ptr,len} buffer-view value.
+Honest support means a real view type (slicing producing sub-views,
+length-based truthiness, `.nbytes`) across BOTH the ordinary GIMPLE path
+and the C++ coroutine-body path — zipfile also uses `memoryview` in
+`_ZipWriteFile.write` (~line 1334, non-generator). Note the NUL-
+termination problem too: ZIP extra fields legitimately contain 0x00
+bytes, so even a char*-identity lowering would be semantically wrong.
+Feature-sized; not attempted.
+
+To expose the blockers BEHIND it, diagnosed against a scratch copy
+(`/tmp/zipdiag/zf.py`, `split`'s body de-memoryview'd — diagnostic only,
+no runtime fidelity claimed for that copy). With memoryview out of the
+way the remaining error set is exactly four gcc diagnostics, and TWO of
+the doc's four groups are now genuinely FIXED (all four quality gates
+green after each change; test_gimple 253/253, test_module_cache 76/76,
+self-host clean, stdlib dylib 0 skips):
+
+1. **FIXED (commit 6fc759a) — group (2), FileHeader int32 under-widening.**
+   Root cause was NOT struct-field narrowing as theorized below (the
+   `self.compress_size = 0` fields are typed int64_t just fine). The real
+   bug: `_gen_stmt_MultiAssignStmt` declared a first-time chained-assign
+   target from the RAW lowered RHS type — literal `0` lowers to C 'int' —
+   ignoring the function-wide `_inferred_var_types` hint that the single-
+   target path (`_assign_target`) has consulted since
+   CODEGEN_multi_assign_local_var_type_not_inferred.md. That hint DOES
+   see `file_size = 0xffffffff` later in the body (int64_t), so honoring
+   it declares the locals int64_t and both "non-trivial conversion in
+   'integer_cst'" errors and the comparison-operand error vanish.
+   Verified end-to-end: minimal repro (chained zero-init + 0xffffffff
+   reassign + ZIP64_LIMIT comparison) compiles AND returns correct
+   values (zip64 sentinel path fires: 2x4294967295).
+
+2. **FIXED (commit 4d3626d) — group (1) RESIDUE, `_Extra.strip`'s
+   `cls.split(data)` call.** After 2c9fe02 one -Wint-conversion remained:
+   `_lower_method_call`'s generator-method branch passed the
+   POST-resolution receiver pair to `<base>_start`; the classmethod-
+   receiver block had by then retagged `cls`'s int64_t pair to
+   `'_Extra *'`, and coercing that into the start function's slot 0
+   (the opaque never-read int64_t cls placeholder per
+   gimple_cpp_async.py's param_ctypes) went through
+   `_ensure_local('_Extra *', 'cls')` → `_Extra * _t6 = cls;`. Now, when
+   slot 0 of the registered start signature is 'int64_t' (exactly the
+   classmethod-placeholder shape) and the receiver lowered to a scalar,
+   the raw pre-resolution pair is passed straight through. Verified
+   end-to-end with a minimal classmethod-generator + genexp-consumed-by-
+   join repro: compiles AND produces correct output.
+
+3. **FIXED (commit 4094f7a) — NEW residual found this session.**
+   `ZipFile._sanitize_windows_name`: "request for member
+   '_windows_illegal_name_trans_table' in something not a structure or
+   union". The method-scalar-observation pass mapped call args onto
+   parameter names excluding only 'self', so the instance-called
+   classmethod `self._sanitize_windows_name(arcname, os.path.sep)`
+   observed arcname's 'char *' evidence onto `cls` (and shifted every
+   later observation up a slot). cls then being 'char *' made the body's
+   `cls._windows_illegal_name_trans_table = table` write emit a raw
+   `cls->_attr` field store on a non-struct. Classmethods now exclude
+   their implicit `cls` receiver from arg→param mapping. Both x2 error
+   groups gone.
+
+REMAINING after these fixes (scratch copy; real file additionally blocked
+by memoryview above):
+
+- **pwd caller/callee disagreement x2 (read/testzip → mojo_open)** —
+  unchanged in substance: callee `open(..., pwd=None)`'s slot resolved
+  int64_t while `read`'s forwarded `pwd` is inferred 'char *'. Confirmed
+  this is exactly the unannotated-None-default-param family (
+  bugs/hard/CODEGEN_unannotated_init_param_field_type_defaults_int64.md);
+  explicitly out of scope this session per campaign rules. Still open.
+- **`_sanitize_windows_name` "non-trivial conversion in 'mem_ref'" x2**
+  — different root cause than the (now-fixed) member-store error: the
+  source REBINDS `arcname` to a generator-expression OBJECT
+  (`arcname = (x.rstrip(' .') for x in arcname.split(pathsep))`) and the
+  next statement ITERATES that local (`pathsep.join(x for x in arcname
+  if x)`). This scalar model can't hold a genexp object in a local, so
+  `arcname` stays char* and the second loop lowered as CHAR iteration
+  (`x = *_t36` deref) colliding with the char*-typed loop var declared by
+  the first loop. Local-held generator/genexp consumed as an iterable is
+  the same feature-sized family recorded on fsutil.py's six-generator
+  refusal list; not attempted.
+
 ## Status (updated 2026-08-24 -- re-verified, unchanged)
 
 Re-checked this session while triaging the C4 cluster. All four residual issues (classmethod-generator receiver-passing mismatch in `_Extra.strip`; `int`/`int64_t` struct-field width under-inference in `FileHeader`; the `pwd=None` caller/callee signature disagreement) are unaffected by this session's two landed fixes elsewhere (stdin/stdout/stderr field-name escaping; more char* string methods in coroutine bodies -- none of this file's own blockers touch string methods or stdin/stdout/stderr-named fields). Still structural / shared fragile type-inference machinery; untouched.

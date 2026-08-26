@@ -2102,8 +2102,21 @@ def gen_module_impl(self, stmts):
                     .get(call.func.member)
                 if meth is None:
                     continue
+                # A @classmethod's FIRST param (`cls`) is bound by the
+                # receiver, exactly like an instance method's `self` —
+                # call arguments map onto the params AFTER it. Not
+                # excluding it here made an instance-called classmethod
+                # (`self._sanitize_windows_name(arcname, os.path.sep)`,
+                # zipfile) observe its first ARG's type as cls's type AND
+                # shift every later observation one slot up: cls got
+                # typed 'char *' from arcname's string evidence, and the
+                # method body's `cls.<attr> = ...` write then emitted a
+                # raw `cls->_attr` field store on a non-struct ("request
+                # for member ... in something not a structure or union").
+                _meth_is_cls = 'classmethod' in (getattr(meth, 'decorators', None) or [])
                 pnames = [pn for pn, _ in (meth.params or [])
-                          if pn != 'self' and not pn.startswith('*')]
+                          if pn != 'self' and not (_meth_is_cls and pn == 'cls')
+                          and not pn.startswith('*')]
                 for i, a in enumerate(call.args):
                     if i >= len(pnames):
                         break
